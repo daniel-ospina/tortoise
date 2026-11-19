@@ -44,6 +44,9 @@ diagnosis instead of a mystery:
   (`id` / `eventId` / `url`). They can never be matched to a record row, so they are
   **graph-only by construction** and are counted INTO `graph_only` as well as being
   named separately. Silently skipping them would make a strip delete them.
+* `record_unreadable_total` — the same condition counted TENANT-WIDE (one aggregate row),
+  next to `record_readable_total`. The per-label `record_unreadable_vector` is narrowed to
+  the graph's keys; these two are the whole-tenant view.
 * `record_unreadable_vector` — of this label's graph key set, the record rows whose
   `embedding` payload is present but whose GENERATED `embedding_vec` is NULL (the `public.record_embedding_vector`
   converter refuses anything that is not a 384-long all-numeric array). These are the
@@ -90,10 +93,27 @@ Usage::
     # machine-readable, and non-zero if any label is not at parity
     uv run python tools/entity_vector_parity_census.py --json out.json --require-parity
 
-Exit status: ``0`` measured · ``3`` refused · ``4`` measured and a `--require-*` flag
-was not satisfied (`--require-parity` = both stores agree; `--require-ready` = that AND
-every label's write gate closed — the strip precondition)
-was passed and at least one label is not at parity · ``1`` usage.
+Exit status — four cases, and the last two are different QUESTIONS:
+
+``0``
+    Measured. No `--require-*` flag was passed, or the one that was is satisfied.
+``3``
+    REFUSED: a side could not be read, the tenant is unnamed, or the run could not
+    complete at all. A census that cannot be run is a REFUSAL, not a pass.
+``4`` — `--require-parity`
+    A label is NOT at parity: at least one graph node carries a vector the record cannot
+    answer with. ⛔ This is graph ⊆ record, and it is ONE-directional on purpose —
+    `record_only` is the direction the cutover WANTS, so "both stores agree exactly" is a
+    different (and stricter) claim this flag does not make.
+``4`` — `--require-ready`
+    Parity holds, but a strip is still refused: some label's write gate is open, so the
+    next write would re-add what we removed. This is the STRIP precondition.
+``4`` — either flag on a NARROWED run
+    The run measured a SUBSET of the population (`--label`), so it cannot certify the
+    whole retirement. It exits 4 and names the labels it did not look at, rather than
+    exiting 0 on a question it never asked.
+``2``
+    Argparse's own usage error — never a verdict.
 """
 
 from __future__ import annotations
@@ -223,6 +243,12 @@ class LabelCensus:
     #: graph's keys (it comes from one aggregate row). Printed so a reader can see a record
     #: that is far ahead of the graph, or far behind, without shipping those rows.
     record_readable_total: int = 0
+    #: The tenant-wide count of rows whose payload exists but whose GENERATED
+    #: `embedding_vec` is NULL. ⛔ CONSUMED, not merely demanded: `_RECORD_AGGREGATE_COLUMNS`
+    #: requires the column of the cursor, so a schema gate that never read the value would
+    #: be stricter than the code needs (dropping the column would refuse a census whose
+    #: printed number was still correct).
+    record_unreadable_total: int = 0
     #: Filled by `census()` — the live reason a strip of THIS label is refused, if any.
     blocked_reason: str | None = None
 
@@ -250,6 +276,7 @@ class LabelCensus:
             "record_unreadable_vector": self.record_unreadable_vector,
             "record_only": self.record_only,
             "record_readable_total": self.record_readable_total,
+            "record_unreadable_total": self.record_unreadable_total,
             "verdict": self.verdict,
             "at_parity": self.at_parity,
             "blocked_reason": self.blocked_reason,
@@ -317,10 +344,17 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
             # it is UNMATCHABLE. Counted separately AND into graph_only by the
             # caller, because a strip that skipped it would delete the only copy
             # while reporting a clean parity table.
-            if not isinstance(node_key, str) or not node_key:
+            # ⛔ PRESENCE, NOT TYPE. `node_key` arrives typed from FalkorDB and the record
+            # side is a `text` column, so an integer `:Object.id` is a perfectly keyable
+            # identity the record can be asked about. Classifying it "unkeyed" made it
+            # graph-only BY CONSTRUCTION, which blocked its label for ever with a remedy
+            # ("backfill the record") that cannot apply — reachable through
+            # `sdk._update_entity`'s `SET n += $props` and through a backup dump, both of
+            # which preserve JSON value types.
+            if node_key is None or node_key == "":
                 unkeyed += 1
                 continue
-            keys.append(node_key)
+            keys.append(node_key if isinstance(node_key, str) else str(node_key))
         if last is None:  # pragma: no cover - a page exists, so it has rows
             break
         cursor = last + 1
@@ -386,6 +420,7 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
     cannot take that shape, because the scope either holds or the census exits 3.
 
     Returns ``{"readable": set, "unreadable": int, "record_readable_total": int,
+    "record_unreadable_total": int,
     "rows": int}`` where ``record_readable_total`` is the whole table's readable count
     (one aggregate row) so the caller can report how far AHEAD the record is without
     fetching the rows that make it ahead.
@@ -469,6 +504,7 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
         "readable": readable,
         "unreadable": unreadable,
         "record_readable_total": int(aggregate.get("record_readable") or 0),
+        "record_unreadable_total": int(aggregate.get("record_unreadable") or 0),
         "rows": len(rows),
     }
 
@@ -571,6 +607,7 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             # computed from one aggregate row rather than by fetching the extra rows.
             record_only=max(0, record["record_readable_total"] - len(record["readable"])),
             record_readable_total=record["record_readable_total"],
+            record_unreadable_total=record["record_unreadable_total"],
         )
         keyed_graph_only = sorted(set(graph["keys"]) - record["readable"])
         row.graph_only = len(keyed_graph_only) + graph["unkeyed"]
