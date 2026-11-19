@@ -250,11 +250,15 @@ def _label_hits() -> tuple[int, int, int]:
     return lines, files, narrow
 
 
-#: The UNPATCHED `Path.read_text`, captured at import. Every recorder below passes
-#: through THIS rather than through `Path.read_text` as it happens to be at that
-#: moment: `test_a_read_from_another_thread_is_not_attributed_to_label_hits` needs
-#: two recorders in one test, and a pass-through captured inside the second one
-#: would be the FIRST recorder — two spies chained, each appending to its own list.
+#: The UNPATCHED `Path.read_text`, captured at import — LOAD-BEARING, not a
+#: convenience. `_spy` below passes every read through to THIS callable, and
+#: `monkeypatch.setattr(Path, "read_text", _spy)` replaces the attribute on the
+#: CLASS for the whole process (pytest's documented `setattr` behaviour: the
+#: attribute on the object is replaced and undone at teardown, so there is no
+#: per-thread or per-instance view to fall back on). A pass-through that named
+#: `Path.read_text` at CALL time would therefore resolve to `_spy` itself and
+#: recurse until the stack dies. Captured here, before any recorder installs, so
+#: no test's patch order can change what the pass-through is.
 _REAL_READ_TEXT = Path.read_text
 
 
