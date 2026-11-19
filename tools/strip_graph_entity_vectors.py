@@ -265,6 +265,11 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
 #: The gate predicates. A writer must CALL one of these; merely mentioning it is not enough.
 _GATE_REFERENCES = frozenset({"mirror_required", "_derived_mirror_required"})
 
+#: The graph property a graph-side vector lives in — `embedding`, not the record's
+#: `embedding_vec` column. One name, because evidence for "the writer stores the vector"
+#: and the statement that removes it must not be able to drift apart.
+EMBEDDING_PROPERTY = "embedding"
+
 #: The repo's own completeness witness for "who stores a vector on a label". Its ``stores``
 #: field is re-derived at HEAD by `tests/test_embed_writer_register.py`, and it is the ONLY
 #: population that is not a hand-maintained list — which is why the write gate reads it.
@@ -417,40 +422,141 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # round 5 re-admitted one layer down by matching any embedding-ish name or string.
         # `Return`/`Raise` covers the early-exit form; a store-shaped node covers the
         # encode-guard form `#13617` uses (`embedding = derived_embedding.encode(...)`).
-        if any(isinstance(child, ast.Return | ast.Raise)
-               for statement in sub.body for child in ast.walk(statement)):
-            return True                      # early exit: `not` is the CORRECT polarity
-        # ⛔ THE STORE ARM NEEDS A *POSITIVE* ASK. `mirror_required` reads "Must the GRAPH
-        # still store this?" — so `if not mirror_required("object"): embedding = …` stores
-        # on exactly the runs where the gate said STOP, i.e. on every run a strip can
-        # happen. A `not` around the gate is refused here (and only here: for the
-        # Return/Raise arm, `if not gate(...): return` is the shape we WANT).
-        if _asks_positively(sub.test, wanted) \
-                and any(_stores_embedding(statement) for statement in sub.body):
+        polarity = _gate_polarity(sub.test, wanted)
+        if polarity == 0:
+            continue                          # masked: `… is False`, `bool(…)`, a lookup
+        # ⛔ AN EXIT IS ONLY A WRITE-STOP IF IT DOES NOT *WRITE*. `if gate(l): return
+        # self._write(ev)` RETURNS A WRITE on the mirror arm — that is a store, and under a
+        # negated test it stores exactly when the gate said stop, i.e. the polarity
+        # inversion again wearing a `return`. Only a bare `return`/`return None`/`raise` is
+        # an exit; a `return` carrying a call is judged as a write, below.
+        if any(_is_write_stop_exit(statement)
+               for statement in sub.body for statement in _own_walk(statement)):
+            return True
+        # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
+        # either direction is a defect that was measured:
+        #   +1 (positive ask, `if gate(l): …`)   → the branch runs when the graph must
+        #        still mirror, so it must STORE, or clear/remove on the other arm.
+        #   -1 (negated ask, `if not gate(l): …`) → the branch runs when the graph must
+        #        STOP mirroring, so it must REMOVE the property. Counting a STORE here is
+        #        the polarity inversion; refusing the removal shut the gate on the dict
+        #        writer whose only write-stop IS this shape.
+        if polarity > 0 and any(
+                _stores_embedding(statement) or _returns_a_write(statement)
+                for statement in sub.body):
+            return True                      # the mirror arm: writing here is correct
+        if polarity < 0 and any(_removes_embedding(statement) for statement in sub.body):
             return True
     return False
 
 
-def _asks_positively(test, wanted: set[str]) -> bool:
-    """Is the gate's answer used WITHOUT negation in this branch test?
+def _is_write_stop_exit(statement) -> bool:
+    """Is this statement a plain early exit — `raise`, or a `return` that writes nothing?
 
-    ⛔ `or` ANYTHING DOES NOT COUNT. `if gate("object") or self.force_vectors:` takes the
-    branch when the gate said stop — a force/backfill flag is a plausible thing for a real
-    writer to grow, and it would store the vector on a "write-stopped" verdict. `And` is
-    fine: every operand must hold, so the gate still has to have said mirror.
+    A `return` of a CALL is a write that also exits, so it is judged by the same polarity
+    rule as an assignment. Treating every `Return` as an exit accepted
+    `if not gate(l): return self._write(ev)`, which stores on the arm the gate said stop.
     """
     import ast
 
-    if not _asks_about(test, wanted):
+    if isinstance(statement, ast.Raise):
+        return True
+    if isinstance(statement, ast.Return):
+        return statement.value is None or not any(
+            isinstance(node, ast.Call) for node in _own_walk(statement.value))
+    return False
+
+
+def _returns_a_write(statement) -> bool:
+    """`return self._write(ev)` — a write on the arm it sits in, i.e. the mirror arm."""
+    import ast
+
+    return (isinstance(statement, ast.Return) and statement.value is not None
+            and any(isinstance(node, ast.Call) for node in _own_walk(statement.value)))
+
+
+def _own_walk(node):
+    """`ast.walk`, but a NESTED SCOPE is not this function's code.
+
+    ⛔ `ast.walk` descends into an inner `def`/`class`/lambda, so a store inside a helper
+    that never runs "proved" the write-stop, and a `return` inside one satisfied the
+    early-exit arm — while `_reachable_ifs` prunes exactly those scopes for the guard. Being
+    stricter one level up and laxer one level down is how the same defect walks back in.
+    """
+    import ast
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+                      | ast.ClassDef):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _gate_conjuncts(test) -> list:
+    """The top-level operands of an `and` chain, or `[test]` — nothing else unwrapped.
+
+    ⛔ WHITELIST, NOT BLACKLIST. Refusing `not` and `or` by name was two tokens of a long
+    list: `gate(...) is False`, `== False`, `!= True`, `bool(gate(...)) is False`,
+    `{True: False, False: True}[gate(...)]` and `all((gate(...), True))` all invert or mask
+    the answer and all passed. `is False` is not exotic — this repo already spells it that
+    way in its write paths — and a WIP write-stop spelled that way would let the destructive
+    strip proceed into a live writer, the single outcome `REFUSE_WRITE_STILL_EMITS` exists
+    to prevent. So the gate call must BE the operand: anything wrapped around it (a
+    comparison, a `not`, another call, a subscript) is not evidence.
+    """
+    import ast
+
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        operands = []
+        for value in test.values:
+            operands.extend(_gate_conjuncts(value))
+        return operands
+    return [test]
+
+
+def _is_gate_call(node, wanted: set[str]) -> bool:
+    """Is this expression EXACTLY a gate call about one of ``wanted``?"""
+    import ast
+
+    if not isinstance(node, ast.Call):
         return False
-    for sub in ast.walk(test):
-        if isinstance(sub, ast.UnaryOp) and isinstance(sub.op, ast.Not):
-            return False
-        # An `and` chain is fine: every operand must hold, so a non-gate operand can only
-        # make the branch LESS likely — never take it against the gate.
-        if isinstance(sub, ast.BoolOp) and isinstance(sub.op, ast.Or):
-            return False
-    return True
+    name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+    if name not in _GATE_REFERENCES or not node.args:
+        return False
+    first = node.args[0]
+    return (isinstance(first, ast.Constant) and isinstance(first.value, str)
+            and first.value in wanted)
+
+
+def _gate_polarity(test, wanted: set[str]) -> int:
+    """``+1`` — a conjunct IS the gate call; ``-1`` — it is negated; ``0`` — masked away.
+
+    ⛔ `not gate(...)` IS A VALID ASK FOR A REMOVAL-ARM WRITE-STOP. `mirror_required` reads
+    "must the GRAPH still store?", so the dict writer's stop is
+    `if not gate("object"): props.pop("embedding")` — remove the property exactly when the
+    graph must no longer mirror it. Refusing `not` outright (as one revision did) shut the
+    gate permanently on `sdk::_update_entity`: an enforcer that can never fire. Polarity is
+    therefore decided HERE and enforced per-arm by the caller, not globally.
+    """
+    import ast
+
+    positive = negative = False
+    for conjunct in _gate_conjuncts(test):
+        if _is_gate_call(conjunct, wanted):
+            positive = True
+        elif isinstance(conjunct, ast.UnaryOp) and isinstance(conjunct.op, ast.Not) \
+                and _is_gate_call(conjunct.operand, wanted):
+            negative = True
+    # ⛔ `max(0, -1)` IS 0 — the first version of this function silently reported "masked"
+    # for a negated ask, because 0 (the "no answer" sentinel) beat -1.
+    if positive:
+        return 1
+    if negative:
+        return -1
+    return 0
 
 
 def _reachable_ifs(node):
@@ -483,8 +589,11 @@ def _reachable_ifs(node):
                 stack.extend(current.orelse)
             continue
         if isinstance(current, ast.While | ast.For | ast.AsyncFor):
-            if isinstance(current.test if isinstance(current, ast.While)
-                          else current.iter, ast.Constant):
+            # ⛔ ONLY A *FALSY* CONSTANT IS DEAD. Pruning every constant test treated
+            # `while True:` like `while False:` and dropped a reachable guard — the
+            # fail-closed direction, but a state the docstring did not name.
+            test = current.test if isinstance(current, ast.While) else current.iter
+            if isinstance(test, ast.Constant) and not test.value:
                 continue                  # `while False:` / `for x in []` never runs
             for field in ("body", "orelse"):
                 stack.extend(getattr(current, field, []) or [])
@@ -550,15 +659,17 @@ def _stores_embedding(node) -> bool:
       leaves in the guarded branch while the vector IS stored on the branch the gate said
       stop.
 
-    So the value must be non-constant. The accepted shapes are: `embedding =
-    derived_embedding.encode(...)` (the `#13617` form), and a Cypher clause that sets or
-    clears the property, either as a self-naming call (`set_embedding_clause`) or as an
-    assigned string (`q = "SET n.embedding = $e"`). `clear_embedding` is NOT accepted:
-    clearing is the thing the strip does, not evidence that a writer stopped storing.
+    So the value must be non-constant. The accepted shapes are exactly two: `embedding =
+    derived_embedding.encode(...)` (the `#13617` form), and a Cypher clause that **SETS** the
+    property — a self-naming call (`set_embedding_clause`) or an assigned string
+    (`q = "SET n.embedding = $e"`). `clear_embedding` is NOT accepted: clearing is the thing
+    the strip does, not evidence that a writer stopped storing. Neither is `popitem()` — it
+    takes no argument, so nothing names WHICH key went; that is `_removes_embedding`'s
+    `pop(<this property>)` arm.
     """
     import ast
 
-    for sub in ast.walk(node):
+    for sub in _own_walk(node):
         if isinstance(sub, ast.Assign | ast.AnnAssign | ast.AugAssign):
             value = sub.value
             # A Cypher clause is a store whatever it is assigned to: the property is set
@@ -579,17 +690,30 @@ def _stores_embedding(node) -> bool:
             name = getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
             if "set_embedding" in name:
                 return True
-            # ⛔ A DICT WRITER'S WRITE-STOP *REMOVES THE KEY*: `props.pop("embedding")`
-            # before `SET n += $props` (`sdk::_update_entity`'s shape). Counting only
-            # assignments would refuse the one form that writer can possibly take, making
-            # the gate unopenable there — an enforcer that can never fire. Narrow on
-            # purpose: `pop`/`popitem` on a dict, with the property named as a constant.
-            if name in ("pop", "popitem") and any(
-                    isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
-                    and "embedding" in argument.value
-                    for argument in sub.args):
-                return True
+
+    return False
+
+
+def _removes_embedding(node) -> bool:
+    """Does this statement REMOVE the vector — the dict writer's write-stop?
+
+    ⛔ EXACT PROPERTY NAME, `pop` ONLY. A substring match accepted
+    `props.pop("embedding_model", None)` — and this repo pops the identity triple
+    (`embedding_text_hash`/`embedding_model`/`embedding_revision`) while KEEPING the vector,
+    so "drop identity, keep vector" is a shape already in the tree, and accepting it would
+    license the strip on a writer that still stores. `popitem()` is not accepted: it takes no
+    argument, so no property is named and nothing proves WHICH key went — an earlier version
+    advertised it while the code could never match it.
+    """
+    import ast
+
+    for sub in _own_walk(node):
+        if isinstance(sub, ast.Call):
+            name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None) or ""
+            if name == "pop" and sub.args:
+                first = sub.args[0]
+                if isinstance(first, ast.Constant) and first.value == EMBEDDING_PROPERTY:
+                    return True
     return False
 
 
@@ -604,9 +728,9 @@ def _names_embedding(node) -> bool:
     import ast
 
     if isinstance(node, ast.Name):
-        return "embedding" in node.id
+        return EMBEDDING_PROPERTY in node.id
     if isinstance(node, ast.Attribute):
-        return "embedding" in node.attr
+        return EMBEDDING_PROPERTY in node.attr
     if isinstance(node, ast.Subscript):
         # `props["embedding"] = vec` — a dict-shaped writer's store.
         key = node.slice
@@ -658,9 +782,15 @@ def _register_writers(label: str) -> tuple[str, ...]:
     """
     from tortoise import embed_writer_register as register
 
+    # ⛔ A NON-TUPLE `stores` IS NOT "STORES NOTHING". `LABELS_AT_RUNTIME` means the labels
+    # this writer stores are not statically nameable — precisely a writer the gate cannot
+    # prove stopped — so it must never be dropped from the population silently: that would
+    # open the gate and let the strip race a live writer. `NO_LIVE_VECTOR` is a positive
+    # declaration that the writer stores nothing, so it is excluded on purpose.
     return tuple(sorted(
         key for key, record in register.EMBED_WRITER_CLASSES.items()
-        if isinstance(record.stores, tuple) and label in record.stores))
+        if (isinstance(record.stores, tuple) and label in record.stores)
+        or record.stores == register.LABELS_AT_RUNTIME))
 
 
 def _writers_for(label: str) -> tuple[tuple[str, ...], str | None]:
@@ -1046,7 +1176,7 @@ def _live_entries(g: Any, labels: list[str]) -> list[tuple[str, str]]:
 
 def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             graph_name: str, graph_uri: str, confirmed: str, batch: int,
-            expect_empty: bool) -> dict:
+            expect_empty: bool, expect_narrowed: bool = False) -> dict:
     """Every precondition, then the batched removal. Refuses BEFORE the first write."""
     # ⛔ THE WHOLE TARGET TRIPLE. The graph NAME alone is not the target: the tenant
     # flags default from `TORTOISE_RECORD_ORG_ID`/`TORTOISE_RECORD_GRAPH_ID`, and the
@@ -1069,7 +1199,10 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
             f"graph={graph_name!r} org={org_id!r} graph_id={graph_id!r} "
             f"uri={graph_uri!r}). A plan is an authority over ONE target. Nothing was "
             "removed.")
-    labels = [row["label"] for row in plan["labels"]]
+    # ⛔ NEVER `plan["labels"]` HERE. A hand-edited plan without the key used to raise
+    # `KeyError` out of the destructive path — a traceback and exit 1 ("usage"), not one of
+    # the published refusal tokens, at the moment the operator most needs a verdict.
+    labels = [row["label"] for row in (plan.get("labels") or ())]
 
     # ── the parity re-check, LIVE, immediately before the first write ────────
     live = parity.census(
@@ -1212,6 +1345,7 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
         "plan_digest": confirmed,
         "labels": [row["label"] for row in plan["labels"]],
         "unmeasured_by_label": unmeasured,
+        "expect_narrowed": bool(expect_narrowed),
         "children": len(plan["labels"]),
         "removed": sum(removed.values()),
         "expected": total,
@@ -1235,6 +1369,14 @@ def result_exit_code(result: dict) -> int:
     residuals = list((result.get("residual_by_label") or {}).values())
     unmeasured = [v for v in residuals if not isinstance(v, int)]
     if unmeasured or sum(v for v in residuals if isinstance(v, int)):
+        return 5
+    # ⛔ A NARROWED PLAN IS NOT A COMPLETED RETIREMENT. `residual_by_label` is over the
+    # plan's labels, so a `--label Object` run whose residuals are all zero used to exit 0
+    # while `Event`/`Source`/`Subject` still held their vectors — the false PASS that
+    # `REFUSE_NOTHING_TO_STRIP` exists for ("a re-run reports a finished retirement it never
+    # performed"). A script routing on exit 0 must not read a partial sweep as a finished
+    # one; the stderr warning is for a human, and the exit code is for the caller.
+    if result.get("unmeasured_by_label") and not result.get("expect_narrowed"):
         return 5
     return 0
 
@@ -1308,6 +1450,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm-plan-digest", default=None,
                         help="the plan's `sha256:` digest, i.e. the token authorising "
                              "this exact set (required with --execute)")
+    parser.add_argument("--expect-narrowed", action="store_true",
+                        help="acknowledge that this plan covers only SOME labels and that "
+                             "the others still hold their vectors — without it a narrowed "
+                             "execution exits 5, never 0 (a partial sweep is not a "
+                             "completed retirement)")
     parser.add_argument("--expect-empty", action="store_true",
                         help="allow an EMPTY plan to execute as a no-op")
     args = parser.parse_args(argv)
@@ -1420,7 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
             # of refusing it. Both are the same bug seen from two sides.
             graph_uri=uri_fingerprint(args.uri or args.db_path or ""),
             confirmed=args.confirm_plan_digest, batch=args.batch or plan_batch,
-            expect_empty=args.expect_empty)
+            expect_empty=args.expect_empty, expect_narrowed=args.expect_narrowed)
     except Refusal as exc:
         sys.stderr.write(
             f"strip_graph_entity_vectors: {exc.token} — {exc}\n")
