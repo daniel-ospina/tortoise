@@ -4689,6 +4689,92 @@ def _upsert_object(props, ev):
         props.update({"embedding_model": _m()})
     _write(props)
 """,
+        # ⛔ …AND THE MAPPING OPERAND'S **TRANSPARENT WRAPPERS**. The pairs fix gave that form
+        # `.copy()` and `if…else`; the mapping form had neither, so
+        # `props |= [("embedding", vec)].copy()` was refused while
+        # `props |= {"embedding": vec}.copy()` was CERTIFIED — the same merge, one operand
+        # form apart, and the asymmetry was introduced BY the pairs fix (measured at this
+        # head by the review of this branch). `.copy()` returns a new dict holding the same
+        # keys and PEP 584's `|=` "behaves like `dict.update()`" (mapping-like objects), so
+        # neither wrapper changes what is placed. Every row was CERTIFIED before this fix.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev)}.copy()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev)}.copy()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({"embedding": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev)} if _flag(ev) else {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev)} if _flag(ev) else {})
+        return None
+    _write(props)
+""",
+        # ⛔ …AND A `**` MERGE INSIDE THE CONSTRUCTOR'S MAPPING OPERAND (P1). The constructor
+        # scan asked `_mapping_argument_stores_the_vector`, whose `ast.Dict` arm calls
+        # `_dict_stores_the_vector` WITHOUT `stop_arm` — so the `**` recursion was INERT and
+        # the constructor form was CERTIFIED while the SAME literal behind the `**` was
+        # refused (measured at this head). It is a REGRESSION inside this branch: refused at
+        # `1d375c8ee0`, lost by `b6954ca082` with no row pinning it (`agent-infra#3442`). The
+        # operand helper passes `stop_arm=True`; all three call sites are pinned here — the
+        # `|=` rebuild, the hand-off, and the mutator.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _collections.OrderedDict({**{"embedding": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_collections.OrderedDict({**{"embedding": _encode(ev)}}))
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -5000,6 +5086,33 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props = _collections.OrderedDict({"embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ …AND THE WRAPPER ARMS' TWO NARROWINGS HOLD ONE FORM OVER, or the new refusals
+        # become an inert enforcer that costs a writer its gate: `.copy()` on the IDENTITY
+        # triple (this repo stores `embedding_model` beside the vector) places no vector, an
+        # `if…else` whose mapping holds the PLACEHOLDER places nothing, and a `**` merge of
+        # the placeholder is the pre-guard reset. All three were CERTIFIED before the fix and
+        # must stay CERTIFIED after it.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": None} if _flag(ev) else {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": None}})
         return None
     _write(props)
 """,

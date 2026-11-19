@@ -1235,8 +1235,13 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # for the same reason: this is a refusal the mirror arm does not make, and a fix
             # may add refusals, never acceptances. Measured GATED at `8637df0fde` for
             # `props = {"embedding": _encode(ev)}` and `props = {**props, "embedding": …}`.
-            if anywhere and isinstance(value, ast.Dict) \
-                    and _dict_stores_the_vector(value, stop_arm=True):
+            # ⛔ AND THE MAPPING LITERAL FOLLOWS THE SAME TRANSPARENT WRAPPERS AS THE PAIRS
+            # FORM (`.copy()`, `if…else`): the pairs fix made `props |= [("embedding",
+            # vec)].copy()` refused while `props = {"embedding": vec}.copy()` and
+            # `props |= {"embedding": vec}.copy()` stayed CERTIFIED (measured at this head
+            # by the review of this branch). Refusal-only, `anywhere`-gated like every other
+            # arm in this family.
+            if anywhere and _mapping_literal_stores_the_vector(value):
                 return True
             # ⛔ AN UNPACKED OR CHAINED TARGET IS STILL A STORE (`#13647` round 12). The
             # mirror arm's rule is "EVERY target names the property", which is right where
@@ -1439,6 +1444,37 @@ def _mapping_stores_the_vector(call) -> bool:
         for keyword in call.keywords)
 
 
+def _mapping_literal_stores_the_vector(node) -> bool:
+    """Is this expression a MAPPING LITERAL that sets the vector — `copy()`/`if` included?
+
+    ⛔ ONE RULE FOR THE MAPPING FORM'S *WRAPPERS*, because the pairs form got them and this
+    one did not. Once `.copy()` / `BinOp` / comprehension were added to
+    `_pairs_operand_stores_the_vector`, `props |= [("embedding", vec)].copy()` was refused
+    while `props |= {"embedding": vec}.copy()` was CERTIFIED (measured at this head by the
+    review of this branch) — the SAME merge, one operand form apart, and the asymmetry was
+    introduced BY the pairs fix. Neither wrapper changes what is placed: `copy()` returns a
+    new dict holding the same keys, and PEP 584's `|=` "behaves like `dict.update()`" (it
+    takes mapping-like objects), while an `if`-expression picks one of two mappings.
+
+    ⛔ ONLY MAPPING SHAPES, deliberately NOT the pairs rule: `props = [("embedding", vec)]`
+    assigns a LIST and places no key, so answering the pairs question here would refuse it.
+    """
+    import ast
+
+    if isinstance(node, ast.Dict):
+        # ⛔ THE `**` MERGE NEEDS THE RECURSIVE FORM, hence `stop_arm=True` — every caller is
+        # the stop arm (see `_mapping_operand_stores_the_vector` and the assignment arm), and
+        # a fix may add refusals, never acceptances.
+        return _dict_stores_the_vector(node, stop_arm=True)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "copy" and not node.args and not node.keywords:
+        return _mapping_literal_stores_the_vector(node.func.value)
+    if isinstance(node, ast.IfExp):
+        return (_mapping_literal_stores_the_vector(node.body)
+                or _mapping_literal_stores_the_vector(node.orelse))
+    return False
+
+
 def _mapping_operand_stores_the_vector(node) -> bool:
     """One operand of a mapping call, without the call: literal, pairs, or `*`-starred.
 
@@ -1450,8 +1486,13 @@ def _mapping_operand_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Starred):
         return _mapping_operand_stores_the_vector(node.value)
-    if isinstance(node, ast.Dict):
-        return _dict_stores_the_vector(node, stop_arm=True)
+    if _mapping_literal_stores_the_vector(node):
+        # ⛔ THE LITERAL THROUGH THE WRAPPERS A REFACTOR PUTS AROUND IT (`.copy()`,
+        # `if…else`), not only the bare `ast.Dict`. The pairs rule below already follows
+        # them, so following them here only for pairs was HALF A RULE:
+        # `props.update({…}.copy())` was CERTIFIED while
+        # `props.update([…].copy())` was refused (measured at this head by the review).
+        return True
     if isinstance(node, ast.List | ast.Tuple):
         return (_pairs_store_the_vector(node)
                 or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
@@ -1501,8 +1542,19 @@ def _constructor_stores_the_vector(call) -> bool:
             # own keywords and args, while every other constructor's operands are reached
             # here — the MAPPING literal (which the pairs rule has no arm for) and the PAIRS
             # literal (which the mapping rule only follows one wrapper in).
+            # ⛔ AND THE **OPERAND** RULE, NOT ONLY THE ARGUMENT ONE. The argument helper's
+            # `ast.Dict` arm calls `_dict_stores_the_vector(node)` WITHOUT `stop_arm`, so its
+            # `**`-merge recursion is INERT on that path — and
+            # `OrderedDict({**{"embedding": vec}})` was CERTIFIED at this head: a refusal
+            # this branch HAD at `1d375c8ee0`, lost when `b6954ca082` re-wired this scan to
+            # the weaker helper, with no row pinning it (measured by the review of this
+            # branch). The operand helper passes `stop_arm=True`, and follows the
+            # `.copy()` / `if…else` wrappers, so `OrderedDict({…}.copy())` is answered too.
+            # ⛔ THE ARGUMENT HELPER STAYS BESIDE IT, not instead of it: it is the only term
+            # that reads a NESTED `dict(embedding=…)` operand, and dropping it would be a new
+            # ACCEPTANCE. Adding a term is a refusal; removing one is not.
             or any(_mapping_argument_stores_the_vector(argument)
-                   or _pairs_operand_stores_the_vector(argument)
+                   or _mapping_operand_stores_the_vector(argument)
                    for argument in call.args))
 
 
