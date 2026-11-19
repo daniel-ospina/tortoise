@@ -2983,15 +2983,24 @@ def test_the_SIGNED_attempt_key_crosses_the_halves_in_BOTH_directions(monkeypatc
     as_minted = consent_token.mint_attempt_key()
     random_part = as_minted.split(".")[1]
     chosen = "b" * 43
-    # ⛔ THE MUTATION MUST BE A REAL ONE. The MAC is 43 base64url chars for 32 bytes, so its last
-    # character can only be one of the 16 pad-aligned values (`A E I M Q U Y c g k o s w 0 4 8`) and
-    # only the ending `AAA` decodes to the same two bytes — which the `endswith` guard below avoids
-    # by switching to `BBB`. (A replacement that collided with a REACHABLE ending would make this a
-    # silent no-op and red a correct tree; measured 0 no-ops in 200 000 mints, and the sibling
-    # `test_oauth_consent_bridge.py::test_a_TAMPERED_attempt_key_is_refused` carries the same class
-    # for the random part, where `…[:-1] + "A"` DID collide once in 16.)
-    forged_mac = as_minted[:-3] + ("AAA" if not as_minted.endswith("AAA") else "BBB")
+    # ⛔ THE MUTATION MUST BE A REAL ONE, AND THE READING THAT MATTERS IS BYTES. The MAC is 43
+    # base64url chars for 32 bytes, so the LAST character carries only 4 significant bits and its
+    # low 2 are padding: an encoder that emitted them non-zero (or a value minted by anything but
+    # `_b64url_encode`) makes `…[:-3] + "AAA"` a different STRING that decodes to the IDENTICAL
+    # signature — `verifyAttemptKey` correctly accepts it, and the arm below reds a correct tree.
+    # Mutating position 0 changes the first 6 bits of the MAC's first byte under EVERY encoding, so
+    # the mutation cannot be a no-op by construction; the decoded-bytes assertion below is what
+    # makes that a MEASUREMENT rather than a claim about the encoder. (Same class, and the same
+    # remedy, as `test_oauth_consent_bridge.py::test_a_TAMPERED_attempt_key_is_refused`, where
+    # `…[:-1] + "A"` collided once in 16.)
+    mac = as_minted.rsplit(".", 1)[1]
+    flipped = ("A" if mac[0] != "A" else "B") + mac[1:]
+    forged_mac = as_minted[:-len(mac)] + flipped
     assert forged_mac != as_minted, "the test's own mutation was a no-op"
+    assert (consent_token._b64url_decode(flipped, "the forged MAC")
+            != consent_token._b64url_decode(mac, "the minted MAC")), (
+        "the test's own mutation decoded to the SAME 32 bytes — the MAC comparison would accept it "
+        "and the assertion below would red a correct tree")
 
     out = _run("attempt_key", values={"as_minted": as_minted, "chosen": chosen,
                                       "empty": "", "forged_mac": forged_mac})
