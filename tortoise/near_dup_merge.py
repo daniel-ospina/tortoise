@@ -455,8 +455,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     # the same import-cost reason as `link_entity` above (`entity_identity`
     # pulls `entity_resolver`, and this module is on every extractor import).
     try:
-        from .entity_identity import (
-            attachment_target_ids, name_key_space_same_entity)
+        from .entity_identity import attachment_target_ids, name_key_space_same_entity
     except Exception as e:  # noqa: BLE001, RUF100
         out["warnings"].append(
             f"merge attachment skipped, name key space unavailable "
