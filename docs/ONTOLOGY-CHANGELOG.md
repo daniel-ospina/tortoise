@@ -41,7 +41,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reader resolve the approval instead of being told it is the text itself — the form the owner rejected
 > for v3.36 (comment `6965147045`).
 >
-> **What was wrong.** §3's Principle ended with *"Facts = confidence 1.0."* The audit measured the opposite:
+> **What was wrong.** §2's Principle ended with *"Facts = confidence 1.0."* The audit measured the opposite:
 > an `:Object` created `confidence=1.0` is **served** at 1.0, **seeded** at `Beta(1,1)` = 0.5 (EP reads
 > `coalesce(n.ep_alpha, 1.0)` / `ep_beta`, never `confidence`), and has its 1.0 **overwritten** by the run
 > (`ep.py:632`, `:822`). `n.confidence` appears in `ep.py` only inside `SET` clauses.
@@ -55,7 +55,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > overwrites it every run, ranking reads the persisted value, and a caller who writes `confidence` asserts
 > nothing about belief.
 >
-> **What did NOT change:** every other §3 statement, the §4 metadata rows (which already described
+> **What did NOT change:** every other §2 statement, the §4 metadata rows (which already described
 > `confidence` as the posterior mean — they were right, this sentence disagreed with them), and every
 > stored value. Whether entity declared priors should exist at all is tracked by **no open issue** —
 > the code cites #9063 (`sdk.py:646-647`), which *raised* this question, reserved it to the owner, and closed

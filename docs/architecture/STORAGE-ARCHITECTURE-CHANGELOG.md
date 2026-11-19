@@ -2708,11 +2708,40 @@ design sentence is unchanged in substance: the FILLING rule is
 **ALONE**, with the `SourceVersioned` version transition served by the same entry and the same skip
 arms. What moved is only the delivery half, which belongs here per #8542:
 
-* PR `#13473` landed that rule and closed `#13418`;
-* the `#13412` document-vector text rule rode the same PR — it now CALLS
+- PR `#13473` landed that rule and closed `#13418`;
+- the `#13412` document-vector text rule rode the same PR — it now CALLS
   `projection.entities._build_search_text` instead of composing `title + content`.
 
 The row keeps every design claim it carried (the three `:Source` populations that derive nothing,
 the caller-vector passthrough, the live≠rebuild difference on a SERVED label); only the "landed at
 PR X, closing Y" clause became "is X", and "closed by the same PR" was dropped from the `#13412`
 clause for the same reason.
+
+## §14.3's step-2 delivery narration moves here (`#13610`, PR `#13617`)
+
+Seven occurrences of `✅ **STEP 2 HAS LANDED (#13610)** — see §14.3's *What #13610 landed* …` and the
+§14.3 heading `**What #13610 landed (R1 step 2), and what it did NOT.**` stated a DELIVERY STATE inside
+the design document — the class
+`tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+refuses (`LANDED`/`shipped` within 40 characters of a `#NNN`), and it red-ed `test (a)` on this branch.
+Per #8542 the delivery half belongs here; the design sentence is unchanged in substance:
+
+- step 2's behaviour is §14.3's **The graph copy on the verified path (R1 step 2), and its bounds** —
+  the write gate, the coverage count, and the rollback spelling are all stated there;
+- the graph copy of `:Object`/`:Subject`'s derived vector is RETIRED on a deployment whose RECORD proves
+  coverage, and RETAINED — written AND read — until it does;
+- retiring the ALREADY-STORED graph vectors is a separate, later act, and it is never in the same
+  release as the record step (`#11395` comment `6956793300`).
+
+Two further sites in the same class, both introduced by this branch's own review fixes:
+
+- §14.3's tenant rationale carried *"a cut `#13610` first shipped, and it was wrong twice over"* — the
+  history is this entry's (the request's record TENANT was considered for the index-retirement
+  condition and rejected twice, because `vector_index_retired()` is STORE-scoped and one-shot while a
+  tenant is REQUEST-scoped, so the CREATE path and the DROP path could disagree about one store); the
+  design document now states only the rule.
+- the same rewrite removed the dangling `*What #13610 landed*` cross-reference, so the heading it named
+  is now **The graph copy on the verified path (R1 step 2), and its bounds**.
+
+**Gates at this change.** `tests/test_extractor_v4_citation_rot.py` (17) — offender scan 0 on
+`STORAGE-ARCHITECTURE.md` after the rewrite; the design document keeps every design claim it carried.
