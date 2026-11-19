@@ -1208,7 +1208,8 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                     return True           # `q = "SET n.embedding = $e"; session.run(q)`
                 continue                  # text nothing runs
             if isinstance(sub, ast.AugAssign) and (
-                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(sub.value))
+                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(
+                        sub.value, alias_keys=alias_keys))
                     # ⛔ THE ITERABLE-OF-PAIRS SPELLING, STOP-ARM ONLY. `dict.__ior__` accepts
                     # `[("embedding", vec)]` exactly as it accepts the literal, and the
                     # `isinstance(..., ast.Dict)` narrowing walked past it (measured CERTIFIED
@@ -1224,13 +1225,15 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                     # does not take a container of MAPPINGS, so borrowing that rule refused
                     # `props |= [{"embedding": vec}]` — a statement Python rejects outright —
                     # and turned a refusal the branch never had into a new one (measured).
-                    or (anywhere and _pairs_operand_stores_the_vector(sub.value))
+                    or (anywhere and _pairs_operand_stores_the_vector(
+                        sub.value, alias_keys=alias_keys))
                     # ⛔ AND THE PAIRS BUILT BY A `zip` OF TWO LITERAL COLUMNS (`#13788`):
                     # `props |= zip(("embedding",), (vec,))` places the pair the literal
                     # spelling places, and the residual that named `zip` was about a zip of
                     # NAMES. Gated on `anywhere` for the same reason every other arm in this
                     # block is: on the mirror arm a new recognition is a new ACCEPTANCE.
-                    or (anywhere and _zip_stores_the_vector(sub.value))):
+                    or (anywhere and _zip_stores_the_vector(
+                        sub.value, alias_keys=alias_keys))):
                 # `props |= {"embedding": vec}` — a merge that places the vector. The same
                 # narrowing as everywhere else: EXACT property name, NON-CONSTANT value, so
                 # `props |= [("embedding", None)]` and `props |= [("embedding_model", _m())]`
@@ -1255,7 +1258,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # forms are deliberately NOT followed: `props = [{"embedding": vec}]` builds a
             # LIST (and `|=` rejects it outright), so it places nothing and must keep
             # certifying.
-            if anywhere and _mapping_literal_stores_the_vector(value):
+            if anywhere and _mapping_literal_stores_the_vector(value, alias_keys=alias_keys):
                 return True
             # ⛔ …AND A COMPREHENSION KEYED BY AN ALIAS OF THE PROPERTY (`#13788`, measured):
             # the assignment path is the only one holding the alias set, and without this arm
@@ -1278,7 +1281,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # target, so every other arm here misses them. `_rebuild_stores_the_vector` is
             # deliberately narrow (a MERGE, never a plain literal) so a mention such as
             # `_audit({"embedding": props.get(…)})` stays a mention.
-            if anywhere and _rebuild_stores_the_vector(value):
+            if anywhere and _rebuild_stores_the_vector(value, alias_keys=alias_keys):
                 return True
             if not all(_names_embedding(target)
                        or (anywhere and _keyed_by_alias(target, alias_keys))
@@ -1313,7 +1316,8 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                 # Accepting only the keyword spelling refused a dict writer that used the
                 # other one — with a message claiming it had no gate `if` at all.
                 for argument in sub.args:
-                    if isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument):
+                    if isinstance(argument, ast.Dict) and _dict_stores_the_vector(
+                            argument, alias_keys=alias_keys):
                         return True
             # ⛔ AND THE MUTATOR'S METHOD SPELLING IS THE SAME STORE, which the vocabulary
             # above missed: it recognises the OPERATOR form `props |= {"embedding": vec}`
@@ -1326,14 +1330,14 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # (the stop arm) because that is where a missed store is a false PASS; on the
             # mirror arm the identical recognition would WIDEN what the destructive gate
             # accepts, and a fix may add refusals, never acceptances.
-            if anywhere and _mutator_stores_the_vector(sub):
+            if anywhere and _mutator_stores_the_vector(sub, alias_keys=alias_keys):
                 return True
             # ⛔ AND A WRITER HANDED A REBUILT MAPPING IS THE SAME STORE (`98eec2ca`):
             # `_write({**props, "embedding": vec})`. Narrow by construction —
             # `_rebuild_stores_the_vector` asks for a MERGE (`**`/`|`) or a `dict(embedding=…)`,
             # so a plain literal handed to a logger (`_audit({"embedding": props.get(…)})`)
             # is a mention and stays one.
-            if anywhere and any(_rebuild_stores_the_vector(operand)
+            if anywhere and any(_rebuild_stores_the_vector(operand, alias_keys=alias_keys)
                                 for operand in _call_operands(sub)):
                 return True
             # ⛔ AND A CALL HANDED A `zip` OF TWO LITERAL COLUMNS IS THE SAME STORE
@@ -1341,7 +1345,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # `operator.ior(props, zip(…))` place the pair, and the `zip` residual named
             # "a zip of names" — a literal pair of columns needs no data flow. Stop arm
             # only, as every recognition in this family is.
-            if anywhere and any(_zip_stores_the_vector(operand)
+            if anywhere and any(_zip_stores_the_vector(operand, alias_keys=alias_keys)
                                 for operand in _call_operands(sub)):
                 return True
         elif isinstance(sub, ast.For | ast.AsyncFor) and anywhere:
@@ -1449,7 +1453,7 @@ def _target_names_the_vector(target) -> bool:
     return _names_embedding(target)
 
 
-def _mapping_stores_the_vector(call) -> bool:
+def _mapping_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this call carry a MAPPING operand that sets the vector?
 
     ⛔ ONE HELPER FOR THE THREE SPELLINGS A MAPPING ARRIVES AS, because they were fixed one
@@ -1474,8 +1478,10 @@ def _mapping_stores_the_vector(call) -> bool:
     # answers the literal AND the wrappers the pairs rule already follows, so a `**` operand
     # asks it rather than a type test; a `**` operand that is a PAIRS literal is a spelling
     # Python rejects (`update(**[…])`), and refusing it is the fail-closed direction.
-    return any(_mapping_operand_stores_the_vector(argument) for argument in call.args) or any(
-        keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
+    return any(_mapping_operand_stores_the_vector(argument, alias_keys=alias_keys)
+               for argument in call.args) or any(
+        keyword.arg is None and _mapping_operand_stores_the_vector(
+            keyword.value, alias_keys=alias_keys)
         for keyword in call.keywords)
 
 
@@ -1509,7 +1515,7 @@ def _transparent_copy_operand(node):
     return None
 
 
-def _mapping_literal_stores_the_vector(node) -> bool:
+def _mapping_literal_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Is this expression a MAPPING LITERAL that sets the vector — `copy()`/`if` included?
 
     ⛔ ONE RULE FOR THE MAPPING FORM'S *WRAPPERS*, because the pairs form got them and this
@@ -1530,14 +1536,14 @@ def _mapping_literal_stores_the_vector(node) -> bool:
         # ⛔ THE `**` MERGE NEEDS THE RECURSIVE FORM, hence `stop_arm=True` — every caller is
         # the stop arm (see `_mapping_operand_stores_the_vector` and the assignment arm), and
         # a fix may add refusals, never acceptances.
-        return _dict_stores_the_vector(node, stop_arm=True)
+        return _dict_stores_the_vector(node, stop_arm=True, alias_keys=alias_keys)
     copied = _transparent_copy_operand(node)
     if copied is not None:
         # ⛔ BOTH SPELLINGS OF THE WRAPPER (`#13788`, measured at `716991951e`): `.copy()` and
         # the functional `copy.copy(…)` are the same new mapping. Recursing into THIS rule
         # (mapping shapes only) keeps the narrowing: `props = [{"embedding": vec}]` builds a
         # LIST and still places nothing, so it must keep certifying.
-        return _mapping_literal_stores_the_vector(copied)
+        return _mapping_literal_stores_the_vector(copied, alias_keys=alias_keys)
     if isinstance(node, ast.DictComp):
         # ⛔ THE COMPREHENSION IS THE SAME MAPPING FORM, so it is answered HERE, once, for
         # every position this rule is asked from — the ASSIGN arm, the ``**`` operands, and
@@ -1547,10 +1553,10 @@ def _mapping_literal_stores_the_vector(node) -> bool:
         # twin. ⛔ `_pairs_operand_stores_the_vector` is what owns the recognition (it reads
         # the generator SOURCE and the constant-property key) — this arm only says that a
         # comprehension is a MAPPING, which is the question this helper asks.
-        return _pairs_operand_stores_the_vector(node)
+        return _pairs_operand_stores_the_vector(node, alias_keys=alias_keys)
     if isinstance(node, ast.IfExp):
-        return (_mapping_literal_stores_the_vector(node.body)
-                or _mapping_literal_stores_the_vector(node.orelse))
+        return (_mapping_literal_stores_the_vector(node.body, alias_keys=alias_keys)
+                or _mapping_literal_stores_the_vector(node.orelse, alias_keys=alias_keys))
     # ⛔ `or`/`and` AND THE WALRUS ARE THE SAME TRANSPARENT WRAPPER (`#13788`, measured at
     # `105b047b`): `x or y` IS `x if x else y`, which the arm above already answers, and
     # `(p := x)` evaluates to `x` with no name to resolve. Typing only an `if`-expression
@@ -1568,9 +1574,10 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     # DISCLOSED here rather than left to be rediscovered (the same imprecision already exists
     # for `if`-expressions, whose branches are both answered too).
     if isinstance(node, ast.BoolOp):
-        return any(_mapping_literal_stores_the_vector(value) for value in node.values)
+        return any(_mapping_literal_stores_the_vector(value, alias_keys=alias_keys)
+                   for value in node.values)
     if isinstance(node, ast.NamedExpr):
-        return _mapping_literal_stores_the_vector(node.value)
+        return _mapping_literal_stores_the_vector(node.value, alias_keys=alias_keys)
     # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME MAPPING (`#13788` F4):
     # `[{"embedding": vec}][0]` is the literal itself, one constant index in, and it CERTIFIED
     # the ASSIGN arm (`props = [{"embedding": vec}][0]`, runtime-checked to leave the key)
@@ -1595,12 +1602,12 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
         return any(
             -len(option) <= index < len(option)
-            and _mapping_literal_stores_the_vector(option[index])
+            and _mapping_literal_stores_the_vector(option[index], alias_keys=alias_keys)
             for option in _const_index_candidates(node.value))
     return False
 
 
-def _mapping_operand_stores_the_vector(node) -> bool:
+def _mapping_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """One operand of a mapping call, without the call: literal, pairs, or `*`-starred.
 
     ⛔ RECURSIVE BECAUSE THE OPERAND CAN BE A CONTAINER OF MAPPINGS: `props.update(*[{…}])`
@@ -1610,8 +1617,8 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     import ast
 
     if isinstance(node, ast.Starred):
-        return _mapping_operand_stores_the_vector(node.value)
-    if _mapping_literal_stores_the_vector(node):
+        return _mapping_operand_stores_the_vector(node.value, alias_keys=alias_keys)
+    if _mapping_literal_stores_the_vector(node, alias_keys=alias_keys):
         # ⛔ THE LITERAL THROUGH THE WRAPPERS A REFACTOR PUTS AROUND IT (`.copy()`,
         # `if…else`), not only the bare `ast.Dict`. The pairs rule below already follows
         # them, so following them here only for pairs was HALF A RULE:
@@ -1619,8 +1626,9 @@ def _mapping_operand_stores_the_vector(node) -> bool:
         # `props.update([…].copy())` was refused (measured at this head by the review).
         return True
     if isinstance(node, ast.List | ast.Tuple):
-        return (_pairs_store_the_vector(node)
-                or any(_mapping_operand_stores_the_vector(element) for element in node.elts))
+        return (_pairs_store_the_vector(node, alias_keys=alias_keys)
+                or any(_mapping_operand_stores_the_vector(element, alias_keys=alias_keys)
+                       for element in node.elts))
     # ⛔ A MAPPING-BUILDING CALL NEEDS NO ARM HERE, and that is MEASURED rather than assumed
     # (`#13788` F6): `props.update(dict.fromkeys(["embedding"], vec))` and its siblings are
     # answered by `_rebuild_stores_the_vector`, which `_stores_embedding` asks for every
@@ -1638,7 +1646,7 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     # rule only, so the SAME one-line wrapper re-opened the hole for the MAPPING spelling:
     # `props.update({"embedding": vec}.copy())` was CERTIFIED beside
     # `props.update([("embedding", vec)].copy())` refused. The wrapper arms ask both rules.
-    return _pairs_operand_stores_the_vector(node)
+    return _pairs_operand_stores_the_vector(node, alias_keys=alias_keys)
 
 
 #: Callee names that BUILD a mapping from `dict()`'s own operands, so an instance of one is
@@ -1662,7 +1670,7 @@ def _is_mapping_constructor(name: str) -> bool:
     return name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS
 
 
-def _constructor_stores_the_vector(call) -> bool:
+def _constructor_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this MAPPING CONSTRUCTOR place the vector — through EITHER operand form?
 
     ⛔ ONE HELPER, THREE CALLERS, because the same constructor is a store whether it is
@@ -1702,12 +1710,11 @@ def _constructor_stores_the_vector(call) -> bool:
             return False
         keys = call.args[0]
         named = (isinstance(keys, ast.List | ast.Tuple | ast.Set)
-                 and any(isinstance(element, ast.Constant)
-                         and element.value == EMBEDDING_PROPERTY
+                 and any(_names_property_key(element, alias_keys)
                          for element in keys.elts))
         return (named and len(call.args) >= 2
                 and not isinstance(call.args[1], ast.Constant))
-    return (_mapping_argument_stores_the_vector(call)
+    return (_mapping_argument_stores_the_vector(call, alias_keys=alias_keys)
             # …and EACH OPERAND BY THE *OPERAND* RULE, not the ARGUMENT rule (`#13788` F1,
             # measured at `10184e6d`). The argument rule's dict-literal arm calls
             # `_dict_stores_the_vector` WITHOUT `stop_arm`, so its `{**{…}}` recursion is
@@ -1718,13 +1725,13 @@ def _constructor_stores_the_vector(call) -> bool:
             # carries the stop-mode Dict recursion, the `Starred`/List/Tuple arms, the
             # `.copy()`/`if…else` mapping wrappers AND the pairs tail, so the separate pairs
             # leg this loop used to carry answers nothing it does not.
-            or any(_mapping_operand_stores_the_vector(argument)
+            or any(_mapping_operand_stores_the_vector(argument, alias_keys=alias_keys)
                    # …and a CONSTRUCTOR OPERAND IS AN OPERAND ONE NESTING IN: the operand
                    # of `OrderedDict` may itself be `OrderedDict({**{…}})`, and the operand
                    # rules answer a `Call` with `False`. Recursion descends the AST, so it
                    # terminates; STOP ARM ONLY, as this whole helper is.
                    or (isinstance(argument, ast.Call)
-                       and _constructor_stores_the_vector(argument))
+                       and _constructor_stores_the_vector(argument, alias_keys=alias_keys))
                    # ⛔ AND A `dict(zip(KEYS, VALUES))` OPERAND NEEDS NO ARM HERE, and that is
                    # MEASURED rather than assumed (`#13788`): the literal-column `zip` is
                    # answered by `_stores_embedding`'s operand scan, which reaches the SAME
@@ -1737,7 +1744,7 @@ def _constructor_stores_the_vector(call) -> bool:
                    for argument in call.args))
 
 
-def _zip_stores_the_vector(call) -> bool:
+def _zip_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Is this `zip(KEYS, VALUES)` pairing a LITERAL property key with a live value?
 
     ⛔ THE STATED RESIDUAL WAS HALF A RESIDUAL (`#13788`, measured on this branch).
@@ -1779,8 +1786,24 @@ def _zip_stores_the_vector(call) -> bool:
     # wrapper here is refusal-only: any branch that is a storing zip still refuses.
     branches = _conditional_branches(call)
     if len(branches) > 1 or branches[0] is not call:
-        return any(_zip_stores_the_vector(branch) for branch in branches)
+        return any(_zip_stores_the_vector(branch, alias_keys=alias_keys) for branch in branches)
+    # ⛔ THE CONTAINER WRAPPERS ARE THE SAME WRAPPERS (`#13788` F12, measured at `6504b28f9e`).
+    # This arm answered a conditional but not the container vocabulary the two operand rules
+    # already resolve, so `props.update([zip(("embedding",), (vec,))][0])`, its `|=` twin and
+    # `list([…])[0]` CERTIFIED beside the bare `props.update(zip((…), (…)))` refused — a store
+    # one constant index in (runtime-checked: each leaves `{"embedding": VEC}` in `props`).
+    # ⛔ AND IT ASKS THE ONE RESOLVER (`_sequence_options`), NOT A COPY OF THE VOCABULARY: an
+    # OPTION is an element list, so the element a constant index selects is `option[index]`.
+    # A copy is exactly what left this hole (the resolver's four earlier copies each knew a
+    # different subset), so the fix is the resolver plus an index, nothing else.
     if not isinstance(call, ast.Call):
+        if isinstance(call, ast.Subscript) and (index := _constant_index(call.slice)) is not None:
+            for option in _sequence_options(call.value) or []:
+                # `is not call` cannot happen (a Subscript is never an element of its own
+                # container), but the recursion is on a CHILD node either way, so it ends.
+                if -len(option) <= index < len(option) and _zip_stores_the_vector(
+                        option[index], alias_keys=alias_keys):
+                    return True
         return False
     if _callee_name(call) != "zip" or len(call.args) != 2:
         return False
@@ -1804,13 +1827,13 @@ def _zip_stores_the_vector(call) -> bool:
     # `embedding` with a live value). The value must be non-constant, as everywhere else.
     return any(
         index < len(value_option)
-        and isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
+        and _names_property_key(key, alias_keys)
         and not isinstance(value_option[index], ast.Constant)
         for key_option in key_options for value_option in value_options
         for index, key in enumerate(key_option))
 
 
-def _pairs_operand_stores_the_vector(node) -> bool:
+def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """The ITERABLE-OF-PAIRS operand, through the wrappers a refactor puts around it.
 
     `dict.__ior__` and `dict.update` both accept a sequence of `(key, value)` pairs, so
@@ -1862,18 +1885,18 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     import ast
 
     if isinstance(node, ast.Starred):
-        return _pairs_operand_stores_the_vector(node.value)
+        return _pairs_operand_stores_the_vector(node.value, alias_keys=alias_keys)
     if isinstance(node, ast.List | ast.Tuple | ast.Set):
-        return (_pairs_store_the_vector(node)
+        return (_pairs_store_the_vector(node, alias_keys=alias_keys)
                 # …and a `Starred` ELEMENT splices another sequence in (`(*[pairs],)`).
-                or any(_pairs_operand_stores_the_vector(element)
+                or any(_pairs_operand_stores_the_vector(element, alias_keys=alias_keys)
                        for element in node.elts if isinstance(element, ast.Starred)))
     if isinstance(node, ast.BinOp):
         # ⛔ CONCATENATION AND REPETITION ARE THE SAME SEQUENCE: `[("embedding", vec)] + []`
         # and `[("embedding", vec)] * 1` place the vector exactly as the bare literal does,
         # and one `+ []` re-opened the hole `.copy()` was fixed for (measured).
-        return (_pairs_operand_stores_the_vector(node.left)
-                or _pairs_operand_stores_the_vector(node.right))
+        return (_pairs_operand_stores_the_vector(node.left, alias_keys=alias_keys)
+                or _pairs_operand_stores_the_vector(node.right, alias_keys=alias_keys))
     if isinstance(node, ast.DictComp):
         # ⛔ A DICT COMPREHENSION IS A COMPREHENSION TOO, and it is NOT in the tuple below
         # because its fields are `key`/`value`, not `elt` — adding the type there without this
@@ -1924,7 +1947,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
                 # does not read a list's own `.copy()`, the pairs rule does. One vocabulary
                 # that is a SUPERSET is not one that is a REPLACEMENT, and narrowing
                 # acceptance is the one direction this file forbids.
-                _pairs_operand_stores_the_vector(generator.iter)
+                _pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
                 or _unpacked_element_stores_the_vector(generator.iter)
                 or _comprehension_source_pairs_the_property_with_a_value(generator.iter)
                 # ⛔ AND THIS FOURTH, ADDITIVE LEG FOLLOWS THE WRAPPERS THE RESOLVER DOES NOT:
@@ -1961,7 +1984,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
             # resolver cannot read a list's own `.copy()` and the pairs rule can, so replacing
             # one with the other narrowed acceptance (`[("embedding", vec)].copy()` went from
             # REFUSED to CERTIFIED in this lane's own first draft — measured).
-            and (_pairs_operand_stores_the_vector(generator.iter)
+            and (_pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
                  or _unpacked_element_stores_the_vector(generator.iter)
                  or _comprehension_source_pairs_the_property_with_a_value(generator.iter))
             for generator in node.generators)
@@ -1969,8 +1992,8 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
         # yields the pair. Static here because the SOURCE is a literal this check can read;
         # the elt is followed too, for the spelling that puts the literal in the element.
-        return (_pairs_operand_stores_the_vector(node.elt)
-                or any(_pairs_operand_stores_the_vector(generator.iter)
+        return (_pairs_operand_stores_the_vector(node.elt, alias_keys=alias_keys)
+                or any(_pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
                        for generator in node.generators))
     if isinstance(node, ast.Call):
         name = _callee_name(node)
@@ -1980,7 +2003,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # — yet this arm named only `list`/`tuple`, while three sibling arms name `set` too. Six
         # matrix rows measured it CERTIFIED beside its refused twin.
         if name in ("list", "tuple", "set") and len(node.args) == 1 and not node.keywords:
-            return _operand_stores_the_vector(node.args[0])
+            return _operand_stores_the_vector(node.args[0], alias_keys=alias_keys)
         # ⛔ THE ITEMS VIEW IS THE SAME PAIRS ITERABLE (`#13788`, measured at `40db94f1`):
         # `update({"embedding": vec}.items())` and the comprehension over it
         # (`{k: v for k, v in {"embedding": vec}.items()}`) both place the key and both
@@ -1990,7 +2013,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # answered here.
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
                 and not node.args and not node.keywords):
-            return _mapping_operand_stores_the_vector(node.func.value)
+            return _mapping_operand_stores_the_vector(node.func.value, alias_keys=alias_keys)
         copied = _transparent_copy_operand(node)
         if copied is not None:
             # ⛔ BOTH SPELLINGS: the value under `.copy()` may be the PAIRS literal or the
@@ -2000,7 +2023,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
             # mapping, and naming only the METHOD certified every one of them here, in
             # `update(…)`, in the `**` operand and in the rebuild assignment while the
             # `.copy()` spelling was refused. `_transparent_copy_operand` answers the family.
-            return _operand_stores_the_vector(copied)
+            return _operand_stores_the_vector(copied, alias_keys=alias_keys)
         # ⛔ A MAPPING CONSTRUCTOR IS **NOT** ANSWERED HERE, and that is measured rather
         # than assumed: `_constructor_stores_the_vector` answers it at the three sites that
         # can be handed one (the `|=` arm through the rebuild walk, `update(…)`, and the
@@ -2016,7 +2039,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # call sites instead, where a new recognition can only add a refusal.
         return False                  # `zip(NAMES, …)`, `map(…)`, a builder: residual, above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
-        return _operand_stores_the_vector(node.value)
+        return _operand_stores_the_vector(node.value, alias_keys=alias_keys)
     # ⛔ A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME OPERAND (`#13788` F4, measured
     # at this head). The slice arm above follows `[pairs][:]` but not `[pairs][0]`, so
     # `props.update([[("embedding", vec)]][0])`, `props |= [{…"embedding"…}][0]` and the
@@ -2042,11 +2065,11 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
         return any(
             -len(option) <= index < len(option)
-            and _operand_stores_the_vector(option[index])
+            and _operand_stores_the_vector(option[index], alias_keys=alias_keys)
             for option in _const_index_candidates(node.value))
     if isinstance(node, ast.IfExp):
-        return (_operand_stores_the_vector(node.body)
-                or _operand_stores_the_vector(node.orelse))
+        return (_operand_stores_the_vector(node.body, alias_keys=alias_keys)
+                or _operand_stores_the_vector(node.orelse, alias_keys=alias_keys))
     # ⛔ `or`/`and` AND THE WALRUS ARE THE SAME TRANSPARENT WRAPPER, HERE TOO (`#13788`,
     # measured at `105b047b`). This rule answered the `if`-expression above but not its
     # boolean spelling, so `props |= [] or [("embedding", vec)]`, `props |= [("x", 1)] and
@@ -2055,13 +2078,14 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     # wrapper family — and the mapping rule above carries the identical two arms, which is
     # the whole reason they are written as a pair here rather than one at a time.
     if isinstance(node, ast.BoolOp):
-        return any(_operand_stores_the_vector(value) for value in node.values)
+        return any(_operand_stores_the_vector(value, alias_keys=alias_keys)
+                   for value in node.values)
     if isinstance(node, ast.NamedExpr):
-        return _operand_stores_the_vector(node.value)
+        return _operand_stores_the_vector(node.value, alias_keys=alias_keys)
     return False
 
 
-def _operand_stores_the_vector(node) -> bool:
+def _operand_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this OPERAND place the vector — in EITHER of the two interchangeable forms?
 
     ⛔ ONE QUESTION, TWO SPELLINGS, ONE ANSWER (`#13788` F1, measured at `10184e6d`).
@@ -2079,8 +2103,8 @@ def _operand_stores_the_vector(node) -> bool:
     able to answer one form and not the other. STOP ARM ONLY, as every caller of both rules
     is: this adds refusals, never acceptances (the mirror-arm probes are unchanged).
     """
-    return (_mapping_operand_stores_the_vector(node)
-            or _pairs_operand_stores_the_vector(node))
+    return (_mapping_operand_stores_the_vector(node, alias_keys=alias_keys)
+            or _pairs_operand_stores_the_vector(node, alias_keys=alias_keys))
 
 
 def _constant_index(node) -> int | None:
@@ -2702,7 +2726,7 @@ def _const_index_candidates(node) -> list:
     return _sequence_options(node) or []
 
 
-def _pairs_store_the_vector(node) -> bool:
+def _pairs_store_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this list/tuple/SET literal hold an `(EXACT property, non-constant)` pair?
 
     ⛔ A SET IS AN ITERABLE OF PAIRS TOO (`#13788`, measured by the review of this branch):
@@ -2716,13 +2740,16 @@ def _pairs_store_the_vector(node) -> bool:
 
     return any(
         isinstance(element, ast.Tuple | ast.List) and len(element.elts) == 2
-        and isinstance(element.elts[0], ast.Constant)
-        and element.elts[0].value == EMBEDDING_PROPERTY
+        # ⛔ THE PAIR'S KEY IS THE SAME KEY (`#13788` F11): `[(key, vec)]` with
+        # `key = "embedding"` places the property exactly as `[("embedding", vec)]` does, so
+        # the alias rule answers here too rather than leaving one spelling of the same key
+        # certified.
+        and _names_property_key(element.elts[0], alias_keys)
         and not isinstance(element.elts[1], ast.Constant)
         for element in node.elts)
 
 
-def _two_argument_store(arguments) -> bool:
+def _two_argument_store(arguments, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Is this `(EXACT property, non-constant value)` as the FIRST TWO arguments?
 
     The two-argument form of a mapping write — `props.__setitem__("embedding", vec)`,
@@ -2734,8 +2761,9 @@ def _two_argument_store(arguments) -> bool:
     import ast
 
     return (len(arguments) >= 2
-            and isinstance(arguments[0], ast.Constant)
-            and arguments[0].value == EMBEDDING_PROPERTY
+            # ⛔ AND THE PROPERTY KEY MAY BE AN ALIAS of its own string (`#13788` F11):
+            # `props.__setitem__(key, vec)` / `setdefault(key, vec)` place the same key.
+            and _names_property_key(arguments[0], alias_keys)
             and not isinstance(arguments[1], ast.Constant))
 
 
@@ -2759,7 +2787,7 @@ def _spliced_sequence_elements(node) -> list:
     return [element for option in options for element in option]
 
 
-def _third_argument_stores_the_vector(call) -> bool:
+def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this call NAME the property exactly, in a position a writer would name it in?
 
     `setattr(props, "embedding", vec)`, `operator.setitem(props, "embedding", vec)` and a
@@ -2797,11 +2825,11 @@ def _third_argument_stores_the_vector(call) -> bool:
     # non-constant second argument and refused it. A fix may add refusals, never acceptances,
     # so the raw form is tested too (and the two are not duplicates: each covers a case the
     # other misses, and dropping either reddens the suite).
-    if _two_argument_store(arguments) or _two_argument_store(raw):
+    if _two_argument_store(arguments, alias_keys=alias_keys) or _two_argument_store(
+            raw, alias_keys=alias_keys):
         return True
     if (len(arguments) >= 3
-            and isinstance(arguments[1], ast.Constant)
-            and arguments[1].value == EMBEDDING_PROPERTY
+            and _names_property_key(arguments[1], alias_keys)
             and not isinstance(arguments[2], ast.Constant)):
         return True
     # ⛔ A ``**`` OPERAND IS THE SAME FACTS ONE LEVEL IN. `keyword.arg` is `None` for it, so the
@@ -2829,7 +2857,7 @@ def _third_argument_stores_the_vector(call) -> bool:
     # property as a POSITIONAL constant anywhere before the value, which then arrives as a
     # keyword (so the three-positional-argument test above never sees it).
     named_positionally = any(
-        isinstance(argument, ast.Constant) and argument.value == EMBEDDING_PROPERTY
+        _names_property_key(argument, alias_keys)
         for argument in arguments)
     if named_positionally and live_keyword:
         return True
@@ -2851,7 +2879,8 @@ def _third_argument_stores_the_vector(call) -> bool:
     # ⛔ AND THE NAMED SCANS ABOVE ARE NO LONGER A DIFFERENT QUESTION (`#13788` F5): a wrapper
     # around a `key=`/`value=` pair DOES have statically readable values once it is unwrapped
     # (`_mapping_values`), and reading only a top-level literal left five false PASSes.
-    return any(keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
+    return any(keyword.arg is None and _mapping_operand_stores_the_vector(
+                   keyword.value, alias_keys=alias_keys)
                for keyword in call.keywords)
 
 
@@ -2926,7 +2955,7 @@ def _mapping_values(node):
                 yield from _mapping_values(argument)
 
 
-def _mutator_stores_the_vector(call) -> bool:
+def _mutator_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this CALL place the vector through a dict/attr MUTATOR, not an assignment?
 
     ⛔ NARROW IN THE SAME TWO WAYS as the rest of `_stores_embedding`, so this is not the
@@ -2958,10 +2987,19 @@ def _mutator_stores_the_vector(call) -> bool:
        (`props.update(_props_for(vec))`, `dict((k, v) for …)`).
     3. **Dynamic forms** — `getattr(props, "__setitem__")(…)`, `exec`, `globals()[…]`: out of
        AST reach by construction, the same caveat `_asks_the_gate` states for the gate call.
-    4. **A COMPUTED property key** — `props[KEY] = vec` where `KEY = "embedding"` and
-       `props[NAME_FOR_EMBEDDING]`. Resolving the constant is data flow this check does not
-       do, so the assignment reads as a store of nothing. (It used to be named only inside
-       the `With`-arm comment, where a reader of the ASSIGNMENT vocabulary would not find it.)
+    4. **A COMPUTED property key whose binding is NOT IN THE WRITER'S OWN SCOPE** —
+       `props[NAME_FOR_EMBEDDING] = vec` where the name is a PARAMETER, a call result, or a
+       MODULE-level constant. ⛔ THE SUBSCRIPT SPELLING IS *NOT* THE RESIDUAL IT USED TO BE:
+       a name bound to the property's own string IN THIS SCOPE is resolved statically
+       (`_property_alias_names` feeds `_keyed_by_alias`, `_dict_comp_keyed_by_alias` and —
+       since `#13788` F11 — every dict-literal spelling through `_names_property_key`), so
+       `key = "embedding"; props[key] = vec` AND `props.update({key: vec})` are both REFUSED.
+       What this walk does not follow is the binding itself when it lives outside the writer
+       (MEASURED at `6504b28f9e`: a MODULE-level `KEY = "embedding"` is still CERTIFIED,
+       because the alias set is built per function scope). ⛔ THIS PARAGRAPH USED TO SAY the
+       SUBSCRIPT was certified — false since `98eec2ca`, and the stale half mattered: a reader
+       who trusted it concluded computed keys were uniformly residual, which is exactly the
+       excuse the mapping-literal hole needed.
 
     ⛔ WHAT IS *NOT* A RESIDUAL ANY MORE: a store reached through a HELPER ARGUMENT
     (`_set(props, "embedding", vec)`) used to be listed here as "indistinguishable from
@@ -2987,7 +3025,7 @@ def _mutator_stores_the_vector(call) -> bool:
         # `dict.__or__(props, {…})` all place the vector — and all three were measured CERTIFIED
         # by the review of THIS branch, while the tuple one line up already carried `__ior__`
         # beside `ior`. The dunder/non-dunder pair is now named as a pair, in both places.
-        return _mapping_stores_the_vector(call)
+        return _mapping_stores_the_vector(call, alias_keys=alias_keys)
     if name in ("pop", "popitem"):
         # ⛔ A REMOVAL IS NOT A STORE, and the caller-vocabulary rule below would otherwise
         # refuse the dict writer's own write-stop: `props.pop("embedding", _MISSING)` is
@@ -3019,9 +3057,9 @@ def _mutator_stores_the_vector(call) -> bool:
         # stop arm. ⛔ ONLY A `Starred` OPERAND, because a PLAIN literal handed to an unknown
         # callee is a MENTION, not a store (`_audit({"embedding": props.get("embedding")})`
         # reports, it does not write) — and refusing it costs an honest writer its gate.
-        return (_third_argument_stores_the_vector(call)
+        return (_third_argument_stores_the_vector(call, alias_keys=alias_keys)
                 or any(isinstance(argument, ast.Starred)
-                       and _mapping_operand_stores_the_vector(argument)
+                       and _mapping_operand_stores_the_vector(argument, alias_keys=alias_keys)
                        for argument in call.args))
     # The UNBOUND `dict.__setitem__(props, …)` / `dict.setdefault(props, …)` forms need no
     # argument shift of their own: the receiver lands in argument position 0, so the
@@ -3040,11 +3078,11 @@ def _mutator_stores_the_vector(call) -> bool:
         # the helper-argument forms (`props.__setitem__(key="embedding", value=vec)`) —
         # the receiver form shares the caller vocabulary one branch up, so it must share
         # the recognition too rather than only the positional test.
-        _mapping_stores_the_vector(call)
-        or _third_argument_stores_the_vector(call))
+        _mapping_stores_the_vector(call, alias_keys=alias_keys)
+        or _third_argument_stores_the_vector(call, alias_keys=alias_keys))
 
 
-def _rebuild_stores_the_vector(node) -> bool:
+def _rebuild_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this expression REBUILD a mapping WITH the vector, rather than mention it?
 
     ⛔ ONE EXPRESSION FORM OVER (#13647, measured fail-OPEN at `98eec2ca`). The dict
@@ -3095,7 +3133,7 @@ def _rebuild_stores_the_vector(node) -> bool:
             # vec}}` and `_write(props | {**{"embedding": vec}})` (the last two through the
             # union arm below, whose `_own_walk` also yields the display). Refusal-only:
             # both call sites of this helper are `anywhere`-gated.
-            if merges and _dict_stores_the_vector(leaf, stop_arm=True):
+            if merges and _dict_stores_the_vector(leaf, stop_arm=True, alias_keys=alias_keys):
                 return True       # `{**props, "embedding": vec}`
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
@@ -3111,7 +3149,7 @@ def _rebuild_stores_the_vector(node) -> bool:
             # recursion, the comprehension, the `Starred`/container arms and both wrappers;
             # a non-mapping operand (`a | b` for sets, a constructor) still answers False
             # here, so no honest union is swept in.
-            if any(_mapping_operand_stores_the_vector(side)
+            if any(_mapping_operand_stores_the_vector(side, alias_keys=alias_keys)
                    for side in (leaf.left, leaf.right)):
                 return True
         elif isinstance(leaf, ast.Call) and (_is_mapping_constructor(_callee_name(leaf))
@@ -3123,7 +3161,7 @@ def _rebuild_stores_the_vector(node) -> bool:
             # the `|=` arm used a `*Dict` suffix meant `props = OrderedDict({"embedding":
             # vec})` was CERTIFIED beside `props = dict({"embedding": vec})` refused
             # (measured), the same constructor under two spellings of one name list.
-            if _constructor_stores_the_vector(leaf):
+            if _constructor_stores_the_vector(leaf, alias_keys=alias_keys):
                 return True
     return False
 
@@ -3183,7 +3221,7 @@ def _keyed_by_alias(target, alias_keys: frozenset[str]) -> bool:
             and target.slice.id in alias_keys)
 
 
-def _mapping_argument_stores_the_vector(node) -> bool:
+def _mapping_argument_stores_the_vector(node, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this VALUE place the vector — a dict LITERAL, or a `dict(...)` CONSTRUCTOR?
 
     ⛔ THE CONSTRUCTOR SPELLING IS THE SAME MAPPING (`#13647`, measured at `8637df0f`).
@@ -3198,7 +3236,7 @@ def _mapping_argument_stores_the_vector(node) -> bool:
     import ast
 
     if isinstance(node, ast.Dict):
-        return _dict_stores_the_vector(node)
+        return _dict_stores_the_vector(node, alias_keys=alias_keys)
     # ⛔ A COMPREHENSION NEEDS NO ARM HERE, AND THE REASON IS NOT A TAIL OF THIS HELPER — it
     # ends in `return False`, and it never asks the pairs rule nor the mapping-literal rule.
     # Every position that matters reaches a comprehension through a DIFFERENT caller, and the
@@ -3221,13 +3259,40 @@ def _mapping_argument_stores_the_vector(node) -> bool:
             # while the unwrapped spelling was refused). The mapping-operand rule answers the
             # literal AND the transparent wrapper; a pairs operand here is a spelling Python
             # rejects (`dict(**[…])`), and refusing it is the fail-closed direction.
-            if keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value):
+            if keyword.arg is None and _mapping_operand_stores_the_vector(
+                    keyword.value, alias_keys=alias_keys):
                 return True          # `dict(**{"embedding": vec})`
-        return any(_mapping_argument_stores_the_vector(argument) for argument in node.args)
+        return any(_mapping_argument_stores_the_vector(argument, alias_keys=alias_keys)
+                   for argument in node.args)
     return False
 
 
-def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
+def _names_property_key(node, alias_keys: frozenset[str]) -> bool:
+    """Is this dict KEY the exact property — the literal, or a NAME bound to it in this scope?
+
+    ⛔ ONE RULE FOR BOTH SPELLINGS (`#13788` F11, measured at `6504b28f9e`). The SUBSCRIPT
+    arm (`_keyed_by_alias`) and the dict-COMPREHENSION arm (`_dict_comp_keyed_by_alias`) have
+    resolved a name bound to the property's own string since `98eec2ca`, but every rule that
+    reads a dict LITERAL took only `ast.Constant` — so with `key = "embedding"` bound inside
+    the writer, `props[key] = vec` and `props |= {key: v for k, v in [(…)]}` were refused while
+    `props.update({key: vec})`, `props |= {key: vec}`, `props = {key: vec}`,
+    `{**{key: vec}}`, `props.__setitem__(key, vec)` and `props.setdefault(key, vec)` all
+    CERTIFIED a stop arm that stores (runtime-checked: `p.update({key: vec})` places
+    `p["embedding"]`). The binding is STATIC — a local assigned a constant in THIS scope — so
+    the exact-property precision that keeps `embedding_model` out is preserved.
+
+    ⛔ STOP-ARM ONLY, at the call sites: every caller passes `alias_keys`, which
+    `_stores_embedding` populates only when `anywhere` (the stop arm). On the mirror arm a new
+    recognition would be a new ACCEPTANCE, and a fix may add refusals, never acceptances.
+    """
+    import ast
+
+    return ((isinstance(node, ast.Constant) and node.value == EMBEDDING_PROPERTY)
+            or (isinstance(node, ast.Name) and node.id in alias_keys))
+
+
+def _dict_stores_the_vector(node, *, stop_arm: bool = False,
+                            alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this dict LITERAL set the vector — directly, or through a `{**{…}}` merge?
 
     ⛔ `stop_arm` GATES THE *RECURSION*, NOT THE DIRECT TEST, and that split is load-bearing:
@@ -3256,10 +3321,12 @@ def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
         # The operand rule is the one rule that answers a literal, a comprehension AND the
         # transparent wrappers, so the `**` value asks IT rather than a type test; the pairs
         # tail it carries is what already answered the `DictComp` spelling.
-        if stop_arm and key is None and _mapping_operand_stores_the_vector(value):
+        if stop_arm and key is None and _mapping_operand_stores_the_vector(
+                value, alias_keys=alias_keys):
             return True
-        if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
-                and not isinstance(value, ast.Constant)):
+        # ⛔ THE KEY RULE IS ONE RULE (`#13788` F11): a literal AND an alias of the property's
+        # own string answer the same question (`_names_property_key`).
+        if _names_property_key(key, alias_keys) and not isinstance(value, ast.Constant):
             return True
     return False
 

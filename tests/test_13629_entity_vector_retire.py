@@ -6263,6 +6263,126 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE PROPERTY'S OWN STRING BOUND TO A NAME IS THE SAME KEY, IN EVERY SPELLING
+        # (`#13788` F11, measured at `6504b28f9e`). `_keyed_by_alias` (subscript) and
+        # `_dict_comp_keyed_by_alias` (comprehension) resolved it since `98eec2ca`, but every
+        # rule that reads a dict LITERAL took only `ast.Constant` — so with `key = "embedding"`
+        # bound inside the writer, `props[key] = vec` was REFUSED while `props.update({key:
+        # vec})`, `|=`, `=`, `{**{…}}`, `__setitem__`, `setdefault`, the pairs form and a
+        # constructor operand were all CERTIFIED on a stop arm that stores (each runtime-checked
+        # to leave `props["embedding"]`). One key rule (`_names_property_key`), threaded through
+        # the mapping/pairs/operand/constructor rules, answers them all.
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update({key: _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {key: _encode(ev)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props = {key: _encode(ev)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update({**{key: _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.__setitem__(key, _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.setdefault(key, _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update([(key, _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update(OrderedDict({key: _encode(ev)}))
+        return None
+    _write(props)
+""",
+        # ⛔ AND A `zip` OF TWO LITERAL COLUMNS IS THE SAME PAIR ONE CONSTANT INDEX IN
+        # (`#13788` F12, measured at `6504b28f9e`): `_zip_stores_the_vector` answered a
+        # conditional but not the container-index vocabulary the two operand rules already
+        # resolve, so `[…][0]` / `list([…])[0]` CERTIFIED beside the bare operand refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([zip(("embedding",), (_encode(ev),))][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [zip(("embedding",), (_encode(ev),))][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(list([zip(("embedding",), (_encode(ev),))])[0])
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE SPLICE'S `Mult` (REPETITION) ARM IS REACHED BY NO ROW OF THE COMMIT THAT
+        # ADDED IT (`#13788` F13): the `BinOp(Add)` twin was pinned, the repetition was not, so
+        # disabling it flipped these two rows from REFUSED to CERTIFIED while the whole suite
+        # stayed green. ⛔ THE ROW MUST BE THE **SPLIT** FORM (`*["embedding", v]` splices to TWO
+        # arguments), not a pair tuple (`*[("embedding", v)]` is refused by the pairs rule
+        # whether the splice flattens it or not — measured: that spelling stays refused with
+        # the `Mult` arm removed, so it pins nothing). The zero-repetition control below
+        # (`*[…] * 0`) is the other half: it must keep certifying.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)] * 1))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(1 * ["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
