@@ -434,7 +434,16 @@ _prewarm_embedder() {
     _flag="${_flag%"${_flag##*[![:space:]]}"}"
     case "${_flag,,}" in
         0|false|no|off)
-            echo "tortoise: embedder boot pre-warm SKIPPED (TORTOISE_EMBEDDER_WARMUP=${TORTOISE_EMBEDDER_WARMUP}) — the in-process load is disabled too, so there is nothing this would make cheap"
+            # ⛔ #13674 review F3: this switch gates the WARM-UP only
+            # (`start_warm_up` / `warm_up` / the hosted lifespan pre-warm).
+            # `EmbeddingModel.get()` — the REQUEST path — is NOT gated
+            # (`tortoise/mcp_auth.py` states it: "does NOT gate this path, and
+            # that is the point"). So the app still loads the model on the first
+            # request that needs an embedding, at COLD cost, under its own
+            # bound: skipping this MOVES the cost, it does not remove it. Do not
+            # restore the old "nothing this would make cheap" wording — it told
+            # the operator the opposite, at the one decision this hands back.
+            echo "tortoise: embedder boot pre-warm SKIPPED (TORTOISE_EMBEDDER_WARMUP=${TORTOISE_EMBEDDER_WARMUP}) — the in-process WARM-UP is disabled, but the request path still loads the model, cold, on first use, so skipping this only moves that cost to the first request"
             return 0
             ;;
     esac
@@ -526,7 +535,12 @@ PY
             ;;
         124|137)
             echo "tortoise: WARNING — embedder boot pre-warm hit its ${_bound}s bound (${_wall}s wall) and was stopped; continuing WITHOUT it (non-fatal)." >&2
-            echo "tortoise: the app will load the embedder lazily under its own ${_bound}s bound, at COLD cost — if that also fails the dense leg stays off and reads declare keyword-only (#2952)." >&2
+            # `$_bound` is the PRE-WARM's bound, not the app's (the app applies
+            # `EmbeddingModel._LOAD_TIMEOUT_S`, #13674 review F3) — they coincide
+            # only at the default, so advertising the number here would state a
+            # bound the app never applies (e.g. TORTOISE_BOOT_EMBEDDER_WARMUP_
+            # TIMEOUT_S=45 would claim a 45 s app bound).
+            echo "tortoise: the app will load the embedder lazily, at COLD cost, under its own request-path bound — if that also fails the dense leg stays off and reads declare keyword-only (#2952)." >&2
             ;;
         127)
             echo "tortoise: WARNING — embedder boot pre-warm could not run (timeout/python not found, rc=127); continuing WITHOUT it (non-fatal)." >&2
