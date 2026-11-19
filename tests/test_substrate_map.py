@@ -1499,9 +1499,36 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the staged read is inside the checkout, so it cannot stand in for an "
         "ambient reader that `_label_hits` provably never performs"
     )
+    #: The read a NAME-based rule would wrongly take. `_imposter` is a DIFFERENT code
+    #: object that merely shares `_label_hits`'s `co_name`, so `f_code.co_name` — the
+    #: natural spelling this rule is one refactor away from — attributes it to
+    #: `_label_hits` and reds the control on a file `_label_hits` never reads. That is
+    #: the false RED #13699 is, one refactor out, so the comment above `_LABEL_HITS_CODE`
+    #: is pinned here rather than left as prose. `CodeType.replace` keeps it ordinary
+    #: local code, with no `exec` a linter would have to excuse.
+    imposter_file = tmp_path / "read-by-a-same-named-imposter.txt"
+    imposter_file.write_text("not `_label_hits`\n", encoding="utf-8")
+    assert not imposter_file.is_relative_to(REPO), (
+        "the imposter's file is inside the checkout, so a containment filter could "
+        "explain its absence and this arm would pin nothing"
+    )
+
+    def _imposter(path: Path) -> None:
+        path.read_text(encoding="utf-8")
+
+    imposter = _imposter
+    imposter.__code__ = imposter.__code__.replace(co_name=_LABEL_HITS_CODE.co_name)
+    assert imposter.__code__.co_name == _LABEL_HITS_CODE.co_name, (
+        "the imposter does not share `_label_hits`'s code name, so a name-based rule "
+        "would not take its read and this arm would pin nothing"
+    )
+    assert imposter.__code__ is not _LABEL_HITS_CODE, (
+        "the imposter IS `_label_hits`'s code object, so it is not an imposter"
+    )
 
     def _an_ambient_read() -> None:
         ambient.read_text(encoding="utf-8")
+        imposter(imposter_file)
 
     everything: list = []
     read = _label_hits_reads(monkeypatch, during=_an_ambient_read, everything=everything)
@@ -1509,6 +1536,10 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the recorder did not see the same-thread read, so the contamination "
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
+    )
+    assert imposter_file in [p for p, _ in everything], (
+        "the recorder did not see the IMPOSTER's read, so the code-object arm below "
+        "would be vacuous — a name-based rule passed it by not running"
     )
     #: The frame NAME half of `everything` is asserted, not just collected: the
     #: name recorded for this read must be the frame that made it, not
@@ -1537,6 +1568,12 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "`_label_hits`, which reds the population control on a path it never "
         "reads and reports a defect that is not there (CI: `/proc/2932/stat`, "
         "test (e) of run 44442459469, #13699)"
+    )
+    assert imposter_file not in read, (
+        "a read made by a DIFFERENT function that merely shares `_label_hits`'s "
+        "CODE NAME was attributed to `_label_hits` — the rule compared "
+        "`f_code.co_name`, a string, instead of the code object, so any same-named "
+        "function anywhere in the process re-opens the false-RED class #13699 is"
     )
     assert not _population_drift(read), (
         "the recorded population drifted off the tracked set under tortoise/: "
