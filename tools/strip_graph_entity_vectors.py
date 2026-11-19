@@ -2570,14 +2570,34 @@ def uri_fingerprint(uri: str) -> str:
         # ⛔ BUT ONLY WHEN THE *OTHER* READING IS NOT EQUALLY PLAUSIBLE. `_host_port` on
         #    the pre-marker text says "a query could start here"; it does NOT say the
         #    userinfo reading is impossible. `docker://admin:1234?x@prod:6379/g` has a
-        #    pre-marker `admin:1234` that parses as host `admin` + port `1234`, so the
-        #    query reading was taken and everything after the `?` — the REAL host — was
-        #    discarded as query content: measured, prod and staging folded onto
-        #    `docker://admin:1234/g` AND the userinfo itself was emitted into the plan.
-        #    `docker://prod:6379?x@other:6379` is character-for-character the same shape.
-        #    When a `host:port` follows an `@` after the marker as well, both readings are
-        #    grammatical and nothing in the URI prefers one — so it is REFUSED, which is
-        #    the only answer that neither prints the credential nor folds two targets.
+        #    pre-marker `admin:1234` that parses as host `admin` + port `1234`, and
+        #    `docker://prod:6379?x@other:6379` is character-for-character the same shape,
+        #    so a `host:port` after an `@` past the marker makes BOTH readings grammatical.
+        #
+        #    ⛔ WHAT IS MEASURED, AND WHAT IS NOT (round-17 review, corrected here): the
+        #    fix does NOT rest on "the real host is discarded" for these shapes. The
+        #    resolver reads the authority with `urlsplit` (RFC 3986 §3.2 — it ends at the
+        #    first `/`, `?` or `#`), so for `docker://admin:1234?x@prod:6379/g`
+        #    `netloc == 'admin:1234'` and `FalkorProjection.from_uri` DIALS `admin:1234`;
+        #    the `@prod:6379` tail is query content the tool never connects to, and
+        #    `prod`/`staging` differ only there. So no credential is emitted for that
+        #    shape and there is no production→staging swap to prevent — an earlier
+        #    draft of this comment claimed both, and both claims were false.
+        #
+        #    The refusal is still right, for the reason that survives: the value is a
+        #    COMPARISON KEY, and when two grammatical readings name different targets the
+        #    key cannot be derived — `docker://:pa/ss@host:6379/g` is the same shape where
+        #    the pre-marker text IS the credential. Refusing is the only answer that holds
+        #    both properties on every member of the class, and it is fail-closed with a
+        #    named remedy.
+        #
+        #    ⛔ SCOPE, STATED PLAINLY BECAUSE IT IS WIDER THAN IT LOOKS: this refuses EVERY
+        #    query/fragment carrying an `@host:port` (`?ssl=true&addr=user@master:6379`
+        #    included), measured at 12,672 inputs that previously fingerprinted to the very
+        #    host the resolver dials. That is an accepted cost, not an oversight: the URI
+        #    cannot distinguish them, and the remedy (percent-encode, or pass
+        #    `--graph-name`) is in the message. A bare-word tail (`?x@y/g`) has no port, so
+        #    it is not a competing `host:port` and still resolves to its real host.
         after_marker = authority[marker:]
         tail = after_marker[after_marker.rfind("@") + 1:] if "@" in after_marker else ""
         tail_host = _host_port(tail)
@@ -2588,13 +2608,13 @@ def uri_fingerprint(uri: str) -> str:
             raise Refusal(
                 REFUSE_TARGET_UNPARSEABLE,
                 f"the graph target {scheme}://… cannot be fingerprinted: a '?'/'#' is "
-                "followed by an '@' whose tail is a host:port, so this reads BOTH as a "
-                "query after a real host AND as a password containing a '?'/'#' — and "
-                "the two readings name different targets. Taking the query reading can "
-                "print the userinfo into the plan and fold two deployments onto one "
-                "fingerprint; taking the userinfo reading can fold two others. "
-                "Percent-encode the credential ('?' → '%3F', '#' → '%23', '/' → '%2F') "
-                "so the boundary is unambiguous.")
+                "followed by an '@' whose tail is a host:port, so the authority reads "
+                "BOTH as a host followed by a query AND as a credential containing a "
+                "'?'/'#', and the two readings name different targets. A fingerprint is "
+                "compared to decide whether two deployments are the same, so it may not "
+                "be derived from an undecidable boundary. Percent-encode the credential "
+                "('?' → '%3F', '#' → '%23', '/' → '%2F') or pass the graph name out of "
+                "band with `--graph-name` so the target becomes parseable.")
         # a GENUINE query/fragment: it is not target identity and can carry a credential
         # (`?api_key=…`), so it is dropped — from the authority AND from the path.
         host = head.split("@")[-1] if "@" in head else head

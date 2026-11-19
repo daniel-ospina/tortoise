@@ -1966,6 +1966,13 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
         "docker://svc:1?pass@prod:6379/g",
         "docker://user?pw@prod:6379/g",
         "docker://prod:6379?x@other:6379",
+        # ⛔ THE `#` ARM NEEDS ITS OWN MEMBER. Every other member above uses `?`, so
+        # deleting `#` from the marker set left the whole suite green while
+        # `docker://prod:6379#x@other:6379` started rendering `docker://other:6379` — a
+        # host the tool never dials (`urlsplit` puts the whole `#…` in the fragment).
+        "docker://prod:6379#x@other:6379",
+        "docker://admin:1234#x@prod:6379/g",
+        "docker://prod:6379?ssl=true&addr=user@master:6379",
     ):
         with pytest.raises(strip.Refusal) as amb:
             strip.uri_fingerprint(ambiguous)
