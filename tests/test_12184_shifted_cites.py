@@ -136,12 +136,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57480`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57500`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57480` passes `"event"`', _SDK, 57480, 'entity_type="event"'),
+    (_AUDIT, '`sdk.py:57500` passes `"event"`', _SDK, 57500, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -198,9 +198,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'sdk.py:21889', _SDK, 21889, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:21931', 'tortoise/sdk.py', 21931, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:22054`', 'tortoise/sdk.py', 22054, 's.summary, s.topics, s.'),
-    (_AUDIT, 'hosted_api.py:22962', 'tortoise/hosted_api.py', 22962, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:22774`', 'tortoise/hosted_api.py', 22774, 'def _execute_commit_writes'),
-    (_AUDIT, '`:33725`', 'tortoise/hosted_api.py', 33725, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:23028', 'tortoise/hosted_api.py', 23028, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:22840`', 'tortoise/hosted_api.py', 22840, 'def _execute_commit_writes'),
+    (_AUDIT, '`:33791`', 'tortoise/hosted_api.py', 33791, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -248,8 +248,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21931", _SDK, 21931, "s.summary=CASE WHEN $sum"),
     (":22054", _SDK, 22054, "s.summary, s.topics, s."),
-    ("hosted_api.py:22962", "tortoise/hosted_api.py", 22962, "MERGE (s:Source {url:$did})"),
-    (":22774", "tortoise/hosted_api.py", 22774, "def _execute_commit_writes"),
+    ("hosted_api.py:23028", "tortoise/hosted_api.py", 23028, "MERGE (s:Source {url:$did})"),
+    (":22840", "tortoise/hosted_api.py", 22840, "def _execute_commit_writes"),
 )
 
 
@@ -293,7 +293,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37525` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37525`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37502` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57480` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57500` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -338,9 +338,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21889'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21931'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22054`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22962'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22774`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33725`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23028'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22840`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33791`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5375` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7154` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,

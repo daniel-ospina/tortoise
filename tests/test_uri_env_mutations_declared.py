@@ -144,28 +144,52 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     ],
     # #12186: the capstone-measurement file is declared HERMETIC (no DB, no graph,
     # no docker, no network, no model call) in `config/ci-surfaces.yml`, and its
-    # three sites exist to pin the `run()` ARM that answers — not to reach a
-    # database. (1) `delenv` at the door test: `run()` has four `return 3` arms, so
-    # with an ambient URI the URI arm can answer for the door arm and the test
-    # stays green over a deleted door guard (measured in its own docstring); the
-    # environment is therefore pinned EMPTY. (2) `setenv rediss://`: proves
-    # execution reaches `FalkorProjection.from_uri` at all — the assertion is the
-    # raised sentinel, not a message. (3) `setenv postgres://`: pins the RUN()-LEVEL
-    # wiring, not the predicate. `_uri_refusal` is already pinned in both
-    # directions at the unit level (`test_the_uri_guard_accepts_every_scheme_the_
-    # product_itself_supports`), so deleting the PREDICATE would red those. What
-    # nothing else covers is `run()`'s half: it reads `_uri_refusal` and returns 3,
-    # and deleting THAT block leaves the unit pins green while every arm figure is
-    # written against a backend the product cannot use — measured: with the block
-    # deleted, `run()` reached `FalkorProjection.from_uri` and this row was the only
-    # red (`1 failed, 2 passed` over the uri-selected cases).
-    # Every site uses `monkeypatch`, so no lane state leaks, and none of them
-    # constructs anything: the ports are stubbed above the driver.
-    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored, like every row above: `_is_declared`
-    # matches each censused line on its own, so these three spellings are all the row
-    # authorizes and any FUTURE site in the same file reds until it is triaged (#11083 —
-    # a looser, unanchored arm would ride along silently, which is exactly the #942
-    # vacuity vector this census exists to catch).
+    # three sites exist to pin WHICH `run()` arm answers — not to reach a database.
+    #   (1) `delenv` (door test): `run()` has four `return 3` arms and the door arm
+    #       is the first. Pinning the environment EMPTY is what makes the URI arm
+    #       LIVE (`_uri_refusal("")` refuses), so the test's reason assertion can
+    #       tell the two adjacent arms apart — measured with the door guard
+    #       neutralised: `1 failed`, the assertion reporting that the refusal that
+    #       fired was NOT the door arm's (it quotes the URI arm's `REFUSED: no live
+    #       FalkorDB in TORTOISE_DB_URI …`). With an accepted ambient URI instead the
+    #       URI arm cannot answer at all (`_uri_refusal` returns None for
+    #       docker/redis/rediss), so a deleted door guard reaches
+    #       `FalkorProjection.from_uri` instead of refusing — a connection-layer error
+    #       where the host is unreachable, and a full measurement against the LIVE
+    #       server where it is up — which is precisely what pinning the environment
+    #       empty prevents.
+    #   (2) `setenv rediss://`: proves execution reaches `FalkorProjection.from_uri`
+    #       at all — the assertion is the raised sentinel, not a message.
+    #   (3) `setenv postgres://`: pins `run()`'s half of the URI guard. `_uri_refusal`
+    #       is already pinned in BOTH directions at the unit level
+    #       (`test_the_uri_guard_accepts_every_scheme_the_product_itself_supports`),
+    #       so the predicate is not this row's DISTINCT cover — and gutting it
+    #       (`_uri_refusal` -> `return None`) reds those pins AND this row (`2 failed`,
+    #       because the run then dies on `from_uri`'s `ValueError` instead of refusing).
+    #       What nothing else covers is that `run()` READS it and returns 3: with that
+    #       block deleted the unit pins stay green and this row is the only red
+    #       (`1 failed, 2 passed` over the uri-selected cases). With the block present
+    #       the same input produces the instrument's own `rc=3` + "no live FalkorDB"
+    #       refusal instead of an uncaught traceback. ⚠️ It does NOT prevent figures
+    #       being written against an unusable backend — `FalkorProjection.from_uri`
+    #       refuses the same scheme set and raises `ValueError` (measured:
+    #       `resolve_db_endpoint` raises for `postgres://host/db` and for `""`), so the
+    #       run dies either way; the row buys the actionable refusal, not the block.
+    # Every site uses `monkeypatch`, so no lane state leaks. What keeps each off a
+    # real store is per-site, not a shared "ports are stubbed" property: all three
+    # stub `_user_door_binding`; the door test returns at the door arm, the
+    # `rediss://` one stubs `FalkorProjection` and stops at its sentinel, and the
+    # `postgres://` one constructs nothing because the URI guard returns 3 BEFORE
+    # `from_uri` is called.
+    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored to THIS row's three spellings:
+    # `_is_declared` matches each censused line on its own, so these three spellings are
+    # all the row authorizes and any FUTURE site in the same file reds until it is
+    # triaged (#11083 — a looser, unanchored arm would ride along silently, which is
+    # exactly the #942 vacuity vector this census exists to catch). ⚠️ This is a
+    # deliberate narrowing of THIS row, not a description of the table: the dict
+    # header's norm is site-CLASS patterns "robust to line drift", most rows (and the
+    # row above) are unanchored, and only a handful are anchored — so do not read this
+    # row as evidence that another row already reds on a new spelling; check that row.
     "test_capstone_12186_recall.py": [
         r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "rediss://:pw@falkordb\.example:6379/g"\)$',
