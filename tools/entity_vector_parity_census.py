@@ -29,7 +29,7 @@ which imports THIS module's reads and comparison rather than restating either.
 | column | meaning | what a reader does with it |
 |---|---|---|
 | `graph_vectors` | graph nodes of this label whose `embedding` is present | the population the strip would touch |
-| `record_vectors` | record rows for this tenant whose `embedding_vec` is present | the copy that must already exist |
+| `record_vectors` | of THIS label's graph key set, the rows the record can answer with a readable `embedding_vec` | the copy that must already exist — ⛔ intersected with the graph's keys, because a tenant-wide total answers "does the record hold vectors", not "does it hold THIS node's" |
 | **`graph_only`** | graph nodes carrying a vector whose record row has **no `embedding_vec`** | ⛔ **the refusal.** Each one is a vector whose removal destroys the only readable copy |
 
 `graph_only` is the number this whole instrument exists for, and **it is printed
@@ -44,8 +44,8 @@ diagnosis instead of a mystery:
   (`id` / `eventId` / `url`). They can never be matched to a record row, so they are
   **graph-only by construction** and are counted INTO `graph_only` as well as being
   named separately. Silently skipping them would make a strip delete them.
-* `record_unreadable_vector` — record rows whose `embedding` payload is present but
-  whose GENERATED `embedding_vec` is NULL (the `public.record_embedding_vector`
+* `record_unreadable_vector` — of this label's graph key set, the record rows whose
+  `embedding` payload is present but whose GENERATED `embedding_vec` is NULL (the `public.record_embedding_vector`
   converter refuses anything that is not a 384-long all-numeric array). These are the
   rows a naive `embedding IS NOT NULL` comparison would call "the record has it" —
   they answer no dense query, so on the graph side they are graph-only too.
@@ -90,7 +90,9 @@ Usage::
     # machine-readable, and non-zero if any label is not at parity
     uv run python tools/entity_vector_parity_census.py --json out.json --require-parity
 
-Exit status: ``0`` measured · ``3`` refused · ``4`` measured and `--require-parity`
+Exit status: ``0`` measured · ``3`` refused · ``4`` measured and a `--require-*` flag
+was not satisfied (`--require-parity` = both stores agree; `--require-ready` = that AND
+every label's write gate closed — the strip precondition)
 was passed and at least one label is not at parity · ``1`` usage.
 """
 
@@ -217,6 +219,10 @@ class LabelCensus:
     unkeyed_graph_nodes: int = 0
     record_unreadable_vector: int = 0
     record_only: int = 0
+    #: The TENANT-WIDE readable count for the label — the one number NOT narrowed to the
+    #: graph's keys (it comes from one aggregate row). Printed so a reader can see a record
+    #: that is far ahead of the graph, or far behind, without shipping those rows.
+    record_readable_total: int = 0
     #: Filled by `census()` — the live reason a strip of THIS label is refused, if any.
     blocked_reason: str | None = None
 
@@ -243,6 +249,7 @@ class LabelCensus:
             "unkeyed_graph_nodes": self.unkeyed_graph_nodes,
             "record_unreadable_vector": self.record_unreadable_vector,
             "record_only": self.record_only,
+            "record_readable_total": self.record_readable_total,
             "verdict": self.verdict,
             "at_parity": self.at_parity,
             "blocked_reason": self.blocked_reason,
@@ -478,16 +485,28 @@ def _quote_record_table(table: str) -> str:
 def _write_gate() -> Any:
     """The stripper's own gate, imported lazily so the two tools share ONE answer.
 
-    The stripper imports this module, so the import runs the other way only at call
-    time. An import that fails is NOT smoothed over into "closed": it returns ``None``,
-    which ``census`` records as "not evaluated" and folds to ``ready=False``.
+    The stripper imports this module, so the import runs the other way only at call time.
+
+    ⛔ AN IMPORT FAILURE IS NOT `None`, which means "the caller opted out of the question",
+    and a census reading one as the other sends an operator to fix their own call instead
+    of the broken import. So a failure returns a callable that REFUSES and names the
+    import error — the same "unreadable gate is not a closed gate" polarity as everywhere
+    else, with a message that points at the cause.
     """
     try:
         import strip_graph_entity_vectors as strip_mod
 
         return strip_mod.strip_readiness
-    except Exception:
-        return None
+    except Exception as exc:
+        reason = (
+            f"the write gate could not be loaded — `strip_graph_entity_vectors` is not "
+            f"importable ({type(exc).__name__}: {exc}) — so 'ready to strip' is "
+            "unanswered, which is not the same as yes")
+
+        def _refuse(_label: str) -> tuple[bool, str]:
+            return False, reason
+
+        return _refuse
 
 
 def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
@@ -544,6 +563,7 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             # The record being AHEAD is the direction the cutover wants, and it is
             # computed from one aggregate row rather than by fetching the extra rows.
             record_only=max(0, record["record_readable_total"] - len(record["readable"])),
+            record_readable_total=record["record_readable_total"],
         )
         keyed_graph_only = sorted(set(graph["keys"]) - record["readable"])
         row.graph_only = len(keyed_graph_only) + graph["unkeyed"]
@@ -580,6 +600,13 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
         row.blocked_reason = "; ".join(blocks) or None
         rows.append(row)
     measured = [r.label for r in rows]
+    if not measured:
+        # ⛔ AN EMPTY POPULATION IS NOT A PASS. `all([])` is True, so without this a
+        # `census(labels=[])` reports `parity=True, ready=True` on ZERO evidence — the
+        # vacuous verdict this module exists to refuse.
+        raise CensusError(
+            "the census measured NO label — an empty population reports parity over "
+            "nothing, which is not a pass")
     return {
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
         "labels": [r.as_dict() for r in rows],
@@ -606,14 +633,14 @@ def render(report: dict, graph_name: str) -> str:
         f"entity-vector parity census — graph {graph_name!r} at {report['at']}",
         "",
         f"{'label':10} {'graph':>9} {'record':>9} {'graph_only':>11} "
-        f"{'unkeyed':>8} {'rec_unread':>11} {'rec_only':>9}  verdict",
+        f"{'unkeyed':>8} {'rec_unread':>11} {'rec_only':>9} {'rec_total':>9}  verdict",
     ]
     for row in report["labels"]:
         lines.append(
             f"{row['label']:10} {row['graph_vectors']:>9} {row['record_vectors']:>9} "
             f"{row['graph_only']:>11} {row['unkeyed_graph_nodes']:>8} "
-            f"{row['record_unreadable_vector']:>11} {row['record_only']:>9}  "
-            f"{row['verdict']}")
+            f"{row['record_unreadable_vector']:>11} {row['record_only']:>9} "
+            f"{row['record_readable_total']:>9}  {row['verdict']}")
     lines.append("")
     for row in report["labels"]:
         if row["blocked_reason"]:
@@ -738,6 +765,20 @@ def main(argv: list[str] | None = None) -> int:
     # into a flag named "parity" makes a parity PASS report as a parity FAILURE whenever
     # the write-stop has not landed, which is the reading that sends an operator hunting
     # a missing record copy that is actually present.
+    # ⛔ A NARROWED RUN CANNOT SATISFY A WHOLE-RETIREMENT FLAG. Both flags assert
+    # something about the population, and what this run measured is a SUBSET of it — so a
+    # narrowed run exits 4 and says which labels it did not look at, rather than exiting 0
+    # on a question it never asked. The verdict for the labels it DID measure is still in
+    # the table and the JSON; `--require-*` is the assertion form, and an assertion over
+    # part of a population is a different claim.
+    if (args.require_parity or args.require_ready) and report["narrowed"]:
+        unmeasured = sorted(set(report["declared_population"]) - set(report["population"]))
+        sys.stderr.write(
+            f"entity_vector_parity_census: NARROWED — this run measured "
+            f"{', '.join(report['population'])} and says NOTHING about "
+            f"{', '.join(unmeasured)}, so a --require-* flag cannot certify the "
+            "retirement. Re-run without --label to assert over the whole population.\n")
+        return 4
     if args.require_parity and not report["parity"]:
         return 4
     if args.require_ready and not report["ready"]:
