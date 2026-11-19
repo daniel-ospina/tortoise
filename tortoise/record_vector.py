@@ -2270,10 +2270,25 @@ def searcher(
                 # DECIDES NOTHING: the read proceeds exactly as before, because with
                 # both sides empty the two stores answer identically (which is why
                 # the two-zero case is marked rather than refused).
+                # ⛔ IT STATES A **MEASUREMENT-TIME** FACT, NOT A PRESENT-TENSE ONE
+                # (#13799 review). `verdict` here is frequently CACHED — a verified
+                # verdict is sticky for the life of the process (`_cached_coverage`),
+                # and a trivial one is verified — so between taking the verdict and
+                # this read the tenant may have WRITTEN: the record grows, the mirror
+                # stays off (`mirror_required` is already False, because a trivial
+                # verdict is verified), and this read RETURNS ROWS. A line reading
+                # "this read is empty because the POPULATION is empty" would then be
+                # false on every such read — the trace that lies, and it would
+                # mislabel the caught-up case the line exists to distinguish from the
+                # vacuous one. Nothing needs emitting after the query for this: the
+                # line's subject is the VERDICT's provenance (why the gate passed),
+                # and `reason`'s own prose is already measurement-time ("BOTH SIDES
+                # ARE EMPTY"), so the framing below is what keeps the two aligned.
                 logging.getLogger(LOG_NAME).debug(
-                    "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
-                    "the record holds no vector for this label and neither did the "
-                    "graph, so this read is empty because the POPULATION is empty",
+                    "record dense leg: `%s` coverage was verified TRIVIALLY (%s) — "
+                    "that verdict was TAKEN when both stores held no vector for "
+                    "this label, so it is evidence about that MEASUREMENT and not "
+                    "about this read's population",
                     entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.
