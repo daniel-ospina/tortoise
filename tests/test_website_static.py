@@ -95,10 +95,33 @@ PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
 # renders the same prices, so a second copy would be two prices that can drift
 # with nothing red. See `TestPricingSourceIsShared`.
 PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
+
+#: The hosts this site serves itself from. An asset referenced through one of
+#: these is SAME-ORIGIN — the browser loads the same file a relative path would —
+#: so the absolute spelling must not be read as a foreign asset and skipped
+#: (#13696 round 9, P3).
+SITE_HOSTS = frozenset({"premiselabs.co", "www.premiselabs.co"})
 # The shared consent module (#658/#736). It GAINED a behaviour for #13645 — the
 # `tortoise:consent` event — and the niche page's whole funnel reads it, so the
 # seam is pinned here: see `TestConsentSeam`.
 CONSENT_JS = REPO_ROOT / "website" / "consent.js"
+
+#: The consent seam's calls, each anchored as a STATEMENT in the file's own code.
+#: ⛔ Every one of these replaced a `str.find`/`in` substring test, which three
+#: successive spellings defeated: a whole-line comment, a trailing comment, a
+#: `//` glued to a colon, and a STRING LITERAL
+#: (`throw new Error("opt_in_capturing() is handled by the caller")`). All four
+#: left a deleted call green (#13696 rounds 6, 8, 9). A pattern anchored to the
+#: line's own code cannot be satisfied by prose, a string, or a fragment of a
+#: larger expression.
+OPT_IN_STMT = re.compile(
+    r"^[ \t]*window\.posthog\.opt_in_capturing\(\)[ \t]*;", re.M)
+LOADERS_STMT = re.compile(r"^[ \t]*loadConsentedAnalytics\(\)[ \t]*;", re.M)
+GRANTED_STMT = re.compile(
+    r"""^[ \t]*announceConsent\((["'])granted\1\)[ \t]*;""", re.M)
+#: The page's consent gate, as the statement it is: `if (!consented()) return;`.
+NOT_CONSENTED_STMT = re.compile(
+    r"^[ \t]*if \(!consented\(\)\)[ \t]*return\b", re.M)
 # The niche product page (#13645) — a GTM experiment added ALONGSIDE
 # `/tortoise`, served at the company root (`premiselabs.co/tortoise-for-product-
 # teams`), not under the `/tortoise` prefix.
@@ -352,14 +375,28 @@ def _keep_code_indent(line: str, stripped: str, cut: int,
 
 
 def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
-    """One page's render function with its COMMENT LINES removed.
+    """One page's render function with its COMMENTS removed.
 
     The two product pages explain the same code with different comments — and
     legitimately so: `product.html` cites `#4815` for the labels resolver, the
     campaign page cites the funnel. What must not differ is the CODE, so the
     comparison is taken over it.
+
+    `_code_only`, not `_strip_comment_lines`: this consumer compares two pages
+    as STRINGS, so a TRAILING `// note` on one page is a difference that is not
+    a difference in code. `_strip_comment_lines` deliberately keeps a trailing
+    `//` (the price channels scan it — fail-closed there), which made a
+    comment-only edit red this row (#13696 round 9, P2). The two consumers want
+    opposite things, so they use opposite strippers.
     """
-    return _strip_comment_lines(_function_refs(html, fn_name, page)).strip()
+    return "\n".join(
+        ln.rstrip()
+        for ln in _code_only(_function_refs(html, fn_name, page)).splitlines()
+        # Blank lines dropped: a cut comment leaves one behind, and a blank line
+        # is not a difference in CODE — keeping them made one page's extra
+        # comment red the equality row (#13696 round 9, P2).
+        if ln.strip()
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7292,11 +7329,20 @@ PRICE_FIGURE_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d")
 #: any comparison.
 PRICE_ONLY_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*")
 
+#: The tags that can sit INSIDE a figure without ending its line box. Any
+#: other tag is a block boundary, where a reader sees two separate texts — so a
+#: tag run spanning one must never be read as a split figure (measured, #13696
+#: round 9, P2: `<div class="price">$0</div>` followed by a `<p>` was reported
+#: as "splits a price figure", sending the editor to rewrite correct markup).
+INLINE_TAGS = "span|b|i|em|strong|sup|sub|small|code|abbr|mark"
+
 #: A figure whose DIGIT RUN is interrupted by markup — `$15<b>9</b>`, which a
 #: reader sees as `$159` while every detector above can only read `$15`. The
 #: tag group in `PRICE_ONLY_RE` sits before the digits, so it cannot span one.
 #: Fail closed on the ambiguous spelling rather than guess which is meant.
-PRICE_SPLIT_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*(?:<[^>]+>\s*)+\d")
+PRICE_SPLIT_RE = re.compile(
+    r"\$\s?(?:<(?:" + INLINE_TAGS + r")\b[^>]*>\s*)*\d[\d,]*"
+    r"(?:<(?:" + INLINE_TAGS + r")\b[^>]*>\s*)+\d")
 
 
 def _figures(text: str) -> list[str]:
@@ -7341,6 +7387,25 @@ def _style_bodies(html: str) -> list[str]:
                                   re.S | re.I)]
 
 
+def _same_origin_asset(name: str, ref: str) -> tuple[Path | None, str]:
+    """`(path, label)` for a same-origin asset reference, or `(None, label)`.
+
+    SAME-ORIGIN means the site's own host as well as a path: the page may write
+    `https://premiselabs.co/assets/x.js`, which loads exactly the file a
+    relative `src` would, so the absolute spelling must not select a channel
+    (measured, #13696 round 9, P3: the absolute spelling left both price rows
+    green). A cache-busting `?v=…` is stripped before the file is resolved — the
+    site already serves `/favicon.ico?v=…`, so refusing a query would false-red
+    a legitimate tag.
+    """
+    url = urlsplit(ref)
+    if url.scheme or url.netloc:
+        if url.netloc.lower() not in SITE_HOSTS:
+            return None, ref  # a genuinely foreign asset: not this site's code
+    path = REPO_ROOT / "website" / url.path.lstrip("/")
+    return path, url.path
+
+
 def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
     """`(src, text)` for every SAME-ORIGIN script a page loads, except the source.
 
@@ -7354,9 +7419,9 @@ def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
     """
     out: list[tuple[str, str]] = []
     for src in _pricing_source_includes(html):
-        if src.startswith(("http://", "https://", "//")):
+        path, label = _same_origin_asset(name, src)
+        if path is None:
             continue
-        path = REPO_ROOT / "website" / src.lstrip("/")
         if path.resolve() == PRICING_SOURCE.resolve():
             continue
         assert path.is_file(), (
@@ -7367,6 +7432,45 @@ def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
         # them: a `// …` note may name a figure without being a second copy.
         out.append((src, _strip_comment_lines(
             path.read_text(encoding="utf-8"))))
+    return out
+
+
+def _same_origin_style_bodies(name: str, html: str) -> list[tuple[str, str]]:
+    """`(href, text)` for every LINKED stylesheet a page loads.
+
+    `<style>` is not the only channel that renders CSS text: a
+    `<link rel="stylesheet">` file (or an `@import` inside one) carries a
+    `content:` rule just as effectively, and `_served` never sees it — so a
+    price there was in no channel at all (measured, #13696 round 9, P1: 145 rows
+    green with `$25/mo` in a linked stylesheet, while the same rule inside the
+    page's own `<style>` red). The enumeration is the defect, so this row reads
+    the linked files too rather than waiting for the next species.
+    """
+    refs: list[str] = []
+    href_re = re.compile(
+        r"""\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""", re.I)
+    for tag in re.findall(r"<link\b[^>]*>", html, re.I):
+        if not re.search(r"\brel\s*=\s*['\"]?stylesheet", tag, re.I):
+            continue
+        m = href_re.search(tag)
+        if m:
+            refs.append(next(g for g in m.groups() if g))
+    out: list[tuple[str, str]] = []
+    for ref in refs:
+        path, _label = _same_origin_asset(name, ref)
+        if path is None or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        out.append((ref, _strip_comment_lines(text)))
+        # ONE level of `@import`: a stylesheet may pull in another file, and the
+        # price would be one hop deeper than any row looks.
+        for imported in re.findall(
+                r"@import\s+(?:url\()?\s*['\"]?([^'\")]+)", text, re.I):
+            ipath, _ = _same_origin_asset(name, imported)
+            if ipath is None or not ipath.is_file():
+                continue
+            out.append((imported, _strip_comment_lines(
+                ipath.read_text(encoding="utf-8"))))
     return out
 
 
@@ -7651,6 +7755,8 @@ class TestPricingSourceIsShared:
             channels += [("`<style>`", body) for body in _style_bodies(markup)]
             channels += [(f"`{src}`", body)
                          for src, body in _same_origin_script_bodies(name, markup)]
+            channels += [(f"`{href}` (stylesheet)", body)
+                         for href, body in _same_origin_style_bodies(name, markup)]
             hits = [
                 f"{where}: {line.strip()}"
                 for where, body in channels
@@ -7938,36 +8044,39 @@ class TestConsentSeam:
         js = CONSENT_JS.read_text(encoding="utf-8")
         for path in self.GRANTED_PATHS:
             body = self._function_body(js, path)
-            granted = body.find('announceConsent("granted")')
-            assert granted != -1, (
+            granted_m = GRANTED_STMT.search(body)
+            assert granted_m is not None, (
                 f"`{path}` grants consent but never dispatches "
                 f"`{self.EVENT}` with state `granted`: a visitor who accepts "
                 "the banner here has their page view dropped (#13645)")
-            opt_in = body.find("opt_in_capturing()")
-            assert opt_in != -1, (
+            # ⛔ A STATEMENT, not a substring. `str.find` was satisfied by a
+            # mention in a comment, and then by a mention in a STRING LITERAL
+            # (`throw new Error("opt_in_capturing() is handled by the caller")`)
+            # and by a `//` that directly followed a colon — so a deleted call
+            # stayed green through three successive spellings (#13696 rounds 6,
+            # 8, 9). An anchored pattern matches the call and nothing else.
+            opt_in_m = OPT_IN_STMT.search(body)
+            assert opt_in_m is not None, (
                 f"`{path}` no longer calls `opt_in_capturing()` — the path "
                 "this gate measures the ordering against moved")
-            assert opt_in < granted, (
+            assert opt_in_m.start() < granted_m.start(), (
                 f"`{path}` dispatches `{self.EVENT}` with state `granted` "
                 "BEFORE calling `opt_in_capturing()`. The event tells a page "
                 "consent has been applied, so announcing first is the "
                 "pre-consent beacon this seam exists to prevent — the page "
                 "would capture before the opt-in landed")
             # ⛔ THE PRESENCE HALF IS ASSERTED FIRST, because the ordering
-            # comparison below is VACUOUS without it: `str.find` answers -1 for
-            # a call that is absent, and -1 < granted is true — so deleting the
-            # loader call from a granted path would pass this row while GTM/Meta
-            # never get activated (measured: with only the comparison, deleting
-            # `loadConsentedAnalytics()` from `onAccept` left all three
-            # `TestConsentSeam` rows green).
-            loaders = body.find("loadConsentedAnalytics()")
-            assert loaders != -1, (
+            # comparison is VACUOUS without it: an absent call yields no match,
+            # so deleting the loader call from a granted path would pass a
+            # comparison-only row while GTM/Meta never get activated.
+            loaders_m = LOADERS_STMT.search(body)
+            assert loaders_m is not None, (
                 f"`{path}` grants consent but never calls "
                 "`loadConsentedAnalytics()`: the consent-gated GTM/Meta loaders "
                 "are never activated on the accept path, so a visitor who "
                 "explicitly opted in is measured by nothing downstream "
                 "(#13645)")
-            assert loaders < granted, (
+            assert loaders_m.start() < granted_m.start(), (
                 f"`{path}` dispatches `{self.EVENT}` before activating the "
                 "consent-gated loaders (GTM/Meta), so a listener acts on a "
                 "decision the tags have not followed yet")
@@ -8023,11 +8132,12 @@ class TestConsentSeam:
         identifier in place.
         """
         track = self._page_function(_product_teams_html(), "track")
-        gate = track.find("!consented()")
-        assert gate != -1, (
+        gate_m = NOT_CONSENTED_STMT.search(track)
+        assert gate_m is not None, (
             "the page's `track()` has no `consented()` gate, so an undecided "
             "visitor's click or page view reaches `posthog.capture` — the "
             "pre-consent beacon this seam exists to prevent (#13645)")
+        gate = gate_m.start()
         capture = track.find("posthog.capture(")
         assert capture != -1, (
             "this gate's subject moved: `track()` no longer calls "
