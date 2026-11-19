@@ -1182,14 +1182,26 @@ Four properties, because each is a different misread:
 a 4 s attempt and a 290 s attempt of the same 300 s bound render identically — and they call for
 opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
 is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
-running thread is the authority).
+running thread is the authority). It is the in-flight attempt's OWN elapsed time; the bound to compare
+it against is `load_timeout_s`, which is the CLASS default — an attempt a caller started with
+`get(load_timeout=…)` runs under THAT bound instead (`embeddings.py::status`). True and harmless on
+the shipped path (the pre-warm takes the default), but the comparison is only exact there.
 - **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
 returned `None` at the bound and the loader is still importing. The guard then refuses to start a
-second attempt for as long as that thread lives, so the block reads `state: "cooldown"`,
-`failure_kind: "load_timeout"`, `load_in_progress: true` with an elapsed time past the bound, and the
-leg stays keyword-only. This resolves BY ITSELF when the thread exits (the guard clears, and the next
-`get()` retries once the 60 s cooldown has passed); a reading that stays past the bound for minutes
-means the import is STUCK, and that does not resolve without `fly machine restart` — read the boot
+second attempt for as long as that thread lives, and the leg stays keyword-only. The tuple to match
+is `failure_kind: "load_timeout"` + `load_in_progress: true` + `load_in_progress_s` past the bound —
+**whichever of the two `state` words accompanies it**: `cooldown` while the 60 s negative-cache
+window is live, and `unavailable` once it expires with no `get()` in between, which is the reading a
+quiet box shows because a `/health` poll never re-stamps it. ⛔ A `get()` **inside** the window is
+refused by the outer negative cache (`embeddings.py:1210-1215`) and does NOT touch the stamp, so
+traffic running inside the window does not hold it open: it is re-armed by the first `get()` AFTER
+expiry, i.e. the reclaim refusal (`:1245`) — which is what makes `cooldown` recur on a busy box.
+⛔ Do not read the in-flight bullet's
+“wait, it is RUNNING” mapping on this tuple: `load_in_progress_s` past the bound is the one case
+where the attempt is already dead to its caller. This resolves BY ITSELF when the thread exits (the
+guard clears, and the next `get()` retries once the cooldown has passed); a reading that stays past
+the bound for minutes means the import is STUCK, and that does not resolve without
+`fly machine restart` — read the boot
 log for the bound it hit, then check the image layer/page-cache path, not the app.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
