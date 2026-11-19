@@ -73,7 +73,7 @@ to `sdk.tortoise_fts_query`, and the artifact re-reads that binding at run time
 | capture prior — `TORTOISE_UNDERSCORE_TERMS=0` (pre-`#12368`) | 0.8033 | 0.8600 | 0.8933 | 0.9300 |
 | capture prior — **shipped** | **0.9800** | **0.9933** | **0.9933** | **0.9933** |
 | user door — `TORTOISE_UNDERSCORE_TERMS=0` (pre-`#12368`) | 0.7933 | 0.8500 | 0.8833 | 0.9200 |
-| user door — **SHIPPED (what a user gets today)** | **0.9700** | **0.9800** | **0.9800** | **0.9800** |
+| user door — **SHIPPED (what a user gets today)** | **0.9900** | **0.9800** | **0.9800** | **0.9800** |
 | user door — fused rerank **armed** (NOT the shipped default) | 0.9733 | 0.9733 | 0.9733 | 0.9733 |
 
 Where the `#12368` gain actually lands, by class (user door, recall@3 / recall@15):
