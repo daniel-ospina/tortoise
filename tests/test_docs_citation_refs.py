@@ -1965,6 +1965,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ⛔ AND A PREPOSITION BETWEEN THE VERB AND THE ANSWER (`comes back WITH an empty
     # list`, `resolves to ZERO`), measured GREEN before this line (#13802 review, round 7)
     r"(?:(?:with|to|as|into|out|of)\s+)?"
+    # ⛔ AND THE QUANTIFIER AND THE COMMA-BOUNDED INSERTION BETWEEN THEM (#13802 review,
+    # round 10, P1 — MEASURED GREEN through ban, detector and ledger: `prints ONLY one
+    # path`, `has NO FEWER THAN two files`, `shows MORE THAN one path`, `prints, at this
+    # head, nothing`). Every quantifier here is in `_typed_answers_to_tortoise_cmd`'s OWN
+    # strip list, so a quantifier that detector removes and this bridge does not is a hole
+    # in the same sense the verb class was — and on the `set`/deictic anchor this ban is
+    # the only layer at all.
+    r"(?:(?:just|only|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|"
+    r"no\s+fewer\s+than|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both)"
+    r"\s+)?"
+    r"(?:,\s*[^,.;\n]{1,30},)?\s*"
     r"(?:(?:NOT|not)\s+)?"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
@@ -1985,14 +1996,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # literal, `none`/`zero`, a counted FILE set (`holds exactly four files`), a named path
     # after an unlisted verb (`answers with `tortoise/x.py``), and the diff-side paraphrase
     # of the comment-only claim (`is this diff's own comment-only edits`).
-    r"|`?\[\]`?|none|None|zero|ZERO|nothing|Nothing"
+    r"|`?\[\]`?|none|None|zero|ZERO|nothing|Nothing|blank|BLANK"
     # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7, P1 —
     # each measured GREEN here while the detector read it; for the DEICTIC and `set` anchors
     # this ban is the ONLY layer, because the detector anchors on a command token)
     r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
     r"|single|SINGLE|\b\d+\b"
     r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
-    r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?)"
+    r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entries|diffs?|hits?)"
     r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
     # ⛔ AND THE VERB-BEFORE-PATH PARAPHRASES that carry the answer as a NOUN PHRASE
     # (`paths only as comment/docstring text`) — no verb after the anchor at all.
@@ -2121,6 +2132,19 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "The `tortoise/` set prints both files at this head.",
         "The `tortoise/` set is non-empty at this head.",
         "At this head the `tortoise/` set holds both paths.",
+        # ⛔ AND A QUANTIFIER OR A COMMA-BOUNDED INSERTION BETWEEN THE VERB AND THE ANSWER
+        # (#13802 review, round 10, P1 — all four measured GREEN through ban, detector and
+        # ledger; every quantifier here is in the detector's own strip list)
+        "the `tortoise/` set prints only one path",
+        "the `tortoise/` set has no fewer than two files",
+        "the `tortoise/` set shows more than one path",
+        "the `tortoise/` set prints, at this head, nothing",
+        # ⛔ AND `six`..`ten` BOUND TO A NOUN THE `no …` ARM ALREADY CARRIED (#13802 review,
+        # round 10, P2 — `prints six entries` was GREEN while `prints six files` red)
+        "`-- tortoise/` prints six entries",
+        "`-- tortoise/` prints ten entries",
+        "`-- tortoise/` prints seven diffs",
+        "`-- tortoise/` prints blank",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
