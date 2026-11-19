@@ -2955,6 +2955,21 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `MODE = install` claim reds on `:545` (the `--print-labels` prelude comment) and the refusal
     claim reds on `:550` (`# every install.`). The same holds for a number this pin already knows:
     `:578` swapped for `:551` (the `--print-labels` block) reds only the sentence check.
+
+    ⛔ THE RANGE HALF IS PINNED BY CONTENT TOO, AND BY A RELATION, BECAUSE A NUMBER KEY CANNOT BE
+    TRUSTED ALONE (review round 5). `range_ends` pins each span's TRAILING line(s) against a token
+    its sentence names; the algebra bullet is additionally checked against the carve-outs span the
+    next bullet calls "from that union" — the doc's own two numbers, one inside the other. That
+    relation is not redundant: at the pre-fix head BOTH numbers were re-derived together and both
+    were wrong (`:554-569` + a `range_ends` entry calibrated to `:569`), so every per-span check was
+    green and the span certified itself. Measured at this head, one arm at a time: (a) shorten the
+    doc to `:554-569` and leave the table — "cites installer RANGE(s) this pin does not know …
+    [(554, 569)]"; (b) shorten BOTH the doc and its table entry back to the shipped pair — "label
+    algebra span :554-569 does not CONTAIN the carve-outs span :578-594"; (c) leave both numbers
+    and change the installer's end token (`installer:593`, `grep -qiE` → `grep -Eiq`) — "RANGE whose
+    END is not the line that carries what the sentence names"; (d) put `:459` back in the WRITERS
+    sentence outside the map region — "cites :459 as `resolve_os_label` … but that line is `case
+    "$pages" in …`".
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
     start = next(
@@ -3115,8 +3130,14 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
         (451, 552): [r'^  LABELS="\$LABELS\$OS_LABELS"$', r"^\}$"],
         # the OS-label flag, validated once — the `case` through its `esac`
         (478, 481): [r'die "CI_RUNNER_OS_LABEL must be off', r"^esac$"],
-        # the union's label algebra: `is_host_label` through its `return 1`/`}`
-        (554, 569): [r"return 1", r"^\}$"],
+        # ⛔ THE UNION'S LABEL ALGEBRA IS ALL FOUR READERS, NOT THE FIRST ONE. This entry used to pin
+        # `is_host_label`'s `return 1`/`}` — i.e. it was calibrated to the doc's WRONG end `:569`, so
+        # the table CERTIFIED a span that stops two predicates short of what "the union's label
+        # algebra" is (review round 5, F2). `list_has` (:571), `is_foreign_arch_label` (:578-584) and
+        # `is_version_pinned_hosted_label` (:592-594) all follow, and the NEXT bullet cites `:578-594`
+        # as living inside this union — a span cannot contain its own sibling. The end is the version
+        # pin's `grep` and its brace.
+        (554, 594): [r"grep -qiE", r"^\}$"],
         # the two carve-out predicates: foreign-arch, then the version pin's own `grep`
         (578, 594): [r"grep -qiE", r"^\}$"],
         # the `--status` block, through its `exit 0` and closing `fi`
@@ -3231,6 +3252,49 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     assert owner == head, (
         f"the runbook says the body ending on :{tail} is `resolve_labels`'s, but that brace closes "
         f"the function whose header is :{owner} — the end belongs to a DIFFERENT construct"
+    )
+
+    # ⛔ AND THE ALGEBRA SPAN MUST CONTAIN THE SPAN THE NEXT BULLET CITES (review round 5, F2). This
+    # is the runbook's OWN contradiction: "the union's label algebra at `:A-B`" is followed by "TWO
+    # NAMED CARVE-OUTS from that union (:C-D)". A span that stops at `is_host_label`'s brace cannot
+    # contain the carve-out predicates the next bullet says live INSIDE the union — and that is the
+    # state this head shipped, because the doc's end AND the end-content entry were re-derived
+    # together and were both wrong, so a per-span content check on the end alone still read green.
+    # The RELATION between the two spans is what fails here.
+    flat_region = " ".join(region_text.split())
+    algebra = re.search(r"the union's label algebra at `:(\d+)-(\d+)`", flat_region)
+    assert algebra is not None, (
+        "the runbook no longer cites the union's label algebra as a span — re-anchor this pin rather "
+        "than deleting it (an unpinned span is how it stopped two predicates short of its own name)"
+    )
+    carve_outs = re.search(r"TWO NAMED CARVE-OUTS[^`]*?\(`?:(\d+)-(\d+)`?\)", flat_region)
+    assert carve_outs is not None, (
+        "the runbook no longer cites the carve-outs span — re-anchor this pin rather than deleting it"
+    )
+    a_lo, a_hi = int(algebra.group(1)), int(algebra.group(2))
+    c_lo, c_hi = int(carve_outs.group(1)), int(carve_outs.group(2))
+    assert a_lo <= c_lo and c_hi <= a_hi, (
+        f"the runbook's label algebra span :{a_lo}-{a_hi} does not CONTAIN the carve-outs span "
+        f":{c_lo}-{c_hi} that the very next bullet calls 'from that union' — the algebra block runs "
+        "through its last predicate, so re-derive its end (checking the two numbers against the "
+        "installer ONE AT A TIME does not catch this: both were wrong together)"
+    )
+
+    # ⛔ ONE CITATION OUTSIDE THE MAP REGION IS KEYED TO A NUMBER TOO, so no table above reaches it:
+    # the `CI_RUNNER_OS_LABEL` section's WRITERS sentence. It cited `:459` on the pre-rebase head —
+    # a COMMENT inside the "validated ONCE" block — while `resolve_os_label` was at `:467`, and the
+    # same page cited `:467` for the same function twice, so the page contradicted itself and nothing
+    # read it (review round 5, F4). Pinned by the SENTENCE the operator follows.
+    flat = " ".join(line.strip() for line in runbook)
+    m = re.search(r"`resolve_os_label` in `tools/install-ci-runner-x64\.sh` \(`:(\d+)`\)", flat)
+    assert m is not None, (
+        "the runbook no longer cites `resolve_os_label`'s line in the WRITERS sentence — re-anchor "
+        "this pin rather than deleting it (an unpinned number is how it drifted onto a comment)"
+    )
+    n = int(m.group(1))
+    assert re.search(r"^resolve_os_label\(\) \{", installer[n - 1]), (
+        f"the runbook cites :{n} as `resolve_os_label` in its WRITERS sentence, but that line is "
+        f"{installer[n - 1].strip()!r} — re-derive the number from the installer"
     )
 
 

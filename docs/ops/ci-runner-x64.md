@@ -537,7 +537,7 @@ falls back.
   registration at `:1665-1675` (verify `:1665`, token `:1668`, one argv `:1673`, `config.sh`
   `:1675`; the run at `:1657` is the dry-run echo) · systemd install/start at `:1685-1694` · label
   resolution at `:451-552` (`fallback_engaged` `:455`, `resolve_os_label` `:483`, `resolve_labels`
-  `:515`, whose body ends at its `}` on `:552`) · the union's label algebra at `:554-569` and the
+  `:515`, whose body ends at its `}` on `:552`) · the union's label algebra at `:554-594` and the
   repair that uses it, `repair` `:1226` · the label-coverage block `:629-1204` (its header `say` at
   `:629`, its three no-verdict arms at `:969`, `:977` and `:986`, the uncovered verdict at `:1204`)
   and the `--status` block that contains it `:606-1206` · `--print-labels` `:1430`.
