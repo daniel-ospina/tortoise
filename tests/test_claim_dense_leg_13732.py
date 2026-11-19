@@ -1436,10 +1436,9 @@ class TestTheDSNDeclaration:
 
     def _reach_the_declaration(self, tool_mod, monkeypatch, tmp_path, *, prior=None):
         """Run `main()` up to the first corpus read, capturing the declarations."""
+        import tools.window_quality_m2 as wqm
         from tortoise import record_vector
         from tortoise.record_writer import RECORD_DSN_ENV
-
-        import tools.window_quality_m2 as wqm
 
         if prior is None:
             monkeypatch.delenv(RECORD_DSN_ENV, raising=False)
@@ -1702,6 +1701,155 @@ class TestTheSeedReport:
     def test_the_report_states_the_door_it_used(self, tool_mod):
         payload = self._report(tool_mod).as_dict()
         assert "live_write.write" in payload["door"], payload["door"]
+
+    def test_the_repair_NAMES_the_store_it_must_fold_into(self, tool_mod):
+        """⛔ THE `--dsn` VARIABLE IS ONLY HALF OF NAMING THE STORE (#13839).
+
+        `--dsn "$TORTOISE_RECORD_DSN"` says WHICH variable, never WHICH value: a
+        shell exporting a DIFFERENT record folds this population into a store nobody
+        measured, silently. The artifact therefore carries the DSN's FINGERPRINT —
+        the tree's own secret-hygiene handle (#2903/#2796) — so the operator can tell
+        whether their shell is the record this run measured. Asserted as a PAIR, in
+        the artifact and in the fold block, because a fingerprint that is published
+        but not beside the command is not a comparison.
+        """
+        from tortoise.record_writer import dsn_fingerprint
+
+        dsn = "postgresql://u:sup3rsecret@h:5432/db"
+        expected = dsn_fingerprint(dsn)
+        payload = self._report(
+            tool_mod,
+            record_applied=1,
+            record_unprojected=1,
+            record_dsn_fingerprint=expected,
+        ).as_dict()
+        fold = payload["fold"]
+        assert payload["record_dsn_fingerprint"] == expected, payload
+        assert fold["dsn_fingerprint"] == expected, fold
+        assert '--dsn "$TORTOISE_RECORD_DSN"' in fold["plan"], fold["plan"]
+        assert '--dsn "$TORTOISE_RECORD_DSN"' in fold["apply"], fold["apply"]
+        assert "sup3rsecret" not in json.dumps(payload), (
+            "the artifact carries the DSN VALUE — a secret must travel as its "
+            "fingerprint, never as itself"
+        )
+
+    def test_a_DECLINED_write_is_PUBLISHED_never_a_clean_zero(self, tool_mod):
+        """⛔ `applied=False, unprojected=0` IS TWO FACTS (#13839, finding 1).
+
+        `live_write` reports the seam's durable DECLINE with exactly the shape an
+        UNARMED deployment has, so a seed the record REFUSED OUTRIGHT used to publish
+        as a clean one: 0 applied, 0 unprojected, no repair. It is published instead —
+        and it gets NO `fold`, because a decline means there is no durable line for a
+        fold to replay; a repair command that cannot work is the same class of false
+        promise a rejected-by-argparse command was in round 2.
+        """
+        payload = self._report(
+            tool_mod,
+            record_applied=0,
+            record_unprojected=0,
+            record_declined=2,
+            record_armed=True,
+        ).as_dict()
+        assert payload["record_declined"] == 2, payload
+        assert "fold" not in payload, payload.get("fold")
+        assert payload["declined"]["count"] == 2, payload["declined"]
+        assert "NO FOLD HEALS" in payload["declined"]["why"], payload["declined"]
+
+    def test_a_clean_seed_reports_ZERO_declined(self, tool_mod):
+        """The count is always present, so its absence can never read as "unknown"."""
+        payload = self._report(tool_mod).as_dict()
+        assert payload["record_declined"] == 0, payload
+        assert "declined" not in payload, payload
+
+
+class TestTheDeclinedWrite:
+    """#13839 review, finding 1 — the fourth store answer, counted where it happens.
+
+    ⛔ THE SEED CAN BE REFUSED IN A WAY THAT LOOKS LIKE SUCCESS. Every armed
+    `applied=False` EXCEPT the durable decline sets `unprojected=1`
+    (`live_write.write`), so `no_durable_journal` is the ONE arm that answers
+    "the record did not take this row" while the report's two counts both stay 0.
+    Left uncounted it is indistinguishable from a seed the record took, which is the
+    silent-no-op shape this whole finding is about.
+    """
+
+    def test_a_DECLINED_write_is_COUNTED_at_the_seed(self, tool_mod, monkeypatch, tmp_path):
+        from tortoise import record_writer
+
+        _journal_double(monkeypatch)
+        decline = types.SimpleNamespace(
+            applied=False, refusal=record_writer.NON_DURABLE_JOURNAL_REFUSAL, outcome="declined"
+        )
+        monkeypatch.setattr(record_writer, "write_live_record", lambda record, **_kw: decline)
+        population = [
+            {"id": "pt-12186000000", "content": "alpha"},
+            {"id": "pt-12186000001", "content": "beta"},
+        ]
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            population,
+            journal_path=tmp_path / "j.jsonl",
+            encode_many=lambda texts: [[0.5] for _ in texts],
+        )
+        assert (seed.record_applied, seed.record_unprojected) == (0, 0), seed.as_dict()
+        assert seed.record_declined == 2, seed.as_dict()
+        payload = seed.as_dict()
+        assert payload["record_declined"] == 2 and payload["declined"]["count"] == 2, payload
+        assert "fold" not in payload, payload.get("fold")
+
+    def test_an_UNPROJECTED_write_is_NOT_counted_as_declined(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """The two arms are disjoint, or the counts would double-report one write.
+
+        An REFUSED projection carries a `refusal` token too (`write_failed`,
+        `no_tenant`, …) — `live_write` marks it `unprojected=1` precisely so it is
+        NOT this arm. Collapsing them would count one lost row twice and point the
+        operator at the wrong repair (a fold DOES heal an unprojected write).
+        """
+        from tortoise import record_writer
+
+        _journal_double(monkeypatch)
+        refused = types.SimpleNamespace(applied=False, refusal="write_failed", outcome="refused")
+        monkeypatch.setattr(record_writer, "write_live_record", lambda record, **_kw: refused)
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            [{"id": "pt-12186000000", "content": "alpha"}],
+            journal_path=tmp_path / "j.jsonl",
+            encode_many=lambda texts: [[0.5] for _ in texts],
+        )
+        assert seed.record_unprojected == 1, seed.as_dict()
+        assert seed.record_declined == 0, seed.as_dict()
+
+    def test_the_seed_publishes_the_STORE_it_wrote_never_the_secret(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        from tortoise import record_writer
+
+        _journal_double(monkeypatch)
+        dsn = "postgresql://u:sup3rsecret@h:5432/db"
+        applied = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
+        monkeypatch.setattr(record_writer, "write_live_record", lambda record, **_kw: applied)
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            [{"id": "pt-12186000000", "content": "alpha"}],
+            journal_path=tmp_path / "j.jsonl",
+            record_dsn=dsn,
+            encode_many=lambda texts: [[0.5] for _ in texts],
+        )
+        assert seed.record_dsn_fingerprint == record_writer.dsn_fingerprint(dsn), seed.as_dict()
+        assert "sup3rsecret" not in json.dumps(seed.as_dict())
+
+    def test_an_unarmed_run_publishes_NO_fingerprint(self, tool_mod, monkeypatch, tmp_path):
+        """No record in this run ⇒ `null`, not the fingerprint of ""."""
+        _journal_double(monkeypatch)
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            [{"id": "pt-12186000000", "content": "alpha"}],
+            journal_path=tmp_path / "j.jsonl",
+            encode_many=lambda texts: [[0.5] for _ in texts],
+        )
+        assert seed.record_dsn_fingerprint is None, seed.as_dict()
 
 
 class TestTheArmBlockage:
@@ -2201,6 +2349,16 @@ class TestTheDocumentedRunPath:
         monkeypatch.setattr(tool_mod, "require_corpus", lambda _d: [corpus / "a.jsonl"])
         monkeypatch.setattr(tool_mod, "require_embedder", lambda: None)
         monkeypatch.setattr(tool_mod, "_resolve_dsn", lambda _explicit: None)
+        # ⛔ THE DSN DECLARATION IS THE RUN'S, NOT THIS PROCESS'S (#13839 review,
+        # finding 1). `run_measurement` publishes the resolved DSN into
+        # `TORTOISE_RECORD_DSN` for the write seam and `main()` restores it — but
+        # every test here calls `run_measurement` DIRECTLY, which is the path with no
+        # restore. `delenv` records "was unset" and monkeypatch's teardown deletes
+        # whatever the run left behind, so a stub run cannot arm the record for the
+        # NEXT test in this session (the same hazard the journal declaration has).
+        from tortoise.record_writer import RECORD_DSN_ENV
+
+        monkeypatch.delenv(RECORD_DSN_ENV, raising=False)
 
         def _no_record(_dsn):
             raise tool_mod.Refused("no_record_dsn", self.BLOCK_MESSAGE)
@@ -2254,7 +2412,13 @@ class TestTheDocumentedRunPath:
         _FakeGraph.prefix_unreadable = prefix_unreadable
         _FakeSDK.unopenable = graph_unopenable
 
-        def _seed(_proj, pop, *, journal_path=None, tenant=None):
+        def _seed(_proj, pop, *, journal_path=None, tenant=None, record_dsn=None):
+            # ⛔ WHAT THE SEED WAS TOLD IS CAPTURED, NOT IGNORED (#13839 review,
+            # finding 1). The run's DSN reaches the seed so the artifact can publish
+            # the STORE it wrote; a stub without the keyword would let that wiring
+            # be dropped with the suite green, which is the class of gap this review
+            # exists for.
+            self.seed_dsn = record_dsn
             if seed_refused is not None:
                 # ⛔ A `Refused` FROM INSIDE THE SEED MUST SURVIVE THE WRITE
                 # GUARD. It is a `RuntimeError`, so the guard's broad
@@ -2868,6 +3032,28 @@ class TestTheDocumentedRunPath:
         assert artifact["seed"]["record_applied"] == 3, artifact["seed"]
         assert "fold" not in artifact["seed"], artifact["seed"]
         assert artifact["arms"]["record_dense"].get("blocked") is None, artifact["arms"]
+        assert rc == 0, rc
+
+    def test_the_run_hands_the_seed_the_dsn_so_the_store_can_be_named(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE REPORT'S HALF OF FINDING 1 (#13839).
+
+        The declaration arms the WRITE; this is the other half of the corollary —
+        the artifact has to publish WHICH store it wrote, or the emitted repair can
+        only name the variable and the operator has no way to know whether their
+        shell resolves to the record this run measured. Measured through the shipped
+        call site, because a `record_dsn=` keyword that is accepted but never passed
+        is exactly the wiring gap the review found.
+        """
+        target = tmp_path / "dsn.json"
+        rc = self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, record_ok=True
+        )
+        assert self.seed_dsn == "postgresql://u@h/db", (
+            "the run resolved a DSN and did not pass it to the seed — the artifact "
+            "cannot then publish the fingerprint of the store it wrote"
+        )
         assert rc == 0, rc
 
     def test_the_emitted_bar_fields_agree_with_the_emitted_note(

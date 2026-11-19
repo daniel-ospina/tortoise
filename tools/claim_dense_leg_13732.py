@@ -223,6 +223,19 @@ unarmed again — so that mismatch can neither recur silently nor be mistaken fo
 fold. ⚠️ A caller that invokes :func:`_seed_population` directly must declare the
 same variable itself; the seam reads nothing else.
 
+⛔ AND A WRITE THE RECORD *DECLINED* IS THE FOURTH ANSWER, NOT A ZERO (#13839
+review, finding 1). ``live_write`` reports the seam's durable DECLINE
+(``no_durable_journal``) as ``applied=False, unprojected=0`` — the SAME shape an
+UNARMED deployment has — so a seed the record refused outright used to publish as
+clean: no count, no repair, nothing to see. It is now ``seed.record_declined``,
+published with a ``declined`` note and a stderr warning, and it deliberately gets
+NO ``fold``: a decline means there is no durable line for a fold to replay, so a
+repair command there could not work. The artifact also carries
+``seed.record_dsn_fingerprint`` — the STORE this run wrote, as the tree's own
+secret-hygiene handle (#2903/#2796) — because the emitted ``--dsn
+"$TORTOISE_RECORD_DSN"`` names the variable, and only the fingerprint tells an
+operator whether their shell's value is the record this run measured.
+
 ⛔ THE JOURNAL IS A PRECONDITION, DECLARED, NOT DERIVED. The record is
 ``replay(journal)``, so a seed that appends nowhere is not a seed; ``--journal``
 (or ``TORTOISE_RECORD_JOURNAL``, which also tells ``record_vector.journal_ready``
@@ -1215,7 +1228,17 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
             f"scope, an enumerated replay refused on a cut-over graph (all three "
             f"leave no row), or a row whose `embedding` produced no "
             f"`embedding_vec` (row present, not rankable — a width the store's "
-            f"converter will not hold). Run the record's own fold over "
+            f"converter will not hold). ⛔ PLUS ONE WRITER-SIDE CAUSE THAT IS "
+            f"REACHABLE AND IS NOT A FOLD: a write the seam DECLINED — it "
+            f"answered, refused and never attempted the row, so there is no "
+            f"durable line for a fold to replay. Read the artifact's `seed` block "
+            f"to tell them apart: `record_declined > 0` (with its `declined` "
+            f"note) IS that arm and means the journal itself was not durable, "
+            f"while everything else here is a fold fact. `record_armed: false` on "
+            f"a run that resolved a DSN does not reach this message at all — the "
+            f"arm is blocked `record_arm_undeclared` instead, so a run whose write "
+            f"seam and reads DISAGREE is never reported as a fold shortfall. "
+            f"Run the record's own fold over "
             f"the journal this run wrote (`tools/record_runner.py plan "
             f"--from-checkpoint`, then `apply --acknowledge-plan <N>`, "
             f"both carried in the artifact's `seed.fold` with this run's tenant "
@@ -1374,6 +1397,26 @@ class SeedReport:
     ``positions_unproven``, and a record row written without one leaves no
     ``public.journal_event`` row — which the readiness gate then reads as a tenant
     that is behind (correctly).
+
+    ⛔ ``record_declined`` IS THE FOURTH STORE ANSWER, and it exists because
+    ``applied=False, unprojected=0`` IS TWO FACTS (#13839 review, finding 1).
+    ``live_write`` reports the seam's durable DECLINE — its own
+    ``no_durable_journal`` token, a scratch buffer that has no journal for a line
+    to be missing from — in exactly the shape an UNARMED deployment has. It used
+    to be invisible here, so a seed the record refused OUTRIGHT read as clean: 0
+    applied, 0 unprojected, no repair. A declined write IS a write the record did
+    not take, so it is counted and published — and it is deliberately NOT given a
+    ``fold``, because a decline means there is no durable line for a fold to
+    replay (:meth:`_fold_needed`).
+
+    ⛔ ``record_dsn_fingerprint`` IS THE STORE THIS RUN WROTE, in the only form of
+    a DSN that may be published (``record_writer.dsn_fingerprint``,
+    #2903/#2796). The emitted repair names the DSN as a SHELL VARIABLE, which is
+    only half of naming the store: the operator still has to know whether their
+    ``TORTOISE_RECORD_DSN`` is the record this run measured. The fingerprint is
+    that comparison handle — without it, a shell exporting a DIFFERENT record folds
+    the population into a store nobody measured (#13839 review, finding 1,
+    corollary).
     """
 
     __slots__ = (
@@ -1386,6 +1429,8 @@ class SeedReport:
         "positions_unproven",
         "record_applied",
         "record_armed",
+        "record_declined",
+        "record_dsn_fingerprint",
         "record_unprojected",
         "written",
     )
@@ -1404,6 +1449,8 @@ class SeedReport:
         folded: int,
         first_seq: int | None,
         last_seq: int | None,
+        record_declined: int = 0,
+        record_dsn_fingerprint: str | None = None,
     ) -> None:
         self.journal = journal
         self.org_id = org_id
@@ -1416,6 +1463,8 @@ class SeedReport:
         self.folded = folded
         self.first_seq = first_seq
         self.last_seq = last_seq
+        self.record_declined = record_declined
+        self.record_dsn_fingerprint = record_dsn_fingerprint
 
     def _fold_needed(self) -> bool:
         """Is there a record fold to run at all?
@@ -1425,6 +1474,12 @@ class SeedReport:
         missing from — so emitting a repair there would send the operator to a fold
         over a store this run never wrote. An unprojected write always needs one
         (it exists only where the record was armed and refused).
+
+        ⛔ AND A DECLINED WRITE NEEDS NONE (#13839 review, finding 1). The seam's
+        ``no_durable_journal`` decline means there is NO durable line to replay — a
+        fold over a scratch buffer has nothing to fold — so pointing the operator at
+        one would be a repair command that cannot work. It is published as
+        ``record_declined``/``declined`` instead: a visible fact, not a silent zero.
         """
         if self.record_unprojected:
             return True
@@ -1444,10 +1499,19 @@ class SeedReport:
             "record_armed": self.record_armed,
             "record_applied": self.record_applied,
             "record_unprojected": self.record_unprojected,
+            "record_declined": self.record_declined,
             "positions_unproven": self.positions_unproven,
             "folded": self.folded,
             "first_seq": self.first_seq,
             "last_seq": self.last_seq,
+            # ⛔ THE STORE THIS RUN WROTE, AS A COMPARISON HANDLE — never the value
+            # (#13839 review, finding 1, corollary). The fold commands name the DSN
+            # as a shell variable, so this is what tells the operator whether their
+            # `TORTOISE_RECORD_DSN` is the record this run measured; without it, a
+            # shell naming a DIFFERENT record folds the population into a store
+            # nobody measured, silently. `record_writer.dsn_fingerprint` is the
+            # tree's own secret-hygiene form (#2903/#2796).
+            "record_dsn_fingerprint": self.record_dsn_fingerprint,
             "door": "tortoise.live_write.write (journal append → record projection → graph fold)",
         }
         # ⛔ THE REPAIR IS TWO COMMANDS, AND BOTH ARE RUNNABLE (review round 2,
@@ -1485,12 +1549,15 @@ class SeedReport:
                 "plan": (
                     f"uv run python tools/record_runner.py plan --from-checkpoint "
                     f"--journal {journal} {ident} --dsn \"$TORTOISE_RECORD_DSN\""
-                ),
-                "apply": (
+                ),                "apply": (
                     f"uv run python tools/record_runner.py apply --journal {journal} "
                     f"{ident} --dsn \"$TORTOISE_RECORD_DSN\" "
                     f"--acknowledge-plan <N: the count `plan` reports>"
                 ),
+                # The handle an operator compares their shell against, so "is my
+                # $TORTOISE_RECORD_DSN the store this run wrote?" is answerable
+                # without a secret in the artifact.
+                "dsn_fingerprint": self.record_dsn_fingerprint,
                 "why": (
                     "`apply` writes NOTHING without --acknowledge-plan (a number only "
                     "`plan` prints), and `--from-checkpoint` makes the plan report "
@@ -1521,6 +1588,27 @@ class SeedReport:
                 f"reported here rather than run in-process because the fold is the "
                 f"record's own door, not a second writer (#13345)"
             )
+        # ⛔ A DECLINED WRITE IS PUBLISHED, never left as a clean-looking zero
+        # (#13839 review, finding 1). `live_write.write` reports the seam's durable
+        # DECLINE as `applied=False, unprojected=0` — the SAME shape an UNARMED
+        # deployment has — so without this block a seed the record refused outright
+        # is indistinguishable from one it took. It gets NO `fold`: a decline means
+        # there is no durable line to replay, so a repair here could not work.
+        if self.record_declined:
+            payload["declined"] = {
+                "count": self.record_declined,
+                "why": (
+                    f"{self.record_declined} of {self.written} seeded write(s) were "
+                    f"DECLINED by the record seam: it answered, refused, and did not "
+                    f"attempt the row (`live_write`'s `no_durable_journal`, or another "
+                    f"armed DECLINE). The journal append committed, so the population "
+                    f"is in the journal and NOT in the record — and NO FOLD HEALS "
+                    f"this one, because a decline means there is no durable journal "
+                    f"line to replay. Point `--journal` at a real journal path and "
+                    f"check the seam's `durable` answer; the id-scoped guard still "
+                    f"blocks `record_dense` by name, so no figure depends on it"
+                ),
+            }
         return payload
 
 
@@ -1566,7 +1654,13 @@ def _arm_blockage(dsn: str | None, seed: SeedReport) -> Refused | None:
 
 
 def _seed_population(
-    proj, population: list[dict], *, journal_path, tenant=None, encode_many=None
+    proj,
+    population: list[dict],
+    *,
+    journal_path,
+    tenant=None,
+    encode_many=None,
+    record_dsn: str | None = None,
 ) -> SeedReport:
     """Write the claim population through the ONE journaled door (#13830).
 
@@ -1615,6 +1709,13 @@ def _seed_population(
     direction a replay heals. The report counts them (:class:`SeedReport`), the
     artifact publishes the counts, and :func:`require_population_in_record` still
     refuses the arm by name if the record does not hold every id.
+
+    ⛔ ``record_dsn`` DOES NOT ARM ANYTHING — it is the report's, and only the
+    report's (#13839 review, finding 1). The door is armed by the run's
+    DECLARATION into ``TORTOISE_RECORD_DSN`` (see ``run_measurement``), because the
+    seam's predicate asks the environment and ``live_write.write`` has no ``dsn=``
+    parameter. What the value is used for here is publishing its FINGERPRINT, so
+    the emitted repair can be checked against the store this seed actually wrote.
     """
     from tortoise import live_write
     from tortoise.embeddings import compute_embeddings
@@ -1641,7 +1742,7 @@ def _seed_population(
             exit_code=2,
         )
     log = EventLog(journal_path)
-    applied = unprojected = unproven = folded = 0
+    applied = unprojected = unproven = declined = folded = 0
     armed_yes = armed_unmeasured = False
     first_seq = last_seq = None
     for row, vec in zip(population, vectors, strict=True):
@@ -1675,12 +1776,30 @@ def _seed_population(
             applied += 1
         elif outcome.unprojected:
             unprojected += 1
+        elif outcome.refusal:
+            # ⛔ THE FOURTH ANSWER, AND THE ONE THAT USED TO VANISH (#13839 review,
+            # finding 1). Every armed `applied=False` EXCEPT the durable DECLINE
+            # sets `unprojected=1` in `live_write.write`, so reaching here means the
+            # seam ANSWERED AND DECLINED — `no_durable_journal`, or another armed
+            # decline: the record did not take the row and there is no durable line
+            # for a fold to replay. Counting it as neither applied nor unprojected
+            # made a refused seed read as a clean one.
+            declined += 1
         if outcome.armed is True:
             armed_yes = True
         elif outcome.armed is None:
             armed_unmeasured = True
         if outcome.folded:
             folded += 1
+    # The STORE this run wrote, in the only publishable form of a DSN
+    # (`record_writer.dsn_fingerprint`, #2903/#2796) — and only when a DSN was
+    # resolved at all, so an unarmed run publishes `null` rather than a hash of the
+    # empty string.
+    dsn_fingerprint = None
+    if record_dsn:
+        from tortoise.record_writer import dsn_fingerprint as _fingerprint
+
+        dsn_fingerprint = _fingerprint(record_dsn)
     return SeedReport(
         journal=str(journal_path),
         org_id=tenant[0] if tenant else None,
@@ -1693,6 +1812,8 @@ def _seed_population(
         folded=folded,
         first_seq=first_seq,
         last_seq=last_seq,
+        record_declined=declined,
+        record_dsn_fingerprint=dsn_fingerprint,
     )
 
 
@@ -1832,7 +1953,17 @@ def run_measurement(args: argparse.Namespace) -> int:
     # store fault — see `#13745` review round 15.
     tenant = (scope.org_id, scope.graph_id) if scope is not None else None
     try:
-        seed = _seed_population(proj, population, journal_path=journal_path, tenant=tenant)
+        seed = _seed_population(
+            proj,
+            population,
+            journal_path=journal_path,
+            tenant=tenant,
+            # ⛔ THE REPORT'S OWN (never the door's — the declaration above is what
+            # arms it): the artifact has to publish the STORE this seed wrote, or
+            # the emitted repair cannot be checked against it (#13839 review,
+            # finding 1, corollary).
+            record_dsn=dsn,
+        )
     except Refused:
         raise
     except Exception as exc:
@@ -1871,6 +2002,20 @@ def run_measurement(args: argparse.Namespace) -> int:
             f"came back UNPROJECTED and {seed.positions_unproven} proved no journal "
             f"position — repair with `seed.fold.plan` then `seed.fold.apply` "
             f"(the artifact carries both, with this run's tenant filled in)",
+            file=sys.stderr,
+        )
+    if seed.record_declined:
+        # ⛔ THE DECLINE IS REPORTED TOO, AND IT IS NOT THE FOLD'S (#13839 review,
+        # finding 1). It used to be invisible — `applied=False, unprojected=0` is the
+        # shape an UNARMED deployment has — so a seed the record refused outright
+        # read as clean. There is no repair command to name: a decline means the seam
+        # saw no durable journal line to take.
+        print(
+            f"WARNING: {seed.record_declined} of {seed.written} seeded write(s) were "
+            f"DECLINED by the record seam (it answered and refused, so the row was "
+            f"never attempted) — the population is in the journal and not in the "
+            f"record, and no fold heals a decline; see `seed.declined` in the "
+            f"artifact",
             file=sys.stderr,
         )
     written = seed.written

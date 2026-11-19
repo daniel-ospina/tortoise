@@ -299,9 +299,24 @@ silent fold into a store nobody measured.
 
 ⛔ **If a write comes back unprojected, the artifact says so and names the repair.** `seed` in the
 artifact carries `record_armed` (three-state: `true`/`false`/`null`, so `record_applied: 0` on an
-unarmed deployment is not read as a refusal), `record_applied`, `record_unprojected` and
-`positions_unproven`; when a fold is needed it also carries `seed.fold` — the record's own fold over
-the journal this run wrote, as the TWO commands `record_runner` actually requires:
+unarmed deployment is not read as a refusal), `record_applied`, `record_unprojected`,
+`record_declined` and `positions_unproven`; when a fold is needed it also carries `seed.fold` — the
+record's own fold over the journal this run wrote, as the TWO commands `record_runner` actually
+requires:
+
+⛔ **`record_declined` IS THE FOURTH ANSWER, AND IT IS NOT A FOLD** (#13839 review). A write the seam
+DECLINED (`live_write`'s `no_durable_journal`: it answered, refused and never attempted the row)
+reports `applied: 0, unprojected: 0` — the same shape an UNARMED deployment has — so it used to read
+as a clean seed. It now carries its own count, a `declined` note and a stderr warning, and it
+deliberately emits **no** `seed.fold`: a decline means there is no durable journal line for a fold to
+replay, so a repair command there could not work. If `record_declined` is non-zero, the journal is not
+a real journal.
+
+⛔ **And `record_dsn_fingerprint` says WHICH store.** `--dsn "$TORTOISE_RECORD_DSN"` names the
+variable, not the value, so the artifact publishes the DSN's 8-hex fingerprint (`record_writer.dsn_fingerprint`,
+#2903/#2796 — a secret must never enter an artifact) beside the commands. Compare it against the
+fingerprint of the DSN in your shell before pasting the fold: a shell that exports a *different*
+record folds this population into a store nobody measured, silently.
 
 ```bash
 # 1. plan: read the number, writes nothing
