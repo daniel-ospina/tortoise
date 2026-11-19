@@ -181,7 +181,10 @@ Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's tr
 contradicted its own declaration, **or an arm was BLOCKED by a precondition**
 (recorded by name in ``arms``/``not_measured``, with the artifact still written)
 · ``4`` argument error **for a flag the tool validates ITSELF** (--ks, --deep,
-and the positive-integer bounds on --population/--points/--min-population).
+and the positive-integer bounds on --population/--points/--min-population),
+**or an unsupported interpreter** — the ``#5128`` guard below exits ``4`` on
+Python < 3.12, because ``0``/``3`` are ANSWERS a reader branches on and ``1`` is
+an uncaught traceback.
 ⚠️ An argparse-**typed** flag (--population, --points, --min-population, --deep
 with a non-integer) fails through ``parser.error()``, which exits **2** with
 usage and NO ``REFUSED[...]`` marker — so ``2`` covers both "a precondition
@@ -195,12 +198,32 @@ measurement.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse an old interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# The refusal wears THIS tool's own "could not run" status, 4 (the docstring's
+# exit table: 0 ran, 2 precondition refused, 3 published-but-incomplete, 4 the
+# tool's own non-answer status), because 0 and 3 are ANSWERS a caller branches on
+# and 1 is an uncaught traceback — an old interpreter would otherwise read as a
+# crash or, worse, as a published figure. The table states this fourth meaning of
+# 4 too, so a reader of the published contract is not left to infer it here.
+# Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/claim_dense_leg_13732.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/claim_dense_leg_13732.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(4)
+
 import argparse
 import contextlib
 import json
 import math
 import os
-import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
