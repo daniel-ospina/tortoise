@@ -712,7 +712,7 @@ _DOCS = (Path(__file__).resolve().parent.parent
 #: previous revision keyed the pin on the branch's own `git diff origin/main...HEAD`
 #: carrying the brief's directory or `tools/paired_expansion_ab_2518.py`, and it
 #: failed in BOTH directions (measured at round 2, replaying the removed guard):
-#:   · pre-fix head 5f88e29 (touches neither)      -> SKIP, so all three assertions
+#:   · pre-fix head 5f88e29 (touches neither)      -> SKIP, so all four assertions
 #:     below were dead code on every branch that does not touch the record;
 #:   · a branch editing ONLY the probe             -> ARMED, 11 of the 12 paths
 #:     `extra` => RED — a FALSE BLOCK on the lane that repairs the probe;
@@ -2494,7 +2494,7 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     neither the brief nor the probe. ⛔ That guard failed in BOTH directions,
     measured by replaying it (#13572 review, P1 finding then P2 on the REASON; its
     round-2 descendant — armed by the brief alone — has the same defect): it
-    SKIPPED on every head that touches neither, so the three assertions were dead
+    SKIPPED on every head that touches neither, so the four assertions were dead
     code there, and it ARMED and RED on any head that edits
     `tools/paired_expansion_ab_2518.py` (11 of the 12 paths in `extra`) or the
     brief's directory (all 12) — a FALSE BLOCK on exactly the lanes that own or
@@ -2538,12 +2538,19 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     named = tokens - dirs
 
     # ⛔ SCOPED BY FREEZING, not by a live diff (#13572 review rounds 1–3; each round's
-    # diff-keyed guard had the same defect one layer deeper). The three assertions below
+    # diff-keyed guard had the same defect one layer deeper). The four assertions below
+    # (⚠️ FOUR since this commit: `extra`, `missing`, the `tortoise/` arm and the
+    # `dirs` arm — an earlier revision of this comment said three, and the recorded
+    # mutation row credited a cell-only `tortoise/sdk.py` edit to the `tortoise/` arm
+    # when it fires `extra` first: the `tortoise/` arm is reachable only when the
+    # CONSTANT also names the path. Behaviour is unchanged — a `tortoise/` path reds
+    # either way — but the record of which arm did it was wrong, so it is corrected
+    # where the reader is)
     # are about ONE PR's change — this cell publishes the path set of the
     # `#13267`/`#13302` lane — and NO branch's diff can answer for it. Measured by
     # replaying the guards that were tried here:
     #   · arm on the brief's directory + the probe (round 1): a head touching neither
-    #     SKIPs — all three assertions unreachable, dead code exactly where the cell
+    #     SKIPs — all four assertions unreachable, dead code exactly where the cell
     #     cannot have gone stale — while a head that edits either is ARMED and REDs
     #     (`extra` = 12 armed by the brief alone, 11 by the probe alone or by both,
     #     since the probe is itself one of the twelve);
