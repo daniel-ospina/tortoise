@@ -16509,10 +16509,16 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "prints (#13794 measurement, P2)",
     ),
     (
-        # ⛔ bare phrase on purpose: the quote-strip below is what keeps a marked,
-        # QUOTED retraction from redding this pin, so no entry needs a frame — and
-        # giving only SOME entries one is precisely the asymmetry that broke it.
-        "AND THE BOX IS NO LONGER SHALLOW, so",
+        # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
+        # carries neither the refuted sentence's connective nor its capitalisation. The
+        # quote-strip below is what keeps a marked, QUOTED retraction from redding this
+        # pin, so no entry needs a frame — and giving only SOME entries one is precisely
+        # the asymmetry that broke it. ⛔ The connectives are NOT part of the reading, and
+        # keeping one was a FALSE PASS (#13809 review, P2 — MEASURED: with `, so` still
+        # on this literal, an unquoted `AND THE BOX IS NO LONGER SHALLOW.` and its
+        # lowercase form both read GREEN, i.e. the refuted claim could come back in prose
+        # and the pin would not fire).
+        "the box is no longer shallow",
         "measured on the clone this row was repaired on: "
         "`git rev-parse --is-shallow-repository` -> `true` and "
         "`git merge-base 2584a86ec1 origin/main` -> rc=1, so the unshallow is a REPAIR a "
@@ -16548,9 +16554,9 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
         if line.lstrip().startswith("| **D5** |")
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
-    asserted = _D5_QUOTED_SPAN.sub("", d5[0])
+    asserted = _D5_QUOTED_SPAN.sub("", d5[0]).casefold()
     restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
-                if claim in asserted]
+                if claim.casefold() in asserted]
     assert not restated, (
         "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated))
 
