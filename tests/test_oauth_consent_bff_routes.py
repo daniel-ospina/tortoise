@@ -1649,7 +1649,8 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
     `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
     swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
     leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
-    outcome `start.ts`'s session-read `try`/`catch` exists to remove.
+    silence `start.ts`'s ATTEMPT-WRITE `try`/`catch` exists to break (it logs `consent attempt write
+    failed`; the session-read catch above it exists for a different reason - an untyped 500).
 
     SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
     failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
