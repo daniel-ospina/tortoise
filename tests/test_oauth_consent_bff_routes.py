@@ -346,6 +346,13 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   if (opts.issuer !== undefined) e.CONSENT_TOKEN_ISSUER = opts.issuer;
   if (opts.appOrigin !== undefined) e.APP_ORIGIN = opts.appOrigin;
   if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
+  // The KEY-SET deployment (#10794): the mint's `kid` and its signing bytes both come from this
+  // variable. Without an opt that can set it, EVERY executed mint runs the legacy single-secret
+  // branch, so `const kid = consentCurrentKid(env);` in `token.ts` was unpinned — deleting that
+  // line left the whole suite green while the header named `consent-1` and the HMAC used another
+  // key (the #10488 silent split, one field along).
+  if (opts.keys !== undefined) e.CONSENT_TOKEN_KEYS = opts.keys;
+  if (opts.currentKid !== undefined) e.CONSENT_TOKEN_CURRENT_KID = opts.currentKid;
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
@@ -1185,6 +1192,44 @@ def test_a_token_minted_by_the_bff_is_accepted_by_the_AS(monkeypatch) -> None:
         "state": _PARAMS["state"],
     }
     assert assertion["email"] is None, "email is display-only and must not be invented"
+
+
+def test_the_mint_stamps_the_CURRENT_kid_and_the_AS_verifies_it_under_the_same_set(monkeypatch) -> None:
+    """`token.ts`'s `kid` line is LOAD-BEARING, and this is the only arm that executes it.
+
+    A key set on both halves makes the minter stamp the CURRENT kid and sign with that kid's bytes.
+    If the route stamps anything else — `LEGACY_KID` via a deleted `const kid = consentCurrentKid(env);`
+    — the AS selects a key by a name it does not hold and answers `401 invalid_token` on every
+    redemption while the mint still answers `200`: the #10488 silent split, one field along, and
+    invisible to the fingerprint (§2.5). Every other mint scenario builds its env through `env()`,
+    which never sets `CONSENT_TOKEN_KEYS`, so `input.kid ?? LEGACY_KID` answered `"consent-1"` with
+    or without that line — the mutant left the whole suite green, which is why the pin exists.
+    """
+    keys = f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", keys)
+    monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "new")
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", _ISSUER)
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+
+    out = _run("mint_ok", keys=keys, currentKid="new")
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+
+    import base64
+
+    header_seg = token.split(".")[0]
+    header = json.loads(base64.urlsafe_b64decode(header_seg + "=" * (-len(header_seg) % 4)))
+    assert header["kid"] == "new", (
+        f"the mint stamped kid {header['kid']!r} while resolving its signing key from a set whose "
+        "current kid is 'new' — the AS selects the verification key BY that name, so every "
+        "redemption would be refused with the mint still answering 200")
+
+    # …and the OTHER half accepts it, under the same set: the stamp and the bytes agree ACROSS the
+    # two languages, which is the property the split breaks and neither half can check alone.
+    from tortoise.consent_token import verify_consent_token
+
+    assertion = verify_consent_token(token, presented=_presented())
+    assert assertion["sub"] == "user-1"
 
 
 def _issuer_claim(token: str) -> str:
@@ -2938,7 +2983,15 @@ def test_the_SIGNED_attempt_key_crosses_the_halves_in_BOTH_directions(monkeypatc
     as_minted = consent_token.mint_attempt_key()
     random_part = as_minted.split(".")[1]
     chosen = "b" * 43
+    # ⛔ THE MUTATION MUST BE A REAL ONE. The MAC is 43 base64url chars for 32 bytes, so its last
+    # character can only be one of the 16 pad-aligned values (`A E I M Q U Y c g k o s w 0 4 8`) and
+    # only the ending `AAA` decodes to the same two bytes — which the `endswith` guard below avoids
+    # by switching to `BBB`. (A replacement that collided with a REACHABLE ending would make this a
+    # silent no-op and red a correct tree; measured 0 no-ops in 200 000 mints, and the sibling
+    # `test_oauth_consent_bridge.py::test_a_TAMPERED_attempt_key_is_refused` carries the same class
+    # for the random part, where `…[:-1] + "A"` DID collide once in 16.)
     forged_mac = as_minted[:-3] + ("AAA" if not as_minted.endswith("AAA") else "BBB")
+    assert forged_mac != as_minted, "the test's own mutation was a no-op"
 
     out = _run("attempt_key", values={"as_minted": as_minted, "chosen": chosen,
                                       "empty": "", "forged_mac": forged_mac})

@@ -3644,6 +3644,52 @@ def test_a_MALFORMED_key_set_is_UNPROVISIONED_and_names_the_malformation(monkeyp
         assert consent_token.consent_token_key_health()["configured"] is False
 
 
+def test_no_key_set_fault_ECHOES_the_configured_VALUE(monkeypatch) -> None:
+    """The fault NAMES the malformation by POSITION; it never repeats the entry.
+
+    `consent_token_secret_problem()` is interpolated into two UNAUTHENTICATED bodies: the 503 that
+    `GET /oauth/authorize` answers before any authentication, and the 503 `verify_consent_token`
+    raises (so any request carrying `X-Consent-Token` reaches it through `/oauth/consent/preview`
+    and `/oauth/consent`). The likeliest operator error with this variable is pasting the key
+    WITHOUT its `kid=`, and then the offending entry IS the HMAC key — so echoing it hands a
+    forgery key to anyone who asks. The sibling arms are the model: `EMPTY secret` names the kid,
+    `_key_problem` names a byte LENGTH, and neither publishes the bytes.
+    """
+    from tortoise import consent_token
+
+    value_that_must_not_escape = "consent-key-MUST-NOT-ECHO-0123456789abcdef"
+    for shape, position in (
+        (value_that_must_not_escape, "entry 1 of 1"),                      # the typo itself
+        (f"k1={_KEY_OLD},{value_that_must_not_escape}", "entry 2 of 2"),   # a later entry
+        (f"{value_that_must_not_escape},k2={_KEY_NEW}", "entry 1 of 2"),
+    ):
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", shape)
+        monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+        problem = consent_token.consent_token_secret_problem()
+        assert problem, shape
+        assert value_that_must_not_escape not in problem, (
+            f"the provisioning fault echoed the configured value into a response body that two "
+            f"unauthenticated routes publish: {problem}")
+        # …and the operator is still told WHICH entry is wrong, which is the whole diagnostic.
+        assert position in problem, problem
+
+
+def test_the_CURRENT_KID_fault_does_NOT_enumerate_the_configured_kids(monkeypatch) -> None:
+    """The 503 must not publish the key NAMES the 401 deliberately withholds.
+
+    `verify_consent_token`'s unknown-kid refusal says so in place ("an enumeration of the
+    configured set would hand a probe the deployment's key names") — and the provisioning 503
+    reaches the same anonymous callers, so the two rules have to agree.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="typo")
+    problem = consent_token.consent_token_secret_problem()
+    assert problem and "typo" in problem, problem
+    assert "old" not in problem and "new" not in problem, (
+        f"the 503 enumerated the deployment's key names: {problem}")
+
+
 def test_a_CURRENT_KID_that_names_nothing_is_unprovisioned(monkeypatch) -> None:
     """Minting under a name no verifier can select is the state `kid` exists to prevent."""
     from tortoise import consent_token

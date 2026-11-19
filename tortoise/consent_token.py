@@ -336,13 +336,22 @@ def parse_consent_token_keys() -> tuple[dict[str, str] | None, str | None]:
     raw = os.environ.get(_KEYS_ENV, "")
     if not raw.strip():
         return None, None
+    entries = raw.split(",")
     keys: dict[str, str] = {}
-    for entry in raw.split(","):
+    for index, entry in enumerate(entries, start=1):
         kid, sep, secret = entry.partition("=")
         if not sep:
+            # ⛔ THE ENTRY IS NEVER ECHOED — its POSITION is. This message travels to TWO
+            # UNAUTHENTICATED bodies (`/oauth/authorize` and the two `/oauth/consent*` routes all
+            # put `consent_token_secret_problem()` in a 503 description), and the likeliest operator
+            # error with this variable is pasting the key WITHOUT its `kid=` — so the offending
+            # entry can BE the HMAC key, which the `_MIN_SECRET_BYTES` floor exists to keep out of
+            # reach but does not make public. Naming which entry is wrong is what the operator
+            # needs; it is also all this class of message may carry, exactly like the `too_short`
+            # arm below, which names a byte LENGTH and never the bytes.
             return None, (
                 f"{_KEYS_ENV} has an entry with no '=' — every entry is `<kid>=<secret>`, so "
-                f"{entry.strip()[:64]!r} names no secret")
+                f"entry {index} of {len(entries)} names no secret")
         kid = kid.strip()
         if not _KID_RE.match(kid):
             return None, (
@@ -458,9 +467,15 @@ def _secret_state() -> tuple[str, str] | None:
     if keys is not None:
         current = os.environ.get(_CURRENT_KID_ENV, "").strip()
         if current and current not in keys:
+            # ⛔ THE SET IS COUNTED, NOT LISTED. `verify_consent_token` refuses to enumerate the
+            # configured kids in a 401 for the same reason this 503 must not: it reaches a caller
+            # who sent nothing (`GET /oauth/authorize`, or any request carrying `X-Consent-Token`),
+            # and a list of the deployment's key NAMES is a probe's inventory. What the operator
+            # needs is their own value back plus the fact that it matches none of the set, and
+            # that is what this says.
             return ("not_set",
-                    f"{_CURRENT_KID_ENV}={current!r} is not one of the kids in {_KEYS_ENV} "
-                    f"({', '.join(sorted(keys))}) — a deployment would MINT with a name no "
+                    f"{_CURRENT_KID_ENV}={current!r} is not one of the {len(keys)} kids "
+                    f"configured in {_KEYS_ENV} — a deployment would MINT with a name no "
                     "verifier can select")
         for kid, secret in keys.items():
             problem = _key_problem(secret, label=f"the {_KEYS_ENV} key for kid {kid!r}")
