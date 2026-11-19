@@ -126,9 +126,17 @@ _SENTINEL_PARAMS = dict(
 # token. HTML permits ASCII whitespace on BOTH sides of `=` in an attribute (whatwg HTML: attribute
 # name state → before attribute value state), so `<img src = "//evil.example/x">` and
 # `<link rel=stylesheet href = "/x.css">` are well-formed documents that match none of the flat
-# tokens (`"src="`, `"href="`). The classes stay narrow enough that the page's legitimate
-# `<meta charset>` / `<meta name=viewport>` match nothing here.
-_AFFORDANCE_RE = re.compile(r"<\s*a[\s>]|(?:href|src)\s*=|(?:<\s*form)|http-equiv")
+# tokens (`"src="`, `"href="`).
+#
+# ⛔ `href=`/`src=` is NOT the set of attributes that fetch a subresource, and an earlier revision of
+# this guard claimed "every way" while enforcing three. `<img srcset='//cdn/x 1x'>`,
+# `<video poster=…>`, `<button formaction=…>`, `<a ping=…>` and `<object data=…>` each carry a
+# destination with no scheme and no `<a`/`href` — a `srcset` mutant stayed GREEN under the narrower
+# pattern (review of #13712, F2) — so all five are matched. The classes stay narrow enough that the
+# page's legitimate `<meta charset>` / `<meta name=viewport>` match nothing here, which the suite's
+# unmutated negative control re-measures on every run.
+_AFFORDANCE_RE = re.compile(
+    r"<\s*a[\s>]|(?:href|srcset|poster|formaction|ping|data|src)\s*=|(?:<\s*form)|http-equiv")
 
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
@@ -2135,7 +2143,38 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
 # page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
 # three words in order with ANY markup or whitespace between them, so the re-introduction cannot
 # evade the guard by wrapping the phrase, emphasising it, or hyphenating it.
-_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure")
+#
+# `IGNORECASE` rather than a `.lower()` copy of the corpus: lowercasing is not length-preserving for
+# every character, and the assertion below QUOTES the span it matched out of the ORIGINAL text, so
+# an index taken from a lowered copy could quote a different span than the one that earned the red.
+_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
+
+# ⛔ …but the PHRASE alone is not the defect, and matching it alone reddened the CORRECT form. The
+# sentence this change asks an author to write states the universal about the PAST and then names
+# what survives — "before #13671, every hard failure of this route answered raw JSON; two arms still
+# do" — and a phrase-only match failed it while reporting that the file "claims EVERY HARD FAILURE
+# is a page", the opposite of what that sentence says (review of #13712, F3). A sentence that NAMES
+# the survivors is not suppressing them, so it is exempt; a sentence that states the universal
+# without naming them is the absolute, whatever predicate it uses to spell it.
+_SURVIVORS_NAMED_RE = re.compile(
+    r"\bstill\b|\bsurviv|\bremains?\b"
+    r"|\b(?:two|2|both)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
+    re.IGNORECASE)
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence around `text[start:end]`, BOUNDED at both ends so a survivor named in a
+    different sentence cannot exempt this one. A `.` ends a sentence only when whitespace follows,
+    so `start.ts` and `json({error, reason})` do not truncate the window; the head is additionally
+    capped at 240 characters so a run-on paragraph cannot hide the match behind a distant terminator.
+    """
+    head = text[:start]
+    cut = max(head.rfind(". "), head.rfind(".\n"), head.rfind("\n\n"))
+    begin = cut + 1 if cut >= 0 else 0
+    tail = text[end:]
+    stop = re.search(r"\.\s", tail)
+    finish = end + (stop.start() + 1 if stop else min(len(tail), 240))
+    return text[max(begin, start - 240):finish]
 
 
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
@@ -2161,8 +2200,15 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     the edit takes: wrapped inside the phrase (`every hard` / `   * failure`), emphasised
     (`every **hard** failure`), or hyphenated (`hard-failure`). Pinning the literal
     `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
-    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the DENIAL — those three words in
-    that order, in any markup — which is the claim, not a wording.
+    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE in any markup.
+
+    ⛔ AND THE PHRASE ALONE IS NOT THE DEFECT. It also appears in the sentence this change asks an
+    author to write — the universal stated about the PAST, with the survivors named ("before
+    #13671, every hard failure … answered raw JSON; two arms still do"). A phrase-only match failed
+    that sentence and reported that the file "claims EVERY HARD FAILURE is a page", the opposite of
+    what it says (review of #13712, F3). So a match is exempt when its OWN sentence names the
+    survivors, and the message QUOTES the span it matched — a red can no longer be read as a claim
+    about a sentence nobody wrote.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
     `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
@@ -2181,11 +2227,18 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                                       "consent-identity-bridge.md").read_text(encoding="utf-8"),
     }
     for name, text in corpus.items():
-        assert not _FALSE_ABSOLUTE_RE.search(text.lower()), (
-            f"`{name}` claims EVERY HARD FAILURE is a page, and `start.ts` returns JSON from TWO "
-            "places (the `400` caller error and the terminal `200` flow state — see "
-            "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL: the terminal `200` "
-            "is #10865's recorded decision, and a summary that denies it invites converting it.")
+        for m in _FALSE_ABSOLUTE_RE.finditer(text):
+            if _SURVIVORS_NAMED_RE.search(_sentence_around(text, m.start(), m.end())):
+                continue
+            # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can
+            # tell which sentence earned the red instead of being told what it supposedly claims.
+            raise AssertionError(
+                f"`{name}` states the absolute: it says {text[m.start():m.end()]!r} and names "
+                "nothing that still answers JSON, while `start.ts` returns JSON from TWO "
+                "places (the `400` caller error and the terminal `200` flow state — see "
+                "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL, or name the "
+                "survivors: the terminal `200` is #10865's recorded decision, and a summary that "
+                "denies it invites converting it.")
 
 
 def _key_from(location: str | None) -> str:
