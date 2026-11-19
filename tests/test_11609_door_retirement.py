@@ -42,8 +42,9 @@ THAT UNBLOCKS IT, not silently:
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
   · `search` carries a `rest_spec` (and a list envelope as well). `issue_insight` and
-    `session_context` were held on the `rest_spec` reason until #11609 lane P6 measured
-    it FALSE — the row is not the route — and retired both; see below;
+    `session_context` were held on the `rest_spec` reason until #11609 lane P4 MEASURED
+    it FALSE — the row is not the route — and lane P6, the batch that ACTED on that
+    measurement, retired both; see below;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -422,15 +423,17 @@ class TestEveryPointerResolvesInOneHop:
             f"lands on another shim (aliases are not transitive): {strays}")
 
     def test_the_live_count_moved_strictly_lower(self):
-        """#11609's arithmetic: 55 → 48 → 46 → 44 → 42 → 40 advertised, no row arriving.
+        """#11609's arithmetic: 55 → 48 → 46 → 44 → 40 advertised, no row arriving.
 
         Each retiring wave removes doors into arms its container had to grow for them
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
         `recompute=True` / `recall=True`), so the count can only fall and no container is
-        added. The waves are independent subtractions on the same base surface —
-        48 minus 2 minus 2 = 44, then 44 minus 2 minus 2 = 40 — because each merged on
-        its own; the pin is the SUM, which is what the merged registry actually
-        advertises.
+        added. The chain is the sequence of pins the merged trees actually carried, one
+        step per wave that landed on its own — 48 minus 2 = 46 (P1, #13556), 46 minus 2 = 44
+        (P2, #13550) — and then 44 minus 4 = 40, because P6's two pairs (`rest_spec`,
+        then DELETE) merged TOGETHER in one commit (`73c26022db`). No
+        `len(TOOL_REGISTRY) == 42` pin ever existed, so 42 is not a surface this chain may
+        claim as advertised.
         """
         assert len(TOOL_REGISTRY) == 40, (
             f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
