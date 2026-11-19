@@ -108,7 +108,19 @@
     /* Beat: fixed overlay, z-index above canvas */
     .beat {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center;
+      /* ⛔ `safe center`, not plain `center`. A centred flex column that
+         OVERFLOWS spends its own padding — half the overflow comes off the top —
+         and the hero's 5rem `padding-top` is the only thing keeping its <h1>
+         out from under the fixed Login pill (`padding: 18px 24px` → the button
+         reaches y 54.4). Measured at 320x821: content 783.1px in a padded box of
+         709 → 74.1px of overflow, 37.1px of it off the top, h1 at y=43.0 = an
+         11.4px overlap with the pill. `safe center` falls back to flex-start
+         exactly when the content does not fit, so the padding survives at every
+         viewport — no height threshold, no per-beat special case. Browsers
+         without `safe` keep the plain `center` above, i.e. today's behaviour. */
+      justify-content: safe center;
       z-index: 1; pointer-events: none; opacity: 0;
       padding: 2rem;
       box-sizing: border-box;
@@ -579,14 +591,27 @@
       .video figcaption { text-align: center; }
       /* Same measure as the paragraph above (no 3px inset), one column. The
          ↓ group keeps a hair more separation so the two lists still read as
-         two lists stacked into one column, not six interchangeable rows. */
+         two lists stacked into one column, not six interchangeable rows.
+         ⛔ The `max-width` used to be a FLAT 660px here, which overrides the
+         shared `min(660px, 74ch)` for the whole 670–760px band: at 760 the grid
+         box was 660 against a 605.9px prose box (+54.1px, 27.1px out on each
+         side). It is inherited now, so the grid matches the prose at every
+         width — that is owner item 3, and it was still broken here. */
       .outcomes {
         grid-template-columns: 1fr;
         justify-content: stretch;
         gap: 0.6rem;
-        max-width: 660px;
       }
       #beat-compute .outcomes .down { margin-top: 0.35rem; }
+    }
+
+    /* Very narrow (iPhone SE 1st gen, 320px): the primary CTA is 256.7px wide
+       against a 256px column, so its label wrapped and left the arrow alone on
+       a second line — the same orphan shape the rest of this page avoids. 24px
+       less horizontal padding fits it on one line and changes nothing above
+       324px. */
+    @media (max-width: 360px) {
+      #beat-hero .cta-start { padding: 0.9rem 1.25rem; }
     }
 
     /* Short viewports: a beat is a fixed full-height overlay with no scroll of
