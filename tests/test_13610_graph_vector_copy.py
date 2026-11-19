@@ -51,6 +51,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -702,9 +703,12 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     label that holds nothing in EITHER store reported the SAME `verified=True` as a
     fully backfilled one, so *"the record caught up"* was a finding the count never
     established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
-    population PASSES this gate and is then served as `mechanism=pgvector,
-    reason=empty_results` — the SAME token a backfilled label answering the same
-    empty read records, which is why the instrument could not tell the two apart.
+    population PASSES this gate and is then served by a leg whose trace does not name
+    the two-zero state: `empty_results` on the record for the two CONTRACTED labels
+    (`object`/`subject`), and for the other five — including `point`, the label this
+    case reads — the empty record answer falls through and the graph records
+    `scan_fallback`/`no_embeddings`/`degraded=True`. Neither token says the count
+    compared two zeroes, which is why the instrument could not tell the states apart.
 
     ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
     stores answer identically, so refusing would change deployment behaviour for a
@@ -732,6 +736,18 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     assert "TRIVIAL" in supplied.reason and "EMPTY" in supplied.reason, (
         f"the reason does not state the vacuity, so a reader who sees only the "
         f"prose is told nothing: {supplied.reason!r}")
+    # ⛔ AND IT DATES THE COUNT (#13812 review P2). This string outlives the
+    # instant it describes — a verified verdict is cached for the life of the
+    # process, and `Coverage.as_dict()` hands the same string to a caller — so a
+    # present-tense "the record HOLDS N / the graph SERVES M" is read later as a
+    # claim about the population NOW, while the read rendering it may return rows
+    # the count never saw. The renderer is the trace line the cases below drive;
+    # this pins the string where it is BUILT, so the DECLINE line and `as_dict()`
+    # cannot keep a present-tense count after the trace has been corrected.
+    assert not re.search(r"\b(holds|serves)\s+\d", supplied.reason), (
+        "the reason narrates its count in the PRESENT tense, so every later "
+        "reader of it (a cached verdict, the unverified DECLINE line, a caller's "
+        f"as_dict()) is told a stale number is the current one: {supplied.reason!r}")
     assert supplied.as_dict()["trivial"] is True, (
         "the marker is not on the serialised verdict, so an artifact that records "
         "`as_dict()` cannot tell a trivial pass from a catch-up")
@@ -977,6 +993,14 @@ def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
     "TRIVIALLY", so the capture below cannot be satisfied by a pre-existing line;
     the assertion that bites is the measurement-time one, which the reverted message
     fails while every other assertion here stays green (measured).
+
+    ⛔ AND REDS IF THE COUNT IS RENDERED IN THE PRESENT TENSE (`#13812` review P2
+    follow-up). Wording the wrapper "was verified … WHEN IT WAS TAKEN" while
+    interpolating a present-tense `verdict.reason` ("the record holds 0 vector(s)")
+    makes the sentence contradict itself on THIS read: the parenthetical says the
+    record holds nothing while `rows2` carries a row. Both halves are pinned below —
+    the line must carry the measurement-time phrasing, and must not carry a
+    present-tense count — so correcting one half of the sentence cannot pass.
     """
     import logging
 
@@ -1030,6 +1054,21 @@ def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
     assert "MEASUREMENT" in caplog.text, (
         "the line does not say the verdict was a MEASUREMENT-time fact, so it reads "
         f"as a claim about this read: {caplog.text!r}")
+    # ⛔ AND THE PARENTHETICAL IS DATED TOO (`#13812` review P2 follow-up). The
+    # wrapper above can say "was verified … WHEN IT WAS TAKEN" while the
+    # `verdict.reason` it interpolates still narrates its count in the PRESENT tense
+    # — "the record holds 0 vector(s)" — which on this very read (a row is served)
+    # makes the sentence contradict itself. Pinning only the wrapper left that half
+    # correctable-by-omission, so both halves are asserted.
+    trivial_line = next(
+        (line for line in caplog.text.splitlines() if "TRIVIALLY" in line), "")
+    assert "the count measured" in trivial_line, (
+        "the parenthetical does not date the count it prints, so a cached verdict "
+        f"is rendered as a reading of THIS read: {trivial_line!r}")
+    assert not re.search(r"\b(holds|serves)\s+\d", trivial_line), (
+        "the parenthetical still states the stale count in the PRESENT tense — on "
+        "the very read this case returns a row for, an operator triaging from the "
+        f"log is told the record holds 0 vectors: {trivial_line!r}")
     assert "this read is empty" not in caplog.text, (
         "⛔ THE TRACE LIES: the verdict was taken when both stores were empty, but "
         "this read returned rows, so a present-tense 'this read is empty' is false "
@@ -1670,9 +1709,11 @@ def test_the_numerator_applies_the_labels_kind_predicate():
     (`vector_search`: `if kind_filter: where.append(kind_filter)`), so a numerator
     taken over the whole table compares a KIND's served rows against the PARENT
     table's total: a record holding only plain points would verify `operator` on a
-    surplus of plain points, and the operator-scoped read would then be answered
-    from the record with zero rows of that kind, reported `mechanism=pgvector,
-    reason=ok`. `record ≥ graph` is the expected steady state once the record (truth)
+    surplus of plain points, and the operator-scoped read's record answer would hold
+    zero rows of that kind — which for a non-contracted label falls through to the
+    graph (`search_engine.py:4179`) — so nothing on the record leg reports the
+    shortfall. `record ≥ graph` is the expected
+    steady state once the record (truth)
     is ahead of the graph (cache), so the surplus is not exotic.
     """
     sql: list[str] = []

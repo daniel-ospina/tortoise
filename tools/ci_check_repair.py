@@ -192,7 +192,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
 #: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
 #: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
-#: `tools/ci_queue_health.py:354` is the DERIVED VALUE,
+#: `tools/ci_queue_health.py:369` is the DERIVED VALUE,
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
@@ -222,7 +222,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
 #: as a denial of a queue-wait budget it is a misreading that then discards the one
 #: section that supports this floor. A lane re-deriving 5400 s follows §1
-#: (measurement) → §6 / `ci_queue_health.py:354` (budget).
+#: (measurement) → §6 / `ci_queue_health.py:369` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards
@@ -981,6 +981,7 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
              queue_congested: bool | None = None,
              queue_congestion_measured: bool | None = None,
              queue_congestion_apart_from=None,
+             queue_congestion_apart_from_measured: bool | None = None,
              also_repairable: frozenset[int] | None = None) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
@@ -1208,15 +1209,24 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
                     # measured congestion, and the required check could never be
                     # produced: `docs/ci/ci-check-repair-red-surface.md` §Fact 2.
                     #
-                    # The question is asked of the READING, not re-derived here, and
-                    # only a MEASURED congestion may answer it: an unmeasured queue has
-                    # no witness list to exclude from. `None` (a reading that cannot
-                    # answer, a hand-built object, a cut leg) refuses like any other
-                    # unmeasured input — the exemption is never a default.
+                    # The question is asked of the READING, not re-derived here. ⛔ TWO
+                    # MEASURED-NESS VALUES, NOT ONE (#13825 review round 3):
+                    # `queue_congestion_measured` is the REPO-WIDE witness and is `False`
+                    # for every reading whose `congests_pr` is `None`; the per-run
+                    # exemption needs its own — `queue_congestion_apart_from_measured` —
+                    # because a `PR-NEVER-DISPATCHED` reading is exactly the shape where
+                    # the repo-wide answer is (correctly) "not measured" while the per-run
+                    # answer is a measurement (nothing LIVE witnesses congestion). Fusing
+                    # the two refused the repair AND escalated every window to exit 1.
+                    # `None` (a reading that cannot answer, a hand-built object, a cut leg)
+                    # still refuses like any other unmeasured input — the exemption is never
+                    # a default.
                     apart = (queue_congestion_apart_from(
                                  r.id, also_repairable=zero_job_targets)
                              if queue_congestion_apart_from is not None else None)
-                    if not (apart is False and queue_congestion_measured is True):
+                    if not (apart is False and (
+                            queue_congestion_measured is True
+                            or queue_congestion_apart_from_measured is True)):
                         # THE REFUSAL IS RECORDED, NOT SILENT. This run was named a
                         # zero-job repair candidate above and is now not repaired;
                         # without this entry the plan counts for nothing in
@@ -1737,7 +1747,8 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                 deadline: float | None = None,
                 queue_congested: bool | None = None,
                 queue_congestion_measured: bool | None = None,
-                queue_congestion_apart_from=None) -> list[PrPlan]:
+                queue_congestion_apart_from=None,
+                queue_congestion_apart_from_measured: bool | None = None) -> list[PrPlan]:
     plans: list[PrPlan] = []
     # A PASS IS THE CACHE SCOPE. Two passes in one process (a launcher that polls)
     # must not reuse a verdict measured against a head that has since moved.
@@ -1781,6 +1792,8 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
                               queue_congested=queue_congested,
                               queue_congestion_measured=queue_congestion_measured,
                               queue_congestion_apart_from=queue_congestion_apart_from,
+                              queue_congestion_apart_from_measured=(
+                                  queue_congestion_apart_from_measured),
                               also_repairable=pass_repairable))
     return plans
 
@@ -1807,7 +1820,17 @@ def read_queue_health(repo: str):
             sys.path.insert(0, root)
         from tools import ci_queue_health  # optional dependency
 
-        return ci_queue_health.read_health(repo)
+        # ⛔ THE PROOF STORE IS PASSED HERE TOO (#13825 review round 4). This pass runs every
+        # 30 minutes — more often than the queue-health job that owns the store — and a pass
+        # that never reads it starts from ``proofs = {}`` and spends its budget on the SAME
+        # oldest-first prefix every window. The population can then never accumulate: the
+        # reading keeps the frozen 14-day `oldest` and `queue_congested: true` this issue is
+        # about, and pays the probe budget every pass for a prefix it re-proves. Absent or
+        # empty is exactly the pre-#13825 reading (`state_file=None`), so an environment
+        # that does not wire the store degrades to MORE alarming, never less.
+        return ci_queue_health.read_health(
+            repo, state_file=os.environ.get("CI_QUEUE_HEALTH_STATE") or None
+        )
     except Exception:  # a queue read must never fail the repair pass
         return None
 
@@ -1835,6 +1858,56 @@ def queue_congestion_reading(queue) -> bool | None:
     if queue is None:
         return None
     return getattr(queue, "congests_pr", None)
+
+
+#: The queue-health tool's verdict token for "every waiter was proved never dispatched".
+#: ⛔ DUPLICATED LITERAL, DELIBERATELY: `ci_queue_health` is an OPTIONAL dependency of this
+#: module (imported lazily inside `read_queue_health`), so a module-level import here would
+#: make a failed queue import break the whole repair pass. The duplication is pinned by
+#: `test_the_never_dispatched_vocabulary_matches_the_queue_tool`, so the two cannot drift.
+_QUEUE_NEVER_DISPATCHED_TOKEN = "PR-NEVER-DISPATCHED"
+
+
+def queue_congestion_apart_from_measured(queue) -> bool | None:
+    """May the PER-RUN deadlock exemption be evaluated on THIS reading? (#13825)
+
+    ⛔ THE EXEMPTION HAS TWO HALVES AND THEY WERE ONE.
+    `classify` authorises a zero-job repair only when ``apart is False and
+    queue_congestion_measured is True`` — and `queue_congestion_measured` is
+    ``congestion is not None``, i.e. it is `False` for every reading whose
+    `congests_pr` is `None`, INCLUDING the `PR-NEVER-DISPATCHED` reading whose whole
+    content is "every former witness was proved dead". MEASURED consequence of leaving
+    them fused (review round 3): the run is refused, the refusal is recorded, and
+    `main()` escalates a refusal on an unmeasured queue to exit 1 — every window, with
+    the required check never produced. That is the alarm-fatigue class
+    `docs/ci/ci-check-repair-red-surface.md` §Fact 2 declares unsound.
+
+    So the per-run question gets its OWN measured-ness, and it is deliberately NARROWER
+    than the repo-wide one: `True` only when the reading's sole degradation is that
+    every waiter was PROVED never dispatched. `congests_pr` stays `None` for the same
+    reading, so no REPO-WIDE destructive act is authorised on the strength of an
+    exclusion — only the per-run exemption, which exists precisely to break this
+    deadlock.
+
+    ``None`` when the object cannot answer (a `--no-queue-health` pass, a failed read, a
+    hand-built double), which leaves every run on the refusing side exactly as before.
+    """
+    if queue is None:
+        return None
+    verdict = getattr(queue, "verdict", None)
+    pr_never_dispatched = getattr(queue, "pr_never_dispatched", 0) or 0
+    if not pr_never_dispatched:
+        return None
+    if verdict != _QUEUE_NEVER_DISPATCHED_TOKEN:
+        return None
+    # ⛔ `wait_witness_ids` IS NOT TESTED (#13825 review round 4): `PR-NEVER-DISPATCHED`
+    # requires `not wait_runs`, and the witness tuple is built exclusively from `wait_runs`,
+    # so a conjunct on it could never vary — dead weight masquerading as protection, the M20
+    # class. The truncation guards below CAN vary and are what keep a cut reading failing
+    # closed.
+    if getattr(queue, "truncated", False) or getattr(queue, "pending_truncated", False):
+        return None
+    return True
 
 
 def queue_congestion_apart_from_reader(queue):
@@ -2370,6 +2443,12 @@ def main(argv: list[str] | None = None) -> int:
     # because the runs are only known inside it (#10641 review P1). `None` when the
     # reading cannot answer, which leaves every run on the refusing side.
     queue_apart_from = queue_congestion_apart_from_reader(queue)
+    # ⛔ THE PER-RUN EXEMPTION'S OWN MEASURED-NESS (#13825 review round 3). See
+    # `queue_congestion_apart_from_measured`: the repo-wide witness above is `False` on a
+    # reading whose `congests_pr` is `None`, and a `PR-NEVER-DISPATCHED` reading is the
+    # shape where that repo-wide "not measured" is right while the PER-RUN question is
+    # answered by a measurement. Threaded separately so the two can never be fused again.
+    queue_apart_from_measured = queue_congestion_apart_from_measured(queue)
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -2380,7 +2459,9 @@ def main(argv: list[str] | None = None) -> int:
                             args.max_attempts, queue_starved=queue_starved,
                             deadline=pass_deadline, queue_congested=queue_congested,
                             queue_congestion_measured=congestion is not None,
-                            queue_congestion_apart_from=queue_apart_from)
+                            queue_congestion_apart_from=queue_apart_from,
+                            queue_congestion_apart_from_measured=(
+                                queue_apart_from_measured))
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
         # ⛔ A REFUSAL MADE UNDER SILENCE IS NOT A DISCHARGED WINDOW, and exit 0 is
