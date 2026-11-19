@@ -1374,6 +1374,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # across `projection/__init__.py`. That is why every row here is re-derived
     # from the live file (`sed -n "<n>p" <file>`) and never nudged by a delta:
     # a constant copied off the row above is wrong for four of these seven.
+    #
+    # Main's own drift, re-derived here after a forward-merge of `origin/main`
+    # reddened this pin for EVERY lane (the shard's last-failed cache then
+    # re-ran this one test to the exclusion of the rest, so one stale locator
+    # made the required matrix red repo-wide). Re-derived against the live
+    # file, not nudged by a constant, and the brief's §1 row moved with it.
     ("tortoise/search_engine.py", 2945, "def run_fts_query(",
      "`tortoise/search_engine.py:2945`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
@@ -1385,7 +1391,7 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # numbers in the rows ABOVE are the record of a drift, not a locator to
     # trust.
     ("tortoise/search_engine.py", 3157, "CALL db.idx.fulltext.queryNodes",
-     "`:3157-3165`"),
+     "`:3157-3166`"),
     ("tortoise/search_engine.py", 2787, "def recency_tie_clause(",
      "`search_engine.py:2787`"),
     ("tortoise/search_engine.py", 5074,
