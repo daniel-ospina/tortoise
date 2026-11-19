@@ -228,6 +228,34 @@ def _function_refs(html: str, fn_name: str) -> str:
     return m.group(0)
 
 
+def _render_code(html: str, fn_name: str) -> str:
+    """One page's render function with its COMMENT LINES removed.
+
+    The two product pages explain the same code with different comments — and
+    legitimately so: `product.html` cites `#4815` for the labels resolver, the
+    campaign page cites the funnel. What must not differ is the CODE, so the
+    comparison is taken over it.
+
+    Line-based on purpose. A regex `//`-strip would cut the `https://` inside
+    the self-host anchor and hide every mutation past it; in these bodies every
+    comment occupies a line of its own, so a per-line drop is exact.
+    """
+    out: list[str] = []
+    in_block = False
+    for line in _function_refs(html, fn_name).splitlines():
+        stripped = line.strip()
+        if in_block:
+            in_block = "*/" not in stripped
+            continue
+        if stripped.startswith("/*"):
+            in_block = "*/" not in stripped
+            continue
+        if stripped.startswith("//"):
+            continue
+        out.append(line.rstrip())
+    return "\n".join(out).strip()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. PRICING object parses + tier inventory
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6903,7 +6931,14 @@ class TestProductSetIsServedUnderTheOneHost:
     # product) and their links must use the prefix. A reviewer measured that they were in
     # NEITHER link population, so a future `href="/"` labelled "Back to product" on
     # `privacy.html` would have shipped green — the same miss measured on `contact.html`.
-    ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html")
+    # `tortoise-for-product-teams.html` (#13645) is served at the COMPANY ROOT
+    # (`premiselabs.co/tortoise-for-product-teams`), so it belongs here on the
+    # docstring's own test: its `/` is the company homepage, not the product, and
+    # a link from it must carry the `/tortoise` prefix. Measured before adding it:
+    # its links are already correct (no `href="/"`, no `OLD_PRODUCT_PATHS` member),
+    # so this closes a #11764-shaped hole rather than fixing a live defect.
+    ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html",
+                  "tortoise-for-product-teams.html")
     # The app origin's page population, pinned for the same reason `_pages` is: the guard
     # below walks a non-recursive glob, so a page added to a subdirectory (or served from
     # `apps/dashboard/index.html`, which lives OUTSIDE `public/`) would leave coverage with
@@ -7172,6 +7207,49 @@ class TestPricingSourceIsShared:
                 "one set of prices from the shared source (#13645).\n"
                 f"--- {left_name} ---\n{slice_fn(left)}\n"
                 f"--- {right_name} ---\n{slice_fn(right)}")
+
+    # The five functions that turn the shared table into the prices a JS
+    # visitor actually sees. See `test_the_two_pages_render_from_the_same_code`.
+    RENDER_FUNCTIONS = (
+        "fmtPrice", "checkSvg", "renderPricing", "renderSelfHost", "setBilling",
+    )
+
+    def test_the_two_pages_render_from_the_same_code(self):
+        """…and the JS RENDER agrees too, not just the static fallback.
+
+        #13696 review finding 1. Both pages carry their own `fmtPrice` /
+        `renderPricing` / `renderSelfHost` / `setBilling`. Every row above
+        reads the STATIC cards, and
+        `test_the_pages_format_prices_through_the_shared_function` only asserts
+        that the string `window.tortoiseFmtPrice(` OCCURS — so the render every
+        real visitor receives was read by no test at all. Measured at
+        `1608357fc7`, before this row: changing the campaign page's call to
+        `window.tortoiseFmtPrice(price, currentBilling, 0)` left all 133 rows
+        GREEN while that page quoted $19/$25/$149 "annually" against
+        `/tortoise`'s $15/$20/$119 — the exact divergence this PR exists to
+        make impossible, one token away, with nothing red. A label or tier-order
+        edit drifts the same way.
+
+        Held as equality rather than derived per page because the invariant is
+        that there is ONE render: a second copy that is merely *also* correct
+        today is the state the defect looks like until someone edits one of
+        them. `_render_code` drops comment lines only, so the two pages may keep
+        explaining themselves differently.
+        """
+        by_name = {name: {fn: _render_code(path.read_text(encoding="utf-8"), fn)
+                          for fn in self.RENDER_FUNCTIONS}
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        for fn in self.RENDER_FUNCTIONS:
+            left, right = by_name[left_name][fn], by_name[right_name][fn]
+            assert left == right, (
+                f"{fn}() differs between {left_name} and {right_name}. The "
+                "pricing RENDER is a second copy that no other row reads, so a "
+                "divergence here is invisible: a different formatter argument "
+                "prints another page's prices, and a different `labels` map "
+                "prints another page's tier names (#13645, #13696 review 1).\n"
+                f"--- {left_name} ---\n{left}\n"
+                f"--- {right_name} ---\n{right}")
 
     def test_the_static_cards_on_both_pages_carry_the_shared_numbers(self):
         """…and the identical copy is also the CORRECT one.
@@ -7533,6 +7611,58 @@ class TestProductTeamsIdentity:
         assert PRODUCT_TEAMS_URL in locs, (
             f"no sitemap advertises {PRODUCT_TEAMS_URL} — an indexable page "
             "with no <loc> is invisible to a crawler")
+
+    def test_the_routing_decision_is_recorded_in_the_architecture_doc(self):
+        """The THIRD place the decision lives — and the one nothing read.
+
+        #13696 review finding 3: the PR body says the decision is "recorded in
+        three places kept in sync … pinned together by a test". Two of the three
+        were pinned (the page's own `<meta>` and the sitemap, above); the host-map
+        entry in `website/website_architecture.md` was prose only, so deleting it
+        reddened no row.
+
+        That entry is the one a later reader consults BEFORE re-cutting the routing
+        map, and it carries the two facts that are not visible anywhere else: this
+        page is served at the ROOT and is deliberately NOT a `PRODUCT_PAGES` member
+        (membership would 301 it to a 404), and it is INDEXED on purpose. With the
+        entry gone, the next routing change is free to "tidy" it into the product
+        prefix — the exact failure that would put the campaign URL at a 404 — so it
+        is held to the same decision as the meta and the sitemap rather than trusted
+        to stay in sync.
+        """
+        architecture = (REPO_ROOT / "website" / "website_architecture.md").read_text(
+            encoding="utf-8")
+        route = PRODUCT_TEAMS_URL.removeprefix("https://premiselabs.co")
+        assert route in architecture, (
+            f"`website/website_architecture.md` no longer records {route} — the "
+            "host map is where a later reader learns this page is served at the "
+            "COMPANY ROOT and is deliberately not a `PRODUCT_PAGES` member. "
+            "Without it the routing record makes the prefix look like the place "
+            "this page belongs, and 301ing it there is a 404 on the URL the owner "
+            "asked for.")
+        entry = next((ln for ln in architecture.splitlines() if route in ln), "")
+        # The recorded decision is a MULTI-LINE bullet: bind to the bullet, not to
+        # the line, so re-wrapping the prose does not red this row while moving
+        # the decision out of the bullet does.
+        lines = architecture.splitlines()
+        start = next(i for i, ln in enumerate(lines) if route in ln)
+        bullet = [lines[start]]
+        for ln in lines[start + 1:]:
+            if ln.startswith("- ") or not ln.strip():
+                break
+            bullet.append(ln)
+        entry = "\n".join(bullet)
+        assert "INDEXED" in entry, (
+            f"the architecture doc's {route} entry no longer states the page is "
+            "INDEXED. `noindex` and `index` differ in whether the experiment can "
+            "be measured at all, so the recorded decision must name which one is "
+            "in force — the same reason the page's `<meta>` and the sitemap `<loc>` "
+            "are pinned above.")
+        assert "PRODUCT_PAGES" in entry, (
+            f"the architecture doc's {route} entry no longer says why this page is "
+            "NOT a `PRODUCT_PAGES` member. That membership is a 301 to "
+            "`/tortoise/tortoise-for-product-teams`, which does not exist; the "
+            "reason has to live beside the route or the next reader removes it.")
 
     def test_the_page_loads_the_consent_module(self):
         """Every named event must be gated, so the gate must be loaded."""
