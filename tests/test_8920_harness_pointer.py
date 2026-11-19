@@ -104,9 +104,10 @@ _POINTER = re.compile(
 #: Python module because the then-extension-list did not name `mjs` — and such a
 #: list is only ever as complete as today's citations (`tests/` also carries
 #: `.json` (159), `.mjs` (15), `.txt` (11), `.md` (10), `.jsonl` (8), `.ts` (2),
-#: `.yaml` (2), `.sh` (1), `.c` (1) — measured with
-#: `git ls-files tests | sed 's/.*\.//' | sort | uniq -c`). A JS harness is not a
-#: module in any Python sense, so that assertion had no ground. The token is now
+#: `.yaml` (2), `.yml` (1), `.sh` (1), `.c` (1) — measured with
+#: `git ls-files tests | sed 's/.*\.//' | sort | uniq -c`, and `.yaml`/`.yml` are
+#: the SAME family spelled two ways, which is exactly the point). A JS harness is
+#: not a module in any Python sense, so that assertion had no ground. The token is now
 #: classified as a FILE pointer and is LISTED, not asserted — see `_classify`.
 #: ⛔ AND THE FIX MUST NOT FAIL OPEN. A first cut of this split classified a token
 #: as a FILE pointer whenever `tests/<written>.py` did NOT exist — which is
@@ -207,13 +208,15 @@ def _classify(
 
     Shared by both spellings on purpose — `_production_pointers` calls it for the
     slash form and for the dotted form, so there is ONE rule and no drift between
-    them. The body is form-neutral: a dotted module name carries no `/`, so the
-    `replace` is a no-op for it.
+    them.
 
     EVIDENCE-POSITIVE, and that is the whole point. A token is a FILE pointer
-    only when `tests/<written>.<symbol>` IS a file — any extension, so the rule
-    never needs extending — or when its tail is the bare-file extension
-    (`_NOT_A_SYMBOL`, the `tests/x.py` shape). Every other token is a SYMBOL
+    when EITHER probe hits — `tests/<written>.<symbol>` IS a file, or (the nested
+    case a multi-segment dotted name needs) its SLASHED form
+    `tests/<written with dots as slashes>.<symbol>` IS a file — for any
+    extension, so the rule never needs extending; or when its tail is the
+    bare-file extension (`_NOT_A_SYMBOL`, the `tests/x.py` shape). Every other
+    token is a SYMBOL
     pointer and IS imported and looked up, INCLUDING a token whose module does
     not exist: that is precisely the renamed-away shape this guard exists to
     red, so its absence must not be what silences the check.
@@ -325,7 +328,8 @@ def test_the_file_pointer_split_is_what_makes_the_mjs_pointer_sane():
     """The `.mjs` pointer that motivated the split is classified as a FILE, not a module.
 
     A class-complete check cannot be a list of extensions: such a set is only as
-    complete as today's citations (`tests/` carries `.jsonl`, `.sh`, `.c`).
+    complete as today's citations. The census lives in ONE place —
+    `_NOT_A_SYMBOL`'s note above — so it cannot drift the way two copies did.
     So this pins the DECISION for the pointer that broke first: it is
     classified as a FILE pointer, and the import assertion therefore never sees
     it. (Whether a file pointer's target exists is a different question, and is
