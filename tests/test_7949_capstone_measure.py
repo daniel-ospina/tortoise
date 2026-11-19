@@ -6415,8 +6415,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # is unique in the file. The first cut pinned only three of the nine, and review measured the
         # residual by mutating the rest — the rest of the file GREEN — so they are pinned too.
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("20204", "``body.harness`` only ever introduces a harness on a session the server"),
-            ("20311", "if count + est > max_points:"),
+            ("20222", "``body.harness`` only ever introduces a harness on a session the server"),
+            ("20329", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("12141", "_registry_cache = PackRegistry(packs_dir)"),
