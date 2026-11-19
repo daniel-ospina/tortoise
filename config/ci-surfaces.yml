@@ -7225,6 +7225,13 @@ surfaces:
   - test_lme_m6_evidence.py
   - test_longmem_costing.py
   - test_longmem_errors.py
+  # #8486: the failure-record coherence pins (finding 1) and the ingest-cost
+  # profiler's calibration pins (finding 3). Both are hermetic — no lane, no DB,
+  # no embedder — so `core` is the right arm, and both shipped unregistered on
+  # this PR's first head, which is a `manifest-integrity` red (#1262) AND ran
+  # them in no leg (#1349/#2938) — green by absence.
+  - test_longmem_failure_record_coherence.py
+  - test_longmem_ingest_profile.py
   - test_longmem_preflight.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
