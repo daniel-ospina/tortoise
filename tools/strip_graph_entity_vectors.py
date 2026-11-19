@@ -1518,6 +1518,16 @@ def _mapping_literal_stores_the_vector(node) -> bool:
         # (mapping shapes only) keeps the narrowing: `props = [{"embedding": vec}]` builds a
         # LIST and still places nothing, so it must keep certifying.
         return _mapping_literal_stores_the_vector(copied)
+    if isinstance(node, ast.DictComp):
+        # ⛔ THE COMPREHENSION IS THE SAME MAPPING FORM, so it is answered HERE, once, for
+        # every position this rule is asked from — the ASSIGN arm, the ``**`` operands, and
+        # `update(…)`'s operands. Measured at `45b5f88a`: a comprehension whose KEY is the
+        # property (`{"embedding": _encode(ev) for _x in _keys()}`) placed a real top-level
+        # vector and was CERTIFIED in five of those positions, each beside a refused literal
+        # twin. ⛔ `_pairs_operand_stores_the_vector` is what owns the recognition (it reads
+        # the generator SOURCE and the constant-property key) — this arm only says that a
+        # comprehension is a MAPPING, which is the question this helper asks.
+        return _pairs_operand_stores_the_vector(node)
     if isinstance(node, ast.IfExp):
         return (_mapping_literal_stores_the_vector(node.body)
                 or _mapping_literal_stores_the_vector(node.orelse))
@@ -1684,6 +1694,14 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # and two more, each runtime-checked to place no top-level key) and deleting the two
         # terms changed no verdict on any fixture — the branch's own row is answered by the
         # generator's `iter`, which is where the pairs literal actually is.
+        # ⛔ AND THE KEY EXPRESSION CAN *BE* THE PROPERTY. `{"embedding": _encode(ev) for _x
+        # in _keys()}` places a real top-level vector — the produced mapping's key is the
+        # constant, not a pair — and scanning only the generators certified it (measured at
+        # `45b5f88a`, and runtime-checked to leave `{"embedding": VEC}` in `props`). Same
+        # narrowing as everywhere else: EXACT name, NON-CONSTANT value.
+        if (isinstance(node.key, ast.Constant) and node.key.value == EMBEDDING_PROPERTY
+                and not isinstance(node.value, ast.Constant)):
+            return True
         return any(_pairs_operand_stores_the_vector(generator.iter)
                    for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
@@ -1824,18 +1842,23 @@ def _third_argument_stores_the_vector(call) -> bool:
     # two rules below cannot see a `key`/`value` pair it carries — and
     # `_set(props, **{"key": "embedding", "value": vec})` certified the stop arm while its
     # keyword spelling was refused. Same two narrowings, applied to the mapping's values.
-    starred = [keyword.value for keyword in call.keywords
-               if keyword.arg is None and isinstance(keyword.value, ast.Dict)]
+    # ⛔ AND THE VALUES COME FROM THE WALK, NOT FROM A TOP-LEVEL LITERAL (`#13788` F5, measured
+    # at `45b5f88a`): reading `keyword.value` only when it IS an `ast.Dict` meant every
+    # one-wrapper spelling of the SAME `key`/`value` pair certified — `…}.copy()`, `… if f
+    # else {}`, `{**{…}}`, `dict(key=…, value=…)` and `… | {}` — while the bare row was
+    # refused. `_mapping_values` follows exactly the wrappers the store rule follows, so the
+    # two halves of one vocabulary cannot drift apart again.
+    starred = [value for keyword in call.keywords if keyword.arg is None
+               for value in _mapping_values(keyword.value)]
     live_keyword = (
         any(keyword.arg is not None and not isinstance(keyword.value, ast.Constant)
             for keyword in call.keywords)
-        or any(not isinstance(value, ast.Constant)
-               for mapping in starred for value in mapping.values))
+        or any(not isinstance(value, ast.Constant) for value in starred))
     named_as_value = (
         any(keyword.arg is not None and isinstance(keyword.value, ast.Constant)
             and keyword.value.value == EMBEDDING_PROPERTY for keyword in call.keywords)
         or any(isinstance(value, ast.Constant) and value.value == EMBEDDING_PROPERTY
-               for mapping in starred for value in mapping.values))
+               for value in starred))
     # `record.set("embedding", value=vec)` / `_set(props, "embedding", value=vec)` — the
     # property as a POSITIONAL constant anywhere before the value, which then arrives as a
     # keyword (so the three-positional-argument test above never sees it).
@@ -1859,11 +1882,76 @@ def _third_argument_stores_the_vector(call) -> bool:
     # ⛔ AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
     # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
     # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows. The
-    # two NAMED scans above stay literal-only on purpose — they read the mapping's VALUES
-    # (`key=`/`value=` spellings), which is a different question from "does this operand
-    # place the vector", and a wrapper has no statically readable values.
+    # AND IT IS THE OPERAND RULE, NOT A TYPE TEST (`#13788` F2, measured at `45b5f88a`):
+    # the `ast.Dict` narrowing certified `_set(props, **{"embedding": vec}.copy())` beside
+    # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
+    # ⛔ AND THE NAMED SCANS ABOVE ARE NO LONGER A DIFFERENT QUESTION (`#13788` F5): a wrapper
+    # around a `key=`/`value=` pair DOES have statically readable values once it is unwrapped
+    # (`_mapping_values`), and reading only a top-level literal left five false PASSes.
     return any(keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
                for keyword in call.keywords)
+
+
+def _mapping_values(node):
+    """The VALUES a ``**`` operand carries — through a wrapper, a merge or a constructor.
+
+    ⛔ THE ``**`` OPERAND'S *VALUE* SCAN IS THE SAME VOCABULARY AS ITS *STORE* TEST
+    (`#13788` F5, measured at `45b5f88a`). `_set(props, **{"key": "embedding", "value":
+    vec})` is a store (the property is the CONSTANT VALUE beside a live one) and was refused,
+    while every one-wrapper spelling of that same pair CERTIFIED: `…}.copy()`, `… if f else
+    {}`, `{**{…}}`, `dict(key=…, value=…)`, `… | {}`. The store test already follows all of
+    those (`_mapping_operand_stores_the_vector`); this scan read only a TOP-LEVEL literal's
+    values, so the two halves of one vocabulary answered differently — the recurring shape
+    of this whole series.
+
+    ⛔ NOTHING HERE DECIDES A STORE: the caller applies the same two narrowings to what this
+    yields (the property must be the EXACT constant `embedding`, beside a non-constant
+    value), and a ``**`` operand is already refused by default for an unknown callee. So a
+    wider walk can only complete that refusal, never accept more.
+
+    ⛔ STATED RESIDUALS — a ``**`` operand reached through a CALL or an INDEX
+    (`dict(*[{…}])`, `(tuple([{…}])[0])`) is not followed: selecting a mapping out of a
+    sequence is data flow this module does not do, the same limit
+    `_mutator_stores_the_vector` states for a mapping reached through a name. The
+    `List`/`Tuple`/slice arms a first draft carried were REMOVED rather than left looking
+    load-bearing: `**` requires a mapping, so Python rejects `**list(…)`, `**tuple(…)` and
+    `**<slice>` outright, and the revert of each changed no verdict on any fixture — an
+    unreachable guard is the defect this series exists to remove.
+    """
+    import ast
+
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values, strict=False):
+            if key is None:
+                yield from _mapping_values(value)     # `{**{…}}` — the merge one level in
+            else:
+                yield value
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        yield from _mapping_values(node.left)
+        yield from _mapping_values(node.right)
+    elif isinstance(node, ast.IfExp):
+        yield from _mapping_values(node.body)
+        yield from _mapping_values(node.orelse)
+    elif isinstance(node, ast.Call):
+        name = _callee_name(node)
+        copied = _transparent_copy_operand(node)
+        if copied is not None:
+            # ⛔ THE WRAPPER FAMILY HAS TWO SPELLINGS, HERE TOO (`#13788`, measured at
+            # `716991951e`): naming the METHOD left `copy.copy({…})` / `copy.deepcopy({…})`
+            # reading as an unreadable operand, so `_set(props, **copy.copy({"key":
+            # "embedding", "value": vec}))` CERTIFIED beside its refused `.copy()` twin —
+            # the same pair F5 closed one wrapper over, one spelling over.
+            yield from _mapping_values(copied)
+        elif _is_mapping_constructor(name):
+            # `dict(key="embedding", value=vec)` and its `**` inside: a constructor's named
+            # keywords are the SAME facts as a literal's entries.
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    yield from _mapping_values(keyword.value)
+                else:
+                    yield keyword.value
+            for argument in node.args:
+                yield from _mapping_values(argument)
 
 
 def _mutator_stores_the_vector(call) -> bool:
@@ -2025,12 +2113,27 @@ def _rebuild_stores_the_vector(node) -> bool:
     for leaf in _own_walk(node):
         if isinstance(leaf, ast.Dict):
             merges = any(key is None for key in leaf.keys)
-            if merges and _dict_stores_the_vector(leaf):
+            # ⛔ AND THE `{**{…}}` MERGE IS READ IN STOP MODE (`#13788` F4, measured at
+            # `45b5f88a`). `_dict_stores_the_vector`'s `**` recursion is gated on
+            # `stop_arm`, and this route — the writer being HANDED a rebuilt mapping — asked
+            # it with the default OFF while being reached only under `anywhere`. So the
+            # recursion was inert here and five spellings CERTIFIED beside their
+            # non-merge siblings refused: `_write({**{"embedding": vec}})`, its `.copy()`,
+            # `_write({**props, **{"embedding": vec}})`, `props = props | {**{"embedding":
+            # vec}}` and `_write(props | {**{"embedding": vec}})` (the last two through the
+            # union arm below, whose `_own_walk` also yields the display). Refusal-only:
+            # both call sites of this helper are `anywhere`-gated.
+            if merges and _dict_stores_the_vector(leaf, stop_arm=True):
                 return True       # `{**props, "embedding": vec}`
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
             # construction, so the `merges` requirement above is met by the operator.
-            if any(isinstance(side, ast.Dict) and _dict_stores_the_vector(side)
+            # ⛔ AND THE UNION'S COMPREHENSION OPERAND IS THE SAME MERGE (measured at
+            # `45b5f88a`): `props = props | {"embedding": vec for …}` places exactly what
+            # `props | {"embedding": vec}` places, and this arm accepted only the literal.
+            if any((isinstance(side, ast.Dict) and _dict_stores_the_vector(side))
+                   or (isinstance(side, ast.DictComp)
+                       and _pairs_operand_stores_the_vector(side))
                    for side in (leaf.left, leaf.right)):
                 return True
         elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
@@ -2099,6 +2202,10 @@ def _mapping_argument_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Dict):
         return _dict_stores_the_vector(node)
+    # ⛔ A COMPREHENSION NEEDS NO ARM HERE: `_mapping_literal_stores_the_vector` above answers
+    # it (the mapping form, once, for every position), and this helper's own tail asks the
+    # pairs rule. An explicit arm was written, measured REDUNDANT — removing it changed no
+    # verdict on any fixture — and removed rather than kept looking load-bearing.
     if isinstance(node, ast.Call) and _callee_name(node) == "dict":
         for keyword in node.keywords:
             if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):
