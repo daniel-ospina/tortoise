@@ -3303,15 +3303,33 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
 def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_names():
     """⛔ THE MAP PIN ABOVE COVERS ONE BULLET; THE REST OF THE TREE CITES THE INSTALLER TOO.
 
-    `tools/runner_autoscale.py`, `tests/test_runner_autoscale.py` and `MEMORY.md` all point at
-    installer lines by NUMBER and name the symbol in the same sentence (`die()`, `resolve_labels`,
+    `tools/runner_autoscale.py`, `tests/test_runner_autoscale.py`,
+    `tests/test_runner_tool_contract.py` and `MEMORY.md` all point at installer lines by NUMBER and
+    name the symbol in the same sentence (`die()`, `resolve_labels`, the matrix-expression refusal,
     the repair's whole-set relabel). Two reviews found those wrong — `:153` was `-h|--help` and
     `:208` was `fallback_engaged()`, a DIFFERENT seam — while every pinned ref in the runbook still
     landed, so nothing went red. Every installer edit above them shifts them again; that is exactly
     the class this arm makes red instead of silent.
 
-    Non-vacuity: pointing either `die()` citation back at `:153` (the help flag) reds it, and so
-    does leaving the repair-range citation on the pre-PR `:241-256` (the tail of `resolve_labels`).
+    ⛔ `tests/test_runner_tool_contract.py` WAS THE ONE THIS ENUMERATION MISSED, and its docstring
+    claimed the opposite scope ("the rest of the tree cites the installer too"). It quoted the
+    installer's matrix-expression refusal and cited `:759-764` — correct on `origin/main`, where that
+    paragraph really is at `:759-765`. This PR inserts 177 lines above it (`main:761` → `head:938`),
+    so the citation silently became the label-coverage `awk` reader while every OTHER installer
+    citation in the tree was re-derived by the same commit. Nothing reddened, because the file was
+    not in the loop. `range_ends` below closes the second half of that gap: `land()` reads `:N`
+    only, so a `:N-M` citation is half-checked — its END can stop short of the construct the
+    sentence names and still pass.
+
+    Deliberately NOT pinned here: this file's OWN historical cites (`:2984`, `:3776`, `:5087`) — they
+    quote pre-PR heads as provenance ("the runbook grew by six lines, `:299` and …"), so they must
+    NOT move when the installer does; re-deriving them would falsify the record. The installer's
+    self-citations are pinned separately (8c).
+
+    Non-vacuity: pointing either `die()` citation back at `:153` (the help flag) reds it, leaving the
+    repair-range citation on the pre-PR `:241-256` (the tail of `resolve_labels`) reds it, and
+    reverting the tool-contract citation to `:759-764` reds BOTH the landing arm and "cites
+    installer RANGE(s) this pin does not know".
     """
     installer = INSTALLER.read_text().splitlines()
 
@@ -3323,14 +3341,42 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
             "symbol the sentence names — re-derive the number"
         )
 
-    # The citations in the two files, and the symbol the sentence around them names. The `:NNN`
+    # The citations in the enumerated files, and the symbol the sentence around them names. The `:NNN`
     # sometimes sits on the NEXT line (`install-ci-runner-x64.sh::resolve_labels` then ``:232``), so
     # the window is two lines each side rather than the cited line alone.
-    known = {"die()": r"^die\(\)", "resolve_labels": r"^resolve_labels\(\)"}
-    for rel in ("tools/runner_autoscale.py", "tests/test_runner_autoscale.py"):
+    known = {
+        "die()": r"^die\(\)",
+        "resolve_labels": r"^resolve_labels\(\)",
+        # The matrix-expression refusal. Its paragraph OPENS on the cited range's first line, which
+        # is the line `land()` reads (`:N`, never the `-M` end — the END is `range_ends`'s job).
+        "REFUSES an expression rather than skipping it": r"THE EXTRACTION COULD NOT READ IS",
+    }
+    # ⛔ A RANGE CITATION'S START CAN LAND WHILE ITS END IS WRONG — the class that cost four rounds
+    # on the runbook map above (`range_ends` there). `land()` only ever sees `:N`, so a span cited as
+    # `:N-M` is half-checked: an end that stops short of the construct its sentence names, or one
+    # re-derived to a plausible closer, passes. Pinned by CONTENT at the END, two-way exactly like
+    # the runbook's table: a range this one does not know is a FAIL (add it), and an entry nothing
+    # cites any more is a FAIL too.
+    range_ends: dict[tuple[str, int, int], str] = {
+        # the matrix-expression refusal paragraph: its header through "the choice every other arm
+        # here already made", which is where the citing docstring's quotation continues into.
+        (
+            "tests/test_runner_tool_contract.py",
+            936,
+            941,
+        ): r"the choice every other arm here already made",
+    }
+    spans: set[tuple[str, int, int]] = set()
+    for rel in (
+        "tools/runner_autoscale.py",
+        "tests/test_runner_autoscale.py",
+        "tests/test_runner_tool_contract.py",
+    ):
         lines = (REPO_ROOT / rel).read_text().splitlines()
         cited = 0
         for i, line in enumerate(lines):
+            for r in re.finditer(r"install-ci-runner-x64\.sh:(\d+)-(\d+)", line):
+                spans.add((rel, int(r.group(1)), int(r.group(2))))
             for m in re.finditer(r"install-ci-runner-x64\.sh:(\d+)", line):
                 window = "\n".join(lines[max(0, i - 2): i + 3])
                 named = [rx for key, rx in known.items() if key in window]
@@ -3344,6 +3390,31 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
                      named[0] if len(named) == 1 else f"(?:{'|'.join(named)})")
                 cited += 1
         assert cited, f"{rel} no longer cites an installer line — re-anchor this pin"
+
+    unknown_spans = sorted(spans - range_ends.keys())
+    assert not unknown_spans, (
+        "a cross-file citation points at an installer RANGE this pin does not know — re-derive the "
+        "end against the installer and add the span rather than leaving it half-checked: "
+        f"{unknown_spans}"
+    )
+    stale_spans = sorted(range_ends.keys() - spans)
+    assert not stale_spans, (
+        "this pin lists installer range(s) no cross-file citation writes any more — a pin over refs "
+        f"nobody cites is pinning nothing: {stale_spans}"
+    )
+    bad_ends: list[str] = []
+    for (rel, lo, hi), expect in sorted(range_ends.items()):
+        assert 1 <= hi <= len(installer), (
+            f"{rel} cites :{lo}-{hi}, past EOF ({len(installer)} lines)"
+        )
+        if not re.search(expect, installer[hi - 1]):
+            bad_ends.append(
+                f"{rel} :{lo}-{hi} ends at {installer[hi - 1].strip()!r} (expected {expect!r})"
+            )
+    assert not bad_ends, (
+        "a cross-file citation points at a RANGE whose END is not the line that carries what its "
+        "sentence names — re-derive both ends from the installer: " + "; ".join(bad_ends)
+    )
 
     # `MEMORY.md` cites the REPAIR's range (the whole-set relabel that drops a version pin).
     memory = (REPO_ROOT / "MEMORY.md").read_text()
