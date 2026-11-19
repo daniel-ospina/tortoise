@@ -155,8 +155,9 @@
 #
 # ⛔ PROVENANCE OF THE PER-ROW CELLS — a RECORD, not a value, and it lives HERE because `cut`
 # re-emits this header ALONE. Every `served_from` in the rows below is `_code_digest` of its
-# handler's CODE OBJECT, written by a re-cut; a lane edit does not re-stamp it (see the end of this
-# block), and NOBODY hand-types one. Until #13626 this record sat as a per-row comment above the
+# handler's CODE OBJECT: a re-cut writes it, and a DECLARATION change may re-stamp it by hand (see
+# the `#12547` note above, where exactly that happened) — it is never typed from memory. Until
+# #13626 this record sat as a per-row comment above the
 # `tortoise_query` row, which is the only form a re-cut DELETES: that PR's `cut` took 53 per-row
 # `  #` lines with it — including the file's copy of the generated-artifact `OVERRIDES:` marker
 # below, one of the four the merge base carried (that cut left three) — and nothing reds on a
