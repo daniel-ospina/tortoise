@@ -1544,6 +1544,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # this list can only say the file is ALLOWED to run the lever, so the
         # flags it actually passes are pinned against `_fts_rows`'s own.
         "tools/window_quality_m2.py": frozenset({"query"}),
+        # ⛔ A MIRROR of the MCP tool's own door, and it must pass NO
+        # `_rerank_candidates` kwarg BECAUSE the tool passes none (the measured
+        # arm is the user's door — `sdk.tortoise_fts_query(entity_type='object',
+        # limit=15)`). Opting it out would make the capstone's 0.9700@3 / 0.9800@5
+        # describe a reader the tool does not run; the SHIPPED/ARMED split is the
+        # arm's own `TORTOISE_FUSED_RERANK` env flag one line apart
+        # (`user_search` OFF, `user_search_rerank` ON — that pair IS the +1.13 pt
+        # claim), which is exactly the reason the flag exists. `_TracedSdk` is the
+        # capture-prior mirror of `extractor_v2._fts_rows` and forwards the same
+        # one method, so it runs the same leg.
+        # `run` is the WARM-UP read (`sdk.tortoise_fts_query("warm", …)`,
+        # result discarded) that warms the leg before the index waits: the
+        # `user_search_rerank` arm runs the lever, so warming it disarmed
+        # would leave that arm paying the cross-encoder cold start inside the
+        # timing it reports.
+        "tools/capstone_12186_recall.py": frozenset({
+            "tortoise_fts_query", "_query_rows", "run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
