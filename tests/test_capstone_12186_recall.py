@@ -13,8 +13,9 @@ closes both:
    plain-language summary and in its §1 provenance, §2 recall / per-class /
    paired / leg-degradation, §3a duplicate-rate, §3b mint and §4 lever tables is
    recomputed from the committed artifact and compared — CELL-scoped for the
-   tabular ones, ROW-scoped and digit-bounded for the prose ones — so no figure in
-   those places can disagree with the evidence.
+   tabular ones, CLAUSE-scoped for the abstract's three sentences, and
+   ROW-scoped with digit-bounded tokens for the prose rows — so no figure in those
+   places can disagree with the evidence.
    ⛔ **This is the boundary of the claim, and it is deliberately narrower than
    "the whole document".** Figures in §5's declared limits and §6's run metadata
    are NOT pinned. Every earlier cut of this paragraph claimed more than it
@@ -23,9 +24,13 @@ closes both:
    assertion at all; the second left §1 and §4 unpinned while calling them "not
    re-derivable" (they are, and §4 holds the SECOND quotation of the mint rate);
    the third pinned only §4's figures and left its `shipped state` and verdict
-   WORD unpinned, so `OFF by default` could become `ON by default` with every pin
-   green. **A claim wider than its measurement is the defect this file exists to
-   avoid**, so when adding a row here, mutate the cell first.
+   WORD unpinned, so `OFF by default` could become `ON by default`; the fourth
+   pinned the word but not the phrase, so `n/a — no code shipped` became
+   `n/a — code shipped`; and it pinned the abstract's figures against the WHOLE
+   paragraph, so `0 lost` in one clause satisfied the loss count of another.
+   **A claim wider than its measurement is the defect this file exists to avoid**,
+   so when adding a row here, mutate the cell first — and mutate a digit upward,
+   which is the bump a substring check misses.
 
 ⛔ Nothing here runs the measurement — it needs a live FalkorDB and ~10 minutes of
 queries. That is deliberate (the same reason
@@ -562,10 +567,34 @@ def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
         assert int(_number(losses)) == cell["losses"], (name, row[4])
 
         p = row[5].replace("*", "").strip()
+        #: A `<` BOUND is pinned EXACTLY, not by inequality: `< 1e-12` -> `< 0.99`
+        #: stays TRUE (`9.09e-13 < 0.99`), so an inequality check called it green while
+        #: §2 published a far weaker significance bound than the artifact measured —
+        #: the same figure §4 pins exactly (measured). A plain number stays a float
+        #: comparison, because the doc legitimately renders `1` as `1.0`.
         if p.startswith("<"):
-            assert cell["p"] < float(p[1:].strip())
+            assert p.replace(" ", "") == cell["p_display"].replace(" ", ""), (
+                f"README p bound for {name} is {p!r}, artifact records "
+                f"{cell['p_display']!r}")
+            assert cell["p"] < float(p.replace("<", "").strip()), (name, p)
         else:
             assert float(p) == pytest.approx(cell["p"])
+
+
+def _clause(paragraph: str, marker: str) -> str:
+    """The SENTENCE of `paragraph` that mentions `marker`, flattened.
+
+    The abstract states three verdicts in three sentences, and a token pinned only
+    against the WHOLE paragraph is satisfied by any of them: `0lost` occurs in the
+    rerank clause, so `41 queries gained, none lost` -> `41 queries gained, 9 lost`
+    in the underscore clause stayed green (measured). Clause-scoping is what makes a
+    figure belong to the lever it is stated about.
+    """
+    sentences = [s for s in paragraph.split(". ") if marker in s]
+    assert len(sentences) == 1, (
+        f"expected exactly one sentence mentioning {marker!r}, got "
+        f"{len(sentences)} in {paragraph!r}")
+    return _flat(sentences[0])
 
 
 def _count(cell: str) -> int:
@@ -807,17 +836,26 @@ LEVER_ROW_MARKERS: dict[str, tuple[str, ...]] = {
 
 #: §4's two left columns, as PREFIXES each row must carry. `#12368`'s and
 #: `#12343`'s `shipped state` is DERIVED from `merged_lever_visibility` (see the
-#: test); the rest are DECLARATIONS the artifact cannot carry — no boolean exists
-#: for the write-path fold, and the two unmeasured levers are unmeasured by
-#: construction — so they are declared here and pinned the same way, which is what
-#: stops a prose edit promoting `#12349` from `n/a` to `YES`.
-LEVER_COLUMN_PREFIXES: dict[str, tuple[str, str]] = {
-    "underscore": ("", "YES"),
-    "fold": ("ON", "YES"),
-    "rerank": ("", "NO"),
-    "verdict": ("ON", "not"),
-    "m3": ("measured", "n/a"),
+#: test) and is asserted to be a real ON/OFF word before use, so the check can never
+#: go vacuous on an empty prefix.
+#:
+#: ⛔ The verdict prefix is the row's whole LEADING PHRASE, not its first word. A
+#: one-word check passes on a sentence that reverses itself: `n/a — no code shipped`
+#: -> `n/a — code shipped`, `a user does not get it` -> `a user gets it` and
+#: `**YES — +15.47 pts**` -> `**YES, only for admins — +15.47 pts**` all survived a
+#: `startswith("YES"/"n/a"/...)` check (measured). The phrase ends where the row's
+#: first FIGURE begins, which is the point beyond which no wording is claimed.
+LEVER_COLUMNS: dict[str, tuple[str, str]] = {
+    "underscore": ("", "YES—"),
+    "fold": ("ON", "YESonthewritepath"),
+    "rerank": ("", "NO—auserdoesnotgetit"),
+    "verdict": ("ON", "notmeasurablehere"),
+    "m3": ("measured", "n/a—nocodeshipped"),
 }
+
+#: The rows whose verdict is a DECLARATION rather than a measurement: their cell
+#: must not claim visibility, in any wording.
+LEVER_DECLARATION_ROWS = ("verdict", "m3")
 
 
 def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
@@ -849,6 +887,12 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         "underscore": visibility["underscore_terms_shipped_default"],
         "rerank": visibility["fused_rerank_shipped_default"],
     }
+    #: ⛔ A derived prefix that is empty makes `startswith` vacuously true. Assert the
+    #: artifact still records a real ON/OFF word before it is used as one (measured:
+    #: an empty value let `**ON**` -> `**OFF**` through).
+    assert set(derived_shipped.values()) <= {"ON", "OFF"}, (
+        f"`merged_lever_visibility` no longer holds ON/OFF shipped defaults: "
+        f"{derived_shipped}")
     assert visibility["fused_rerank_ran_in_user_search"] is False, (
         "the artifact no longer records the rerank as un-run in user search, so "
         "§4's `NO` verdict has no premise")
@@ -856,14 +900,20 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
         row = _one_row(rows, marks, key)
         shipped = _flat(row[1])
         verdict = _flat(row[2])
-        want_shipped = derived_shipped.get(key, LEVER_COLUMN_PREFIXES[key][0])
+        want_shipped, want_verdict = LEVER_COLUMNS[key]
+        want_shipped = derived_shipped.get(key, want_shipped)
+        assert want_shipped, f"§4 `{key}` has no shipped-state expectation"
         assert shipped.startswith(want_shipped), (
             f"§4 `{key}` shipped state {row[1]!r} does not start with "
             f"{want_shipped!r}")
-        want_verdict = LEVER_COLUMN_PREFIXES[key][1]
+        assert want_verdict, f"§4 `{key}` has no verdict expectation"
         assert verdict.startswith(want_verdict), (
             f"§4 `{key}` verdict {row[2]!r} does not start with {want_verdict!r} "
-            "— a lever cannot be promoted to visible by a prose edit")
+            "— a lever's verdict cannot be qualified or reversed by a prose edit")
+        if key in LEVER_DECLARATION_ROWS:
+            assert "visible" not in verdict, (
+                f"§4 `{key}` is a DECLARATION row but its verdict now claims "
+                f"visibility: {row[2]!r}")
 
     underscore = visibility["underscore_terms_visible_on_user_door"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["underscore"], "#12368")[2])
@@ -903,26 +953,44 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
         if not ln.strip():
             break
         paragraph.append(ln)
-    text = _flat(" ".join(paragraph))
-    assert text, "the plain-language summary is empty"
+    paragraph = " ".join(paragraph)
+    assert paragraph.strip(), "the plain-language summary is empty"
 
     visibility = artifact["merged_lever_visibility"]
     underscore = visibility["underscore_terms_visible_on_user_door"]
     rerank = visibility["fused_rerank_effect_on_user_door_if_armed"]
     mint = artifact["arms"]["mint_rate"]
+
+    #: CLAUSE-SCOPED — see `_clause`. `none lost` is how the doc spells 0 here, and
+    #: the significance bound is the figure the whole `+15.5 points` claim rests on:
+    #: neither the loss count nor `p < 1e-12` nor the `top 3` was pinned before, and
+    #: all three were editable with every pin green (measured: `none lost` ->
+    #: `9 lost`, `p < 1e-12` -> `p < 0.4`, `top 3` -> `top 15`).
     _assert_mentions(
-        text,
+        _clause(paragraph, "#12368"),
         (f"{underscore['before_recall_clean'] * 100:.1f}%",
          f"{underscore['after_recall_clean'] * 100:.1f}%",
+         f"top{underscore['k']}",
          f"+{underscore['delta_pts_clean']:.1f}points",
          f"{underscore['gains']}queriesgained",
-         f"{underscore['losses']}lost",
-         f"+{rerank['delta_pts_clean']:.2f}points",
+         "nonelost" if underscore["losses"] == 0
+         else f"{underscore['losses']}lost",
+         f"p{underscore['p_display']}"),
+        "the abstract's `#12368` clause")
+
+    _assert_mentions(
+        _clause(paragraph, "#12343"),
+        (f"+{rerank['delta_pts_clean']:.2f}points",
          f"{rerank['gains']}gained",
-         f"p={rerank['p_display']}",
-         f"{mint['norm_only']['rate'] * 100:.0f}%",
+         f"{rerank['losses']}lost",
+         f"p={rerank['p_display']}"),
+        "the abstract's rerank clause")
+
+    _assert_mentions(
+        _clause(paragraph, "#12304"),
+        (f"{mint['norm_only']['rate'] * 100:.0f}%",
          f"{mint['shipped']['rate'] * 100:.1f}%"),
-        "the plain-language summary")
+        "the abstract's `#12304` clause")
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
