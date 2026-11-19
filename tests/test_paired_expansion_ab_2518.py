@@ -2476,6 +2476,12 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
             ["git", "-C", str(repo), "diff", "--name-only",
              f"{base}...HEAD"],
             capture_output=True, text=True, check=True).stdout.split()
+        # ⛔ `--diff-filter=A`: the paths this branch CREATES, not merely touches
+        # (#13572 review round 3, P2). See the trigger comment below.
+        added = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--name-only", "--diff-filter=A",
+             f"{base}...HEAD"],
+            capture_output=True, text=True, check=True).stdout.split()
     except (subprocess.CalledProcessError, FileNotFoundError):
         pytest.skip("origin/main does not resolve here (shallow checkout) — the "
                     "path set is re-read by a reviewer at each head")
@@ -2515,19 +2521,35 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     # files this lane may legitimately edit, so an overlap test would re-arm the false
     # block for any PR that touches one of them (and this fix edits
     # `tests/test_paired_expansion_ab_2518.py` itself).
-    # ⛔ ARMED BY THE RECORD'S DOCUMENT, and by that alone (#13572 review round 2, P2).
-    # `tools/paired_expansion_ab_2518.py` is ITSELF one of the paths the cell enumerates,
-    # so arming on it too would make any ordinary follow-up fix to that instrument red on
-    # the eleven paths a one-file diff cannot carry — the same false block this change
-    # exists to remove, re-created one layer in (measured: armed on a probe-only diff,
-    # `extra` = 11). The residual is deliberate and named: a probe-only PR is NOT checked
-    # by this pin, because the claim below is about the change the brief records, and the
-    # brief is the record. A PR that merely edits a test file the cell names still skips.
+    # ⛔ ARMED ONLY BY A BRANCH THAT **CREATES** THE RECORD (#13572 review round 3, P2).
+    # The scope has to be "adds", not "touches". The three assertions below say the
+    # RECORD's enumerated path set is exactly ITS authoring branch's diff — a claim
+    # that can hold for one diff and no other. Every weaker trigger re-creates a false
+    # block, measured three times over:
+    #   * arm on `tools/paired_expansion_ab_2518.py` (round 2's attempt): the probe is
+    #     itself one of the twelve enumerated paths, so a probe-only fix is red on the
+    #     eleven a one-file diff cannot carry (`extra` = 11);
+    #   * arm on the brief's DIRECTORY: that directory exists on `origin/main` already
+    #     (`f462ad3acb`), so an ordinary maintenance edit to the brief or one of its
+    #     JSON artifacts is red on the same eleven — measured, `extra` = 11 — and the
+    #     only way to green it would be to rewrite the record's cell to describe the
+    #     EDITING branch, falsifying the record;
+    #   * `named & diff` overlap: the named set includes test files this lane may
+    #     legitimately edit (this file among them), which re-arms the original block.
+    # `--diff-filter=A` on the brief's directory is the trigger that means what the
+    # assertions MEAN: this diff is the one that brings the record into existence.
+    #
+    # RESIDUAL, stated rather than hidden: a PR that merely EDITS the record is not
+    # checked by this pin (it skips). That is deliberate — the set re-read below is the
+    # authoring diff's, and no later diff can be measured against it without falsifying
+    # the record. The honest pin for an edit is the reviewer's read, which the record's
+    # own sentence already requires ("re-read by a reviewer at each head").
     brief_dir = _DOCS.relative_to(repo).as_posix() + "/"
-    if not [p for p in diff if p.startswith(brief_dir)]:
-        pytest.skip("this branch's diff does not carry the research brief this cell "
-                    "records (the cell describes one PR's change) — the set is "
-                    "re-read by a reviewer at each head")
+    if not [p for p in added if p.startswith(brief_dir)]:
+        pytest.skip("this branch does not CREATE the research record this cell "
+                    "enumerates (it already exists at the base) — the cell publishes "
+                    "ONE authoring diff's path set, and the set is re-read by a "
+                    "reviewer at each head")
 
     assert not [p for p in diff if p.startswith("tortoise/")], (
         "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
