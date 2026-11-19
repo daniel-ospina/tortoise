@@ -438,6 +438,13 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # gated at `df345c22` because this arm ran the exit test BEFORE looking at
         # `polarity` (round 8's F1.a, measured: GATED). The correct spelling is
         # `if not gate("object"): return`.
+        #
+# ⛔ AN EXIT IS A WRITE-STOP ONLY UNDER A *NEGATED* ASK. `if not gate(l): return` skips
+# the write when the graph must stop mirroring — that is the stop. `if gate(l):
+# return` skips it when the graph DOES need the vector, i.e. the branch that must
+# write is the one that leaves; and a bare exit under a positive ask cleared the
+# gate on a body that wrote on the stop arm anyway. It is refused (fail-closed).
+# A `return` carrying a CALL is judged as a write, by the polarity rule below.
         if polarity < 0 and any(_is_write_stop_exit(statement)
                                 for statement in sub.body
                                 for statement in _own_walk(statement)):
@@ -545,6 +552,22 @@ def _is_gate_call(node, wanted: set[str]) -> bool:
             and first.value in wanted)
 
 
+def _is_explicit_inversion(node, wanted: set[str]) -> bool:
+    """Is this `gate(l) <op> <bool literal>` — an inversion the author spelled out?"""
+    import ast
+
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1 or len(node.comparators) != 1:
+        return False
+    if not _is_gate_call(node.left, wanted):
+        return False
+    op, right = node.ops[0], node.comparators[0]
+    if not (isinstance(right, ast.Constant) and isinstance(right.value, bool)):
+        return False
+    # `is False` / `== False` / `is not True` / `!= True` invert; the mirror forms assert.
+    same = isinstance(op, (ast.Is, ast.Eq))
+    return (same and right.value is False) or (not same and right.value is True)
+
+
 def _gate_polarity(test, wanted: set[str]) -> int:
     """``+1`` — a conjunct IS the gate call; ``-1`` — it is negated; ``0`` — masked away.
 
@@ -563,6 +586,13 @@ def _gate_polarity(test, wanted: set[str]) -> int:
             positive = True
         elif isinstance(conjunct, ast.UnaryOp) and isinstance(conjunct.op, ast.Not) \
                 and _is_gate_call(conjunct.operand, wanted):
+            negative = True
+        elif _is_explicit_inversion(conjunct, wanted):
+            # `gate(l) is False` / `== False` / `is not True` / `!= True` — a DECIDED
+            # inversion, not a mask: a `Compare` against a boolean literal names exactly
+            # the same answer `not` does, so it is a valid ask (and `is False` is a spelling
+            # this repo already uses in its write paths). `bool(...)`, `all(...)` and a
+            # lookup remain refused: they can produce a value that is none of the gate's.
             negative = True
     # ⛔ `max(0, -1)` IS 0 — the first version of this function silently reported "masked"
     # for a negated ask, because 0 (the "no answer" sentinel) beat -1.
@@ -673,13 +703,22 @@ def _stores_embedding(node) -> bool:
       leaves in the guarded branch while the vector IS stored on the branch the gate said
       stop.
 
-    So the value must be non-constant. The accepted shapes are exactly two: `embedding =
-    derived_embedding.encode(...)` (the `#13617` form), and a Cypher clause that **SETS** the
-    property — a self-naming call (`set_embedding_clause`) or an assigned string
-    (`q = "SET n.embedding = $e"`). `clear_embedding` is NOT accepted: clearing is the thing
-    the strip does, not evidence that a writer stopped storing. Neither is `popitem()` — it
-    takes no argument, so nothing names WHICH key went; that is `_removes_embedding`'s
-    `pop(<this property>)` arm.
+    So the value must be non-constant, AND THE PROPERTY MUST BE EXACT: `props["embedding"]`,
+    `n.embedding`, a local named exactly `embedding`. A SUBSTRING match accepted
+    `props["embedding_model"] = current_model()` — the identity triple this repo stores
+    alongside the vector (`embedding_text_hash`/`embedding_model`/`embedding_revision`) — so
+    a writer that sets its identity but still stores `props["embedding"]` elsewhere cleared
+    the gate. That is the exact mirror of the removal-side hole (`pop("embedding_model")`),
+    and this repo proves the shape exists: `embeddings.py` pops that triple while keeping
+    the vector.
+
+    The accepted shapes are three: `embedding = derived_embedding.encode(...)` (the `#13617`
+    form), `props["embedding"] = …`, `n.embedding = …`, and a Cypher clause **assigned as a
+    string** (`q = "SET n.embedding = $e"`). ⛔ NOT accepted: `set_embedding_clause(...)` in a
+    CALL position — it is a pure string BUILDER (`tortoise/vector_write.py`) that writes
+    nothing, so it is evidence of a clause being assembled, not of a store; `clear_embedding`
+    (clearing is what the strip does); `popitem()` (no argument names WHICH key went — that is
+    `_removes_embedding`'s `pop(<this property>)` arm).
     """
     import ast
 
@@ -698,13 +737,15 @@ def _stores_embedding(node) -> bool:
                 continue                  # `embedding = None` places nothing
             return True
         elif isinstance(sub, ast.Call):
-            # The repo's Cypher vector writers name themselves — but only the SETTING
-            # ones. `clear_embedding` is the strip's own operation, not a write-stop.
+            # ⛔ A DICT-STYLE STORE: `props.update(embedding=vec)`. The keyword must name the
+            # property exactly and carry a non-constant value.
             callee = sub.func
             name = getattr(callee, "id", None) or getattr(callee, "attr", None) or ""
-            if "set_embedding" in name:
-                return True
-
+            if name == "update":
+                for keyword in sub.keywords:
+                    if keyword.arg == EMBEDDING_PROPERTY \
+                            and not isinstance(keyword.value, ast.Constant):
+                        return True
     return False
 
 
@@ -722,7 +763,12 @@ def _removes_embedding(node) -> bool:
     import ast
 
     for sub in _own_walk(node):
-        if isinstance(sub, ast.Call):
+        if isinstance(sub, ast.Delete):
+            # `del props["embedding"]` — an unambiguous, decided removal.
+            if any(isinstance(target, ast.Subscript) and _names_embedding(target)
+                   for target in sub.targets):
+                return True
+        elif isinstance(sub, ast.Call):
             name = getattr(sub.func, "id", None) or getattr(sub.func, "attr", None) or ""
             if name == "pop" and sub.args:
                 first = sub.args[0]
@@ -742,14 +788,16 @@ def _names_embedding(node) -> bool:
     import ast
 
     if isinstance(node, ast.Name):
-        return EMBEDDING_PROPERTY in node.id
+        return node.id == EMBEDDING_PROPERTY
     if isinstance(node, ast.Attribute):
-        return EMBEDDING_PROPERTY in node.attr
+        return node.attr == EMBEDDING_PROPERTY
     if isinstance(node, ast.Subscript):
-        # `props["embedding"] = vec` — a dict-shaped writer's store.
+        # `props["embedding"] = vec` — a dict-shaped writer's store. EXACT key: a substring
+        # match accepted `props["embedding_model"]`, which the repo stores while keeping the
+        # vector.
         key = node.slice
         return (isinstance(key, ast.Constant) and isinstance(key.value, str)
-                and "embedding" in key.value)
+                and key.value == EMBEDDING_PROPERTY)
     return False
 
 
@@ -830,12 +878,19 @@ def _fold_consults_gate(label: str) -> tuple[bool, str]:
     if refusal:
         return False, refusal
     entity_types = tuple(parity.affected_entity_types(label))
+    # ⛔ EVERY ENTITY TYPE THE LABEL SERVES, not just one of them. `:Source` is addressed as
+    # both `document` and `source`, so a writer whose only stop asks
+    # `_derived_mirror_required("document")` leaves the `source` half writing — the same
+    # label-blindness this gate already fixed once, one level down. `_writer_consults_gate`
+    # is called once per type for that reason.
     ungated: list[str] = []
     for key in writers:
         module_name, _, symbol = key.partition("::")
-        gated, why = _writer_consults_gate(module_name, symbol, entity_types)
-        if not gated:
-            ungated.append(why)
+        for entity_type in entity_types:
+            gated, why = _writer_consults_gate(module_name, symbol, (entity_type,))
+            if not gated:
+                ungated.append(why)
+                break
     if ungated:
         return False, (
             f":{label} has {len(ungated)} writer(s) that do not ask the gate, so a strip "
@@ -1341,12 +1396,15 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 g, label, _key_prop(label))["count"]
         except CensusError as exc:  # pragma: no cover - post-write read failure
             residual[label] = f"UNMEASURED({exc})"
-    # ⛔ THE LABELS THIS RUN DID NOT TOUCH. `residual_by_label` is over the plan's labels,
-    # so a narrowed strip whose residuals are all zero would otherwise report a clean
-    # retirement of a population it never looked at — the declared-but-unmeasured labels
-    # still hold their vectors. Named in the result so no reader has to infer the scope.
-    unmeasured = sorted(set(plan.get("declared_population") or ())
-                        - {row["label"] for row in plan["labels"]})
+    # ⛔ THE LABELS THIS RUN DID NOT TOUCH, READ FROM THE **LIVE** CENSUS. `residual_by_label`
+    # is over the plan's labels, so a narrowed strip whose residuals are all zero would
+    # otherwise report a clean retirement of a population it never looked at. ⛔ NOT from
+    # `plan["declared_population"]`: the plan's digest covers the KEY LISTS, not that field,
+    # so an edited plan could declare the narrow scope it wants and publish exit 0 while the
+    # other labels still hold their vectors — the same "a count/field a hand can edit"
+    # defect this tool refuses to trust `total_nodes` for. The live census is a measurement.
+    served = set(live.get("declared_population") or ()) or set(plan.get("declared_population") or ())
+    unmeasured = sorted(served - {row["label"] for row in plan["labels"]})
     if unmeasured:
         sys.stderr.write(
             f"strip_graph_entity_vectors: NARROWED — this plan covers "

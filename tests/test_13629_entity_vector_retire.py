@@ -666,14 +666,14 @@ def _upsert_object(ev):
 WRITER_RETURNED_AND_DECIDING = (
     """
 def _upsert_object(ev):
-    if mirror_required("object"):
-        return self._write(ev)
-    return None
+    if not mirror_required("object"):
+        return None
+    return self._write(ev)
 """,
     """
 def _upsert_object(ev):
-    if not _derived_mirror_required("object"):
-        return
+    if ev and not mirror_required("object"):
+        return None
     return self._write(ev)
 """,
 )
@@ -879,6 +879,70 @@ def _upsert_object(ev):
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a VACUOUS store opened the gate: {source!r}"
 
+    # ⛔ THE PROPERTY NAME MUST BE EXACT ON THE STORE SIDE TOO. A substring match accepted
+    # `props["embedding_model"] = current_model()` — the identity triple this repo stores
+    # while KEEPING the vector — so a writer that set its identity inside the guard cleared
+    # the gate while still storing `props["embedding"]` elsewhere. And a clause BUILDER
+    # (`set_embedding_clause`) writes nothing: it assembles a string.
+    for source in ("""
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props["embedding_model"] = current_model()
+    props["embedding"] = _encode(props)
+    return _write(props)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        embedding_text = ev.text
+    embedding = _encode(ev)
+    return _write(ev, embedding)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        clause = set_embedding_clause("ev")
+    return _write(ev, clause)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"an identity/clause-builder store opened the gate: {source!r}"
+
+    # …and the decided removals that DO name the property: `del props["embedding"]`, and an
+    # explicit inversion spelled `is False` (a Compare, which the whitelist would otherwise
+    # refuse) — this repo writes `is False` in its own write paths.
+    for source in ("""
+def _upsert_object(props):
+    if _derived_mirror_required("object") is False:
+        props.pop("embedding", None)
+    return _write({"SET n += $props": props})
+""", """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        del props["embedding"]
+    return _write({"SET n += $props": props})
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, f"a decided removal was refused: {source!r}"
+
+    # ⛔ A BARE EXIT UNDER A POSITIVE ASK IS NOT A STOP. `if gate(l): return None` skips the
+    # write when the graph NEEDS the vector, and an earlier revision accepted it — which is
+    # a fail-open when the body writes on the other arm. The stop is the NEGATED form.
+    for source in ("""
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        return None
+    props["embedding"] = _encode(ev)
+    return _write(ev)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        return None
+    return _write(ev)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a bare exit under a POSITIVE ask opened the gate: {source!r}"
+
     # ⛔ A FIVE-LABEL WRITER STORES THROUGH A DICT (`SET n += $props`), so its write-stop
     # REMOVES THE KEY rather than skipping an encode — `props.pop("embedding")`. Counting
     # only assignments would refuse the one form that writer can take, i.e. leave the gate
@@ -919,10 +983,10 @@ def _upsert_object(ev):
         clause = "SET n.embedding = $vec"
     return _write(ev, clause)
 """, """
-def _upsert_object(ev):
+def _upsert_object(props):
     if _derived_mirror_required("object"):
-        clause = set_embedding_clause("ev")
-    return _write(ev, clause)
+        props.update(embedding=_encode(props))
+    return _write(props)
 """):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         assert strip._writer_consults_gate(
@@ -1933,6 +1997,46 @@ def test_a_plan_without_a_labels_key_refuses_instead_of_raising(stores, monkeypa
     else:                                    # pragma: no cover - must refuse
         pytest.fail("a plan with no `labels` key executed")
     assert graph.vector_keys("Object"), "the refusal must not have removed anything"
+
+
+def test_an_edited_plan_cannot_acknowledge_its_own_narrowing(stores, monkeypatch):
+    """⛔ THE DIGEST COVERS THE KEY LISTS, NOT `declared_population`, so that field is a hand-
+    editable declaration — and deriving "what was left unmeasured" from it let an edited
+    plan publish exit 0 while the other labels still held their vectors. The live census is
+    a measurement; the plan is an authority over ONE key set.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    plan["declared_population"] = ["Object"]          # the edit the digest cannot see
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    result = _execute(graph, plan)
+    assert result["unmeasured_by_label"], "a plan field acknowledged its own narrowing"
+    assert strip.result_exit_code(result) == 5
+
+
+def test_a_writer_must_ask_about_EVERY_type_the_label_serves(monkeypatch, tmp_path):
+    """⛔ `:Source` is addressed as BOTH `document` and `source`. A writer whose only stop asks
+    about `document` leaves the `source` half writing, so checking one type and assuming the
+    other is how a strip half-lands on the document half of `:Source`.
+    """
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_document(ev):
+    if not _derived_mirror_required("document"):
+        props.pop("embedding", None)
+    return _write(props)
+""")
+    monkeypatch.setattr(strip, "_writers_for",
+                        lambda label: ((f"{module}::_upsert_document",), None))
+    gated, _why = strip._fold_consults_gate("Source")
+    assert gated is False, "a document-only stop cleared the `source` half of :Source"
+    # The per-type loop is what refuses it: the SAME function answers gated for `document`.
+    assert strip._writer_consults_gate(
+        module, "_upsert_document", ("document",))[0] is True
+    assert strip._writer_consults_gate(
+        module, "_upsert_document", ("source",))[0] is False
 
 
 def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):
