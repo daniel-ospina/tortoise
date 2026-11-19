@@ -3394,14 +3394,54 @@ _APPROVAL_LABEL_SPLIT_ACROSS_RUNS = (
 # class this file's review rounds kept re-opening.
 _ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD = (
     "> **Owner&#32;approval of the exact changes** — given in-session, no comment cited.")
-# ⛔ A LEADING DETERMINER PUTS THE LABEL OUT OF SCOPE, AND NOW THE RESIDUAL LIST NAMES IT
-# (review @ 764b5cf2, finding 3): `_APPROVAL_LABEL_START_RE` is anchored on the phrase, so
-# `**The owner's approval …**` does not render as a label to this reader and PASSES even
-# though it OPENS the paragraph in bold. Measured ACCEPTED at this head — reachable by
-# typing one determiner. Driven here so the disclosure is a measurement rather than a
-# sentence, exactly as the entity-encoded space above is.
+# ⛔ A LEADING DETERMINER AND A LEAD-IN WERE DECLARED FAIL-OPEN SHAPES, AND BOTH ARE
+# CLOSED HERE (#13669, measured at this head rather than read off the residual list).
+# `_APPROVAL_LABEL_START_RE` was anchored on the phrase itself, so `**The owner's
+# approval …**` — and `**A owner approval …**` — did not render as a label to this reader
+# and PASSED although they OPEN the paragraph in bold: the same record, one determiner
+# away. The second shape is the one no round had named: a lead-in INSIDE the run
+# (`**R1 — Owner's approval …**`, `**— Owner's approval …**`), which a release note
+# writing a numbered record reaches by typing a prefix.  ⛔ MEASURED, before → after, with
+# this file's own functions: both shapes ACCEPTED → REFUSED, and their CITED mirrors stay
+# ACCEPTED (a widening that refused a record naming its home would be the false block the
+# arm exists to avoid); over all **43** landed blocks the refusal set is IDENTICAL — the
+# same **2** (v3.35, v3.33) before and after — and the landed v3.32 / v3.37 mentions and
+# the plain ``no approval`` control stay GREEN.  The fail-closed cost this buys is stated
+# and driven too: a TOPICAL mention carrying a determiner (`**The approval of spend** …`)
+# is refused, exactly as its article-free sibling already was — the class is now
+# determiner-consistent rather than one word deep.  ⛔ RESIDUAL, declared: a lead-in this
+# pattern does not spell (`**v3.41 — Owner's approval …**`, `**1. Owner approval …**`) is
+# still fail-OPEN until a fixture says otherwise.
 _APPROVAL_RECORD_WITH_A_LEADING_DETERMINER = (
     "> **The owner's approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_WITH_AN_INDEFINITE_DETERMINER = (
+    "> **A owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN = (
+    "> **R1 — Owner's approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_WITH_A_LEADING_DASH = (
+    "> **— Owner's approval of the exact changes** — given in-session, no comment cited.")
+# …and the MIRRORS, so the widening is not satisfied by refusing every run that starts
+# with a dash or a determiner: a record that names its home stays GREEN.
+_APPROVAL_RECORD_WITH_A_LEADING_DETERMINER_AND_AN_ID = (
+    "> **The owner's approval of the exact changes** — given in-session "
+    "(comment `6993778525`).")
+_APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN_AND_AN_ID = (
+    "> **R1 — Owner's approval of the exact changes** — given in-session "
+    "(comment `6993778525`).")
+# ⛔ THE COST THE WIDENING BUYS, DRIVEN SO IT IS A MEASUREMENT AND NOT A SENTENCE: the
+# topical mention this arm already refuses without an article is refused WITH one, because
+# a determiner must not be the one word that walks a shape out of scope.
+_TOPICAL_APPROVAL_MENTION_WITH_AN_ARTICLE = (
+    "> **The approval of spend** requires two owners and is unrelated to any changelog "
+    "record.")
+# ⛔ AND THE BOUND OF THE LEAD-IN RULE, DRIVEN (residual, fail-OPEN): only a short
+# alphanumeric id or a bare dash is read as a lead-in, so a lead-in the pattern does not
+# spell — a version, an ordinal — is still not a label to this reader and PASSES. Measured
+# ACCEPTED here so the residual list's bullet is a measurement: widening the class to `.*`
+# before the separator reds this fixture, which is what makes the bound a decision.
+_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN = (
+    "> **v3.41 — Owner's approval of the exact changes** — given in-session, no comment "
+    "cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
 # tracker`` is a container, not a home, and is REFUSED — the stop-list binds only the
 # reversed form, so this cost is driven as a fixture rather than left to be discovered.
@@ -3665,10 +3705,10 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
     enumeration of every way a label can render. Seven are fail-OPEN, which is the direction
     that matters: an unread record, an unread HTML label, a label split across runs, a label
-    in a table row, an entity-encoded space, a label whose rendered text carries a leading
-    determiner and an id borrowed from a contrastive parenthetical all PASS, so this arm
-    reduces the vacuity #13669 measured rather than ending it, and a reading this list does
-    not name should be treated as fail-OPEN until a fixture says otherwise:
+    in a table row, an entity-encoded space, a lead-in this arm's bounded rule does not spell
+    and an id borrowed from a contrastive parenthetical all PASS, so this arm reduces the
+    vacuity #13669 measured rather than ending it, and a reading this list does not name
+    should be treated as fail-OPEN until a fixture says otherwise:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
         ``Owner approval: comment `NNN`.`` in plain prose, and ``The change landed.
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
@@ -3685,14 +3725,6 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         structurally (fail-closed);
       - a quotation of an older approval inside a nested ``> > `` run is read as a second
         record and its citation is demanded (fail-closed);
-      - a label whose rendered text carries a LEADING DETERMINER
-        (``**The owner's approval of the exact changes**``, ``**A owner approval …**``)
-        does not BEGIN with the phrase, so ``_APPROVAL_LABEL_START_RE`` does not read it
-        as a record and it **PASSES** even though it opens the paragraph in bold —
-        reachable by typing one word (fail-OPEN, out of scope; driven by
-        ``_APPROVAL_RECORD_WITH_A_LEADING_DETERMINER``). Closing it means widening the
-        start pattern to a determiner, which also widens the false-block surface the
-        bolded-denial control below already pays — a trade, not a one-line fix;
       - an HTML ``<b>`` / ``<strong>`` label (``<b>Owner approval …</b>``) is not an
         emphasis RUN to this reader and is therefore **not read as a record** (fail-open,
         out of scope: the corpus writes ``**`` exclusively — no ``<b>`` or ``<strong>``
@@ -3726,6 +3758,11 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         so a contrastive parenthetical naming another id (v3.37's shape) is accepted, and
         telling WHICH of two ids records the approval needs the comment's own text — the
         reviewer step recorded in #12068;
+      - a LEAD-IN the bounded rule does not spell (``**v3.41 — Owner's approval …**``,
+        ``**1. Owner approval …**``) is not read as a label and **PASSES** (fail-OPEN): the
+        lead-in class is a short alphanumeric id or a bare dash, deliberately narrow so it
+        cannot swallow prose, and widening it towards ``.*`` is what makes it read — driven
+        by ``_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN``;
       - a label sentence whose first sentence is cut by an initial or by ``etc.`` before
         the citation (``… the owner (D. Ospina) ruled … comment `NNN```) is REFUSED —
         fail-closed, and it is the SHARED reader's split that cuts it
@@ -3800,7 +3837,19 @@ NO_RESOLVABLE_HOME_DIAGNOSIS = "records an owner approval but names no comment i
 _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
 # ⛔ THE PLURAL POSSESSIVE IS IN THE CLASS (review round 3): `Owners' approval` renders as
 # the same label, and `owner'?s?` covered `owner` / `owner's` / `owners` but not `owners'`.
-_APPROVAL_LABEL_START_RE = re.compile(r"^(?:owners?['\u2019]?s?\s+)?approval\b", re.IGNORECASE)
+# ⛔ A DETERMINER AND A LEAD-IN ARE PART OF THE LABEL, NOT A WAY OUT OF IT (#13669):
+# anchored on the phrase alone, `**The owner's approval …**` — and `**R1 — Owner's
+# approval …**` — opened the paragraph in bold and PASSED unread, so the same record sat
+# one typed word away from being detected. Both are read now. The lead-in is deliberately
+# BOUNDED, because a wide prefix would swallow mid-sentence emphasis: a short
+# alphanumeric release id (`R1`, `D2`, `ID12` — `[A-Za-z]` under IGNORECASE) or a bare
+# dash, each followed by one separator. A lead-in outside that class (`v3.41 — `, `1. `)
+# stays fail-OPEN and is named in the residual list above, rather than widening this until
+# it catches prose.
+_APPROVAL_LABEL_START_RE = re.compile(
+    r"^(?:(?:[A-Z]{1,3}\d{0,3}\s*[\u2014\u2013-]\s*|[\u2014\u2013-]\s*))?"
+    r"(?:(?:an?|the)\s+)?(?:owners?['\u2019]?s?\s+)?approval\b",
+    re.IGNORECASE)
 # ⛔ THE POINTER PHRASE IS READ IN EITHER WORD ORDER (#13669 finding 2): ``an issue of
 # its own`` / ``a tracking issue of its own`` is the same pointer as ``its own issue``,
 # and the shipped adjacency-exact pattern (`own` then up to three words then `issue`)
@@ -4150,7 +4199,16 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE,
                             _APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE,
                             _APPROVAL_RECORD_AS_A_BOLD_DENIAL,
-                            _TOPICAL_APPROVAL_MENTION_AS_A_BOLD_LABEL):
+                            _TOPICAL_APPROVAL_MENTION_AS_A_BOLD_LABEL,
+                            # ⛔ THE DETERMINER AND LEAD-IN SHAPES, REFUSED (#13669):
+                            # each was measured ACCEPTED before the start pattern read a
+                            # determiner and a bounded lead-in, so each reds on its own
+                            # narrowing — not as a group.
+                            _APPROVAL_RECORD_WITH_A_LEADING_DETERMINER,
+                            _APPROVAL_RECORD_WITH_AN_INDEFINITE_DETERMINER,
+                            _APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN,
+                            _APPROVAL_RECORD_WITH_A_LEADING_DASH,
+                            _TOPICAL_APPROVAL_MENTION_WITH_AN_ARTICLE):
         with pytest.raises(AssertionError) as marked_up:
             _refuse_an_approval_record_with_no_resolvable_home(marked_up_label)
         _assert_refused_by(
@@ -4177,10 +4235,16 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # (#13669 cycle 5): an HTML-bold label is not an emphasis run to this reader.
     _refuse_an_approval_record_with_no_resolvable_home(_HTML_LABEL_IS_NOT_A_RECORD)
     _refuse_an_approval_record_with_no_resolvable_home(_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD)
-    # …and the leading-determiner label is the SIXTH declared fail-OPEN, ACCEPTED here so
-    # the residual list's newest bullet is a measurement (review @ 764b5cf2, finding 3).
+    # ⛔ THE WIDENING'S MIRRORS, GREEN (#13669): a determiner or a lead-in must not be the
+    # word that refuses a record which DOES name its comment — otherwise "refuse every run
+    # starting with `The` or a dash" would satisfy the four rows above.
     _refuse_an_approval_record_with_no_resolvable_home(
-        _APPROVAL_RECORD_WITH_A_LEADING_DETERMINER)
+        _APPROVAL_RECORD_WITH_A_LEADING_DETERMINER_AND_AN_ID)
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN_AND_AN_ID)
+    # …and the BOUND of the lead-in rule is a measured residual, not a silent one.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN)
     # ⛔ AND THE MID-PARAGRAPH BOUNDARY, BOTH DIRECTIONS (merge reconciliation with `main`'s
     # #13679, whose paragraph-wide scan read these): a label that does not OPEN its
     # paragraph is out of scope to this reader, so both PASS. Pinned so a widening has to
