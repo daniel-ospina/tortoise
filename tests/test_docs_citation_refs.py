@@ -524,11 +524,27 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     (`docs/architecture/S2-DECISION-SEAM.md`), and an exit code a document does not
     measure is that class of number. Because the census's own state is `main`'s drift
     rather than the branch's, the honest text names the COMMAND and the head it must
-    be read at. So this arm asserts (a) the green literals are GONE, (b) the command
-    is still discoverable (deleting a false green must send the reader to the verb,
-    not away from it), and (c) the inherited-red attribution is still stated, so the
-    next reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
+    be read at. So this arm asserts (a) a census green may appear ONLY in a row that
+    also names a hex token — a head it can be read at — (b) the command is still
+    discoverable (deleting a false green must send the reader to the verb, not away
+    from it), and (c) the inherited-red attribution is still stated, so the next
+    reader is sent to `--refresh`/`main` and not asked to "fix" `main`'s census
     inside a docs PR.
+
+    ⛔ AND (a) IS A SPELLING-KEYED LEG, WHICH IS A KNOWN AND STATED GAP. It was
+    a blanket ban (`assert green not in doc`) until this branch's own `5db18e9a77`
+    re-took the census figures and the checker started EXITING 0 here — at which
+    point the ban could only be satisfied by reporting a false RED, so it became
+    "name the head". MEASURED, on a scratch worktree of this head: appending
+    "…`git diff --name-only origin/main...HEAD -- tortoise/` prints nothing here …"
+    leaves this FILE green (the live command prints the two comment-only modules),
+    and so does appending "`--check` exits 1 at this head" (the verb exits 0). A
+    re-worded direction or a re-worded false RED is therefore NOT caught here.
+    A live-measurement leg that WOULD have caught both was written, reviewed and
+    REMOVED (#13550 review, cycle 16: one occurrence of the word "grep" within 70
+    characters disabled it, which is fail-open and worse than a stated gap) — so the
+    gap is recorded here and in the PR body rather than papered over by a gate that
+    reports OK over a wrong artifact.
 
     NON-VACUITY, MEASURED: on the pre-fix document **leg (a) reds**
     (`AssertionError: 05-verify.md asserts '--check` exits 0'`). Legs (b) and (c)
