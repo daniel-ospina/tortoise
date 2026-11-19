@@ -553,9 +553,14 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     mutation is pinned as a witness below.
     """
     answers: list[tuple[str, bool]] = []
+    # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
+    # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
+    # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
+    # skipped. Pre-existing, and the live document does not wrap; it is named here so the
+    # closure claim above is read as "closed under formatting ON ONE LINE".
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"`?[\s*]*(?:(?:still|now|actually|also)\s+)?"
+            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         rest = doc[match.end():match.end() + 90]
@@ -972,6 +977,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     for _formatted_spelling in (
             "prints `two` paths",
             "**prints** the two COMMENT-ONLY modules",
+            "_prints_ the two comment-only modules",
+            "__prints__ the two comment-only modules",
+            "`prints` the two comment-only modules",
             "prints _two_ paths",
             "Prints two paths",
             "prints now only one path",
