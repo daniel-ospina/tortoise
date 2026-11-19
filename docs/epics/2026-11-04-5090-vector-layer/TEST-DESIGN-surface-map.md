@@ -489,10 +489,13 @@ prose inside a docstring; `flag_in_shipped_configs` is `:911`), and it attribute
 **F2 — `docs/architecture/SUBSTRATE-REBUILD-MAP.md` states the opposite of this artifact's existence**
 (`:84` *"No test-design issue and no capstone exist for E4"*, the "test-design / integration-surface
 map: ❌ none" row at `:385`, and the **D6** row at `:438` — *"no epic has a test-design map or a
-capstone"*). ⛔ All three are re-derived by CONTENT at this head, never by an offset: the sentence
-used to cite `:322` for the ❌ row (that has been the `tests/test_substrate_map.py` re-derivation
-sentence since before it was written; the ❌ row was `:383` on `main`, `:385` here) and `:375` for
-D6, which is a blank line at `main` and here (the D6 row is `grep -n '^| \*\*D6\*\*'` -> `:438`).
+capstone"*). ⛔ All three are re-derived by CONTENT at this head, never by an offset. At the cut head
+the three cites this row used to carry (`:84`/`:322`/`:375`) were **right**; what rotted is that the
+map grew under them, and then this PR's own §5 insert moved every line below `:252` a further `+2`.
+By `main` the ❌ row was already `:383` and `:375` already a blank line — the re-derivation sentence
+that the old `:322` now reads as sat at `:270` at the cut head and at `:322` on `main`
+(`grep -n 're-derives both numbers'`; `:324` here). So each anchor is named as well as numbered:
+`:84`/`:385`/`:438` at this head.
 **That the map states the opposite was true when this artifact was cut (`af864a42a`)**;
 **#11084 now exists and this is its artifact.** Recorded here rather than
 edited into a dated, test-guarded cut — a lane reading the substrate map should follow the pointer, not
