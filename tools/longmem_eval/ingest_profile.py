@@ -28,7 +28,7 @@ built so the two are never conflated.
 
 Usage::
 
-    uv run python -m tools.longmem_eval.ingest_profile            # embedded tempdir graph
+    uv run python -m tools.longmem_eval.ingest_profile            # embedded tempdir (or $TORTOISE_DB_URI, as run.py does)
     uv run python -m tools.longmem_eval.ingest_profile --json
     uv run python -m tools.longmem_eval.ingest_profile --db docker://:falkordb@localhost:6379/tortoise
 
@@ -127,8 +127,19 @@ def synthetic_question(qid: str, sessions: int, turns: int,
 def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
     """Per-question SDK — the SAME construction ``run.py``'s
     ``_make_question_sdk`` performs, so the measurement describes the run's
-    path (``--db`` → one graph per question on the server; else a fresh
-    embedded tempdir)."""
+    path (a server → one graph per question on it; else a fresh embedded
+    tempdir).
+
+    ⛔ The ARM is selected the way ``run_main`` selects it, not by ``--db``
+    alone: ``run_main`` promotes an ambient ``TORTOISE_DB_URI`` into the server
+    path when no ``--db`` was given, so a lane that exports that variable (the
+    likeliest state — ``tools/test_lane.py`` exports exactly it) runs on the
+    shared FalkorDB server. Selecting the embedded arm there would measure a
+    different ENGINE, not just a different timeout, which is the one thing this
+    module's parity claim cannot survive.
+    """
+    if db_uri is None:
+        db_uri = os.environ.get("TORTOISE_DB_URI")
     if db_uri:
         prev = os.environ.get("TORTOISE_DB_URI")
         # ASSIGN, not setdefault: an already-exported TORTOISE_DB_URI would
@@ -262,8 +273,10 @@ def main(argv: list[str] | None = None) -> int:
         description="#8486 finding 3: profile the deterministic ingest path")
     p.add_argument("--db", default=None,
                    help="FalkorDB URI (docker://|redis://|rediss://|bolt://). "
-                        "Default: an embedded tempdir graph — the same choice "
-                        "run.py makes when --db is absent")
+                        "Default: an embedded tempdir graph — UNLESS "
+                        "TORTOISE_DB_URI is exported, which run.py promotes "
+                        "into the server path and this module mirrors, so "
+                        "the arm matches the run's")
     p.add_argument("--json", action="store_true",
                    help="emit one JSON object instead of the human render")
     p.add_argument("--no-profile", action="store_true",

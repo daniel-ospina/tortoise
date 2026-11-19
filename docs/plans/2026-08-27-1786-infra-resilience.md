@@ -385,15 +385,20 @@ record. Measured at this head, one mutant per arm, over
 - neutralise `retryable_aborted_write` -> `[write-lock]` ALONE, which is what
   makes the third arm load-bearing rather than decorative (the `misconf` row
   stays green here too, for the reason above).
-- make `infra_failure` return `False` -> every row named in the two single-arm
-  bullets above, together: the three `INFRA_REDIS_FAMILIES` rows, `[loading]`,
-  and the four coherence pins. ⛔ That union does NOT grow the way the arm
-  bullets do — `test_a_redactor_failure_does_not_mask_the_failure` builds its
-  entry from the same smoke exception, so it reds under the
-  `graph_abort_family` mutant and is easy to leave out of that bullet's count
-  (it was, twice). The coherence pins red under several mutants because they
-  assert the flag on entries whose failures ARE infra: that is the same
-  property from the other end, not a second claim.
+- make `infra_failure` return `False` -> the union of the three bullets above,
+  named explicitly because the union is what a reader checks against: the three
+  `INFRA_REDIS_FAMILIES` rows, `TRANSIENT_VALUE_REDIS_FAMILIES[loading]`, and
+  FIVE coherence pins — `test_the_smoke_record_is_now_coherent`,
+  `test_a_deterministic_bug_stays_excluded`,
+  `test_the_recovery_tier_preservation_stays_coherent`,
+  `test_r2_counts_a_second_pipeline_attempt` and
+  `test_a_redactor_failure_does_not_mask_the_failure`. ⛔ The enumeration is
+  load-bearing: the recovery-tier pin was missing from it in the previous two
+  revisions (it reds under M1 as well), and the redactor pin was missing twice
+  before that, because it builds its entry from the same smoke exception as the
+  `graph_abort_family` bullet. The coherence pins red under several mutants
+  because they assert the flag on entries whose failures ARE infra: that is the
+  same property from the other end, not a second claim.
 - restore the `isinstance(exc, RedisError)` base-class arm -> all four
   `DETERMINISTIC_REDIS_REFUSALS` rows, the three excluded
   `TRANSIENT_VALUE_REDIS_FAMILIES` rows, and

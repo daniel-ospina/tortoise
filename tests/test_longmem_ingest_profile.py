@@ -124,6 +124,59 @@ def test_the_named_db_also_borrows_the_runs_socket_bound(monkeypatch):
     assert ENV_SOCKET_CONNECT_TIMEOUT not in os.environ
 
 
+def test_the_ambient_uri_selects_the_server_arm_like_runpy(monkeypatch):
+    """No ``--db`` + an exported ``TORTOISE_DB_URI`` must measure the SERVER.
+
+    ``run_main`` promotes the ambient variable into the server path, so that is
+    the path a real run takes on a lane that exports it — and choosing the
+    embedded arm there would measure a different engine while the module's whole
+    justification is parity with the run. Pinned because the docstrings claimed
+    parity the code did not have (review round 7).
+    """
+    # ⛔ Discriminate on the CONSTRUCTOR SHAPE, not on the env var: the embedded
+    # arm leaves TORTOISE_DB_URI untouched, so an env-only assertion passes on
+    # both arms and pins nothing (measured — the first version of this test was
+    # a false PASS against the un-promoted code). The server arm constructs
+    # ``TortoiseSDK(namespace=…)``; the embedded arm passes a PATH positionally.
+    seen: dict[str, object] = {}
+
+    class _StubSDK:
+        def __init__(self, *args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@ambient:6379/lane")
+
+    _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
+    assert seen["args"] == (), (
+        "the SERVER arm takes no path — an embedded tempdir path here means the "
+        "ambient URI was ignored and a different engine measured")
+    assert seen["kwargs"] == {"namespace": "profile-test"}
+    cleanup()
+    assert os.environ["TORTOISE_DB_URI"] == "docker://:pw@ambient:6379/lane"
+
+
+def test_with_no_uri_at_all_the_arm_is_embedded(monkeypatch):
+    """The contrast half: no --db and no ambient URI => the embedded tempdir."""
+    seen: dict[str, object] = {}
+
+    class _StubSDK:
+        def __init__(self, *args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+    _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
+    args = seen["args"]
+    assert len(args) == 1 and str(args[0]).endswith("lme.db"), (
+        "an embedded tempdir path is the no-URI arm")
+    assert seen["kwargs"] == {}
+    cleanup()
+
+
 def test_an_explicit_socket_bound_is_respected(monkeypatch):
     """A lane that DID set the bound keeps it — parity is not an override."""
     from tools.longmem_eval.stall_guard import ENV_SOCKET_TIMEOUT

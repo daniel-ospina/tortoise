@@ -1406,16 +1406,6 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
     return _retry_failed_skip_reason(entry) is None
 
 
-#: How much of a raw message is handed to the redactor. Truncating BEFORE the
-#: scrub keeps the cost bounded (measured: an 8 MB repr cost ~6.7 s inside
-#: ``flock_exclusive``, blocking every other worker's checkpoint write), and it
-#: cannot leak: the redactor only ever SHORTENS a span, so any credential fully
-#: visible in the stored ``ERROR_REPR_CAP``/``ERROR_DETAIL_CAP`` prefix also sits
-#: entirely inside this window — and a span straddling the cut is dropped whole
-#: by those same caps. Same order, one bound.
-SCRUB_INPUT_CAP = 64_000
-
-
 def _scrub(text: str) -> str:
     """The PRODUCT's credential redactor, applied to anything persisted.
 
@@ -1428,10 +1418,23 @@ def _scrub(text: str) -> str:
     actually emits (a connection URL, an API key) cannot reach a record that is
     both persisted and republished; a caller with a wider secret surface still
     owns that.
+
+    ⚠️ The WHOLE text is scanned, deliberately, and the cost is linear in it
+    (measured 8 MB repr -> ~6.7 s, inside ``flock_exclusive``). Truncating the
+    input first to bound that cost is a LEAK, not an optimisation, and this
+    module tried it once: a credential whose terminator falls past the cut is
+    not recognised, and because an earlier span can compress ~100× (a PEM block
+    collapses to one token) its cleartext prefix lands inside the stored
+    ``ERROR_REPR_CAP``/``ERROR_DETAIL_CAP`` window — measured, a full
+    ``redis://user:password@host`` password persisted in ``error_detail``. The
+    premise that made it look safe ("the redactor only shortens a span") is
+    false too: the connection-URL rule LENGTHENS one. A bounded scrub needs
+    span-aware truncation, not a character cap; the linear cost is the price of
+    the guarantee until that exists (#8486 follow-up).
     """
     from tortoise.security import redact_secrets
 
-    scrubbed, _counts = redact_secrets(text[:SCRUB_INPUT_CAP])
+    scrubbed, _counts = redact_secrets(text)
     return scrubbed
 
 
