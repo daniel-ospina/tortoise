@@ -16574,9 +16574,14 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     assignment an earlier cut of this docstring named is `:12109`) and `12163` is
     `r[key] = st[key]` — neither line carries the symbol, so a reader
     following the second pair landed on unrelated code. It was green because the two
-    `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers
-    (`:6164`-`:6175` name `7201`, `12168`, `12221`) and NO row anywhere names `12110` or
-    `12163` (`grep -nE '12110|12163'` finds comment lines and this docstring only) — so
+    `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers — the
+    fail-OPEN probe row names `7201` and its consume row names `12168`/`12221`, and NO row
+    anywhere names `12110` or `12163` (`grep -nE '12110|12163'` finds comment lines and this
+    docstring only). ⛔ NO LINE RANGE is quoted for those two rows (#13746 review round 9): an
+    earlier cut wrote one, and it identified lines that are not the rows — the span started
+    inside the `00-plan.md` row above and stopped one line before the second row's close — which
+    is the same head-bound self-locator this file exists to forbid. A row is named by its label
+    and its numbers, never by where it currently sits. So
     the trailing pair was read by nothing at all, which is why it could sit there
     contradicting the opening pair indefinitely. A row proves ITS OWN number is somewhere
     on the line; it cannot be "satisfied" by a different, unregistered pair. That is the
