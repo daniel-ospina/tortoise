@@ -20384,13 +20384,27 @@ class FalkorProjection(
         it is a full-label scan. Left unbounded it inherits the door's default
         while every other graph statement on that path carries the read's budget
         (`run_vector_query` passes `timeout=_graph_timeout_ms`) — the exact
-        30x-mismatch class `#11691` closed for the record half. ``None`` leaves the
-        door's own bound in place, unchanged — the default, and today UNUSED: this
-        method was added by `#13610` and has ONE production caller
-        (`sdk._record_vector_searcher`, which always supplies the read's own budget
-        when the read has one), so there is no reconstruction caller here to keep
-        unbounded. A health/restore sweep that legitimately needs seconds would
-        have to be given this argument deliberately when it arrives.
+        30x-mismatch class `#11691` closed for the record half.
+
+        ⛔ THERE ARE NOW TWO PRODUCTION CALLERS, AND ONLY ONE OF THEM PASSES A BUDGET —
+        the split is deliberate, and the earlier cut of this comment ("today UNUSED …
+        ONE production caller") went stale the moment the second one landed (`#13796`):
+
+        * ``sdk._record_vector_searcher`` — the READ path — always supplies the read's own
+          budget when the read has one. That is what the paragraph above requires.
+        * ``tools/strip_graph_entity_vectors.py::graph_vector_population`` — the operator
+          stripper — binds this method and lets :func:`record_vector._safe_population` call
+          it with the LABEL and no timeout (``graph_population(entity_type)``, so
+          ``timeout_ms=None``), which leaves the door's own bound. That is the correct
+          choice there and not an oversight: the tool takes one aggregate per label for a
+          whole run, so a short budget would not protect a hot path — it would only convert
+          a slow count into ``None``, and ``None`` is
+          UNVERIFIED, which makes the strip gate refuse a label whose record may well
+          cover it. A tool that refuses on its own measurement's latency is useless; an
+          operator tool waiting for one honest count is not.
+
+        A third caller that needs seconds (a health or restore sweep) still has to be given
+        this argument deliberately — nothing here infers it.
         """
         from ..security import ENTITY_TYPE_LABELS, entity_label
 
