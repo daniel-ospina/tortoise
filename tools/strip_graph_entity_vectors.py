@@ -1539,10 +1539,17 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     # mapping that stores" — the same reason the `.copy()` arm above lives here. The index
     # must be a CONSTANT and the container a List/Tuple LITERAL: an index that is a name or
     # an expression is the stated data-flow residual, not a wrapper.
-    if (isinstance(node, ast.Subscript)
-            and (index := _constant_index(node.slice)) is not None
-            and isinstance(node.value, ast.List | ast.Tuple)):
-        elements = node.value.elts
+    # ⛔ AND THE CONTAINER MAY BE A WRAPPER OF THE LITERAL, not the literal itself
+    # (`#13788`, measured at `40db94f1`): `[{"embedding": vec}][0:][0]` and
+    # `list([{"embedding": vec}])[0]` CERTIFIED while `[{"embedding": vec}][0]` was
+    # refused — the container arms and the index arm were added in the same round and only
+    # met when the literal was BARE. `_container_literal` answers the transparent
+    # container wrappers (a FULL slice, `list(…)`/`tuple(…)`) and nothing else.
+    if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
+        container = _container_literal(node.value)
+        if container is None:
+            return False
+        elements = container.elts
         if -len(elements) <= index < len(elements):
             return _mapping_literal_stores_the_vector(elements[index])
         return False
@@ -1730,6 +1737,16 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         name = _callee_name(node)
         if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
             return _operand_stores_the_vector(node.args[0])
+        # ⛔ THE ITEMS VIEW IS THE SAME PAIRS ITERABLE (`#13788`, measured at `40db94f1`):
+        # `update({"embedding": vec}.items())` and the comprehension over it
+        # (`{k: v for k, v in {"embedding": vec}.items()}`) both place the key and both
+        # CERTIFIED, while `update({"embedding": vec})` was refused. The mapping under
+        # `.items()` is a LITERAL the check can read (`_mapping_operand_stores_the_vector`
+        # decides it, wrappers included). `.keys()`/`.values()` place no vector and are not
+        # answered here.
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
+                and not node.args and not node.keywords):
+            return _mapping_operand_stores_the_vector(node.func.value)
         copied = _transparent_copy_operand(node)
         if copied is not None:
             # ⛔ BOTH SPELLINGS: the value under `.copy()` may be the PAIRS literal or the
@@ -1767,10 +1784,15 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     # `anywhere`-gated `|=` arm and the rebuild rule, and no mirror-arm fixture changes
     # verdict (measured — `tests/test_13629_entity_vector_retire.py` is green, and that suite
     # carries the mirror-arm pins that a widening would redden).
-    if (isinstance(node, ast.Subscript)
-            and (index := _constant_index(node.slice)) is not None
-            and isinstance(node.value, ast.List | ast.Tuple)):
-        elements = node.value.elts
+    # ⛔ AND THE CONTAINER MAY BE A WRAPPER OF THE LITERAL (`#13788`, measured at
+    # `40db94f1`) — the same gap the mapping rule above carries: `[pairs][0:][0]` and
+    # `list([pairs])[0]` CERTIFIED beside `[pairs][0]` refused. One helper answers both
+    # rules, so the two cannot answer the same spelling differently.
+    if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
+        container = _container_literal(node.value)
+        if container is None:
+            return False
+        elements = container.elts
         if -len(elements) <= index < len(elements):
             return _operand_stores_the_vector(elements[index])
         return False
@@ -1823,6 +1845,59 @@ def _constant_index(node) -> int | None:
             and isinstance(node.operand.value, int)):
         return (-node.operand.value if isinstance(node.op, ast.USub)
                 else node.operand.value)
+    return None
+
+
+def _is_full_slice(node) -> bool:
+    """Does this subscript index select the WHOLE container — `[:]`, `[0:]`, `[::1]`?
+
+    ⛔ `[0:]` IS A FULL SLICE AND IT IS SPELLED AS A LOWER BOUND (`#13788`, measured at
+    `40db94f1`): `[{"embedding": vec}][0:][0]` still CERTIFIED after the bare `[:]` form was
+    answered, because `0:` is `Slice(lower=Constant(0))`, not `Slice()`. Only a lower bound
+    of `0` qualifies — any other bound, or a step other than `1`, changes WHICH element the
+    outer index selects, so resolving it would answer about a different element.
+    """
+    import ast
+
+    if not isinstance(node, ast.Slice):
+        return False
+
+    def _is_zero(expr) -> bool:
+        return expr is None or (isinstance(expr, ast.Constant) and expr.value == 0)
+
+    def _is_one(expr) -> bool:
+        return expr is None or (isinstance(expr, ast.Constant) and expr.value == 1)
+
+    return _is_zero(node.lower) and node.upper is None and _is_one(node.step)
+
+
+def _container_literal(node):
+    """The List/Tuple LITERAL this expression IS behind a transparent container wrapper.
+
+    ⛔ ONE ANSWER FOR BOTH OPERAND RULES (`#13788`, measured at `40db94f1`). The container
+    arms (`[<mapping>][0]`, `update([<pairs>][0])`) required the literal to be BARE, so the
+    same element reached through a wrapper that builds or returns the same container
+    CERTIFIED while its unwrapped spelling was refused:
+
+        props.update([{"embedding": vec}][0:][0])      CERTIFIED
+        props.update(list([{"embedding": vec}])[0])    CERTIFIED
+
+    Both are runtime-checked to leave `{"embedding": VEC}` in `props`.
+
+    ⛔ NARROW ON PURPOSE: only a FULL slice (`[:]` — a lower/upper/step changes WHICH element
+    the index selects, so resolving it would mis-answer, and a partial slice is not a
+    wrapper) and `list(…)`/`tuple(…)` over a single positional argument. A container bound to
+    a NAME stays the stated data-flow residual: `pairs[0]` still answers False.
+    """
+    import ast
+
+    if isinstance(node, ast.List | ast.Tuple):
+        return node
+    if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
+        return _container_literal(node.value)
+    if (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
+            and _callee_name(node) in ("list", "tuple")):
+        return _container_literal(node.args[0])
     return None
 
 

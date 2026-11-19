@@ -5221,6 +5221,49 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE CONTAINER REACHED THROUGH A WRAPPER — the container arms and the index
+        # arm landed in the same round and only met when the literal was BARE (`#13788`,
+        # measured at `40db94f1`). `[<mapping>][0:][0]` (a FULL slice spelled with a lower
+        # bound, `Slice(lower=Constant(0))` — not the bare `[:]` the first fix answered),
+        # `list([<mapping>])[0]`, and the `.items()` view (or its comprehension) of a mapping
+        # literal all place the vector and all CERTIFIED while the bare spellings were
+        # refused. One helper (`_container_literal`) answers the container wrappers for BOTH
+        # operand rules, so the two cannot answer the same spelling differently.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([{"embedding": _encode(ev)}][0:][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(list([{"embedding": _encode(ev)}])[0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({k: v for k, v in {"embedding": _encode(ev)}.items()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev)}.items())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= tuple([{"embedding": _encode(ev)}][::1])[0]
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -5230,6 +5273,25 @@ def _upsert_object(props, ev):
     # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
     # removal, a bare exit, and a non-store statement before the exit are all write-stops.
     accepted = (
+        # ⛔ THE TWO NARROWINGS OF THE CONTAINER WRAPPER, or the fix becomes an over-refusal.
+        # A PARTIAL slice changes WHICH element the outer index selects (`[1:][0]` is the
+        # SECOND element), so resolving it would answer about a different element — the same
+        # reason `_is_full_slice` takes only `[:]` / `[0:]` / `[::1]`. And `.values()` is not
+        # the pairs view; only `.items()` places keys.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([{"embedding": _encode(ev)}, {}][1:][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({k: v for k, v in {"embedding_model": _m()}.items()})
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
