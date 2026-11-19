@@ -962,6 +962,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # LOGIC and its SUBJECT anchoring, never for a wider answer list
     # (#13802 review round 10, P2: the correction re-made the very class it was correcting,
     # against the row it named).
+    # ⛔ AND "ZERO" WAS AN ASSERTION UNTIL CYCLE 6 MEASURED IT FALSE (#13802 review, cycle 6,
+    # P1): three of the detector's OWN answer forms were read by it and by nothing here —
+    # `non empty` (the detector's class is `non[- ]?empty`, a SPACE spelling this pattern did
+    # not carry), a bare count word with no noun (`prints one`, `prints both`), and a bare
+    # `prints tortoise/`. On the `set`/deictic anchors, where this ban is the ONLY layer,
+    # each was a refuted claim no arm refused in ANY checkout — measured `ban=False` against a
+    # non-empty detector verdict, and the injected sentence stayed green. All three are read
+    # here now (witnesses below pin them), so the residue is a MEASUREMENT — `[]` over the
+    # detector's `_member`/`_empty` alphabet — rather than the claim it used to be.
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
     # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
@@ -1984,7 +1993,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
     r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
-    r"|empty|EMPTY|non-empty|nonempty|not empty"
+    # ⛔ AND THE SPACE SPELLING OF `non-empty` (#13802 review, cycle 6, P1 — MEASURED):
+    # the detector's own class is `non[- ]?empty`, so it reads `is non empty`; this
+    # pattern listed only the hyphen and closed spellings, so
+    # ``the `tortoise/` set is non empty`` was read by NO arm in ANY checkout — measured
+    # `ban=False det=[('prints non empty', False)]`. A token the detector reads and this
+    # bridge does not is the same hole the verb class was.
+    r"|empty|EMPTY|non[- ]?empty|not[- ]empty"
     r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
@@ -2005,6 +2020,19 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # this ban is the ONLY layer, because the detector anchors on a command token)
     r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
     r"|single|SINGLE|\b\d+\b"
+    # ⛔ AND A COUNT WORD WITH NO NOUN AT ALL (#13802 review, cycle 6, P1 — MEASURED):
+    # the detector's `_member` reads a bare `one`/`two`/…/`ten`/`both` (`prints one`,
+    # `prints both` returned a MEMBERSHIP verdict while this pattern returned no match),
+    # so a refuted count stated as `` prints both`` / ``holds one`` walked through green
+    # on the `set` and deictic anchors, where this ban is the only layer. The lookahead
+    # keeps ordinary prose intact: the word must END there, not continue into a noun this
+    # class already reads above (`one path`, `both files`).
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|both)"
+    r"(?=[\s.,;:!?)]|$)"
+    # ⛔ AND A BARE `tortoise/` AS THE ANSWER (#13802 review, cycle 6, P1 — MEASURED): the
+    # detector reads ``prints tortoise/`` as membership; this pattern required a full
+    # `` `tortoise/x.py` `` path (or a `no `-bound noun), so the bare directory walked.
+    r"|`?tortoise/`?(?=[\s.,;:!?)]|$)"
     r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
     r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entries|diffs?|hits?)"
     r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
@@ -2148,6 +2176,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` prints ten entries",
         "`-- tortoise/` prints seven diffs",
         "`-- tortoise/` prints blank",
+        # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
+        # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
+        # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
+        # layer, so each was a refuted claim that no arm refused).
+        "the `tortoise/` set is non empty at this head",
+        "the `tortoise/` set prints one",
+        "the `tortoise/` set holds both",
+        "`-- tortoise/` prints `tortoise/`",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
