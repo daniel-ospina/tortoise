@@ -2938,6 +2938,17 @@ class TestContradictionTest:
     quietly reverse that are a VECTOR index on the graph and record rows written
     from the harness — both are refused here, by AST, so the refusal is about the
     code and not about a reviewer's memory.
+
+    ⛔ AND ``#13830`` DID NOT REVERSE THE SECOND ONE — it CHANGED ITS ROUTE,
+    which is why this docstring is not "record rows are banned" (it said that
+    until #13839's review flagged the staleness). The harness now does cause
+    record rows, through the ONE sanctioned door: ``live_write.write`` appends the
+    journal record and the record projects it on that write's own transaction
+    (#13345). What stays banned is every SECOND spelling of that write — a direct
+    SQL statement here, or a direct ``write_live_record``/``write_records``/
+    ``RecordWriter`` call in the seed (pinned in
+    ``TestTheArmsConstruction::test_the_seed_carries_no_direct_write_of_either_store``)
+    — because a second path is what can disagree with the journal.
     """
 
     #: Cypher/DDL this instrument may never contain.
