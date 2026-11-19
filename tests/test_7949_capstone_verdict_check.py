@@ -4705,6 +4705,7 @@ def test_every_git_call_carries_a_bound_and_the_blob_read_gets_the_wider_one(
 
     monkeypatch.setattr(cvc.subprocess, "run", _capture)
     cvc._OBJECT_DB_MEMO.clear()
+    cvc._CONDITIONAL_MEMO.clear()
     cvc._is_git_repo(_REPO)
     cvc._resolves(_REPO, "1" * 40)
     cvc._is_ancestor(_REPO, "1" * 40, "2" * 40)
@@ -4798,6 +4799,7 @@ def test_an_expiry_never_names_a_cause_it_cannot_establish(monkeypatch):
         raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
     monkeypatch.setattr(cvc.subprocess, "run", _expire)
+    cvc._CONDITIONAL_MEMO.clear()
     probe = cvc._git(_REPO, "rev-parse", "--is-inside-work-tree")
     assert probe.returncode == 124, probe
     why = cvc._repo_refusal(probe)
@@ -4833,3 +4835,84 @@ def test_the_bounds_fit_inside_the_configured_pytest_budget():
     assert isinstance(budget, int), budget
     assert budget > cvc.GIT_TIMEOUT, (cvc.GIT_TIMEOUT, budget)
     assert budget > cvc.BLOB_TIMEOUT, (cvc.BLOB_TIMEOUT, budget)
+
+
+def _wedged_green_record() -> dict:
+    """Five GREEN rows whose S2.3 is conditional — the shape the epic ships.
+
+    This is the record that makes the AGGREGATE the interesting number: every
+    row goes through V3, V5's work-tree probe and V5's step accounting, so the
+    probe count is a multiple of the row count rather than one per row.
+    """
+    rec = _record()
+    for row in rec["rows"]:
+        row.update(verdict="GREEN", evidence_kind="measurement",
+                   evidence="docs/evidence/7949-capstone/capstone.log",
+                   numerator=31, denominator=50, blocked_by=None,
+                   corpus_sha256="a" * 64, sha="6" * 40)
+    rec["corpus"] = {"path": "corpus.json", "sha256": "a" * 64, "turns": 50}
+    rec["prereg"] = {"sha": "5" * 40, "status": "OK",
+                     "artifact": cvc.RECORD_ARTIFACT}
+    required = [s for s in cvc.STEPS if s != "S2.3"]
+    rec["run"] = {"status": "COMPLETED", "reason": "eight steps",
+                  "steps_observed": list(required),
+                  "steps_required": list(required),
+                  "steps_conditional": [{"step": "S2.3", "state": "idle",
+                                         "basis": "flag ON, no activity, no "
+                                                  "failure marker"}]}
+    return rec
+
+
+def test_the_cost_one_wedged_check_pays_is_BOUNDED_as_an_AGGREGATE(monkeypatch):
+    """The number that decides the timeout is the SUM over one `check()`.
+
+    `test_the_bounds_fit_inside_the_configured_pytest_budget` compares each
+    constant with the budget ALONE, and that is not the shape that reds the
+    harness: `check()` makes several probes per row and the row loop multiplies
+    them, so a bound "well inside 300 s" on its own can still sum past it —
+    which is how a later bump silently restores `Failed: Timeout (>300.0s)`,
+    the exact failure #13800 removed. So this arm measures the aggregate the
+    comment above `GIT_TIMEOUT` claims: every `_git` call ONE `check()` makes on
+    a five-GREEN-row record, with the clock expiring on all of them, summed over
+    the bound each probe carried.
+
+    Non-vacuity, both halves: on the pre-fix code the blob read is NOT memoised,
+    so five rows pay five `BLOB_TIMEOUT`s and the sum is 450 s against a 300 s
+    budget — `total < budget` and the single-blob assertion both red there, and
+    only the memo turns them green.
+    """
+    calls: list[tuple[list[str], float | None]] = []
+
+    def _expire(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("timeout")))
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+    rec = _wedged_green_record()
+    monkeypatch.setattr(cvc.subprocess, "run", _expire)
+    cvc._OBJECT_DB_MEMO.clear()
+    cvc._CONDITIONAL_MEMO.clear()
+    try:
+        cvc.check(rec, repo=_REPO, require_green=False)
+        total = sum(bound for _argv, bound in calls)
+    finally:
+        cvc._CONDITIONAL_MEMO.clear()
+        cvc._OBJECT_DB_MEMO.clear()
+
+    ini = tomllib.loads((_REPO / "pyproject.toml").read_text())
+    budget = ini["tool"]["pytest"]["ini_options"]["timeout"]
+    assert calls, "no probe reached the runner — the sum below would be vacuous"
+    assert total < budget, (
+        f"one wedged check() spends {total}s of a {budget}s budget across "
+        f"{len(calls)} probes")
+
+    # The MULTIPLICITY, pinned directly so the amount of headroom is legible:
+    # the work-tree probe is asked twice per row (V3, then V5) and the one
+    # NETWORK read is paid once however many rows ask for it.
+    work_tree = [c for c in calls
+                 if c[0][1:3] == ["rev-parse", "--is-inside-work-tree"]]
+    blobs = [c for c in calls if c[0][1:2] == ["show"]]
+    assert len(work_tree) == 2 * len(rec["rows"]), calls
+    assert len(blobs) == 1, calls
+    assert blobs[0][1] == cvc.BLOB_TIMEOUT, blobs
+    assert all(bound == cvc.GIT_TIMEOUT for argv, bound in calls
+               if argv[1:2] != ["show"]), calls

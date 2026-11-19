@@ -703,6 +703,25 @@ RECORD_STEPS_KEY = "steps"
 RECORD_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 
 
+#: ``_record_conditional``'s answers, memoised per (checkout, sha, path) for the
+#: life of the PROCESS (#13800 review, P2). ``_step_accounting`` runs once per
+#: GREEN row and asks the SAME question every time — one frozen commit, one pinned
+#: path — so five rows paid five blob reads, and in a ``blob:none`` partial clone
+#: that read is the ONE NETWORK round trip in this file, at four times the object
+#: probes' clock. Five of them is what made the per-``check()`` aggregate refuse to
+#: fit the harness budget however small each individual bound was made.
+#:
+#: The key is content-addressed by construction: a commit sha fixes its tree, so
+#: ``show <sha>:<path>`` cannot change answer for a checkout that already has it.
+#: ⚠️ ONE case is not immutable, and caching it is deliberate: an EXPIRY. A fetch
+#: that ran out of clock once would otherwise be retried by each remaining row at
+#: the full ``BLOB_TIMEOUT`` — the unbounded-cost shape this exists to remove — and
+#: re-asking is not more correct, because a cached expiry is a REFUSAL (its caller
+#: turns it into a V5 finding), never a pass. A ``False``/``None`` answer is the
+#: same direction as ``_OBJECT_DB_MEMO``'s and fails CLOSED for the same reason.
+_CONDITIONAL_MEMO: dict[tuple[str, str, str], tuple[frozenset[str] | None, str]] = {}
+
+
 def _record_conditional(repo: Path, prereg_sha: str | None,
                         artifact: str) -> tuple[set[str] | None, str]:
     """The conditional steps the FROZEN record declares, or ``(None, why not)``.
@@ -711,6 +730,10 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
     the same reason the run probe reads it that way: a record edited after the
     numbers are in is not a pre-registration, and a worktree read would serve
     that edit.
+
+    The read itself is ``_read_conditional_blob``, memoised in ``_CONDITIONAL_MEMO``
+    — see that cache's comment for why the answer may be reused and which answer
+    is deliberately not immutable.
     """
     if not prereg_sha or not isinstance(prereg_sha, str):
         return None, "the log names no pre-registration sha"
@@ -724,6 +747,19 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
                       f"step declaration lives only in {RECORD_ARTIFACT!r} — a "
                       "conditional set read from any other file is not the frozen "
                       "record, whatever it contains")
+    key = (str(repo), prereg_sha, normalised)
+    hit = _CONDITIONAL_MEMO.get(key)
+    if hit is not None:
+        steps, why = hit
+        return (None if steps is None else set(steps)), why
+    steps, why = _read_conditional_blob(repo, prereg_sha, normalised, artifact)
+    _CONDITIONAL_MEMO[key] = (None if steps is None else frozenset(steps), why)
+    return steps, why
+
+
+def _read_conditional_blob(repo: Path, prereg_sha: str, normalised: str,
+                           artifact: str) -> tuple[set[str] | None, str]:
+    """The uncached read behind ``_record_conditional``: one bounded ``git show``."""
     # A WIDER clock than the object probes: in a partial clone this read is a
     # network fetch of the blob, not a local lookup (#13800).
     blob = _git(repo, "show", f"{prereg_sha}:{normalised}", timeout=BLOB_TIMEOUT)
@@ -895,11 +931,24 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
 # Every git invocation here is BOUNDED (#13800). A probe that cannot answer is a
 # verdict, but a probe that never returns is a hung gate — and this tool gates a
 # merge. `GIT_TIMEOUT` is generous for the operations bounded by it (a commit or
-# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that one wedged
-# probe cannot outlive a `pytest-timeout` budget; `check()` makes ONE such probe
-# per row (and `_resolves` is memoised), so a completely wedged git costs five
-# probes ≈ 75 s, inside the 300 s budget. The ONE network read (a
-# `show <sha>:<path>` blob fetch in a partial clone) passes its own wider bound.
+# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that the
+# AGGREGATE one `check()` can spend on a wedged git fits inside a `pytest-timeout`
+# budget. The ONE network read (a `show <sha>:<path>` blob fetch in a partial
+# clone) passes its own wider bound.
+#
+# ⛔ THE AGGREGATE, NOT "one probe per row" (#13800 review P2). The row loop
+# multiplies the probes, so a per-probe bound that looks comfortably small can
+# still sum past the budget — which is how a later "still well inside 300 s" bump
+# would restore `Failed: Timeout (>300.0s)`, the exact failure #13800 removed.
+# Enumerated from the call sites and MEASURED by
+# `test_the_cost_one_wedged_check_pays_is_BOUNDED_as_an_AGGREGATE`: on a
+# five-GREEN-row record whose steps are declared conditional, with the clock
+# expiring on every probe, `check()` makes 11 — 5 x `rev-parse
+# --is-inside-work-tree` for V3, 5 x the same probe for V5's work-tree test, and
+# ONE `git show` (memoised in `_CONDITIONAL_MEMO`) — for 5x15 + 5x15 + 60 =
+# 210 s against the 300 s budget. In the wedged case the V5 ancestry arm
+# short-circuits on the failed work-tree probe, so `_resolves`/`merge-base` add
+# nothing; those only run when git answers, and they are then local lookups.
 GIT_TIMEOUT = 15.0
 BLOB_TIMEOUT = 60.0
 

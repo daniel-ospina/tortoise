@@ -424,8 +424,8 @@ commit**. §4.1 did not say that.
 
 **Cardinality is a decision, and it moves the verdict tool's hardcoded five.** If the A-rows become verdict rows (and §1 J1's
 "ten rows" says they do), then the table is **10**, and these move **in the same change**: the `V2` "the table is 5 rows"
-refusal (`capstone_verdict_check.py:1057`), the `--require-green: {len(red)}/5` message (`:1634`), and the `5/5`
-prose and strings at `:160`, `:178`, `:630`, `:1222`, `:1237`, `:1628`, `:1822`. **And
+refusal (`capstone_verdict_check.py:1106`), the `--require-green: {len(red)}/5` message (`:1683`), and the `5/5`
+prose and strings at `:160`, `:178`, `:630`, `:1271`, `:1286`, `:1677`, `:1871`. **And
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
 
