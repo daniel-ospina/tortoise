@@ -265,25 +265,31 @@ _PROVENANCE_RECORD = """\
 # `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
 # the cell, and that row went stale: `surface_manifest.py check --provenance-strict` read it as a
 # FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
-# `3d437429e9` (the re-cut whose only changed file was `config/ci-surfaces.yml`, so it cannot
-# reach that row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`
-# pair. Re-derive it with that command; never type a digest from memory.
+# `3d437429e9` (the commit whose ONLY changed file was `config/ci-surfaces.yml` — a `cut` by
+# definition also writes THIS file, so that commit cannot have refreshed the row, which is what
+# makes the reading a FAIL on `main` rather than a stale probe): rc=1, and the identical
+# `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8` pair. Re-derive it with that command;
+# never type a digest from memory.
 #
-# ⛔ THAT ROW WAS RE-CUT, NOT HAND-HELD, IN #11609 P2 — the re-cut is what moved the cell, and it
-# is also what deleted the per-row copy of this record. The confidence-arms batch GREW
-# `tortoise_check_confidence` (the RECOMPUTE/RECALL arms, then the refusal that an arm-only
-# argument names its arm), so the handler's code object changed and
-# `served_from`/`served_attributes` genuinely moved: the `cut` wrote the derived pair, exactly as
-# "Derived files re-cut, never hand-edited" says to — while silently deleting the block that
-# explains it, which is the ONLY thing that block existed to warn about.
+# ⛔ THREE SEPARATE EVENTS, which the old per-row copy ran together. (a) The CELL moved in
+# `#13052`'s cut (`4a5ffa0a14a0`), which re-stamped this row `5864fd98a914f746 ->
+# 59f8f7e5957d81d8`. (b) The RECORD was CREATED by #11609 P2's commit `2c1065a52ed8` — that
+# batch GREW `tortoise_check_confidence` (the RECOMPUTE/RECALL arms, then the refusal that an
+# arm-only argument names its arm), so ITS cell moved (`2457694ae1e3fd91 -> 4f5930ddfee59b8c`)
+# and the prose explaining the practice was added BESIDE this row; the manifest already carried
+# `59f8f7e5957d81d8` for `tortoise_query` in P2's parent, so P2 neither moved nor hand-held this
+# cell. (c) The DELETION came later, from #13626's re-cut, which is why the record lives in the
+# header now — nothing in P2 deleted it. In every case the cell was WRITTEN BY THE GENERATOR,
+# exactly as "Derived files re-cut, never hand-edited" says to.
 #
 # ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
 # instead of being kept twice. `#13000`'s `980f271acc` added eleven lines saying that row was
 # "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
 # but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
 # earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
-# behind on the day it was written and 44 is what `rows` carried then (#11609 P2's
-# confidence arms retired two, the create-arms wave two more; 40 live at P6). Keeping both blocks
+# behind on the day it was written (`counts.tools` was 48 in `980f271acc`) and 44 is what `rows`
+# carried only after the NEXT two batches retired four more (#11609 P1 two, P2 two; 40 live at
+# P6). Keeping both blocks
 # would leave this file asserting a count its own `rows` does not have — which is exactly what
 # `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
 # preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
@@ -295,19 +301,22 @@ _PROVENANCE_RECORD = """\
 # `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
 # approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
 # REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
-# carries no `approval_status`. The operative reason here is narrower: re-running `cut` from a docs
-# branch would re-derive every row's observed-usage columns from THIS machine's call log and rewrite
-# the served-file digests — a large, unreviewable diff to buy back a cell that is already correct on
-# `main`. ⛔ A re-cut no longer deletes this record (that is why it lives here), so "protect the
-# block" is not a reason to run one at all.
+# carries no `approval_status`. The operative reason here is narrower: a re-cut rewrites the
+# served-file digests (`served_from`/`served_attributes`), and with `--refresh-observations` it
+# ALSO re-derives every row's observed-usage columns from THIS machine's call log (without that
+# flag the committed evidence is carried forward) — a large, unreviewable diff either way, to buy
+# back a cell that is already correct on `main`. ⛔ And a re-cut no longer deletes this record
+# (that is why it lives here), so "protect the block" is not a reason to run one at all.
 #
 # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
 # source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
-# all state it, and it is the right default) — because this file's provenance is only
-# re-derivable from the record beside the rows: a `cut` deletes every per-row block, so "just
-# regenerate it" would cost the WHY to re-buy a value the tree already agrees with. The VALUE is
-# still never hand-derived — it is the digest `check --provenance-strict` compares. A reader
-# holding the "always regenerate" page should put it down here, not "fix" a row by cutting.
+# all state it, and it is the right default) — because a digest a generator can produce is only
+# half of this file's provenance: WHY a cell went stale, and which measurement resolved it, exist
+# only in prose, and a `cut` deletes every per-row block (so that prose lives in this header,
+# which a cut RE-EMITS, instead). "Just regenerate it" therefore regenerates the VALUE and
+# silently drops the record. The VALUE itself is still never hand-derived — it is the digest
+# `check --provenance-strict` compares. A reader holding the "always regenerate" page should put
+# it down here, not "fix" a row by cutting.
 """
 
 
