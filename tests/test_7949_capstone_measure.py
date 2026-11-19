@@ -6840,18 +6840,23 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15328-15405`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15346-15423`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15367` (both needles are the file's only occurrences —
-    # `:15357` and `:15367` — so a later end cannot change the sum). Ends below `:15367` fail
+    # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
+    # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15328`-`:15367` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15328` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
+    # ⛔ EVERY FIGURE ABOVE IS THE RE-DERIVED ONE AT THIS HEAD (`#13841`'s `+18` above
+    # `org_info`): an earlier cut of this comment kept `:15328-15405` / `:15357` / `:15367`
+    # after the assertions below had already moved, so it stated a threshold (`:15367`) the
+    # `max_nodes` arm REJECTS — the reader it misled is the next lane re-deriving a `+18` here,
+    # which is why the numbers live beside the asserts and move with them (#13879 review, P2).
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
     assert _i7.count("`hosted_api.py:15346-15423`") == 1, (
         "04-plan.md I7's range cite moved or was re-spelled — re-derive BOTH endpoints from "
