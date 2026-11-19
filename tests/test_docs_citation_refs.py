@@ -544,12 +544,26 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "--check` reports every stated figure `== measured`",
         "--check` reports both figures `== measured`",
     ):
-        assert green not in doc, (
-            f"05-verify.md asserts {green!r}. `tools/hosted_api_cite_census.py --check` "
-            "is RED at this head (exit 1, `STALE` lines) and is red on `origin/main` "
-            "too, so a merge would put a false PASS claim into a document beside a "
-            "checker that refutes it. State the COMMAND and the head it must be read "
-            "at — never a green (#13489 review, P0)")
+        for _row in doc.splitlines():
+            if green not in _row:
+                continue
+            # ⛔ A GREEN IS LEGAL ONLY WHEN THE ROW NAMES THE HEAD IT WAS MINTED AT
+            # (#13550 review, P1 — MEASURED). The blanket ban this leg used to be was
+            # true while the census was red on `main` AND the graded modules were
+            # absent from every diff; both stopped being true when this branch's own
+            # `5db18e9a77` re-took the figures with `--refresh`. A bare ban would then
+            # force the document to say RED about a checker that exits 0 — a false
+            # report is a false report in either direction. So the property asserted is
+            # the one #13489 was after: a verdict must travel with the head it belongs
+            # to. NON-VACUITY, MEASURED: on the pre-fix row (the green with no sha in
+            # it) this leg reds; it is green once the row names the re-taking commit.
+            assert re.search(r"\b[0-9a-f]{7,40}\b", _row), (
+                f"05-verify.md states a census verdict ({green!r}) in a row that names no "
+                "head. `tools/hosted_api_cite_census.py --check` is RED on `origin/main` "
+                "(`STALE  census DEFAULT_PIVOT: states [25193], the tree measures [25422]`)"
+                " and green only at the head whose figures were re-taken, so a verdict "
+                "without its head is unreadable in both directions. State the COMMAND and "
+                "the head it must be read at (#13489 review, P0; #13550 review, P1)")
     assert "tools/hosted_api_cite_census.py --check" in doc, (
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing the false green must send the reader to the verb, not delete the "
@@ -590,10 +604,16 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "very command it quotes — and it satisfied the presence-only leg above while "
             "contradicting the empty claims beside it (#13489 review, P1)")
     assert any(f"{_tortoise_cmd}` {_word}" in doc
-               for _word in ("is empty", "-> empty", "is EMPTY")), (
-        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
-        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
-        "reader who can see which way the measurement went (#13489 review, P1)")
+               for _word in ("is empty", "-> empty", "is EMPTY")) and (
+               "at THIS head it prints two (`activation_scorecard.py`, `hosted_api.py`" in doc), (
+        "05-verify.md must state which way the `tortoise/` measurement went, BOTH ways "
+        "(#13489 review, P1; #13550 review, P1 — MEASURED). The single `is empty` "
+        "assertion this leg used to be was a claim about ONE head: at the merge heads "
+        "this section was written for the list was empty (the `#12943` modules had "
+        "landed on `main`), and at a head that re-takes the census notes it holds two "
+        "modules — so a single-direction assertion forces the document to be false at "
+        "whichever head it is not describing. NON-VACUITY, MEASURED: reds on the "
+        "pre-fix document, which asserted only the empty direction.")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
