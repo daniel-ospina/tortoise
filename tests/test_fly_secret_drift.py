@@ -2156,26 +2156,22 @@ def _reader_citations(
     different checker. A region that comes back inverted raises rather than
     returning an empty list.
 
-    `symbol` is the function named for that cite (`::start_warm_up` and so on).
-    Where no function is named inline it is resolved by NUMBER instead — the two
-    prose RANGE cites below the list are bound to the reader whose numbered entry
-    starts at the same line. Only the `:40-50` resolver cite ends up `None`: it
-    names the DEFINITION, not a consumer, so there is no reader to bind it to.
-    The numbered-list symbol is tracked per ENTRY, so reader 2's cite cannot
-    inherit reader 1's function.
+    `symbol` is the function named for that cite (`::start_warm_up` and so on),
+    or `None` where none is named (the `:40-50` resolver line and the range cites
+    in prose). The numbered-list symbol is tracked per ENTRY, so reader 2's cite
+    cannot inherit reader 1's function.
     """
     assert start < end, (start, end)
     cites: list[tuple[str, int, int, str | None]] = []
     current = "embeddings.py"
     symbol: str | None = None
-    #: cite start -> the reader the numbered list names for it, so the two RANGE
-    #: cites in the prose below are bound to the same reader their start number
-    #: belongs to instead of being left unbound.
-    by_number: dict[int, str] = {}
     for ln in lines[start:end]:
         # A numbered reader entry starts a new claim: its symbol is its own. The
         # invariant sentence below the list ends them, so nothing after it may
-        # inherit reader 5's symbol — its cites are bound by NUMBER instead.
+        # inherit reader 5's symbol; those cites are checked by the needle alone.
+        # The entry regex accepts BOTH artifacts' spellings (`#   1. …` in the
+        # manifest, `> 1. …` in the runbook) and the reset is markdown-insensitive
+        # (the runbook bolds "**function names**").
         if _READER_ENTRY_RE.match(ln) or _READER_SYMBOL_RESET_RE.search(ln.replace("*", "")):
             symbol = None
             symbol = None
@@ -2190,14 +2186,8 @@ def _reader_citations(
             symbol = named.group(1)
         for m in _READER_CITE_RE.finditer(ln):
             lo = int(m.group(1))
-            if symbol is not None:
-                by_number.setdefault(lo, symbol)
             cites.append((current, lo, int(m.group(2) or lo), symbol))
-    # The prose repeats two of those numbers as ranges; bind them to the reader
-    # their start number names. The resolver cite (`:40-50`) names no reader, so
-    # it stays unbound and is covered by the needle check alone.
-    return [(f, lo, hi, sym if sym is not None else by_number.get(lo))
-            for f, lo, hi, sym in cites]
+    return cites
 
 
 def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
@@ -2327,16 +2317,30 @@ def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | N
     `_lifespan` contains a `_prewarm_embeddings` helper. The enclosing chain is
     therefore read by INDENTATION: the nearest definition at the same indent as
     the named one is the one that encloses the cite.
+
+    Only a real DEFINITION counts, in either the Python form (`def`/`async def`)
+    or the shell forms (`name() {`, `function name {`, and the brace on the line
+    after the signature) — a bare `name()` CALL must not register as one, which
+    is why every arm requires the opening brace.
     """
     defs: list[tuple[int, str]] = []  # (indent, name), in file order, above line_no
-    for raw in body[: max(line_no, 0)]:
+    for idx, raw in enumerate(body[: max(line_no, 0)]):
         py = re.match(r"(\s*)(?:async\s+)?def\s+([A-Za-z_]\w*)", raw)
         if py:
             defs.append((len(py.group(1)), py.group(2)))
             continue
-        sh = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{?", raw)
-        if sh and not raw.lstrip().startswith("#"):
+        sh = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{", raw)
+        if sh:
             defs.append((len(sh.group(1)), sh.group(2)))
+            continue
+        sh_kw = re.match(r"(\s*)function\s+([A-Za-z_]\w*)\s*\{", raw)
+        if sh_kw:
+            defs.append((len(sh_kw.group(1)), sh_kw.group(2)))
+            continue
+        # `name()` / `function name` with the opening brace on the next line.
+        sh_open = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*$", raw)
+        if sh_open and idx + 1 < len(body) and body[idx + 1].lstrip().startswith("{"):
+            defs.append((len(sh_open.group(1)), sh_open.group(2)))
             continue
     target = next((d for d in reversed(defs) if d[1] == symbol), None)
     if target is None:
