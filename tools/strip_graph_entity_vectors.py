@@ -2226,15 +2226,22 @@ def _comprehension_source_yields(source, _depth: int = 0):
     # still unanswered, so `{k: vec for k in ([] or ["embedding"])}` and
     # `{k: vec for k in (p := ["embedding"])}` CERTIFIED while the `if…else` twin was refused.
     # Answering them through `_conditional_branches` (which is the ONE definition of the family)
-    # keeps the `if…else` arm where it is rather than growing a second vocabulary beside it —
-    # and the arm below keeps its own stated semantics, including "an unreadable branch
-    # contributes nothing", which is why this block covers ONLY the two spellings it omits.
+    # keeps the `if…else` arm where it is rather than growing a second vocabulary beside it.
+    # ⛔ AND IT MUST USE THAT ARM'S OWN POLICY (`#13788`, measured at `794eb162`, F2): the first
+    # cut of this block answered `None` when ANY branch was unreadable, while the `if…else` arm
+    # unions its READABLE branches — so the SAME conditional got two answers:
+    # `{k: vec for k in (["embedding"] or _maybe)}` CERTIFIED (deterministic: a non-empty list
+    # is truthy, so the reading is the literal) while
+    # `{k: vec for k in (["embedding"] if _f() else _maybe)}` was refused. `None` now means
+    # EVERY branch is unreadable, which is strictly additive: an unreadable branch contributes
+    # nothing, exactly as it does one `if…else` over.
     if isinstance(source, ast.BoolOp | ast.NamedExpr):
-        branches = _conditional_branches(source)
-        resolved = [_comprehension_source_yields(branch, _depth + 1) for branch in branches]
-        if any(item is None for item in resolved):
+        resolved = [_comprehension_source_yields(branch, _depth + 1)
+                    for branch in _conditional_branches(source)]
+        readable = [item for item in resolved if item is not None]
+        if not readable:
             return None
-        return [item for chunk in resolved for item in chunk]
+        return [item for chunk in readable for item in chunk]
     if isinstance(source, ast.Starred):
         return _comprehension_source_yields(source.value, _depth + 1)
     # ⛔ THE TRANSPARENT COPY OF THE SOURCE IS THE SAME SOURCE (`#13788`, measured by the fix
@@ -2316,17 +2323,24 @@ def _comprehension_source_yields(source, _depth: int = 0):
         return _comprehension_source_yields(source.value, _depth + 1)
     # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THAT ELEMENT (`#13788`, measured):
     # `{k: _encode(ev) for k in [{"embedding": 1}][0]}` iterates the mapping ONE INDEX in and
-    # CERTIFIED, while `{k: _encode(ev) for k in {"embedding": 1}}` was refused. `_constant_index`
-    # and `_container_literal` are the ONE answer the operand rules already give this spelling,
-    # so the resolver asks them instead of spelling a second vocabulary.
+    # CERTIFIED, while `{k: _encode(ev) for k in {"embedding": 1}}` was refused.
+    # ⛔ AND IT ASKS `_const_index_candidates`, NOT `_container_literal` (`#13788`, measured at
+    # `794eb162`, F3). This arm's note claimed those two were "the ONE answer the operand rules
+    # already give this spelling", and that was measurably FALSE: `_container_literal` is the
+    # resolver with NO conditional vocabulary, so
+    # `{k: vec for k in ([{"embedding": 1}] if _f() else [{"x": 1}])[0]}` CERTIFIED while the
+    # operand rule refused its twin `([{"embedding": vec}] if _f() else [{}])[0]` — for the same
+    # reason F1 of the previous round existed. `_const_index_candidates` answers EVERY branch of
+    # a conditional container in any nesting order, so the two rules cannot disagree again.
     if isinstance(source, ast.Subscript) and (index := _constant_index(source.slice)) is not None:
-        container = _container_literal(source.value)
-        if container is None:
-            return None
-        elements = container.elts
-        if -len(elements) <= index < len(elements):
-            return _comprehension_source_yields(elements[index], _depth + 1)
-        return None
+        resolved = []
+        for literal in _const_index_candidates(source.value):
+            if -len(literal.elts) <= index < len(literal.elts):
+                each = _comprehension_source_yields(literal.elts[index], _depth + 1)
+                if each is None:
+                    return None
+                resolved.extend(each)
+        return resolved or None
     if isinstance(source, ast.Call):
         name = _callee_name(source)
         if name in ("list", "tuple", "set") and len(source.args) == 1 and not source.keywords:
@@ -2660,6 +2674,73 @@ def _two_argument_store(arguments) -> bool:
             and not isinstance(arguments[1], ast.Constant))
 
 
+def _spliced_sequence_elements(node) -> list:
+    """The elements a `*`-splice contributes, through the wrappers a refactor puts around them.
+
+    ⛔ ONE FLATTENER, AND IT IS NOT ONE LEVEL DEEP (`#13788`, measured at `794eb162`, F1). The
+    splice answered a bare List/Tuple, then (one round later) the three conditional spellings,
+    while every OTHER wrapper the pairs rule already looks through still CERTIFIED a stop arm
+    that stores, beside its refused bare twin:
+
+        props._set(x, *list(["embedding", vec]))          CERTIFIED
+        props._set(x, *tuple(["embedding", vec]))         CERTIFIED
+        props._set(x, *(["embedding", vec].copy()))       CERTIFIED
+        props._set(x, *(["embedding", vec] + []))         CERTIFIED
+        props._set(x, *(["embedding", vec][:]))           CERTIFIED
+        props._set(x, *[*["embedding", vec]])            CERTIFIED   (Starred in Starred)
+        props._set(x, *([*["embedding", vec]] if f else []))  CERTIFIED
+
+    Every one is a wrapper `_pairs_operand_stores_the_vector` already resolves — `list`/`tuple`,
+    `.copy()`/`copy.copy()`, `BinOp` concatenation and repetition, a full slice, a `Starred`, a
+    conditional — so the splice asks the SAME vocabulary instead of a second copy of it, which is
+    precisely how the two spellings had drifted apart.
+
+    ⛔ IT NEVER RETURNS `None` FOR "UNREADABLE": an expression this check cannot read is
+    contributed AS ITSELF, so the caller's raw-form test still sees an opaque argument and the
+    verdict can only move toward refusal. `props._set(x, *(["embedding", vec] if f else _maybe))`
+    therefore still refuses when its readable branch stores — a `None` here would have turned the
+    unknown branch into nothing and CERTIFIED it, i.e. widened an acceptance.
+    """
+    import ast
+
+    if isinstance(node, ast.Starred):
+        return _spliced_sequence_elements(node.value)
+    if isinstance(node, ast.List | ast.Tuple):
+        elements: list = []
+        for element in node.elts:
+            # a `Starred` ELEMENT splices its own sequence in, exactly as it does at runtime.
+            elements.extend(_spliced_sequence_elements(element)
+                            if isinstance(element, ast.Starred) else [element])
+        return elements
+    copied = _transparent_copy_operand(node)
+    if copied is not None:
+        return _spliced_sequence_elements(copied)
+    if (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
+            and _callee_name(node) in ("list", "tuple", "set")):
+        return _spliced_sequence_elements(node.args[0])
+    if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
+        return _spliced_sequence_elements(node.value)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return [*_spliced_sequence_elements(node.left),
+                *_spliced_sequence_elements(node.right)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        # `[a, b] * 1` is the same sequence and `* 0` is EMPTY. The constant may be on either
+        # side (`1 * [a, b]` is the same repetition); a non-constant count answers the
+        # sequence once, which can only add refusals.
+        for sequence, counted in ((node.left, node.right), (node.right, node.left)):
+            count = _constant_index(counted)
+            if count is not None:
+                return _spliced_sequence_elements(sequence) * max(count, 0)
+        return _spliced_sequence_elements(node.left) + _spliced_sequence_elements(node.right)
+    # ⛔ EVERY CONDITIONAL BRANCH, which is the family the previous round taught this splice:
+    # a branch this check cannot read contributes ITSELF, never nothing.
+    branches = _conditional_branches(node)
+    if len(branches) > 1 or branches[0] is not node:
+        return [element for branch in branches
+                for element in _spliced_sequence_elements(branch)]
+    return [node]
+
+
 def _third_argument_stores_the_vector(call) -> bool:
     """Does this call NAME the property exactly, in a position a writer would name it in?
 
@@ -2685,19 +2766,10 @@ def _third_argument_stores_the_vector(call) -> bool:
     raw = list(arguments)
     spliced: list = []
     for argument in raw:
-        # ⛔ A CONDITIONAL SPLICE IS EVERY BRANCH (`#13788`, measured at `6a164ac9`):
-        # `props._set(x, *(["embedding", vec] if f else []))` is the same splice as the bare
-        # literal one wrapper in, and the `isinstance(argument.value, ast.List | ast.Tuple)`
-        # test below answered only the bare spelling. A branch that is not a literal keeps the
-        # `Starred` node, so the raw-form test below still sees it.
+        # ⛔ A `Starred` ARGUMENT IS SPLICED THROUGH THE WHOLE WRAPPER FAMILY (`#13788`, measured
+        # at `794eb162`, F1) — see `_spliced_sequence_elements`, which is the ONE flattener.
         if isinstance(argument, ast.Starred):
-            branch_elements = []
-            for branch in _conditional_branches(argument.value):
-                if isinstance(branch, ast.List | ast.Tuple):
-                    branch_elements.extend(branch.elts)
-                else:
-                    branch_elements.append(argument)
-            spliced.extend(branch_elements)
+            spliced.extend(_spliced_sequence_elements(argument.value))
         else:
             spliced.append(argument)
     arguments = spliced

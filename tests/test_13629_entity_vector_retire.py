@@ -6087,6 +6087,91 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE SPLICE IS NOT ONE LEVEL DEEP (`#13788`, measured at `794eb162`). It answered
+        # a bare literal and then the conditional spellings, while every OTHER wrapper the pairs
+        # rule already resolves still CERTIFIED beside its refused bare twin — `list()`/`tuple()`,
+        # `.copy()`, `+`, a full slice, a `Starred` element, and the conditional of a `Starred`.
+        # One flattener (`_spliced_sequence_elements`) now asks that same vocabulary, so a splice
+        # and the operand rule cannot answer one spelling differently.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *list(["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *tuple(["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)].copy()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)] + []))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)][:]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *[*["embedding", _encode(ev)]])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *([*["embedding", _encode(ev)]] if _f() else []))
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE COMPREHENSION SOURCE RESOLVER HAD TWO POLICIES FOR ONE WRAPPER (`#13788`,
+        # measured at `794eb162`): its `BoolOp` arm answered `None` when ANY branch was
+        # unreadable while its `if…else` arm unions the readable branches — so the SAME
+        # conditional got two answers (`["embedding"] or _maybe` CERTIFIED, `["embedding"] if f
+        # else _maybe` refused). `None` now means EVERY branch is unreadable.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (["embedding"] or _maybe)}
+        return None
+    _write(props)
+""",
+        # ⛔ AND ITS CONST-INDEX ARM ASKED `_container_literal`, THE ONE RESOLVER WITH NO
+        # CONDITIONAL VOCABULARY (`#13788`, measured at `794eb162`) — the arm's own note claimed
+        # those were "the ONE answer the operand rules already give this spelling", which is
+        # measurably false. It asks `_const_index_candidates` now.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ([{"embedding": 1}] if _f() else [{"x": 1}])[0]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ([{"embedding": 1}] or [{"x": 1}])[0]}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -6101,6 +6186,31 @@ def _upsert_object(props, ev):
     # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
     # removal, a bare exit, and a non-store statement before the exit are all write-stops.
     accepted = (
+        # ⛔ THE SPLICE FLATTENER MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
+        # `794eb162`): a splice of a sequence that names no property, a repetition by zero,
+        # and a conditional whose branches place nothing are honest write-stops. Without these
+        # rows a flattener that answered "any Starred is a store" would pass every refused row.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *list(["embedding_model", _m()]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding", _encode(ev)] * 0))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(x, *(["embedding_model", _m()] if _f() else []))
+        return None
+    _write(props)
+""",
         # ⛔ THE CONDITIONAL RESOLVERS MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
         # `6a164ac9`): a branch that yields nothing, and a wrapper around a NON-STORING
         # spelling, are honest write-stops. Without these rows a resolver that answered "any
