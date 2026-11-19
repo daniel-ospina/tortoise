@@ -1183,6 +1183,14 @@ a 4 s attempt and a 290 s attempt of the same 300 s bound render identically —
 opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
 is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
 running thread is the authority).
+- **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
+returned `None` at the bound and the loader is still importing. The guard then refuses to start a
+second attempt for as long as that thread lives, so the block reads `state: "cooldown"`,
+`failure_kind: "load_timeout"`, `load_in_progress: true` with an elapsed time past the bound, and the
+leg stays keyword-only. This resolves BY ITSELF when the thread exits (the guard clears, and the next
+`get()` retries once the 60 s cooldown has passed); a reading that stays past the bound for minutes
+means the import is STUCK, and that does not resolve without `fly machine restart` — read the boot
+log for the bound it hit, then check the image layer/page-cache path, not the app.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),

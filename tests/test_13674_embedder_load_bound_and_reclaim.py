@@ -293,8 +293,6 @@ class TestReclaimBeforeRetry:
         thread = EmbeddingModel._load_attempt_thread
         assert thread is not None and thread.is_alive()
 
-    @pytest.mark.skipif(not os.path.exists("/proc/self/status"),
-                        reason="needs /proc for the RSS measurement")
     def test_the_reclaim_refusal_decides_and_logs_from_one_reading(
             self, monkeypatch, clean_embedder, caplog):
         """The guard's CONDITION and its message must be the same read.
@@ -337,6 +335,8 @@ class TestReclaimBeforeRetry:
             "condition and its message can disagree"
         )
 
+    @pytest.mark.skipif(not os.path.exists("/proc/self/status"),
+                        reason="needs /proc for the RSS measurement")
     def test_an_abandoned_attempt_releases_its_model(self, monkeypatch,
                                                      clean_embedder, caplog):
         """The abandon-release BRANCH runs, and the model it built is not retained.
@@ -1133,6 +1133,16 @@ class TestTheBoundIsReadableFromTheProduct:
         )
         block = body["embedder"]
         assert set(block) == _EXPECTED_EMBEDDER_HEALTH_KEYS
+        # ⛔ THE PRODUCER SIDE (#13819 review): `_embedder_health()` builds the
+        # block as `{key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}`, so
+        # the assertion above compares the app's own tuple with itself and
+        # cannot notice a rename in `status()` — `/health` would publish a
+        # permanently `null` key (e.g. the documented `threads`) while every row
+        # here stayed green.
+        assert set(EmbeddingModel.status()) == _EXPECTED_EMBEDDER_HEALTH_KEYS, (
+            "`status()` and the published key set have drifted — the operator's "
+            "`jq .embedder.<key>` now resolves to null"
+        )
         assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
         assert block["available"] is True
         assert block["state"] == "ready"
