@@ -623,8 +623,16 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             stars = [i for i, e in enumerate(target.elts) if isinstance(e, ast.Starred)]
             if (
                 value_elts is not None
-                # defensive: Python's parser rejects two stars (`*a, *b = …` is a
-                # SyntaxError), so this can only be true for a hand-built AST.
+                # ⛔ TWO STARS REFUSE TO PAIR, AND THIS *IS* REACHABLE FROM SOURCE — not only
+                # from a hand-built AST (`#13628` review finding 2, `len(stars) <= 1`, the one
+                # clause of that finding `main` left unpinned). MEASURED on Python 3.12:
+                # `ast.parse("*b, A, *c = 1, object, 2")` SUCCEEDS — only `compile()` rejects
+                # two stars ("multiple starred expressions in assignment") — and this reader
+                # walks `ast.parse`, so a source file it really sees can reach this branch.
+                # Refusing to pair makes NO claim: the earlier binding stands and the call is
+                # still REPORTED. Pairing instead places `A` beside `object` and answers `[]`,
+                # which is a LOST site in the false-PASS direction (AGENTS.md A/B). Pinned by
+                # the two-star row at the end of the starred block below.
                 and len(stars) <= 1
                 and not any(isinstance(e, ast.Starred) for e in value_elts)
                 and len(value_elts) >= len(target.elts) - len(stars)
@@ -1963,6 +1971,19 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ), ("a STARRED VALUE was paired element-wise — `(*x, 1)` has no static element at the "
         "star, so no claim may be made and `A`'s import binding must stand")
+    # ⛔ TWO STARRED TARGETS (`#13628` review finding 2, the `len(stars) <= 1` clause). The shape
+    # is COMPILER-invalid but PARSE-reachable, so it is a real source file to this reader rather
+    # than a hand-built AST: measured, `ast.parse("*b, A, *c = 1, object, 2")` succeeds and only
+    # `compile()` raises "multiple starred expressions in assignment". With the guard, pairing is
+    # refused and `A`'s import binding stands, so the call is REPORTED. Drop the guard (`<= 1` →
+    # `<= 2`) and the offset arithmetic pairs `A` with `object`: it binds `SHADOWED` and the row
+    # answers `[]` — the false-PASS direction, silently.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "*b, A, *c = 1, object, 2\n"
+        "A(app)\n"
+    ), ("TWO stars were paired element-wise — `*b, A, *c = 1, object, 2` is compiler-invalid, "
+        "so no claim may be made and `A`'s import binding must stand (pairing loses the site)")
     # ⛔ …AND `nonlocal` BINDS TO THE FUNCTION THAT OWNS THE NAME, not the nearest one
     # (`#13585 review e9867da8` P2). At depth 3 the two differ and the value was filed in `mid`
     # while CPython rebinds `outer` — so `outer` kept reading `{shadowed}` and a real wiring after

@@ -1082,7 +1082,7 @@ Two things this pin keeps TRUE, which is why it is safe on a pool runner:
   issue (`ai-review-gate`, #9942; the other three name a reason and no owner, so a green run does
   NOT certify an owner for the population) rather than pretending to a gap-free population. A job
   that calls no `gh` is outside the sweep by construction, which is why `redis-guard` needs no step.
-- `redis-guard` needs no contract step: its only `run:` is `python3 tools/redis-guard.py`, whose only
+- `redis-guard` needs no contract step: its only `run:` is `python tools/redis-guard.py`, whose only
   subprocess is `git rev-parse --show-toplevel`, and the job pins `actions/setup-python@v5` / `3.12`
   itself, so moving off `ubuntu-latest` cannot change the interpreter.
 
