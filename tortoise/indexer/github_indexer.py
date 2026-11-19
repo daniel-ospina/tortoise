@@ -1647,7 +1647,7 @@ class GitHubIndexer:
         # position, the row every props door can produce — `update_knowledge(id,
         # isClosed=0)` stores the integer verbatim: `update_knowledge`
         # (`sdk.py:22651-22826`) relays through `_update_entity_any` to
-        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:56011`)
+        # `_update_entity`, whose per-label `SET n += $props` (`sdk.py:56031`)
         # applies the caller's props unchanged — `isClosed` is no reserved name, so
         # nothing coerces it) then records NO transition at all: `prev_state is None`
         # gates the mint off and nothing repairs the marker, so nothing re-fires.

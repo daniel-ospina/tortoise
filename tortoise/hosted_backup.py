@@ -1035,6 +1035,49 @@ def _require_served_restore_labels(
     return strip, frozenset(strip_edges)
 
 
+#: The labels a coverage-gated ``embedding`` can be attached to, in the order the
+#: writer census scans them. ``:Point``/``:Operator`` are deliberately absent — a
+#: ``:Point``'s vector is RECORD TRUTH (`#5004`) and is never gated.
+_GATED_RESTORE_LABELS: tuple[str, ...] = ("Object", "Subject", "Event", "Source")
+
+
+def _gated_labels_of(node_labels) -> list[str]:
+    """The gated labels a restored node actually carries (order-stable, deduped)."""
+    present = set(node_labels or ())
+    return [label for label in _GATED_RESTORE_LABELS if label in present]
+
+
+def _restore_retires_vector(node_labels) -> bool:
+    """ONE decision for a node: may its restored vector be dropped?
+
+    ⛔ ``all``, NOT ``any`` (#13854 review, F4). The vector serves EVERY gated label
+    the node carries, so it may go only when each of them says stop. ``:Source`` is
+    the shape this rule was first written for — its vector serves both ``document``
+    and ``source``, two populations — and a ``:Subject`` that also carries
+    ``:Object`` is the same node with the same property. The two errors are not
+    symmetric: keeping a redundant vector costs bytes on a rare restore, while
+    dropping one the record does not hold costs the vector — the `#11395` outcome
+    no writer may produce.
+
+    A node with NO gated label answers ``False`` (nothing may be dropped), and so
+    does every unreadable/unknown answer, because the predicate behind it is
+    conservative in every unknown.
+    """
+    from tortoise.projection.entities import _derived_mirror_required
+
+    if "Object" in node_labels and _derived_mirror_required("object"):
+        return False
+    if "Subject" in node_labels and _derived_mirror_required("subject"):
+        return False
+    if "Event" in node_labels and _derived_mirror_required("event"):
+        return False
+    if "Source" in node_labels and (
+            _derived_mirror_required("document")
+            or _derived_mirror_required("source")):
+        return False
+    return bool(_gated_labels_of(node_labels))
+
+
 def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
                   allow_unserved_vectors: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
@@ -1199,6 +1242,16 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # restore that happens rarely, while dropping one the record does not hold costs the
     # vector — the `#11395` outcome no writer may produce.
     #
+    # ⛔ AND THAT IS THE RULE FOR EVERY CO-LABELLED NODE, NOT ONLY `:Source` (#13854 review,
+    # F4). A `:Subject` can also carry `:Object` (`sdk.py`'s `_sibling`), and the SAME
+    # argument applies verbatim: the one vector serves both halves, so either answer alone
+    # is evidence about one half. The pops below used to be four INDEPENDENT `if`s — i.e.
+    # OR across the labels a node carries, where every other writer of this contract drops
+    # on AND — so a restored `:Object:Subject` node with `object` verified and `subject`
+    # unverified came back with no graph vector while the record may not hold one, the
+    # exact "vector in neither store" state `_update_entity`'s per-label rebinding exists
+    # to prevent. `_restore_retires_vector` is that ONE decision.
+    #
     # ⛔ THE VECTOR IS POPPED FROM `node_rows` ITSELF, not from a copy, because TWO write
     # passes read these rows: the CREATE loop (which stores `props` verbatim, including a
     # plain-list `embedding`) and the `vecf32` pass. A decision taken in one of them would
@@ -1212,6 +1265,16 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     from tortoise.projection.entities import _derived_mirror_required
     for _node_id, node_labels, node_props in node_rows:
         if not isinstance(node_props.get(EMBEDDING_PROPERTY), list):
+            continue
+        # ⛔ ONE DECISION FOR THE NODE, THEN the per-label arms (#13854 review, F4). The
+        # guard is `all(...)` over EVERY gated label this node carries; the arms below it
+        # are the census's grammar — `tools/strip_graph_entity_vectors.py` reads a
+        # write-stop as `if <THIS label's ask>: pop("embedding")`, so a shape that only
+        # ASKS inside a helper would be a writer the census must report as STILL EMITTING.
+        # They therefore ask once more each, and the duplication can only ever be
+        # fail-CLOSED: a predicate that flipped between the two asks on one node would skip
+        # a retirement, never take one the guard refused.
+        if not _restore_retires_vector(node_labels):
             continue
         # ⛔ THE LITERAL `"embedding"`, not this module's `EMBEDDING_PROPERTY` — the
         # strip's writer census reads the removed property BY NAME
@@ -1230,7 +1293,15 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
             node_props.pop("embedding", None)
         if not isinstance(node_props.get(EMBEDDING_PROPERTY), list):
             retired_vectors += 1
-            retired_vector_labels.update(node_labels or (_UNLABELLED_DUMP_ENTRY,))
+            # ⛔ THE LABELS THAT ANSWERED STOP, not every label on the node (#13854
+            # review, P3). The list is operator-facing (the result field and the log
+            # line), so reporting `Point`/`Subject` for a `:Subject:Object` node whose
+            # only stop was `object` is a wrong diagnosis after a DR restore even though
+            # no stored byte was wrong. The guard above is the reason this set is exact:
+            # a node that retires here had EVERY gated label it carries answer stop, so
+            # this set is non-empty by construction — no placeholder fallback, which would
+            # only ever MASK a divergence between the guard and this reporter.
+            retired_vector_labels.update(_gated_labels_of(node_labels))
 
     # The function REBUILDS a graph — it does not merge into one. Rejecting a
     # dirty target keeps the returned counts coherent (they describe the dump's
