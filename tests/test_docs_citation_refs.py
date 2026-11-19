@@ -557,11 +557,20 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             r"`?" + re.escape(cmd)
             + r"`?[\s*]*(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
-              r"names|includes|contains|has|->|→|is|=|:)", doc):
+              r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
         low = rest.lower()
+        # ⛔ NORMALISE THE HEAD ONCE (#13795 review, rounds 5-7): markdown emphasis and
+        # backticks are not the answer's content, and this document writes both — its answers
+        # close with `**` (`prints NOTHING**`, `prints NO path at all**`: two occurrences at
+        # the head this was written for) and its paths are backticked after `->`
+        # (`-> `tortoise/…``: one). Stripping them here is what makes the class below CLOSED
+        # under formatting rather than under one spelling of it; the `**prints** …` and
+        # `` prints `two` path `` forms this witness list pins are MUTATIONS of those, not
+        # quotations of the tree — stated as mutations so the comment cannot go stale with it.
+        low = re.sub(r"[`*_]", "", low).strip()
         if not rest:
             continue
         # ⛔ THE HEAD OF THE ANSWER DECIDES, AND NOTHING ELSE DOES (#13795 review,
@@ -581,35 +590,51 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # an emptiness WORD doing membership duty — `nothing but the two modules`
             claims_empty = False
         else:
-            low = re.sub(r"^(?:the|a|an|its|this|that|those|these)\s+", "", low)
             # ⛔ QUANTIFIER FILLERS, AND A BACKTICKED PATH TOKEN (#13795 review, round 4).
             # The cut before this one matched a BARE `tortoise/` only, so the document's own
             # spelling — a BACKTICKED path, which is how every path in this file is written
             # — was skipped and a refuted membership answer stayed green; and a quantifier
             # before the numeral (`just one`, `only one`, `at least one`, `no fewer than
-            # two`) skipped it the same way. Strip one quantifier, then match the head.
-            low = re.sub(
-                r"^(?:just|only|still|now|actually|also|at\s+least|at\s+most|more\s+than"
-                r"|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
-            # ⛔ AND A DOUBLED FORM (`prints contains …`) — a listed verb can sit where the
-            # answer should start, and the head token is what follows it (#13795 review,
-            # round 4). Only the form words are stripped, so a pointer sentence
-            # (`is the command that answers it`) still starts at `command` and is skipped.
+            # two`) skipped it the same way.
+            # ⛔ FILLERS ARE STRIPPED UNTIL NONE REMAINS — QUANTIFIERS **AND** ARTICLES
+            # (#13795 review, round 5; #13728 review, P1). One quantifier pass left
+            # `prints now only one path` skipped, because both `now` and `only` sit in
+            # front of the numeral. The determiner strip then still ran ONCE, BEFORE this
+            # loop, so a quantifier removed inside the loop re-exposed a determiner that
+            # nothing removed and the answer fell out of the `continue` below — measured,
+            # `prints only the two COMMENT-ONLY modules`, `prints only a single path`,
+            # `prints just the two comment-only modules`, `prints at least the two
+            # comment-only modules` and `prints exactly the two comment-only modules` were
+            # all SKIPPED, while the control `prints the two COMMENT-ONLY modules` (one
+            # determiner fewer) classified correctly. That is in-class vocabulary — a
+            # listed form, a listed quantifier and the document's own `the two COMMENT-ONLY
+            # modules` head — so a refuted membership claim walked through green. The
+            # determiner alternation is therefore INSIDE the loop: stripping stops only
+            # when a whole pass changes nothing, whichever filler it removed.
+            _before = None
+            while _before != low:
+                _before = low
+                low = re.sub(
+                    r"^(?:the|a|an|its|this|that|those|these"
+                    r"|just|only|still|now|actually|also|at\s+least|at\s+most"
+                    r"|more\s+than|no\s+fewer\s+than|exactly)\s+", "", low, count=1)
             low = re.sub(
                 r"^(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows"
                 r"|names|includes|contains|has)\s+", "", low, count=1)
+            # (no leading `` `? ``: :573 already stripped every backtick from `low`, so that
+            # branch could never match — dropped rather than left as an inert alternative.)
             _member = re.match(
-                r"(?:`?tortoise/|comment-only\b|non[- ]?empty\b"
+                r"(?:tortoise/|comment-only\b|non[- ]?empty\b"
                 r"|\d+\b|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b"
                 r"|nine\b|ten\b|both\b|single\b)", low)
-            # ⛔ A ZERO NUMERAL IS EMPTINESS, NOT MEMBERSHIP (#13795 review, round 4):
-            # `prints 0 paths` / `prints exactly zero paths` are TRUE at an empty head, and
-            # reading `\d+` first refused them — the same shape as the round-2 hedge bug,
-            # punishing a true sentence and rewarding its deletion. Tested BEFORE `_member`.
+            # ⛔ A ZERO NUMERAL IS EMPTINESS, FULL STOP (#13795 review, rounds 4 and 5):
+            # `prints 0 paths`, `prints exactly zero paths`, `prints 0 files` and
+            # `prints 0 lines` are all TRUE at an empty head. The first cut gated it on the
+            # following NOUN, so `0 files` fell through to `\d+` and was read as MEMBERSHIP —
+            # refusing a true sentence. Zero is emptiness whatever it counts.
             _empty = re.match(
-                r"(?:empty\b|nothing\b|none\b|zero\b|blank\b"
-                r"|0\b(?=\s*`?(?:path|paths|tortoise/|module|modules|set))"
-                r"|no\b\s*`?(?:path|paths|tortoise/))", low)
+                r"(?:empty\b|nothing\b|none\b|zero\b|blank\b|0\b"
+                r"|no\b\s*(?:path|paths|tortoise/))", low)
             if _empty:
                 claims_empty = True
             elif _member:
@@ -1003,13 +1028,39 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector skips or mis-reads {_member_spelling!r} — a MEMBERSHIP "
             "answer spelled the way this document writes it, so the refuted claim passes "
             "green (#13795 review, round-4 P1)")
-    for _zero_spelling in ("prints 0 paths", "prints exactly zero paths"):
+    for _zero_spelling in ("prints 0 paths", "prints exactly zero paths", "prints 0 files"):
         assert _typed_answers_to_tortoise_cmd(
             f"`{_tortoise_cmd}` {_zero_spelling}", _tortoise_cmd
         ) == [(_zero_spelling, True)], (
             f"the shape detector reads {_zero_spelling!r} as a MEMBERSHIP claim, so it "
             "REFUSES a true emptiness claim at an empty head — the round-2 hedge harm in "
             "the other direction (#13795 review, round-4 P2)")
+    # ⛔ AND FORMATTING IS NOT CONTENT (#13795 review, round 5): the head is normalised once
+    # (markdown emphasis and backticks stripped, fillers stripped to a fixpoint, the form
+    # matched case-insensitively), because the class this guard declares is "a listed form +
+    # a member/emptiness head token", not "one spelling of it". Each variant is pinned.
+    # ⛔ AND A FILLER IN FRONT OF A FILLER (#13728 review, P1): the last five spellings put a
+    # DETERMINER between the quantifier and the numeral, which is where the fixpoint used to
+    # stop — restoring the one-shot determiner strip reds exactly those rows.
+    for _formatted_spelling in (
+            "prints `two` paths",
+            "**prints** the two COMMENT-ONLY modules",
+            "prints _two_ paths",
+            "Prints two paths",
+            "prints now only one path",
+            "prints only the two COMMENT-ONLY modules",
+            "prints only a single path",
+            "prints just the two comment-only modules",
+            "prints at least the two comment-only modules",
+            "prints exactly the two comment-only modules"):
+        _seen = _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_formatted_spelling}", _tortoise_cmd)
+        assert _seen and _seen[0][1] is False, (
+            f"the shape detector skips or mis-reads {_formatted_spelling!r} — a "
+            "MEMBERSHIP answer whose only difference is emphasis, backticks, casing, a "
+            "second quantifier or a determiner between the quantifier and the numeral, so "
+            "a refuted claim in that format passes green (#13795 review, round-5 P1; "
+            "#13728 review, P1)")
     # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
     # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
     # a false membership claim at THIS (empty) head and would refuse the true sentence at a
