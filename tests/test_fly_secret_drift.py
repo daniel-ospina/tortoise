@@ -2630,16 +2630,22 @@ def _reviewer_entry_point() -> str:
     file rather than a line range that drifts under every edit above it.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
-    for start, line in enumerate(lines):
-        if "ENTRY-POINT FOR A REVIEWER" in line:
-            break
-    else:
+    # `next(...)` rather than a `for`/`break`: the heading's INDEX is used after
+    # the loop, so a loop-control variable would be a `B007` ("not used within
+    # loop body") — the lint that reddened `agent-infra-ci / lint` on the first
+    # push of this probe. Same fail-closed behaviour: `None` when the heading is
+    # gone.
+    heading = next(
+        (index for index, line in enumerate(lines) if "ENTRY-POINT FOR A REVIEWER" in line),
+        None,
+    )
+    if heading is None:
         raise AssertionError(
             "the manifest has no reviewer entry point — the probe is stale, and a "
             "stale probe would pass vacuously"
         )
     block: list[str] = []
-    for line in lines[start + 1:]:
+    for line in lines[heading + 1:]:
         if line.startswith("# ⛔"):
             break
         stripped = line.lstrip("#").strip()
