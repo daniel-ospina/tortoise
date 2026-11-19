@@ -2273,7 +2273,7 @@ def searcher(
                 logging.getLogger(LOG_NAME).debug(
                     "record dense leg: `%s` coverage is verified TRIVIALLY (%s) — "
                     "the record holds no vector for this label and neither did the "
-                    "graph, so this read is empty because the POPULATION is",
+                    "graph, so this read is empty because the POPULATION is empty",
                     entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
             # whose fold actually stops writing has a graph worth refusing.
