@@ -600,9 +600,32 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # the TRUE statement — the same class of error as the frozen sign this arm replaced
     # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
     # only where the measurement supports it.
-    _tortoise_set = subprocess.run(
+    # ⛔ THE BASE'S READABILITY IS CHECKED HERE TOO (#13802 review, finding 1 — P1).
+    # This leg used to take `.stdout` and drop the exit status, so on the depth-1 PR
+    # checkout `python-ci.yml` uses (`origin/main` unresolvable) the command failed with
+    # rc=128 and printed nothing, `_tortoise_set` came back EMPTY, and every spelling
+    # below was `.continue`d over — the arm asserted NOTHING in the only job that gates
+    # merges, while every other base-dependent leg reported UNPROVABLE. Measured by the
+    # reviewer on a real `--depth 1` clone: `11 passed, 2 skipped`, the census leg green
+    # and silent. An empty set is now only usable when it was MEASURED:
+    _tortoise_probe = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
-        cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
+        cwd=REPO, capture_output=True, text=True, check=False)
+    if _tortoise_probe.returncode != 0:
+        # NOT the unconditional direction the cite-set arms take: those have a fallback
+        # that still catches their defect class when the base is unreadable (no cite set
+        # can show a re-point here, so no attribution may be asserted). This leg has no
+        # such fallback — its prohibition is a claim about a DIFF, and with no base there
+        # is no diff to read, while asserting either direction unconditionally reds a
+        # document that is true at the head being merged. So it reports UNPROVABLE, by
+        # name, and the caller re-derives with the command rather than trusting a green.
+        pytest.skip(
+            "`git diff --name-only origin/main...HEAD -- tortoise/` cannot run in this "
+            f"checkout ({_base_ref_absent_detail() or 'the base ref does not resolve'}), "
+            "so the `-- tortoise/` membership leg is UNPROVABLE here — this is NOT a "
+            "pass: re-derive it with `git fetch origin main` then the command "
+            "(#13802 review, finding 1)")
+    _tortoise_set = _tortoise_probe.stdout.split()
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
@@ -749,19 +772,27 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # A re-point's NEW side has to resolve in the file it lands in, whatever the diff
     # did: the cites the document presents as the row's CURRENT values must name the
     # content the sentence says they name, at this head.
+    # ⛔ SCOPED TO WHAT IT ACTUALLY GRADES (#13802 review, finding 2 — P2). This loop
+    # used to REQUIRE both cites to be present and to blame `05-verify.md` for
+    # "present[ing] them as the row's current value" — a claim the document explicitly
+    # refuses to make ("read its value ... at the head you merge, never from this
+    # sentence"), and a requirement that reds every PR the moment `main` re-derives that
+    # row again (the document records that happening four times). The invariant that IS
+    # the tree's: WHEREVER `docs/00_index.md` carries one of these cites, the line it
+    # names must be the content that cite is for. A row `main` has moved is then not a
+    # false accusation against this document — the cite is simply no longer there.
     _sdk = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8").splitlines()
     for _cite, _needle in (
             ("sdk.py:21715", "_capture_stats_with_step_witness("),
             ("sdk.py:28178", "dedup_reviewed IS NULL")):
-        assert _cite in index, (
-            f"05-verify.md presents `{_cite}` as the row's current value; "
-            "`docs/00_index.md` carries no such cite (#13746 review, round 3, P2)")
+        if _cite not in index:
+            continue
         _n = int(_cite.rsplit(":", 1)[-1])
         assert _needle in _sdk[_n - 1], (
-            f"05-verify.md presents `{_cite}` as the row's current value, but "
-            f"`tortoise/sdk.py:{_n}` is {_sdk[_n - 1].strip()!r} — the cite does not "
-            "name the content the sentence says it names "
-            "(#13746 review, round 3, P2)")
+            f"`docs/00_index.md` carries `{_cite}`, but `tortoise/sdk.py:{_n}` is "
+            f"{_sdk[_n - 1].strip()!r} — that cite does not name the content it is "
+            "for, so a reader who follows it lands on an unrelated line "
+            "(#13746 review, round 3, P2; scoped by #13802 review, finding 2)")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # ARMS THAT NEED THE BASE REF (#13802 review, finding 3 — P1, blocking).
