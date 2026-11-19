@@ -3779,8 +3779,13 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         **PASSES** (fail-open, out of scope). ⛔ THEY ARE ONE CLASS WITH TWO DIFFERENT FIXES,
         which is why they are named separately instead of as "the one block kind" (review
         P3: the completeness word pointed the next fix at the wrong half). Every one is
-        measured against ``markdown_it(commonmark)``, which reads the label in all three as
-        its own paragraph; what differs is what has to learn about it:
+        measured against ``markdown_it(commonmark)``, and the READING is what splits the
+        class in two (⛔ NOT "all three give the label its own paragraph" — that reads as
+        if every paragraph OPENS with the label, which is true only of the break and the
+        fence): the BREAK and the FENCE make the label OPEN its own paragraph, while the
+        ROW makes ONE paragraph whose text OPENS with the table's leading ``|`` and carries
+        the label mid-paragraph — the same reason a mid-sentence bold run passes. What
+        differs is what has to learn about it:
         · the ROW's opening run is not read because the table's leading ``|`` sits BEFORE it
           — the same reason a mid-sentence bold run passes — so the fix lives in the
           STRIPPER, not in ``_PARAGRAPH_START_RE``: teaching that pattern a `|` row start
@@ -4460,9 +4465,12 @@ def test_the_block_kind_residuals_are_fail_open_by_a_commonmark_reading() -> Non
 
     Two facts are derived here, and neither is asserted in prose alone:
 
-    * a real CommonMark parser opens a paragraph for the label in all three shapes — which
-      is what makes the green pin above an honest DECLARED gap rather than the right answer
-      stated as a residual;
+    * a real CommonMark parser gives a reader-visible paragraph carrying the label in all
+      three shapes, though NOT the same way: the break and the fence make the label OPEN
+      its paragraph, while the row makes one paragraph that OPENS with ``|`` and carries
+      the label mid-paragraph. That difference is measured below rather than asserted in
+      prose, and it is what makes the green pin above an honest DECLARED gap rather than
+      the right answer stated as a residual;
     * the arm does NOT read any of the three — so the day one is closed, this test reds and
       says to move that shape to the refused set, instead of leaving a pin that is now a
       false claim.
@@ -4480,9 +4488,26 @@ def test_the_block_kind_residuals_are_fail_open_by_a_commonmark_reading() -> Non
         label_paragraphs = [tokens[index + 1].content
                             for index, token in enumerate(tokens[:-1])
                             if token.type == "paragraph_open"]
-        assert any("Owner approval" in paragraph for paragraph in label_paragraphs), (
-            f"a reader opens a paragraph for the label after a {kind}, which is what makes "
-            f"the green pin a DECLARED gap; measured rendered paragraphs: {label_paragraphs!r}")
+        # ⛔ THE PROPERTY, NOT A SUBSTRING (review P2 at `0e9f920d7f6`): "some paragraph
+        # CONTAINS the label" is satisfied by the ROW's own paragraph, whose text OPENS
+        # with `|` — so a containment assert passed for a reason that contradicts the
+        # comment it documents. The groups differ in exactly this, so each is asserted
+        # with its own shape and neither can stand in for the other.
+        opened = [p for p in label_paragraphs if _opening_approval_label(p)]
+        if kind == "table row":
+            assert label_paragraphs and all(p.lstrip().startswith("|")
+                                            for p in label_paragraphs), (
+                f"a reader gives the table row ONE paragraph whose text OPENS with `|`; "
+                f"measured rendered paragraphs: {label_paragraphs!r}")
+            assert not opened, (
+                f"the table row's label now OPENS its paragraph — that is the STRIPPER "
+                f"having learned the row, so this shape is no longer the fail-open this "
+                f"test declares: measured paragraphs: {label_paragraphs!r}")
+        else:
+            assert opened, (
+                f"a reader opens a paragraph for the label AFTER a {kind} — i.e. the "
+                f"label OPENS it; that is what makes the green pin a DECLARED gap; "
+                f"measured rendered paragraphs: {label_paragraphs!r}")
         assert not [paragraph for paragraph in _quoted_paragraphs(block)
                     if _opening_approval_label(paragraph)], (
             f"the {kind} shape is READ as a record now — that is an improvement, but it is "
