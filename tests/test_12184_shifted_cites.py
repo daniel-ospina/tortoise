@@ -121,13 +121,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is a docstring line at this
-    # head and on `origin/main`, where the statement is `:57387` (the `#13550` / `#13584`
-    # integration inserted 186 lines above it, and later merges 111 more — 297 in all). ⛔ AND EACH
+    # head and on `origin/main`, where the statement is `:57423` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
-    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57387` is
-    # NOT that head's), and `57276 + 111 = 57387` is `origin/main`'s and this head's. Measured per
+    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
+    # NOT that head's), and `57276 + 147 = 57423` is `origin/main`'s and this head's. Measured per
     # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
-    # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
+    # this comment named `:57423` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
     # makes the next one red instead of silent.
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
@@ -138,7 +138,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
     # those three (`sdk.py:57387`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
-    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +111 since
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
     (_AUDIT, '`sdk.py:57423` passes `"event"`', _SDK, 57423, 'entity_type="event"'),
@@ -876,7 +876,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
     # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
-    # and 297 by this head (`:57387`).
+    # and 333 by this head (`:57423`).
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     assert len(_PINS) == 59
 
