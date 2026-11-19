@@ -3391,9 +3391,9 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     beyond a static suite. That is exactly how the third defect of the same release
     shipped (*"remains open (#9063)"* for an issue closed COMPLETED in 2026-10-20);
     it was corrected in the text. ⛔ **Updated**: the CLAIM is now pinned for that
-    release by ``tests/test_13634_9063_pointer_resolves.py`` (claim forms, quoted
-    spans skipped) — what still has no arm is the TRACKER STATE itself, which no
-    static suite can read.
+    release by ``tests/test_13634_9063_pointer_resolves.py`` (claim forms; a quoted
+    span is skipped only when a correction marker introduces it) — what still has no
+    arm is the TRACKER STATE itself, which no static suite can read.
 
     ⛔ AND EACH DIRECTION IS ATTRIBUTED TO THE ARM THAT REFUSED IT (``_assert_refused_by``),
     not to "something raised": a bare ``pytest.raises`` is the exact shape this file's

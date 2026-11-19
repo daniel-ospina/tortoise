@@ -361,8 +361,8 @@ F1, a closed node keeps both its full-strength posterior and its vote.
    `{superseded, deprecated, archived, retracted}`). Whether a completed work item should stop being
    evidence is a model decision; I did not take it.
 4. **Declared priors for entities.** Their absence is **not an accident of the code**: no writer
-   exists, and `set_point_baseline` refuses a non-Point **by design**
-   (`sdk.py::TortoiseSDK.set_point_baseline`, cited by SYMBOL). ⛔ **#9063 raised this question,
+   exists, and `set_point_baseline` refuses a non-Point (the writer is `:Point`-only — a code fact,
+   not a recorded decision) (`sdk.py::TortoiseSDK.set_point_baseline`, cited by SYMBOL). ⛔ **#9063 raised this question,
    reserved it to the owner, and closed COMPLETED on 2026-10-20 WITHOUT deciding it** — so
    `remains open (#9063)` pointed a reader at a **closed** issue for a question that is still
    undecided. That is the state today: the question is open, and **no open issue tracks it** (#9063's

@@ -206,6 +206,10 @@ def test_no_v338_entry_calls_9063_the_open_tracker():
         'The withdrawn claim "remains open (#9063)" is retired.',
         'The v3.36 entry asserted "remains open (#9063)".',
         'It carried *"whether declared priors remain open (#9063)"*, now retired.',
+        # The two alternatives a mutation sweep proved were UNPINNED (deleting either stayed green):
+        # the `reads`/`read` record verb, and the single-curly glyph family.
+        'The v3.38 entry reads `remains open (#9063)`; that was false.',
+        "The old wording, withdrawn, read \u2018remains open (#9063)\u2019.",
         "As merged it read \u201cremains open (#9063)\u201d and that was false.",
         "The wording used to read \u00abremains open (#9063)\u00bb before the correction.",
         "The earlier text, withdrawn, used to read `remains open (#9063)`.",
