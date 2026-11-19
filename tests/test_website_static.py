@@ -256,6 +256,24 @@ def _pricing_init_code(html: str, page: str = "product.html") -> str:
     return hits[0]
 
 
+def _code_only(code: str) -> str:
+    """`code` with every JS comment removed — block AND line, whole-line
+    or trailing.
+
+    Whole-line stripping alone is not enough where the result feeds a PRESENCE
+    check: a trailing `// opt_in_capturing() is now handled inside …` satisfied
+    `str.find` while the real call was gone (#13696 round 7). `_strip_comment_lines`
+    stays the tool for the price channels, where a trailing comment is meant to
+    be scanned WITH the code (it fails closed there — the line is read as
+    written); this helper is for the rows that ask "is the call there at all",
+    where a mention is indistinguishable from the call and so must not count.
+
+    `(?<!:)` keeps a `//` that is part of a URL scheme (`https://…`) intact.
+    """
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", "", code)
+
+
 def _strip_comment_lines(code: str) -> str:
     """`code` with every WHOLLY-comment line removed and every comment SPAN cut.
 
@@ -7207,22 +7225,50 @@ def _without_html_comments(markup: str) -> str:
 def _pricing_source_includes(html: str) -> list[str]:
     """The `src` of every `<script>` the browser PARSES, in source order.
 
-    Commented-out tags are excluded: they are not in the page, so a row that
-    pins them must not see them (see `_without_html_comments`).
+    TWO independent properties, kept together because either one alone leaves a
+    channel unread:
+
+    - COMMENTED-OUT tags are excluded (`_without_html_comments`): they are not
+      in the page, so a row that pins them must not see them.
+    - The attribute is parsed TOLERANTLY — `src="…"`, `src='…'` and
+      `src = "…"` all count. A stricter spelling does not merely misread the
+      attribute: the tag is then skipped by `_inline_scripts` (its
+      `\\bsrc\\s*=` test still excludes it) and deleted by `_served`, so the
+      file it loads is in NO channel at all (measured, #13696 round 7: the same
+      price-bearing asset was read red under `src="…"` and left 219 rows green
+      under `src='…'`).
     """
     return re.findall(
-        r'<script\b[^>]*\bsrc="([^"]+)"', _without_html_comments(html), re.I)
+        r"""<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""",
+        _without_html_comments(html), re.I)
 
 
 #: ONE spelling of a price figure, shared by the rows that refuse a second copy
 #: of it outside the shared table.
-PRICE_FIGURE_RE = re.compile(r"\$\s?\d")
+#:
+#: ⛔ The tag group is load-bearing: the section slice is MARKUP, not text, and
+#: both pages already style a price in parts (`<div class="price">$119<span>
+#: /mo</span></div>`), so `$<b>89</b>/mo` — which a reader sees as `$89/mo` — is
+#: the natural way to write a figure. Without this it matched nothing and left
+#: 219 rows green (#13696 round 7). It does NOT let tags join two figures:
+#: digits must follow the tag run, so `$1</div>…428` still yields only `$1`.
+PRICE_FIGURE_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d")
 
 #: A whole figure, for the row that asks whether the SHARED SOURCE can produce
-#: it. Kept separate from `PRICE_FIGURE_RE` on purpose: the detector must stay
-#: `$`+digit so it cannot be narrowed out of a channel, while an extracted value
-#: needs its digits to be compared.
-PRICE_ONLY_RE = re.compile(r"\$\s?\d[\d,]*")
+#: it. Same tag tolerance as the detector, so a figure cannot be read as
+#: present-but-different; `_figures` normalises the match back to `$89` before
+#: any comparison.
+PRICE_ONLY_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*")
+
+
+def _figures(text: str) -> list[str]:
+    """Every `$` figure in `text`, inline markup removed from INSIDE the match.
+
+    Normalised per MATCH, never over the whole document: stripping tags
+    document-wide would splice `$1</div><div>428` into a figure (`$1428`) that
+    neither the page nor the source states.
+    """
+    return [re.sub(r"<[^>]+>", "", m) for m in PRICE_ONLY_RE.findall(text)]
 
 
 def _inline_scripts(html: str) -> list[str]:
@@ -7466,7 +7512,7 @@ class TestPricingSourceIsShared:
                 "section compare above is the thing that finds the boundary")
             outside = served.replace(section, "", 1)
             hits = [outside[max(0, m.start() - 50):m.end() + 20].strip()
-                    for m in re.finditer(r"\$\s?\d", outside)]
+                    for m in re.finditer(PRICE_FIGURE_RE, outside)]
             assert not hits, (
                 f"{name} quotes a price OUTSIDE the pricing section:\n  "
                 + "\n  ".join(hits)
@@ -7675,14 +7721,14 @@ class TestPricingSourceIsShared:
         for tier in pricing["tiers"].values():
             for mode in ("monthly", "annual"):
                 for rendered in _fmt_price(tier["price"], mode, disc):
-                    allowed.update(PRICE_ONLY_RE.findall(rendered))
+                    allowed.update(_figures(rendered))
         for key in ("overage_line", "license_self_hosted"):
-            allowed.update(PRICE_ONLY_RE.findall(pricing["display"][key]))
+            allowed.update(_figures(pricing["display"][key]))
         assert allowed, "the shared source yields no figure at all — this row is vacuous"
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             section = unescape(_served(_pricing_section(
                 path.read_text(encoding="utf-8"))))
-            stray = sorted(set(PRICE_ONLY_RE.findall(section)) - allowed)
+            stray = sorted(set(_figures(section)) - allowed)
             assert not stray, (
                 f"{name} quotes {stray!r} inside `#pricing-section`, and the "
                 f"shared source can produce only {sorted(allowed)!r}. Both "
@@ -7782,7 +7828,7 @@ class TestConsentSeam:
             # visitor's page view was dropped by an instrument that stayed green.
             # The file's own `_strip_comment_lines` is the exact instrument and
             # is already used by `_render_code`/`_inline_scripts` for this hazard.
-            return _strip_comment_lines(src[m.start():end])
+            return _code_only(src[m.start():end])
         raise AssertionError(
             f"no `function {name}(` at the module's own indent in consent.js — "
             "this gate's subject moved, so it is no longer asserting order")
