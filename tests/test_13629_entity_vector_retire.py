@@ -22,7 +22,8 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_a_stale_plan_naming_the_delta` | the exact-set precondition | a population that moved between plan and execute is stripped anyway |
 | `test_execute_refuses_a_graph_only_node_and_removes_nothing` | the parity refusal is BEFORE the first write | the only copy of a fingerprint is removed, or removed before the refusal |
 | `test_execute_refuses_while_the_write_path_still_emits_vectors` | the write gate | a strip runs into a live writer and is silently undone |
-| `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` | fail-closed in every unknown | an unreadable gate reads as permission |
+| `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` / `…cannot_be_imported` | fail-closed in every unknown | an unreadable gate reads as permission |
+| `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last step before the delete licence | the arm is inverted or deleted, so an unmapped type is answered by whatever population joins `None` |
 | `test_label_write_gate_requires_every_entity_type_addressing_the_label` | `:Source` serves TWO types | a strip lands on the document half while `source` still writes |
 | `test_execute_strips_the_planned_set_and_reports_the_count` | the batched `REMOVE` | a partial strip reports a complete one |
 | `test_execute_refuses_an_empty_plan_unless_expect_empty` | "nothing to strip" is a refusal | an empty plan reports a finished retirement |
@@ -507,6 +508,66 @@ def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "not a permission" in reason
+
+
+def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
+    """⛔ THE THIRD UNKNOWN, and the one with no falsifier at all.
+
+    `write_gate` looks the module up inside its own `try` so an unlanded symbol cannot hide
+    behind an `ImportError` — but the IMPORT ITSELF can raise, and that arm is a different
+    unknown from `…raises` (which drives a gate that raises *after* a successful import).
+    Inverting its polarity to `return False` left the whole file **green (measured: 90
+    passed)**, and the polarity here is the deliberate inversion the docstring states: a
+    module we cannot import proves nothing about any writer, so it must never licence a
+    delete.
+    """
+    import sys
+
+    import tortoise
+
+    monkeypatch.delattr(tortoise, "record_vector", raising=False)
+    monkeypatch.setitem(sys.modules, "tortoise.record_vector", None)
+
+    emits, reason = strip.write_gate("object")
+    assert emits is True, f"an unimportable gate licensed a delete ({reason})"
+    assert "could not be imported" in reason
+    assert "STILL EMITTING" in reason
+
+
+def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypatch):
+    """⛔ The `entity_type`→label mapping is the last step before the delete licence.
+
+    Everything below this arm — `_fold_consults_gate(label)` and its population check — is
+    asked about a LABEL, and there is exactly one way to get one. Inverting the arm to
+    `return False` left the whole file **green (measured: 90 passed)**, and the arm is
+    reachable: the record predicate answers `False` for an unmapped type exactly as it does
+    for a mapped one.
+
+    ⛔ AND THE ARM IS NOT A FORMALITY ONE DECLARATION AWAY. `LABELS_AT_RUNTIME` joins EVERY
+    label's population, so without this arm `_writers_for(None)` stops being empty while
+    `affected_entity_types(None)` is `[]` — nothing is `missing`, nothing is `ungated`, and
+    the fold gate certifies the unmapped type. The second half of this test drives that
+    population on purpose: with the arm deleted it answers `emits is False`, i.e. a delete
+    licence minted for a label nothing serves.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
+                        raising=False)
+
+    emits, reason = strip.write_gate("no_such_entity_type_13647")
+    assert emits is True, f"an unmapped entity_type licensed a delete ({reason})"
+    assert "no declared graph label" in reason
+
+    # …and the refusal survives the population that makes the hole reachable.
+    monkeypatch.setattr(strip, "_register_writers",
+                        lambda label: ("tortoise.sdk::_runtime_only",))
+    monkeypatch.setattr(strip, "_writer_consults_gate", lambda *a, **k: (True, "asks"))
+    emits, reason = strip.write_gate("no_such_entity_type_13647")
+    assert emits is True, (
+        "a runtime-labels writer made an unmapped entity_type look write-stopped, so the "
+        f"strip would be licensed on a label nothing serves ({reason})")
+    assert "no declared graph label" in reason
 
 
 def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
