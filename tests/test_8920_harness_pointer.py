@@ -81,8 +81,12 @@ PRODUCTION_DIR = ROOT / "tortoise"
 #: opposite in direction: the `.py` shape fails SILENT (a pointer to a deleted
 #: `.py` test stays green — #13765), while this one fails LOUD. Neither is a
 #: reason to trust the other.
+#: ⛔ The dotted alternative allows INNER SEGMENTS (`tests.eval.harness.grading
+#: .SomeSymbol`): it did not, and an unmatched token is neither asserted nor
+#: listed — the same silent-loss shape as a fail-open branch, for a module the
+#: SLASH spelling of the same pointer would have guarded in full.
 _POINTER = re.compile(
-    r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+)\.(?P<dsym>[A-Za-z0-9_]+)"
+    r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\.(?P<dsym>[A-Za-z0-9_]+)"
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
 )
 
@@ -240,11 +244,18 @@ def _production_pointers(
     (`tests.x.json`, `tests.x.py`) is LISTED, and a dotted module pointer is
     imported and looked up — one rule, not two.
     """
-    #: ⚠️ EXACTLY `rglob`, and the DIRECTORY SEAM is why this is testable: the
-    #: real tree carries no dotted FILE pointer, so a regression in the dotted
-    #: branch would be invisible to every assertion made against the real tree.
-    #: `production_dir`/`tests_dir` let a `tmp_path` tree drive the ROUTING (not
-    #: just `_classify`), which is where the branch actually lives.
+    #: ⚠️ WHAT THE SYNTHETIC TREES ADD, MEASURED — stated this precisely because
+    #: two earlier cuts of this note claimed the opposite and were refuted by the
+    #: tree. Of the four real SYMBOL pointers, ONE is dotted
+    #: (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
+    #: (`tests/_embedded._projection_host`, two in `tests/_http_fixtures`), so the
+    #: real tree DOES exercise the slash SYMBOL rule. It also already reaches the
+    #: slash FILE-side conjunct four times (`tests/sample_transcript.txt`,
+    #: `tests/_assembly_census.json` twice, and
+    #: `tests/test_middleware_host_consolidation.mjs` — pinned by the mjs test
+    #: above). What NO real token reaches is the DOTTED spelling's FILE routing
+    #: (the tree carries zero dotted file pointers) and the multi-segment dotted
+    #: shape. Those are what the synthetic cases and `test_both_spellings_...` pin.
     production_dir = PRODUCTION_DIR if production_dir is None else production_dir
     tests_dir = TESTS_DIR if tests_dir is None else tests_dir
     symbols: list[tuple[Path, str, str, str]] = []
@@ -379,7 +390,8 @@ def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path)
     (prod / "probe.py").write_text(
         "`tests.harness.mjs` `tests.test_present.py` `tests.test_present.X`\n"
         "`tests.test_dotted_away.SomeSymbol`\n"
-        "`tests/test_slash_away.SomeSymbol`\n",
+        "`tests/test_slash_away.SomeSymbol`\n"
+        "`tests.sub.mod.SomeSymbol`\n",
         encoding="utf-8",
     )
     syms, files = _production_pointers(production_dir=prod, tests_dir=tests)
@@ -404,6 +416,12 @@ def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path)
     # a dotted module pointer that DOES exist is asserted, not listed
     assert "tests.test_present" in sym_modules, (
         f"the dotted module pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    # a MULTI-SEGMENT dotted pointer is no longer silently unscanned: the shape
+    # must MATCH, so the module reaches the import assertion. There is no
+    # `tests/sub/mod.py` here, so it is a SYMBOL pointer — i.e. it would red.
+    assert "tests.sub.mod" in sym_modules, (
+        f"the multi-segment dotted pointer fell out of the scan: syms={sorted(sym_modules)}"
     )
 
 
