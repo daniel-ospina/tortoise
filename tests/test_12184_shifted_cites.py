@@ -136,7 +136,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57387`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57423`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
@@ -165,6 +165,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
     (_SUBSTRATE, "`:3506`", _SE, 3506, "# #11682: the corpus join is PER FAMILY"),
+    # ⛔ The two `:Document` addresses §5's #12915 move names had NO pin, and that is how BOTH shipped
+    # one line high — `:37143`/`:37185` are the `:Source` lines of those two docstrings, so the cites
+    # pointed a reader just OUTSIDE the set §5 censuses (§5 counts `git grep -n` lines carrying
+    # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
+    # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
+    # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
+    (_SUBSTRATE, "tortoise/sdk.py:37144", _SDK, 37144, "``:Document`` node)."),
+    (_SUBSTRATE, "`:37186` in `_file_human_approval`", _SDK, 37186, "``:Document`` node)."),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -309,6 +317,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6891'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37144'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37186` in `_file_human_approval`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -877,8 +887,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
     # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
     # and 333 by this head (`:57423`).
+    # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
+    # names (`:37144` / `:37186`) had NO pin at all — both shipped one line high (on the `:Source`
+    # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
+    # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28008` rows above.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 59
+    assert len(_PINS) == 61
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
