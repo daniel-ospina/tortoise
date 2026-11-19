@@ -475,7 +475,7 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     # "emits" — the record's coverage does not stop a write nobody gated.
     emits, reason = strip.write_gate("object")
     assert emits is True
-    assert "writes `embedding` without CALLING" in reason
+    assert "writes `embedding` without an early-exit" in reason
     # …and the reason NAMES the writers, so an operator can read which code to fix.
     assert "_upsert_object" in reason
     # ⛔ AND IT NAMES THE WRITERS THE FOLD MAP ALONE MISSED. `tortoise.sdk::_update_entity`
@@ -499,7 +499,7 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
         "tortoise.projection.entities", "_upsert_event")
     assert gated is False
     assert "tortoise.projection.entities::_upsert_event" in why
-    assert "without CALLING" in why
+    assert "without an early-exit" in why
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -537,6 +537,40 @@ def _upsert_object(ev):
         return None
     return _write(ev)
 """
+
+#: Shapes that CALL the gate and write anyway. Each is refused: the call must ask about
+#: THIS label, must not be short-circuited away, and its branch must EXIT.
+WRITER_CALL_BUT_UNGATED = (
+    # asks about a DIFFERENT label (a five-label writer's partial write-stop)
+    """
+def _upsert_object(ev):
+    if mirror_required("source"):
+        return None
+    return _write(ev)
+""",
+    # a computed argument the tool cannot attribute to this label
+    """
+def _upsert_object(ev):
+    kind = "object"
+    if mirror_required(kind):
+        return None
+    return _write(ev)
+""",
+    # short-circuited: the branch is taken either way
+    """
+def _upsert_object(ev):
+    if mirror_required("object") or True:
+        return _write(ev)
+    return None
+""",
+    # a call that decides nothing: the write runs regardless
+    """
+def _upsert_object(ev):
+    if mirror_required("object"):
+        _bump_counter()
+    return _write(ev)
+""",
+)
 
 #: A gate call that is RETURNED while the write has already happened — the "dying
 #: declaration" one line further along. None of these may count as gated.
@@ -596,7 +630,12 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object")
         assert gated is False, f"{source!r} was accepted as a gate"
-        assert "without CALLING" in why
+        assert "without an early-exit" in why
+
+    for source in WRITER_CALL_BUT_UNGATED:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"an un-attributed / short-circuited gate was accepted: {source!r}"
 
     for source in WRITER_RETURNED_NOT_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -605,10 +644,11 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
 
     for source in WRITER_RETURNED_AND_DECIDING:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
-        assert strip._writer_consults_gate(module, "_upsert_object")[0] is True, source
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, source
 
     module = _fake_writer_module(tmp_path, monkeypatch, WRITER_GATED)
-    assert strip._writer_consults_gate(module, "_upsert_object")[0] is True
+    assert strip._writer_consults_gate(module, "_upsert_object", ("object",))[0] is True
     # The positive direction must survive reformatting that a substring check would miss.
     module = _fake_writer_module(
         tmp_path, monkeypatch, """
@@ -620,7 +660,8 @@ def _upsert_object(ev):
     # ⛔ A LOCAL ALIAS IS *NOT* ACCEPTED, and that is deliberate: `gate = mirror_required`
     # then `gate(...)` cannot be resolved without data flow, and accepting any call would
     # accept `f(...)`. Failing closed costs a refactor; failing open costs the data.
-    assert strip._writer_consults_gate(module, "_upsert_object")[0] is False
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is False
 
 
 def test_the_gate_check_is_fail_closed_on_an_unreadable_or_renamed_writer(
@@ -729,11 +770,19 @@ def test_a_plan_that_lists_a_label_twice_is_refused(tmp_path):
     assert "more than once" in str(excinfo.value)
 
 
-def test_execute_honours_the_plans_recorded_batch(tmp_path):
-    """A recorded value must not be silently ignored at the moment it is used."""
+def test_main_honours_the_plans_recorded_batch_and_the_flag_overrides_it(
+        tmp_path, monkeypatch):
+    """A recorded value must not be silently ignored at the moment it is used.
+
+    ⛔ THIS DRIVES `main`, which is where the resolution lives. The earlier version of this
+    test asserted `int(plan["batch"]) == 7` — a Python expression about a dict it had just
+    built, which stayed green when the fix was reverted, because `main` is the only caller
+    that resolves the value and every other `execute` test passes `batch=` explicitly.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x")
     plan = {
         "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
-        "graph": "g", "graph_uri": "docker://x/g", "org_id": "o", "graph_id": "g",
+        "graph": "g", "graph_uri": "docker://h:6379/g", "org_id": "o", "graph_id": "g",
         "batch": 7,
         "labels": [{"label": "Object", "keys": ["obj-1"], "nodes": 1,
                     "unkeyed_nodes_blocking": 0, "strip_ready": True,
@@ -741,9 +790,37 @@ def test_execute_honours_the_plans_recorded_batch(tmp_path):
         "total_nodes": 1,
     }
     plan["digest"] = strip.digest(strip.plan_entries(plan))
-    assert strip.plan_entries(plan) == [("Object", "obj-1")]
-    # The CLI resolves `--batch` OR the plan's value; the plan's is the fallback.
-    assert int(plan.get("batch") or strip.DEFAULT_BATCH) == 7
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    import tortoise.projection as projection
+
+    seen: dict = {}
+
+    class _Proj:
+        g = "GRAPH"
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj()),
+                                       "__init__": lambda self, *a, **k: None}))
+    monkeypatch.setattr(strip.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(strip.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(strip.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+    monkeypatch.setattr(strip, "execute",
+                        lambda **kwargs: seen.update(kwargs) or {"removed": 0})
+    monkeypatch.setattr(strip, "result_exit_code", lambda result: 0)
+
+    base = ["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+            "--org-id", "o", "--graph-id", "g",
+            "--execute", "--plan", str(plan_path),
+            "--confirm-plan-digest", plan["digest"]]
+
+    assert strip.main(base) == 0
+    assert seen["batch"] == 7, seen["batch"]          # the plan's recorded value
+
+    assert strip.main([*base, "--batch", "2"]) == 0
+    assert seen["batch"] == 2                          # an explicit flag wins
 
 
 def test_an_unreadable_or_empty_writer_population_is_not_evidence(monkeypatch):

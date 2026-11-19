@@ -62,7 +62,9 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
     asks the gate** — not "the fold does". The gate therefore refuses all four labels
-    today, INCLUDING after #13617 lands, and it names each un-cleared writer. That is the
+    today, INCLUDING after #13617 lands. When the coverage predicate is present it names
+    each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
+    it names the requirement rather than the writers. That is the
     true state of a two-pronged retirement, and it is a satisfiable one: as each
     writer's `stores` entry loses the label, the gate opens for it. Testing that the gate
     CAN open (rather than only that it refuses) is
@@ -251,10 +253,13 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     "Object": ("_upsert_object",),
     "Subject": ("_upsert_subject",),
     "Event": ("_upsert_event", "_event_plain_merge"),
-    # `_event_plain_merge` MERGEs `(s:Source {url:$id})` and sets its embedding, so the
-    # source label has THREE writers, not two — verified by walking `MERGE (x:Label`
-    # targets in each fold body, not by reading the function names.
-    "Source": ("_upsert_source", "_upsert_document", "_event_plain_merge"),
+    # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
+    # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
+    # `set_embedding_clause("e")`), so it writes the EVENT vector, not the Source one. A
+    # MERGE-target walk finds the Source and stops — which is how an earlier comment
+    # "verified" a write that does not happen, and it made `:Source` permanently
+    # unopenable on a function that cannot legitimately ask about a vector it never writes.
+    "Source": ("_upsert_source", "_upsert_document"),
 }
 
 #: The gate predicates. A writer must CALL one of these; merely mentioning it is not enough.
@@ -328,7 +333,7 @@ def _gate_call(node) -> bool:
     return False
 
 
-def _asks_the_gate(node) -> bool:
+def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     """Does this function ASK the gate — i.e. let its answer steer control flow?
 
     ⛔ THREE WAYS TO BE WRONG, and each one was a real hole in the first version of this
@@ -346,6 +351,23 @@ def _asks_the_gate(node) -> bool:
     TEST that is not a constant. That is the shape the real write-stop uses (`if
     _derived_mirror_required("object"):` around the encode in `_upsert_object`), and it is
     the ONLY position where the gate demonstrably prevents a write *inside the function*.
+
+    ⛔ AND IT MUST BE ASKED **ABOUT THIS LABEL**. `_update_entity` and `restore_graph` each
+    store FIVE labels, so a gate call is not a fact about all of them: a partial write-stop
+    shaped `if _derived_mirror_required("object"): props.pop("embedding")` leaves the
+    Source/Event stores unconditional, and a name-only match would clear every label that
+    function declares — the "one boolean meaning five things" defect this file already
+    fixed once at the fold level. So the call's first positional argument must be a
+    STRING CONSTANT naming one of the label's own ``entity_types``; a computed argument is
+    "still emits", because the tool cannot tell which label it asked about.
+
+    ⛔ AND THE TESTED BRANCH MUST EXIT. `if mirror_required("object"): _bump_counter()`
+    calls the gate, and the write then runs anyway; `if g(...) or True:` and
+    `while g(): break` are the same shape. The accepted form is an ``if`` whose test asks
+    the gate about this label and whose body RETURNS or RAISES — the early-exit write-stop
+    `#13617` actually uses (`if _derived_mirror_required("object"): return` /
+    `if not …: return`), where the guarded branch demonstrably skips the rest of the
+    function. Refusing the weaker shapes costs a refactor; accepting one costs the race.
 
     ⛔ A RETURNED VALUE IS NOT ACCEPTED, even when it is the gate's own answer.
     ``self._write(ev); return mirror_required("object")``, ``return (self._write(ev),
@@ -368,20 +390,52 @@ def _asks_the_gate(node) -> bool:
     """
     import ast
 
+    wanted = set(entity_types)
     for sub in ast.walk(node):
-        if isinstance(sub, ast.If | ast.While | ast.IfExp):
-            if isinstance(sub.test, ast.Constant):
-                continue                      # `if False:` — dead, decides nothing
-            # ⛔ THE TEST SUBTREE covers the boolean/negation forms (`not g(...)`,
-            # `g(...) and _write()`), because the call sits INSIDE the test. Reading
-            # `BoolOp.value`/`UnaryOp.value` — as an earlier version did — read a field
-            # those nodes do not have, so both promised arms were dead code.
-            if _gate_call(sub.test):
-                return True
+        if not isinstance(sub, ast.If):
+            continue
+        if isinstance(sub.test, ast.Constant):
+            continue                          # `if False:` — dead, decides nothing
+        if not _asks_about(sub.test, wanted):
+            continue
+        if any(isinstance(child, ast.Return | ast.Raise)
+               for child in ast.walk(sub) if child is not sub):
+            return True
     return False
 
 
-def _writer_consults_gate(module_name: str, symbol: str) -> tuple[bool, str]:
+def _asks_about(test, wanted: set[str]) -> bool:
+    """Does this test CALL the gate about one of ``wanted`` (a label's entity types)?"""
+    import ast
+
+    # ⛔ SHORT-CIRCUITED AWAY IS NOT ASKED. `if g("object") or True:` contains the call and
+    # its answer decides nothing — the branch is taken either way. A constant operand of a
+    # boolean operator makes the whole test constant in the direction that matters, so the
+    # test is refused rather than read as a gate.
+    for sub in ast.walk(test):
+        if isinstance(sub, ast.BoolOp):
+            for operand in sub.values:
+                if isinstance(operand, ast.Constant):
+                    return False
+
+    for sub in ast.walk(test):
+        if not isinstance(sub, ast.Call):
+            continue
+        callee = sub.func
+        name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+        if name not in _GATE_REFERENCES:
+            continue
+        if not sub.args:
+            continue
+        first = sub.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                and first.value in wanted:
+            return True
+    return False
+
+
+def _writer_consults_gate(module_name: str, symbol: str,
+                          entity_types: tuple[str, ...] | None = None) -> tuple[bool, str]:
     """``(gated, reason)`` for ONE ``module::symbol`` writer of a retired label."""
     try:
         bodies = _function_bodies(_module_source(module_name))
@@ -393,12 +447,14 @@ def _writer_consults_gate(module_name: str, symbol: str) -> tuple[bool, str]:
             f"`{symbol}` is ABSENT from {module_name} — a renamed writer cannot be proven "
             "stopped")
     # EVERY definition must ask, not just one: a shadowed first definition is a writer too.
-    ungated = [d.lineno for d in definitions if not _asks_the_gate(d)]
+    wanted = tuple(entity_types or ())
+    ungated = [d.lineno for d in definitions
+               if not (wanted and _asks_the_gate(d, wanted))]
     if ungated:
         return False, (
             f"`{module_name}::{symbol}` (definition at line(s) "
-            f"{', '.join(str(n) for n in ungated)}) writes `embedding` without CALLING "
-            f"`{WRITE_GATE_SYMBOL}`")
+            f"{', '.join(str(n) for n in ungated)}) writes `embedding` without an "
+            f"early-exit `if {WRITE_GATE_SYMBOL}(<this label>): return/raise`")
     return True, f"{module_name}::{symbol} calls the gate"
 
 
@@ -438,10 +494,11 @@ def _fold_consults_gate(label: str) -> tuple[bool, str]:
     writers, refusal = _writers_for(label)
     if refusal:
         return False, refusal
+    entity_types = tuple(parity.affected_entity_types(label))
     ungated: list[str] = []
     for key in writers:
         module_name, _, symbol = key.partition("::")
-        gated, why = _writer_consults_gate(module_name, symbol)
+        gated, why = _writer_consults_gate(module_name, symbol, entity_types)
         if not gated:
             ungated.append(why)
     if ungated:
@@ -475,13 +532,18 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
     gate = getattr(record_vector, WRITE_GATE_SYMBOL, None)
     if gate is None:
         return True, (
-            f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL} is ABSENT on this tree, so the "
-            "graph fold still derives and writes this label's vector on every write "
-            "(including ON MATCH). #13610's write half (PR #13617) gates the "
-            "object/subject folds only; it leaves the event, source and document folds "
-            "writing unconditionally — which this function ALSO checks below, so the "
-            "predicate appearing is necessary and not sufficient. Stripping now would "
-            "be undone by the next write of the same node")
+            f"{WRITE_GATE_MODULE}.{WRITE_GATE_SYMBOL} is ABSENT on this tree, so EVERY "
+            "writer of this label still derives and writes its vector on every call "
+            "(including ON MATCH) and no write-stop exists to consult. ⛔ THE WRITERS ARE "
+            "NOT ONLY THE FOLDS: `tortoise.projection.entities` is where the encode lives, "
+            "but the same property is stored by `tortoise.sdk::_update_entity` (a "
+            "caller-supplied `embedding` through `SET n += $props`), by "
+            "`tortoise.hosted_backup::restore_graph` and, for `:Event`, by five more "
+            "`sdk`/`session_indexer` writers — each of which re-adds the vector on its "
+            "next call. The requirement this tool enforces is therefore EVERY declared "
+            "writer of the label (see `_writers_for`), which `#13617` alone does not "
+            "satisfy: it gates the object/subject FOLDS. Stripping now would be undone by "
+            "the next write of the same node")
     try:
         needed = bool(gate(entity_type))
     except Exception as exc:  # a raising gate is not a permission
