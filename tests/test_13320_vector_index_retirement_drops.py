@@ -228,6 +228,13 @@ def test_an_armed_setup_REMOVES_a_real_in_graph_vector_index(monkeypatch, caplog
 
         monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
         monkeypatch.setenv(ARMING_ENV, "1")
+        # ⛔ AND AN EXPLICIT ARM — which is the `=1` above and nothing else (#13631).
+        # The RECORD TENANT that used to be set here was the retired condition: being
+        # armed stopped meaning "the record answers" when the arm became the default,
+        # and the DROP runs at setup, before any coverage can exist, so it asks the
+        # store-scoped operator statement (`record_vector.arm_is_explicit`) instead.
+        # A tenant is request-scoped and `vector_index_retired()` reads none — the
+        # lines this comment replaces were inert, and asserted nothing.
         assert vector_index_retired() is True, (
             "the store is not armed, so this pin is not testing the retirement")
 
@@ -399,6 +406,13 @@ def _bare(graph_obj, *, graph: str = "test_13320_bare") -> FalkorProjection:
 
 
 def _arm(monkeypatch):
+    """The EXPLICIT-ARM posture `vector_index_retired` asks for (see `#13631`).
+
+    ⛔ The tenant triple that used to be set here was INERT: the predicate reads
+    `record_dsn()` and `arm_is_explicit()` and no tenant at all, so those lines
+    asserted nothing while their comment told the next editor they were the
+    third condition. The arm is the `=1`.
+    """
     monkeypatch.setenv(RECORD_DSN_ENV, _RECORD_DSN)
     monkeypatch.setenv(ARMING_ENV, "1")
 

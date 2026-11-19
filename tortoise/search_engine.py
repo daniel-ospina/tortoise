@@ -3640,6 +3640,47 @@ def run_bm25_query(
         return []
 
 
+class _NeverRaised(Exception):
+    """A never-matching `except` target for import-failure resilience (#13610)."""
+
+
+def _record_answer_marker() -> type:
+    """`record_vector.RecordAnswer`, resolved LAZILY (#13610).
+
+    The class that says *the record's dense answer is the WHOLE answer, empty
+    included*. Lazy for the same reason as :func:`_record_without_fallback` —
+    `record_vector` imports THIS module — and `_NeverRaised` is a safe stand-in:
+    nothing can be an instance of it, so an unimportable `record_vector` reads as
+    "no contracted answer was handed to me", which is the pre-contract behaviour
+    (an empty leg falls through to the graph) and cannot be reached here anyway,
+    because no searcher could have been built without that import.
+    """
+    try:
+        from .record_vector import RecordAnswer
+
+        return RecordAnswer
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return _NeverRaised
+
+
+def _record_without_fallback() -> type[BaseException]:
+    """`record_vector.RecordVectorWithoutFallback`, resolved LAZILY (#13610).
+
+    ⛔ LAZY, and the failure is SWALLOWED, because `record_vector` imports THIS
+    module (the status vocabulary, the budget arithmetic) and a module-scope import
+    the other way would close the cycle. The swallow cannot hide a real state:
+    nothing can raise this class unless `record_vector` imported successfully in
+    the caller that BUILT the searcher, so an unimportable `record_vector` means
+    `pg_vector` was never supplied and this `except` clause is never reached.
+    """
+    try:
+        from .record_vector import RecordVectorWithoutFallback
+
+        return RecordVectorWithoutFallback
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return _NeverRaised
+
+
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20,
     timeout_ms: int = VECTOR_LEG_BUDGET_MS,
@@ -4053,9 +4094,11 @@ def run_vector_query(
     #             dense leg is armed, with `#689`'s terminal cage applied from the
     #             record's own fold. A label that IS served but declines THIS read
     #             (the folded arm's bind bound) takes the `raise` arm below
-    #             instead, so the fallback is named. The graph still answers while
-    #             `record_vector.cutover_armed()` is OFF, which is the default, so
-    #             the graph leg is what ships today.
+    #             instead, so the fallback is named. The graph answers while the
+    #             label's coverage is unverified — which is the state of every
+    #             deployment that has not backfilled, and is the DEFAULT state since
+    #             `#13610` even though the arm itself now defaults ON — so the graph
+    #             leg is what ships until `record_vector.coverage` proves the record.
     #   * rows  -> record `pgvector` and return through the SAME ordering pass
     #             the graph branches use, so the ranking cannot drift between
     #             the two by construction (`#6214`/`#10121`).
@@ -4067,9 +4110,49 @@ def run_vector_query(
     #             recorded as a failure and the graph leg (which can see the
     #             whole label) is allowed to answer instead.
     if pg_vector is not None:
+        # ⛔ THE POST-CONTRACT LEG STAMPS ITS ANSWER (#13610). A sealed answer —
+        # `record_vector.RecordAnswer` — is the record's COMPLETE cohort for this
+        # label, because its coverage has been verified: the mirror has stopped, so
+        # the graph's population is frozen at the contract and is NOT a fallback.
+        # Both cases exist side by side below: an UNSEALED empty list keeps the
+        # pre-contract behaviour (ask the graph — the record is a fold with no
+        # backfill), a SEALED one is returned, empty or not.
+        _sealed = _record_answer_marker()
         try:
             pg_rows = pg_vector(entity_type, query_vec, limit,
                                 excluded_statuses)
+        except _record_without_fallback() as e:  # #13610: NO graph branch
+            # ⛔ POST-CONTRACT, THE GRAPH IS NOT A FALLBACK (#13610). The record's
+            # coverage has been VERIFIED for this label (it holds a vector for
+            # every vector-bearing node the graph has), and the graph write has
+            # stopped, so the graph's dense population has been FROZEN since the
+            # contract while the record's has kept growing. Answering from it now
+            # would return a SMALLER cohort and present it as the answer — the
+            # `#5090` Q2 defect, on the branch that carries production traffic,
+            # and with `mechanism=scan_fallback` as the only trace of it.
+            #
+            # So the leg reports that it could not look: `degraded=True` with the
+            # documented `query_failed` reason, no rows. The read is then declared
+            # degraded (`declared_degraded_read`) and the keyword/structural legs
+            # still answer — which is the honest outcome and the one an operator
+            # can alert on. `#4999` is satisfied the other way round: there is no
+            # fallback to announce, and the trace says the leg failed.
+            logger.info(
+                "record dense leg for %s is the label's ONLY source and did not "
+                "answer (%s) — reporting the failed leg rather than a smaller "
+                "graph cohort", entity_type, e)
+            # ⛔ `failure=True` AND the mechanism, for the same reason every other
+            # failure record in this function carries them (`#13610` review F2).
+            # The closure's empty-scope rule is `_scope_empty and not failure`:
+            # without the flag, a SCOPED read whose scope probe measured nothing
+            # stamps this entry NEUTRAL (`VECTOR_SCOPE_EMPTY`), `declared_degraded_read`
+            # skips neutral entries, and the leg that could not look is laundered
+            # into "no scope, nothing to say" — the exact laundering the rule's own
+            # comment forbids. `mechanism` is what the sealed-empty arm beside it
+            # passes: a post-contract failure reports the record leg, not nothing.
+            _record(ran=True, degraded=True, reason="query_failed", count=0,
+                    mechanism=MECHANISM_PGVECTOR, failure=True)
+            return []
         except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
             index_attempted = True
             # The record leg spent part of the read and did not answer: the
@@ -4080,7 +4163,20 @@ def run_vector_query(
                 "record dense leg did not answer (%s: %s) — falling back to "
                 "the graph", type(e).__name__, e)
         else:
-            if pg_rows is not None and not pg_rows:
+            if isinstance(pg_rows, _sealed):
+                # ⛔ AN EMPTY ANSWER FROM THE LABEL'S ONLY SOURCE IS THE ANSWER
+                # (#13610, Indicator (2) of the issue). The contract retired the
+                # graph WRITE, so the graph's dense cohort stopped growing at the
+                # moment coverage verified — answering from it now would replace
+                # the record's authoritative "nothing matches" with a SMALLER
+                # cohort labelled `scan_fallback`. Recorded as the HEALTHY
+                # `empty_results` it is (`degraded=False`), with `pgvector` as the
+                # mechanism: no fallback ran.
+                if not pg_rows:
+                    _record(ran=True, degraded=False, reason="empty_results",
+                            count=0, mechanism=MECHANISM_PGVECTOR)
+                    return []
+            elif pg_rows is not None and not pg_rows:
                 # ⛔ AN EMPTY RECORD ANSWER IS NOT A COMPLETE ONE (#11642
                 # review P1). The record is a journal FOLD with no backfill, so
                 # a live tenant's record legitimately holds ZERO rows while the

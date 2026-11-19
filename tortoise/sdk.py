@@ -1103,7 +1103,7 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
-def _record_vector_searcher(sdk=None, timeout_ms=None):
+def _record_vector_searcher(sdk=None, timeout_ms=None, projection=None):
     """The dense leg's POSTGRES searcher for THIS request — or ``None``.
 
     #11642 / #4051 V1. Two properties are the whole reason this is a function
@@ -1171,9 +1171,33 @@ def _record_vector_searcher(sdk=None, timeout_ms=None):
         from .record_vector import searcher
     except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
         return None
+    # ⛔ #13610: THE COVERAGE DENOMINATOR. `record_vector.searcher` gates the
+    # `object`/`subject` arm on a COUNT — does the record hold a vector for every
+    # vector-bearing node the graph has? — and only the caller holds a graph
+    # handle, so the count is supplied here as a bound method on the projection
+    # this read is already using (no new handle is opened, and the count is
+    # cached per tenant/label by `record_vector.coverage`, so this is asked at
+    # most once per TTL whatever the read rate).
+    # `None` (no projection in hand) is SAFE and it is not neutral: with no
+    # denominator the gated labels DECLINE and the graph branch keeps answering,
+    # which is a deployment left in double-storage rather than one served a short
+    # cohort. See `searcher`'s docstring on why an unwired caller gets none of
+    # this issue's benefit.
+    population = None
+    if projection is not None:
+        population = getattr(projection, "_label_vector_count", None)
+        if population is not None and timeout_ms is not None:
+            # ⛔ THE READ'S BUDGET REACHES THE DENOMINATOR TOO (#13610 review). The
+            # count is a full-label aggregate on `:Object`/`:Subject` — neither
+            # carries a graph vector index (`#4997`) — and it runs on the dense
+            # read path, so leaving it on the door's default is the 30x mismatch
+            # `#11691` closed for the record half of the same gate.
+            population = lambda label: projection._label_vector_count(  # noqa: E731
+                label, timeout_ms=timeout_ms)
     try:
         return searcher(carried=getattr(sdk, "_record_tenant", None),
-                        timeout_ms=timeout_ms)
+                        timeout_ms=timeout_ms,
+                        graph_population=population)
     except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
         _logger.debug("record dense searcher unavailable — using the graph",
                       exc_info=True)
@@ -16354,6 +16378,49 @@ class TortoiseSDK:
             _note_tenant_graph(cache_graph=_cache_graph,
                                org_id=org_id, graph_id=graph_id)
 
+    @contextlib.contextmanager
+    def _record_tenant_scope(self):
+        """Install this SDK's BY-VALUE record tenant for ONE graph write (#13610).
+
+        ⛔ WHY THIS EXISTS. `#13610` retires the graph copy of a derived vector once
+        the record proves it holds one — and the fold that writes that copy asks
+        `record_vector.mirror_required`, which resolves the tenant through
+        `record_writer.record_tenant_effective`. The READ half of the same request
+        already passes its tenant by value (`_record_vector_searcher`), but a FOLD
+        has no SDK handle: it runs inside `proj.apply`, below the door. On the
+        hosted REST lane — which enters no ambient scope by design (see
+        `_bind_record_tenant`) — an ambient-only resolution therefore answers "no
+        tenant" for every write, keeps the mirror for ever, and leaves the double
+        storage this issue exists to end in place on the lane built for
+        multi-tenancy, while the read half of the same request cuts over.
+
+        So the door installs what it holds as the AMBIENT carrier, for the length of
+        that one write, and both halves then resolve ONE tenant. It is the same
+        primitive the MCP lane installs per request (`use_record_tenant`), not a
+        second precedence: `record_tenant_effective(carried=…)` still wins over it
+        wherever a caller passes a value.
+
+        ⚠️ Scope, so this cannot become a silent data-mover: it wraps the graph
+        FOLD only, and only for an SDK that already bound a usable tenant. Nothing
+        bound (the MCP lane, a single-tenant process resolving by env, a plain
+        `TortoiseSDK(...)`) yields NO scope — the carriers stay exactly as they were
+        and `mirror_required` keeps its conservative True. A tenant shape the record
+        seam would refuse (`record_writer.is_usable_tenant`) is likewise left alone:
+        this helper must never be the reason a write changes.
+        """
+        try:
+            from .record_writer import is_usable_tenant, use_record_tenant
+
+            tenant = self._record_tenant
+            usable = is_usable_tenant(tenant)
+        except Exception:  # noqa: BLE001, RUF100 — unarmed is the safe answer
+            usable, tenant = False, None
+        if not usable:
+            yield
+            return
+        with use_record_tenant(*tenant):
+            yield
+
     def _cache_graph_name(self) -> str:
         """The cache graph this SDK WILL fold into — derived, never opened.
 
@@ -16606,7 +16673,7 @@ class TortoiseSDK:
         # journal-then-cache by construction; a `proj.apply` reached from
         # anywhere BUT these live doors (or a replay) is refused by
         # `FalkorProjection.apply`.
-        with _live_write_scope("chokepoint"):
+        with self._record_tenant_scope(), _live_write_scope("chokepoint"):
             proj.apply(event)
 
     def _event_raw_write_door(self, proj, statement: str, *,
@@ -37777,7 +37844,8 @@ class TortoiseSDK:
                                     # keeps the graph branch unchanged.
                                     # #11691: bound to this read's budget.
                                     pg_vector=_record_vector_searcher(
-                                        self, timeout_ms=_budget_ms),
+                                        self, timeout_ms=_budget_ms,
+                                        projection=proj),
                                     # #13108: the store's own measured index
                                     # inventory, so an unindexed label skips the
                                     # doomed queryNodes attempt (`None` = not
@@ -46385,7 +46453,8 @@ class TortoiseSDK:
             # would find no tenant and take the graph branch on EVERY request
             # while reporting nothing. `None` (no record DSN, or no tenant
             # installed) keeps the graph branches byte-identically.
-            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms),
+            pg_vector=_record_vector_searcher(self, timeout_ms=_leg_budget_ms,
+                                              projection=proj),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -48790,7 +48859,8 @@ class TortoiseSDK:
                 # #11691: bound to THIS pass's budget, the same `timeout_ms` the
                 # graph branches just above get — otherwise the record leg would
                 # still be on the door's 15 s inside a 500 ms read.
-                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms),
+                pg_vector=_record_vector_searcher(self, timeout_ms=timeout_ms,
+                                                  projection=proj),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
@@ -52536,7 +52606,7 @@ class TortoiseSDK:
         # declares itself here rather than silently bypassing the gate. The
         # deviation itself is unchanged and still recorded at the module-top
         # contract.
-        with _live_write_scope("create_entity"):
+        with self._record_tenant_scope(), _live_write_scope("create_entity"):
             apply_result = proj.apply(event)
         if label == "Event":
             # #2061: journal EventRecorded so SDK-created Events survive
