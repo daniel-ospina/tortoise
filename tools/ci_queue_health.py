@@ -1338,13 +1338,18 @@ class QueueHealth:
             # four conditions at a 5 400 s floor — nothing independent of the target
             # witnesses congestion. The repo-wide `congests_pr` stays `None`, so no
             # repo-wide destructive act is authorised on the strength of an exclusion.
-            # ⛔ THE TRUNCATION GUARDS ARE THE LOAD-BEARING CONJUNCTS: a cut reading can
-            # also reach this shape, and it must keep failing closed. (`wait_witness_ids`
-            # is NOT tested here — `PR_NEVER_DISPATCHED` is returned only from the
-            # `not wait_runs` clause and the witness tuple is built exclusively from
-            # `wait_runs`, so a conjunct on it could never vary. A guard that cannot fire
-            # is dead weight masquerading as protection — the M20 class this very change
-            # removed from the escalation arm.)
+            # ⛔ WHAT EACH CONJUNCT IS FOR, STATED ACCURATELY (#13825 review round 4).
+            # Inside `classify_queue` this branch fires only for the state that clause
+            # RETURNS — and that clause refuses a cut feed itself, returning
+            # `PR_UNWITNESSED` instead (see its `truncated or pending_truncated` arm), so
+            # the truncation conjuncts cannot vary for a reading this module produced.
+            # (`wait_witness_ids` was removed for that reason: `PR_NEVER_DISPATCHED` is
+            # returned only from the `not wait_runs` clause, so a conjunct on it could
+            # never vary — the M20 dead-weight class this change removed from the
+            # escalation arm.) The truncation conjuncts stay as the guard for a
+            # `QueueHealth` built OUTSIDE `classify_queue` (`tests/test_ci_check_repair.py`
+            # does exactly that), where `verdict` and `truncated` are independent and a
+            # contradictory pair must not authorise the exemption.
             if (self.verdict == PR_NEVER_DISPATCHED and self.pr_never_dispatched
                     and not self.truncated and not self.pending_truncated):
                 return False
@@ -2290,7 +2295,15 @@ def classify_queue(
             reasons.append(
                 f"PR-UNWITNESSED: both wait legs are empty and {pr_never_dispatched} "
                 f"run(s) were PROVED never dispatched, but a feed was CUT at its page "
-                f"cap (queued_truncated={truncated}, "
+                # ⛔ THE FLAG IS NAMED FOR WHAT IT IS (#13825 review round 4).
+                # `truncated` is `queued_truncated or running_truncated` (see
+                # `read_health`), so calling it `queued_truncated=` here stated something
+                # the payload does not carry — measured: with the queued leg COMPLETE and
+                # only the in-progress feed cut, the line read `queued_truncated=True`.
+                # The refusal itself stays on the merged flag: an in-progress cut cannot
+                # hide a WAITING run, so it is the safe (over-refusing) direction, and it
+                # is the same treatment `health()` gives `OK` for the same flag.
+                f"cap (truncated={truncated}, "
                 f"pending_truncated={pending_truncated}) — and that feed is "
                 f"NEWEST-FIRST, so the dropped rows are the OLDEST, i.e. exactly the "
                 f"run an absence claim would be about. The PR work was not witnessed"
@@ -2317,9 +2330,16 @@ def classify_queue(
         # runs is PR CI with a backlog — the thing this tool exists to PROTECT —
         # not a reporting workflow eating the repo's slots. The governor must not
         # act; whether PR CI is nevertheless STARVED is `no_flood()`'s question.
+        # ⛔ THE NUMBER PRINTED IS THE NUMBER COMPARED (#13825 review round 4). This
+        # clause compares against `global_max_live`, so quoting the FEED max here
+        # printed a dominance count no live workflow held — measured on a
+        # residue-dominated queue: `another workflow holds more of the queue (137 > 8)`
+        # where the leader held 9 live runs and the 137 were excluded `Python CI`
+        # zombies. The feed truth is named separately one reason line up
+        # (`global_max_queued=…`), so no information is lost by printing the live one.
         reasons.append(
             f"not a flood: another workflow holds more of the queue "
-            f"({global_max} > {offender_queued}), so the queue is dominated by PR "
+            f"({global_max_live} > {offender_queued}), so the queue is dominated by PR "
             "work rather than by a reporting workflow"
         )
         return no_flood()
@@ -2870,17 +2890,23 @@ def _load_queue_proofs(
         if type(run_id) is not int:
             invalid += 1
             continue
+        # ⛔ THE TYPE GATE STAYS, AND IT IS NOT THE SAME GUARD AS THE FINITE CHECK BELOW
+        # (#13825 review round 4, caught by R23's `1700000000` row). A string stamp is
+        # REJECTED here, not coerced: `float("1700000000")` succeeds, so without this gate
+        # a store whose schema drifted to strings would be HONOURED as soon as the value
+        # happened to land inside the TTL — the silent coercion the identity/type checks
+        # exist to prevent.
         if type(proved_at) is not int and type(proved_at) is not float:
             invalid += 1
             continue
-        # ⛔ THE STAMP MUST CONVERT TO A FINITE FLOAT (#13825 review round 4), checked
-        # HERE because this function's contract is "never raises" and both escapes are
-        # real, not theoretical: a hand-edited `proved_at` of 400 digits raises
-        # `OverflowError` out of `float()`, and JSON's `NaN` passes the type gate while
-        # making BOTH comparisons below `False` — which honours a wrong proof FOR EVER,
-        # the exact immortality the future-stamp rule above exists to forbid. A stamp
-        # the clock arithmetic cannot represent is not a proof; it is a dropped record
-        # (the run counts as WAITING again — the safe direction).
+        # ⛔ AND A NUMBER STILL HAS TO CONVERT TO A FINITE FLOAT, checked HERE because
+        # this function's contract is "never raises" and both escapes are real, not
+        # theoretical: a hand-edited `proved_at` of 400 digits raises `OverflowError` out
+        # of `float()`, and JSON's `NaN` passes the type gate while making BOTH age
+        # comparisons `False` — which honours a wrong proof FOR EVER, the exact immortality
+        # the future-stamp rule above exists to forbid. A stamp the clock arithmetic cannot
+        # represent is not a proof; it is a dropped record (the run counts as WAITING
+        # again — the safe direction).
         try:
             proved_at_f = float(proved_at)
         except (OverflowError, ValueError):

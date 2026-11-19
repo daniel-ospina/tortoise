@@ -4342,8 +4342,7 @@ def test_R16_an_all_never_dispatched_queue_still_lets_the_zero_job_repair_fire(
 
     `queue_congestion_apart_from_measured` is the second measured-ness that keeps the
     per-run answer live. Mutation: drop the `or queue_congestion_apart_from_measured is
-    True` from the exemption (or the `and queue_apart_from_measured is not True` from the
-    escalation) — this reds on `rerun == []` and/or exit 1.
+    True` from the exemption — this reds on `rerun == []` and/or exit 1.
     """
     from tools import ci_queue_health as Q
 

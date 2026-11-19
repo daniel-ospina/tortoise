@@ -4915,8 +4915,11 @@ def test_R9_R10_a_failed_probe_read_abstains_rather_than_reading_zero(monkeypatc
 
 def test_R8_the_budget_and_the_deadline_both_bound_the_probe_pass(monkeypatch):
     """Count AND wall clock: the count alone overruns when reads hang, the deadline alone
-    wastes a pass when they are fast. Mutation: drop the `remaining <= 0` break — with a
-    spent deadline every suspect is probed and this reds."""
+    wastes a pass when they are fast. Mutation: drop `[:max_queue_probes]` — every suspect
+    is probed (`probed == [1..5]`) and this reds. (The DEADLINE guard cannot red here:
+    with `max_queue_probes=3` the slice stops the pass first, and this test never spends
+    the deadline — `test_R8_an_exhausted_deadline_probes_nothing` covers it.)
+    """
     suspects = [{"id": i, "name": "Python CI", "event": "pull_request",
                  "created_at": "2026-10-01T00:00:00Z",
                  "updated_at": "2026-10-01T00:00:00Z", "run_attempt": 1}
@@ -5183,20 +5186,31 @@ def test_R23_a_CUT_feed_cannot_print_PR_NEVER_DISPATCHED():
         assert cut.congests_pr is None, "still no clearance from a cut read"
 
 
-def test_R23_a_NON_NUMERIC_proved_at_is_dropped_not_raised(tmp_path):
-    """P2 (code review): `_load_queue_proofs` is contractually "never raises".
+@pytest.mark.parametrize("proved_at", [
+    "not-a-number",   # `float()` raises `ValueError` — the try/except's row
+    "1700000000",     # `float()` PARSES it — only the type gate rejects this one
+])
+def test_R23_a_NON_NUMERIC_proved_at_is_dropped_not_raised(tmp_path, proved_at):
+    """P2 (code review): `_load_queue_proofs` is contractually "never raises", and its
+    `proved_at` TYPE GATE is what stops a string-typed store from being honoured.
 
-    A string `proved_at` reaches `now - proved_at` and raises `TypeError` — escaping as a
-    crash instead of a dropped record, in the one function the docstring promises cannot
-    raise. Mutation: drop the `proved_at` type check — this reds with the exception.
+    Mutation: drop the `proved_at` type gate — `float()` parses `"1700000000"`, so the
+    record is silently SKIPPED instead of reported, and the warning assertion reds. The
+    bare `"not-a-number"` row no longer discriminates on its own: `float()` raises
+    `ValueError` and the `try/except` added in round 4 turns that into the same drop. That
+    catch's own row is the 400-digit int in
+    `test_round4_a_non_finite_or_overflowing_proof_stamp_is_a_DROP`.
     """
     state = tmp_path / "proofs.json"
     state.write_text(json.dumps({"version": 1, "repo": "o/r", "proofs": [
-        {"run_id": 1, "never_dispatched": True, "proved_at": "not-a-number",
+        {"run_id": 1, "never_dispatched": True, "proved_at": proved_at,
          "updated_at": "2026-10-01T00:00:00Z"},
     ]}))
+    # `feed_stamps` carries the run's CURRENT, MATCHING stamp: with anything else the
+    # record would be dropped by the feed check instead, and the row would pass for a
+    # reason it does not name (review round 4's non-blocking note).
     proofs, warning = Q._load_queue_proofs(
-        state, "o/r", NOW, Q.NEVER_DISPATCHED_REPROOF_SECONDS)
+        state, "o/r", NOW, {1: "2026-10-01T00:00:00Z"})
     assert proofs == {}, "the record must be DROPPED, not honoured and not raised"
     assert warning, "and the drop must be REPORTED, or a silent store is a silent bug"
 
@@ -5206,12 +5220,22 @@ def test_R16_the_per_run_deadlock_breaker_still_answers_FALSE():
     refuses the only repair that can clear a zero-job run and escalates to exit 1.
 
     Mutation: drop the guarded branch in `congests_pr_apart_from` — this reds (None).
+
+    ⛔ THE CUT HALF PASSES FOR A DIFFERENT REASON THAN IT ONCE CLAIMED (review round 4):
+    `classify_queue` refuses a cut feed ITSELF, so this shape's verdict is
+    `PR-UNWITNESSED` and the `None` comes from the fall-through, not from the branch's
+    truncation conjuncts. That verdict is asserted so the mechanism is visible; the
+    conjuncts guard a `QueueHealth` constructed outside `classify_queue`, which no
+    assertion here can reach.
     """
     residue = [nd_run(100 + i, never_dispatched=True) for i in range(3)]
     health = classify(residue)
     assert health.congests_pr_apart_from(100, also_repairable=frozenset({101, 102})) is False
     # …but a CUT leg keeps failing closed on the same shape.
     cut = classify(residue, truncated=True)
+    assert cut.verdict == Q.PR_UNWITNESSED, (
+        "the cut feed is refused by the residue clause itself — which is WHY the None "
+        "below comes from the fall-through, not from a truncation conjunct")
     assert cut.congests_pr_apart_from(100, also_repairable=frozenset({101, 102})) is None
 
 
@@ -5305,3 +5329,28 @@ def test_round4_a_zombie_free_reading_keeps_the_share_sentence_BYTE_IDENTICAL():
     queued = flood_queued(10) + starving_pr_runs(4, age_seconds=9000)
     joined = " ".join(classify(queued, in_progress=serving_pr_runs(1)).reasons)
     assert "Largest share: 'finding-provenance' (10 of 14)" in joined
+
+
+def test_round4_the_not_a_flood_dominance_count_is_the_one_COMPARED():
+    """`offender_queued < global_max_live` decides the clause, so the dominance count it
+    prints must be `global_max_live`. Pairing the FEED max (`global_max`) printed a count
+    no live workflow held — measured: `another workflow holds more of the queue (137 > 8)`
+    where the leader held 9 live runs and the 137 were excluded `Python CI` zombies,
+    inviting the operator to go trim a workflow that holds 9.
+
+    Mutation: print `global_max` again — "(8 > 6)" below becomes "(20 > 6)" and this reds.
+    """
+    residue = [nd_run(100 + i, never_dispatched=True, name="Python CI")
+               for i in range(20)]
+    live_pr = [run(500 + i, "pr-ci", event="pull_request", age_seconds=60)
+               for i in range(8)]
+    offender = [run(700 + i, "python-ci", age_seconds=60) for i in range(6)]
+    health = classify(residue + live_pr + offender)
+    assert health.verdict == Q.OK, health.reasons
+    joined = " ".join(health.reasons)
+    assert "another workflow holds more of the queue (8 > 6)" in joined, (
+        "the printed count must be the LIVE leader's, the one the clause compared")
+    assert "(20 > 6)" not in joined, (
+        "20 is the excluded residue's feed count, not any live workflow's")
+    # The feed fact is still reported, under its own name, one reason line up.
+    assert "global_max_queued=20" in joined
