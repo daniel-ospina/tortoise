@@ -264,6 +264,12 @@ def test_a_token_naming_a_real_file_is_not_a_symbol_pointer():
         "the extension-list discriminator needs its OWN real file, with a suffix "
         "`_NOT_A_SYMBOL` does not carry — that is the whole point of this token"
     )
+    assert "jsonl" not in _NOT_A_SYMBOL, (
+        "the discriminator above is only a discriminator while `jsonl` is NOT in "
+        "`_NOT_A_SYMBOL` — with it there, a suffix LIST answers for both file "
+        "pointers and this row stays green with the rule deleted; pick a suffix "
+        "the list does not carry, do not extend the list"
+    )
     assert not broken_target.exists(), (
         f"the control token only tests the rule while `{broken_target.name}` does "
         "NOT exist — now that it does, this pointer IS a file pointer, so pick "
