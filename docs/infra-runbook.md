@@ -4380,7 +4380,10 @@ operator who read the line above as "CI defends this" would never run it.
 > ⛔ Count these in the right UNIT: **three warm-up surfaces** (1, 4, 5) **+ two readiness bounds**
 > (2, 3) **= five read sites**. "Five warm-up surfaces" is wrong; "three read sites" omits the bound
 > pair. The **function names** are the invariant — the line numbers are a convenience and they move
-> whenever `embeddings.py` grows, so re-pin them on a merge.
+> whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **Both copies of this list are pinned:**
+> this one by `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`,
+> the manifest's by its sibling, so a merge that moves the code reds instead of rotting one copy
+> silently while the other stays green.
 >
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
