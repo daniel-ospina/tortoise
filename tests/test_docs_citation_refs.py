@@ -1059,6 +1059,44 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "rather than rendering a failed read as the measurement "
             "(#13795 review, finding 1)")
     _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
+
+    def _head_labelled_at(needle: str) -> bool:
+        """True when a HEAD LABEL sits within 120 characters of `needle` (#13845 review, P2).
+
+        ⛔ The literal arm below is a substring test, so without this it pins the SIGN of a
+        head-bound measurement: a TRUE claim that names its head (`... was EMPTY at
+        `2584a86ec1``) was refused because THIS head's set is non-empty, which is the exact
+        false block the docstring says the class does not commit. A claim carrying a head
+        label is a claim about THAT head and this head's measurement cannot refute it —
+        measured: the live document's own head-labelled sentence was refused before this
+        guard and passes after it; the same sentence with its head label removed still
+        reds. RESIDUAL, stated: a claim labelled with THE VERY HEAD under test would also
+        be skipped, because reading "is this label this head" would make the arm a git
+        client — the live document labels history with other heads, and a present-tense
+        claim carries no label at all, which is the shape this arm exists to catch.
+        """
+        for _m in re.finditer(re.escape(needle), doc):
+            # ⛔ THE LABEL MUST BELONG TO THE CLAIM, not merely sit nearby — measured twice:
+            # a 120-character window found SOME sha in the surrounding prose and let an
+            # UNLABELLED claim through (the mutation below stayed green, a bypass), and a
+            # wider clause window leaked the preceding clause's `NOT at this head:` into the
+            # pre-position (same bypass, one layer in). The rule is now positional: a label
+            # AFTER the claim, in the rest of its sentence, or a label BEFORE it that nothing
+            # asserts over (no `:`, `**` or em dash between the label and the claim).
+            _label = r"\b[0-9a-f]{7,40}\b|at (?:that|this|the) head\b"
+            _post = re.split(r"[.;|)]", doc[_m.end():_m.end() + 60])[0]
+            if re.search(_label, _post):
+                return True
+            _pre = doc[max(0, _m.start() - 30):_m.start()]
+            # ⛔ ANY clean label counts, not the FIRST one — measured: `re.search` took the
+            # earliest match, which was the PREVIOUS clause's `NOT at this head:`, and its
+            # tail was an assertion boundary, so a genuinely head-labelled claim was refused
+            # (a false block, the one direction this guard must never take).
+            for _hit in re.finditer(_label, _pre):
+                if not re.search(r"[:*\u2014]", _pre[_hit.end():]):
+                    return True
+        return False
+
     for _claim, _claim_is_empty in (
             *((_c, True) for _c in (
                 f"neither is `{_tortoise_cmd}`",
@@ -1090,9 +1128,15 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                 "which two `tortoise/` paths this diff carries",
             )),
     ):
-        # contradiction iff the claim's direction equals the measurement's (a member claim
-        # when the set is empty, or an emptiness claim when it is not).
-        assert _claim_is_empty != bool(_tortoise_set) or _claim not in doc, (
+        # contradiction iff the claim's direction EQUALS the measurement's (a member claim
+        # when the set is empty, or an emptiness claim when it is not) — so `_consistent` is
+        # the case where they differ, written out rather than inlined, because the first cut
+        # of this guard negated the whole disjunction and let an UNLABELLED emptiness claim
+        # through (measured: the mutation below stayed green, which is a bypass, not a fix).
+        # AND a claim carrying a HEAD LABEL is not refuted by THIS head, which the sign-only
+        # test cannot see (#13845 review, P2).
+        _consistent = _claim_is_empty != bool(_tortoise_set)
+        assert _consistent or _claim not in doc or _head_labelled_at(_claim), (
             f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
             f"direction the tree refutes at this head, where that command prints "
             f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
@@ -1102,6 +1146,13 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # SHORT form was invisible to the arm above — the same half-closure one layer down.
     # Both spellings are read; a claim naming the command by pronoun is not, and that
     # residual is declared in the module docstring rather than left implied.
+    # ⛔ DECLARED RESIDUAL, #13818 (recorded there with the measurement): this arm knows ONE
+    # pathspec — `-- tortoise/` and its abbreviation. The D5 row's stated authority is the
+    # PER-ROW form (`-- <that row's own path>`), and nothing reads it, so a claim of that
+    # shape passes green whatever the tree says: measured on this PR's review cycle 3, two
+    # such claims (`05-verify.md:102` naming no pathspec, `:134` naming
+    # `-- tests/test_7949_capstone_measure.py`) were false at that head and invisible here.
+    # The repair is a general arm deriving the pathspec from the claim, not N more literals.
     for _answer, _claims_empty in (
             *_typed_answers_to_tortoise_cmd(doc, _tortoise_cmd),
             *_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")):
