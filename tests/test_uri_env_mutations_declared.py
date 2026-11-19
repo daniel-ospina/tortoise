@@ -159,14 +159,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   (3) `setenv postgres://`: pins `run()`'s half of the URI guard. `_uri_refusal`
     #       is already pinned in BOTH directions at the unit level
     #       (`test_the_uri_guard_accepts_every_scheme_the_product_itself_supports`),
-    #       so deleting the PREDICATE reds those and not this row. What nothing else
-    #       covers is that `run()` reads it and returns 3: with that block deleted,
-    #       the unit pins stay green and this row is the only red (`1 failed, 2 passed`
-    #       over the uri-selected cases). ⚠️ It does NOT prevent figures being written
-    #       against an unusable backend — `FalkorProjection.from_uri` refuses the same
-    #       scheme set and raises `ValueError` (measured), so the run dies anyway; the
-    #       row's value is turning that uncaught traceback into the instrument's own
-    #       actionable `rc=3` refusal, and keeping the prefix set single-sourced.
+    #       so the predicate is not this row's DISTINCT cover — and gutting it
+    #       (`_uri_refusal` -> `return None`) reds those pins AND this row (`2 failed`,
+    #       because the run then dies on `from_uri`'s `ValueError` instead of refusing).
+    #       What nothing else covers is that `run()` READS it and returns 3: with that
+    #       block deleted the unit pins stay green and this row is the only red
+    #       (`1 failed, 2 passed` over the uri-selected cases). With the block present
+    #       the same input produces the instrument's own `rc=3` + "no live FalkorDB"
+    #       refusal instead of an uncaught traceback. ⚠️ It does NOT prevent figures
+    #       being written against an unusable backend — `FalkorProjection.from_uri`
+    #       refuses the same scheme set and raises `ValueError` (measured:
+    #       `resolve_db_endpoint` raises for `postgres://host/db` and for `""`), so the
+    #       run dies either way; the row buys the actionable refusal, not the block.
     # Every site uses `monkeypatch`, so no lane state leaks, and none of them
     # constructs anything: the ports are stubbed above the driver.
     # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored to THIS row's three spellings:
