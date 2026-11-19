@@ -16677,6 +16677,21 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "sdk",
         "n.dedup_reviewed IS NULL",
     ),
+    # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
+    # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
+    # carries ~50 numbers — so `:20311` was "read" from an unrelated clause denotating a
+    # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
+    # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
+    # regex binds the number to the sentence that gives the number its meaning, so a future
+    # `+N` above `org_info` reds the CLAIM instead of pairing a fresh number with a rotted
+    # one. Anchors: `is <symbol>` then `at THIS head`, which is exactly how the row states a
+    # current-tense address.
+    (
+        "the quota guard `if count + est > max_points:`",
+        r"and `:(?P<n>\d+)` is `if count \+ est > max_points:` at THIS head",
+        "hosted_api",
+        "if count + est > max_points:",
+    ),
 )
 
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
