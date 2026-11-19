@@ -82,7 +82,15 @@ _POINTER = re.compile(
 #: A trailing token that is a file EXTENSION, not a symbol — i.e. the pointer
 #: names a whole file, which is outside this guard's scope (a file pointer
 #: does not break on a rename unless the file itself moves).
-_NOT_A_SYMBOL = frozenset({"py", "json", "yml", "yaml", "md", "txt", "toml"})
+#: ⛔ A LIST IS NOT THE GUARANTEE — `_names_a_whole_file` is (below), because a
+#: static list only knows the extensions someone thought of here. This one knew
+#: seven and not `mjs`, so `tests/test_middleware_host_consolidation.mjs` (a real
+#: pointer in `tortoise/hosted_api.py`) was imported as a MODULE and reddened the
+#: required `test` job on a tree where nothing had moved.
+_NOT_A_SYMBOL = frozenset({
+    "py", "json", "yml", "yaml", "md", "txt", "toml",
+    "mjs", "js", "cjs", "mts", "ts", "jsx", "tsx", "sh", "sql", "css", "html",
+})
 
 #: Names the #8920 move renamed away or never existed: the two pre-rename
 #: helpers, and the callee the moved docstring misspelled (`_purge_deleted_orgs`
@@ -150,16 +158,36 @@ CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
 CONSUMERS = tuple(CONSUMER_FIXTURES)
 
 
-def _production_pointers() -> list[tuple[Path, str, str, str]]:
+def _names_a_whole_file(
+    path_group: str, symbol: str, tests_dir: Path = TESTS_DIR
+) -> bool:
+    """True when `tests/<path_group>.<symbol>` IS a file — a pointer at a whole file.
+
+    STRUCTURAL, not a vocabulary: any extension a file in `tests/` really carries
+    is out of scope, whether or not `_NOT_A_SYMBOL` happens to name it. A list of
+    extensions is a list of the ones someone remembered, and the one it forgot
+    (`mjs`) turned a prose pointer into an import of a module that never existed.
+    """
+    return (tests_dir / f"{path_group}.{symbol}").is_file()
+
+
+def _production_pointers(
+    production_dir: Path = PRODUCTION_DIR,
+    tests_dir: Path = TESTS_DIR,
+) -> list[tuple[Path, str, str, str]]:
     """Every (file, token, module, symbol) dotted pointer in production source."""
     found: list[tuple[Path, str, str, str]] = []
-    for path in sorted(PRODUCTION_DIR.rglob("*.py")):
+    for path in sorted(production_dir.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for match in _POINTER.finditer(text):
             dotted = match.group("dotted")
             module = dotted if dotted else match.group("path").replace("/", ".")
             symbol = match.group("dsym") or match.group("psym")
             if symbol in _NOT_A_SYMBOL:
+                continue
+            path_group = match.group("path")
+            if path_group is not None and _names_a_whole_file(
+                    path_group, symbol, tests_dir):
                 continue
             found.append((path, match.group(0), f"tests.{module}", symbol))
     return found
@@ -187,6 +215,46 @@ def test_production_pointers_into_the_test_tree_resolve():
         "production source names test symbols that do not resolve:\n  "
         + "\n  ".join(broken)
     )
+
+
+def test_a_pointer_at_a_whole_FILE_is_not_scanned_as_a_symbol(tmp_path: Path) -> None:
+    """A file pointer whose extension the static list has not been taught yet.
+
+    NON-VACUITY: on the pre-fix guard `_NOT_A_SYMBOL` held seven extensions and no
+    `.mjs`, so `tests/test_middleware_host_consolidation.mjs` — a real pointer in
+    `tortoise/hosted_api.py`, unchanged from `main` — was returned as
+    `(…, 'tests.test_middleware_host_consolidation', 'mjs')` and the guard failed
+    trying to IMPORT it. The suite was red on a tree where nothing had moved, and
+    the fix is structural (the target IS a file), not a longer list: a list only
+    ever names the extensions someone remembered. `zzz` below is an extension no
+    list in this repo names, which is the point.
+    """
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_widget.zzz").write_text("noop\n", encoding="utf-8")
+    (tests_dir / "test_widget.py").write_text("X = 1\n", encoding="utf-8")
+    production_dir = tmp_path / "tortoise"
+    production_dir.mkdir()
+    (production_dir / "mod.py").write_text(
+        "# behaviourally by `tests/test_widget.zzz`); what stays\n"
+        "# and the seam `tests/test_widget.py` — a whole file too\n",
+        encoding="utf-8",
+    )
+
+    assert _production_pointers(production_dir, tests_dir) == [], (
+        "a pointer naming a whole FILE was scanned as a symbol — the required "
+        "`test` job reds on prose that moved nothing"
+    )
+
+    # …and the scan still finds a REAL symbol pointer in the same tree, so the
+    # assertion above cannot pass by the walk breaking.
+    (production_dir / "mod.py").write_text(
+        "# `tests.test_widget.X` is the only symbol pointer here\n",
+        encoding="utf-8",
+    )
+    assert _production_pointers(production_dir, tests_dir) == [
+        (production_dir / "mod.py", "`tests.test_widget.X`", "tests.test_widget", "X")
+    ]
 
 
 def test_no_source_still_names_the_pre_move_symbols():
