@@ -192,6 +192,7 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 """
 from __future__ import annotations
 
+import inspect
 import re
 import subprocess
 from pathlib import Path
@@ -704,12 +705,17 @@ def test_the_retired_membership_spellings_are_read_in_both_directions():
 
     ⛔ TWO defects are pinned here, and neither is observable from the bundle alone:
 
-    1. **The arm must READ each spelling, in BOTH directions** (#13807 review, F1/F3). The
-       cut this replaces keyed the two lists on a live measurement, so in a depth-1 checkout
-       it read neither — and no row anywhere changed colour when it was broken, which is why
-       it took a fresh-context reviewer to find it. Each injected spelling below reds, so a
-       list that loses a row, or a direction that regains a measurement gate, reds HERE.
-    2. **The live bundle must carry none of them** (#13807 review, F2). `05-verify.md:147`
+    1. **The arm must READ each spelling, in BOTH directions, and the lists must not SHRINK**
+       (#13807 review, F1/F3). The cut this replaces keyed the two lists on a live
+       measurement, so in a depth-1 checkout it read neither — and no row anywhere changed
+       colour when it was broken, which is why it took a fresh-context reviewer to find it.
+       Each injected spelling below reds, and the list lengths are pinned: "every row
+       present is read" is satisfied by an EMPTY list, so a deleted spelling — the edit that
+       would silently narrow the ban — is what the counts catch.
+    2. **The arm must not consult the clone** (F1's root, pinned structurally). It is a text
+       ban now; `inspect` on its own source reds if a `git`/`subprocess` probe is ever put
+       back, because that is the shape that asserted nothing in the gating job.
+    3. **The live bundle must carry none of them** (#13807 review, F2). `05-verify.md:147`
        still described the OLD one-sided arm as vacuous at an empty head — a sentence that
        licensed exactly the re-insertion the ban exists to stop.
 
@@ -717,8 +723,25 @@ def test_the_retired_membership_spellings_are_read_in_both_directions():
     `_census_membership_verdicts` on why a head-relative re-measurement is both unreachable
     in CI and a false-red generator on every code PR.
     """
-    assert _TORTOISE_AFFIRMATIVE_SPELLINGS, "the affirmative list must not be empty"
-    assert _TORTOISE_NEGATIVE_SPELLINGS, "the negative list must not be empty"
+    # The lists, pinned by SIZE and by the spellings that actually shipped and survived: a
+    # lost row narrows the ban silently, and nothing else in this file would notice.
+    assert len(_TORTOISE_AFFIRMATIVE_SPELLINGS) == 6, (
+        "the affirmative list holds the six recorded spellings; a lost row is a narrowed ban")
+    assert len(_TORTOISE_NEGATIVE_SPELLINGS) == 5, (
+        "the negative list holds the five recorded spellings; a lost row is a narrowed ban")
+    assert "prints exactly `tortoise/activation_scorecard.py`" in _TORTOISE_AFFIRMATIVE_SPELLINGS
+    assert "which two `tortoise/` paths this diff carries" in _TORTOISE_AFFIRMATIVE_SPELLINGS
+    assert f"{_TORTOISE_CENSUS_CMD}` prints NOTHING" in _TORTOISE_NEGATIVE_SPELLINGS
+
+    # The arm must read the document only. A clone-dependent probe here is the F1 defect:
+    # the `test` job is depth-1, so the three-dot walk exits 128 and both directions are
+    # skipped — zero assertions in the job that gates the merge.
+    _arm_source = inspect.getsource(_census_membership_verdicts)
+    assert "subprocess" not in _arm_source and "git " not in _arm_source, (
+        "arm (c) must read the document's TEXT only — a `git`/`subprocess` measurement is "
+        "unreachable at the depth-1 checkout the gating job uses and skips both directions "
+        "there (#13807 review, F1)")
+
     for _spelling in _TORTOISE_MEMBERSHIP_SPELLINGS:
         _injected = f"… and the earlier cut said {_spelling} about this bundle …"
         assert _census_membership_verdicts(_injected) == [_spelling], (
