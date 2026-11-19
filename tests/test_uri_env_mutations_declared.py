@@ -239,6 +239,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # IS the measurement (DELIBERATE_EMBEDDED_LANE), exactly as in the module above.
     "test_13036_capstone_v2.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #13557/#13558 (landed as PR #13833, `1231060fd2`) — the same "module landed
+    # without its row" shape as #9664 above, and it reds this gate on `main`
+    # (measured on this head: the ONLY undeclared site in the tree). DELIBERATE_URI,
+    # not an embedded-lane control: the `sdk` fixture's `monkeypatch.setenv(
+    # "TORTOISE_DB_URI", _uri())` at `:122` aliases the caller's ambient URI or the
+    # live `docker_uri`/`legacy_uri` probe result, i.e. it POINTS the handle at a real
+    # FalkorDB — the file is `@_docker_only`, because both reads under test are Cypher
+    # over a real store and neither can run embedded. A future reader must not read
+    # this entry as permission to redirect the file to an embedded lane: an embedded
+    # redirect would make those reads untestable rather than merely different.
+    "test_13557_13558_reachable_reads.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #12521: `test_10015_organisation_account.py` landed URI-unsets with no
     # register row (`monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, at `:49`
     # and `:257`), which reds this gate on `main` — the same "module landed without
