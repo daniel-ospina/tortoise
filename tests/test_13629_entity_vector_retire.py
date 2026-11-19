@@ -32,6 +32,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
 | `test_the_collision_clause_of_at_parity_stands_alone` | each `at_parity` clause has its OWN falsifier | the `render_collision == 0` clause is deleted and only `graph_only` refuses |
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
+| `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -3758,6 +3759,133 @@ def _upsert_object(props):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is True, f"an honest write-stop was refused: {source!r} ({why})"
+
+
+def test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either(tmp_path, monkeypatch):
+    """⛔ ON A POSITIVE ASK THE *ELSE* IS THE STOP ARM (`#13647`, measured at `f9d0549e80`).
+
+    `mirror_required(l)` answers True = "the graph must still store this", so under
+    `if gate(l): …` the BODY is the mirror arm and `orelse` is the arm that runs when the
+    graph must STOP. Every polarity arm read `sub.body` only — the mirror arm demanded a
+    store there, and the negated arms guarded their own body — so a store on the positive
+    ask's ELSE was never examined by anything:
+
+        if _derived_mirror_required("object"):
+            props["embedding"] = _encode(ev)
+        else:
+            props["embedding"] = _encode(ev)     # stores exactly when told to stop
+            return None
+
+    Measured fail-OPEN at `f9d0549e80` through `_writer_consults_gate`: **GATED** — a writer
+    that stores precisely on the stop arm lifted `REFUSE_WRITE_STILL_EMITS`, the same defect
+    `622e9935` closed for the `if not gate(l):` spelling one arm over. The walk reads
+    `orelse` with `anywhere=True` for the same reason the negated stop arm does: an
+    unplaceable store on a stop arm still places the vector, so refusing is the fail-closed
+    answer (a `try`'s `orelse` is unrelated — `_reachable_ifs` yields `If` nodes only).
+
+    Mutation: delete the `sub.orelse` arm in `_asks_the_gate` and every refused shape below
+    answers `True` again; the accepted controls stay `True`, which keeps the rule from
+    becoming an inert enforcer that refuses the honest `else` (a removal, an audit line).
+    """
+    refused = (
+        # the else places the vector, THEN exits
+        """
+def _upsert_object(ev):
+    props = {}
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        props["embedding"] = _encode(ev)
+        return None
+    return _write(props)
+""",
+        # …the keyword-mutator spelling of the same store
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        props.update(embedding=_encode(ev))
+        return None
+    _write(props)
+""",
+        # …behind a live condition inside the else (anywhere=True, not unconditional)
+        """
+def _upsert_object(ev):
+    props = {}
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        if ev.get("force"):
+            props["embedding"] = _encode(ev)
+        return None
+    return _write(props)
+""",
+        # …in the else arm's own `finally`, which the exit walk descends into
+        """
+def _upsert_object(ev):
+    props = {}
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        try:
+            _log("stopping", ev)
+        finally:
+            props["embedding"] = _encode(ev)
+    return _write(props)
+""",
+        # …removes then RE-PLACES it: the removal alone would look like an honest stop
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        props.pop("embedding", None)
+        props["embedding"] = _encode(ev)
+    _write(props)
+""",
+    )
+    for source in refused:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, (
+            f"the STOP ARM of a POSITIVE ask stored and still certified: {source!r} ({why})")
+
+    # ⛔ AND THE HONEST POSITIVE FORMS MUST STILL CERTIFY, or the new refusal is an inert
+    # enforcer that shuts the gate on the very shape `#13617` ships.
+    accepted = (
+        # the real `#13617` shape: an encode guard with no else at all
+        """
+def _upsert_object(ev):
+    embedding = None
+    if _derived_mirror_required("object"):
+        embedding = _encode(ev)
+    props["embedding"] = embedding
+""",
+        # an else that REMOVES is exactly the write-stop
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        props.pop("embedding", None)
+    _write(props)
+""",
+        # …and an else that only READS/LOGS places nothing, so it is not a store
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props["embedding"] = _encode(ev)
+    else:
+        _audit(props.get("embedding"))
+        _log("skipping the graph copy", ev)
+    _write(props)
+""",
+    )
+    for source in accepted:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is True, f"an honest positive-ask write-stop was refused: {source!r} ({why})"
 
 
 def test_the_mutator_vocabulary_does_not_widen_the_mirror_arm(tmp_path, monkeypatch):

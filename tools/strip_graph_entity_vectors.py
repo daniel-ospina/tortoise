@@ -311,6 +311,27 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     # MERGE-target walk finds the Source and stops — which is how an earlier comment
     # "verified" a write that does not happen, and it made `:Source` permanently
     # unopenable on a function that cannot legitimately ask about a vector it never writes.
+    #
+    # ⛔ `_upsert_source` STAYS, and the round-13 review's request to drop it was NOT
+    # applied — its premise ("stores no vector: zero `set_embedding_clause`/`clear_embedding`
+    # in the body") is TRUE AND IRRELEVANT, which is why the measurement is written here
+    # instead of the reading being trusted (`#13647`). The body issues no LITERAL clause of
+    # its own, but it PERSISTS THE CALLER'S: `_upsert_source` ends by funnelling extra props
+    # through `_persist_extra_props("MATCH (n:Source {url: $url})", …, allow_keys=_allow)`,
+    # `_allow = self._SOURCE_EXTRA_PROPS`, and that closed surface DECLARES `embedding`
+    # (`tortoise/projection/entities.py::_SOURCE_EXTRA_PROPS`, beside `domain`/`summary`;
+    # `#12182` cycle 9 corrected the register's entry for the same mistake). So
+    # `create_source(url, props={"embedding": [...]})` lands a vector on `:Source` with no
+    # gate — the `sdk::_update_entity` passthrough class this map exists to cover. Dropping
+    # the name would therefore be a FAIL-OPEN: the day `_upsert_document` learns to ask,
+    # `:Source` would clear while an ungated writer still re-adds the vector on the next
+    # call. A fix may add refusals, never acceptances.
+    #
+    # STATED RESIDUAL: neither Source writer asks the gate today, so `:Source` is refused
+    # for as long as the passthrough stores an ungated caller vector — the fail-closed
+    # direction (an operator is refused a strip, never granted a losing one). Opening it is
+    # `#12180`'s work (a caller vector landing on `:Source` with no gate and no width
+    # check), tracked there rather than papered over by a narrower population here.
     "Source": ("_upsert_source", "_upsert_document"),
 }
 
@@ -421,8 +442,10 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     (`embedding = None`) are both refused, because a `False` verdict must actually stop the
     vector being written.
 
-    ⛔ AND ON THE STOP ARM (`if not gate(l): …`) A STORE REFUSES THE GUARD, WHATEVER ITS
-    POSITION. The exit-shaped write-stop and the removal-shaped one are both accepted only
+    ⛔ AND ON THE STOP ARM A STORE REFUSES THE GUARD, WHATEVER ITS POSITION — and the stop
+    arm is the BODY under a negated ask (`if not gate(l): …`) and the **`else`** under a
+    positive one (`if gate(l): … else: …`). The exit-shaped write-stop and the
+    removal-shaped one are both accepted only
     when the arm places NO vector at all: `if not gate("object"): props["embedding"] =
     _encode(ev); return None` is a writer that stores exactly when told to stop, and an
     earlier revision certified it GATED because the exit arm ran first and asked nothing
@@ -434,7 +457,16 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     refuse. What this still cannot see is residual 4's family: a store reached through a
     helper ARGUMENT (`_set(props, embedding)`), which no arm-level walk can attribute.
 
-    ⛔ STATED RESIDUALS, all three, because a completeness claim narrower than the code is
+    ⛔ AND THE POSITIVE ASK'S `else` IS THAT SAME STOP ARM (`#13647`, measured at
+    `f9d0549e80`). Under `if gate(l): …` the body runs when the graph must still mirror and
+    `orelse` runs when it must stop, so a store on `orelse` is the stop arm storing what it
+    was told to stop — and every arm read `sub.body` only, so it was never examined:
+    `if gate("object"): props["embedding"] = …; else: props["embedding"] = …; return None`
+    certified the writer GATED. Both stop arms now read their own arm with
+    `anywhere=True`; the mirror arm never does, so the destructive gate cannot ACCEPT a
+    writer it refused before.
+
+    ⛔ STATED RESIDUALS, all four, because a completeness claim narrower than the code is
     how the next lane re-derives false confidence:
 
     1. **Two write sites, one guarded** — undetectable without data flow this check does
@@ -448,9 +480,11 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     3. **Dead code, nested scopes, NESTED CONDITIONS and SWALLOWED EXITS are pruned, not
        analysed** — a guard wrapped in `if False:`/`while False:` or inside an inner
        `def`/`class`/`lambda` is not counted (`_reachable_ifs`); a guard behind a
-       runtime-false condition this check cannot evaluate is likewise not counted; an
-       arm's STORE/REMOVE is counted only where it is UNCONDITIONALLY reached
-       (`_unconditional_walk`); and an EXIT is counted only where it is unconditionally
+       runtime-false condition this check cannot evaluate is likewise not counted; on the
+       MIRROR arm a STORE is counted only where it is UNCONDITIONALLY reached
+       (`_unconditional_walk`) — on a STOP arm the same question is asked to REFUSE, so a
+       store there is counted ANYWHERE the check can place it (`_own_walk`); and an EXIT is
+       counted only where it is unconditionally
        reached AND a raise there can actually LEAVE the function — a raise a `try`
        handler or a context manager can swallow is unproven, whether that `try`/`with`
        sits INSIDE the guard body (`_unconditional_exits`) or ENCLOSES the guard
@@ -522,14 +556,8 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # on every run a strip can happen — the inverted write-stop, and still certified
         # gated at `df345c22` because this arm ran the exit test BEFORE looking at
         # `polarity` (round 8's F1.a, measured: GATED). The correct spelling is
-        # `if not gate("object"): return`.
-        #
-# ⛔ AN EXIT IS A WRITE-STOP ONLY UNDER A *NEGATED* ASK. `if not gate(l): return` skips
-# the write when the graph must stop mirroring — that is the stop. `if gate(l):
-# return` skips it when the graph DOES need the vector, i.e. the branch that must
-# write is the one that leaves; and a bare exit under a positive ask cleared the
-# gate on a body that wrote on the stop arm anyway. It is refused (fail-closed).
-# A `return` carrying a CALL is judged as a write, by the polarity rule below.
+        # `if not gate("object"): return`; a `return` carrying a CALL is judged as a
+        # write by the polarity arms below, never as an exit.
         # ⛔ AND THE STOP ARM MUST NOT STORE THE VECTOR IT CLAIMS TO STOP. Measured
         # fail-OPEN at `622e9935`: `if not gate("object"): props["embedding"] =
         # _encode(ev); return None` was certified GATED, because the EXIT arm below ran
@@ -564,6 +592,23 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         #        STOP mirroring, so it must REMOVE the property. Counting a STORE here is
         #        the polarity inversion; refusing the removal shut the gate on the dict
         #        writer whose only write-stop IS this shape.
+        # ⛔ AND ON A POSITIVE ASK THE *ELSE* IS THE STOP ARM (`#13647`, round-13 review).
+        # `polarity > 0` means the BODY runs when the graph must still mirror, so a store
+        # there is correct — but `mirror_required` answering False runs `orelse`, and a
+        # store there is the stop arm storing the vector it was told to stop writing, the
+        # same defect `622e9935` closed for the negated spelling one arm over. Measured
+        # fail-OPEN at `f9d0549e80`: `if gate("object"): props["embedding"] = …; else:
+        # props["embedding"] = …; return None` certified GATED through
+        # `_writer_consults_gate`, because no arm read `sub.orelse` at all.
+        #
+        # `anywhere=True` for the same reason as the negated arm above: on a STOP arm a
+        # store the check cannot place (behind a live condition, inside the arm's
+        # `finally`) still places the vector, so the fail-closed answer is to refuse. This
+        # can only ever refuse MORE — the stated posture of every rule in this function.
+        # A `try`'s `orelse` is unrelated (`_reachable_ifs` yields `If` nodes only).
+        if polarity > 0 and any(_stores_embedding(statement, anywhere=True, scope=node)
+                                for statement in sub.orelse):
+            continue                         # the stop arm STORES — not a write-stop
         if polarity > 0 and any(_stores_embedding(statement, scope=node)
                                 for statement in sub.body):
             return True                      # the mirror arm: writing here is correct
@@ -1116,7 +1161,7 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
     and this repo proves the shape exists: `embeddings.py` pops that triple while keeping
     the vector.
 
-    The accepted shapes are three: `embedding = derived_embedding.encode(...)` (the `#13617`
+    The accepted shapes are four: `embedding = derived_embedding.encode(...)` (the `#13617`
     form), `props["embedding"] = …`, `n.embedding = …`, and a Cypher clause string **that
     REACHES A STATEMENT RUNNER** — either passed directly to one
     (`session.run("… SET n.embedding = $e …")`) or assigned to a local and then passed to
