@@ -33,9 +33,10 @@ WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
 -----------------------------------------------------------
 The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/start` renders a page
 for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
-`x-consent-refusal` — `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`
+`x-consent-refusal` — `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`
 enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
-purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
+purpose and are classified in the guard's own docstring
+(`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`):
 the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
 different contract).
 
@@ -84,6 +85,70 @@ _PARAMS = {
     "state": "state-xyz",
     "scope": "mcp",
 }
+
+# A `resource` (RFC 8707) audience in a NON-http scheme. It is a real destination the page could be
+# talked into carrying and one the `http://`/`https://` origin assertion cannot see, which is why it
+# gets its own row in the echoed-value tuple below.
+_RESOURCE = "cursor://tools.internal/v1"
+
+# The OTHER destination the origin assertion cannot see, and the reason `resource` is NOT the only
+# parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
+# `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
+# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED row of
+# `_CROSS_HALF_URIS`). `cursor://…` carries no
+# `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
+# `client.example/cb` tail row: a page that rendered it passed every assertion in
+# `_assert_refusal_page` GREEN (review of #13712, F1).
+_NATIVE_REDIRECT = "cursor://sentinel.example/cb"
+
+# `scope` is unvalidated free text (`start.ts:135`), so the sentinel arm sends this instead of the
+# production-shaped `"mcp"`. A production-shaped value made the echo row's GREENNESS a coincidence of
+# the copy's capitalisation (the page renders "MCP"), so an ordinary copy edit to `your mcp client`
+# would red six arms with "the page ECHOES 'mcp' from the request" — an accusation of an interpolation
+# that does not exist (review of #13712, F2). A sentinel is absent for a reason no copy edit supplies.
+_SCOPE_SENTINEL = "scope-sentinel-mcp"
+
+# The params that carry what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
+# (widening it would change what every other arm proves), so the values that need to be distinctive —
+# both non-http destinations and the `scope` sentinel — ride on a copy of these instead. That copy is
+# a superset of `_PARAMS` in KEYS, with TWO VALUES overridden (`redirect_uri`, `scope`) — so an
+# arm presenting it does NOT prove every `_PARAMS` row: the scheme-less `client.example/cb` row is
+# presented by the five `_PARAMS` arms and by neither sentinel arm. Stated rather than glossed,
+# because a lane that added a row on "superset" would publish one that is vacuous on both refusal
+# copies (review of #13712, F12).
+#
+# ⛔ WHY BOTH REFUSAL COPIES NEED ONE OF THESE ARMS — and the revision of this comment that argued
+# otherwise had it backwards. The echoed-value tuple is checked against every arm's BODY, which makes
+# it copy-scoped but NOT parameter-scoped: a row can only red on a value the arm under test actually
+# PRESENTS. An ordinary `_PARAMS` `403` arm has no `resource` key at all, so a `FLOW_NOT_YOURS` copy
+# that interpolated it rendered empty there and the `_RESOURCE` row passed VACUOUSLY — F1's class (a
+# page carrying a destination the origin assertion cannot see) surviving in the very copy F1 named.
+# The `403` arm therefore presents the sentinel params too (same KEYS, so the `_PARAMS` rows still
+# apply except the overridden `redirect_uri`, and
+# the arm count stays 7), giving each refusal copy an arm that can red for what that copy could
+# interpolate. Measured, not assumed: hardcoding `cursor://tools.internal/v1` into `FLOW_NOT_YOURS`
+# reds exactly that arm (`1 failed, 6 passed`, opts6) and nothing else (review of #13712, F1b).
+_SENTINEL_PARAMS = dict(
+    _PARAMS, resource=_RESOURCE, redirect_uri=_NATIVE_REDIRECT, scope=_SCOPE_SENTINEL)
+
+# The WAYS AN ELEMENT, OR THE PAGE'S OWN CSS, CAN BE TALKED INTO A DESTINATION — each matched as a
+# PATTERN rather than as a bare token. HTML permits ASCII whitespace on BOTH sides of `=` in an
+# attribute (whatwg HTML: attribute name state → before attribute value state), so
+# `<img src = "//evil.example/x">` and `<link rel=stylesheet href = "/x.css">` are well-formed
+# documents that match none of the flat tokens (`"src="`, `"href="`).
+#
+# ⛔ THIS IS A LIST OF THE CHANNELS THAT EXIST, NOT A PROOF THAT NO OTHER ONE CAN. A universal is
+# what the previous revisions kept claiming and kept being falsified by — first `<img srcset>`, then
+# `<body background=…>` and the page's OWN `<style>` block, where `url(...)` and `@import` are
+# equally well-formed destinations carrying no scheme (review of #13712, F2 and F2b: each mutant
+# stayed GREEN under the narrower pattern before it was added). So the comment names what the pattern
+# enforces; a newly-found channel is APPENDED here rather than the sentence being widened to cover
+# it. The classes stay narrow enough that the page's legitimate `<meta charset>` / `<meta
+# name=viewport>` match nothing here, which the suite's unmutated negative control re-measures on
+# every run.
+_AFFORDANCE_RE = re.compile(
+    r"<\s*a[\s>]|(?:href|srcset|poster|formaction|ping|data|src|background)\s*="
+    r"|(?:<\s*form)|http-equiv|url\(|@import")
 
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
@@ -762,11 +827,16 @@ console.log("RESULT " + JSON.stringify(out));
 
 
 def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
-    """A hard failure of the carriage is a PAGE — with the status and the reason UNCHANGED.
+    """A REFUSAL of the carriage is a PAGE — with the status and the reason UNCHANGED.
 
     #10884 (the `503` store arms) and #10865 arm B (the `403`) are one root: `start` answered a
     browser with `json({error, reason})`, so a person saw a JSON blob on a blank page with no way
-    forward. The fix is deliberately presentation-only, and this helper is where that is enforced:
+    forward. "REFUSAL" is the load-bearing word: `start.ts` still returns JSON from the `400`
+    caller error and the terminal `200` flow state, so this helper does NOT assert that every hard
+    failure of the route is a page —
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left` is where those
+    two survivors are counted and classified. The fix is deliberately presentation-only, and this
+    helper is where that is enforced:
 
       * the STATUS is exactly what it was — the `403`'s deliberate, recorded exemption from §2.3's
         no-oracle rule is carried by the code, so a page that answered `200` would retire a refusal;
@@ -798,12 +868,89 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         "invites a guess")
     assert "no-store" in (out.get("cacheControl") or ""), (
         f"{reason}: a refusal is cacheable ({out.get('cacheControl')!r}) and its URL carried a key")
-    # …and it DECIDES NOTHING: no script, no external asset, no echo of the request.
+    # …and it DECIDES NOTHING: no script, no external asset, no link, no echo of the request.
     assert "<script" not in body.lower(), f"{reason}: the refusal page carries script"
-    assert "http://" not in body and "https://" not in body, (
+    # `body.lower()` on BOTH sides of the pair: the affordance loop below is case-insensitive, so a
+    # scheme assertion over the raw body let an echoed `HTTPS://…` through the very property it
+    # guards (review of #13712, P2).
+    assert "http://" not in body.lower() and "https://" not in body.lower(), (
         f"{reason}: the refusal page names an origin (an external asset, or an echoed URL)")
-    for echoed in ("state-xyz", "client-abc", "attempt_key", "code_challenge"):
-        assert echoed not in body, f"{reason}: the page ECHOES {echoed!r} from the request"
+    # ⛔ NO AFFORDANCE THAT CAN BE TALKED INTO A DESTINATION. The module docstring says the retry
+    # is PROSE, not an `href`, "because any `href` would have to echo the query or choose a
+    # target" — and a relative `href` satisfies both assertions above, so the property had no
+    # guard at all. The sibling page this one is modelled on DOES carry one (`<a href="/contact">`
+    # in `website/functions/_middleware.ts`), which makes a copy-paste from the precedent the exact
+    # edit that would ship it green.
+    # `http-equiv`/`src=` add two MORE channels the forms above cannot express — *not* "the two
+    # ways", which would be the same false exhaustiveness this guard exists to stop:
+    # `<meta http-equiv="refresh" content="0;url=/contact">` is a redirect the page's CSP
+    # (`default-src 'none'`, no `navigate-to`) does not block, and a protocol-relative `<img src>`
+    # or `<iframe src>` is a subresource with no scheme. The enforced set is the pattern below, and
+    # it also carries `srcset`, `poster`, `formaction`, `ping`, `data`, `background` and CSS
+    # `url(`/`@import`; `<meta charset>`/`<meta name=viewport>` stay legal, which is what the page
+    # actually needs.
+    # ⛔ Matched as PATTERNS (`_AFFORDANCE_RE`), not as flat tokens: a whitespace-bearing attribute
+    # (`<img src = "//evil.example/x">`) is well-formed HTML and matched none of the bare strings a
+    # token loop carried — a hole in the very guard this change adds (review of #13712, note 1).
+    affordance = _AFFORDANCE_RE.search(body.lower())
+    assert affordance is None, (
+        f"{reason}: the refusal page carries an affordance ({affordance.group(0)!r}) — the retry "
+        "affordance must be prose, because any link would have to echo the query or choose a "
+        "destination")
+    # The VALUES, not only the param NAMES. `attempt_key` (the name) is not a substring of the key
+    # the arms actually present (`b-attempt-key`, `ak-guessed`), so a name-only tuple left a mutant
+    # that interpolates `url.searchParams.get(ATTEMPT_KEY_PARAM)` into the copy fully GREEN — and
+    # that key is the one secret this page's CSP + `Referrer-Policy` exist to keep out of a third
+    # party's log. These are the values a mutant can interpolate into the copy and still slip past
+    # every assertion above — a new arm that presents a different key is pinned by adding it here
+    # rather than by remembering to.
+    #
+    # ⛔ The tuple is checked against THIS arm's body, whatever params the arm presented — so an arm
+    # covers the copy it renders, and only that: a row can red only on a value the arm under test
+    # actually PRESENTS, so a value only one arm presents is rendered EMPTY in the other copy's arms
+    # and passes VACUOUSLY there. That is why each of the page's TWO copies (`STORE_FAULT` /
+    # `FLOW_NOT_YOURS`, `consent-refusal.ts:110-132`) has an arm PRESENTING the sentinel params,
+    # rather than one sentinel arm being assumed to cover both — the earlier revision of this
+    # paragraph claimed exactly that and was wrong (review of #13712, F1b — measured: hardcoding a
+    # sentinel into `FLOW_NOT_YOURS` reds the `403` arm, opts6, and nothing else).
+    #
+    # ⛔ `redirect_uri` appears TWICE, and the split is load-bearing. The `_PARAMS` literal is pinned
+    # only as its SCHEME-LESS tail (`client.example/cb`): the full `https://client.example/cb` is
+    # already forbidden by the origin assertion above (`#13671`), so the whole URL would be a row that
+    # can never be the failing one (the red would land on the origin assertion instead). The tail
+    # alone was NOT enough for the NATIVE-scheme form — see `_NATIVE_REDIRECT` — hence its own row.
+    #
+    # `code_challenge_method` stays production-shaped and is the one deliberate exception: it has
+    # exactly ONE legal value (`start.ts:124-125` upper-cases and requires `S256`), so there is
+    # nothing to make distinctive; the copy renders no "S256" today. If the copy ever explains PKCE
+    # this row must become a sentinel-or-nothing decision rather than a coupling to prose casing.
+    for echoed in (
+        _PARAMS["client_id"],
+        "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme the origin assert forbids
+        _PARAMS["state"],
+        _PARAMS["code_challenge"],
+        _PARAMS["code_challenge_method"],
+        # the native-scheme redirect the origin assertion structurally cannot see (`_NATIVE_REDIRECT`)
+        _NATIVE_REDIRECT,
+        # `resource` (RFC 8707) carries a URI with NO scheme check (`start.ts:136`), so it names a
+        # destination in a non-http scheme exactly as `redirect_uri` can — and the origin assertion
+        # is blind to both. Reachable only through `_SENTINEL_PARAMS`, which is why that arm exists.
+        _RESOURCE,
+        # a `scope` no copy edit can produce, so the row's greenness is not a coincidence of casing
+        _SCOPE_SENTINEL,
+        # the attempt keys the arms present (the one credential, #10487/#10884)
+        "b-attempt-key",
+        "ak-guessed",
+        # the param NAMES too: cheap, and it pins that the page never prints a query skeleton
+        "attempt_key",
+        "code_challenge",
+        "redirect_uri",
+        "client_id",
+    ):
+        assert echoed not in body, (
+            f"{reason}: the page ECHOES {echoed!r} from the request — the copy is compile-time "
+            "constants only (#10884/#13671): an echoed value is a destination or a credential "
+            "this page can be talked into carrying")
 
 
 def _run(scenario: str, **opts) -> dict:
@@ -1727,7 +1874,8 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
     `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
     swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
     leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
-    outcome `start.ts`'s session-read `try`/`catch` exists to remove.
+    silence `start.ts`'s ATTEMPT-WRITE `try`/`catch` exists to break (it logs `consent attempt write
+    failed`; the session-read catch above it exists for a different reason - an untyped 500).
 
     SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
     failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
@@ -1957,26 +2105,48 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
-    # #10865 arm B — the `403`.
+    # The SENTINEL arm for a store fault — one of the TWO refusal copies that present the values a
+    # `_PARAMS` arm cannot (the `403` below is the other), all of them
+    # `cursor://`-class destinations or distinctive sentinels (see `_SENTINEL_PARAMS`). It matters
+    # because `resource` and `redirect_uri` are both DESTINATIONS that may carry a non-http scheme —
+    # `cursor://…` is not `http(s)://`, and this repo accepts exactly that scheme for `redirect_uri`
+    # in `NATIVE_REDIRECT_SCHEMES` — so a refusal page that interpolated either one would carry a
+    # target the `http://`/`https://` check cannot see. `_PARAMS` deliberately stays unnarrowed: it is
+    # the set EVERY arm presents, so widening it would change what every other arm proves.
+    ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
+     "consent_store_unavailable", 503),
+    # #10865 arm B — the `403`. It presents the SENTINEL params (the same KEYS as `_PARAMS`, with
+    # `redirect_uri`/`scope` overridden, so the `_PARAMS` rows apply to this copy except that one),
+    # because a row can only red on a value the arm
+    # PRESENTS: an ordinary `_PARAMS` arm has no `resource`, so a `FLOW_NOT_YOURS` copy interpolating
+    # it rendered empty and the `_RESOURCE` row passed vacuously — F1's class alive in the copy F1
+    # named. See the `_SENTINEL_PARAMS` comment above (review of #13712, F1b).
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
-                         "params": dict(_PARAMS, attempt_key="b-attempt-key")},
+                         "params": dict(_SENTINEL_PARAMS, attempt_key="b-attempt-key")},
      "flow_not_yours", 403),
 ])
-def test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status(
+def test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status(
     scenario: str, opts: dict, reason: str, status: int,
 ) -> None:
-    """#10884 + #10865 arm B, one root, ONE assertion: EVERY hard failure is a page.
+    """#10884 + #10865 arm B, one root, ONE assertion: EVERY REFUSAL is a page.
 
     The four `json({error, reason})` bodies were the defect: a person in a browser got a JSON blob
     and no way forward. Pinning only the arms the issues name by line would let the NEXT refusal
-    added to this route ship as JSON again — the root is "the carriage's failure states were never
+    added to this route ship as JSON again — the root is "the carriage's refusal states were never
     given a user-facing face", not "this arm at this line" — so the whole family is enumerated and
     each one is held to the same four properties (status unchanged, page, reason in a header, body
     not JSON) by ONE helper.
 
+    ⛔ The name says REFUSAL, and the narrowing is not pedantry: `return json(` still survives in
+    TWO places in `start.ts` (the `400` caller error, the terminal `200` flow state) and both reach
+    a browser, so "every hard failure is a page" was a claim the route falsified — and believing it
+    invites converting the terminal `200`, which #10865's owner comment records as a DIFFERENT
+    CONTRACT. The survivors are counted and classified by
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`.
+
     ⚠️ `as_origin_misconfigured` is included deliberately and is NOT named by either issue: it is
     the same route, the same class, and the same one-line fix. Leaving it as JSON would make the
-    claim "every hard failure of this route is a page" false, which is the kind of half-face that
+    claim "every REFUSAL of this route is a page" false, which is the kind of half-face that
     produced these issues in the first place.
     """
     _assert_refusal_page(_run(scenario, **opts), reason, status)
@@ -2042,7 +2212,7 @@ def test_the_refusal_page_makes_NO_outbound_request_and_carries_no_referrer() ->
         assert (out.get("referrerPolicy") or "").lower() == "no-referrer", (opts, out.get("referrerPolicy"))
 
 
-def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
+def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None:
     """The class, not the instances: a NEW refusal added as `json(...)` reds here.
 
     The parametrised test enumerates the arms that exist TODAY. That is the right shape for
@@ -2074,6 +2244,333 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
         f"`start.ts` returns JSON from {len(jsons)} place(s), not the 2 accounted for — a hard "
         "failure of the carriage is being answered with a JSON body again; render it with "
         "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
+
+
+# ⛔ The DENIAL this PR exists to keep out of the contract artifacts: "every hard failure is a
+# page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
+# three words in ORDER, with any run of non-word characters between them, so the re-introduction
+# cannot evade the guard by wrapping the phrase over a line, emphasising it, or hyphenating it.
+#
+# ⛔ AND THAT IS THE WHOLE CLAIM — it is a PHRASE match, not a semantic one. Two limits are known and
+# deliberate: markup that puts a WORD CHARACTER between them (`every <b>hard</b> failure`, where
+# `</b>` contains letters) does not match, and a different determiner (`all` / `each` / `any hard
+# failure`) is a different phrase. This guard pins the string this change retires; it does not claim
+# to catch a rephrased denial, and a comment that claimed it would be the class of over-claim this
+# PR exists to remove (review of #13712, F8).
+#
+# `IGNORECASE` rather than a `.lower()` copy of the corpus: lowercasing is not length-preserving for
+# every character, and the assertion below QUOTES the span it matched out of the ORIGINAL text, so
+# an index taken from a lowered copy could quote a different span than the one that earned the red.
+_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
+
+# ⛔ THE PHRASE **IS** THE DEFECT, SO THERE IS NO EXEMPTION — and that is the final answer after
+# four defeated attempts to write one. The phrase is false of this route: `start.ts` returns JSON
+# from TWO places (the `400` caller error and the terminal `200` flow state), so "every hard
+# failure" is a claim the code falsifies, PRESENT OR PAST. A historical sentence is true but still
+# carries the false noun, which is exactly why this change rewrites main's "Every hard failure of
+# that route used to answer" into "Every REFUSAL on that route used to answer" — the moment the
+# guard LET a "hard failure ... used to answer" sentence through, reverting that hunk stopped
+# reddening the guard, i.e. the guard stopped pinning the fix it exists to pin.
+#
+# Every exemption shape before this one was defeated by ordinary prose, and the reasons are worth
+# keeping because they are the argument for deleting the mechanism rather than tuning it:
+#
+#   * a bare WORD LIST (`still` / `survives` / `remains`) — "…is a page; the status is still
+#     unchanged" went GREEN (F4);
+#   * a retro marker accepted ANYWHERE in the sentence — "every hard failure is a page, as noted
+#     before" went GREEN (F5);
+#   * a `used to` read from an unbounded tail — "…is a page, used to work" went GREEN (F5 again);
+#   * a clause-scoped past tense with `\w+ed` — deleting ONE COMMA flipped a shipped RED row to
+#     GREEN, and `documented` / `agreed` / `unchanged` counted as past tense (F6);
+#   * one anchored historical SHAPE — did not fail open, but made the guard VACUOUS: main's own
+#     pre-fix sentence matched it, so reverting this change redded nothing (measured).
+#
+# "Does this sentence mean the past?" is a semantic question, and a prose lint that answers
+# semantic questions either fails open (F4–F6) or stops pinning anything (the shape). Requiring the
+# phrase's ABSENCE is mechanical, cannot be defeated by any phrasing, and costs only a reword: the
+# corpus already writes the true sentence without it ("Every REFUSAL on that route used to answer
+# `json({error, reason})`"), and the assertion names that form. This is the A/B line applied to
+# itself — fail closed, never open.
+
+# A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
+# which carry no such pair), AND at a PARAGRAPH BREAK in either direction. The paragraph arm is not
+# decoration: a JSDoc blank line is ` *\n *\n`, never `\n\n`, so a `\n\n`-only head cut was dead in
+# every TS header it scans, and the tail had no paragraph arm at all. The HEAD is capped at 240
+# characters; the tail is capped at 240 only when it carries no terminator at all (`finish =
+# stop.end() if stop else …`), which is the run-on case, so the window can exceed 240 — length is a
+# message concern, never a decision, because the guard reads spans, not windows. This window now
+# serves only the MESSAGE (it quotes the sentence that earned the red), never a decision.
+_SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
+
+
+def _sentence_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """`(begin, finish)` of the sentence around `text[start:end]`, BOUNDED at both ends so the
+    sentence the assertion quotes is the one that carries the phrase.
+    """
+    head = text[:start]
+    breaks = list(_SENTENCE_BREAK_RE.finditer(head))
+    begin = breaks[-1].end() if breaks else 0
+    stop = _SENTENCE_BREAK_RE.search(text, end)
+    finish = stop.end() if stop else min(len(text), end + 240)
+    return max(begin, start - 240), finish
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence around `text[start:end]` — see `_sentence_bounds` for the window."""
+    begin, finish = _sentence_bounds(text, start, end)
+    return text[begin:finish]
+
+
+def _absolute_violations(text: str) -> list[tuple[str, str]]:
+    """Every `(matched span, its sentence window)` in which `text` states the false absolute.
+
+    The DECISION lives here, in one place: the corpus check and the committed table both drive THIS
+    function, so a widening of the pattern cannot pass by leaving a second, re-typed copy of the
+    loop behind (review of #13712, F7). There is no exemption to widen.
+    """
+    return [(m.group(0), _sentence_around(text, m.start(), m.end()))
+            for m in _FALSE_ABSOLUTE_RE.finditer(text)]
+
+
+def _false_absolute_in(text: str) -> str | None:
+    """The first false-absolute span in `text`, or None.
+
+    A thin accessor over `_absolute_violations`, so the table is exercised through the shipped
+    decision rather than through a retyped copy of its loop in the test that pins its shape.
+    """
+    violations = _absolute_violations(text)
+    return violations[0][0] if violations else None
+
+
+def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSIFY() -> None:
+    """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
+    claim the route FALSIFIES — and pinning that PHRASE, wherever only non-word characters separate
+    its three words (a line wrap, emphasis, a hyphen, a tab), is what keeps it corrected.
+
+    Why a prose claim earns a guard here rather than a comment: this is not untidiness. #10865's
+    owner comment records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the
+    absolute would "finish" the job by converting an arm whose retirement is the OWNER'S DECISION
+    (that comment offers it as an option and calls it "an owner-visible API decision, not a review
+    fix" — it does not rule it out, and this guard must not claim it does) — the false summary
+    actively steers a future lane to reverse a recorded decision, which no arm-level test can see.
+
+    The files scanned are the ones a reader takes the CONTRACT from: the route, the page builder
+    (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
+    sentence appears there legitimately, as the thing being narrowed.
+
+    ⛔ WHERE THE RED CAN ACTUALLY LAND — one corpus, not three. Only `consent-refusal.ts` carried
+    the phrase until this change; `start.ts` and `consent-identity-bridge.md` contain it NOWHERE at
+    head (`git grep -i 'every hard failure'`), so their rows are FORWARD-LOOKING: they hold the next
+    author who writes the absolute there, and neither can be the red for a revert of this hunk.
+    Three files scanned is not three catches, and this docstring must not be read as though it were.
+
+    ⛔ THE MATCH IS NOT ONE WHITESPACE-EXACT SPELLING. A prose absolute comes back in whatever shape
+    the edit takes: wrapped inside the phrase (`every hard` / `   * failure`), emphasised
+    (`every **hard** failure`), or hyphenated (`hard-failure`). Pinning the literal
+    `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
+    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE wherever only NON-WORD
+    characters separate the three words — not "in any markup", which is FALSE of `every <b>hard</b>
+    failure` (the `</b>` carries letters); the limit is stated on the regex itself.
+
+    ⛔ AND THE PHRASE ALONE IS **NOT** A PHRASE-ONLY MATCH THAT NEEDS AN EXEMPTION — that was tried
+    four times and every exemption leaked or went vacuous (the argument is on `_FALSE_ABSOLUTE_RE`
+    and in the table below). The phrase is false of this route PRESENT OR PAST, because "hard
+    failure" is the wrong NOUN: `start.ts` answers JSON from the `400` caller error and the terminal
+    `200` TODAY, so a sentence about the past still carries the false universal. Requiring absence is
+    the mechanical rule, and this change's own wording ("every REFUSAL … used to answer") is the
+    true sentence it asks for. The message QUOTES the span it matched, so a red cannot be read as a
+    claim about a sentence nobody wrote.
+
+    ⛔ THE SHAPES ARE PINNED BY THEIR OWN TABLE, not only by this corpus: the phrase is UNREACHABLE
+    here at head — `git grep -i 'every hard failure'` over the three files below returns 0 hits — so
+    without `test_the_summary_guard_REDS_the_phrase_in_EVERY_shape` a later narrowing of the pattern
+    would ship with nothing red claiming to cover it. That table drives `_false_absolute_in` →
+    `_absolute_violations`, the same decision this loop calls.
+
+    Non-vacuous, and where the red actually lands: `origin/main`'s
+    `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
+    answer `json({error, reason})`" — the sentence this change rewrites — so reverting that hunk
+    REDS this guard. ⛔ It does NOT red on a `start.ts` header carrying the absolute: no header of
+    that file ever read `**Every hard failure is a PAGE, not a JSON blob**` (`git log -S 'Every
+    hard failure' -- …/api/consent/start.ts` is empty, and main's header already says "Every
+    REFUSAL is a PAGE"), so `consent-refusal.ts` is the real pre-fix red and the only provenance
+    this docstring may claim.
+    """
+    corpus = {
+        "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
+        "consent-refusal.ts": (FUNCTIONS / "_shared/auth/consent-refusal.ts").read_text(
+            encoding="utf-8"),
+        "consent-identity-bridge.md": (REPO / "docs" / "engineering" / "auth" /
+                                      "consent-identity-bridge.md").read_text(encoding="utf-8"),
+    }
+    for name, text in corpus.items():
+        # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can tell
+        # which sentence earned the red instead of being told what it supposedly claims.
+        span = _false_absolute_in(text)
+        if span is None:
+            continue
+        raise AssertionError(
+            f"`{name}` carries the phrase {span!r}, which is the absolute this change retires: "
+            "`start.ts` returns JSON from TWO places (the `400` caller error and the terminal `200` "
+            "flow state — see "
+            "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`), so "
+            "\"hard failure\" is false of this route PAST OR PRESENT. Say every REFUSAL; a "
+            "historical sentence says `every REFUSAL … used to answer` (that is what the corpus "
+            "writes). The terminal `200` is #10865's recorded decision, and a summary that denies "
+            "it invites converting it.")
+
+
+# One row per shape the pattern must RED, run through the SAME shipped decision the corpus guard
+# calls (`_false_absolute_in` → `_absolute_violations`). There is no exemption left to test, so this
+# table's job is the opposite one: it pins that no PHRASING gets a sentence with the false noun past
+# the guard — including the historical forms the deleted exemptions were written to allow.
+#
+# ⛔ FIVE EXEMPTION SHAPES WERE TRIED — four failed OPEN and the fifth made the guard VACUOUS — and
+# each one is the argument for deleting the mechanism rather than tuning it: a bare word list
+# (`bf5202ce79`), a retro marker accepted anywhere in the sentence (`4ab3033e32`), a `used to` read
+# from an unbounded tail, a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and an
+# anchored historical shape that did not fail open but matched `origin/main`'s own pre-fix sentence,
+# so reverting the copy hunk redded nothing.
+#
+# ⛔ THE TABLE IS NOT "EVERY ROW BELOW WAS GREEN UNDER ONE OF THOSE", and two earlier wordings of this
+# comment said exactly that and were falsified by the table itself (review of #13712, F15/F16 —
+# measured: 8 of the rows are RED under ALL FIVE schemes, GREEN under none — 35 rows when that was
+# measured; the table has 36 because this very comment block added the F6 row). A row whose own
+# comment names a revision is a casualty of that scheme; the rest are here for their own reason — the
+# bare denial, and the spelling rows (wrap, `**hard**`, `hard-failure`, tab) that hold the PATTERN
+# rather than an exemption. Both kinds belong in the table; what must never be written is that a row
+# demonstrates a discrimination it does not perform — which is the class of over-claim this PR
+# exists to remove.
+_SUMMARY_ABSOLUTE_ROWS: list[str] = [
+    # the denial itself, however it is dressed
+    ("Every hard failure is a page, not a JSON blob."),
+    # ⛔ AND HOWEVER IT IS SPELLED — the shape tolerance `_FALSE_ABSOLUTE_RE` exists for, which the
+    # rows below this one would NOT pin on their own: every other row carries the contiguous literal,
+    # so a table without these stayed all-green when the pattern was swapped back to the bare
+    # literal and the tie to F3's fix was lost (measured — review of #13712, F8). The assertion
+    # compares by ORDERED CONTAINMENT of the three words, not by equality, so a span carrying `**`
+    # or a line wrap is accepted here.
+    # ⛔ WRAP-ONLY, and that is load-bearing (review of #13712, F11). The earlier text opened with a
+    # CONTIGUOUS copy ("Every hard failure is a page, …") before the wrapped one, so the FIRST match
+    # was the contiguous span and this row stayed GREEN under a newline-hostile pattern — measured:
+    # `re.compile(r"every(?:(?!\n)\W)+hard(?:(?!\n)\W)+failure", re.I)` matches the old row and does
+    # NOT match this one. The row exists to pin the wrap tolerance, so it must carry nothing but the
+    # wrapped copy.
+    ("Wrapped over a line:\n * every hard\n * failure is a page."),
+    ("Every **hard** failure is a page, not a JSON blob."),
+    ("Every hard-failure is a page, not a JSON blob."),
+    ("Every\thard\tfailure is a page, not a JSON blob."),
+    ("EVERY HARD FAILURE IS A PAGE, not a JSON blob."),
+    # ordinary-English clauses: a word list (`still` / `remains`) exempted ALL FOUR under `bf5202ce79`
+    ("Every hard failure is a page; the consent cookie is still set before the flow starts."),
+    ("Every hard failure of the route is a page, and the store remains the source of truth."),
+    ("Every hard failure is a page, which still leaves the graph as the source of truth."),
+    ("Every hard failure is a page, and the status is still unchanged."),
+    # a survivor in the NEXT sentence is a different sentence
+    ("Every hard failure is a page. Two arms still answer JSON."),
+    # counted survivors alone are not enough
+    ("Every hard failure is a page, because two arms still answer JSON."),
+    # …and a retro frame alone is not enough
+    ("Before #13671, every hard failure is a page, and the store remains the source of truth."),
+    # LATER CLAUSE (F5): the retro word is about another subject and comes AFTER the universal
+    ("Every hard failure is a page, as noted before, and two arms still return JSON."),
+    ("Every hard failure is a page, and the two arms still return JSON, as we said before."),
+    # `before` / `until` as present-tense conjunctions name nothing that used to be true
+    ("Until the cookie is set, every hard failure is a page; two arms still return JSON."),
+    ("Before the cookie is set, every hard failure is a page; two arms still return JSON."),
+    # a past PARTICIPLE is not a past tense: "is answered" is present
+    ("Every hard failure is answered with a page; two arms still return JSON."),
+    # `used to` in a LATER clause is another subject's verb
+    ("Every hard failure is a page, used to work; two arms still return JSON."),
+    ("Every hard failure is a page, which used to be documented; two arms still return JSON."),
+    # an anchored `before` cannot lend its frame to a present-tense universal
+    ("Before #13671, every hard failure is a page; two arms still write JSON."),
+    # ⛔ F6 — THE COMMA. These two are the SAME sentence; deleting one comma flipped the first from
+    # RED to GREEN under the clause-scoped `\w+ed` rule, because the neighbouring clause's `-ed` verb
+    # landed inside the denial's own clause. Both are RED now, and they are kept as a PAIR so the
+    # scoping cannot come back as a punctuation dependency.
+    ("Before #13671, every hard failure answered raw JSON; two arms converted, so now every hard "
+     "failure is a page."),
+    ("Before #13671, every hard failure answered raw JSON; two arms converted so now every hard "
+     "failure is a page."),
+    ("Before #13671, every hard failure of that route answered raw JSON; we have since converted "
+     "two places, so every hard failure is a page."),
+    ("Before #13671 every hard failure was JSON; two arms of the route still answer JSON, and "
+     "every hard failure is a page."),
+    ("Every hard failure is a page, and before #13671 every hard failure was JSON; two arms "
+     "still do."),
+    # ⛔ F6, the other half: an `-ed` word is not a tense. ⛔ THE NEXT TWO ROWS ARE NOT ITS CASUALTIES,
+    # and an earlier comment credited them with a discrimination they do not perform (review of
+    # #13712, F17 — measured at `094c824817` AND `ceb8ab564f`, the TWO revisions that shipped the
+    # clause-scoped `\w+ed` rule — an earlier wording of this line said "only", and `094c824817` is an
+    # ancestor, so that superlative was itself a provenance claim a re-measuring reader falsifies,
+    # review F18). Both rows are RED at BOTH revisions, and both go GREEN the moment a retro frame is
+    # added, because that rule ALSO required one and neither row carries it; here they are casualties
+    # of the bare word list at `bf5202ce79`. The row BELOW them is the one that rule EXEMPTS: it
+    # carries the retro frame AND `documented`, it is GREEN at `ceb8ab564f`, and it REDs the moment
+    # `documented` is removed — that measured dependence is the discrimination it is here to pin.
+    ("Two arms remain, and every hard failure is a page as documented."),
+    ("Two arms were converted and every hard failure is a page now."),
+    ("Before #13671, every hard failure is a page as documented; two arms still do."),
+    # a true past prefix does not excuse the SAME sentence asserting the present
+    ("Every hard failure answered raw JSON, and is a page now."),
+    # ⛔ AND SO IS THE HISTORICAL FORM — this is the row that decides whether the guard pins the fix.
+    # main's own pre-fix sentence is grammatically true ("used to answer") and still false of the
+    # route, because "hard failure" is the wrong noun: two arms answer JSON TODAY. When an anchored
+    # historical-shape exemption was tried, this sentence was allowed, reverting the copy hunk
+    # stopped reddening the guard, and the guard stopped pinning anything (measured through
+    # `_absolute_violations` against `origin/main`). It REDS, and the fix's own wording —
+    # "every REFUSAL … used to answer" — is what the corpus writes instead.
+    ("Before #13671, every hard failure of that route answered raw JSON; two arms still do."),
+    ("Every hard failure of that route used to answer `json({error, reason})`; two arms still do."),
+    ("Previously every hard failure of that route answered raw JSON; both arms return one."),
+    ("Every hard failure used to answer raw JSON; two arms still do."),
+    ("Before this change, every hard failure returned raw JSON; both returns remain."),
+    # a ` * ` line is layout, not a clause boundary, so wrapping the sentence must not change it
+    ("Before #13671, every hard failure of that route\n * answered raw JSON; two arms still do."),
+]
+
+
+@pytest.mark.parametrize("sentence", _SUMMARY_ABSOLUTE_ROWS)
+def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(sentence: str) -> None:
+    r"""A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
+
+    ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a
+    measurement that lives only in a commit message is the "reads as coverage it does not have"
+    pattern this PR has corrected twice (review of #13712). The rows ARE the measurement, and they
+    drive `_false_absolute_in` → `_absolute_violations`, the same decision the corpus guard calls —
+    never a retyped copy of the loop.
+
+    ⛔ WHY EVERY ROW IS RED AND THERE IS NO EXEMPT COLUMN. Each of the four revisions before this one
+    tried to DECIDE whether a sentence meant the past, and each failed OPEN on ordinary prose: a
+    word list at `bf5202ce79`, a whole-sentence retro search at `4ab3033e32`, an unbounded tail
+    after that, and a clause-scoped `\w+ed` whose verdict turned on a comma (the two paired rows
+    above are one sentence with and without it). A fifth, anchored historical shape did not fail
+    open — it made the guard VACUOUS, because `origin/main`'s own pre-fix sentence matched it. "Does
+    this sentence mean the past?" is a semantic question; a prose lint that answers semantic
+    questions has no safe answer, so the phrase is required to be ABSENT and a historical sentence
+    is REWORDED (the corpus writes "every REFUSAL … used to answer"). The cost is a false block,
+    never a false pass — the direction this repo's A/B line demands.
+
+    ⛔ SO THE TABLE PINS THE PATTERN, INCLUDING ITS SHAPE TOLERANCE. Rows below carry the phrase
+    wrapped over a line, emphasised, hyphenated and tab-separated, because the assertion compares by
+    case-insensitive CONTAINMENT of `every`, `hard`, `failure` in order rather than by equality with
+    the bare literal: an equality check would reject the very variants `_FALSE_ABSOLUTE_RE` exists to
+    catch, leaving F3's fix unpinned (measured: with the literal regex swapped back in, an
+    equality-checking table stayed all green — review of #13712, F8).
+
+    ⛔ THE NEGATION FORM ("NOT every hard failure is a page") IS NOT EXEMPT, deliberately: a
+    mechanical negator test would exempt "not only is every hard failure a page", which is the
+    fail-open direction. Reword instead.
+    """
+    span = _false_absolute_in(sentence)
+    assert span is not None, (
+        f"the guard FAILS OPEN on {sentence!r}: it states the denial and nothing reds it")
+    # The span is quoted out of the ORIGINAL text, so compare case-insensitively and by ORDER, not
+    # by equality: a wrap/emphasis/hyphen variant spans more than the bare literal.
+    words = [w for w in re.findall(r"[a-z]+", span.lower()) if w in {"every", "hard", "failure"}]
+    assert words == ["every", "hard", "failure"], (
+        f"the guard matched {span!r} for {sentence!r}, which is not the phrase itself")
 
 
 def _key_from(location: str | None) -> str:
@@ -2485,7 +2982,7 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     raises. ⚠️ Read the biconditional for what it actually holds: it is the ARM
     that is still emitted, not the raw body. Since #10884/#10865 arm B the
     `start` leg renders that arm as a PAGE (`x-consent-refusal: …`, asserted by
-    `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`),
+    `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`),
     and the mint leg (`token.ts`) still answers JSON — deliberately, because the
     AS page's `fetch()` is its reader and that page renders the human copy.
     The CONDITION is what is unfixed: which store call raises is not
