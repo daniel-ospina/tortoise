@@ -519,10 +519,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     ⛔ THE ANSWER-FORM LIST IS FINITE ON PURPOSE, AND THAT IS THE CONTRACT (#13795 review,
     finding 2). A match on the answer's CONTENT alone — no form required — cannot tell an
     ASSERTION from a QUOTED RETRACTION, and this document carries both: it quotes
-    `"returns exactly those two"` and marks it FALSE in every half, and it says the command
-    `... and only refuses those spellings when the command actually prints a path`, where
-    the answer sits mid-sentence. Reading either as a live membership claim would red the
-    document for retracting a falsehood. So the class covered here is "the same answer,
+    `"returns exactly those two"` and marks it FALSE in every half, and ⛔ it DID carry a
+    second one — `... and only refuses those spellings when the command actually prints a
+    path`, the answer sitting mid-sentence — which is quoted here as the historical example
+    it now is (round 6 review, P3 — MEASURED: `grep -c 'actually prints a path'` on
+    05-verify.md is 0 at this head, because the sentence described a RETIRED guard and was
+    removed). Reading either as a live membership claim would red the document for
+    retracting a falsehood. So the class covered here is "the same answer,
     behind another LISTED form", NOT "any English sentence whose object is the same": a
     re-wording onto a verb outside this list is not detected. Said plainly because a guard
     may be narrow, but may not describe itself as complete.
@@ -793,22 +796,28 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "run it; a set named here rots the moment `main` lands the same re-derivation "
         "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
     # ⛔ AND EVERY ANSWER THE SIBLING SHAPE DETECTOR KNOWS, NOT JUST THIS REGEX'S VERBS
-    # (#13802 review, round 4, P2 — MEASURED): `_TORTOISE_SET_DIRECTION_CLAIM` names four
-    # answer FORMS, while the sibling `_typed_answers_to_tortoise_cmd` names fourteen. A
+    # (#13802 review, round 4, P2 — MEASURED): at that round this regex named four answer
+    # FORMS while the sibling `_typed_answers_to_tortoise_cmd` named fourteen, and a
     # refuted claim spelled with one of the other ten (`reports exactly two paths`,
-    # `carries no paths`, `lists one path`, …) was seen by NEITHER arm where it matters:
+    # `carries no paths`, `lists one path`, …) was seen by NEITHER arm where it matters.
+    # ⛔ THOSE TWO COUNTS ARE HISTORY, NOT THIS HEAD'S (round 6 review, P3 — MEASURED): the
+    # regex has since been widened to the same verb class and answer forms, so `reports
+    # exactly two paths` and `lists one path` DO match it here, and the reason the detector
+    # is still asked separately is its direction LOGIC (`shows`/`names`/`includes`/
+    # `contains`/`has`/`=`/`:`), not a wider verb list.
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
     # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
-    # membership claim. Both checks are TEXT-ONLY, so neither needs a
-    # base ref and neither can be skipped away; they are kept BESIDE each other because
-    # they cover different spellings (this regex knows the `-- tortoise/` shorthand the
-    # detector's full-command anchor does not; the detector knows the answer forms this
-    # regex's verb list does not).
+    # membership claim. Both checks are TEXT-ONLY, so neither needs a base ref and neither
+    # can be skipped away; they are kept BESIDE each other because the regex knows the
+    # `-- tortoise/` shorthand and a bare verb, while the detector carries the direction
+    # LOGIC (`shows`/`names`/`includes`/`contains`/`has`/`=`/`:`) that decides whether an
+    # answer is a claim at all.
     # ⛔ AND IN BOTH SPELLINGS OF THE COMMAND (#13802 review, round 5, P2 — MEASURED). The
     # detector anchors on the FULL command, so the document's own shorthand —
-    # "`-- tortoise/` reports exactly two paths" — was seen by NEITHER arm: the regex above
-    # does not list `reports`, and the detector was asked only about the long form.
+    # "`-- tortoise/` reports exactly two paths" — was seen by NEITHER arm: the regex did
+    # not then list `reports` (it does now, round 6), and the detector was asked only about
+    # the long form.
     # MEASURED on the rail's topology (no `origin/main`): that injected shorthand stayed
     # GREEN over a refuted claim, while the same claim in the long
     # spelling reds. The second element carries its backticks ON PURPOSE: a bare
