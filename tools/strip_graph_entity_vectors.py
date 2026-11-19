@@ -1463,12 +1463,22 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     return _pairs_operand_stores_the_vector(node)
 
 
-#: Mapping constructors whose NAME does not end in `Dict` but whose result is one. `|=` and
-#: `update` merge them exactly as they merge a dict literal, so a constructor call is a store
-#: when its operand is (`_pairs_operand_stores_the_vector`). Named as a set rather than inferred
-#: from the name because `endswith("Dict")` is a shape, not a family — measured: it excludes
-#: all three of these while each really merges.
-_MAPPING_CONSTRUCTORS = frozenset({"defaultdict", "ChainMap", "Counter"})
+
+#: Callee names that BUILD a mapping from `dict()`'s own operands, so an instance of one is
+#: a mapping `dict.__ior__` / `dict.update` MERGES rather than iterates (measured on this box:
+#: `|=` and `update()` both merge all six, PEP 584's "mapping-like objects … or iterables of
+#: key-value pairs"). ⛔ AN INCLUDE LIST, for the reason `_STATEMENT_RUNNERS` states: the
+#: question is "does this call build a MAPPING", and a blacklist of the names that do not
+#: would re-open the hole at the next spelling nobody thought of. The `endswith("Dict")`
+#: suffix still carries the CamelCase `collections` family (`OrderedDict`, `UserDict`, and a
+#: project's own `*Dict` subclass) — the lowercase/other-named ones have to be named here.
+_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap")
+
+
+def _is_mapping_constructor(name: str) -> bool:
+    """Does this callee name build a MAPPING — a merge source, not a pairs iterable alone?"""
+    return name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS
+
 
 
 def _pairs_operand_stores_the_vector(node) -> bool:
@@ -1487,6 +1497,12 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
     — extracting a pair out of a call result is data flow this module does not do, and it is
     disclosed here rather than left to be rediscovered.
+
+    ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
+    helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
+    an OPERAND (rather than a bare RHS) therefore asks
+    `_mapping_argument_stores_the_vector` FIRST or as well: a helper that answers one of two
+    interchangeable operand forms is half a rule, and half a rule is a false PASS.
     """
     import ast
 
@@ -1530,26 +1546,20 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # ⛔ A MAPPING CONSTRUCTOR IS A MAPPING: `props |= OrderedDict([("embedding", vec)])`
         # merges through `dict.__ior__` because `OrderedDict` IS a dict subclass, and the
         # constructor spelling was CERTIFIED while the bare literal was refused (measured).
-        # ⛔ THE OPERAND CAN BE A PAIRS SEQUENCE **OR A MAPPING LITERAL**
-        # (`OrderedDict({"embedding": vec})` — the mapping form of the very constructor this
-        # arm was added for), so both rules are asked.
-        # ⛔ AND THE CONSTRUCTOR FAMILY IS NOT "SUFFIX `Dict`": that is a name SHAPE, not the
-        # family — it excludes `defaultdict`/`ChainMap`/`Counter` (measured CERTIFIED, and each
-        # really merges: `d |= OrderedDict({"embedding": 1})`), so the documented set is spelled
-        # out. The mapping operand need not be the FIRST positional (`defaultdict(list, pairs)`)
-        # and need not be alone (`OrderedDict(pairs, extra=1)`), so every positional operand and
-        # every ``**`` keyword is followed and the arity/keyword restriction is gone. Narrow by
-        # construction: only these callee NAMES, so `_audit([pairs])` stays a mention.
-        # ⛔ A ``**`` MAPPING KEYWORD IS NOT SCANNED HERE, and that is a measurement rather
-        # than an omission: a nested `dict(**{"embedding": vec})` reaches
-        # `_mutator_stores_the_vector` as its own call while the arm is walked, so the keyword
-        # path answers it already — removing this scan changed no verdict on any fixture (the
-        # mutant SURVIVED until the row was checked against the OTHER arm, which is how the
-        # redundancy was found). Left out rather than kept looking load-bearing.
-        if name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS:
-            return any(_pairs_operand_stores_the_vector(operand)
-                       or _mapping_operand_stores_the_vector(operand)
-                       for operand in node.args)
+        # ⛔ AND THE CONSTRUCTOR FAMILY IS AN INCLUDE LIST, NOT A NAME SHAPE:
+        # `endswith("Dict")` excludes `defaultdict`/`ChainMap`/`Counter`, each of which `|=`
+        # and `update()` merge like any dict (measured CERTIFIED, and each really merges).
+        # ⛔ AND THE OPERAND IS ANSWERED BY **BOTH** RULES — pairs sequence and mapping — or by
+        # neither: PEP 584 takes "mapping-like objects … or iterables of key-value pairs", so
+        # `OrderedDict({"embedding": vec})` is the mapping form of the very constructor this arm
+        # exists for. ⛔ AND IT NEED NOT BE THE FIRST OPERAND OR THE ONLY ONE
+        # (`defaultdict(list, pairs)`, `OrderedDict(pairs, extra=1)`), so every positional
+        # operand is followed and the keyword restriction is gone — a keyword on the
+        # CONSTRUCTOR does not make its positional mapping operand disappear.
+        if _is_mapping_constructor(name):
+            return any(_mapping_argument_stores_the_vector(argument)
+                       or _pairs_operand_stores_the_vector(argument)
+                       for argument in node.args)
         return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _pairs_operand_stores_the_vector(node.value)

@@ -3997,6 +3997,49 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE CONSTRUCTOR'S **MAPPING** OPERAND IS THE SAME MERGE (PEP 584: `d |= x`
+        # "behaves like `dict.update()`", taking "mapping-like objects … or iterables of
+        # key-value pairs"). The constructor arm asked only the PAIRS rule — which has no
+        # `ast.Dict` arm by design — so every mapping spelling below was CERTIFIED while
+        # `[(…)]` was refused (measured at the review of this branch): the halves of one
+        # rule, one operand form apart. `Counter`/`ChainMap`/`defaultdict` are named because
+        # they are merge sources too (measured: `|=` and `update()` merge all of them), and a
+        # name-suffix test for `*Dict` alone cannot reach them.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_collections.OrderedDict({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.Counter({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.defaultdict(dict, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.ChainMap({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -4870,6 +4913,32 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props["embedding"], = (None,)
+        return None
+    _write(props)
+""",
+        # ⛔ AND A CONSTRUCTOR OPERAND THAT PLACES NOTHING IS STILL A MENTION: the mapping
+        # rule's two narrowings (EXACT property, NON-CONSTANT value) travel with it into the
+        # constructor arm, so `OrderedDict({"embedding": None})` — the pre-guard reset — and
+        # the identity triple stay honest write-stops. Without these the widened arm would be
+        # an inert-by-over-refusal rule that costs a writer its gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({"embedding": None})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.Counter({"embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.defaultdict(dict, {"embedding": None})
         return None
     _write(props)
 """,
