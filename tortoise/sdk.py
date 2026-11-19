@@ -149,8 +149,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
-    name_key_space_same_entity,
+    ambiguous_holder_ids as _ambiguous_holder_ids, attachment_target_ids,
+    entity_create_lock, name_key_space_same_entity,
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
@@ -21233,6 +21233,12 @@ class TortoiseSDK:
                             # disposition for this site): a resolver call here
                             # would REFUSE on two live same-name carriers where
                             # capture writes, silently losing an attachment.
+                            # ⛔ #12244: and that disposition is NOT the same
+                            # question as "ONE entity, two rows". The rows are
+                            # collapsed per ENTITY below before anything is
+                            # attached (see the note at the query), so the two
+                            # DISTINCT carriers this disposition protects still
+                            # both keep their edge.
                             _space, _space_params = name_key_space_same_entity(
                                 "o", _n)
                             if _subject_fold_only and _space:
@@ -21246,14 +21252,44 @@ class TortoiseSDK:
                                 "RETURN o.id",
                                 params=_space_params).result_set
                                 if _space else [])
-                            _idless = False
-                            for _row in _oid_rows:
-                                _oid = _row[0] if _row else None
-                                if isinstance(_oid, str) and _oid:
-                                    link_entity(proj, "Point", pid,
-                                                _oid, sdk=self)
-                                else:
-                                    _idless = True
+                            # ⛔ #12244: the MERGE-COLLAPSE half, on top of the
+                            # writer's SPELLING space above. `apply_entity_merge`
+                            # is non-destructive, so a merged pair is ONE entity
+                            # with TWO live rows under one folded key and the
+                            # space matches BOTH — attaching to every row wrote a
+                            # second edge onto the carrier the merge retired,
+                            # which `resolve_or_mint` would never return. The
+                            # holders are mapped through
+                            # `entity_identity.attachment_target_ids`, so ONE
+                            # edge lands, on the survivor. Attach-to-every-carrier
+                            # for every DISTINCT entity is UNCHANGED (the collapse
+                            # only dedupes rows the merge's own pointer joins), and
+                            # the id-less arm below still reads the same space (a
+                            # stub carries no `resolved_from` evidence and no id
+                            # to attach by).
+                            _holder_ids = [(_row[0] if _row else None)
+                                           for _row in _oid_rows]
+                            _idless = any(
+                                not (isinstance(_h, str) and _h)
+                                for _h in _holder_ids)
+                            try:
+                                _targets = attachment_target_ids(
+                                    proj.g, "Object", _holder_ids)
+                            except Exception as _col_exc:  # noqa: BLE001, RUF100
+                                # A collapse that cannot be computed must not sink
+                                # the capture (the point is already durable); it
+                                # degrades to the pre-#12244 attachment set and
+                                # says so — never to silence.
+                                _targets = [_h for _h in _holder_ids
+                                            if isinstance(_h, str) and _h]
+                                warnings.append(
+                                    "about-entity collapse failed for "
+                                    f"{_n!r}: {type(_col_exc).__name__}: "
+                                    f"{_col_exc} — attached to every matched "
+                                    "carrier")
+                            for _oid in _targets:
+                                link_entity(proj, "Point", pid,
+                                            _oid, sdk=self)
                             if _idless:
                                 # An id-less name stub (hosted_api.py mints
                                 # these with `MERGE (o:Object {name:$name})`)

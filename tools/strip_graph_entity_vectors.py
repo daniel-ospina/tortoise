@@ -1207,9 +1207,28 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                        for target in targets):
                     return True           # `q = "SET n.embedding = $e"; session.run(q)`
                 continue                  # text nothing runs
-            if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
-                    and _dict_stores_the_vector(sub.value):
-                # `props |= {"embedding": vec}` — a merge that places the vector.
+            if isinstance(sub, ast.AugAssign) and (
+                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(sub.value))
+                    # ⛔ THE ITERABLE-OF-PAIRS SPELLING, STOP-ARM ONLY. `dict.__ior__` accepts
+                    # `[("embedding", vec)]` exactly as it accepts the literal, and the
+                    # `isinstance(..., ast.Dict)` narrowing walked past it (measured CERTIFIED
+                    # by the review of this branch while the CALL form
+                    # `props.update([("embedding", vec)])` was already refused).
+                    # ⛔ STOP-ARM ONLY IS LOAD-BEARING: the mirror arm's arm is reached for
+                    # EVERY statement, and recognizing a new spelling there is a new
+                    # ACCEPTANCE, not a new refusal — measured: the same recognition
+                    # unconditionally turned a `refused` mirror-arm fixture GATED. A fix may add
+                    # refusals, never acceptances.
+                    # ⛔ AND IT IS `_pairs_operand_stores_the_vector`, NOT the `update` arm's
+                    # recursive container rule. `dict.__ior__` takes an iterable of PAIRS; it
+                    # does not take a container of MAPPINGS, so borrowing that rule refused
+                    # `props |= [{"embedding": vec}]` — a statement Python rejects outright —
+                    # and turned a refusal the branch never had into a new one (measured).
+                    or (anywhere and _pairs_operand_stores_the_vector(sub.value))):
+                # `props |= {"embedding": vec}` — a merge that places the vector. The same
+                # narrowing as everywhere else: EXACT property name, NON-CONSTANT value, so
+                # `props |= [("embedding", None)]` and `props |= [("embedding_model", _m())]`
+                # stay certified.
                 return True
             # ⛔ A MAPPING LITERAL ASSIGNED IN THE ARM IS A STORE TOO, and a `{**{…}}` merge
             # needs the RECURSIVE form — hence `stop_arm=True` here and `anywhere`-only, both
@@ -1445,6 +1464,45 @@ def _mapping_operand_stores_the_vector(node) -> bool:
     return False
 
 
+def _pairs_operand_stores_the_vector(node) -> bool:
+    """The ITERABLE-OF-PAIRS operand, through the wrappers a refactor puts around it.
+
+    `dict.__ior__` and `dict.update` both accept a sequence of `(key, value)` pairs, so
+    `props |= [("embedding", vec)]` places the vector exactly as `props |= {"embedding": vec}`
+    does — and so does the same literal one TRANSPARENT wrapper in: `.copy()`, `list(...)`,
+    `tuple(...)`, a whole-list slice, or an `if`-expression whose branches are both literals.
+    Measured by the review of this branch: every one of those was CERTIFIED, i.e. one
+    `.copy()` re-opened the hole the plain spelling had just closed.
+
+    ⛔ WHAT THIS DELIBERATELY DOES NOT DO — the two halves that are a DIFFERENT rule:
+    a container of MAPPINGS (`[{…}]`) is NOT an iterable of pairs (`dict.__ior__` rejects it
+    with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
+    (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
+    — extracting a pair out of a call result is data flow this module does not do, and it is
+    disclosed here rather than left to be rediscovered.
+    """
+    import ast
+
+    if isinstance(node, ast.Starred):
+        return _pairs_operand_stores_the_vector(node.value)
+    if isinstance(node, ast.List | ast.Tuple):
+        return _pairs_store_the_vector(node)
+    if isinstance(node, ast.Call):
+        name = _callee_name(node)
+        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
+            return _pairs_operand_stores_the_vector(node.args[0])
+        if (name == "copy" and isinstance(node.func, ast.Attribute)
+                and not node.args and not node.keywords):
+            return _pairs_operand_stores_the_vector(node.func.value)
+        return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+        return _pairs_operand_stores_the_vector(node.value)
+    if isinstance(node, ast.IfExp):
+        return (_pairs_operand_stores_the_vector(node.body)
+                or _pairs_operand_stores_the_vector(node.orelse))
+    return False
+
+
 def _pairs_store_the_vector(node) -> bool:
     """Does this list/tuple literal hold an `(EXACT property, non-constant)` pair?"""
     import ast
@@ -1605,12 +1663,30 @@ def _mutator_stores_the_vector(call) -> bool:
     import ast
 
     name = _callee_name(call)
-    if name in ("update", "dict", "__ior__", "ior"):
+    if name in ("update", "dict", "__ior__", "ior", "or_", "__or__"):
         # `props.update(embedding=…)` / `props.update(**{…})` / `props |= dict(embedding=…)`
         # / `props.__ior__([("embedding", vec)])` / `operator.ior(props, {…})` — one mapping,
         # three spellings. `ior` is the FUNCTOR form of `|=`; `setitem` was recognised one
         # round earlier and `ior` was left behind, which is the same one-verb-over gap.
+        # ⛔ AND `operator.or_` IS THE NON-IN-PLACE FUNCTIONAL `|`, which the review of this
+        # commit measured CERTIFIED GATED (`props = operator.or_(props, {"embedding": vec})`)
+        # — the same store as `props | {…}`, through the one spelling the include list did not
+        # name. The list is the vocabulary: a spelling absent from it is a false PASS, not a
+        # missing nicety.
+        # ⛔ AND ITS DUNDER ALIAS IS THE SAME FUNCTION: `operator.__or__ is operator.or__`, so
+        # `operator.__or__(props, {…})`, the METHOD form `props.__or__({…})` and
+        # `dict.__or__(props, {…})` all place the vector — and all three were measured CERTIFIED
+        # by the review of THIS branch, while the tuple one line up already carried `__ior__`
+        # beside `ior`. The dunder/non-dunder pair is now named as a pair, in both places.
         return _mapping_stores_the_vector(call)
+    if name in ("pop", "popitem"):
+        # ⛔ A REMOVAL IS NOT A STORE, and the caller-vocabulary rule below would otherwise
+        # refuse the dict writer's own write-stop: `props.pop("embedding", _MISSING)` is
+        # `(receiver, PROPERTY, non-constant)` to the third-argument test, which was written
+        # for `_set(props, "embedding", vec)`. Measured in the review of this commit: the
+        # parent certified that stop arm and this branch refused it. `_removes_embedding` is
+        # the arm that certifies a removal; nothing a `pop` can carry places a vector.
+        return False
     if name not in ("__setitem__", "setdefault"):
         # ⛔ ANY OTHER CALLEE — INCLUDING `setattr` AND `operator.setitem`: the helper-argument
         # spelling (`_set(props, "embedding", vec)`, `setattr(props, "embedding", vec)`,
@@ -1620,6 +1696,12 @@ def _mutator_stores_the_vector(call) -> bool:
         # (measured: removing it changes no verdict), so it is gone rather than left in place
         # looking load-bearing. A `_read(props, "embedding", default)` is refused too — that
         # costs a refactor, and refusing costs nothing that this gate exists to protect.
+        # ⛔ THE SAME OVER-REFUSAL REACHES A NON-REMOVAL HELPER: `_note("embedding", reason)`
+        # (a report with the property and a live value) is refused as if it were a store. It is
+        # disclosed rather than special-cased because there is no callee list to narrow it
+        # with — an include list is what this rule already is; naming a LOGGER would be a
+        # second one, and a name this gate has never seen must answer fail-closed. `pop` IS
+        # separated above, because removing the property is the write-stop itself.
         #
         # ⛔ AND IT CARRIES THE MAPPING-OPERAND TEST TOO, for one reason: a `*`-starred
         # MAPPING operand (`_set(props, *[{"embedding": vec}])`) is the same store as the
