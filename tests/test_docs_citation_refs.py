@@ -676,6 +676,17 @@ _TORTOISE_MEMBERSHIP_SPELLINGS = (
     # added together with the document edit that removes the string, because an
     # unconditional ban row would otherwise red the document it polices.
     "`-- tortoise/` returns ONE module",
+    # ⛔ AND THE ORDER-REVERSED FORM (#13807 review round 6, F2 — MEASURED, and it was LIVE).
+    # Every row above is either a bare phrase or a COMMAND-THEN-ANSWER string, and the
+    # answer-form matcher requires the command to PRECEDE the verdict. A sentence that puts
+    # the ANSWER FIRST and the command after it therefore slipped past both arms while it was
+    # FALSE at the head it described — the spelling below is the one that did, and it survived
+    # round 5's abbreviated-command work because that closed the ABBREVIATION axis, not the
+    # ORDER axis. Retired by name for that reason; the ordering sensitivity it exposes is
+    # DECLARED in `_census_membership_verdicts`'s docstring rather than fixed by teaching the
+    # matcher to read prose in either order, because a heuristic that guesses in the permissive
+    # direction is a FALSE PASS — the same trade this ledger already states twice.
+    "carries `tortoise/` paths",
 )
 #: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
 #: list above, and every bit as carryable: the set is a property of the HEAD the command was
@@ -776,6 +787,18 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     FUTURE re-wording onto a NEW phrasing — an abbreviated command this ledger has not seen
     before — is not detected. The class is finite in both arms, and a guard may be narrow;
     what it may not do is describe itself as complete.
+
+    ⛔ AND THE ORDER SENSITIVITY IS DECLARED HERE (#13807 review round 6, F2 — MEASURED).
+    `_typed_answers_to_tortoise_cmd` requires the command to PRECEDE the answer, so a
+    sentence that states the verdict FIRST and names the command AFTER it is invisible to the
+    shape half. That is not hypothetical: one such sentence was live in `05-verify.md` and
+    FALSE at its own head, with every arm green, and it survived round 5's
+    abbreviated-command work because that closed the ABBREVIATION axis, not the ORDER axis.
+    The order half is NOT fixed by teaching the matcher to read prose in either order (a
+    permissive heuristic over prose is a FALSE PASS — the same reason a retraction-aware
+    carve-out was rejected above); it is closed where it was measured, by retiring that
+    spelling BY NAME in the ledger, and this declaration is the part that keeps the next lane
+    from mistaking the shape half for complete.
     """
     return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
 
@@ -1237,6 +1260,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
         "the `tortoise/` set above is the two COMMENT-ONLY modules",
         "`-- tortoise/` returns ONE module",
+        "carries `tortoise/` paths",
     ) == _TORTOISE_MEMBERSHIP_SPELLINGS, (
         "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
         "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
@@ -1280,7 +1304,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # a substitution that does not also deliberately recompute it. A legitimate ledger change
     # therefore updates the ledger, its readable tuple AND this digest — which is the point.
     assert hashlib.sha256("\n".join(_TORTOISE_MEMBERSHIP_SPELLINGS).encode()).hexdigest() == (
-        "cc115e0ff30fdec88b009b8752c752180c8716cc3ca3f51cb203c32b03ab0a1c"), (
+        "641b5c03277de43cf4410a8743029da3af02a56685b0b6c11be69bfe54b5943e"), (
         "the membership ledger's TEXT changed. If that was deliberate, recompute this digest "
         "and the tuple above; if it was a find-and-replace across the file, it just silently "
         "narrowed the ban (#13807 review round 5, F2)")
@@ -1303,21 +1327,40 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     def _explode(*_a, **_k):
         raise AssertionError("(c-i) shelled out; it must read the document's TEXT only")
     # ⛔ THE WHOLE FAMILY, NOT ONE NAME (#13807 review round 5, F3 — MEASURED). Patching only
-    # `subprocess.run` left the regression undetected when re-introduced as
-    # `subprocess.check_output`, which called the three-dot walk on every invocation and
-    # swallowed its errors while every pin in this file stayed green. The seam is "a child
+    # `subprocess.run` left a regression undetected whenever it reached a child process by a
+    # primitive that does not go through the module-global `run`. ⛔ WHAT THIS PATCH ACTUALLY
+    # BOUGHT, CORRECTED IN ROUND 6 (#13807 review round 6, F5 — MEASURED): an earlier cut of
+    # this comment named `subprocess.check_output` as the bypass, and that is WRONG —
+    # `check_output` dispatches to the module-global `run` at CALL time, so the single-name
+    # patch already covered it. The genuinely NEW coverage is `Popen`, `os.popen` and
+    # `os.system` (each measured: passing pre-patch, raising post-patch); `check_call` and
+    # `call` are built on `Popen`, so they are reached through it. The seam is "a child
     # process", not one function, so every primitive that reaches one explodes.
     for _seam in ("run", "check_output", "check_call", "Popen", "getoutput", "call"):
         monkeypatch.setattr(subprocess, _seam, _explode, raising=False)
     monkeypatch.setattr(os, "popen", _explode, raising=False)
     monkeypatch.setattr(os, "system", _explode, raising=False)
+    # ⛔ AND A BLACKLIST OF PRIMITIVES CANNOT CLOSE AN ALIAS (#13807 review round 6, F4 —
+    # MEASURED). The patches above set ATTRIBUTES, so a probe bound at import time
+    # (`from subprocess import Popen as _P`, `_os_system = os.system`) reads the ORIGINAL
+    # object and stays green — which is the very shape this pin's docstring names as the one
+    # it is defending against. The whitelist below is the closure: the arm's bytecode may
+    # reach ONE global name, the ledger it ban-matches, and nothing else, so no module, no
+    # function and no alias can be reached without appearing here.
+    assert _census_membership_verdicts.__code__.co_names == (
+        "_TORTOISE_RETIRED_SPELLINGS",
+    ), (
+        "arm (c-i) reaches a global name beyond its own ledger, so it can obtain a "
+        "subprocess (or any other seam) behind an import-time alias — which the attribute "
+        "patches above cannot see. Keep the arm a pure function of the document's TEXT "
+        "(#13807 review round 6, F4)")
     _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
     assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
         "arm (c-i) stopped answering from the document's text when a child-process seam "
         "was unavailable — a clone-dependent arm is unreachable at the depth-1 checkout "
         "the gating job uses and asserts nothing there (#13807 review, F1; the family is "
-        "patched rather than one name because `check_output` slipped past the single-name "
-        "pin, round 5 F3)")
+        "patched rather than one name because `Popen` and `os.popen` do not go through the "
+        "patched `run`, round 5 F3 — corrected round 6 F5)")
 
     # The inverse: the COMMAND the document is supposed to keep is never itself a verdict.
     assert _census_membership_verdicts(
