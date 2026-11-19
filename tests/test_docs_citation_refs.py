@@ -193,6 +193,7 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -591,7 +592,17 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — each was measured FALSE against the tree at this head.
+    # (c) RETIRED SPELLINGS — measured FALSE against the tree, so the arm READS the tree
+    # instead of freezing which direction the answer points.
+    # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
+    # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
+    # so at this head the command prints NOTHING and every one of those five spellings became
+    # the TRUE statement — the same class of error as the frozen sign this arm replaced
+    # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
+    # only where the measurement supports it.
+    _tortoise_set = subprocess.run(
+        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
+        cwd=REPO, capture_output=True, text=True, check=False).stdout.split()
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is NOT empty",
@@ -599,12 +610,14 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"{_tortoise_cmd}` -> empty",
         f"{_tortoise_cmd}` prints NOTHING",
     ):
+        if not _tortoise_set:
+            # The empty claim is the measured one here; asserting it is not a defect.
+            continue
         assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the two "
-            "comment-only modules this branch's `--refresh` re-took, so the sentence is "
-            "refuted by the very command it quotes (#13489 review, P1; #13750 review, "
-            "cycle 1 — the empty claim was true of an earlier head and is not true of "
-            "this one)")
+            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints "
+            f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very command "
+            "it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty claim was "
+            "true of an earlier head and is not true of this one)")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -665,6 +678,77 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
         f"05-verify.md calls `sdk.py:{old}` the PRE-re-point value, but "
         f"`docs/00_index.md` still carries it — either the re-point did not happen "
         "or the pair is stale (#13489 review, cycle 5)")
+
+
+def _added_cite_tokens(diff_text: str) -> set[str]:
+    """The `sdk.py:<n>` tokens a `--word-diff=plain` patch ADDS to `docs/00_index.md`.
+
+    Derived from the diff, never typed: `{+…+}` is word-diff's added span, so the set
+    is empty exactly when the patch re-points no cite.
+    """
+    added = "".join(re.findall(r"\{\+(.*?)\+\}", diff_text, re.S))
+    return set(re.findall(r"sdk\.py:(\d+)", added))
+
+
+#: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
+#: measured FALSE at the head the arm below was written for (#13746 review, round 3,
+#: finding 4): the file's one changed line is the `#12296` row's DESCRIPTION of its own
+#: `:27861` clause, and no `sdk.py:<n>` token moves.
+_INDEX_REPOINT_CLAIMS = (
+    "this diff carries ONE `docs/00_index.md` change — the capstone row's",
+    "it IS in the set, for ONE cite",
+    "for exactly ONE cite",
+    "THIS repair re-points it once more, to",
+    "this repair re-pointed that cite once more",
+)
+
+
+def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
+    """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
+
+    It is not, and the command printed beside the claim refutes it: at this head
+    `git diff --numstat origin/main...HEAD -- docs/00_index.md` is `1 1`, while
+    `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` moves no
+    `sdk.py:<n>` token in either direction (`grep -c 'sdk.py:21679' docs/00_index.md` ->
+    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). The line it rewrites
+    is the `#12296` entity-verdict row's DESCRIPTION of its own `:27861` clause.
+
+    So "the `1 1` numstat IS this cite re-point" was the same defect class the last four
+    review rounds kept finding, and it reached the rail because nothing read this
+    section (#13746 review, round 3, finding 4). The arm READS the live diff instead of
+    freezing which direction the answer points, because the residual moves whenever
+    `main` re-derives a row.
+
+    NON-VACUITY, MEASURED: `_added_cite_tokens` is exercised on a CRAFTED patch that
+    DOES move a cite, so an empty reading of the real diff is a fact about this diff and
+    not an inert extractor; and on the pre-fix document the three surviving spellings
+    are present with `moved` empty, so the loop reds on the first one.
+    """
+    assert _added_cite_tokens("a [-sdk.py:21679-]{+sdk.py:21715+} b") == {"21715"}, (
+        "_added_cite_tokens cannot read a word-diff patch that DOES move a cite, so the "
+        "arm below would pass on an empty set for the wrong reason")
+
+    proc = subprocess.run(
+        ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
+         "docs/00_index.md"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()
+
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    for claim in _INDEX_REPOINT_CLAIMS:
+        if claim not in doc:
+            continue
+        window = doc[doc.index(claim):doc.index(claim) + 500]
+        named = set(re.findall(r"`?:(\d+)`?", window))
+        assert named & moved, (
+            f"05-verify.md claims this diff re-points a `docs/00_index.md` cite "
+            f"({claim!r}) and names {sorted(named)}, but the live three-dot diff adds "
+            f"no such `sdk.py:<n>` token (added: {sorted(moved) or 'none'}). The "
+            "claim is refuted by the command the document prints beside it: read the "
+            "set from `git diff -U0 --word-diff=plain origin/main...HEAD -- "
+            "docs/00_index.md` at the head being merged, and state the command rather "
+            "than a head-bound pair (#13746 review, round 3, finding 4)")
 
 
 if __name__ == "__main__":  # pragma: no cover

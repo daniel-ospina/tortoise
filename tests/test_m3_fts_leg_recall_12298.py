@@ -1408,13 +1408,13 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # and the +30 is the CAUSE rather than an offset applied to them. Each anchor
     # was re-located by its own text at this tree (one hit each), never nudged:
     # the declared FULLTEXT row, the `def _create_fulltext_index(`, and the
-    # `_FULLTEXT_INDEX_LABEL_FIELDS` loop's call site.
+    # `_FULLTEXT_INDEX_LABEL_FIELDS` loop header.
     ("tortoise/projection/__init__.py", 21004, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21004`"),
     ("tortoise/projection/__init__.py", 21447, "def _create_fulltext_index(",
      "`:21447`"),
-    ("tortoise/projection/__init__.py", 21897,
-     "self._create_fulltext_index(label, fields)", "`:21897`"),
+    ("tortoise/projection/__init__.py", 21889,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21889`"),
 )
 
 
