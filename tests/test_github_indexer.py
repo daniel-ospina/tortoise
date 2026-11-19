@@ -3268,7 +3268,8 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # by — which occurs **once**; and `22593-22768` recorded `None` for its end
     # although the end is a number this change moved, so an insert INSIDE
     # `update_knowledge` left the cited end naming nothing and both guards green.
-    # Both re-derived at `ef0abcb` by the texts pinned below.
+    # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
+    # `c50a03a` (the commit carrying this note), by the texts pinned below.
     ("sdk.py", 55317, 55319): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55469, 55478): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
