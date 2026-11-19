@@ -22,10 +22,12 @@ closes both:
    lever clauses and its three-lever counts; and three §2/§3 NARRATIVE restatements that
    repeat a tabulated figure (`+53.3 points`, the `0.8` Jaccard, `192 of 411`).
 
-   NOT PINNED, and the list is deliberate: narrative prose elsewhere in §1-§4 —
-   `~2.3 %` is now PINNED (see below), so the remaining unpinned set is
-   `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`, `34 of 300` —
-   plus §5's declared LIMITS (items 1-4: not-a-census, phase 2 unmeasured, the
+   NOT PINNED, and the list is deliberate though NOT exhaustive — read it as
+   examples of the class, not as the class: narrative prose elsewhere in §1-§4 —
+   `~2.3 %` is now PINNED (see below), so figures that remain unpinned include
+   `+1.7 and +6.7 points`, `0 gains, 0 losses across 272`, `282/300`, `34 of 300`,
+   §2a's `(0.9733 against 0.9700)` raw-figure pair and its derived `+0.33 pt`
+   reconciliation — plus §5's declared LIMITS (items 1-4: not-a-census, phase 2 unmeasured, the
    load confound, the dense-leg note), item 5's EXTERNAL production share (no
    artifact holds it), and §6's run metadata. ⛔ §5's items 5-7 are NOT in that
    exclusion: their figures (the `30 % / 10 %` oversampling, `n = 300`, the
@@ -606,10 +608,23 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
         f"\"limit=15 is not a shipped window\" caveat is stale")
 
     # …and the note says so, in the terms a reader needs.
-    assert "entity_type='object'" in note, (
-        f"the note must state the `entity_type` the arms actually pass: {note!r}")
-    assert f"limit={cap.KMAX}" in note, (
-        f"the note must state the `limit` the arms actually pass: {note!r}")
+    # ⛔ BOTH copies of each argument, not EITHER (round 23, F2). The note states the
+    # arms' `entity_type` and `limit` TWICE — in the call signature it opens with, and in
+    # the sentence that REASONS about them — and both pins were presence checks, satisfied
+    # by the FIRST copy. Measured at this head: the reason copy mutated to `limit=25`, and
+    # `entity_type='object'` mutated to `entity_type='point'`, both stayed GREEN at 54
+    # passed. The note is not only prose — it is committed verbatim into
+    # `arms.{user_search,user_search_pre_lever,user_search_rerank}.door_note`, so the
+    # record would publish a sentence reasoning about a `limit` the arms do not pass, and
+    # an `entity_type='point'` that its own clause says is `:Object`'s.
+    assert f"sdk.tortoise_fts_query(entity_type='object', limit={cap.KMAX})" in note, (
+        f"the note's CALL copy must state the arguments the arms actually pass: {note!r}")
+    assert "`entity_type='object'` because the population" in note, (
+        f"the note's REASON copy must state why `entity_type='object'` is passed — this "
+        f"second copy was unpinned: {note!r}")
+    assert f"`limit={cap.KMAX}` (both doors default to {door_limit}" in note, (
+        f"the note's REASON copy must state why `limit={cap.KMAX}` is passed — this "
+        f"second copy was unpinned: {note!r}")
     assert f"default to '{door_entity}'" in note, (
         f"the note must name the doors' real `entity_type` default ({door_entity!r}) "
         f"so the reader can see the divergence: {note!r}")
@@ -1104,7 +1119,9 @@ def test_the_artifact_declares_the_edits_made_after_its_run(artifact):
 
     ⛔ `31bce52ddb` is the RUN head, and the rebase onto `origin/main` rewrote it, so
     the `git show` above resolves on no ref of this branch. Run the identical command
-    against `318950c6e0` (this branch, byte-identical tool + `queries.json` blobs) —
+    against `318950c6e0` (this branch; `queries.json` is byte-identical there, while the
+    TOOL is not — it has gained the `_cleanup`/`env` builders and guards since, so the
+    reproduction at that sha runs the same query set through a different tool) —
     the mapping is `artifact["code_head_note"]` and README §6 states it too.
 
     Declaring it is the fix that needs no re-run: the run's own builder writes
@@ -1432,12 +1449,29 @@ def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artif
     us = artifact["arms"]["user_search"]["duplicate_rate_in_window"]
     k3 = f"~{us['3']['rate'] * 100:.1f} %"
     k10 = f"{us['10']['rate'] * 100:.1f} %"
+    #: The doors' own `limit` default, read from the signature rather than spelled here —
+    #: the label this pins is only correct if it names the window the SHIPPED door uses.
+    import inspect
+
+    from tortoise import mcp_server
+
+    door_limit = inspect.signature(
+        mcp_server.tortoise_search).parameters["limit"].default
     assert _phrase_mentions(flat, f"{k3} of the top 3"), (
         f"README §3a must state the duplicate rate as {k3!r} **at k=3** — the k=3 "
         f"cell, labelled with the window it belongs to")
-    assert _phrase_mentions(flat, f"the rate is **{k10}**"), (
-        f"README §3a must also quote the user door's own shipped width (k=10, "
-        f"{k10!r}) so the two windows cannot be confused")
+    # ⛔ THE LABEL, not only the rate (round 23, F3). The pin below used to assert
+    # `the rate is **{k10}**` alone, so the sentence could say the 1.4 % belongs to a
+    # DIFFERENT window — the exact "right figure, wrong label" defect the comment above
+    # records — while every pin stayed green: measured at this head,
+    # `(\`limit=10\`, §5) the rate is **1.4 %**` -> `(\`limit=15\`, §5) …` stayed GREEN at
+    # 54 passed, publishing the k=10 rate as the instrument-only k=15 window that §5's
+    # `k <= 10` bound exists to keep apart. The label is derived from the doors' own
+    # default, not spelled here.
+    assert _phrase_mentions(flat, f"(`limit={door_limit}`, §5) the rate is **{k10}**"), (
+        f"README §3a must quote the user door's own shipped width ({door_limit}, "
+        f"{k10!r}) WITH its label — the rate without its k is the confusion this pins "
+        f"against")
 
 
 def test_section_fives_numbered_limits_five_to_seven_state_the_figures_the_artifact_holds(
@@ -2244,7 +2278,18 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
             #: reds a strictly more correct negation (`… so it is not visible to a
             #: user`) — a false red — while the phrase prefix above already carries the
             #: fail-closed part (measured).
-            assert not re.search(r"(?<!not )(?<!no )\bvisible\b", verdict), (
+            #: ⛔ THE RAW CELL, not `_flat` (round 23, F1). `verdict` is the FLATTENED
+            #: cell — every space deleted — so a `\bvisible\b` search can only fire when
+            #: `visible` is PUNCTUATION-delimited: in any natural wording it is glued to
+            #: its neighbours (`visibletoauser`), and no word boundary exists between two
+            #: letters. The guard was therefore inert for the shape it exists to refuse,
+            #: which is the comment two lines above's whole claim ("must not claim
+            #: visibility, in any wording"): measured at this head, the §4 declaration row
+            #: `not measurable here — it needs a model call` -> `not measurable here —
+            #: visible to a user; it needs a model call` stayed GREEN at 54 passed, and
+            #: only a punctuation-isolated `— visible —` red. Reading `row[2]` restores
+            #: the word boundary; the flat PREFIX check above is unaffected.
+            assert not re.search(r"(?<!not )(?<!no )\bvisible\b", row[2], re.IGNORECASE), (
                 f"§4 `{key}` is a DECLARATION row but its verdict now claims "
                 f"visibility: {row[2]!r}")
 
