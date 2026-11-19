@@ -593,8 +593,10 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # The emphasis that CLOSED around the form (`**prints** x` → `** x`, `_prints_ x` →
         # `_ x`) is formatting, not answer text, and it used to leak into the QUOTED window —
         # which is what a refusal prints back to the reader (`05-verify.md types {answer!r}`).
-        # Dropped here, but only when the run is followed by whitespace, so the document's own
-        # ``prints `two` path`` (a backtick hugging a word) is still quoted exactly.
+        # Dropped here, but only when the run is followed by whitespace, so a backtick that
+        # HUGS a word (``prints `two` path`` — a MUTATION of the document's shape, not a
+        # quotation of it: `grep -c 'prints \`two\`'` on `05-verify.md` is 0) is still quoted
+        # exactly.
         rest = re.sub(r"^[*_`]+\s+", "", rest)
         window = f"{match.group(1)} {rest}".strip()
         low = rest.lower()
@@ -647,6 +649,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         _lower_bound = False
         _tautology = False
         _at_most = False
+        _exactly = False
+        _bound_resolved = False
         _nothing_but = False
         _not_only = False
         _before = None
@@ -667,6 +671,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                     _tautology = True
                 elif re.match(r"(?:at\s+most|no\s+more\s+than)\b", low):
                     _at_most = True
+                elif re.match(r"exactly\b", low):
+                    _exactly = True
                 elif negated and re.match(r"(?:only|just)\b", low):
                     # ⛔ `not only X` / `not just X` IS AN IDIOM, NOT A NEGATION (#13831
                     # review, round 5, P1). It asserts that X is EXCEEDED — the head is
@@ -855,12 +861,30 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 if _at_most and not _not_only:
                     # ⛔ AND THE IDIOM SURVIVES THIS SKIP (#13831 review, round 6): `not only
                     # at most two paths` asserts the upper bound is EXCEEDED (>=3), which IS
-                    # a direction. Skipping it on the bound alone would leave the just-added
-                    # idiom inert behind this branch — measured, `prints not only at most two
-                    # paths`, `… no more than two paths`, `… at least zero paths` and
-                    # `… zero or more paths` all typed NO direction before this guard.
+                    # a direction. Skipping it on the bound alone would leave the idiom inert
+                    # behind this branch — measured, `prints not only at most two paths`,
+                    # `… no more than two paths`, `… at least zero paths` and `… zero or more
+                    # paths` all typed NO direction before this guard.
+                    if not negated:
+                        continue
+                    _bound_resolved = True
+                    claims_empty = False
+                # ⛔ AND A NEGATION IN FRONT OF A BOUND IS ITS OWN CASE (#13831 review, P2):
+                # the flags above are recorded before the negation is read, so the generic
+                # inversion turned a negated BOUND into a direction. MEASURED before this
+                # cut: `prints not more than two paths` / `prints not exactly two paths` /
+                # `prints not at least two paths` all typed EMPTINESS — three sentences that
+                # assert NO direction (each is satisfied by an empty head), i.e. a true
+                # sentence REFUSED at a non-empty head; and their mirror `prints not at most
+                # two paths` (= MORE than two, a real lower bound) was skipped. One table:
+                #   `more than N` / `at least N` / `no fewer than N` / `exactly N`, negated
+                #        → no direction (a range with an empty end);
+                #   `at most N` negated, i.e. `not at most N` → MORE than N → MEMBERSHIP.
+                # A bare `not two paths` keeps the ordinary inversion (see below).
+                elif negated and (_lower_bound or _tautology or _exactly):
                     continue
-                claims_empty = False
+                else:
+                    claims_empty = False
             else:
                 continue
         # ⛔ ANY HEAD NEGATION INVERTS THE HEAD TOKEN'S DIRECTION — including a negation
@@ -871,7 +895,7 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # The idiom asserts EXCEEDING the head, so the answer is MEMBERSHIP whichever
             # direction the head token alone would give — the inversion must not run.
             claims_empty = False
-        elif negated and not _nothing_but:
+        elif negated and not _nothing_but and not _bound_resolved:
             claims_empty = not claims_empty
         answers.append((window, claims_empty))
     return answers
@@ -1413,6 +1437,29 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the shape detector reads `returns a non-empty set` as an EMPTINESS claim because "
         "the word `empty` sits inside `non-empty`; it is a MEMBERSHIP claim, so the "
         "direction is inverted (#13795 review, finding 3)")
+    # ⛔ AND A NEGATED BOUND ASSERTS NO DIRECTION (#13831 review, P2): the flags a filler
+    # leaves are recorded before the negation is read, so `not more than two paths`,
+    # `not exactly two paths` and `not at least two paths` were typed EMPTINESS — each is
+    # satisfied by an empty head, so a TRUE sentence was REFUSED at a non-empty one; and
+    # their mirror `not at most two paths` (= MORE than two) was skipped. One table now:
+    # negated `more than` / `at least` / `no fewer than` / `exactly` → no direction; negated
+    # `at most` → MEMBERSHIP. The control `not two paths` keeps the ordinary inversion.
+    for _negated_bound in (
+            "prints not more than two paths",
+            "prints not exactly two paths",
+            "prints not at least two paths",
+            "prints not no fewer than two paths"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_negated_bound}", _tortoise_cmd
+        ) == [], (
+            f"the shape detector types the NEGATED BOUND {_negated_bound!r} as a direction; "
+            "it is satisfied by an empty head, so reading it as EMPTINESS refuses a true "
+            "sentence at a non-empty one (#13831 review, P2)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_tortoise_cmd}` prints not at most two paths", _tortoise_cmd
+    ) == [("prints not at most two paths", False)], (
+        "`not at most two paths` is MORE than two — a real lower bound, so it is MEMBERSHIP, "
+        "not a skip (#13831 review, P2)")
     # ⛔ AND ITS THREE SIBLINGS (#13795 review, finding 4): a CONTRACTION, the HYPHENLESS
     # spelling, and an emptiness word doing membership duty behind `but`. Each carried the
     # inversion or the skip past the fix above, so each is pinned.
