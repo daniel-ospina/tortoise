@@ -284,7 +284,7 @@ response_fields:
     "absent". Distinct from the `recall_ranking.ep_state` row: that one is the ranker''s OWN row, this one is the
     `ep` block that rides the hit payload. #11702.'
   unchanged_when_off: NO — additive key on an existing `ep` block (see tortoise_search / ep.ep_state). Not flag-gated
-- response: sdk:recall_subgraph
+- response: tortoise_recall
   field: nodes[].ep_state
   emitted_when: 'ALWAYS on every `Point` node in `nodes[]` — the same #11702 three-token state as `ep.ep_state`
     ("measured" / "baseline" / "absent"), paired with `nodes[].confidence`, which is `null` if and only if the state
@@ -759,18 +759,15 @@ response_fields:
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
     every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent"
     (#11702) and an unreadable-spelling one, which reads "unreadable"
-- response: sdk:create_operator
-  field: direction_basis
-  emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction
-    came from: explicit (the caller stated a non-default direction), semantics (the declared Layer-2 meaning resolved
-    it) or default (nothing was declared, so the caller-supplied/write-path default was recorded — the signature
-    default is bidirectional for EVERY op_type; only an explicit direction=None canonicalizes per op_type)'
-  unchanged_when_off: n/a — not flag-gated; an additive key on the returned operator properties, and every pre-existing
-    key keeps its value
 - response: tortoise_create_operator
   field: direction_basis
-  emitted_when: always on the hosted path — the same basis, on the operator the tool returns (#7852 W1, owner-approved
-    "w1 yes approved" 2026-10-09)
+  emitted_when: 'always on every operator created through the #7852 W1 write path, whichever door the caller used
+    — the basis the recorded direction came from: explicit (the caller stated a non-default direction), semantics
+    (the declared Layer-2 meaning resolved it) or default (nothing was declared, so the caller-supplied/write-path
+    default was recorded — the signature default is bidirectional for EVERY op_type; only an explicit direction=None
+    canonicalizes per op_type). The SDK seam for this write path is PRIVATE since #12901 (`_create_operator`, frozen
+    at `archive/sdk-methods/12901-sdk-final/create_operator.py`), so the advertised surface that emits the key is
+    this tool (#7852 W1, owner-approved "w1 yes approved" 2026-10-09).'
   unchanged_when_off: n/a — not flag-gated; the tool returns the operator properties, so every pre-existing key
     keeps its value
 - response: tortoise_create_entity
@@ -1069,7 +1066,7 @@ response_fields:
     the reply is NON-EMPTY **and** that the call was not one whose reply is a no-op.'
   unchanged_when_off: not flag-gated — the key is ABSENT unless a shaping happened, and a write that shapes nothing
     returns byte-identical to before this field existed
-- response: sdk:tortoise_fts_query
+- response: tortoise_search
   field: successorId / successorName / allSuccessorIds / stage / endedAt / linkedEvents / the ended-row shape (the
     ended_scope read) — each a separate row key, never a wrapper object
   emitted_when: 'only for a call that passes ended_scope=True (#13302). Those rows are NOT match rows: they describe
