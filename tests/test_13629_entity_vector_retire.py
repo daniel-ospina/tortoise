@@ -544,10 +544,14 @@ def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monke
     it (`getattr(record_vector, WRITE_GATE_SYMBOL, None)`), so an unlanded symbol answers
     "ABSENT" rather than raising — and the IMPORT ITSELF raising is a different unknown
     again, from `…raises` (which drives a gate that raises *after* a successful import).
-    Inverting its polarity to `return False` left the whole file **green (measured: 90
-    passed)**, and the polarity here is the deliberate inversion the docstring states: a
-    module we cannot import proves nothing about any writer, so it must never licence a
-    delete.
+    ⛔ THE FIGURE BELOW IS A PRE-FIX BASE MEASUREMENT, and it has to say so — it has been
+    re-reported by two rounds because it read as a statement about this head: at the base
+    this test was added to, inverting its polarity to `return False` left the file green
+    (**measured at that base: 90 passed**). At THIS head the same mutant yields
+    **`1 failed, 91 passed`** (measured at `975feae7`), failing on the VERDICT
+    (`assert emits is True`) before either message assert. The polarity here is the
+    deliberate inversion the docstring states: a module we cannot import proves nothing
+    about any writer, so it must never licence a delete.
     """
     import sys
 
@@ -565,8 +569,11 @@ def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monke
 def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypatch):
     """⛔ The `entity_type`→label mapping is the last refusal that can fire WITHOUT a label:
     everything below this arm — `_fold_consults_gate(label)` and its population check — is
-    asked about a LABEL, and there is exactly one way to get one. Inverting the arm to
-    `return False` left the whole file **green (measured: 90 passed)**, and the arm is
+    asked about a LABEL, and there is exactly one way to get one. ⛔ THE FIGURE HERE IS A
+    PRE-FIX BASE MEASUREMENT: at the base this test was added to, inverting the arm to
+    `return False` left the file green (**measured at that base: 90 passed**); at THIS head
+    the same mutant yields **`1 failed, 91 passed`** (measured at `975feae7`), on the
+    VERDICT at the `⛔ POLARITY FIRST` assert. The arm is
     REACHABLE — but only because this test drives the predicate that gates it, and that is
     worth stating rather than assuming: on this tree `record_vector.mirror_required` answers
     `True` for an unmapped `entity_type` **deterministically** (it returns `True` for
@@ -591,20 +598,29 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     — carry `LABELS_AT_RUNTIME`), and, with a population
     forced, by `_fold_consults_gate`'s ungated branch (`affected_entity_types(None)` is
     `[]`, so every writer lands in `ungated`). So the arm is *defence in depth plus an
-    accurate reason*, not the sole refusal — and the difference matters, because a
-    maintainer who believed the stronger claim would delete the arm, expect a red, and
-    find only the message moved.
+    accurate reason*, not the sole refusal. ⛔ The difference shows up in PRODUCT behaviour,
+    not in this test: delete the arm and force nothing, and `write_gate` still answers
+    `emits is True` — only the reason moves. That is exactly why this test forces the steps
+    below it, so the DELETION reds on the verdict instead of on a string.
 
     What the FORCING block (the first half, `⛔ POLARITY FIRST`) therefore asserts is the
     POLARITY the arm owns: with everything below it forced to CERTIFY (`_fold_consults_gate`
     answering `(True, …)`), the arm is the only remaining refusal. Arm present → `emits is
     True` and this reason; arm deleted → `emits is False`, i.e. a delete licence minted for a
     label nothing serves (measured). The UNFORCED half that follows is a different claim —
-    that with the predicate already driven to `False` the FOLD needs no forcing (it already
-    declines) — and it cannot pin the arm: with
+    that with the predicate already driven to `False` the gate refuses at this arm with
+    nothing below it forced — and it cannot pin the arm: with
     the arm deleted it still answers `emits is True` and only its message assertion reds. So
     ⛔ do not drop the forcing half as redundant: that is exactly the message-text-only kill
     this test exists to replace.
+
+    ⛔ AND THE UNFORCED HALF IS NOT EVIDENCE ABOUT THE FOLD, which an earlier revision of
+    this docstring claimed ("the FOLD needs no forcing — it already declines"). The arm
+    returns at `if label is None:`, which is ABOVE `_fold_consults_gate`, so the fold is
+    never consulted on that path at all: measured with a spy on
+    `strip._fold_consults_gate` at `975feae7`, the second half makes **0 invocations**. The
+    half therefore pins that the arm fires with NO forcing below it — a real claim about
+    this tree — and says nothing about whether the fold would decline.
     """
     from tortoise import record_vector
 
@@ -621,8 +637,10 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
         f"so the strip would be licensed on a label nothing serves ({reason})")
     assert "no declared graph label" in reason
 
-    # …and the FOLD needs no forcing (the record predicate IS still driven to `False` — see
-    # the docstring on why it must be): on this tree every step below already declines.
+    # …and the UNFORCED configuration refuses at the SAME arm (the record predicate is still
+    # driven to `False` — see the docstring on why it must be). ⛔ This half pins that the arm
+    # fires with nothing below it forced; it is NOT evidence about the fold, which this path
+    # never reaches (`if label is None:` returns above it — measured: 0 invocations).
     monkeypatch.undo()
     monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
                         raising=False)
