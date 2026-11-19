@@ -297,43 +297,49 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         f"the read took {elapsed_ms:.0f} ms for a {BUDGET_MS} ms budget: the "
         f"bound is not bounding the caller's wall clock")
 
-    # (3) THE FAILURE IS NAMED AND NOTHING FALLS BACK SILENTLY. ⛔ Post-contract the
-    #     graph is NOT a fallback (#13610): the mirror stopped at the contract, so a
-    #     graph answer would hand over a SMALLER cohort as the answer. The old
-    #     assertion here — "the graph answered with `scan_fallback`" — described the
-    #     PRE-contract leg, which in this design declines at the COVERAGE gate before
-    #     any kNN runs; it only ever passed because the coverage aggregate issued the
-    #     same statement and cancellation. What the read must do now is report the
-    #     leg it could not take.
-    assert hits == [], (
-        f"a partial record leg was answered from the frozen graph copy: {hits}")
-    assert graph.query_calls == [], (
-        f"the graph was queried after the record leg failed post-contract: "
-        f"{graph.query_calls}")
+    # (3) THE FAILURE IS NAMED AND THE FALLBACK IS THE NAMED ONE. ⛔ `point` is a
+    #     VERIFIED-GATED label whose fold NEVER stops writing the graph copy
+    #     (`record_vector.MIRROR_RETIRED_LABELS` is `{object, subject}` — only those
+    #     two folds consult `mirror_required`), so its graph is a complete,
+    #     still-fed cohort and NOT a frozen one: the read must fall back to it and
+    #     NAME that (`#4999`), exactly the acceptance (a)+(b) `#11691` set.
+    #     ⛔ Carrying the no-fallback CONTRACT over to this label emptied the dense
+    #     leg for the primary retrieval label on the default posture (`#13617`
+    #     review F1); the contracted direction is pinned on `object`, whose mirror
+    #     really stops, in `tests/test_13610_graph_vector_copy.py`.
+    assert [pid for pid, _score in hits] == [graph.ID], (
+        f"the graph leg's answer did not survive the record leg's cancellation: "
+        f"{hits}. `point`'s graph copy is still maintained, so refusing it empties "
+        f"the dense leg for the primary retrieval label")
+    assert graph.query_calls, "the graph branch never ran on the fallback"
     vector_entries = [e for e in trace if e.get("leg") == "vector"]
     assert vector_entries, f"the read recorded no vector leg at all: {trace}"
     mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY) for e in vector_entries]
-    assert MECHANISM_SCAN_FALLBACK not in mechanisms, (
-        f"a post-contract read announced a fallback that must not exist: "
-        f"mechanisms={mechanisms}")
-    assert any(e.get("reason") == "query_failed" for e in vector_entries), (
-        f"the refused leg was not declared as a failure: {vector_entries}")
+    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
+        f"a record leg that did not answer must be reported as the fallback it "
+        f"took (#4999), got mechanisms={mechanisms}")
+    assert all(e.get("reason") != "timeout" for e in vector_entries), (
+        "the leg answered; a `timeout` entry would discard a result it had")
 
 
-def test_a_fused_read_on_a_contracted_tenant_does_not_wait_for_a_slow_record_leg(
+def test_a_fused_read_on_a_verified_but_still_mirrored_label_does_not_wait_for_a_slow_record_leg(
         monkeypatch, armed):
-    """The COLLECTOR's clock, on the posture `#13610` created (PR #13133 P1).
+    """The COLLECTOR's clock, on the label whose graph copy is still being fed.
 
     `#11691`'s acceptance was (a) the leg is bound by ``min(door, read budget)``
     and (b) *a slow record yields a NAMED graph fallback inside the read's
-    budget*. ⛔ `#13610` RETIRED (b) FOR A CONTRACTED TENANT, deliberately: once
-    the record's coverage is verified the graph copy has been frozen since the
-    contract, so serving it would hand over a SMALLER cohort as the answer
-    (`#5090` Q2, `record_vector.RecordVectorWithoutFallback`). What must survive,
-    and is what this pin now measures, is the COLLECTOR's clock: the fused read
-    must not wait for a slow record leg, must not consult the graph, and must
-    report that it could not look rather than answer with a cohort it no longer
-    maintains.
+    budget*. ⛔ `#13610` retired (b) only for a label whose mirror really stops —
+    `object`/`subject`, `record_vector.MIRROR_RETIRED_LABELS`. This pin drives
+    `point`, whose fold NEVER consults `mirror_required`, so its graph is a
+    complete, still-maintained copy and (b) still holds: the fused read must not
+    wait for a slow record leg, must answer from the graph inside the budget, and
+    must NAME that fallback rather than record an unattributed `timeout`.
+
+    ⛔ `#13617` review F1: while the CONTRACT covered every gated label, this pin
+    asserted the opposite for `point` — an empty answer and no graph query — which
+    emptied the dense leg for the primary retrieval label on the default posture.
+    The contracted direction is pinned on `object` in
+    `tests/test_13610_graph_vector_copy.py`.
 
     RED if `record_vector.record_statement_ms` stops dividing: the leg sleeps the
     read's whole budget, the collector's deadline expires first, and the entry is
@@ -356,31 +362,17 @@ def test_a_fused_read_on_a_contracted_tenant_does_not_wait_for_a_slow_record_leg
         leg_trace=trace, pg_vector=searcher)
     elapsed_ms = (time.monotonic() - started) * 1000.0
 
-    assert fused.get("vector", []) == [], (
-        f"a contracted tenant answered from the graph after its record leg was "
-        f"slow: {fused}. The graph copy has not been maintained since the "
-        f"contract, so that answer is a SMALLER cohort presented as the corpus "
-        f"(#5090 Q2) — the leg must report that it could not look instead")
-    assert graph.query_calls == [], (
-        f"the graph branches were consulted on a CONTRACTED tenant after the "
-        f"record leg failed ({graph.query_calls}): `RecordVectorWithoutFallback` "
-        f"exists so this fallback cannot happen")
+    assert [pid for pid, _score in fused.get("vector", [])] == [graph.ID], (
+        f"the graph leg's answer did not survive the record leg's cancellation on "
+        f"a label whose mirror is still written: {fused}")
+    assert graph.query_calls, (
+        "the graph branches were never consulted, so the reserve the divided "
+        "budget exists to buy went unused")
     vector_entries = [e for e in trace if e.get("leg") == "vector"]
     assert vector_entries, f"the read recorded no vector leg at all: {trace}"
-    assert all(e.get("degraded") is True for e in vector_entries), (
-        f"a contracted tenant that could not answer must declare itself degraded, "
-        f"got {vector_entries}")
-    assert all(e.get("reason") == "query_failed" for e in vector_entries), (
-        f"the failure must be NAMED (`query_failed`), not left as a bare "
-        f"`timeout` or `ok`: got {[e.get('reason') for e in vector_entries]}")
-    # ⛔ AND NOT `scan_fallback`: the graph was never asked, so naming it would be
-    # the trace claiming a fallback that did not happen. The mechanism stays whatever
-    # the record leg itself reported — the `degraded`/`query_failed` pair above is
-    # what tells the operator this read could not look.
     mechanisms = [e.get(search_engine.VECTOR_MECHANISM_KEY) for e in vector_entries]
-    assert MECHANISM_SCAN_FALLBACK not in mechanisms, (
-        f"the fused read recorded the graph's fallback mechanism on a contracted "
-        f"tenant where the graph was never consulted: {mechanisms}")
+    assert MECHANISM_SCAN_FALLBACK in mechanisms, (
+        f"the read fell back without naming it (#4999): {mechanisms}")
     assert all(e.get("reason") != "timeout" for e in vector_entries), (
         f"the failure must be the NAMED one, not a bare `timeout`: {trace}")
     # ⛔ THE DISCRIMINATOR IS ARITHMETIC, not the wall clock: with the budget

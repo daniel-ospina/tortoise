@@ -272,8 +272,14 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: The record still has no backfill, so `point`/`source`/`event` are served from it
 #: only for rows written after the move — which is why the READ is gated per label
 #: on :func:`coverage` (`COVERAGE_GATED_LABELS` is every served label, not two) and
-#: why the in-graph index is not retired on the strength of the arm alone
-#: (:func:`tortoise.projection.vector_index_retired` asks for a record TENANT too).
+#: why the in-graph index is not retired on the strength of the arm alone — the
+#: DROP asks for an EXPLICIT arm (`arm_is_explicit`, `#13631`) AND a record DSN,
+#: and ⛔ NOT the request's record tenant: that cut was wrong twice over, because
+#: the decision is STORE-scoped and one-shot while a tenant is REQUEST-scoped (see
+#: :func:`tortoise.projection.vector_index_retired`'s block comment). ⚠️ The arm is
+#: a deployment STATEMENT, not a coverage proof, so the residual is stated rather
+#: than implied: an EXPLICITLY armed store whose coverage has not verified DOES
+#: drop the index while every gated label is still declining to the graph.
 #: Getting the existing corpus into the record remains the thing to do, and it is
 #: what the coverage count is measured on.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
@@ -473,6 +479,10 @@ class RecordVectorWithoutFallback(RecordVectorError):
     copy stops being maintained: it is frozen at the contract, so a graph branch
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
+    ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
+    :data:`MIRROR_RETIRED_LABELS` have a fold that stops encoding, so only they
+    raise this. The other five are still mirrored after their count verifies, so
+    a graph answer for them is a complete copy and they keep the named fallback.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the
@@ -598,7 +608,38 @@ class Coverage:
 #: their graph vector even after their coverage verifies. That is option 2's
 #: transitional double-storage, not a gap in the proof: the round trip here is
 #: "the read stops trusting the graph last", never "the write stops first".
+#: ⚠️ AND THE CONTRACT IS NARROWER STILL — :data:`MIRROR_RETIRED_LABELS`, the next
+#: declaration. This set answers "may the record decline to the graph"; the
+#: no-fallback arm asks the stronger question and must not be read off this one.
 COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
+
+#: The labels whose GRAPH copy the folds actually STOP writing once coverage
+#: verifies — and therefore the only labels the read's NO-FALLBACK arm may cover.
+#:
+#: ⛔ WHY THIS IS A SECOND, NARROWER SET, and what conflating the two costs
+#: (`#13617` review F1). :data:`COVERAGE_GATED_LABELS` above is correctly WIDE:
+#: while the count is short the graph is a complete copy, so declining to it loses
+#: nothing. The CONTRACT claims something stronger — *the graph copy has been
+#: FROZEN since coverage verified, so a graph answer would be a SMALLER cohort
+#: presented as the answer* (:class:`RecordVectorWithoutFallback`) — and that
+#: premise is produced by exactly ONE thing: the fold consulting
+#: :func:`mirror_required` before it encodes. Only `_upsert_subject` and
+#: `_upsert_object` do (`projection/entities.py:4906`, `:5112`);
+#: `_upsert_event` / `_upsert_document` still call `derived_embedding.encode`
+#: unconditionally, and a `:Point`'s vector is RECORD TRUTH (`#5004`), never
+#: gated. So for those five the graph is not stale — it is a complete,
+#: still-maintained copy, and refusing it on a record blip would empty the dense
+#: leg for `point` (the primary retrieval label) on the DEFAULT posture, where
+#: `main` answered from that same copy.
+#:
+#: ⛔ THE MEMBERSHIP IS PINNED AGAINST THE FOLDS THEMSELVES rather than restated
+#: here: `tests/test_13610_graph_vector_copy.py::
+#: test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing`
+#: parses `projection/entities.py` for its `_derived_mirror_required(<label>)`
+#: call sites, so wiring a third fold WIDENS this set by test failure rather than
+#: leaving that label with a fallback it no longer has — or, in the other
+#: direction, silently taking away a fallback it still has.
+MIRROR_RETIRED_LABELS: frozenset[str] = frozenset({"object", "subject"})
 
 #: How long one tenant's UNVERIFIED coverage verdict is trusted (seconds).
 #:
@@ -2103,14 +2144,20 @@ def searcher(
         # is retained while the count is short (`mirror_required`, the same
         # predicate inverted).
         #
-        # ⛔ TWO DIFFERENT "THE RECORD DID NOT ANSWER" OUTCOMES FOLLOW, and the
+        # ⛔ THREE DIFFERENT "THE RECORD DID NOT ANSWER" OUTCOMES FOLLOW, and the
         # difference is whether the graph is still a complete copy:
         #   * UNVERIFIED -> the graph IS complete -> decline, so the caller
         #     records the NAMED fallback (`#4999`) and hands the graph the
         #     remainder of the read (`#11691`);
-        #   * VERIFIED -> the graph has been FROZEN since the contract -> a
-        #     graph answer would be a SMALLER cohort presented as the answer,
-        #     so the leg reports it could not look instead.
+        #   * VERIFIED and in MIRROR_RETIRED_LABELS -> the graph has been FROZEN
+        #     since the contract -> a graph answer would be a SMALLER cohort
+        #     presented as the answer, so the leg reports it could not look;
+        #   * VERIFIED and NOT in it -> the record answers first, but this label's
+        #     fold is still writing the graph copy (that is what the set means),
+        #     so the graph is a COMPLETE copy and a record blip keeps the named
+        #     fallback. ⛔ CARRYING THE CONTRACT OVER TO THESE FIVE would empty the
+        #     dense leg for `point` on the default posture — a regression against
+        #     `main` on the label the product retrieves by (`#13617` review F1).
         contracted = False
         if entity_type in COVERAGE_GATED_LABELS:
             verdict = coverage(entity_type, scope,
@@ -2136,7 +2183,9 @@ def searcher(
                 raise RecordVectorDeclined(
                     f"the record's `{entity_type}` vector coverage is not proven "
                     f"({verdict.reason}) — the graph branch answers")
-            contracted = True
+            # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
+            # whose fold actually stops writing has a graph worth refusing.
+            contracted = entity_type in MIRROR_RETIRED_LABELS
         try:
             rows = vector_search(scope, entity_type, query_vec, limit,
                                  record_dsn=record_dsn,

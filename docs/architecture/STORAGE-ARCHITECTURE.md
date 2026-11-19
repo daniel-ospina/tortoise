@@ -1712,6 +1712,12 @@ AND read — until it does. Concretely, five facts a reader can hold against the
    `use_record_tenant` primitive the MCP lane installs per request. Without it the write gate would
    answer "no tenant" on every hosted write and keep the mirror for ever, while the read half of the
    same request cut over.
+   ⛔ **And the no-fallback CONTRACT is narrower than the gate, by exactly this fact.** The gate
+   covers all seven because a short count declining to a still-written graph loses nothing; the
+   contract — refuse the graph, seal the answer — is claimed only for the labels whose fold really
+   stops encoding (`record_vector.MIRROR_RETIRED_LABELS`: `object`, `subject`). For the other five a
+   record blip keeps the named `scan_fallback`, because their graph copy is still being fed and
+   refusing it would empty the dense leg for `point` on the default posture (`#13617` review F1).
 5. **The in-graph index is retired only on an EXPLICIT arm.** `vector_index_retired()` is
    `VECTOR_INDEX_RETIRED ∧ DSN ∧ an operator SPELLED the switch` (`record_vector.arm_is_explicit`,
    `#13631`). An UNSET switch is armed for the READ and silent for the DROP, so a default-armed
@@ -1731,12 +1737,15 @@ at all, is a ROLLING DEPLOY: instances that have closed the write gate stop writ
 while instances still on pre-#13610 code serve those labels from the graph. Nothing compares versions;
 the graph-side sweep is the repair.
 
-⚠️ **The in-graph index is retired only on an EXPLICIT arm.** `#13610` made the cutover's default ON,
-which collapsed `vector_index_retired()`'s `DSN ∧ armed` back to "a DSN resolves" — the false "yes"
-`#11660` round 6 P1-3 is about — because the drop happens at setup, before any coverage can exist, when
-every served label is still answering from the GRAPH. So the DROP (a store-scoped, one-shot act) asks a
-store-scoped fact: has this deployment SPELLED `TORTOISE_RECORD_VECTOR_LEG=1`? Unset is armed for the
-READ and silent for the DROP; the index stays and `#4997` keeps its WARNING.
+⚠️ **Why the third condition cannot be the request's record TENANT** (a cut `#13610` first shipped, and
+it was wrong twice over — recorded here because this is the paragraph fact 5's cross-reference promises).
+`vector_index_retired()` is asked at SETUP and its answer is a STORE-scoped, ONE-SHOT act: drop the
+in-graph index, or keep it. A record tenant is REQUEST-scoped, and the hosted REST lane carries it BY
+VALUE (`sdk._record_tenant`) rather than ambiently — so a by-value lane would never satisfy the
+predicate and would never retire, while an ambient-tenant request on the SAME graph would, letting the
+CREATE path and the DROP path disagree about one store. A deployment-level fact cannot have that
+failure, so the third condition is `record_vector.arm_is_explicit` (has this deployment SPELLED the
+switch?) and never a tenant.
 
 ⚠️ **Stated residuals, not oversights.** The count compares SIZES, so it is a coverage claim and not
 a membership proof (a cardinality-preserving mismatch verifies; the graph keys on `id` while the

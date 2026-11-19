@@ -62,6 +62,7 @@ from tortoise.search_engine import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _RECORD_VECTOR = _REPO_ROOT / "tortoise" / "record_vector.py"
+_ENTITIES = _REPO_ROOT / "tortoise" / "projection" / "entities.py"
 
 _DIM = 384
 _SCOPE = ("org_13610", "graph_13610")
@@ -753,6 +754,111 @@ def test_every_label_the_record_serves_is_gated():
         f"{sorted(set(record_vector.LABEL_SERVED) - set(record_vector.COVERAGE_GATED_LABELS))}")
     for label in ("point", "operator", "event", "document", "source"):
         assert label in record_vector.COVERAGE_GATED_LABELS
+
+
+def test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback(
+        monkeypatch):
+    """⮔ THE CONTRACT IS ONLY WHERE THE GRAPH COPY IS ACTUALLY FROZEN (#13617 F1).
+
+    `contracted` claims a PREMISE — *the graph copy stopped being maintained at the
+    contract, so a graph answer is a SMALLER cohort presented as the answer* — and
+    that premise is produced by exactly one thing: the fold consulting
+    `record_vector.mirror_required` before it encodes. Only
+    `_upsert_subject`/`_upsert_object` do (`projection/entities.py:4906`, `:5112`),
+    so only they have a frozen graph. `point` — the PRIMARY retrieval label — is
+    still mirrored unconditionally, so on a record blip the graph holds a COMPLETE,
+    still-fed copy and refusing it empties the dense leg on the DEFAULT posture
+    (where `main` answered from that same copy).
+
+    Both directions are pinned, and the MUTANT IS DRIVEN: widening the retired set
+    to include `point` — the pre-fix code's `contracted = True` for every gated
+    label, in its narrowest form — makes the same row vanish, which is what makes
+    this a measurement of the mechanism rather than of the fixture.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    assert "point" in record_vector.COVERAGE_GATED_LABELS
+    assert "point" not in record_vector.MIRROR_RETIRED_LABELS
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorError("the record went away")
+
+    # coverage VERIFIED for `point` (3 >= 3), and the record leg then fails.
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(_searcher(3), entity_type="point",
+                              graph=_Graph([("point-graph-only", 1.0 / 1.5)]))
+
+    assert [row[0] for row in rows] == ["point-graph-only"], (
+        "a VERIFIED `point` read whose record leg failed answered nothing — the "
+        "no-fallback contract was applied to a label whose fold still writes the "
+        f"graph copy, so the dense leg for the primary label went empty: {rows}")
+    assert graph.queries, "the graph branch never ran for a still-mirrored label"
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+    assert trace[-1]["degraded"] is False, trace
+
+    # ── the MUTANT: the contract widened to every gated label ──────────────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "MIRROR_RETIRED_LABELS",
+                        frozenset({"object", "subject", "point"}), raising=True)
+    rows, _graph, trace = _run(_searcher(3), entity_type="point",
+                               graph=_Graph([("point-graph-only", 1.0 / 1.5)]))
+    assert rows == [], (
+        "the mutant did NOT lose the still-mirrored graph row, so this test cannot "
+        "tell the narrowed contract from the wide one — fix the fixture before "
+        "trusting it")
+    assert trace[-1]["reason"] == "query_failed", trace
+
+    # ── and the VERIFIED `object` direction is unchanged: still no fallback ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    rows, graph, _trace = _run(_searcher(3), graph=_Graph([("obj-graph-only", 1.0 / 1.5)]))
+    assert rows == [], "a contracted `object` read recovered its frozen cohort"
+    assert graph.queries == [], "the graph was queried after `object`'s contract"
+
+
+def test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing():
+    """⮔ THE SET IS PINNED AGAINST THE FOLDS, not restated (#13617 F1).
+
+    `record_vector.MIRROR_RETIRED_LABELS` says which labels' graph copy the folds
+    really stop writing, and the read's no-fallback arm is narrowed to it. The
+    membership is produced by `_derived_mirror_required(<label>)` call sites in
+    `projection/entities.py`, so it is read off THAT FILE rather than trusted: a
+    third fold wired to the write gate would otherwise leave its label keeping a
+    fallback to a graph copy nobody maintains (the `#5090` Q2 direction), and a
+    fold silently un-wired would leave its label refusing a complete copy (the
+    direction this test was written for).
+
+    Also asserts the two sets relate correctly: the CONTRACT is never wider than
+    the GATE — a label that may not be refused is not a label that may be sealed.
+    """
+    tree = ast.parse(_ENTITIES.read_text(encoding="utf-8"))
+    wired: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name != "_derived_mirror_required":
+            continue
+        assert len(node.args) == 1 and isinstance(node.args[0], ast.Constant), (
+            "a `_derived_mirror_required` call site passes a non-literal argument, "
+            f"so the retired-label set cannot be derived from it: {ast.unparse(node)}")
+        wired.add(node.args[0].value)
+
+    assert wired, (
+        "no `_derived_mirror_required` call site was found in projection/entities.py "
+        "— either the write gate was removed (the graph copy is written for ever) "
+        "or it was renamed, and `MIRROR_RETIRED_LABELS` is now unbacked")
+    assert wired == set(record_vector.MIRROR_RETIRED_LABELS), (
+        "the no-fallback arm and the folds' write gate disagree — `contracted` "
+        f"claims a frozen graph for {sorted(record_vector.MIRROR_RETIRED_LABELS)} "
+        f"while the folds stop writing {sorted(wired)}")
+    assert set(record_vector.MIRROR_RETIRED_LABELS) <= set(
+        record_vector.COVERAGE_GATED_LABELS), (
+        "the contract covers a label the coverage gate does not, so a label could "
+        "be sealed with no coverage proof at all: "
+        f"{sorted(set(record_vector.MIRROR_RETIRED_LABELS) - set(record_vector.COVERAGE_GATED_LABELS))}")
 
 
 def test_the_two_denominators_are_stated_as_a_comparison_and_not_a_membership_proof():

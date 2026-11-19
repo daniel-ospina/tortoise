@@ -20354,9 +20354,13 @@ class FalkorProjection(
         it is a full-label scan. Left unbounded it inherits the door's default
         while every other graph statement on that path carries the read's budget
         (`run_vector_query` passes `timeout=_graph_timeout_ms`) — the exact
-        30x-mismatch class `#11691` closed for the record half. ``None`` keeps the
-        historical behaviour for the reconstruction callers (health, restore),
-        which legitimately need seconds.
+        30x-mismatch class `#11691` closed for the record half. ``None`` leaves the
+        door's own bound in place, unchanged — the default, and today UNUSED: this
+        method was added by `#13610` and has ONE production caller
+        (`sdk._record_vector_searcher`, which always supplies the read's own budget
+        when the read has one), so there is no reconstruction caller here to keep
+        unbounded. A health/restore sweep that legitimately needs seconds would
+        have to be given this argument deliberately when it arrives.
         """
         from ..security import ENTITY_TYPE_LABELS, entity_label
 
