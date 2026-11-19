@@ -2108,76 +2108,92 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-# ── The #13674 block's line citations (#13814) ───────────────────────────────
-# The block cites `embeddings.py` BY LINE, so a merge that grows that module
-# silently turns a cite into a pointer at unrelated code while every sentence
-# around it still reads as true. Measured: the origin/main integration that
-# brought #13819 inserted 102 lines into and deleted 11 from
-# `tortoise/embeddings.py` (`git show --numstat c3309ec656 --
-# tortoise/embeddings.py` -> `102  11`; 2695 -> 2786 lines, net +91), and the
-# three gate cites all moved by +65. No other check in CI reads a line number,
-# and a reviewer who follows one lands nowhere.
+# ── The #13674 line citations (#13814) ───────────────────────────────────────
+# TWO artifacts cite `embeddings.py` BY LINE — the manifest's #13674 block and
+# the runbook's operator section — so a merge that grows that module silently
+# turns a cite into a pointer at unrelated code while every sentence around it
+# still reads as true. Measured: the origin/main integration that brought #13819
+# inserted 102 lines into and deleted 11 from `tortoise/embeddings.py`
+# (`git show --numstat c3309ec656 -- tortoise/embeddings.py` -> `102  11`;
+# 2695 -> 2786 lines, net +91), and the three gate cites all moved by +65. No
+# other check in CI reads a line number, and a reader who follows one lands
+# nowhere.
+#
+# Both copies are pinned by the same checker below. Pinning only the manifest
+# would be the fail-open this PR keeps paying for: the suite stays green while
+# the OPERATOR-facing copy — the one read mid-incident — rots silently.
 
 _READER_CITE_RE = re.compile(r"`(?::|(?:tortoise/)?[a-z_]+\.(?:py|sh):)(\d+)(?:-(\d+))?`")
-#: What a cited line has to contain to be the thing the block says it is. The
+#: What a cited line has to contain to be the thing the citation says it is. The
 #: SHELL reads its own copy of the variable, so it is spelled out there.
 _READER_NEEDLE = {
     "embeddings.py": "_embedder_warmup_enabled",
     "hosted_api.py": "_embedder_warmup_enabled",
     "entrypoint.sh": "TORTOISE_EMBEDDER_WARMUP",
 }
+#: A numbered reader entry STARTS a new claim, so its symbol is its own. Two
+#: spellings, because the two artifacts are: the manifest's `#   1. …` inside a
+#: comment block, and the runbook's `> 1. …` inside a blockquote.
+_READER_ENTRY_RE = re.compile(r"^\s*(?:#|>)?\s*\d+\.\s")
+#: The sentence that ENDS the numbered claims in both artifacts: the prose after
+#: it names no function, so nothing in it may inherit reader 5's symbol.
+#: Markdown emphasis is stripped before matching — the runbook bolds
+#: "**function names**", the manifest shouts "FUNCTION NAMES".
+_READER_SYMBOL_RESET_RE = re.compile(
+    r"function names? (?:above )?are the invariant", re.IGNORECASE
+)
+#: A numbered entry's ORDINAL, capturing it, in both artifacts' spellings.
+_READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
+#: The sentence that names, BY ORDINAL, which readers a pair of range cites below
+#: belongs to — the manifest says "Readers 2 and 3", the runbook "Number 2 and 3".
+#: Without this the ranges could only be needle-checked, and the needle passes a
+#: range re-pinned onto ANY flag-reading line, the wrong reader included.
+_READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s+(\d+)")
 
 
-def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
-    """(file, start, end, symbol) for every cite in the manifest's #13674 block.
+def _reader_citations(
+    lines: list[str], start: int, end: int, artifact: str,
+) -> list[tuple[str, int, int, str | None]]:
+    """(file, start, end, symbol) for every cite in `lines[start:end]`.
 
-    Derived from the SHIPPED manifest text — the artifact a reviewer reads — not
-    from a copy here, so a cite edited out of the block cannot stay green in the
-    test. The region is the numbered reader list (the `:40-50` resolver line
-    through reader 5) PLUS the two range cites in the prose below it (`:1466-1470`
-    / `:1592-1593`, the bound readers' `return None` spans); it stops before the
-    paragraph that deliberately cites a NON-reader (the `warm_up` body), which is
-    why that one is outside the span.
+    Parsed from the SHIPPED text — the artifact a reviewer or an operator reads —
+    not from a copy here, so a cite edited out of the artifact cannot stay green
+    in the test. `start`/`end` are the CALLER's bound: each artifact slices its
+    own region, so one parser serves both and neither can drift into a slightly
+    different checker. A region that comes back inverted raises rather than
+    returning an empty list.
 
-    `symbol` is the function the block names for that cite (`::start_warm_up` and
-    so on), or `None` where it names none. The numbered-list symbol is tracked per
+    `symbol` is the function named for that cite (`::start_warm_up` and so on), or
+    `None` where none is named INLINE. The numbered-list symbol is tracked per
     ENTRY, so reader 2's cite cannot inherit reader 1's function. The two prose
-    range cites name no function INLINE; they take the reader their sentence names
-    by ORDINAL ("Readers 2 and 3"), so a range re-pinned onto another reader reds.
-    The `:40-50` resolver cite is the only cite left with `symbol is None`, and for
-    it alone the needle is the check.
+    range cites name no function inline; they are bound to the reader their own
+    sentence names by ORDINAL ("Readers 2 and 3" / "Number 2 and 3"), so a range
+    re-pinned onto another reader reds. Only the `:40-50` resolver cite is left
+    with `symbol is None`, and for it alone the needle is the check.
     """
-    lines = REAL_MANIFEST.read_text().splitlines()
-    start = next(
-        i for i, ln in enumerate(lines)
-        if "is the resolver's DEFINITION; the readers are" in ln
-    )
-    # Past the numbered list AND the two range cites below it.
-    end = next(
-        i for i, ln in enumerate(lines)
-        if "Two records in the tree understate the set" in ln
-    )
     assert start < end, (start, end)
     cites: list[tuple[str, int, int, str | None]] = []
     current = "embeddings.py"
     symbol: str | None = None
     ordinal: int | None = None
-    #: numbered ENTRY -> the reader that entry names, so the prose's two ranges can
-    #: be bound to the readers ITS SENTENCE names for them ("Readers 2 and 3").
+    #: numbered ENTRY -> the reader that entry names, so the prose's ranges can be
+    #: bound to the readers ITS OWN SENTENCE names for them.
     by_ordinal: dict[int, str] = {}
-    #: readers the prose has named by ORDINAL and whose ranges have not been read
-    #: yet. The sentence wraps across lines, so this must outlive one line.
+    #: readers named by ordinal whose range cites have not been reached yet. The
+    #: sentence wraps across lines in BOTH artifacts, so this outlives one line.
     pending: list[str] = []
     ordinal_bound = 0
     for ln in lines[start:end]:
-        # A numbered reader entry starts a new claim: its symbol is its own.
-        entry = re.match(r"\s*#\s+(\d+)\.\s", ln)
+        # A numbered reader entry starts a new claim: its symbol is its own. The
+        # invariant sentence below the list ends them, so nothing after it may
+        # inherit reader 5's symbol. The entry regex accepts BOTH artifacts'
+        # spellings (`#   1. …` in the manifest, `> 1. …` in the runbook) and the
+        # reset is markdown-insensitive (the runbook bolds "**function names**").
+        entry = _READER_ENTRY_ORDINAL_RE.match(ln)
         if entry:
             symbol = None
             ordinal = int(entry.group(1))
-        # The list ends here. The prose below names no reader INLINE, so it must not
-        # inherit reader 5's symbol — its ranges are bound by ORDINAL instead.
-        if "The FUNCTION NAMES above are the invariant" in ln:
+        if _READER_SYMBOL_RESET_RE.search(ln.replace("*", "")):
             symbol = None
             ordinal = None
         for token in ("hosted_api.py", "entrypoint.sh", "embeddings.py"):
@@ -2191,18 +2207,13 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
             symbol = named.group(1)
             if ordinal is not None:
                 by_ordinal.setdefault(ordinal, symbol)
-        # "Readers 2 and 3 ... (`:a-b`, `:c-d`)": the sentence names the readers by
-        # ORDINAL, so the ranges after it bind IN ORDER to those readers. Binding
-        # them by their start NUMBER instead is inert — that number is the one the
-        # named entry already asserted, so a range re-pinned onto another reader
-        # would match its own lookup and pass.
-        prose = re.search(r"Readers?\s+(\d+)\s+and\s+(\d+)", ln)
+        prose = _READER_ORDINAL_SENTENCE_RE.search(ln)
         if prose:
             for group in prose.groups():
                 named_ordinal = int(group)
                 assert named_ordinal in by_ordinal, (
-                    f"the prose names reader {named_ordinal}, but the numbered list has no "
-                    f"such entry (it has {sorted(by_ordinal)})"
+                    f"{artifact}: the prose names reader {named_ordinal}, but its numbered "
+                    f"list has no such entry (it has {sorted(by_ordinal)})"
                 )
                 pending.append(by_ordinal[named_ordinal])
         for m in _READER_CITE_RE.finditer(ln):
@@ -2213,56 +2224,136 @@ def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]
                 bound = pending.pop(0)
                 ordinal_bound += 1
             cites.append((current, lo, hi, bound))
-    # Non-vacuity, and it is the whole point: if this sentence is reworded the
-    # ranges silently fall back to the needle-only check, which passes a range
-    # re-pinned onto ANY flag-reading line — the wrong reader included.
+    # Non-vacuity, and it is the whole point: if that sentence is deleted or
+    # reworded the ranges silently fall back to the needle-only check, which
+    # passes a range re-pinned onto ANY flag-reading line — the wrong reader
+    # included. Both artifacts carry the sentence, so both must bind two ranges.
     assert ordinal_bound == 2, (
-        f"the prose's 'Readers N and M' sentence bound {ordinal_bound} range cite(s), not 2 — "
-        f"reworded, or the ranges moved off that line? The two ranges below the reader "
-        f"list must stay bound to the readers that sentence names, or a range re-pinned "
-        f"onto another reader passes the needle check"
+        f"{artifact}: the sentence naming the range cites' readers by ordinal bound "
+        f"{ordinal_bound} of them, not 2 — reworded, or the ranges moved off it? A range "
+        f"left unbound is only needle-checked, and the needle passes a range re-pinned "
+        f"onto another reader"
     )
     return cites
 
 
-def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
-    """#13814: every cited line MUST be code that reads the flag.
+def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
+    """The cites in the MANIFEST's #13674 block (the inventory a reviewer reads)."""
+    lines = REAL_MANIFEST.read_text().splitlines()
+    start = next(
+        i for i, ln in enumerate(lines)
+        if "is the resolver's DEFINITION; the readers are" in ln
+    )
+    # Past the numbered list AND the two range cites below it.
+    end = next(
+        i for i, ln in enumerate(lines)
+        if "Two records in the tree understate the set" in ln
+    )
+    return _reader_citations(lines, start, end, "the manifest")
 
-    A line number is the one claim in this block that cannot be right by
+
+def _embedder_warmup_runbook_citations() -> list[tuple[str, int, int, str | None]]:
+    """The cites in the RUNBOOK's operator section — the second, unguarded copy.
+
+    Same numbers, same readers, read mid-incident by an operator instead of a
+    reviewer — which is why the manifest's pin alone was not enough: the merge
+    that moved `embeddings.py` moved BOTH copies, and only one of them red.
+
+    The region stops at `**When to flip it.**`: everything above it cites a flag
+    READER, everything below it cites the cold-load timing (`embeddings.py:894`,
+    `entrypoint.sh:422-423`), which is not a reader and would red a needle check
+    for the wrong reason.
+    """
+    lines = REAL_RUNBOOK.read_text().splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("### The embedder warm-up switch")),
+        None,
+    )
+    if start is None:
+        raise AssertionError(
+            "docs/infra-runbook.md has no '### The embedder warm-up switch' section — "
+            "the operator surface this citation list belongs to is gone"
+        )
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("**When to flip it")),
+        len(lines),
+    )
+    return _reader_citations(lines, start, end, "docs/infra-runbook.md")
+
+
+def _assert_every_citation_reads_the_flag(
+    cites: list[tuple[str, int, int, str | None]], artifact: str,
+) -> None:
+    """Every cite must land on code that reads the flag, in the function named.
+
+    Shared by the manifest and runbook tests deliberately: the two artifacts
+    carry the SAME numbers, and a second, slightly different checker is how two
+    copies drift apart while both look pinned.
+    """
+    # Non-vacuity: a parser that found nothing would clear every assertion below.
+    assert len(cites) >= 8, f"{artifact}: the reader list's citations could not be read: {cites}"
+    for fname, lo, hi, symbol in cites:
+        assert fname in _READER_NEEDLE, f"{artifact}: unattributed citation: {fname}:{lo}-{hi}"
+        path = (REPO_ROOT / fname) if fname == "entrypoint.sh" else (REPO_ROOT / "tortoise" / fname)
+        body = path.read_text().splitlines()
+        assert 1 <= lo <= hi <= len(body), (
+            f"{artifact}: {fname}:{lo}-{hi} is outside the file ({len(body)} lines)"
+        )
+        span = "\n".join(body[lo - 1:hi])
+        assert _READER_NEEDLE[fname] in span, (
+            f"{artifact}: {fname}:{lo}-{hi} is cited as a TORTOISE_EMBEDDER_WARMUP "
+            f"reader, but the cited lines do not read it — a merge moved the code "
+            f"and the cite went stale. Re-pin the numbers in {artifact} (the "
+            f"function names are the invariant; the numbers are a convenience). "
+            f"Cited lines: {span[:300]!r}"
+        )
+        if symbol is None:
+            # No function is named for this cite, so there is nothing to bind it
+            # to (the resolver definition `:40-50`, and the range cites in prose).
+            continue
+        # NAME↔NUMBER: the cited line must sit inside the function named for it.
+        # Without this, a swap between two byte-identical gate lines
+        # (`if not _embedder_warmup_enabled():`) passes the needle check.
+        enclosing = _enclosing_definition(body, lo, symbol)
+        assert enclosing == symbol, (
+            f"{artifact}: {fname}:{lo} is cited as {symbol}, but the function "
+            f"enclosing that line is {enclosing!r} — the number was re-pinned against "
+            f"the wrong reader, or the names and numbers have drifted apart."
+        )
+
+
+def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
+    """#13814: every cited line in the MANIFEST block MUST read the flag.
+
+    A line number is the one claim in this list that cannot be right by
     accident — the cited line either reads `TORTOISE_EMBEDDER_WARMUP` or it does
     not. Re-pinning is a one-line edit; finding the stale one after a deploy is
     not.
     """
-    cites = _embedder_warmup_reader_citations()
-    # Non-vacuity: a parser that found nothing would clear every assertion below.
-    assert len(cites) >= 8, f"the reader list's citations could not be read: {cites}"
-    for fname, lo, hi, symbol in cites:
-        assert fname in _READER_NEEDLE, f"unattributed citation: {fname}:{lo}-{hi}"
-        path = (REPO_ROOT / fname) if fname == "entrypoint.sh" else (REPO_ROOT / "tortoise" / fname)
-        body = path.read_text().splitlines()
-        assert 1 <= lo <= hi <= len(body), f"{fname}:{lo}-{hi} is outside the file ({len(body)} lines)"
-        span = "\n".join(body[lo - 1:hi])
-        assert _READER_NEEDLE[fname] in span, (
-            f"{fname}:{lo}-{hi} is cited as a TORTOISE_EMBEDDER_WARMUP reader, but the "
-            f"cited lines do not read it — a merge moved the code and the cite went "
-            f"stale. Re-pin the numbers in .github/scripts/fly-managed-secrets.txt "
-            f"(the function names are the invariant; the numbers are a convenience). "
-            f"Cited lines: {span[:300]!r}"
-        )
-        if symbol is None:
-            # The block names no function for this cite, so there is nothing to
-            # bind it to (the resolver definition `:40-50`, and the two range
-            # cites in the prose).
-            continue
-        # NAME↔NUMBER: the cited line must sit inside the function the block
-        # names for it. Without this, a swap between two byte-identical gate
-        # lines (`if not _embedder_warmup_enabled():`) passes the needle check.
-        enclosing = _enclosing_definition(body, lo, symbol)
-        assert enclosing == symbol, (
-            f"{fname}:{lo} is cited as {symbol}, but the function enclosing that line "
-            f"is {enclosing!r} — the number was re-pinned against the wrong reader, or "
-            f"the block's names and numbers have drifted apart."
-        )
+    _assert_every_citation_reads_the_flag(
+        _embedder_warmup_reader_citations(), ".github/scripts/fly-managed-secrets.txt"
+    )
+
+
+def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
+    """The runbook carries the SAME line cites as the manifest — and no pin.
+
+    #13814 pinned the manifest copy (NAME↔NUMBER, mutation-proved) and left the
+    operator section's copy unguarded, so the next merge that grows
+    `tortoise/embeddings.py` reds the manifest and silently rots the runbook —
+    the copy an operator reads mid-incident, when the flag has to be flipped on
+    the box. Measured at the head before this test: `:1361` / `:1466` / `:1592`
+    are cited in both artifacts, and only the manifest's three were read by any
+    test.
+
+    The brief's own recorded defect class — "guards that cannot be reddened" —
+    is why this is a restore of an existing check to a SECOND artifact rather
+    than a new predicate: the numbers, the needle and the NAME↔NUMBER binding
+    are the same three, and the mutants that red the manifest arm red this one.
+    """
+    _assert_every_citation_reads_the_flag(
+        _embedder_warmup_runbook_citations(), "docs/infra-runbook.md"
+    )
 
 
 def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | None:
@@ -2273,16 +2364,30 @@ def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | N
     `_lifespan` contains a `_prewarm_embeddings` helper. The enclosing chain is
     therefore read by INDENTATION: the nearest definition at the same indent as
     the named one is the one that encloses the cite.
+
+    Only a real DEFINITION counts, in either the Python form (`def`/`async def`)
+    or the shell forms (`name() {`, `function name {`, and the brace on the line
+    after the signature) — a bare `name()` CALL must not register as one, which
+    is why every arm requires the opening brace.
     """
     defs: list[tuple[int, str]] = []  # (indent, name), in file order, above line_no
-    for raw in body[: max(line_no, 0)]:
+    for idx, raw in enumerate(body[: max(line_no, 0)]):
         py = re.match(r"(\s*)(?:async\s+)?def\s+([A-Za-z_]\w*)", raw)
         if py:
             defs.append((len(py.group(1)), py.group(2)))
             continue
-        sh = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{?", raw)
-        if sh and not raw.lstrip().startswith("#"):
+        sh = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{", raw)
+        if sh:
             defs.append((len(sh.group(1)), sh.group(2)))
+            continue
+        sh_kw = re.match(r"(\s*)function\s+([A-Za-z_]\w*)\s*\{", raw)
+        if sh_kw:
+            defs.append((len(sh_kw.group(1)), sh_kw.group(2)))
+            continue
+        # `name()` / `function name` with the opening brace on the next line.
+        sh_open = re.match(r"(\s*)(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*$", raw)
+        if sh_open and idx + 1 < len(body) and body[idx + 1].lstrip().startswith("{"):
+            defs.append((len(sh_open.group(1)), sh_open.group(2)))
             continue
     target = next((d for d in reversed(defs) if d[1] == symbol), None)
     if target is None:
