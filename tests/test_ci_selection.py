@@ -10316,6 +10316,11 @@ ROWED_BY_THIS_FOLD = (
     # row states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
     # listed has no `durations:` row and nothing reds.
     "test_13665_sentry_init_off_loop.py",
+    # #13722 — the projection-open probe's round-trip/flat-cost pins, a file this fold
+    # ADDED. Listed for the reason #13629's and #13665's rows state: the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row and
+    # deleting the row this PR adds reds nothing.
+    "test_13722_projection_open_round_trips.py",
 )
 
 

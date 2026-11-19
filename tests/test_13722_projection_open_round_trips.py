@@ -54,7 +54,7 @@ to its CONTENT, never to a delta someone re-added (#12184's false-correction les
 row below re-derives the line from the fragment it quotes and reds if the evidence points
 somewhere else.
 
-Run (the first six and the cite pin need no database; the live ones need the docker lane)::
+Run (the first five and the cite pin need no database; the two live arms need the docker lane)::
 
     TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \\
         tests/test_13722_projection_open_round_trips.py -q
