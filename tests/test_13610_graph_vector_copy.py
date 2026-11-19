@@ -63,6 +63,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SDK = _REPO_ROOT / "tortoise" / "sdk.py"
 _RECORD_VECTOR = _REPO_ROOT / "tortoise" / "record_vector.py"
 _ENTITIES = _REPO_ROOT / "tortoise" / "projection" / "entities.py"
+_STORAGE_DOC = _REPO_ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
 
 _DIM = 384
 _SCOPE = ("org_13610", "graph_13610")
@@ -1350,6 +1351,107 @@ def test_the_numerator_applies_the_labels_kind_predicate():
     finally:
         rs.open_record = real_open
         rp.scope_connection = real_scope
+
+
+def test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify(
+        monkeypatch):
+    """F1 (round 13): `operator` is UNREACHABLE, not "merely harder".
+
+    ⛔ THE CLAIM THIS PINS, AND THE ONE IT RETIRES. `Coverage`'s docstring used to
+    exempt `operator` from the UNREACHABLE set with *"`point`'s other members are
+    not vector-bearing by default"* — which is inverted. `security.ENTITY_TYPE_LABELS["operator"]
+    == "Point"`, so the DENOMINATOR is every vector-bearing `:Point`, while the
+    numerator applies `(is_operator IS TRUE OR op_type IS NOT NULL)`; and
+    non-operator Points are exactly the population that carries embeddings by
+    default (`projection.entities._upsert_point_props` computes OR restores the
+    vector for NON-operator Points, `#7778`). One embedded plain point therefore
+    keeps `record >= graph` false for ever — the same shape as `document`/`source`.
+
+    The direction is safe (a longer double-storage, never a short answer), which is
+    why this is a claim fix and not a runtime fix — but `operator` stays on the
+    graph branch that `record_vector`'s own header records as defective (no
+    operator predicate at all), so the prose an operator reads must say so.
+    """
+    from tortoise.security import ENTITY_TYPE_LABELS, entity_label
+
+    # (1) THE CODE FACT: the denominator resolves `operator` to the PARENT label,
+    # and the label's own predicate never reaches it.
+    assert ENTITY_TYPE_LABELS["operator"] == "Point", ENTITY_TYPE_LABELS["operator"]
+    assert entity_label("operator") == "Point"
+    tree = ast.parse((_REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text(
+        encoding="utf-8"))
+    counter = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "_label_vector_count")
+    body = ast.unparse(counter)
+    assert "n.embedding IS NOT NULL" in body, body
+    assert "is_operator" not in body, (
+        "the denominator now applies an operator predicate — if that is deliberate, "
+        "`operator` may be reachable again and F1's prose must be re-derived: " + body)
+
+    # (2) THE CONSEQUENCE, EXECUTED: 2 operator rows in the record against the
+    # whole `:Point` population (3, one of them plain) is UNVERIFIED. The record
+    # side is stubbed — this asserts the COMPARISON, not the door.
+    monkeypatch.setattr(record_vector, "_record_vector_count", lambda *a, **k: 2)
+    record_vector.reset_coverage_cache()
+    verdict = record_vector.coverage(
+        "operator", record_vector._Scope(*_SCOPE), graph_vectors=3,
+        record_dsn=None, now=0.0)
+    assert verdict.verified is False, verdict.as_dict()
+    assert (verdict.record_vectors, verdict.graph_vectors) == (2, 3), verdict.as_dict()
+    # ...and the other side of the same comparison, so this is a size test and not
+    # an always-False stub: 3 operator rows DO verify against the same denominator.
+    monkeypatch.setattr(record_vector, "_record_vector_count", lambda *a, **k: 3)
+    record_vector.reset_coverage_cache()
+    assert record_vector.coverage(
+        "operator", record_vector._Scope(*_SCOPE), graph_vectors=3,
+        record_dsn=None, now=0.0).verified is True
+    record_vector.reset_coverage_cache()
+
+    # (3) THE PROSE: the exemption and its inverted reason are gone, and `operator`
+    # is named in the same UNREACHABLE set as the other two.
+    doc = record_vector.Coverage.__doc__ or ""
+    assert "not vector-bearing by default" not in doc, doc
+    idx = doc.find("is UNREACHABLE")
+    assert idx != -1, doc
+    # The whole bullet, not one wrapped line: the claim and the labels that carry it
+    # are spread across the wrap, so a line-scoped read would be a pin on the
+    # formatter rather than on the contract.
+    clause = " ".join(doc[max(0, idx - 900): idx + 1200].split())
+    assert "operator" in clause, (
+        "`Coverage`'s docstring no longer names `operator` as unreachable: " + clause)
+    for label in ("document", "source"):
+        assert label in clause, clause
+
+
+def test_the_coverage_contract_says_the_numerator_applies_the_kind_predicate():
+    """F2 (round 13): `coverage()`'s docstring said "no `kind_filter`"; the code applies one.
+
+    ⛔ THE TWO CONTRACTS IN ONE FILE SAID OPPOSITE THINGS. `_record_vector_count`'s
+    own docstring documents the predicate deliberately (`#13630`), while
+    `coverage()`'s — the one carrying the COMPARABILITY claim the whole gate rests
+    on — promised a whole-table numerator. The stale half was then copied into the
+    shipped §14.3, which contradicted itself six paragraphs later.
+
+    The code is the authority and already has its own pin
+    (`test_the_numerator_applies_the_labels_kind_predicate`); this one keeps the two
+    prose surfaces from drifting back off it. It fails on the pre-fix tree: the old
+    sentence reads ``(no status fold, no `kind_filter`)``.
+    """
+    doc = record_vector.coverage.__doc__ or ""
+    assert "no `kind_filter`" not in doc, doc
+    assert "KIND predicate" in doc, doc
+    assert "#13630" in doc, doc
+    # the status fold is genuinely absent — that half of the old sentence was true
+    assert "no status fold" in doc, doc
+
+    storage = _STORAGE_DOC.read_text(encoding="utf-8")
+    collapsed = " ".join(storage.split())
+    # §14.3's fact 2 is the shipped copy of the same claim, and it wrapped, so the
+    # comparison is on the collapsed text rather than on a line.
+    assert "whole table for the tenant **except the label's own KIND predicate**" in collapsed, (
+        "§14.3's fact 2 still claims a whole-table numerator")
+    assert "except the label's own KIND predicate" in collapsed
 
 
 def test_the_record_numerator_counts_only_vector_bearing_rows():

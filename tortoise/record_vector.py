@@ -543,16 +543,22 @@ class Coverage:
       `name` (`chk_object_node_key_is_contract_key`) — so two nodes sharing a name
       can hold the coverage verdict below what the record can ever reach, in which
       case the deployment double-stores for ever with no defect to point at;
-    * for the two labels that are a SUB-kind of another (`operator` ⊂ `point`,
-      `document` ⊂ `source`) the numerator applies the label's KIND predicate while
-      the denominator is the whole graph label (`_label_vector_count` counts every
-      vector-bearing node of `:Source`, which holds BOTH kinds). The comparison is
-      therefore one-sided HARDER for those two, and `record_vectors >= graph_vectors`
-      is UNREACHABLE whenever the other kind carries any embedding — so `document`
-      and `source` may never verify from this count alone and their cut-over is an
-      OPERATOR act (or a later, kind-aware denominator), never something that
-      "happens by itself". `operator` is unaffected in practice because `point`'s
-      other members are not vector-bearing by default, but the shape is the same.
+    * for the three labels whose KIND predicate splits a graph label (`operator` ⊂
+      `point`, and `source`/`document` both ⊂ `:Source`) the numerator applies the
+      label's KIND predicate while the denominator is the whole graph label
+      (`_label_vector_count` counts every vector-bearing node of `:Point` / `:Source`,
+      which holds BOTH kinds). The comparison is therefore one-sided HARDER for those
+      three, and `record_vectors >= graph_vectors` is UNREACHABLE whenever the other
+      kind carries any embedding — so `operator`, `source` AND `document` may never
+      verify from this count alone, and their cut-over is an OPERATOR act (or a
+      later, kind-aware denominator), never something that "happens by itself".
+      ⛔ `operator` is NOT the exemption an earlier cut of this docstring claimed:
+      its denominator is `MATCH (n:Point) WHERE n.embedding IS NOT NULL`
+      (`security.ENTITY_TYPE_LABELS["operator"] == "Point"`, `_label_vector_count`),
+      and non-operator Points are exactly the population that carries embeddings by
+      default (`projection.entities._upsert_point_props` computes OR restores the
+      vector for NON-operator Points, `#7778`) — so one embedded plain point is
+      enough to make that comparison unreachable for ever.
 
     Neither of the first two is introduced by this gate (they are properties of
     comparing two stores by size) and closing either is a repair sweep or an
@@ -741,8 +747,11 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
     is unverified, which keeps the graph branch and the graph write.
 
     One statement: the record's vector-bearing rows for the label, over the whole
-    table (no status fold, no `kind_filter`) so it is comparable with the graph's
-    whole-label count. That is cheaper than :func:`vector_search`'s arm by design —
+    table (no status fold) EXCEPT the label's own KIND predicate (#13630 —
+    `kind_filter` is applied
+    for `operator`/`source`/`document` and is `""` for the other four, exactly as
+    :func:`_record_vector_count` does it and as :func:`vector_search` serves it), so
+    it is comparable with the graph's whole-label count. That is cheaper than :func:`vector_search`'s arm by design —
     the verification must not cost as much as the read it gates — and it is the
     COUNT the pattern asks for rather than a row-by-row diff, because the question
     is *"does the record hold as many vectors as the graph serves?"* and not

@@ -1694,9 +1694,13 @@ AND read — until it does. Concretely, five facts a reader can hold against the
    ROLLBACK, and it restores the pre-#13610 posture whole (graph answers, mirror written, no stored
    vector dropped). The switch is not deleted in the change that arms it (`#11660`).
 2. **The proof is a COUNT, taken on a cache MISS.** `record_vector.coverage` compares the record's
-   vector-bearing rows (`embedding_vec IS NOT NULL`, whole table for the tenant) against the graph's
+   vector-bearing rows (`embedding_vec IS NOT NULL`, whole table for the tenant **except the label's own
+   KIND predicate**) against the graph's
    vector-bearing nodes (`embedding IS NOT NULL`, whole label), one aggregate each, cached per
-   (dsn, org, graph, label) for 30 s. A verified verdict never expires; an unverified one expires on
+   (dsn, org, graph, label) for 30 s. ⛔ The numerator is the whole table **except the label's own KIND
+   predicate** (`#13630`): `kind_filter` is applied for `operator`/`source`/`document` — the three labels
+   whose rows are a PARTITION of their table — and is empty for the other four. A verified verdict never
+   expires; an unverified one expires on
    the TTL. The graph's aggregate is supplied as a CALLABLE and asked only on a miss — a dense read on
    a cached verdict takes no count at all, which is what keeps a full-label scan off a 500 ms read.
 3. **Every served label is gated, not two.** The narrow {object, subject} cut was wrong for the
@@ -1749,13 +1753,19 @@ switch?) and never a tenant.
 
 ⚠️ **Stated residuals, not oversights.** The count compares SIZES, so it is a coverage claim and not
 a membership proof (a cardinality-preserving mismatch verifies; the graph keys on `id` while the
-record keys on `name`). For the two labels that are a SUB-kind of another (`operator` ⊂ `point`,
-`document` ⊂ `source`) the numerator applies the label's kind predicate while the denominator is the
-whole graph label, so the comparison there can only be HARDER to pass — a longer double-storage, never
-a short answer. ⛔ **And for `document`/`source` it is UNREACHABLE, which is a different claim and is
-stated rather than implied:** one `public.source` table splits into two labels while the graph's
-`:Source` label holds BOTH kinds and the denominator counts every vector-bearing node of it, so
-`record >= graph` cannot be satisfied while the other kind carries any embedding. For those two the
+record keys on `name`). For the three labels whose kind predicate splits a graph label (`operator` ⊂
+`point`, and `source`/`document` both ⊂ `:Source`) the numerator applies the label's kind predicate
+while the denominator is the whole graph label, so the comparison there can only be HARDER to pass —
+a longer double-storage, never a short answer. ⛔ **And for all three it is UNREACHABLE, which is a
+different claim and is stated rather than implied:** one `public.source` table splits into two labels
+while the graph's `:Source` label holds BOTH kinds and the denominator counts every vector-bearing
+node of it, so `record >= graph` cannot be satisfied while the other kind carries any embedding; and
+`operator`'s denominator is `MATCH (n:Point) WHERE n.embedding IS NOT NULL`, i.e. EVERY vector-bearing
+Point, while its numerator is only operators — the non-operator Points are exactly the population that
+carries embeddings by default (`projection.entities._upsert_point_props` computes or restores the
+vector for non-operator Points, `#7778`). Nor is `operator` hidden from this claim by its read being
+cheap: it is in the gated set and in no retired set, so it declines to the graph on every armed read,
+for ever, with no signal. For those three the
 cut-over is therefore an OPERATOR act (or a later kind-aware denominator — the graph has no per-kind
 vector property to count today), never something that happens by itself; the failure direction is a
 longer double-storage, never a short answer. The contract is process-local, so a restart between the contract and the
