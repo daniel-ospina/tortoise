@@ -16488,9 +16488,17 @@ def test_the_D5_row_is_still_one_table_row():
 #: as the claim coming BACK. That is deliberately symmetric across all three entries —
 #: binding one entry to an "asserting frame" while the others stay bare is what made two
 #: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
-#: ⛔ STATED LIMIT: an assertion written INSIDE quotation marks is not caught. That is the
-#: price of never redding a repair, and it is the right side of the trade for a prose
-#: pin: a false red refuses a correct edit, which is how a guard gets weakened or deleted.
+#: ⛔ STATED LIMITS, two, both MEASURED at `3719864ec9` (#13809 review, P2):
+#: (a) an assertion written INSIDE double quotation marks is not caught — that is what the
+#:     strip is FOR; and (b) the strip recognises DOUBLE quotes only, so a retraction marked
+#:     with single quotes or with typography that the word match still sees REDS this pin on a
+#:     CORRECT repair (measured: `'AND THE BOX IS NO LONGER SHALLOW' … DELETED` -> `1 failed`).
+#:     The convention is therefore stated rather than assumed: **mark a retraction by
+#:     double-quoting the wording you delete**, which is what this row's own repair does. An
+#:     earlier cut of this comment called that trade "never redding a repair", and that was
+#:     FALSE — the single-quote spelling is a correct edit and it reds — so the honest claim
+#:     is that the offending convention is the row's own, and the assertion text now says so
+#:     at the point of failure, where the author who hits it needs it.
 #: ⛔ No literal `hosted_api.py:<n>` token is spelled here: the census greps every tracked
 #: file, so one would join the population it measures.
 _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
@@ -16586,7 +16594,10 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
     restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
                 if _d5_words(claim) in asserted]
     assert not restated, (
-        "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated))
+        "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated)
+        + "\n⛔ If you are DELETING this wording rather than asserting it, mark it with "
+        "DOUBLE quotes — a retraction written with single quotes reds this pin, which is "
+        "its one stated false-red surface.")
 
 
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
