@@ -1631,6 +1631,26 @@ class TestTheDocumentedRunPath:
         lines = [line for line in capsys.readouterr().err.splitlines() if "REFUSED[" in line]
         assert len(lines) == 2, lines
         assert {line.split("REFUSED[")[1].split("]")[0] for line in lines} == set(codes)
+        # ⛔ EACH COMPARISON MUST NAME ITS OWN BLOCKED ARM'S CAUSE. Pinning only the
+        # SET of codes let `next(iter(blockages.values()))` — every comparison
+        # reporting the first cause — stay green, so both graph comparisons could
+        # carry the RECORD's cause (`#13745` review round 3, finding 2).
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["blocked"] == "no_record_dsn"
+        assert (
+            artifact["comparisons"]["graph_dense_vs_lexical"]["blocked"]
+            == "graph_population_absent"
+        )
+        assert (
+            artifact["comparisons"]["record_dense_vs_graph_dense"]["blocked"]
+            == "graph_population_absent"
+        )
+        # ⛔ AND EACH NOTE MUST NAME THE ARM IT BELONGS TO. Pinning only the codes
+        # let the note hardcode `record_dense` while carrying a graph cause — the
+        # exact "message is the diagnosis" defect this file pins for the record
+        # guard (`#13745` review round 3, finding 3).
+        by_code = {n.split("BLOCKED[")[1].split("]")[0]: n for n in notes}
+        assert by_code["graph_population_absent"].startswith("the `graph_dense` arm"), by_code
+        assert by_code["no_record_dsn"].startswith("the `record_dense` arm"), by_code
         assert rc == 3
 
     def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
@@ -1900,14 +1920,19 @@ class TestGraphMembership:
         assert "RETURN n.id, n.content" in cypher, cypher  # the PAIR, for the pairing below
         assert params == {"ids": [r["id"] for r in pop]}
 
-    def test_an_earlier_texts_vector_under_the_same_id_is_not_counted(self, tool_mod):
-        """`--graph` re-runs collide on every id; the fold KEEPS the old vector.
+    def test_a_row_this_run_did_NOT_write_is_not_counted(self, tool_mod):
+        """The pairing proves the WRITE REACHED the row — nothing more.
 
-        `_upsert_point_props` rewrites `n.content=$content` unconditionally but
-        keeps `n.embedding` when the payload's vector was refused (the width
-        gate), so an id-only `IS NOT NULL` count passes over a vector that
-        belongs to the OLD text — and `graph_dense` then ranks by a vector this
-        run did not write. The pairing is the fix, and this is its red mutant.
+        A node still holding an earlier population's text at this id is a row
+        this run did not write (the fold's `n.content=$content` is
+        unconditional, so a written row carries THIS run's text). Counting it
+        would let `graph_dense` score a population that is partly not there.
+
+        ⛔ AND THE DISTINCTION MATTERS (`#13745` review round 3, finding 1): this
+        does NOT make the count a check that the stored VECTOR is this run's. On
+        a reused `--graph`, a refused (width-gate) vector leaves this run's text
+        beside the OLD vector, and this count passes — the residual is documented
+        on `graph_population_vectors`, not asserted away here.
         """
         pop = self._pop(2)
         graph = _GraphStub(
@@ -1959,7 +1984,13 @@ class TestGraphMembership:
         # the MECHANISMS are named, not just the arithmetic
         assert "operator point" in ei.value.message
         assert "WIDTH" in ei.value.message
-        assert "--graph" in ei.value.message
+        assert "never reached the row" in ei.value.message
+        # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
+        # text pairing refuses a node that kept "an EARLIER text's vector" — which
+        # the pairing cannot detect, because this run's text is written
+        # unconditionally beside the preserved vector (`#13745` round 3, finding 1).
+        assert "EARLIER text" not in ei.value.message, ei.value.message
+        assert "which the text pairing" not in ei.value.message, ei.value.message
 
     def test_guard_refuses_an_unmeasurable_graph(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:

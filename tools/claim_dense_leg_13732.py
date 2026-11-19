@@ -896,21 +896,26 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
       cannot hold (``#5004``);
     * ``--graph`` names an EXISTING graph.
 
-    ⛔ AND THE ID IS NOT THE WHOLE PAIR — THE TEXT IS. ``n.embedding IS NOT NULL``
-    alone cannot tell THIS run's vector from an EARLIER one under the same id,
-    and on a reused graph every id collides (they are minted deterministically,
-    ``f"{ID_PREFIX['point']}{index:06d}"``). The fold rewrites ``n.content``
-    UNCONDITIONALLY but KEEPS ``n.embedding`` when the payload's vector was
-    refused — so a width mismatch on a reused graph leaves the OLD text's vector
-    on the node, an id-only count passes, and ``graph_dense`` ranks by a vector
-    this run did not write. The returned rows are therefore paired against the
-    text this run asked for, one ``IN $ids`` round trip, not a per-id loop.
+    ⛔ WHAT THE PAIRING PROVES, AND WHAT IT DOES NOT. It proves the write
+    REACHED the node: the returned row's text must be the text this run asked
+    for, so a row that never landed — a node absent, or one still holding an
+    earlier population's text at that id — is not counted (``#13745`` review
+    round 3, finding 1: an earlier cut of this docstring claimed more than that,
+    and the claim was false).
 
-    Residual, stated rather than papered over: the pairing compares TEXT, so the
-    same id holding the SAME text with a vector from a DIFFERENT embedder (same
-    width, no index mismatch) is still indistinguishable. Detecting that needs a
-    model identity on the node (``_record_embedding_identity``, ``#5004``), which
-    the seed payload does not carry.
+    It does NOT prove the stored VECTOR is this run's. ``_upsert_point_props``
+    rewrites ``n.content`` unconditionally (``"n.content=$content"``) while its
+    embedding clause PRESERVES ``n.embedding`` when the payload's vector was
+    refused (the width gate, ``#5004``) — so on a reused ``--graph`` (the ids are
+    deterministic, ``f"{ID_PREFIX['point']}{index:06d}"``, so every one collides)
+    a refused vector leaves THIS run's text beside the OLD vector and this count
+    passes.
+
+    Residual, named rather than papered over: same id + THIS run's text + a
+    preserved vector is indistinguishable here. Closing it needs the vector's
+    provenance ON THE NODE (``_record_embedding_identity``, ``#5004``), which the
+    seed payload does not carry. This guard is an assertion that the population
+    WAS WRITTEN, not that every vector was REPLACED.
 
     A ``graph_dense`` arm over a partially seeded population ranks only the
     seeded part, so its delta against ``record_dense`` is a figure about the
@@ -982,11 +987,10 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
             f"`n.embedding` unset for a row it cannot vectorise (an operator "
             f"point, a text refused by the EMBED gate, an embedding-WIDTH "
             f"mismatch left unset rather than written, or a swallowed encode "
-            f"failure), and on `--graph` a node can keep an EARLIER text's "
-            f"vector under the same deterministic id, which the text pairing "
-            f"above refuses. A `graph_dense` arm over that population ranks only "
-            f"the seeded part, so its delta against `record_dense` is a figure "
-            f"about the seed step and not about the leg",
+            f"failure), or the write never reached the row at all (the count "
+            f"pairs each id with THIS run's text). A `graph_dense` arm over that "
+            f"population ranks only the seeded part, so its delta against "
+            f"`record_dense` is a figure about the seed step and not about the leg",
         )
 
 
