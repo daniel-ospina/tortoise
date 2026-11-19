@@ -1579,13 +1579,15 @@ def write_gate(entity_type: str) -> tuple[bool, str]:
     for a WRITE. This function answers ``True`` (still emits) on an unknown because *"I
     could not read the gate"* must never be able to licence a delete.
 
-    ⚠️ The qualifier is load-bearing: the two reads BELOW the gate read — this module's
+    ⚠️ The qualifier is load-bearing: the reads BELOW the gate read — this module's
     `from tortoise.security import ENTITY_TYPE_LABELS` and `parity.affected_entity_types`
-    via `_fold_consults_gate` — are unguarded and RAISE, so "every unknown" is answered
-    fail-closed by the CALLERS (a raise out of here is caught by
-    `entity_vector_parity_census`'s `strip_readiness` arm, and the label-map read the
-    census performs itself escapes and makes `main` refuse with exit 3). Never relax those
-    callers on the assumption that this function cannot raise.
+    via `_fold_consults_gate` — are unguarded and RAISE. Measured, only the former can
+    fire first (the fold's read repeats that same import, and the census performs it
+    before calling us at all), so in a census run a broken label map is refused by `main`
+    with exit 3 rather than blocking one label at a time, and the catch around
+    `strip_readiness` there is defensive depth. Never relax the callers on the assumption
+    that this function cannot raise. (No line numbers: they rot, and two in this file
+    already rotted inside this PR.)
 
     The symbol is looked up, not imported by name, for one deliberate reason: it is
     `#13610`'s write half and lands in PR #13617. A hard `from … import mirror_required`
