@@ -648,11 +648,15 @@ _TORTOISE_EMPTY_SPELLINGS = (
     f"neither is `{_TORTOISE_CENSUS_CMD}`",
     f"{_TORTOISE_CENSUS_CMD}` -> empty",
     f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
-    # ⛔ Retired by #13807 review, F1. This one names no command, so neither arm could reach
-    # it: it sat two sentences after the command's last mention, behind no answer form, and
-    # both docstrings declare paraphrase out of scope — a residue the guard could not see.
-    # It is the mirror of the membership row "the `tortoise/` set above is the two
-    # COMMENT-ONLY modules"; both are retired now, in both directions.
+    # ⛔ THE TWO THAT WERE STILL LIVE IN THE DOCUMENT (#13807 review round 3, F1, MEASURED).
+    # The three rows above retire the spellings that sit BESIDE the command, and the document
+    # states the same head-bound emptiness verdict WITHOUT it — a direct hit at
+    # `05-verify.md:147` (`at THIS head the `tortoise/` set above is EMPTY`) and at `:139`
+    # before this round (`… that command prints NO path at all`). Both were measured GREEN by
+    # every arm while present. A ledger scoped to "the command, then the answer" cannot see
+    # an answer whose SUBJECT is the set in the previous sentence — which is this document's
+    # house style, so the gap is not hypothetical.
+    "prints NO path at all",
     "the `tortoise/` set above is EMPTY",
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
@@ -681,6 +685,24 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     (`_typed_answers_to_tortoise_cmd`); this one is the ledger of exact spellings that
     actually shipped and survived a merge — including the ones that do not sit beside the
     command, which a shape match cannot reach.
+
+    ⛔ THE OVER-BLOCK THIS ACCEPTS, STATED RATHER THAN HIDDEN (#13807 review round 3, F3).
+    Matching is an unconditional substring test, so a QUOTED RETRACTION that re-spells one
+    of these strings verbatim is refused, where `_typed_answers_to_tortoise_cmd`'s
+    answer-form rule deliberately lets it through — carrying a retraction is not asserting
+    it. This is a category-B cost (something right is refused) taken over a category-A one
+    (something wrong slips through), because the arm it replaces asserted NOTHING at all in
+    the gating job. MEASURED, so it is not theoretical: appending `… said the command
+    `prints exactly `tortoise/activation_scorecard.py``, and that was FALSE at the head it
+    was written for` to the document REDS this arm today.
+
+    The escape is one edit, and it is the one the document already uses everywhere: retract
+    WITHOUT re-spelling the retired string (`the sentences that used to sit here are
+    DELETED, not softened`), or state the command. A retraction-aware carve-out was
+    CONSIDERED AND REJECTED: every version of it is a heuristic over prose (which span is
+    inert? which sentence is a retraction?), and a heuristic that guesses wrong in the
+    permissive direction is a FALSE PASS — the failure class this whole PR exists to close.
+    Narrow, blunt and stated beats wide, clever and silently wrong.
     """
     return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
 
@@ -779,12 +801,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    #: One source of truth for the command: the module-level constant the retired-spelling
-    #: arm is built from. A second LITERAL here would let the two drift apart, and a drift is
-    #: silent — measured (#13807 review, F2): 7 of the 14 banned spellings embed this command
-    #: text, so a one-character drift leaves 0 of the 7 matching the document while the tuple
-    #: pin stays green (it compares the constant against itself). Aliasing makes the drift
-    #: impossible and, should the constant ever move, reds THIS assertion on the document.
+    # ⛔ THE CONSTANT, NOT A SECOND LITERAL (#13807 review round 3, F2). While this was its
+    # own copy, editing `_TORTOISE_CENSUS_CMD` left `assert _tortoise_cmd in doc` green
+    # against the OLD string, so the ledger policed a command the document never contained.
     _tortoise_cmd = _TORTOISE_CENSUS_CMD
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
@@ -887,11 +906,6 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    # ⛔ ALIASED, NOT RE-LITERALLED (#13807 review, F2). This was a second bare literal after
-    # the merge with `main`, so a drift between it and `_TORTOISE_CENSUS_CMD` disabled the
-    # seven command-prefixed rows in arm (c-i) without redding a single test — the constant
-    # is consumed only by the tuples and their pins. One source of truth, and a move in it
-    # now reds the document assertion below.
     _tortoise_cmd = _TORTOISE_CENSUS_CMD
 
     # NON-VACUITY (#13728 review, finding 4): the detector must SEE an answer in both
@@ -1104,7 +1118,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     and turned any code PR's head into a false red (#13807 review, F1, and the false-red
     direction recorded in `_census_membership_verdicts`).
     """
-    assert _TORTOISE_MEMBERSHIP_SPELLINGS == (
+    assert (
         "THREE are in this head",
         "two comment-only `tortoise/` modules",
         "prints exactly `tortoise/activation_scorecard.py`",
@@ -1116,19 +1130,34 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
         f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
         "the `tortoise/` set above is the two COMMENT-ONLY modules",
-    ), (
+    ) == _TORTOISE_MEMBERSHIP_SPELLINGS, (
         "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
         "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
         "ban the document can be re-inserted past (#13746 review, finding 7; #13807 review, "
         "finding 5). Retiring a NEW spelling means adding it; it never means re-wording one.")
-    assert _TORTOISE_EMPTY_SPELLINGS == (
+    assert (
         f"neither is `{_TORTOISE_CENSUS_CMD}`",
         f"{_TORTOISE_CENSUS_CMD}` -> empty",
         f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+        "prints NO path at all",
         "the `tortoise/` set above is EMPTY",
-    ), (
+    ) == _TORTOISE_EMPTY_SPELLINGS, (
         "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
-        "retired for the same reason — head-bound in both directions (#13807 review, F1)")
+        "retired for the same reason — head-bound in both directions (#13807 review, F1). "
+        "The last two rows sit beside NO command because the live document stated the verdict "
+        "that way (#13807 review round 3, F1); they were the answers a command-scoped ban "
+        "still could not see.")
+    # ⛔ THE COMMAND ITSELF IS PINNED (#13807 review round 3, F2 — MEASURED). Both sides of
+    # every `f"{_TORTOISE_CENSUS_CMD}…"` row render from this ONE constant, and the injection
+    # loop iterates the tuples, so editing the constant re-renders ledger AND witnesses
+    # together and reds NOTHING: measured, retyping it as `-- docz/` left `2 passed` while
+    # `_census_membership_verdicts` went blind to the real command (`[]` for a document that
+    # spelled it). 3 of 3 emptiness rows and 5 of 11 membership rows went dead silently. The
+    # literal below is the INDEPENDENT copy that makes the drift red.
+    assert _TORTOISE_CENSUS_CMD == "git diff --name-only origin/main...HEAD -- tortoise/", (
+        "`_TORTOISE_CENSUS_CMD` no longer names the command the `#7949` bundle quotes, so the "
+        "ledger above now polices a string the document does not contain and the ban is "
+        "blind to the real command (#13807 review round 3, F2)")
 
     for _spelling in _TORTOISE_RETIRED_SPELLINGS:
         _injected = f"… and the earlier cut said {_spelling} about this bundle …"
