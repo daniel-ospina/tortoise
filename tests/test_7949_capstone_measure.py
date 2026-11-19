@@ -16475,8 +16475,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file IS in this diff (four numeric
-    # re-points, none of them that pair) and the document's own row reads `sdk.py:28682`. A phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while after the rebase that file is not in
+    # this diff at all (`git diff --name-only origin/main...HEAD` does not list it) and the
+    # document's own row reads `sdk.py:28682`. A phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
@@ -16488,9 +16489,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "`:15225-15302`). Do not re-inflate the count")
     assert "carries ONE numeric re-point" not in text, (
         "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff. "
-        "Measured at this head: that file IS in `git diff --name-only origin/main...HEAD` (four "
-        "numeric re-points), the pair the clause used to name (`sdk.py:28559` -> `:28592`) is "
-        "none of them, and the document's own row reads `sdk.py:28682`")
+        "Measured after the rebase: that file is not in `git diff --name-only "
+        "origin/main...HEAD` at all, so this diff contributes NO re-point there — and the "
+        "pair the clause used to name (`sdk.py:28559` -> `:28592`) does not describe the "
+        "document either, whose row reads `sdk.py:28682`")
     assert "sdk.py:28682" in text, (
         "D5 no longer names `sdk.py:28682`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
