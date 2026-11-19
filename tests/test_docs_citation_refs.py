@@ -1429,11 +1429,12 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
         git show e679d22286:tortoise/sdk.py | cmp - tortoise/sdk.py
         -> identical, so `#13724`'s move is already on the branch's base
 
-    ⛔ At the head this arm now runs on, the file is not in the residual AT ALL —
-    `git diff --name-only origin/main...HEAD -- docs/00_index.md` prints nothing and
-    `git rev-parse origin/main:docs/00_index.md HEAD:docs/00_index.md` prints the same
-    blob twice — so there is no "one changed line", and the `#12296` row's DESCRIPTION
-    of its own `:27861` clause is INHERITED from `origin/main`, not this diff's. The
+    ⛔ Whether the file is in the residual at the head you merge is
+    `git diff --name-only origin/main...HEAD -- docs/00_index.md` and
+    `git rev-parse origin/main:docs/00_index.md HEAD:docs/00_index.md`, read THERE —
+    ⛔ **no answer is typed here, and an earlier cut of this paragraph did type one**,
+    which is the document's own defect class applied to the paragraph that names it
+    (typing the answer is true of the commit that typed it and false of the next). The
     sentence was the document's own defect class — a typed head-bound figure — applied
     to the document it lives in. It survived several review rounds for
     the same reason the census green did: the D5 arms in
