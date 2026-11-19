@@ -1073,6 +1073,49 @@ class TestTheWiringTheReviewFixed:
         assert tool_mod._exit_code(None) == 0
         assert tool_mod._exit_code(tool_mod.Refused("record_population_absent", "x")) == 3
 
+    @pytest.mark.parametrize("flag", ["--population", "--points", "--min-population"])
+    def test_a_non_positive_count_is_an_argument_error_not_a_crash(self, tool_mod, capsys, flag):
+        """⛔ Exit `1` WITH A TRACEBACK is not in the exit table, and it was reachable.
+
+        `--population/--points/--min-population` are argparse-`type=int`, so a
+        non-INTEGER is rejected by argparse (exit 2, usage, no marker) — but `0`
+        and `-1` pass argparse and reached `detectable_effect_pp`, which raises a
+        bare `ValueError` that `main()` never caught. A caller got exit **1** and
+        a traceback: the one code it cannot tell from a crash, on the path
+        `--preregister`'s own help advertises as touching no store. Measured
+        before the fix: `--preregister --population 0` -> exit 1, ValueError.
+
+        These are validated by the tool itself, so they are exit **4** with a
+        `REFUSED:` marker — and the marker is asserted, because the whole point is
+        that the caller can tell these apart from argparse's marker-less exit 2.
+        """
+        for bad in ("0", "-1"):
+            capsys.readouterr()
+            rc = tool_mod.main(["--preregister", flag, bad])
+            err = capsys.readouterr().err
+            assert rc == 4, f"{flag} {bad} gave {rc}, not the documented argument code"
+            assert f"REFUSED: {flag} must be >= 1" in err, err
+
+    def test_argparse_typed_flags_exit_2_without_a_marker_and_ks_does_not(self, tool_mod, capsys):
+        """⛔ THE EXIT TABLE MUST NOT PREDICT A CODE THE TOOL DOES NOT PRODUCE.
+
+        It did: the docstring listed `--ks non-str` among the argparse-TYPED flags
+        that fail through `parser.error()` into exit 2. `--ks` has no `type=`, so
+        argparse never validates it — `--ks abc` exits **4** with
+        `REFUSED: --ks must be comma-separated integers`. A caller branching on
+        `2` vs `4` therefore branched wrongly on the flag the docstring named.
+        """
+        # --deep IS argparse-typed: a non-integer is argparse's, exit 2, no marker.
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as exc:
+            tool_mod.main(["--deep", "notanint"])
+        assert exc.value.code == 2
+        assert "REFUSED" not in capsys.readouterr().err
+        # --ks is NOT: the tool parses it, so it is exit 4 WITH the marker.
+        capsys.readouterr()
+        assert tool_mod.main(["--ks", "abc", "--deep", "10"]) == 4
+        assert "REFUSED: --ks must be comma-separated integers" in capsys.readouterr().err
+
     def test_the_exit_code_decision_is_NOT_nested_inside_the_out_branch(self):
         """⛔ THE CALL SITE, not the helper — this is where the false PASS lived.
 

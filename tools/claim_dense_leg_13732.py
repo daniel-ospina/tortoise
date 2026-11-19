@@ -47,7 +47,7 @@ self.required_embedding_dim)``, inside an ``except Exception: pass``. So on a bo
 WITH an installable embedder, M2's exact payload would have carried vectors; it
 did not because that box had none, ``encode_for_row`` raised, and the blanket
 ``except`` swallowed it. The tree says so about itself at
-``tortoise/record_writer.py:1815``: *"the graph fold derives it and writes it
+``tortoise/record_writer.py:1814-1815``: *"the graph fold derives it and writes it
 straight onto the node, #7845"*. Consequences, both silent:
 
 1. no ``query_vec`` (no embedder on that box) means the vector strategy is never
@@ -180,13 +180,17 @@ exactly the ``#5090`` Q2 false PASS the id-scoped half exists to stop.
 Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's trace
 contradicted its own declaration, **or an arm was BLOCKED by a precondition**
 (recorded by name in ``arms``/``not_measured``, with the artifact still written)
-· ``4`` argument error **for the two the tool validates itself** (--ks, --deep).
-⚠️ An argparse-typed flag (--population, --points, --min-population, --deep,
---ks non-str) fails through ``parser.error()``, which exits **2** with usage and
-NO ``REFUSED[...]`` marker — so ``2`` covers both "a precondition refused" and
-"you typed a flag wrong"; read the stderr marker, not the code, to tell them
-apart. Rule: exit ``3`` alone means "published, but not the complete paired
-answer" — never read it as a measurement.
+· ``4`` argument error **for a flag the tool validates ITSELF** (--ks, --deep,
+and the positive-integer bounds on --population/--points/--min-population).
+⚠️ An argparse-**typed** flag (--population, --points, --min-population, --deep
+with a non-integer) fails through ``parser.error()``, which exits **2** with
+usage and NO ``REFUSED[...]`` marker — so ``2`` covers both "a precondition
+refused" and "a flag that does not parse"; read the stderr marker, not the
+code, to tell them apart. ⚠️ ``--ks`` is NOT argparse-typed (it has no
+``type=``), so ``--ks abc`` does NOT take that path: it exits **4** with
+``REFUSED: --ks must be comma-separated integers``. Rule: exit ``3`` alone means
+"published, but not the complete paired answer" — never read it as a
+measurement.
 """
 
 from __future__ import annotations
@@ -1427,6 +1431,22 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 4
+    # ⛔ A NON-POSITIVE COUNT IS AN ARGUMENT ERROR, NOT A CRASH. These three are
+    # argparse-`type=int`, so argparse rejects a NON-INTEGER (exit 2, usage, no
+    # marker) — but it happily accepts `0` and `-1`, which reached
+    # `detectable_effect_pp` and raised a bare `ValueError` out of `main()`: an
+    # exit **1** with a traceback, the one code a caller cannot distinguish from
+    # a crash, on a path the `--preregister` help advertises as touching no
+    # store. Validated here so the exit table stays true — `4` means "the tool
+    # rejected an argument", which is what this is.
+    for flag, value in (
+        ("--population", args.population),
+        ("--points", args.points),
+        ("--min-population", args.min_population),
+    ):
+        if value < 1:
+            print(f"REFUSED: {flag} must be >= 1 (got {value})", file=sys.stderr)
+            return 4
     if args.preregister:
         print(json.dumps(preregistration(args.population), indent=2, sort_keys=True))
         return 0

@@ -92,7 +92,7 @@ carried a vector. ⛔ But "no `embedding` key" is not why: `_upsert_point_props`
 `content` whenever the payload owns no `embedding` key —
 `tortoise/projection/entities.py:2968-2976`, `elif not op and p.get("content"):
 encode_for_row(p.get("content", ""), self.required_embedding_dim)` — and the tree says so about
-itself at `tortoise/record_writer.py:1815`: *"the graph fold derives it and writes it straight onto
+itself at `tortoise/record_writer.py:1814-1815`: *"the graph fold derives it and writes it straight onto
 the node, #7845"*. On a box **with** an installable embedder M2's exact payload would therefore have
 carried vectors. It did not because that box had none, `encode_for_row` raised, and the surrounding
 `except Exception: pass` swallowed it. A first cut of this bundle stated the opposite ("could not have
