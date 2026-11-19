@@ -924,23 +924,43 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     `tests/test_13685_entity_vector_backfill.py::test_the_per_label_numbers_are_the_census_numbers`
     pins this function's output equal to `parity.census()`'s for the labels the census
     does measure, and the scratch-Postgres end-to-end leg runs the census tool itself.
+
+    ⛔ BOTH RECORD NUMBERS ARE NARROWED TO THIS LABEL'S GRAPH KEYS, which is the
+    census's own definition of them (`entity_vector_parity_census`, `#13647`):
+    `record_vectors` is *"of THIS label's graph key set, the rows the record can answer
+    with a readable `embedding_vec`"*, because *"a tenant-wide total answers 'does the
+    record hold vectors', not 'does it hold THIS node's'"*. The door reads the WHOLE
+    table — it must, since it is the same read that reports which rows are NULL and
+    therefore fillable — so the intersection is this function's job. Without it the
+    plan's record column and its graph column describe two different populations while
+    the census reports one — which is what the equality pin caught when that census
+    change (#13647) landed.
     """
     graph = parity.read_graph_vector_keys(g, label, _key_prop(label))
     record = _read_targets(door, table)
     graph_keys = set(graph["keys"])
     readable = set(record["readable"])
+    #: The rows of the MEASURED population the record can answer — see this function's
+    #: docstring for why the intersection is not optional.
+    readable_in_population = readable & graph_keys
+    #: Row-bearing keys whose vector is unusable (`embedding` set, generated column
+    #: NULL — the converter refused the payload), likewise narrowed.
+    unreadable = set(record["rows"]) - set(record["missing"]) - readable
     return {
         "label": label,
         "record_table": table,
         "graph_vectors": int(graph["count"]),
-        "record_vectors": len(readable),
+        "record_vectors": len(readable_in_population),
         # The census's definition, verbatim: an UNKEYED vector-bearing node can never be
         # matched to a row, so it is graph-only BY CONSTRUCTION and counted into the
         # total as well as named separately.
         "graph_only": len(graph_keys - readable) + int(graph["unkeyed"]),
         "unkeyed_graph_nodes": int(graph["unkeyed"]),
-        "record_unreadable_vector": len(
-            set(record["rows"]) - set(record["missing"]) - readable),
+        "record_unreadable_vector": len(unreadable & graph_keys),
+        #: The record being AHEAD: readable rows this graph holds no vector for. The
+        #: census derives the same number from one aggregate row
+        #: (`record_readable_total - |readable ∩ graph keys|`); this door already holds
+        #: the whole table's readable set, so this set difference IS that figure.
         "record_only": len(readable - graph_keys),
         "keys": graph_keys,
         "record": record,

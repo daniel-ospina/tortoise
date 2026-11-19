@@ -1512,6 +1512,15 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     this pin certifies. A NON-STRING key (`id=123` against a record row `"123"`) makes
     the tool over-report `graph_only` by one — measured, tracked as its own finding — so
     feeding one here would make this pin assert a reconciliation the code does not make.
+
+    ⛔ AND THE RECORD-ONLY ROW IS SEEDED, because the two counts are now POPULATION-SCOPED
+    on both sides: `#13647` narrows `record_vectors` / `record_unreadable_vector` to the
+    graph's key set, and `_measure_label` now does the same (it used to report the
+    tenant-wide total, which made the plan's record column and its graph column describe
+    two different populations). A record row this graph holds NO node for is what makes
+    that visible — `record_vectors` stays 0 while `record_only` counts it — so seeding one
+    is the difference between a pin that certifies the narrowing and one that could not
+    see a revert of it.
     """
     graph, door = stores
     graph.add("Object", "obj-1")
@@ -1534,6 +1543,12 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     # disagreement between the instruments. The unreadable population is seeded on both
     # sides so the equality is a real one.
     graph.add("Event", "evt-unreadable", _vec(0.3))
+    # ⛔ A RECORD-ONLY ROW, seeded for the reason the docstring gives: it is readable and
+    # this graph holds no `Event` node for it, so it is outside the measured population by
+    # construction. Both instruments must leave it out of `record_vectors` and count it in
+    # `record_only` — a tool that reported the tenant-wide readable count would say 1 where
+    # the census says 0.
+    door.seed("event", "evt-record-only", vector=_vec(0.4))
 
     # The census's record leg at ITS contract (#13647): the graph's RENDERED identities
     # in, and the two AGGREGATE totals out — `record_only` is derived from
@@ -1574,6 +1589,11 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     assert ours["Object"]["graph_only"] == 2
     assert ours["Event"]["graph_only"] == 3  # evt-1 + evt-unreadable + the unkeyed node
     assert ours["Event"]["record_unreadable_vector"] == 1
+    # The record-only row is OUTSIDE the population: not a readable copy of any graph
+    # vector (`record_vectors` 0 for `:Event`), and visible only as the record being
+    # ahead. This pair is what a revert of the narrowing would red.
+    assert ours["Event"]["record_vectors"] == 0
+    assert ours["Event"]["record_only"] == 1
     assert ours["Subject"]["graph_only"] == 0
 
 
