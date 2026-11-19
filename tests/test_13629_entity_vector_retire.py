@@ -2692,7 +2692,7 @@ def _upsert_object(ev):
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
-        assert gated is False, f"a CONDITIONAL stop certified the arm: {source!r}"
+        assert gated is False, f"a CONDITIONAL stop certified the arm: {source!r} ({why})"
 
     accepted = (
         # an exit inside a `with` body IS unconditionally reached
