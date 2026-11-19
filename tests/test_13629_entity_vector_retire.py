@@ -540,8 +540,15 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     Everything below this arm — `_fold_consults_gate(label)` and its population check — is
     asked about a LABEL, and there is exactly one way to get one. Inverting the arm to
     `return False` left the whole file **green (measured: 90 passed)**, and the arm is
-    reachable: the record predicate answers `False` for an unmapped type exactly as it does
-    for a mapped one.
+    REACHABLE — but only because this test drives the predicate that gates it, and that is
+    worth stating rather than assuming: on this tree `record_vector.mirror_required` answers
+    `True` for an unmapped `entity_type` **deterministically** (it returns `True` for
+    anything outside `COVERAGE_GATED_LABELS`, and that cover is exactly the key set of
+    `ENTITY_TYPE_LABELS`, so "unmapped" IS "not coverage-gated" — measured). Unpatched,
+    `write_gate("no_such_entity_type_13647")` therefore refuses one step ABOVE this arm, at
+    `if needed:`, with the `answers True` reason. Driving the predicate to `False` below is
+    what makes the arm the deciding step — the state an operator reaches once the cutover is
+    armed and the record has proved coverage.
 
     ⛔ WHAT THIS ARM IS *NOT*, MEASURED, because an earlier revision of this docstring
     claimed it and the claim was false. It is NOT the only thing standing between an
@@ -580,7 +587,8 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
         f"so the strip would be licensed on a label nothing serves ({reason})")
     assert "no declared graph label" in reason
 
-    # …and the refusal needs no forcing at all: on this tree every step below already declines.
+    # …and the FOLD needs no forcing (the record predicate IS still driven to `False` — see
+    # the docstring on why it must be): on this tree every step below already declines.
     monkeypatch.undo()
     monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
                         raising=False)
