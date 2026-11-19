@@ -66,7 +66,16 @@ def _registry_pairs() -> list[tuple[str, str]]:
     #   48 rows / 37 pairs   (before #13556)
     #   46 / 35              #13556 — create_entity's POINT and DIARY arms
     #   44 / 33              #13550 — `check_confidence`'s RECOMPUTE and RECALL arms
-    #   40 / 29              #13626 — the two `rest_spec` doors
+    #   40 / 29              #13626 — FOUR doors, and the count is stated in full
+    #                        because naming only part of a wave is how this table
+    #                        produced a wrong subtraction before: the two `rest_spec`
+    #                        doors (`tortoise_issue_insight`, `tortoise_session_context`)
+    #                        AND the two DELETE doors (`tortoise_delete_point`,
+    #                        `tortoise_delete_entity`) — 44 − 4 = 40. All four named
+    #                        an `sdk_method`, so the PAIRS column moves by four too;
+    #                        only TWO of them were pass-throughs, which is why the
+    #                        pass-through floor below moves by two (12 -> 10) — the
+    #                        two columns are different populations.
     # Every one of those waves retired doors that DID name an `sdk_method`; before them, the
     # READ/QUERY, WRITE/MUTATE and SOURCES/MINE/SESSION container waves and #11609's
     # seven-door wave did the same (`get_session`, `list_batch`,
@@ -239,7 +248,7 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
                 f"{name}: wrapper declares {wrapper_kind!r} but "
                 f"TortoiseSDK.{passed_through} returns {sdk_kind!r}")
     # ── non-vacuity, DERIVED (never a literal floor) ─────────────────────
-    # A count literal is the wrong instrument here: it reds on a CORRECT
+    # A count literal is the wrong instrument for EXHAUSTIVENESS: it reds on a CORRECT
     # retirement — the pre-#4282-Phase-2 population measured 22 pass-throughs;
     # the WRITE/MUTATE wave alone took it to 19 (`tortoise_annotate_operator`,
     # `tortoise_promote_point` and `tortoise_set_point_baseline` retired into
@@ -253,6 +262,9 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # guard actually needs is that the scan is EXHAUSTIVE: every row that names
     # an SDK method is classified into exactly one of pass-through / reshaping,
     # and no row is dropped for an unreadable source or a missing SDK method.
+    # The ONE literal below (`checked >= 10`) is not this instrument — it is the
+    # population floor, argued where it sits, including why it keeps 0 slack while
+    # the `pairs` floor above keeps 4 rows of margin.
     assert not unresolved, (
         "these registry rows name an SDK method that is not on TortoiseSDK, so the "
         "guard skipped them and cannot be exhaustive:\n  " + "\n  ".join(unresolved))
@@ -317,9 +329,28 @@ def test_every_passthrough_wrapper_declares_its_sdk_methods_type():
     # guards ABOVE (`checked > 0`, and `checked + reshaped == len(pairs)`) are what
     # still make a vacuous scan impossible. Measured at this head: 10 pass-through +
     # 19 reshaping = the 29 rows the scan above found.
+    # ⛔ WHY 0 SLACK HERE, and 4 rows of margin 200 lines above (`> 25` for pairs) —
+    # the #13676 review named this as the file's one unexplained convention clash,
+    # so the rule is stated: the `pairs` floor answers a REACH question ("did the scan
+    # reach the registry at all?"), where a floor left at a pre-consolidation number
+    # reds on a CORRECT retirement and a collapse it misses is still caught by
+    # `checked > 0` plus the sum identity. THIS floor answers a COVERAGE question, and
+    # a slack row buys exactly one thing: a wrapper the classifier stopped recognising
+    # goes uncounted, which is the escape `_passthrough_of` is measured to allow. False
+    # PASS is class A, an over-block is class B (AGENTS.md A/B), so the margin that is
+    # right for `pairs` is a blind spot here. The price is named, not hidden: a wave
+    # that retires a pass-through door reds this line and re-pins it in the same wave —
+    # 19 -> 16 -> 13 -> 12 -> 10 above IS that procedure — which is the same FALSE-RED
+    # direction `checked > 0` accepts deliberately a few lines up.
     assert checked >= 10, (
-        f"only {checked} pass-through wrappers were found — the scan is not "
-        f"reaching the registry, so a clean result here would be vacuous")
+        f"only {checked} pass-through wrappers were found ({reshaped} read as "
+        "reshaping) against a floor of 10, the population measured at this head. "
+        "The count cannot tell its two causes apart: a CORRECT retirement of a "
+        "pass-through door, or the classifier going blind (a pass-through rewritten "
+        "in an idiom `_passthrough_of` does not know is counted as reshaping). "
+        "Re-measure the registry before choosing — if the doors really retired, "
+        "re-pin this floor in the same wave as the retirement; if not, the scan lost "
+        "a shape and a clean result here would be vacuous")
     assert not offenders, (
         "these pass-through MCP tools declare a return type their SDK method "
         "contradicts, so FastMCP refuses their own result and every call fails:\n  "
