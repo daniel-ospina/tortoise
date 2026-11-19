@@ -4446,6 +4446,17 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE UNION IS TWO-SIDED, so BOTH sides are pinned: `{…for …} | props` merges the
+        # same mapping and was CERTIFIED while the right-operand spelling was refused. A
+        # right-only implementation passed the suite without this row (measured by the review of
+        # this branch: the mutant survived).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev) for _x in _keys()} | props
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -5314,6 +5325,37 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {"embedding": None for _x in ("m",)}
+        return None
+    _write(props)
+""",
+        # ⛔ …and the EXACT-NAME narrowing of that key, on the key side: `embedding_model` is the
+        # identity triple this repo writes BESIDE the vector, so a comprehension keyed by it sets
+        # nothing this gate is about. A substring match on the key passed the suite without this
+        # row (measured by the review of this branch).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding_model": _m() for _x in ("m",)}
+        return None
+    _write(props)
+""",
+        # ⛔ …and TWO comprehensions whose SOURCE is a pairs literal but whose pair is NOT
+        # unpacked into the key it produces: `{x: 1 for x in [(…)]}` keys the mapping by the
+        # PAIR, and `{v: k for k, v in [(…)]}` by the vector, so neither places an `embedding`
+        # key. Refusing them refused honest writers (measured at this head, each runtime-checked
+        # to leave no such key); the source is now read only when the clause unpacks its pair
+        # into the key it produces.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {x: 1 for x in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v: k for k, v in [("embedding", _encode(ev))]}
         return None
     _write(props)
 """,

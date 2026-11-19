@@ -1749,8 +1749,17 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         if (isinstance(node.key, ast.Constant) and node.key.value == EMBEDDING_PROPERTY
                 and not isinstance(node.value, ast.Constant)):
             return True
-        return any(_pairs_operand_stores_the_vector(generator.iter)
-                   for generator in node.generators)
+        # ⛔ AND THE SOURCE IS A STORE ONLY WHEN THE PAIR IS **UNPACKED INTO THE KEY AND THE
+        # VALUE**. `{k: v for k, v in [("embedding", vec)]}` places the property; the same
+        # source read as a whole (`{x: 1 for x in [("embedding", vec)]}` keyed by the PAIR, or
+        # `{v: k for k, v in […]}`, which keys by the vector) places no `embedding` key at all,
+        # and refusing those refused honest writers (measured at this head — two of them, each
+        # runtime-checked). Hence the target test: the generator must unpack a two-element
+        # target and the produced KEY must be that target's FIRST name.
+        return any(
+            _generator_unpacks_the_pair_into_the_key(node.key, generator)
+            and _pairs_operand_stores_the_vector(generator.iter)
+            for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
         # yields the pair. Static here because the SOURCE is a literal this check can read;
@@ -1856,6 +1865,25 @@ def _constant_index(node) -> int | None:
         return (-node.operand.value if isinstance(node.op, ast.USub)
                 else node.operand.value)
     return None
+
+
+def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
+    """Does this comprehension clause unpack its pair into the KEY it produces?
+
+    `{k: v for k, v in [("embedding", vec)]}` reads the pair as `(key, value)` and places the
+    property; `{x: 1 for x in […]}` keys the mapping by the PAIR ITSELF and `{v: k for k, v in
+    […][…]}` by the vector, so neither places an `embedding` key — refusing those refused
+    honest writers (measured). Static, like every other reading here: the target must be a
+    two-element unpack and the key expression must be its FIRST name.
+    """
+    import ast
+
+    target = getattr(generator, "target", None)
+    if not isinstance(target, ast.Tuple | ast.List) or len(target.elts) != 2:
+        return False
+    first = target.elts[0]
+    return (isinstance(first, ast.Name) and isinstance(key, ast.Name)
+            and key.id == first.id)
 
 
 def _pairs_store_the_vector(node) -> bool:
@@ -2299,10 +2327,16 @@ def _mapping_argument_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Dict):
         return _dict_stores_the_vector(node)
-    # ⛔ A COMPREHENSION NEEDS NO ARM HERE: `_mapping_literal_stores_the_vector` above answers
-    # it (the mapping form, once, for every position), and this helper's own tail asks the
-    # pairs rule. An explicit arm was written, measured REDUNDANT — removing it changed no
-    # verdict on any fixture — and removed rather than kept looking load-bearing.
+    # ⛔ A COMPREHENSION NEEDS NO ARM HERE, AND THE REASON IS NOT A TAIL OF THIS HELPER — it
+    # ends in `return False`, and it never asks the pairs rule or the mapping-literal rule.
+    # Every position that matters reaches the comprehension through a DIFFERENT caller:
+    # `_mapping_operand_stores_the_vector` (which asks `_mapping_literal_stores_the_vector`
+    # first) answers the `update(…)`/`|=` operands and the constructor's operands, and the
+    # assignment arm asks the mapping-literal rule directly. An explicit arm here was written,
+    # measured REDUNDANT — removing it changed no verdict on any fixture, and disabling the
+    # operand leg instead does miss the constructor case — and removed rather than kept
+    # looking load-bearing. ⛔ So a FUTURE caller of THIS helper alone does not get
+    # comprehensions; ask the operand rule.
     if isinstance(node, ast.Call) and _callee_name(node) == "dict":
         for keyword in node.keywords:
             if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):
