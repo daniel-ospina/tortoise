@@ -487,7 +487,7 @@ prose inside a docstring; `flag_in_shipped_configs` is `:911`), and it attribute
 `03-scope.md:66` only).
 
 **F2 — `docs/architecture/SUBSTRATE-REBUILD-MAP.md` states the opposite of this artifact's existence**
-(`:84` *"No test-design issue and no capstone exist for E4"*, `:322` ❌, `:375` D6). That was true when
+(`:84` *"No test-design issue and no capstone exist for E4"*, `:324` ❌, `:375` D6). That was true when
 it was cut (`4f68a2aa7`); **#11084 now exists and this is its artifact.** Recorded here rather than
 edited into a dated, test-guarded cut — a lane reading the substrate map should follow the pointer, not
 find a second, competing status cell. The capstone half of the claim **remains true** (`#11089` is
