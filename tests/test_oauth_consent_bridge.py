@@ -1499,6 +1499,34 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
     )
 
 
+def test_the_spec_does_not_promise_the_fingerprint_CAN_SEE_a_kid_split() -> None:
+    """§2.5 must not restore the MISMATCH guarantee that §2.3 corrects (#10794 review, P1-1).
+
+    ⛔ THE PRE-FIX TEXT IS WHY THIS PIN EXISTS. §2.5 said the key-drift check's comparison of the
+    CURRENT kid's key on each half meant "a half-migrated deployment reads `MISMATCH` until both are
+    moved — the reading an operator wants mid-rotation, not a regression". That is FALSE for a
+    `kid`-scoped migration: both halves can publish the SAME current-kid key BYTES while their
+    accepted kid SETS differ, so the check reads `AGREE` in front of a bridge on which nothing can
+    complete (the #10488 fingerprint deliberately excludes `kid`; `consent_token.py`,
+    `consent-bridge.ts` and `api/consent/key.ts` all say so). The review corrected §2.3 for this and
+    left §2.5 — in the SAME document, 180 lines apart — asserting the guarantee, which is the
+    paragraph an operator reads *during* a rotation.
+
+    DENYLIST, not an absence check: it goes red on the pre-fix sentence, so it pins the correction
+    rather than merely pinning that some paragraph exists.
+    """
+    spec = " ".join(SPEC.read_text().split())
+    assert "a half-migrated deployment reads `MISMATCH`" not in spec, (
+        "§2.5 has re-asserted the fingerprint's MISMATCH guarantee over a half-migrated deployment "
+        "— AGREE compares the CURRENT kid's key BYTES only and cannot see a kid split (§2.3 states "
+        "the scope and the fixed migration order). State the scope, do not restore the guarantee"
+    )
+    assert "does NOT see a `kid` split" in spec, (
+        "the spec no longer says the fingerprint cannot see a kid split — that one sentence is "
+        "what stops an operator reading `AGREE` as 'the bridge works'"
+    )
+
+
 def _section_23_jti_store(spec: str) -> str:
     """§2.3's `jti`-store paragraph, located by its own subject, and asserted found.
 
@@ -1777,6 +1805,11 @@ def _consent_token_env(monkeypatch):
 
     monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
     monkeypatch.delenv("CONSENT_TOKEN_ISSUER", raising=False)
+    # The KEY SET (#10794) is the single secret's sibling, and a host environment carrying either is
+    # a different world than the one each test states: `consent_token_keys()` would then answer from
+    # the host's list while the test believes the single-secret path is in play.
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
     consent_token.reset_consent_jti_store()
     yield
     consent_token.reset_consent_jti_store()
@@ -3366,3 +3399,405 @@ def test_no_TRACKED_file_outside_the_corpus_carries_the_false_premise():
     assert _claims_beyond_the_corpus(
         {victim: _PREMISE_GATE_MARKER + "\n# the consent page embeds it\n"}
     ) == {}, "text BELOW the marker is the documented opt-out and must be exempt"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# §2.3 — the `kid`-KEYED key set, and the SIGNED attempt key (#10794/#13683)
+#
+# WHY THE SET EXISTS. §2.3 recorded a `kid`-scoped rotation window that was NOT BUILT: one
+# `CONSENT_TOKEN_SECRET` was configured, so "two kids are accepted during a rotation window" was a
+# promise with no implementation behind it, and a real rotation was a VALUE SWAP on two halves at
+# once (the #10488 incident, with a ≤120 s blast radius). A SET is what turns `kid` from a
+# decorative header into the mechanism: mint with the current key, verify current + previous,
+# retire the old one by removing it.
+#
+# The same set is what makes the attempt key SIGNED worth doing (#10794): the app half can verify
+# a value the AS minted only if both halves hold the same key, and a rotation that silently breaks
+# that is the `403 flow_not_yours` dead end this bridge has already paid for once.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: Two keys that both clear the module's floor (≥32 UTF-8 bytes, byte-exact, dedicated).
+_KEY_OLD = "consent-key-OLD-0123456789abcdef0123456789abcdef"
+_KEY_NEW = "consent-key-NEW-0123456789abcdef0123456789abcdef"
+_BIND_FOR_KEYS = {"client_id": "client-abc", "redirect_uri": REDIRECT,
+                  "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "state": "st-123"}
+
+
+def _key_set(monkeypatch, keys: str, *, current: str | None = None) -> None:
+    """Configure a KEY SET deployment: `CONSENT_TOKEN_KEYS` set, `CONSENT_TOKEN_SECRET` GONE.
+
+    Deleting the single secret is deliberate — it proves the set is authoritative on its own, and
+    a test that left both in place could not tell the two modes apart.
+    """
+    from tortoise import consent_token
+
+    assert consent_token.LEGACY_KID == "consent-1"
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", keys)
+    if current is None:
+        monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+    else:
+        monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", current)
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET", raising=False)
+
+
+def test_the_key_set_MINTS_with_the_current_kid_and_VERIFIES_it(monkeypatch) -> None:
+    """The foundation: a set of two kids mints with the one named, and accepts its own mint."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    assert consent_token.consent_token_current_kid() == "new"
+    assert set(consent_token.consent_token_keys()) == {"old", "new"}
+
+    token = consent_token.mint_consent_token(user_id="u1", email=None, bind=_BIND_FOR_KEYS,
+                                             jti="jti-1", now=time.time())
+    header = json.loads(base64.urlsafe_b64decode(token.split(".")[0] + "=="))
+    assert header["kid"] == "new", (
+        "the mint did not claim the CURRENT kid — a token whose header names no key the set holds "
+        "is refused by every verifier, and a token naming the WRONG one cannot rotate")
+    claims = consent_token.verify_consent_token(token, presented=_BIND_FOR_KEYS)
+    assert claims["sub"] == "u1"
+
+
+def test_the_key_set_ACCEPTS_the_PREVIOUS_kid_during_a_rotation(monkeypatch) -> None:
+    """The rotation window itself: a value signed by the old kid still verifies.
+
+    Without this the window does not exist — which is what §2.3 recorded as unbuilt, and what made
+    a rotation a coordinated value swap that killed in-flight assertions.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    # Hand-built with the OLD kid's bytes, so this cannot pass by the minter having used them.
+    previous = _signed(_claim_set(_BIND_FOR_KEYS), secret=_KEY_OLD, kid="old")
+    claims = consent_token.verify_consent_token(previous, presented=_BIND_FOR_KEYS)
+    assert claims["sub"] == _U1
+
+    # …and once the old kid is RETIRED, the same value is refused. This is the other half of the
+    # window: "accepted while configured" must not mean "accepted forever".
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", f"new={_KEY_NEW}")
+    monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "new")
+    with pytest.raises(Exception) as refused:
+        consent_token.verify_consent_token(previous, presented=_BIND_FOR_KEYS)
+    assert "kid is not in the configured key set" in str(refused.value), (
+        f"a RETIRED kid was not refused as an unknown kid: {refused.value}")
+
+
+def test_an_UNKNOWN_kid_is_REFUSED_and_never_falls_back_to_a_single_key(monkeypatch) -> None:
+    """⛔ THE FAIL-CLOSED CORE: a token signed with a CONFIGURED KEY under an UNKNOWN kid is refused.
+
+    The signature below is computed with `_KEY_OLD`, which IS the deployment's key — so a verifier
+    that fell back to "the one key" (or compared the MAC before consulting `kid`) would ACCEPT it.
+    Refusing is the whole difference between a key set and a decorative header.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD}")
+    impostor = _signed(_claim_set(_BIND_FOR_KEYS), secret=_KEY_OLD, kid="not-in-the-set")
+    with pytest.raises(Exception) as refused:
+        consent_token.verify_consent_token(impostor, presented=_BIND_FOR_KEYS)
+    assert "kid is not in the configured key set" in str(refused.value), refused.value
+    assert refused.value.status == 401 and refused.value.error == "invalid_token", (
+        f"an unknown kid must be a 401 invalid_token (§2.1's refusal pairing), got "
+        f"{refused.value.status} {refused.value.error!r}")
+
+
+def test_the_mint_REFUSES_to_stamp_a_kid_the_set_does_not_hold(monkeypatch) -> None:
+    """The minting side of "an unknown kid is refused, never defaulted".
+
+    ⛔ THIS REPLACES `test_a_TAMPERED_kid_is_refused`, which asserted that rewriting the `kid` in a
+    signed token breaks the MAC. That assertion could not vary under ANY mutation of this change:
+    the MAC was computed over the ORIGINAL header and the verifier recomputes over the RECEIVED
+    one, so the mismatch is unconditional whichever key the kid selects — including the pre-change
+    "one secret" behaviour. It was JWS's property for free, not this change's (review rule 3: a
+    comment explaining why an assertion cannot fail is not a fix).
+
+    What `kid` becoming load-bearing DOES add is the minter's half: naming a kid the set does not
+    hold must be a refusal, not a token signed with the CURRENT key and stamped with a name no
+    verifier can select (`401 invalid_token` on every redemption, while the mint answers 200).
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    with pytest.raises(ValueError) as refused:
+        consent_token.mint_consent_token(user_id="u1", email=None, bind=_BIND_FOR_KEYS,
+                                        kid="not-in-the-set")
+    assert "not a kid this deployment holds" in str(refused.value), refused.value
+
+    # …and the control: every kid the set DOES hold mints, signed with THAT kid's key — which is
+    # what makes the refusal above a rule about the set rather than a rule about the argument.
+    # The MAC is checked against the named kid's bytes, so a mint that stamped the kid and signed
+    # with the CURRENT key (the mutant this test exists for) reds here.
+    for kid, key in (("old", _KEY_OLD), ("new", _KEY_NEW)):
+        token = consent_token.mint_consent_token(user_id="u1", email=None, bind=_BIND_FOR_KEYS,
+                                                 kid=kid, jti=f"j-{kid}")
+        header_seg, payload_seg, mac_seg = token.split(".")
+        assert json.loads(base64.urlsafe_b64decode(header_seg + "=="))["kid"] == kid
+        expected = base64.urlsafe_b64encode(
+            hmac.new(key.encode(), f"{header_seg}.{payload_seg}".encode(), hashlib.sha256)
+            .digest()).rstrip(b"=").decode()
+        assert mac_seg == expected, (
+            f"the mint stamped kid {kid!r} but did not sign with {kid!r}'s key — the token "
+            "verifies nowhere except by coincidence")
+        assert consent_token.verify_consent_token(token, presented=_BIND_FOR_KEYS)["sub"] == "u1"
+
+
+def test_the_SINGLE_SECRET_path_is_BYTE_IDENTICAL_to_today(monkeypatch) -> None:
+    """Back-compatibility, proved on the BYTES rather than on a happy path.
+
+    A deployment that sets only `CONSENT_TOKEN_SECRET` must keep minting exactly what it minted
+    before this change: kid `consent-1`, MAC over the same signing input with the same key. Both
+    halves are showed — the module's own mint, and a token built by hand the way the wire format is
+    specified — so the assertion is about the format and not about the mutter of one function.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    assert consent_token.consent_token_current_kid() == consent_token.LEGACY_KID == "consent-1", (
+        "the legacy path no longer answers `consent-1` — the value the TypeScript mint stamps, so "
+        "every token it mints would become an unknown kid")
+    assert consent_token.consent_token_keys() == {"consent-1": _TEST_SECRET}
+
+    bind = _BIND_FOR_KEYS
+    mine = consent_token.mint_consent_token(user_id="u1", email=None, bind=bind, jti="j", now=1.0)
+    explicit = consent_token.mint_consent_token(user_id="u1", email=None, bind=bind, jti="j",
+                                                now=1.0, kid="consent-1")
+    assert mine == explicit, "the default kid is no longer `consent-1`"
+    # …and a hand-built legacy token (the pre-existing shape) still verifies.
+    legacy = _signed(_claim_set(bind), secret=_TEST_SECRET, kid="consent-1")
+    assert consent_token.verify_consent_token(legacy, presented=bind)["sub"] == _U1
+
+
+def test_a_token_with_NO_kid_is_refused(monkeypatch) -> None:
+    """The legacy rule, unchanged: `kid` absent is refused.
+
+    ⛔ Stated as its own arm because a key set makes "no kid" the tempting case to default — and a
+    verifier that picked a key for a nameless token would accept anything signed with ANY key it
+    holds while reporting nothing about which one was meant.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    payload = _claim_set(_BIND_FOR_KEYS)
+    signing_input = f"{_seg({'alg': 'HS256', 'typ': 'JWT'})}.{_seg(payload)}"
+    mac = hmac.new(_TEST_SECRET.encode(), signing_input.encode(), hashlib.sha256).digest()
+    nameless = signing_input + "." + base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+    with pytest.raises(Exception) as refused:
+        consent_token.verify_consent_token(nameless, presented=_BIND_FOR_KEYS)
+    assert "kid is missing" in str(refused.value), refused.value
+
+
+def test_the_key_set_APPLIES_the_same_four_key_checks_as_the_single_secret(monkeypatch) -> None:
+    """A rotation is not a way to smuggle in a key the single-secret rule would refuse.
+
+    If a set accepted a short/padded/reused key that the single-secret arm refuses, then the two
+    halves would disagree about the SAME value one deploy later — the #10488 class, reached by
+    rotating instead of by mistyping.
+    """
+    from tortoise import consent_token
+
+    cases = {
+        "too_short": (f"k1={'a' * 8}", "shorter"),
+        "padded": (f"k1={_KEY_OLD} ", "whitespace"),
+    }
+    for label, (value, needle) in cases.items():
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", value)
+        monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+        problem = consent_token.consent_token_secret_problem()
+        assert problem and needle in problem, (label, problem)
+        assert consent_token.consent_token_keys() == {}, (
+            f"a set containing an unusable key ({label}) still handed the verifier keys")
+        assert consent_token.consent_token_secret() is None
+
+    # …and the reused-credential rule, on the anon key, through the SAME helper.
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", f"k1={_KEY_OLD}")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", _KEY_OLD)
+    try:
+        problem = consent_token.consent_token_secret_problem()
+        assert problem and "DEDICATED" in problem and "SUPABASE_ANON_KEY" in problem, problem
+    finally:
+        monkeypatch.delenv("SUPABASE_ANON_KEY", raising=False)
+
+
+def test_a_MALFORMED_key_set_is_UNPROVISIONED_and_names_the_malformation(monkeypatch) -> None:
+    """A typo in the new variable must be a typed 503 that NAMES it, never a half-keyed arm.
+
+    Mapped to the existing `not_set` provisioning CLASS on purpose: `tools/consent_key_check.py`
+    keeps a CLOSED `reason` set that the drift monitor keys its remedy off, so this lane does not
+    grow that vocabulary — the human message carries the detail, as it does for every other arm.
+    """
+    from tortoise import consent_token
+
+    for value, needle in (
+        ("no-separator-here", "no '='"),
+        ("k1=a,k1=b", "twice"),
+        ("bad.dot=<secret>", "kid"),
+        ("k1=", "EMPTY"),
+    ):
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", value)
+        monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+        problem = consent_token.consent_token_secret_problem()
+        assert problem and needle in problem, (value, problem)
+        assert consent_token.consent_token_secret_refusal_code() == "not_set", value
+        assert consent_token.consent_token_key_health()["configured"] is False
+
+
+def test_no_key_set_fault_ECHOES_the_configured_VALUE(monkeypatch) -> None:
+    """The fault NAMES the malformation by POSITION; it never repeats the entry.
+
+    `consent_token_secret_problem()` is interpolated into two UNAUTHENTICATED bodies: the 503 that
+    `GET /oauth/authorize` answers before any authentication, and the 503 `verify_consent_token`
+    raises (so any request carrying `X-Consent-Token` reaches it through `/oauth/consent/preview`
+    and `/oauth/consent`). The likeliest operator error with this variable is pasting the key
+    WITHOUT its `kid=`, and then the offending entry IS the HMAC key — so echoing it hands a
+    forgery key to anyone who asks. The sibling arms are the model: `EMPTY secret` names the kid,
+    `_key_problem` names a byte LENGTH, and neither publishes the bytes.
+    """
+    from tortoise import consent_token
+
+    value_that_must_not_escape = "consent-key-MUST-NOT-ECHO-0123456789abcdef"
+    for shape, position in (
+        (value_that_must_not_escape, "entry 1 of 1"),                      # the typo itself
+        (f"k1={_KEY_OLD},{value_that_must_not_escape}", "entry 2 of 2"),   # a later entry
+        (f"{value_that_must_not_escape},k2={_KEY_NEW}", "entry 1 of 2"),
+    ):
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", shape)
+        monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+        problem = consent_token.consent_token_secret_problem()
+        assert problem, shape
+        assert value_that_must_not_escape not in problem, (
+            f"the provisioning fault echoed the configured value into a response body that two "
+            f"unauthenticated routes publish: {problem}")
+        # …and the operator is still told WHICH entry is wrong, which is the whole diagnostic.
+        assert position in problem, problem
+
+
+def test_the_CURRENT_KID_fault_does_NOT_enumerate_the_configured_kids(monkeypatch) -> None:
+    """The 503 must not publish the key NAMES the 401 deliberately withholds.
+
+    `verify_consent_token`'s unknown-kid refusal says so in place ("an enumeration of the
+    configured set would hand a probe the deployment's key names") — and the provisioning 503
+    reaches the same anonymous callers, so the two rules have to agree.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="typo")
+    problem = consent_token.consent_token_secret_problem()
+    assert problem and "typo" in problem, problem
+    assert "old" not in problem and "new" not in problem, (
+        f"the 503 enumerated the deployment's key names: {problem}")
+
+
+def test_a_CURRENT_KID_that_names_nothing_is_unprovisioned(monkeypatch) -> None:
+    """Minting under a name no verifier can select is the state `kid` exists to prevent."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD}", current="typo")
+    problem = consent_token.consent_token_secret_problem()
+    assert problem and "CONSENT_TOKEN_CURRENT_KID" in problem and "typo" in problem, problem
+    assert consent_token.consent_token_current_kid() is None
+
+
+def test_the_fingerprint_is_the_CURRENT_kids_key(monkeypatch) -> None:
+    """#10488's field, under a set: it must describe the key that SIGNS, not a retired one.
+
+    Otherwise a correct rotation would publish a MISMATCH against the other half's current key and
+    send an operator to rotate again — the incident the field exists to prevent, re-created by the
+    mechanism that was supposed to make rotation safe.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    assert consent_token.consent_key_fingerprint() == hashlib.sha256(
+        _KEY_NEW.encode()).hexdigest()[:12]
+    monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "old")
+    assert consent_token.consent_key_fingerprint() == hashlib.sha256(
+        _KEY_OLD.encode()).hexdigest()[:12]
+
+
+def test_the_attempt_key_round_trips_and_carries_its_kid(monkeypatch) -> None:
+    """The signed flow reference (#10794): three segments, the current kid, a verifiable MAC."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    minted = consent_token.mint_attempt_key()
+    kid, random_part, _mac = minted.split(".")
+    assert kid == "new", minted
+    assert len(random_part) >= 43, (
+        f"the random part is {len(random_part)} characters — RFC 9126 §2 asks a flow reference for "
+        "unpredictable cryptographic randomness, and 32 bytes base64url is 43 characters")
+    assert consent_token.verify_attempt_key(minted) == random_part
+    # A second mint must NOT repeat: the value is per-bounce, and a constant one would be a shared
+    # key across flows (the reason `state`-derived keys were rejected in `consent_bounce_url`).
+    assert consent_token.mint_attempt_key().split(".")[1] != random_part
+
+
+def test_a_CHOSEN_attempt_key_does_NOT_verify(monkeypatch) -> None:
+    """⛔ THE POINT OF THE LANE, at the unit level: a client-chosen value has no valid MAC.
+
+    This is RFC 9700's "detecting a reused value" rather than validating its SHAPE: the value below
+    is a perfectly well-formed 43-character base64url string, exactly what a shape check would
+    accept, and it still verifies nowhere because only the key holder can produce a MAC over it.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"new={_KEY_NEW}", current="new")
+    for chosen in ("a" * 43, "ak-as-minted-0123456789abcdef", " " * 4, "", "new." + "a" * 43):
+        assert consent_token.verify_attempt_key(chosen) is None, chosen
+    # …and the module's own mint is the ONLY thing that verifies, which is what makes the assertion
+    # above about the MAC rather than about the string shape.
+    assert consent_token.verify_attempt_key(consent_token.mint_attempt_key()) is not None
+
+
+def test_a_TAMPERED_attempt_key_is_refused(monkeypatch) -> None:
+    """Each of the three segments is covered or selected, so none of them is free to edit."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    minted = consent_token.mint_attempt_key()
+    kid, random_part, mac = minted.split(".")
+    # ⛔ THE MUTATION MUST BE A REAL ONE, and the LAST character cannot carry one. `random_part` is
+    # `token_urlsafe(32)` = 43 base64url chars for 32 bytes, so the 43rd char holds only the 4
+    # significant bits of the final byte — its 6-bit value is always `4k`, i.e. it is always one of
+    # `A E I M Q U Y c g k o s w 0 4 8`, and it is `"A"` ~1 time in 16. Pinning `…[:-1] + "A"`
+    # therefore produced a value BYTE-IDENTICAL to `minted` on that run, `verify_attempt_key`
+    # correctly returned the random part, and the assertion failed at 6% accusing the MAC of not
+    # covering the random part. Same guard as the MAC arm below, and on a position that can vary.
+    edited_random = ("A" if random_part[0] != "A" else "B") + random_part[1:]
+    assert edited_random != random_part, "the test's own mutation was a no-op"
+    assert consent_token.verify_attempt_key(f"{kid}.{edited_random}.{mac}") is None, (
+        "editing the RANDOM part left the MAC valid — the MAC does not cover it")
+    assert consent_token.verify_attempt_key(f"old.{random_part}.{mac}") is None, (
+        "editing the KID left the MAC valid — the kid is not selected before the comparison")
+    flipped = ("A" if mac[0] != "A" else "B") + mac[1:]
+    assert consent_token.verify_attempt_key(f"{kid}.{random_part}.{flipped}") is None
+
+
+def test_a_RETIRED_kids_attempt_key_is_refused_but_the_PREVIOUS_one_still_works(monkeypatch) -> None:
+    """The rotation window, on the attempt key: ≤15 min of in-flight flows, not a cliff."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    signed_by_old = consent_token.mint_attempt_key(
+        kid="old", random_part="r" * 43)
+    assert consent_token.verify_attempt_key(signed_by_old) is not None, (
+        "a value signed by the PREVIOUS kid was refused — a rotation would kill every in-flight "
+        "consent flow (≤15 min), silently, as `403 flow_not_yours` after sign-in")
+
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", f"new={_KEY_NEW}")
+    assert consent_token.verify_attempt_key(signed_by_old) is None, (
+        "a RETIRED kid's attempt key still verified — the window never closes")
+
+
+def test_an_unprovisioned_arm_mints_no_attempt_key_and_verifies_none(monkeypatch) -> None:
+    """Fail closed, both directions, and never a raise out of the verifier."""
+    from tortoise import consent_token
+
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET", raising=False)
+    with pytest.raises(ValueError) as refused:
+        consent_token.mint_attempt_key()
+    assert "no usable" in str(refused.value), refused.value
+    assert consent_token.verify_attempt_key(f"consent-1.{'r' * 43}.{'a' * 43}") is None

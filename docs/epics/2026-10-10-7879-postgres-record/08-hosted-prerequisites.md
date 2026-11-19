@@ -142,28 +142,41 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 |---|---|
 | the seam | `tortoise/record_writer.py` — `write_live_record`, `_default_connect` |
 | arming surface | `tortoise/record_writer.py` — `RECORD_DSN_ENV` (`TORTOISE_RECORD_DSN`), **default OFF** |
-| dense-leg CUTOVER | `tortoise/record_vector.py` — `ARMING_ENV` (`TORTOISE_RECORD_VECTOR_LEG`), **default OFF**. The second switch, and it is not the same question as the DSN: a DSN is the record being *reachable*, this is the record answering the **dense (vector) read**. See the box below — leaving it off is a measured posture, not an oversight. |
+| dense-leg CUTOVER | `tortoise/record_vector.py` — `ARMING_ENV` (`TORTOISE_RECORD_VECTOR_LEG`), **default ON since `#13610`** (an explicit `0` is the ROLLBACK). Not the same question as the DSN: a DSN is the record being *reachable*, this is the record answering the **dense (vector) read** — and since `#13610` the read itself is gated per label on a coverage COUNT, so arming does not by itself make the record the source. See the box below. |
 | production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py` (`_emit_event`), `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py`; by-value on the hosted REST lane |
 
 > ⛔ **`TORTOISE_RECORD_VECTOR_LEG` — what an operator must know before touching it.** `#11642`
-> moved the dense retrieval leg to the record, and `#11660` made the cutover a **deliberate act,
-> default OFF**, because the record is a journal fold with **no backfill**: it holds a vector only
-> for content written AFTER the move is deployed. So the four facts, in the order that matters:
+> moved the dense retrieval leg to the record, and `#11660` made the cutover a switch, because the
+> record is a journal fold with **no backfill**: it holds a vector only for content written AFTER the
+> move is deployed. ⛔ **`#13610` then made the switch DEFAULT ON, and that is safe only because the
+> READ is gated**: `record_vector.coverage` proves, per label, that the record holds as many vectors
+> as the graph serves, and until it does the graph branch answers AND the graph write is retained
+> (`mirror_required`) — so a deployment that has not backfilled double-stores and is served from the
+> graph, it does not silently answer short. The rollback is `TORTOISE_RECORD_VECTOR_LEG=0`. Four
+> facts an operator still needs, in the order that matters:
 >
-> 1. **The in-graph vector index is retired on a store whose replacement is ARMED** — the next
->    setup drops a `Point.embedding` HNSW index if it finds one and never creates another. That is
->    the decision (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2):
->    an UNARMED store behaves exactly as `main` did — it keeps an index it has and still gains one
->    it lacks — because a store must never be left with neither an in-graph index nor a record leg.
-> 2. **With the leg unarmed — the default — the graph keeps its ANN index**, so dense
->    `Point`/`Source`/`Event` reads are unchanged; a label with NO index is `#4997`'s defect and the
->    setup reports it at **WARNING** (`#4997/#11642` line). Retiring the index is what arming does,
->    so a store that arms without a backfilled record trades its ANN index for a full scan (see 3).
-> 3. **Arming it (`TORTOISE_RECORD_VECTOR_LEG=1`) WITHOUT a backfilled record silently drops every
->    pre-existing point out of the dense pool** — the trace reports `mechanism=pgvector, reason=ok`,
->    because the shortfall assertion counts against the record's own predicate. **Back-fill first,
->    then arm.** A record still holding 0 rows is the state `#11469` measured on the dogfood tenant.
+> 1. **The in-graph vector index is retired on a store whose replacement is EXPLICITLY armed** —
+>    `TORTOISE_RECORD_VECTOR_LEG=1` present in the environment, the only spelling
+>    `vector_index_retired()` (via `arm_is_explicit()`) accepts. The next setup drops a
+>    `Point.embedding` HNSW index if it finds one and never creates another. That is the decision
+>    (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2): a store the
+>    operator has not explicitly armed — which includes the DEFAULT posture, since the arm itself
+>    defaults ON — behaves exactly as `main` did: it keeps an index it has and still gains one it
+>    lacks, because a store must never be left with neither an in-graph index nor a record leg.
+> 2. **With the leg unarmed — the ROLLBACK spelling `TORTOISE_RECORD_VECTOR_LEG=0` — the graph keeps
+>    its ANN index**, so dense `Point`/`Source`/`Event` reads are unchanged; a label with NO index is
+>    `#4997`'s defect and the setup reports it at **WARNING** (`#4997/#11642` line). `#13610` added a
+>    third condition to the retirement: an EXPLICIT `TORTOISE_RECORD_VECTOR_LEG=1`. The arm's default is
+>    ON for the READ (and gated per label on coverage), but the DROP happens at setup, before any
+>    coverage exists and while every served label still answers from the GRAPH — so a default-armed
+>    store keeps its index and `#4997` keeps its WARNING.
+> 3. **An armed deployment WITHOUT a backfilled record does not drop pre-existing points out of the
+>    dense pool** — `#13610` closed exactly that hazard: the per-label coverage count is unverified, so
+>    the graph branch answers and the graph write is retained (this used to read "silently drops every
+>    pre-existing point", which was true of the pre-`#13610` arm). What an operator still sees is
+>    **double-storage** until the record catches up. A record still holding 0 rows is the state
+>    `#11469` measured on the dogfood tenant.
 > 4. **The switch is an ENV var; the rollback of the index itself is a CODE constant.** Unarming
 >    `TORTOISE_RECORD_VECTOR_LEG` restores the WARNING (where a label really has no index) and puts
 >    the store back on `main`'s posture on the next setup, which re-creates the index; the constant

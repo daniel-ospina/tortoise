@@ -224,6 +224,30 @@ export const onRequest: PagesFunction = async (context) => {
     "/dpa", "/dpa.html",
   ]);
 
+  // The contact page is a COMPANY page living at the company ROOT, like the
+  // legal three above — but it is not a legal document, so it is NOT a member of
+  // LEGAL_AT_ROOT: their shared property is the ADDRESS, not the document class.
+  //
+  // ⛔ Why this set has to exist at all (#13636, measured live). `website/_redirects`
+  // carries `/contact/` and `/contact.html` → `/contact`, and those rules are
+  // HOST-AGNOSTIC: they collapse SPELLINGS of one page, they do not move a page
+  // between hosts. So with no branch here `/contact` fell through to
+  // `context.next()` and Pages served `website/contact.html` with a **200 on BOTH
+  // hosts** — the last marketing document left on two addresses after #11762,
+  // which is exactly the class that migration existed to remove. The sibling rows
+  // (`/privacy`, `/dpa`, `/tos`) fired because they are in LEGAL_AT_ROOT; this one
+  // had no row anywhere in this file, in any spelling, ever (git log -S).
+  //
+  // ⛔ EXACT PATHS ONLY — never a prefix. `/contact/submit` is a POST endpoint
+  // (`functions/contact/submit.ts`), so a prefix row would answer it with a 301,
+  // the browser would re-issue a GET, and the message body would be gone. That is
+  // the same reason `/blog/api/*` is excluded from the blog rule. The two members
+  // are the extensionless path and its raw `.html` asset; the trailing-slash form
+  // needs no member because `path` is slash-stripped above — which is also what
+  // keeps `/contact/` ONE hop instead of `_redirects`' same-host 301 onto
+  // `/contact` followed by this one.
+  const CONTACT_AT_ROOT = new Set(["/contact", "/contact.html"]);
+
   // `/signin` is a legacy ALIAS, not a page: `_redirects` maps it to `/auth`,
   // which lives on the APP origin (#4054). It is resolved to the app origin in
   // ONE hop on whichever host is asked — and it is deliberately NOT a member of
@@ -245,6 +269,23 @@ export const onRequest: PagesFunction = async (context) => {
   // product root, but on the COMPANY host it is a duplicate of the COMPANY page
   // and belongs to `_redirects` — the product host's block adds it explicitly.
   const PRODUCT_ROOT = new Set(["/product", "/product.html"]);
+
+  // ⛔ THE ONE ROOT-LEVEL PAGE ON THIS SIDE OF THE MAP (#13645). The niche
+  // product page is served at the company ROOT —
+  // `premiselabs.co/tortoise-for-product-teams` — so it is NOT a `PRODUCT_PAGES`
+  // member (that set 301s its members UNDER the prefix, which would send this
+  // very URL to `/tortoise/tortoise-for-product-teams`, a 404) and NOT a
+  // `PRODUCT_ROOT` asset (that maps onto `/tortoise`). This set exists for the
+  // OTHER direction: the shared Pages project serves every static asset on both
+  // hosts, so without this row the retired product host answers a second 200
+  // copy of the same document at `tortoise.premiselabs.co/tortoise-for-
+  // product-teams` — the duplicate-address condition #11762 removed for every
+  // other page — and it would do so through the asset router's silent
+  // fallthrough, with nothing in this map saying so.
+  const ROOT_PAGE = new Set([
+    "/tortoise-for-product-teams",
+    "/tortoise-for-product-teams.html",
+  ]);
 
   // ── ONE definition of a product URL's canonical form ──────────────────
   // No leading/trailing slashes, no `.html`. Both hosts derive from THIS, because
@@ -536,6 +577,9 @@ export const onRequest: PagesFunction = async (context) => {
     // chaining through the company host's own `_redirects` row (two hops).
     if (path === "/sitemap_index.xml") return toCompany("/sitemap.xml");
     if (CRAWLER_SURFACE.has(path)) return toCompany(path);
+    // The root-level niche product page (#13645): ONE address per document, so
+    // this host's copy consolidates onto the company host in ONE hop.
+    if (ROOT_PAGE.has(path)) return toCompany(path.replace(/\.html$/, ""));
     // The root IS the product page on this host today, so it maps to the one
     // canonical product URL; the raw duplicates map there too (`/index.html` is
     // a duplicate of the PRODUCT root on THIS host — it is the company page's
@@ -576,6 +620,10 @@ export const onRequest: PagesFunction = async (context) => {
     // Legal governs the business, so it lands at the company ROOT, not under
     // the product prefix.
     if (LEGAL_AT_ROOT.has(path)) return toCompany(path.replace(/\.html$/, ""));
+    // The contact page has ONE address on the ONE marketing host, and it is the
+    // company root — one hop, both spellings (see CONTACT_AT_ROOT above; the
+    // trailing-slash form is already collapsed by `path`).
+    if (CONTACT_AT_ROOT.has(path)) return toCompany("/contact");
     if (PRODUCT_PAGES.has(path)) return toCompany(PRODUCT_PREFIX + path.replace(/\.html$/, ""));
   }
 

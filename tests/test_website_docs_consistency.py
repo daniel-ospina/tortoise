@@ -1385,6 +1385,13 @@ _IN_SCOPE_AT_3950 = frozenset({
     "contact.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
     "self-hosted.html", "tos.html",
+    # ⚠️ `tortoise-for-product-teams.html` JOINED this set in #13645: it is
+    # public, served at the company root and INDEXED on purpose (a GTM
+    # experiment nobody can find has no traffic to measure), so it is in the
+    # blog guard's scope like every other public page and carries the hero's
+    # "Read the blog →" link. Flipping it to noindex is the edit that removes it
+    # from here — with this line's reason, not silently.
+    "tortoise-for-product-teams.html",
     # ⚠️ `aviso-privacidad.html` LEFT this set in #9486: the Spanish LFPDPPP
     # notice was RETIRED because the controller's jurisdiction of residence is
     # the United Kingdom — the document had no basis. Its route 301s to
@@ -2366,6 +2373,9 @@ _ALL_WEBSITE_PAGES_AT_3436 = frozenset({
     "index.html", "investors.html", "invite-accept.html", "license.html", "privacy.html",
     "product.html", "security.html", "self-hosted.html",
     "signup.html", "tos.html", "welcome.html",
+    # #13645: the niche product page — a NEW top-level served document, so the
+    # id guard covers it exactly as it covers every other page.
+    "tortoise-for-product-teams.html",
 })
 
 

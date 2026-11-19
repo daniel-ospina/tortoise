@@ -79,6 +79,37 @@ from tortoise.vector_write import (
 logger = logging.getLogger(__name__)
 
 
+def _derived_mirror_required(entity_type: str) -> bool:
+    """Must this fold still write the GRAPH copy of the derived vector? (#13610)
+
+    One question, asked through ONE function, and the answer is ``True`` in every
+    unknown: an unarmed deployment, an unresolvable DSN, no tenant scope on this
+    request, a label nobody has verified, and an unimportable `record_vector` all
+    keep the graph write. Writing the mirror costs storage; skipping it on a guess
+    costs the row, and a row in neither store is the one outcome `#11395`
+    `6956793300` forbids.
+
+    ⛔ NOT A SECOND PREDICATE. `record_vector.mirror_required` owns the decision
+    (and `record_vector.coverage` owns the count behind it); this only keeps the
+    fold from crashing if the record's arming module cannot be imported, which is
+    a WRITE-path fault and must never take a write down.
+
+    ⛔ AND THIS GUARDS THE FOLD ONLY. A `:Point`'s vector is RECORD TRUTH (`#5004`)
+    and is never derived, so nothing here may touch it; the document/Event/Source
+    arms this issue does not retire are untouched too.
+    """
+    try:
+        from tortoise.record_vector import mirror_required
+
+        return bool(mirror_required(entity_type))
+    except Exception:  # noqa: BLE001, RUF100 — unarmed is the safe answer
+        logger.debug(
+            "#13610: the dense cutover's arming predicate could not be read — "
+            "keeping the graph copy of the `%s` vector", entity_type,
+            exc_info=True)
+        return True
+
+
 #: ⛔ The fold's MERGE-key decision used to live here: ``_name_holder_count``
 #: counted every carrier of a name (any status) so ``_upsert_object`` could
 #: choose between the ``name`` key (#7369) and the ``id`` key when 2+ carriers
@@ -4854,26 +4885,44 @@ class _EntityHandlers:
             return
         # Compute embedding for Subject name (#7845)
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
+        #
+        # ⛔ #13610: AND NOT AT ALL ONCE THE RECORD OWNS THE VECTOR. This fold used
+        # to encode `name` unconditionally, mirroring the record's own derivation
+        # into the graph — two stores for one datum, one of which is rent. Now that
+        # the record serves `subject` on the dense leg (`#13422`) and holds the
+        # column (`#13220`), the graph copy is RETIRED on the armed path and
+        # RETAINED while the record's coverage is unverified — option 2 of #13610,
+        # where double-storage is a transitional state that ends per-deployment the
+        # moment the record proves it holds every vector, and no deployment is ever
+        # left with neither copy.
+        #
+        # ⚠️ SKIPPING THE ENCODE IS THE WHOLE OF THE WRITE REMOVAL, and that is not
+        # a shortcut: `set_embedding_clause` preserves a stored vector against an
+        # incoming NULL, and the `clear_embedding` pre-REMOVE above is emitted only
+        # when a NEW vector is being written — so `embedding = None` means "write
+        # none, delete none". The `#4524` vecf32 hazard stays shut and an existing
+        # node's vector is untouched (this issue deletes nothing).
         embedding = None
-        try:
-            # ⛔ THE SEAM (#13447), not `embeddings.encode_for_row` directly:
-            # `derived_embedding.encode` IS that call — same #5008 gate, same
-            # #13224 `bounded`, same #4280 width — plus the per-write memo that
-            # makes the RECORD's identical encode (`record_writer.
-            # derived_embedding_columns`, #13220) a second FREE call instead of a
-            # second model call. Both halves run inside one
-            # `derived_embedding.write_scope()` opened by the live door.
-            from tortoise import derived_embedding
-            # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
-            # the payload text on replay, so it is repairable from the graph and
-            # a live request may decline to wait for a cold embedder. Scoped
-            # here and to the three sibling entity folds ONLY: a Point's vector
-            # is record truth (#5004) and is never dropped. The bound is
-            # suppressed under a replay scope, so a rebuild stays deterministic.
-            embedding = derived_embedding.encode(
-                name, self.required_embedding_dim, bounded=True)
-        except Exception:
-            pass
+        if _derived_mirror_required("subject"):
+            try:
+                # ⛔ THE SEAM (#13447), not `embeddings.encode_for_row` directly:
+                # `derived_embedding.encode` IS that call — same #5008 gate, same
+                # #13224 `bounded`, same #4280 width — plus the per-write memo that
+                # makes the RECORD's identical encode (`record_writer.
+                # derived_embedding_columns`, #13220) a second FREE call instead of
+                # a second model call. Both halves run inside one
+                # `derived_embedding.write_scope()` opened by the live door.
+                from tortoise import derived_embedding
+                # #13224: `bounded=True` — a DERIVED entity vector, recomputed from
+                # the payload text on replay, so it is repairable from the graph
+                # and a live request may decline to wait for a cold embedder.
+                # Scoped here and to the three sibling entity folds ONLY: a Point's
+                # vector is record truth (#5004) and is never dropped. The bound is
+                # suppressed under a replay scope, so a rebuild stays deterministic.
+                embedding = derived_embedding.encode(
+                    name, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
         # #1918: canonical id must win on MATCH too — parity with the #1155
         # Object fix (_upsert_object ON MATCH o.id=coalesce($id, o.id)). The
         # webhook name-stub path (_event_plain_merge) can mint a Subject stub
@@ -5054,16 +5103,23 @@ class _EntityHandlers:
         ok = ev.get("object_kind")  # None default — same issue
         # Compute embedding from name (#7845)
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
+        # ⛔ #13610: the Object twin of `_upsert_subject`'s gate — the graph copy is
+        # retired on the armed path and retained while the record's coverage is
+        # unverified. See that method for why skipping the ENCODE is the whole of
+        # the write removal (`set_embedding_clause` writes no property for a NULL
+        # vector, and the pre-REMOVE is emitted only for one that will be written).
         embedding = None
-        try:
-            # ⛔ THE SEAM (#13447) — see `_upsert_subject` for the scope and for
-            # why the record's identical encode is free rather than a second call.
-            from tortoise import derived_embedding
-            # #13224: DERIVED vector — see `_upsert_subject` for the scope.
-            embedding = derived_embedding.encode(
-                name, self.required_embedding_dim, bounded=True)
-        except Exception:
-            pass
+        if _derived_mirror_required("object"):
+            try:
+                # ⛔ THE SEAM (#13447) — see `_upsert_subject` for the scope and
+                # for why the record's identical encode is free rather than a
+                # second call.
+                from tortoise import derived_embedding
+                # #13224: DERIVED vector — see `_upsert_subject` for the scope.
+                embedding = derived_embedding.encode(
+                    name, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
         # #1155-P1: canonical id must win on MATCH too. The produces-edge
         # wiring in _event_plain_merge can mint a name-stub Object when a
         # poll/webhook event lands BEFORE this entity path's first

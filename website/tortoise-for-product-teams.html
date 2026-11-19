@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en" data-page="product-teams">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- ══ WHAT THIS PAGE IS (#13645) ═══════════════════════════════════════
+       A GTM EXPERIMENT: the product story told for ONE audience — founders and
+       product teams. It is ADDED ALONGSIDE `/tortoise`, which stays the
+       canonical product page and does NOT redirect here (owner decision,
+       2026-11-12 — `~/.pi/agent/state/DECISION-product-page-11762.md`).
+
+       INDEXED, deliberately, and this meta is the decision written where the
+       next reader will find it. A niche page nobody can find has no traffic to
+       measure, so the experiment would have no denominator; the alternative —
+       noindex while it runs — would make it measurable only through paid links
+       we control. It does NOT compete with `/tortoise` for the same queries:
+       the <title> and <h1> name the audience explicitly, and the page links to
+       /tortoise (footer → "Product") for the full story instead of duplicating
+       it. The sitemap entry in `website/sitemap-product.xml` is the same
+       decision, one file over — keep the two in step.
+
+       COPY is the owner's prose from
+       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM —
+       including "make decision with superintelligence" (page 2, singular
+       "decision") and "super intelligence" (step 03) as the PDF spells them.
+       Those are recorded copy defects the owner has not ruled on; verbatim
+       outranks a builder's opinion, so they ship as written.
+
+       PRICING is forked from /tortoise as the PDF instructs, and renders from
+       the SAME SOURCE: `/assets/tortoise-pricing.js`, loaded by both pages.
+       The pricing block below is byte-identical to product.html's on purpose —
+       `tests/test_website_static.py::TestPricingSourceIsShared` asserts the two
+       pages agree, so a price cannot change on one page only.
+
+       TRACKING: PostHog, consent-gated through the existing `/consent.js`; the
+       three named events and the campaign tags are in the script at the bottom
+       of this file, next to the reason each exists.
+
+       Route: `premiselabs.co/tortoise-for-product-teams` is served by the Pages
+       asset of this file (root-level on the ONE marketing host, NOT under the
+       `/tortoise` prefix — the middleware serves that prefix from
+       PRODUCT_PAGES and this page is deliberately not a member, because
+       `PRODUCT_PAGES` would 301 this exact URL to `/tortoise/<name>`, which
+       does not exist). Its `.html` and trailing-slash twins 301 here via
+       `website/_redirects`, and the retired product host 301s here in one hop
+       (the `ROOT_PAGE` row in `website/functions/_middleware.ts`).
+       ──────────────────────────────────────────────────────────────────── -->
+  <meta name="robots" content="index,follow">
+  <title>A Superbrain for Founders &amp; Product Teams — Tortoise</title>
+  <meta name="description" content="A million moving pieces. One coherent &amp; logical picture. Tortoise builds a logical model of your business, product, and code, so you, your team, and your agents have the whole context — current and logical.">
+  <meta property="og:title" content="A Superbrain for Founders &amp; Product Teams — Tortoise">
+  <meta property="og:description" content="A million moving pieces. One coherent &amp; logical picture. Tortoise builds a logical model of your business, product, and code, so you, your team, and your agents have the whole context — current and logical.">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta property="og:image" content="https://premiselabs.co/assets/product-teams-og.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="A Superbrain for Founders &amp; Product Teams — Tortoise, by Premise Labs.">
+  <meta name="twitter:image" content="https://premiselabs.co/assets/product-teams-og.jpg">
+  <meta name="twitter:image:alt" content="A Superbrain for Founders &amp; Product Teams — Tortoise, by Premise Labs.">
+  <meta name="twitter:title" content="A Superbrain for Founders &amp; Product Teams — Tortoise">
+  <meta name="twitter:description" content="A million moving pieces. One coherent &amp; logical picture. Tortoise builds a logical model of your business, product, and code, so you, your team, and your agents have the whole context — current and logical.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
+  <link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
+  <link rel="canonical" href="https://premiselabs.co/tortoise-for-product-teams">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* Tokens are product.html's, plus `--border` lifted from investors.html —
+       the hero's video frame and the intro's hairline rule need it, and minting
+       a third grey for one rule is exactly what the brief excludes. */
+    :root {
+      --bg: #060b14;
+      --border: #1e293b;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --green-dim: rgba(74, 222, 128, 0.25);
+      --gold: #f59e0b;
+      --gold-dim: rgba(245, 158, 11, 0.2);
+      --serif: 'Georgia', 'Times New Roman', serif;
+      --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #scroll-wrapper { height: 630vh; position: relative; }
+
+    canvas {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 0; pointer-events: none;
+    }
+
+    /* Beat: fixed overlay, z-index above canvas */
+    .beat {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 1; pointer-events: none; opacity: 0;
+      padding: 2rem;
+      box-sizing: border-box;
+    }
+
+    /* Text selection: beats receive pointer events ONLY while visible. The
+       full-screen overlay must never swallow clicks when invisible (#744), so
+       GSAP toggles .pe-on from the scrubbed opacity — visible beat = selectable
+       text, faded-out beats = click-through. */
+    .beat.pe-on { pointer-events: auto; user-select: text; }
+
+    /* Beats are fixed full-viewport crossfade overlays — ONLY for short story
+       beats. Pricing + CTA are NORMAL document-flow sections (real scroll,
+       working links, no clipping) below the narrative. */
+    .content-section {
+      position: relative; z-index: 2; background: var(--bg);
+      opacity: 1; pointer-events: auto;
+      padding: 6rem 2rem 5rem; box-sizing: border-box;
+    }
+
+    /* Pricing section (El Dato component shape, Tortoise colors) */
+    #pricing-section { text-align: center; }
+    #pricing-section h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
+    #pricing-section .pricing-sub { color: var(--text); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
+    .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
+    .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
+    .pricing-toggle .badge { display: inline-block; font-size: 0.625rem; font-weight: 700; padding: 0.125rem 0.375rem; border-radius: 9999px; background: var(--green); color: #04121a; margin-left: 0.375rem; }
+    .pricing-grid { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
+    .pricing-card { background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.75rem; position: relative; max-width: 250px; flex: 1; min-width: 230px; transition: border-color 0.2s; }
+    .pricing-card.popular { border: 2px solid var(--accent); }
+    .popular-tag { position: absolute; top: -0.75rem; left: 50%; transform: translateX(-50%); background: var(--accent); color: #04121a; font-size: 0.75rem; font-weight: 600; padding: 0.25rem 1rem; border-radius: 9999px; white-space: nowrap; }
+    .pricing-card h3 { font-size: 1.1rem; margin-bottom: 0.4rem; color: var(--text); }
+    .price { font-size: 2rem; font-weight: 700; color: var(--text); }
+    .price span { font-size: 0.9rem; font-weight: 400; color: var(--text-dim); }
+    .billing { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1.25rem; }
+    .features { display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 1.25rem; }
+    .feature { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text); text-align: left; }
+    .feature svg { width: 0.9rem; height: 0.9rem; flex-shrink: 0; }
+    .feature .x { color: #f87171; margin-right: 0.25rem; }
+    /* The static cards use a text glyph where the JS render uses an inline SVG
+       (checkSvg()). Reserve the SVG's box so the two states wrap identically —
+       otherwise "Unlimited integrations" breaks onto two lines only after the
+       script swaps the markup. */
+    .feature .ck { color: #4ade80; flex: 0 0 0.9rem; width: 0.9rem; text-align: center; font-weight: 700; }
+    .feature .muted { color: var(--text-dim); opacity: 0.7; }
+    .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
+    .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
+    .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
+    .pricing-usage { text-align: center; color: var(--text); font-size: 0.85rem; margin: 1.75rem auto 0; }
+
+    .selfhost { max-width: 900px; margin: 2rem auto 0; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.5rem; }
+    .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
+    .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
+    .selfhost .license { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 1rem; }
+    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+    .selfhost a { color: var(--accent); text-decoration: none; font-size: 0.85rem; border: 1px solid var(--accent); padding: 0.5rem 1rem; border-radius: 0.5rem; }
+    .selfhost a:hover { background: var(--accent); color: #04121a; }
+
+    #beat-hero { opacity: 1; }
+
+    /* Hero headline */
+    /* Beat number (01 · Ingest Any Source, etc.) */
+    .beat-num {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.8em;
+      letter-spacing: 0.08em;
+      margin-right: 0.1em;
+    }
+    .beat h2 {
+      font-family: var(--serif);
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+    }
+    .beat h2 span { color: var(--accent); }
+
+    /* Workflow beats: soft dark backdrop behind the text so it reads cleanly
+       over the animated graph. A radial gradient + backdrop blur — strongest
+       right behind the text, fading out at the edges. */
+    .beat.workflow { position: fixed; }
+    .beat.workflow::before {
+      content: "";
+      position: absolute; top: 50%; left: 50%;
+      width: min(92vw, 880px); height: auto;
+      aspect-ratio: 16 / 9;
+      transform: translate(-50%, -50%);
+      background: radial-gradient(ellipse at center,
+        rgba(6, 11, 20, 0.82) 0%,
+        rgba(6, 11, 20, 0.55) 45%,
+        rgba(6, 11, 20, 0) 72%);
+      border-radius: 2rem;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .beat.workflow h2, .beat.workflow p {
+      position: relative; z-index: 1;
+      text-shadow: 0 1px 3px rgba(6, 11, 20, 0.9), 0 0 24px rgba(6, 11, 20, 0.9);
+    }
+    .beat h2 + p { margin-top: 1.25rem; }
+
+    /* ── Hero: the investors.html split (copy left, the video right) ─────
+       The component is investors.html's `.doc-grid` + `figure.video`, reused
+       rather than re-invented: same 9/16 frame, same poster, same owned
+       <video> (no third-party chrome) and the same real <button> play control.
+       ⛔ NOT a nested <section>: the hero must stay ONE section element,
+       because a slice that stops at the first `</section>` would then cover only
+       part of it. `tests/test_website_static.py::TestProductTeamsIdentity::
+       test_the_hero_is_one_section_element` holds THIS page to that; the sibling
+       gates `_pricing_section` / `_automate_beat_markup` carry the same rule for
+       product.html. */
+    #beat-hero { padding-top: 5rem; }
+    .doc-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 2.25rem;
+      align-items: center;
+      width: 100%;
+      max-width: 1000px;
+    }
+    .doc-grid .doc-copy { min-width: 0; }
+
+    #beat-hero h1 {
+      font-family: var(--serif);
+      font-size: clamp(1.8rem, 4vw, 3.2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: left;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+    }
+    #beat-hero h1 span { color: var(--accent); }
+    #beat-hero .hero-sub {
+      margin-top: 1.25rem;
+      max-width: 560px;
+      color: var(--text);
+      font-size: clamp(0.95rem, 1.6vw, 1.1rem);
+      line-height: 1.6;
+    }
+
+    /* Hero CTA — product.html's button, unchanged. The .beat overlay is
+       pointer-events:none, so the CTA only receives events while its beat is
+       visible (.beat.pe-on, toggled from the scrubbed opacity) — no mid-scroll
+       accidental navigation (#881). */
+    #beat-hero .cta-start {
+      display: inline-block;
+      background: var(--accent);
+      color: var(--bg);
+      padding: 0.9rem 2rem;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.2s;
+      margin-top: 2rem;
+    }
+    #beat-hero .cta-start:hover {
+      background: #0891b2;
+      transform: scale(1.02);
+    }
+    #beat-hero .hero-links {
+      margin-top: 1.25rem;
+      font-size: 0.85rem;
+    }
+    #beat-hero .hero-links a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    /* Video column — investors.html's `.video` component, verbatim. */
+    .video { margin: 0; width: 224px; flex: 0 0 auto; }
+    .video .frame {
+      position: relative;
+      display: block;
+      width: 100%;
+      aspect-ratio: 9 / 16;
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      overflow: hidden;
+      background: #000;
+    }
+    .video .frame video {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover; display: block;
+      background: #060b14;
+    }
+    /* The overlay is a real <button>: keyboard-focusable, and the video file
+       itself is not fetched until it is activated. */
+    .overlay {
+      position: absolute; inset: 0;
+      appearance: none; -webkit-appearance: none;
+      border: 0; background: none; padding: 0;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 0.75rem; }
+    .play {
+      width: 62px; height: 62px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      color: #04121a;
+      background: var(--accent);
+      box-shadow: 0 10px 34px -8px rgba(6, 182, 212, 0.75);
+      transition: transform .2s, background .2s;
+    }
+    .play svg { width: 24px; height: 24px; margin-left: 3px; }
+    .overlay:hover .play { transform: scale(1.06); background: #22d3ee; }
+    .video figcaption {
+      margin-top: 0.8rem;
+      font-size: 0.7rem; letter-spacing: 0.12em;
+      color: var(--text-dim); text-transform: uppercase;
+    }
+
+    /* ── The intro block's hairline rule (the PDF's ______) ───────────── */
+    .beat .rule {
+      width: min(92vw, 660px);
+      height: 1px;
+      background: var(--border);
+      margin-bottom: 2rem;
+      position: relative; z-index: 1;
+    }
+    #beat-intro p { max-width: 660px; }
+    #beat-intro p + p { margin-top: 1.25rem; }
+
+    /* ── The ↑/↓ contrast grid — investors.html's `.outcomes`, verbatim ──
+       Same two-list component, same green/gold markers, the PDF's labels. */
+    .outcomes {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 0.6rem 3rem;
+      margin-top: 2rem;
+      /* Wide enough that the longest label ("Agent Autonomy & Token
+         efficiency", 34 mono characters) does not wrap: the PDF pairs each ↑
+         with the ↓ BESIDE it, and a wrapped label shifts every row below it
+         out of that pairing. Measured at 620px the first row broke. */
+      max-width: 760px;
+      position: relative; z-index: 1;
+      text-align: left;
+    }
+    .outcomes ul { list-style: none; }
+    .outcomes li { display: flex; gap: 0.7rem; align-items: baseline; font-size: 0.95rem; }
+    .outcomes .a { flex: 0 0 auto; }
+    .up .a { color: var(--green); }
+    .down .a { color: var(--gold); }
+    .outcomes li span:last-child { color: var(--text); }
+
+    /* Sub-beats */
+    .beat p {
+      font-family: var(--mono);
+      font-size: clamp(0.85rem, 1.5vw, 1.05rem);
+      color: var(--text);
+      text-align: center;
+      max-width: 560px;
+      line-height: 1.7;
+    }
+    .beat p em { color: var(--accent); font-style: normal; }
+
+    #cta-section { text-align: center; }
+    #cta-section .social-links {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      margin-top: 2rem;
+    }
+    #cta-section .social-link {
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s, opacity 0.2s;
+    }
+    #cta-section .social-link svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+    }
+    #cta-section .social-link:hover { color: var(--accent); opacity: 0.85; }
+
+    /* Subtle fade at bottom edges */
+    #vignette {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none; z-index: 2;
+      background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
+    }
+
+    /* Floating top menu (#1288) — transparent, only a cyan Login button top-right */
+    .floating-topmenu {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 12;
+      display: flex; justify-content: flex-end;
+      padding: 18px 24px;
+      pointer-events: none;  /* container never blocks the page */
+    }
+    .floating-topmenu .login-btn {
+      pointer-events: auto;
+      background: var(--accent, #06b6d4); color: #04121a;
+      padding: 7px 22px; border-radius: 8px;
+      text-decoration: none; font-weight: 600; font-size: 14px;
+      font-family: var(--mono, monospace);
+      transition: background 0.2s;
+    }
+    .floating-topmenu .login-btn:hover { background: var(--accent-hover, #0891b2); }
+
+    /* Legal footer */
+    .legal-footer {
+      position: relative; z-index: 2;   /* paint above the fixed graph canvas */
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem 2rem;
+      padding: 2.5rem 2.5rem 3rem;
+      background: var(--bg);
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-family: var(--mono);
+    }
+    .footer-logo { line-height: 0; }
+    .footer-logo img {
+      height: 44px;
+      width: auto;
+      opacity: 0.85;
+      filter: drop-shadow(0 0 14px rgba(34, 211, 238, 0.25));
+      transition: opacity 0.2s, filter 0.2s;
+    }
+    .footer-logo:hover img {
+      opacity: 1;
+      filter: drop-shadow(0 0 18px rgba(34, 211, 238, 0.45));
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+    }
+    .legal-footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .legal-footer a:hover { color: var(--accent); }
+
+    /* Narrow: the split hero stacks, video centred — investors.html's own
+       collapse (`.doc-grid { grid-template-columns: minmax(0, 1fr) }`). */
+    @media (max-width: 760px) {
+      .doc-grid { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+      #beat-hero h1, #beat-hero .hero-sub { text-align: center; }
+      #beat-hero .hero-sub { margin-left: auto; margin-right: auto; }
+      #beat-hero .doc-copy { text-align: center; }
+      #beat-hero .cta-start { margin-top: 1.5rem; }
+      .video { width: 100%; max-width: 190px; margin: 0 auto; }
+      .video figcaption { text-align: center; }
+      .outcomes { grid-template-columns: 1fr; gap: 0.6rem; max-width: 320px; }
+    }
+
+    /* Short viewports: a beat is a fixed full-height overlay with no scroll of
+       its own, so centred content taller than the window is cut at BOTH edges
+       and unreachable (the document scroll is consumed by ScrollTrigger). The
+       split hero is far taller than the text-only hero this replaced — the
+       video alone is 398px — so the hatch is widened from product.html's 520px
+       (`test_each_tall_beat_declares_the_css_escape_hatch` only floors it at
+       480px) and extended to every beat whose copy can exceed a landscape
+       phone's viewport. `justify-content: flex-start` + `overflow-y: auto` lets
+       the stack scroll instead of clipping. */
+    @media (max-height: 820px) {
+      #beat-hero, #beat-intro, #beat-compute, #beat-ingest, #beat-organize,
+      #beat-reason, #beat-onboard {
+        justify-content: flex-start; overflow-y: auto;
+      }
+      /* The video is 398 px tall at its 224 px width — taller than a landscape
+         phone's whole viewport, so on a short window it is what pushes the CTA
+         out of reach first. Capping it here keeps the copy on the first screen
+         in landscape (and shortens the scroll in portrait). */
+      .video { max-width: 170px; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Floating top menu (#1288): transparent, cyan Login top-right → /auth -->
+  <div class="floating-topmenu">
+    <a class="login-btn" href="/auth">Login</a>
+  </div>
+  <canvas id="graph-canvas"></canvas>
+  <div id="vignette"></div>
+
+  <div id="scroll-wrapper">
+    <!-- ══ 1. Hero ═══════════════════════════════════════════════════════ -->
+    <section id="beat-hero" class="beat">
+      <div class="doc-grid">
+        <div class="doc-copy">
+          <h1>A Superbrain for <span>Founders &amp; Product Teams</span></h1>
+          <p class="hero-sub">A million moving pieces. One coherent &amp; logical picture.</p>
+          <!-- The owner's primary CTA. Campaign tags, so this page's signup
+               funnel is separable from /tortoise's in the same PostHog project
+               (the experiment's denominator — see the tracking script below). -->
+          <a class="cta-start hero-cta"
+             data-cta="primary"
+             href="/auth?utm_source=tortoise-for-product-teams&amp;utm_medium=cta&amp;utm_campaign=tortoise-for-product-teams">Connect your agent →</a>
+          <p class="hero-links">
+            <a data-cta="secondary" href="/tortoise/docs?utm_source=tortoise-for-product-teams&amp;utm_medium=hero&amp;utm_campaign=tortoise-for-product-teams">Browse the docs →</a> ·
+            <a data-cta="secondary" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">GitHub repo →</a> ·
+            <a data-cta="secondary" href="/blog?utm_source=tortoise-for-product-teams&amp;utm_medium=hero&amp;utm_campaign=tortoise-for-product-teams">Read the blog →</a>
+          </p>
+        </div>
+
+        <figure class="video">
+          <!-- Self-hosted, exactly as on investors.html: an owned <video> paints
+               the footage and nothing else, where a YouTube/Vimeo embed would
+               add its own title bar, avatar, share buttons and end-card grid.
+               `preload="none"` means the file is not fetched until the visitor
+               asks for it. Both assets are the design-partner page's, reused:
+               they name the document generically ("Tortoise / 1-minute
+               introduction") and carry no audience-specific copy, so no new
+               asset or encoding is required. -->
+          <div class="frame" id="video-frame">
+            <video id="video" playsinline preload="none"
+                   poster="/assets/design-partners-intro-poster.jpg"
+                   aria-label="Tortoise — 1-minute introduction">
+              <source src="/assets/design-partners-intro.mp4" type="video/mp4">
+            </video>
+            <button class="overlay" type="button" id="video-play"
+                    aria-label="Play the 1-minute introduction">
+              <span class="play" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+              </span>
+            </button>
+          </div>
+          <figcaption>1-minute video</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- ══ 2. Intro ══════════════════════════════════════════════════════ -->
+    <section id="beat-intro" class="beat workflow">
+      <div class="rule" aria-hidden="true"></div>
+      <p>Free up time from repetitive explaining, supervision, and managing dependencies.</p>
+      <p>When agents (and people) understand goal cascades, root causes, trade-offs, and dependencies, they autonomously and reliably advance your business.</p>
+      <p>Tortoise builds a logical model of your business, product, and code. It connects goals, insights and analytics, decisions, and execution so you, your team, and agents have the whole context, current and logical.</p>
+    </section>
+
+    <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
+    <section id="beat-compute" class="beat workflow">
+      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decision with superintelligence.</p>
+      <!-- investors.html's `.outcomes` component: two lists, green ↑ / gold ↓,
+           collapsing to one column on narrow viewports. The PDF's labels. -->
+      <div class="outcomes">
+        <ul class="up">
+          <li><span class="a">↑</span><span>Agent Autonomy &amp; Token efficiency</span></li>
+          <li><span class="a">↑</span><span>Decision quality</span></li>
+          <li><span class="a">↑</span><span>Alignment</span></li>
+        </ul>
+        <ul class="down">
+          <li><span class="a">↓</span><span>Constant Supervision</span></li>
+          <li><span class="a">↓</span><span>Drift &amp; Regressions</span></li>
+          <li><span class="a">↓</span><span>Slack Noise &amp; Meetings</span></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ══ 4-6. The three steps ══════════════════════════════════════════ -->
+    <section id="beat-ingest" class="beat workflow">
+      <h2><span class="beat-num">01</span> · Ingest Any Source</h2>
+      <p>Automatically ingest agent sessions from any harness, GitHub issues, documents, chat messages, systems of record, BI, or any other data you want to connect.</p>
+    </section>
+    <section id="beat-organize" class="beat workflow">
+      <h2><span class="beat-num">02</span> · Organize Your Knowledge</h2>
+      <p>Our ontology engine builds a logical model of how your business, product, and code work, turning loose facts into knowledge. With deduplication and superseding. This logical model enables your agents to not just retrieve facts but understand your logic, eliminating drift and regressions.</p>
+    </section>
+    <section id="beat-reason" class="beat workflow">
+      <h2><span class="beat-num">03</span> · Reason</h2>
+      <p>Improve decision-making with super intelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
+    </section>
+
+    <!-- ══ 7. Onboarding ═════════════════════════════════════════════════ -->
+    <section id="beat-onboard" class="beat workflow">
+      <h2>Onboard in 5 minutes, without learning another UI.</h2>
+      <p>Tortoise connects via MCP or SDK, so you and your agents can use it in Codex, Claude Code &amp; Web, ChatGPT, Cursor, Pi, or any other harness.</p>
+    </section>
+  </div>
+
+  <!-- ══ 8. Pricing — normal document-flow section, FORKED from /tortoise ══
+       The PDF's own instruction: "[pricing section, fork premiselabs.co/tortoise
+       one]". Forked, and rendering from the SAME source as /tortoise —
+       `/assets/tortoise-pricing.js` — so the two pages cannot quote different
+       prices. ⛔ This block is byte-identical to product.html's
+       `#pricing-grid`/usage-line/selfhost markup, and
+       `tests/test_website_static.py::TestPricingSourceIsShared` asserts that:
+       edit both together or neither. The static cards are the no-JS fallback
+       (see the long comment there), pinned to the shared source by
+       `TestStaticPricingFallback`. -->
+    <section id="pricing-section" class="content-section">
+      <h2>Pricing</h2>
+      <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
+
+      <div class="pricing-toggle">
+        <!-- The statically-ACTIVE pill follows `display.annual_default` (true), so a
+             no-JS reader is not shown Annual figures under a highlighted Monthly
+             pill. setBilling() re-applies the same state on load. -->
+        <button id="btn-monthly" aria-pressed="false" onclick="setBilling('monthly')">Monthly</button>
+        <button id="btn-annual" class="active" aria-pressed="true" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
+      </div>
+
+      <!-- The cards are RENDERED IN THE SOURCE, not only by JS. renderPricing()
+             replaces this markup on load (and on every Monthly/Annual toggle), so
+             a JS browser sees the JS render — but a reader that does not run JS
+             (a crawler, or an AI evaluator reading the page) otherwise sees the
+             toggle above an EMPTY grid. The static cards carry the ANNUAL
+             figures because that is `display.annual_default`, so there is no
+             flash before the JS runs. Parity with the PRICING mirror is pinned by
+             tests/test_website_static.py::TestStaticPricingFallback — edit both
+             sides together. -->
+      <div class="pricing-grid" id="pricing-grid" aria-live="polite">
+        <div class="pricing-card">
+          <h3>Free</h3>
+          <div class="price">$0<span>/mo</span></div>
+          <p class="billing">Free forever</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>1 graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>1 collaborator</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>2 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="x">✕</span> <span class="muted">Overage</span></div>
+          </div>
+          <a href="/auth" class="btn secondary">Start free</a>
+        </div>
+        <div class="pricing-card">
+          <h3>Solo</h3>
+          <div class="price">$15<span>/mo</span></div>
+          <p class="billing">$180 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>2 graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>1 collaborator</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>25,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>5 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+        <div class="pricing-card popular">
+          <span class="popular-tag">Most popular</span>
+          <h3>Builder</h3>
+          <div class="price">$20<span>/mo</span></div>
+          <p class="billing">$240 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>2 collaborators</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>50,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>100,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+        <div class="pricing-card">
+          <h3>Team</h3>
+          <div class="price">$119<span>/mo</span></div>
+          <p class="billing">$1428 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited collaborators (invites + RBAC)</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>200,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>600,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>20 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Priority support</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+      </div>
+
+      <p class="pricing-usage" id="pricing-usage-line">$5 per additional 10k write ops — applies to Solo, Builder, Team</p>
+      <p style="font-size:0.75rem;color:var(--text-dim);margin-top:0.75rem;">Use of the service is subject to our <a href="/tos" style="color:var(--accent);text-decoration:none;">Terms of Service</a></p>
+
+      <div class="selfhost" id="selfhost-section">
+        <h4>Self-hosted</h4>
+        <p class="license">BSL 1.1 + $5M AUG (free &lt;$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant</p>
+        <div class="actions">
+          <a href="/tortoise/self-hosted">Self-hosted setup guide →</a>
+          <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
+          <a href="/auth">Migrate to cloud anytime →</a>
+          <a href="/tortoise/license">License →</a>
+        </div>
+      </div>
+  </section>
+
+  <!-- ══ 9. Closing CTA + footer (product.html's, unchanged) ═══════════ -->
+  <section id="cta-section" class="content-section">
+      <div class="social-links">
+        <a class="social-link" href="https://x.com/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on X (Twitter)">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231L18.244 2.25Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z"/></svg>
+        </a>
+        <a class="social-link" href="https://www.linkedin.com/company/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on LinkedIn">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+        </a>
+      </div>
+  </section>
+
+  <!-- ONE pricing source (#13645) — the same file /tortoise loads. -->
+  <script src="/assets/tortoise-pricing.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+  <script>
+    gsap.registerPlugin(ScrollTrigger);
+
+    /* ── Hero video (investors.html's play handler, verbatim) ────────────
+       The poster and the play button are the only things on the footage
+       before activation. On click the overlay is removed and the native
+       player takes over — no third-party chrome is ever injected. */
+    (function () {
+      var overlay = document.getElementById('video-play');
+      var video = document.getElementById('video');
+      if (!overlay || !video) { return; }
+      overlay.addEventListener('click', function () {
+        overlay.parentNode.removeChild(overlay);
+        video.controls = true;
+        var p = video.play();
+        // A rejected play() is not worth shouting about: the native controls
+        // are already visible, so the visitor can simply press play.
+        if (p && p.catch) { p.catch(function () {}); }
+        video.focus();
+      });
+    })();
+
+    /* ── Canvas + graph (product.html's scroll-scrubbed graph) ──────────── */
+    const canvas = document.getElementById('graph-canvas');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      canvas.width = window.innerWidth * devicePixelRatio;
+      canvas.height = window.innerHeight * devicePixelRatio;
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+    }
+    window.addEventListener('resize', () => {
+      resize();
+      // Redistribute nodes to new viewport
+      distributeNodes();
+    });
+
+    const w = () => window.innerWidth;
+    const h = () => window.innerHeight;
+
+    // ponytail: ~18 nodes, scattered → connected graph
+    const NODE_COUNT = 18;
+    const nodes = [];
+
+    function distributeNodes() {
+      const margin = 120;
+      const cw = w(); const ch = h();
+      const cx = cw / 2; const cy = ch / 2;
+      const spread = Math.min(cw, ch) * 0.20;
+
+      // Mutate existing nodes in-place so GSAP's tween references stay alive
+      if (nodes.length === 0) {
+        for (let i = 0; i < NODE_COUNT; i++) {
+          nodes.push({ _x: 0, _y: 0, r: 0, connections: [], accent: false });
+        }
+      }
+
+      for (let i = 0; i < nodes.length; i++) {
+        const angle = (i / nodes.length) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+        const r = spread * (0.4 + Math.random() * 0.6);
+        nodes[i]._x = 30 + Math.random() * 50;
+        nodes[i]._y = 40 + Math.random() * 50;
+        nodes[i].sx = cx + (Math.random() - 0.5) * spread * 1.8;
+        nodes[i].sy = cy + (Math.random() - 0.5) * spread * 1.8;
+        nodes[i].tx = cx + Math.cos(angle) * r;
+        nodes[i].ty = cy + Math.sin(angle) * r;
+        nodes[i].r = 1.2 + Math.random() * 1.3;
+        nodes[i].tr = 1.8 + Math.random() * 2.2;
+        nodes[i].accent = Math.random() > 0.7;
+      }
+
+      // Build connections
+      nodes.forEach((a, i) => {
+        a.connections = [];
+        const dists = nodes.map((b, j) => j === i ? Infinity : Math.hypot(b.tx - a.tx, b.ty - a.ty));
+        const sorted = dists.map((d, j) => ({ d, j })).sort((x, y) => x.d - y.d);
+        const count = 2 + Math.floor(Math.random() * 2);
+        for (let k = 0; k < count && k < sorted.length; k++) {
+          if (!a.connections.includes(sorted[k].j)) a.connections.push(sorted[k].j);
+        }
+      });
+    }
+
+    resize();
+    distributeNodes();
+
+    const tl = gsap.timeline({
+      scrollTrigger: {
+        trigger: '#scroll-wrapper',
+        start: 'top top',
+        end: 'bottom bottom',
+        scrub: 0.8,
+      }
+    });
+
+    nodes.forEach((node, i) => {
+      const stagger = i * 0.02;
+      // Function-based values: GSAP re-reads node.sx/tx each tick, so
+      // distributeNodes() on resize re-targets the running tweens (the
+      // graph actually redistributes to the new viewport — #733-5).
+      tl.to(node, { _x: () => node.sx, _y: () => node.sy, r: () => node.r, duration: 0.12 }, 0.10 + stagger);
+      tl.to(node, { _x: () => node.tx, _y: () => node.ty, r: () => node.tr, duration: 0.5 }, 0.22 + stagger);
+    });
+
+    /* ── Render loop ── */
+    function draw() {
+      ctx.clearRect(0, 0, w(), h());
+
+      const progress = tl.totalProgress();
+      const visible = progress < 0.08 ? 0 : Math.min(1, (progress - 0.08) / 0.10);
+      const edgeAlpha = visible * (0.05 + progress * 0.20);
+      const nodeAlpha = visible * (0.30 + progress * 0.40);
+
+      nodes.forEach(node => {
+        node.connections.forEach(targetIdx => {
+          const target = nodes[targetIdx];
+          ctx.beginPath();
+          ctx.moveTo(node._x, node._y);
+          ctx.lineTo(target._x, target._y);
+          ctx.strokeStyle = `rgba(6, 182, 212, ${edgeAlpha})`;
+          ctx.lineWidth = 0.5 + progress * 0.6;
+          ctx.stroke();
+        });
+      });
+
+      // Nodes
+      nodes.forEach(node => {
+        const color = node.accent
+          ? `rgba(74, 222, 128, ${nodeAlpha})`
+          : `rgba(6, 182, 212, ${nodeAlpha})`;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(node._x, node._y, node.r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Subtle glow on connected nodes
+        if (progress > 0.4) {
+          ctx.fillStyle = `rgba(6, 182, 212, ${nodeAlpha * 0.3})`;
+          ctx.beginPath();
+          ctx.arc(node._x, node._y, node.r * 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      });
+
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    /* ── Content beats (opacity scrubbed to scroll) ──
+       SEVEN beats, not product.html's six: hero · intro · compute · 01 · 02 ·
+       03 · onboarding. The spans are RETUNED for seven, and the binding
+       constraint is NOT the beat count — it is that a `${pct}% top` trigger
+       resolves against the wrapper's FULL height (630vh) while the reader can
+       only scroll `630vh − 100vh`, i.e. the last ~16% of trigger range is
+       unreachable. So the LAST beat's fade-in must complete below ~84%, or it
+       never becomes fully visible (product.html's six fits: its last fade-in
+       ends at 0.83). 0.085 + 0.038 gives step 0.123, putting the seventh
+       beat's fade-in at 0.738-0.768 (≈484vh of the 530vh reachable) and its
+       fade-out just as the pricing section arrives at 530vh. */
+    const beats = ['beat-hero', 'beat-intro', 'beat-compute', 'beat-ingest',
+                   'beat-organize', 'beat-reason', 'beat-onboard'];
+
+    // ── Canvas zoom during the workflow beats (4-6: 01 Ingest → 03 Reason) ──
+    // The graph animation reads as noise behind the workflow text. Zoom the
+    // canvas (CSS transform only — doesn't touch the drawing) so the
+    // background recedes: starts at 1x for beats 1-3 (hero, intro, compute),
+    // zooms gradually through the workflow beats, reaching 2.2x by the last
+    // one (03 · Reason, peak 0.70).
+    gsap.fromTo(canvas,
+      { scale: 1 },
+      {
+        scale: 2.2,
+        scrollTrigger: {
+          trigger: '#scroll-wrapper',
+          start: '34% top',   // zoom begins as the compute beat ends (~0.34)
+          end: '72% top',     // reaches 2.2x by the last workflow beat (~0.72)
+          scrub: 0.6,
+        },
+      }
+    );
+
+    const beatSpan = 0.085;
+    const gapSpan = 0.038;
+    const step = beatSpan + gapSpan;
+
+    /* Toggle .pe-on with visibility so text is selectable only while its beat
+       is on screen — invisible beats stay click-through (#744). */
+    const syncPE = (el) => {
+      el.classList.toggle('pe-on', parseFloat(gsap.getProperty(el, 'opacity')) > 0.05);
+    };
+
+    beats.forEach((id, i) => {
+      const el = document.getElementById(id);
+      const start = i * step;
+      const peak = start + beatSpan;
+
+      if (i === 0) {
+        // Hero starts visible (CSS opacity: 1) — selectable from load.
+        el.classList.add('pe-on');
+        gsap.to(el, {
+          opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: '1% top',
+            end: '6% top',
+            scrub: 0.5,
+          }
+        });
+        return;
+      }
+
+      const fadeInDur  = i === 1 ? 0.085 : 0.03;
+      const fadeInStart = i === 1 ? 0.045 : start;
+
+      gsap.fromTo(el,
+        { opacity: 0, y: 20 },
+        {
+          opacity: 1, y: 0,
+          onUpdate: () => syncPE(el),
+          scrollTrigger: {
+            trigger: '#scroll-wrapper',
+            start: `${fadeInStart * 100}% top`,
+            end: `${(fadeInStart + fadeInDur) * 100}% top`,
+            scrub: 0.5,
+          }
+        }
+      );
+
+      // Fade out at each beat's natural peak with a fast finish — the gap
+      // (gapSpan 0.038 > fadeOut 0.03) guarantees the NEXT beat fades in only
+      // after THIS beat has fully disappeared.
+      const fadeOutStart = peak;
+      gsap.to(el, {
+        opacity: 0, y: -20,
+        onUpdate: () => syncPE(el),
+        scrollTrigger: {
+          trigger: '#scroll-wrapper',
+          start: `${fadeOutStart * 100}% top`,
+          end: `${(fadeOutStart + 0.03) * 100}% top`,
+          scrub: 0.5,
+        }
+      });
+    });
+
+    /* ── Pricing (renders window.TORTOISE_PRICING — the ONE source) ──────
+       Same functions as product.html's, so both pages render one table one
+       way. fmtPrice delegates to the shared module's rounding contract. */
+    const PRICING = window.TORTOISE_PRICING;
+    let currentBilling = 'monthly';
+
+    function fmtPrice(price) {
+      return window.tortoiseFmtPrice(
+        price, currentBilling, PRICING.display.annual_discount_pct);
+    }
+
+    function checkSvg() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+
+    function renderPricing() {
+      const grid = document.getElementById('pricing-grid');
+      const names = ['free', 'solo', 'pro', 'team'];
+      // #4336: display names — the tier KEY stays `pro` (mirror parity,
+      // Stripe ids, pricing.json); only the rendered name changes.
+      const labels = { free: 'Free', solo: 'Solo', pro: 'Builder', team: 'Team' };
+      // One resolver for every rendered name (#4815): a tier present in `names`
+      // but missing from `labels` must never print "undefined" in customer copy.
+      const displayName = (n) => labels[n] || (n.charAt(0).toUpperCase() + n.slice(1));
+      grid.innerHTML = names.map((name) => {
+        const t = PRICING.tiers[name];
+        const label = displayName(name);
+        const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
+        const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
+        const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
+        const cta = name === 'free' ? 'Start free' : 'Get started';
+        return `<div class="pricing-card${t.popular ? ' popular' : ''}">
+          ${popular}
+          <h3>${label}</h3>
+          <div class="price">${fmtPrice(t.price).big}<span>/mo</span></div>
+          <p class="billing">${fmtPrice(t.price).total}</p>
+          <div class="features">${features}${excluded}</div>
+          <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
+        </div>`;
+      }).join('');
+      // Names the tiers the shared mirror marks as metered, and agrees with it
+      // by construction. The drift guards live in
+      // tests/test_website_static.py::test_overage_flag_mirrors and
+      // tests/test_pricing_tiers.py::test_overage_tiers_list_agrees_with_tier_flags.
+      const overageTiers = names.filter((n) => PRICING.tiers[n].overage).map(displayName);
+      document.getElementById('pricing-usage-line').textContent = overageTiers.length
+        ? `${PRICING.display.overage_line} — applies to ${overageTiers.join(', ')}`
+        : PRICING.display.overage_line;
+    }
+
+    function renderSelfHost() {
+      document.getElementById('selfhost-section').innerHTML = `
+        <h4>Self-hosted</h4>
+        <p class="license">${PRICING.display.license_self_hosted}</p>
+        <div class="actions">
+          <a href="/tortoise/self-hosted">Self-hosted setup guide →</a>
+          <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
+          <a href="/auth">Migrate to cloud anytime →</a>
+          <a href="/tortoise/license">License →</a>
+        </div>`;
+    }
+
+    function setBilling(mode) {
+      currentBilling = mode;
+      document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
+      document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
+      document.getElementById('btn-monthly').setAttribute('aria-pressed', String(mode === 'monthly'));
+      document.getElementById('btn-annual').setAttribute('aria-pressed', String(mode === 'annual'));
+      renderPricing();
+    }
+
+    // Guarded: if /assets/tortoise-pricing.js did not load there is no table to
+    // render, and the static cards are already correct — throwing here would
+    // only blank them.
+    if (PRICING) {
+      if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
+      renderSelfHost();
+    }
+
+    /* ── Campaign funnel (#13645) ────────────────────────────────────────
+       This page is an EXPERIMENT, so it has to carry its own denominator.
+       Three events, named here so a later reader can see the funnel without
+       opening a dashboard config:
+
+         product_teams_view           once per visit, carrying the utm_*
+                                      parameters (and the referrer) that
+                                      carried the visitor
+         product_teams_cta_primary    a click that enters the sign-up funnel
+                                      (the hero CTA and the pricing /
+                                      self-host CTAs, which all POST a visitor
+                                      to /auth)
+         product_teams_cta_secondary  a click on the hero's docs / GitHub /
+                                      blog row
+
+       CONSENT IS THE GATE, and it is /consent.js's state, not ours: PostHog
+       is loaded opted OUT, so a capture before consent is dropped anyway —
+       but it would also be a beacon, and blocked requests read as "nobody
+       clicked". So track() refuses unless the state is exactly "granted",
+       and the view event waits for /consent.js's `tortoise:consent` event —
+       without it, a visitor who accepts AFTER this script ran would have had
+       their page view dropped, and the funnel would show clicks with no
+       denominator.
+
+       CAMPAIGN TAGS: every link this page controls that points back into our
+       own surfaces (the CTA to /auth, the docs and blog links) carries
+       utm_campaign=tortoise-for-product-teams + utm_source + utm_medium, so
+       this page's traffic is separable from /tortoise's in the same project.
+       The pricing cards' hrefs are NOT tagged in markup: that block is
+       byte-identical to product.html's on purpose (asserted by
+       tests/test_website_static.py::TestPricingSourceIsShared), so their
+       clicks are counted by the event below instead. */
+    (function () {
+      var EVENTS = {
+        view: 'product_teams_view',
+        primary: 'product_teams_cta_primary',
+        secondary: 'product_teams_cta_secondary'
+      };
+      var CAMPAIGN = 'tortoise-for-product-teams';
+      var viewed = false;
+
+      function campaignParams() {
+        var params = new URLSearchParams(window.location.search);
+        var out = { campaign: CAMPAIGN };
+        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+        for (var i = 0; i < keys.length; i++) {
+          var value = params.get(keys[i]);
+          if (value) out[keys[i]] = value;
+        }
+        if (document.referrer) out.referrer = document.referrer;
+        return out;
+      }
+
+      function consented() {
+        return typeof window.consentState === 'function'
+          && window.consentState() === 'granted';
+      }
+
+      function track(event, props) {
+        if (!consented()) return;
+        if (!window.posthog || typeof window.posthog.capture !== 'function') return;
+        window.posthog.capture(event, props || {});
+      }
+
+      function trackView() {
+        if (viewed || !consented()) return;
+        viewed = true;
+        track(EVENTS.view, campaignParams());
+      }
+
+      window.addEventListener('tortoise:consent', trackView);
+
+      document.addEventListener('click', function (ev) {
+        var el = ev.target && ev.target.closest
+          ? ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')
+          : null;
+        if (!el) return;
+        var primary = el.getAttribute('data-cta') === 'primary'
+          || (!el.hasAttribute('data-cta') && el.closest('#pricing-section'));
+        track(primary ? EVENTS.primary : EVENTS.secondary, {
+          campaign: CAMPAIGN,
+          surface: el.hasAttribute('data-cta') ? 'hero' : 'pricing',
+          href: el.getAttribute('href')
+        });
+      });
+    })();
+  </script>
+
+  <footer class="legal-footer">
+    <a href="https://premiselabs.co" class="footer-logo" aria-label="Premise Labs">
+      <img src="/assets/premiselabs-logo.png" alt="Premise Labs" width="160" height="98" />
+    </a>
+    <nav class="footer-links" aria-label="Footer">
+      <!-- The route BACK to the canonical product page: this page tells the
+           niche story and does not duplicate /tortoise's, so the full product
+           story is one click away rather than re-told here (owner decision,
+           2026-11-12). -->
+      <a href="/tortoise?utm_source=tortoise-for-product-teams&amp;utm_medium=footer&amp;utm_campaign=tortoise-for-product-teams">Product</a>
+      <a href="/blog">Blog</a>
+      <a href="/tortoise/faq">FAQ</a>
+      <a href="/privacy">Privacy Policy</a>
+      <a href="/tos">Terms of Service</a>
+      <a href="/tortoise/license">License</a>
+      <a href="/dpa">DPA</a>
+      <a href="/tortoise/security">Security</a>
+      <a href="/contact">Contact</a>
+    </nav>
+  </footer>
+<script src="/consent.js" defer></script>
+</body>
+</html>

@@ -121,16 +121,16 @@ contain):
 | the tokenizer | `tortoise/sparse.py:662` `tokenize_sparse_query` | splits on **every** `[^a-z0-9]` (`_SPLIT_RE` at `:67`) — **including `_`** |
 | the query term cap | `tortoise/sparse.py:72` `DEFAULT_MAX_OR_TERMS = 12` | 12 terms, longest-first |
 | the degenerate branch | `sparse.py:943` — `if degenerate and not composites:` → `return escape_redisearch_literal(query)` | when ≤1 token survives, the whole query is the **escaped raw string** (⛔ NOT the `max_terms < 1` guard two lines above, whose `return` is byte-identical) |
-| the leg | `tortoise/search_engine.py:2888` `run_fts_query`, Cypher at `:3100-3109` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
-| the tie key | `search_engine.py:2730` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
-| the score discard | `tortoise/search_engine.py:4921` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
-| the index | `tortoise/projection/__init__.py:20845` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:21288`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21738` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
+| the leg | `tortoise/search_engine.py:2945` `run_fts_query`, Cypher at `:3157-3166` | `CALL db.idx.fulltext.queryNodes('Object', $query) … ORDER BY score DESC, <recency tie> LIMIT` |
+| the tie key | `search_engine.py:2787` `recency_tie_clause` | `coalesce(<recency>,'') DESC, coalesce(<id>,'') DESC` — the **id key is DESC on every label** |
+| the score discard | `tortoise/search_engine.py:5074` `for rank, (pid, _score) in enumerate(ranked)` | **why this is a recall question** |
+| the index | `tortoise/projection/__init__.py:21004` `("Object", "name", "FULLTEXT")` (declared in `_REQUIRED_FULLTEXT_INDEXES`), created by `_create_fulltext_index` (def at `:21447`) from the `_FULLTEXT_INDEX_LABEL_FIELDS` loop at `:21889` | **no `OPTIONS`** → RediSearch defaults (language `english`, default stopwords, default tokenizer) |
 
 ---
 
 ## 2. Method — paired, pinned, controlled, and where the control breaks
 
-**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4840`), so on
+**Why recall and not ranking.** `rrf_fusion` discards each leg's score (`search_engine.py:4993`), so on
 the multi-leg read the scorer can only act through `ORDER BY … LIMIT`; the one arm where the magnitude
 survives uses it as a *floor* (`SEARCH-ARCHITECTURE.md` §6.2 says the same). A different scorer is
 therefore a **recall** lever (`#12186` round 2; `#12308` A-3). So M3 reports `recall@k` of the FTS leg
@@ -194,7 +194,7 @@ reaches the population size **exactly** (`==`, not `>=` — an over-count means 
 this run wrote) and **refuses** on timeout, and it **refuses a catalogue row that does not carry a
 FULLTEXT index over `name`**: a count cannot tell `Object.name` from an `Object.id` index, and it cannot
 tell FULLTEXT from the RANGE index the sweep creates on `name` in every graph — the DDL loop over
-`_RANGE_INDEX_LABEL_PROPS` (`tortoise/projection/__init__.py:6798` for Object), which
+`_RANGE_INDEX_LABEL_PROPS` (`tortoise/projection/__init__.py:6957` for Object), which
 `_REQUIRED_RANGE_INDEXES` merely REQUIRES — a
 wrong-kind index reaches the same `numDocuments` and answers every query with zero rows, so it would
 publish a clean-looking 0.0 baseline, and the leg's own trace cannot see it (measured on docker

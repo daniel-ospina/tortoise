@@ -1026,6 +1026,13 @@ EXPECTED_CLASSIFICATION = {
         # to DIFFER per deployment is the one an undeclared surface lets drift with no gate.
         "CONSENT_AS_ORIGIN": ("recommended", ["production"]),
         "CONSENT_TOKEN_ISSUER": ("recommended", ["production"]),
+        # #10794: the `kid`-keyed set. `recommended` because absence IS the single-secret mode and
+        # stays fully supported — the classification records "a deployment without it still works",
+        # which is exactly true here (one key, kid `consent-1`). Declared so the preflight can SEE
+        # them and so an operator setting a set on one half only is a readable surface rather than a
+        # silent split (the fingerprint publishes the CURRENT kid's key).
+        "CONSENT_TOKEN_KEYS": ("recommended", ["production"]),
+        "CONSENT_TOKEN_CURRENT_KID": ("recommended", ["production"]),
     },
 }
 

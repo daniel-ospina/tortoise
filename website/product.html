@@ -512,6 +512,13 @@
       </div>
   </section>
 
+  <!-- ONE pricing source (#13645). This page's tier table used to be inlined here;
+       it now lives in /assets/tortoise-pricing.js, which /tortoise-for-product-teams
+       loads too, so a price changes in exactly one place and the two pages cannot
+       quote different numbers. The static cards further down stay a no-JS
+       fallback, pinned to that source by
+       tests/test_website_static.py::TestStaticPricingFallback. -->
+  <script src="/assets/tortoise-pricing.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
   <script>
@@ -773,36 +780,21 @@
       }
     }
 
-    // ── Pricing section (data mirror of product/pricing.json — single source) ──
-    const PRICING = {
-      display: {
-        annual_discount_pct: 20,
-        annual_default: true,
-        license_self_hosted: "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
-        overage_line: "$5 per additional 10k write ops",
-      },
-      tiers: {
-        free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys", "Unlimited integrations"], excluded: ["Overage"] },
-        solo: { price: 19, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: true, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
-        pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
-        team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
-      }
-    };
+    // ── Pricing section ──
+    // The tier table is NOT here any more: it is `window.TORTOISE_PRICING` from
+    // /assets/tortoise-pricing.js, the ONE source `/tortoise-for-product-teams`
+    // also renders from (#13645). It remains a mirror of product/pricing.json,
+    // pinned by tests/test_website_static.py::TestMirrorNumericParity.
+    const PRICING = window.TORTOISE_PRICING;
 
     let currentBilling = 'monthly';
 
     function fmtPrice(price) {
-      // Annual: effective PER-MONTH price big, total billed small (common practice).
-      // Round ONCE (per-month), then derive the total so the two never disagree
-      // (e.g. $7/mo × 12 must equal $84, not $86).
-      if (currentBilling === 'annual') {
-        if (price === 0) return { big: '$0', total: 'Free forever' };
-        const disc = PRICING.display.annual_discount_pct / 100;
-        const perMonth = Math.max(1, Math.round(price * 12 * (1 - disc) / 12));
-        const total = perMonth * 12;
-        return { big: `$${perMonth}`, total: `$${total} billed annually` };
-      }
-      return { big: `$${price}`, total: 'Billed monthly' };
+      // The rounding contract lives with the data, in the shared module, so the
+      // two pages cannot format one price two ways — see
+      // window.tortoiseFmtPrice's own comment for why it rounds ONCE.
+      return window.tortoiseFmtPrice(
+        price, currentBilling, PRICING.display.annual_discount_pct);
     }
 
     function checkSvg() {
@@ -869,9 +861,14 @@
       renderPricing();
     }
 
-    // Init pricing (annual is default per pricing.json display.annual_default)
-    if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
-    renderSelfHost();
+    // Init pricing (annual is default per pricing.json display.annual_default).
+    // Guarded: if /assets/tortoise-pricing.js did not load there is no table to
+    // render, and the static cards below are already correct — throwing here
+    // would only blank them.
+    if (PRICING) {
+      if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
+      renderSelfHost();
+    }
 
   </script>
 

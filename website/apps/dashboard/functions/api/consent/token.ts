@@ -23,8 +23,10 @@
  *     this path (§9 class 3).
  *
  * WHAT IT MINTS
- * The §2.1 token, HMAC-SHA256, `kid: consent-1`, bound to the four authorize params of the
- * flow the caller names (§2.2). Identity is `sessions.user_id` — NOT anything the caller
+ * The §2.1 token, HMAC-SHA256, `kid: <the deployment's current kid>` (`consent-1` on a
+ * single-secret deployment), bound to the four authorize params of the flow the caller names (§2.2).
+ * 🛑 The kid is LOAD-BEARING since #10794: the AS selects the verification key by it and refuses one
+ * it does not hold, so this route must stamp the kid the SAME key set resolved `secret` from. Identity is `sessions.user_id` — NOT anything the caller
  * sends. `bind` is taken from the RECORDED attempt row, not from the request body, so the
  * token asserts the flow this BFF actually started.
  *
@@ -46,6 +48,7 @@ import {
 import { getAccessTokenForSession } from "../../_shared/auth/token";
 import {
   attemptKeyHash,
+  consentCurrentKid,
   consentSecret,
   mintConsentToken,
   readConsentAttempt,
@@ -193,6 +196,11 @@ async function mint(request: Request, env: Env): Promise<Response> {
   if (!secret) {
     return corsJson(env, origin, { error: "unavailable", reason: "not_configured" }, 503);
   }
+  // The kid this token CLAIMS (#10794). Resolved from the same key set as `secret`, so the two
+  // cannot disagree about which key signs: a token whose header names a kid the AS does not hold is
+  // `401 invalid_token` on every redemption while this route answers 200 — the #10488 silent-split
+  // class, one field along. `undefined` (no usable set) already returned 503 above.
+  const kid = consentCurrentKid(env);
 
   // ── media type: a credentialed POST must be our JSON client, not a form post ───────
   const mediaType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
@@ -291,6 +299,7 @@ async function mint(request: Request, env: Env): Promise<Response> {
   try {
     const minted = await mintConsentToken({
       secret,
+      kid,
       issuer: consentTokenIssuer(env),
       userId: row.user_id,
       // Display only; never an authorization input (§2.1). Left null rather than fetched:

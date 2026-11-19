@@ -32,8 +32,10 @@
  *
  * WHAT IT DOES NOT DISCLOSE (argue, do not assert)
  * ----------------------------------------------
- * The value is `sha256(CONSENT_TOKEN_SECRET)[:12]` — 48 bits of a hash of a ≥32-byte, operator-set
- * key. It is not the key, not a prefix of the key, and not invertible. It hands a guessing attacker
+ * The value is `sha256(<the CURRENT signing key>)[:12]` — 48 bits of a hash of a ≥32-byte,
+ * operator-set key. 🛑 Under a key SET (#10794) that is the CURRENT kid's key: the field exists to
+ * answer "do the two halves SIGN with the same bytes", so fingerprinting a retired kid would report
+ * a working rotation as a split. It is not the key, not a prefix of the key, and not invertible. It hands a guessing attacker
  * NOTHING they do not already have: any guess can already be checked against the live verifier in
  * ONE request (`GET /oauth/consent/preview`, with the token in `X-Consent-Token`, answers
  * `signature does not verify`), so this field is

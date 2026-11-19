@@ -32,19 +32,32 @@ from tortoise.embeddings import EmbeddingModel
 def embedder_get_spy(monkeypatch):
     """Replace ``EmbeddingModel.get`` with a recorder + first-call signal.
 
-    Returns ``(calls, called)``: the recorded ``load_timeout`` args and an
-    event set the instant the embedder is asked for a model.
+    Returns ``(calls, called)``: one ``(load_timeout, thread_name)`` tuple per
+    call, and an event set the instant the embedder is asked for a model.
+
+    ``load_timeout`` is recorded because #13674 removed the pre-warm's own
+    ``300.0`` literal: the two-number shape (a pre-warm override beside a much
+    lower product default) described ONE load and made the timeout log name the
+    wrong bound, so the pre-warm now takes ``EmbeddingModel._LOAD_TIMEOUT_S``.
+    ``thread_name`` is recorded because the flag also gates ``warm_up``, whose
+    call is ALSO ``background_load()`` — the thread is what pins THIS call site
+    (``hosted_api._lifespan`` spawns it as ``embedding-prewarm``) rather than a
+    stray engine-init warm-up.
     """
-    calls: list[float | None] = []
+    calls: list[tuple[float | None, str]] = []
     called = threading.Event()
 
     def _get(_cls, load_timeout=None):
-        calls.append(load_timeout)
+        calls.append((load_timeout, threading.current_thread().name))
         called.set()
         return object()
 
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(_get))
     return calls, called
+
+
+#: The thread ``hosted_api._lifespan`` starts for the pre-warm.
+_PREWARM_THREAD = "embedding-prewarm"
 
 
 def test_flag_zero_skips_the_hosted_prewarm(monkeypatch, embedder_get_spy):
@@ -59,7 +72,7 @@ def test_flag_zero_skips_the_hosted_prewarm(monkeypatch, embedder_get_spy):
 
     assert calls == [], (
         "the hosted lifespan loaded the embedder despite "
-        f"TORTOISE_EMBEDDER_WARMUP=0: load_timeout={calls}"
+        f"TORTOISE_EMBEDDER_WARMUP=0: calls={calls}"
     )
 
 
@@ -73,6 +86,20 @@ def test_default_warms_the_embedder(monkeypatch, embedder_get_spy):
             "the hosted lifespan did not pre-warm the embedder by default"
         )
 
-    # 300.0 is the hosted pre-warm's dedicated cold-start window (#545);
-    # asserting it pins THIS call site, not a stray engine-init warm-up.
-    assert 300.0 in calls, f"hosted pre-warm did not load: calls={calls}"
+    # #13674: the pre-warm no longer passes a bound of its own. It used to pass
+    # ``load_timeout=300.0`` beside a 90.0 product default, so TWO declared
+    # numbers described one load and the timeout log named the wrong one. What
+    # this now pins is the property the old ``300.0 in calls`` assertion was
+    # really about: the call above is THIS call site, and it takes the one
+    # declared bound (the default) rather than a second literal that can drift.
+    prewarm_calls = [t for t, name in calls if name == _PREWARM_THREAD]
+    assert prewarm_calls, (
+        "the hosted lifespan pre-warm did not load the embedder on its own "
+        f"{_PREWARM_THREAD!r} thread: calls={calls}"
+    )
+    overrides = [t for t in prewarm_calls if t is not None]
+    assert not overrides, (
+        "the hosted pre-warm passed its own load bound "
+        f"({overrides}) — #13674 left ONE declared bound, so it must take "
+        f"EmbeddingModel._LOAD_TIMEOUT_S: calls={calls}"
+    )

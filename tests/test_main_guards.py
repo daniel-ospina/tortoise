@@ -50,13 +50,18 @@ _INGEST_WORK_ALLOWANCE_S = 180.0
 #: The budget this derivation replaced. Kept as a named value, not a literal, so
 #: the "must clear the old one" assertion below cannot drift from it.
 _PREFIX_FLAT_BUDGET_S = 120.0
+#: The PRODUCT's declared cold-load bound, used only if the child probe fails.
+#: It must never be SMALLER than what the child applies (#3349's whole point),
+#: so it tracks ``EmbeddingModel._LOAD_TIMEOUT_S``: 300.0 since #13674.
+_PRODUCT_DEFAULT_LOAD_BOUND_S = 300.0
 
 
 def _guard_subprocess_budget() -> float:
     """The subprocess budget: the embedder's OWN declared cold-load bound + work.
 
     #3349: a fixed 120 s was SMALLER than the bound the product itself declares
-    for a cold load (``EmbeddingModel._LOAD_TIMEOUT_S`` = 90 s) plus the ingest
+    for a cold load (``EmbeddingModel._LOAD_TIMEOUT_S``, now 300 s — 90 s when
+    this was written) plus the ingest
     work that follows it, so on a loaded self-hosted runner the subprocess
     redded the shard with a bare ``TimeoutExpired`` while the code under test
     was fine — the test's own title says it hits the ``__main__`` guard, not a
@@ -70,6 +75,11 @@ def _guard_subprocess_budget() -> float:
     derivation misses it and silently pins a SECOND hard-coded number — the
     defect #3349 names, restored. Pinned by
     ``test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound``.
+
+    ⛔ #13674: the FALLBACK is the PRODUCT default (300.0), not the pre-fix 90.0.
+    A fallback that is smaller than the bound the child applies is the very
+    "budget below the cold load" defect this derivation exists to remove — a
+    probe that fails would then certify a 270 s budget over a 480 s need.
 
     ⛔ READ FROM THE PROCESS BEING BOUND, NOT FROM THIS ONE (#11054 review P2).
     ``tests/conftest.py:280`` raises the class attribute to 270 s for the test
@@ -113,9 +123,11 @@ def _bounded_process_cold_load_bound() -> tuple[float, str]:
                                     .split(os.pathsep) if p])})
         if proc.returncode == 0:
             return float(proc.stdout.strip().splitlines()[-1]), "child"
-        return 90.0, f"fallback: child exited {proc.returncode}"
+        return _PRODUCT_DEFAULT_LOAD_BOUND_S, (
+            f"fallback: child exited {proc.returncode}")
     except Exception as exc:  # a failed probe must not SHRINK the budget
-        return 90.0, f"fallback: probe raised {type(exc).__name__}"
+        return _PRODUCT_DEFAULT_LOAD_BOUND_S, (
+            f"fallback: probe raised {type(exc).__name__}")
 
 
 def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
@@ -175,13 +187,13 @@ def test_the_guard_subprocess_budget_clears_the_declared_cold_load_bound():
 #: exists for: the report names neither attempt and the spawned redislite child
 #: is left orphaned.
 #:
-#: The per-attempt figure is the BOUNDED PROCESS's bound: 90 (product default;
-#: the test lane's 270 s override does not cross the process boundary) + 180
-#: allowance = **270 s**, so the pair is 540 s and 720 leaves room for two
-#: interpreter starts and teardown. The pre-derivation fixed 120 s fitted twice
-#: inside 300; 270 does not, which is why these two items carry an explicit
-#: marker above the global default.
-_GUARD_ITEM_TIMEOUT_S = 720
+#: The per-attempt figure is the BOUNDED PROCESS's bound: 300 (product default
+#: since #13674; the test lane's 270 s override does not cross the process
+#: boundary) + 180 allowance = **480 s**, so the pair is 960 s and 1200 leaves room
+#: for two interpreter starts and teardown. The pre-derivation fixed 120 s fitted
+#: twice inside 300; a bounded pair this size does not, which is why these items
+#: carry an explicit marker above the global default.
+_GUARD_ITEM_TIMEOUT_S = 1200
 
 
 def _run_guard_subprocess(argv, cwd, timeout=None):

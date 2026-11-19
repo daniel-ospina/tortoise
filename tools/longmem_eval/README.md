@@ -825,6 +825,66 @@ sweep say NOT MEASURED?" is answered on the artifact instead of guessed from
 the host (see the fourth case above; the winner line names the cause that
 actually fired).
 
+## Ingest cost profile (#8486 finding 3) — measured, not assumed
+
+The 10-question smoke (`--limit 10 --retrieval-only`) measured **ingest: mean
+870 s/question** (p50 757 s, p95 1,365 s) against **retrieval: 2.0 s mean** —
+ingest dominates by ~400×, so it is the term that decides whether the
+escalation ladder is affordable. `tools/longmem_eval/ingest_profile.py` answers
+where it goes, without downloading the dataset (it builds a LongMemEval-SHAPED
+synthetic haystack calibrated to the one measured scale constant — the
+`haystack_overlap` census of **371,095 encode units / 500 questions ≈ 742
+points per question** = 742.19, built here as ~500 turns + ~250 two-turn raw
+chunks, which is **750** points — 1.1 % over the target, and the table below
+reports the shape actually built rather than the target):
+
+```bash
+uv run python -m tools.longmem_eval.ingest_profile --db docker://:falkordb@localhost:6379/tortoise
+```
+
+Measured (private lane, idle box, CPU embedder = the pinned bge-small):
+
+| shape | turns | chunks | points | fixed setup | ingest | s/point |
+|---|---|---|---|---|---|---|
+| 1×4 | 4 | 2 | 6 | 0.11 s | 2.24 s | 0.374 |
+| 5×20 | 100 | 50 | 150 | 0.06 s | 32.10 s | 0.214 |
+| 10×20 | 200 | 100 | 300 | 0.04 s | 63.74 s | 0.213 |
+| 25×20 | 500 | 250 | 750 | 0.04 s | 158.55 s | 0.211 |
+
++ **It is per-question work, not a fixed setup cost.** The fixed per-question
+  setup (SDK construct + fresh graph + first touch) is **0.04–0.11 s**, i.e.
+  ~0.03 % of the question's ingest at the real size; the marginal cost is a
+  flat **0.211–0.214 s per point** from 150 points up, so the cost is
+  proportional to (turns + chunks). ⚠️ Not flat at EVERY size: the 6-point
+  rung measures **0.374 s/point**, 77 % above the plateau — at that size the
+  size-independent excess is a large share of the row: `0.374 − 0.211` =
+  0.163 s/point × 6 = **0.98 s**, i.e. **44 %** of that rung's 2.24 s ingest
+  (the fixed-setup column itself is only 0.11 s, ~5 %). That is the point of
+  the row: extrapolating from the smallest rung would over-state the real cost,
+  and the cause is the per-run overhead around a tiny graph, not the setup
+  probe measured in the first column.
+  The calibration target is **742** points/question (371,095 encode units /
+  500 questions = 742.19); the headline rung builds **750** (500 turns + 250
+  chunks), 1.1 % over it, and the table reports the shape actually built.
++ **The dominant term is the write-time embed: 141.7 s of a 182.8 s run
+  (77.5 %)**, from **776 single-text `encode_for_store` calls** (one per point,
+  plus events) in `cProfile` (`tools/longmem_eval/ingest_profile.py`). The
+  second term is the Cypher fan-out: **12,333 queries for 750 points = 16.4
+  round trips per point** (34.9 s, 19 %), of which the `cypher_guard`
+  numeric-literal scan alone is **19.5 s (10.7 %)** — 61,665 calls to
+  `_numeric_literal_reason` over the same query text.
++ **Projection to the real split:** 742 points × 0.211 s = **~157 s/question
+  ⇒ ~22 h for 500 questions** on an idle box; at the smoke's contended rate
+  (870 s) it is **~5 days**. The shape is the same — the smoke's number is
+  this cost inflated by host load (~5.4×), not a different code path.
+
+⛔ This is a DIAGNOSTIC module: it writes throwaway graphs, produces no report
+and no published number depends on it. The cost levers it identifies are
+filed, not applied here: the batched write-time encode is #13717, the per-point
+query fan-out + the `cypher_guard` literal-scan memo is #13718, and arming the
+existing `encode_cache` for a normal run (so the ladder's repeat passes stop
+re-embedding) is #13719.
+
 ## Ingest cache + fast-cycle protocol (#2080)
 
 The per-question v2 ingest (LLM extraction over long session histories) is

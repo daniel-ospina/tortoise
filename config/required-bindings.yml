@@ -382,6 +382,54 @@ projects:
           .github/scripts/fly-managed-secrets.txt) — the BFF mints with it and
           the AS verifies with it, so a mismatch makes every redemption
           `invalid_token` with no other symptom.
+          ⛔ WHEN `CONSENT_TOKEN_KEYS` IS SET THIS VALUE IS NOT A SIGNING KEY —
+          the set is authoritative (it is never merged with this one). Keep it
+          holding the value of the kid the LEAST-MIGRATED half stamps (`consent-1`)
+          while any half is still un-migrated: a half with no key set accepts exactly
+          one kid, `consent-1`, and `kid` is load-bearing, so a half that has not
+          learned about key sets yet SIGNS with this value but does NOT verify a
+          token stamped with a kid its own one-element set does not name. Once every
+          half is on the set this variable is inert, and it stays `required` so the
+          preflight keeps demanding SOMETHING there.
+
+      # #10794: the `kid`-KEYED key set — §2.3's rotation window, BUILT. Both are `recommended`
+      # because absence is the single-secret deployment and is fully supported: `CONSENT_TOKEN_KEYS`
+      # unset means "one key, kid `consent-1`, exactly as before this change". Declared rather than
+      # left silent so the deploy preflight can SEE them.
+      # ⛔ The SAME names must be set on the hosted API (Fly): the AS mints the attempt key AND
+      # selects the verification key by `kid`, so this is now a third consumer of the same key
+      # material and a rotation touches both halves — see
+      # `docs/engineering/auth/consent-identity-bridge.md` §2.3 for the publish-new / accept-both /
+      # retire-old procedure, its bounded window, and the ordering a MIXED deployment requires
+      # (step 0: ship the code with the set ABSENT; step 1: Fly first, with the legacy kid spelled
+      # out). The Fly half is managed from version control like this one —
+      # `.github/scripts/fly-managed-secrets.txt` declares `CONSENT_TOKEN_KEYS` as `gh-secret:` and
+      # `CONSENT_TOKEN_CURRENT_KID` as `fly-toml-env` — so §2.3 step 1 has an operable route and a
+      # hand-set value on Fly is refused by the provenance gate rather than silently drifting.
+      # ⛔ The key-drift fingerprint does NOT monitor a `kid` split (it compares the CURRENT kid's
+      # key BYTES only): a half whose set omits `consent-1` while its secret still holds those bytes
+      # reads AGREE in front of a bridge on which nothing completes. §2.5 states the scope.
+      - name: CONSENT_TOKEN_KEYS
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          OPTIONAL key set, `<kid>=<secret>,<kid>=<secret>`. When set it is
+          AUTHORITATIVE: it replaces CONSENT_TOKEN_SECRET for signing and
+          verification (never merged). Every kid VERIFIES; only the current one
+          MINTS. Each entry splits on its FIRST `=`, so a base64 secret keeps
+          its padding byte-exact. Retiring a kid is how a rotation's window
+          CLOSES — a value it signed is then refused as an unknown kid.
+
+      - name: CONSENT_TOKEN_CURRENT_KID
+        kind: recommended
+        type: env_vars
+        envs: [production]
+        note: >-
+          Which kid in CONSENT_TOKEN_KEYS MINTS. Unset ⇒ the FIRST kid in the
+          list (declared order). It must name a kid the set holds: a deployment
+          minting under a name no verifier can select is reported as
+          unprovisioned rather than minting into a void.
 
       # #3524 §9 step 3 — the two knobs the mint/bounce routes read. Both carry a correct
       # in-code default (the AS origin and the app origin), so absence is NOT an outage:

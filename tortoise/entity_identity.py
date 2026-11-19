@@ -384,7 +384,8 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
-def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
+def _collapse_resolved_holders(g, label: str, holder_ids, *,
+                               drop_retired_survivors: bool = True) -> list:
     """Collapse MERGED-AWAY carriers onto their survivor — one definition.
 
     #12047 round-4 finding 1, extracted by review F2. ``apply_entity_merge`` is
@@ -403,6 +404,42 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     Each carrier maps to its survivor and counts once; an id-less legacy row
     carries no ``resolved_from`` evidence and stays a holder in its own right,
     per-row (F-B's node-exactness).
+
+    ``drop_retired_survivors`` (#12244) — whether the LIVE filter below runs.
+    It exists for the WRITE path: a create must not MERGE onto a retired
+    incarnation (round 9). The three ``aboutObject`` attachment sites that pass
+    ``False`` are STATUS-BLIND by their own recorded disposition
+    (``near_dup_merge.apply_merge_union``: "a terminal-only holder IS linked"),
+    so they take the hop without the filter — via
+    :func:`attachment_target_ids`, which is the only sanctioned caller.
+    ⛔ This is PER CALLER, not per "attachment site" (#13724 review P2): the Event
+    exact arm (``hosted_api``'s ``_exact_rows`` anchor) is ALSO an attachment
+    site and keeps the default ``True`` on purpose — its own DECLARED DIVERGENCE
+    note states it is live-only because the resolver it narrows is. Reading this
+    paragraph as "attachment ⇒ ``False``" and "correcting" that arm would attach
+    a terminal-only survivor the folded arm deliberately refuses.
+    ⛔ The filter is ALL-OR-NOTHING for the call and not per entity: it
+    drops every collapsed id that is not live once ANY holder hopped, so a
+    status-blind caller that used it would silently lose an unrelated terminal
+    holder it is supposed to link. That is why the flag exists rather than the
+    callers re-deriving the hop.
+
+    ⛔ ``False`` also resolves a DANGLING pointer back to its holder (#12244
+    review, P1). ``follow_resolved_from`` returns the hop's target id without
+    proving the target still exists (``entity_resolver.follow_resolved_from`` —
+    its next read finds no row and it returns ``current``), and the target can
+    legitimately be gone: a deleted survivor (``sdk.delete_entity`` does not
+    sweep its dependents' ``resolved_from``), or a CROSS-LABEL pointer
+    (``apply_entity_merge`` resolves the survivor through ``_identity_row``,
+    which tries ``Object`` then ``Subject``). Handing that id to an id-keyed
+    attach writes NOTHING — measured: a merge record naming a merged variant
+    reported ``linked=0`` with no edge, no ``unresolved`` entry and no warning,
+    where the pre-#12244 code wrote the edge to the still-present carrier. A
+    silent zero on a channel documented as "what actually LANDED" is the
+    false-PASS shape these sites forbid, so the attachment path falls back to
+    the holder that DOES exist. The CREATE path must NOT (a create that MERGEd
+    onto a retired incarnation is the round-9 defect), which is why the fallback
+    is inside the same ``drop_retired_survivors=False`` arm.
     """
     # ⛔ #12047 review round 9: the hop DROPS a terminal survivor. The holders
     # were live-only BEFORE the hop, but a merged-away carrier stays live while
@@ -414,19 +451,45 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     # test every other read uses.
     from .entity_resolver import follow_resolved_from
     from .live import _terminal_excluded
-    collapsed: list = []
-    seen: set = set()
+    pairs: list = []
     hopped = False
     for holder in holder_ids:
         resolved = follow_resolved_from(g, label, holder) if holder else None
         if resolved and holder and str(resolved) != str(holder):
             hopped = True
+        pairs.append((holder, resolved))
+    if hopped and not drop_retired_survivors:
+        # #12244 review P1: a pointer whose target no node of THIS label holds
+        # must not DELETE the attachment — see this function's docstring. Only
+        # the attachment path is here; the create path keeps dropping (round 9).
+        #
+        # ⚠️ RESIDUAL, SURVIVOR side (#13724 review P2): the probe compares the
+        # hop's answer against `n.id`, and `follow_resolved_from` answers
+        # `str(target)` — so a survivor whose STORED id is a legacy NON-STRING is
+        # read as ABSENT here, the pair falls back to the retired CARRIER, and the
+        # edge lands on the carrier and not on the survivor (the #12244 shape, for
+        # that one row). Narrow precondition (a legacy int-id survivor), and the
+        # fix is not local: it needs the id-normalisation decision — whether an id
+        # IS a string with `int` a legacy rendering — which this attachment fix
+        # deliberately does not make. The mirror case (a non-string HOLDER) is
+        # stated at the hosted anchor, which is the only site that can address such
+        # a row at all (`hosted_api`'s `_raw_addressable` note).
+        ids = [str(res) for _holder, res in pairs if res]
+        if ids:
+            present = {str(row[0]) for row in g.query(
+                f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id",
+                params={"ids": ids}).result_set}
+            pairs = [(holder, res if (res and str(res) in present) else holder)
+                     for holder, res in pairs]
+    collapsed: list = []
+    seen: set = set()
+    for _holder, resolved in pairs:
         key = resolved if resolved else f"id-less:{len(collapsed)}"
         if key in seen:
             continue
         seen.add(key)
         collapsed.append(resolved)
-    if hopped:
+    if hopped and drop_retired_survivors:
         ids = [str(c) for c in collapsed if c]
         if ids:
             # Entity labels use the entity vocabulary (no `outdated` flag).
@@ -442,6 +505,97 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
             collapsed = [c for c in collapsed
                          if not (c and str(c) not in live)]
     return collapsed
+
+
+def attachment_target_ids(g, label: str, holder_ids) -> list[str]:
+    """The ENTITY ids an ATTACHMENT site writes its ``aboutObject`` edge to.
+
+    #12244: the three ``aboutObject`` attachment sites
+    (``near_dup_merge.apply_merge_union``, ``sdk._extract_session_v2``'s
+    ``about_entities`` loop and ``hosted_api``'s Point about-anchor) take their
+    holder set from :func:`name_key_space_same_entity` — the writer's SPELLING
+    space — and then attached to EVERY row it returned. ``apply_entity_merge`` is
+    NON-DESTRUCTIVE, so a merged pair is ONE entity with TWO live rows under one
+    folded key: the retired carrier keeps its ``name``/``canonical_name`` and
+    gains ``resolved_from``, the survivor records the candidate's folded key in
+    ``aliases``. So the spelling space matches BOTH and each site wrote TWO edges
+    for one entity — one of them onto the node :func:`resolve_or_mint` would
+    never return. Measured (lane graph): after
+    ``apply_entity_merge(candidate="the team" -> survivor="Acme Holdings")`` a
+    merge record naming ``"team"`` reported ``linked=2`` and the Point carried
+    edges to BOTH the survivor and ``obj-carrier``.
+
+    ⛔ WHAT THIS DOES NOT DO — the recorded dispositions survive:
+
+    * it does NOT pick an identity among DISTINCT carriers. Every distinct
+      entity the spelling space matched is returned, so the sites keep
+      attach-to-every-carrier (the disposition recorded in
+      ``tests/test_entity_identity.py::_ALLOWED_KEYED`` and in
+      ``apply_merge_union``'s docstring), and the objection that made a resolver
+      call wrong there — it would REFUSE where capture writes — still does not
+      apply. Only rows that are the SAME entity, joined by the merge's own
+      ``resolved_from`` pointer, are deduped.
+    * it does NOT speak for id-less stubs. An id-less row carries no
+      ``resolved_from`` evidence and no id to attach by, so it stays a holder in
+      its own right and the CALLER keeps its own id-less arm over the same space
+      (``link_entity`` MERGEs on ``{id:…}``; the hosted anchor's single MERGE
+      attaches id-less rows). They are simply not represented in this answer.
+    * it does NOT answer for a holder id that is not a STRING. The hop is
+      string-keyed — ``follow_resolved_from`` does ``str(node_id)`` at its own
+      entry — so a non-string ``id`` can never be followed, and answering it
+      with ``str(holder)`` names a DIFFERENT row: the writers match on ``id``,
+      so ``"4242"`` addresses any node whose id is literally that string (a
+      *twin* the writer's name space never matched), which took an edge main
+      never wrote. Measured (review of #13724, then the pin
+      ``TestThe12244ANonStringHolderIsNotAnswered`` in
+      ``tests/test_entity_identity.py``): the pre-fix answer for ``[4242]`` was
+      ``['4242']``. Such a row is left to the caller's own
+      arm, on the same footing as an id-less stub: the hosted anchor attaches
+      it by its RAW value (``_raw_addressable``), and the two local sites
+      attached nothing for it before #12244 either (parity, unchanged).
+    * it is STATUS-BLIND, like the sites that use it: a terminal-only holder is
+      still linked, which is what ``apply_merge_union`` documents. See
+      :func:`_collapse_resolved_holders`'s ``drop_retired_survivors`` — the live
+      filter is the CREATE path's, not this one's.
+
+    The survivor is returned even when it is NOT among ``holder_ids``: the
+    spelling space reaches a survivor through ``aliases`` only for the fold the
+    merge recorded, and the ENTITY is the survivor regardless. Both writers match
+    on ``id``, so an id that names no node attaches nothing — never a minted node
+    (``link_entity`` returns 0 when an endpoint is absent) — and a pointer whose
+    target is GONE falls back to the holder that exists, so a dangling
+    ``resolved_from`` cannot turn a landed attachment into a silent zero
+    (:func:`_collapse_resolved_holders`).
+
+    ``label`` is validated HERE, in this function's own frame: the helper is
+    public and a caller may pass anything, and the module's rule is that every
+    label reaching a Cypher label position goes through
+    :func:`_require_identity_label` (`entity_resolver` does the same for the same
+    reason). Borrowing the hop's validation is not enough once the hop is optional
+    (an all-id-less holder set never calls it).
+
+    ⚠️ STATED COST, so a later optimisation is a decision and not a surprise:
+    ``_collapse_resolved_holders`` issues ONE read per id-carrying holder (the
+    hop), plus one batched read per call when a hop occurred. On the capture path
+    that is ``1 + H`` reads per attached name (``H`` = holders in the spelling
+    space, normally 1-2). Batching the hop would touch the CREATE path's shared
+    hop as well, which is not this lane's change; a future lane that batches it
+    must keep the presence evidence (it is what the dangling-pointer fallback
+    above is built on).
+    """
+    _require_identity_label(label)
+    # ⛔ NON-STRING holder ids are filtered OUT of the hop rather than answered
+    # with ``str(holder)``: the hop stringifies at its own entry
+    # (``entity_resolver.follow_resolved_from``), so a non-string id can never
+    # be followed — and its string spelling is a DIFFERENT row's id, so an
+    # answer built from it attaches to a twin the writer's name space never
+    # matched. See this function's docstring. The hosted anchor keeps such a row
+    # addressable through ``_raw_addressable`` (its raw value); the two local
+    # sites attach nothing for it, which is what they did before #12244.
+    addressable = [holder for holder in holder_ids
+                   if isinstance(holder, str)]
+    return [str(holder) for holder in _collapse_resolved_holders(
+        g, label, addressable, drop_retired_survivors=False) if holder]
 
 
 def _name_holder_ids_same_entity(g, label: str, name: str, *,

@@ -2919,15 +2919,27 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     They retire in the batch that gives the container a declared envelope.
     #   · `check_structure` and `calibrate_summary` — the same envelope reason
     #     (`list[dict]`, no `rest_spec`), stated at #10914 and #12951.
-    #   · `issue_insight` and `session_context` — each carries a `rest_spec`
-    #     (`GET /v1/issue-insight`, `GET /v1/context`), so retiring the registry
-    #     entry deletes the REST route with it: a public API removal, and not this
-    #     batch's mandate.
-    #   · `search` — both reasons at once (`list[dict]` AND `GET /v1/search`).
+    #   · `issue_insight` and `session_context` — RETIRED in #11609 lane P6, the batch
+    #     that ACTED on lane P4's measurement that this reason was FALSE: the only thing
+    #     that would derive a route from a `rest_spec` (`FastAPIRouterAdapter.register_all`)
+    #     is instantiated in NO product module, and `GET /v1/issue-insight` / `GET /v1/context`
+    #     are hand-written decorators in `hosted_api.py` that call the SDK directly — so
+    #     retiring the row deletes nothing on the wire, and the "public API removal" the old
+    #     reason feared does not exist to be made. Pinned by
+    #     `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5 and this wave's own
+    #     `tests/test_11609_door_retirement.py` rows. Their `rest_spec` cell stays ON the
+    #     retired row — it is the recorded evidence the route exists independently, and
+    #     `tests/test_11609_structural_blockers.py` reads a retired entry too.
+    #   · `search` — held by its `list[dict]` ENVELOPE, and by nothing else: its
+    #     `rest_spec` (`GET /v1/search`) is a recorded CELL for a route that exists
+    #     independently, and lane P4 measured the coupling FALSE (§1.5) — so "it has a
+    #     REST route" is NOT a second reason, and removing that cell would not gate it.
     #   · `query` — the paged destination two ALREADY-retired pointers name
-    #     (`paginated_query`, `query_points_by_tag`), and one of the two UNION
-    #     envelopes the #8482 sweep's shrinkage floor measures. Retiring it is a
-    #     re-pointing decision, not a door removal, so it is not this wave's.
+    #     (`paginated_query`, `query_points_by_tag`), and the UNION envelope the
+    #     #8482 sweep's shrinkage floor measures alone at this head (the second,
+    #     `delete_entity`, retired in #11609 lane P6 and survives as a shim, which
+    #     the sweep does not read). Retiring `query` is a re-pointing decision,
+    #     not a door removal, so it is not this wave's.
     #   · `create_point`, `diary_write` — RETIRED in #11609 lane P1, which BUILT
     #     the arms that made their recorded reason false (`create_entity` now
     #     dispatches `type="point"` and `type="diary"`, see the residue block
@@ -2946,19 +2958,39 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     through the container now, `gaps`/`subgraph` included — see
     #     `tortoise_check_confidence`'s own docstring for why those two stay
     #     graph-structure reads rather than confidence reads at the SDK layer.
-    #   · `delete`/`delete_point`/`delete_entity`, `create_edge`/`create_operator`,
-    #     `events_poll`, `org_create`, `ingest`, `list_graphs` — their destinations
-    #     (`delete_knowledge`, `link_entities`, `poll_events`, the tenancy pair and
-    #     the builder-only `write_knowledge_batch`) are NOT live on `main` yet, so
-    #     there is no container to answer through.
+    #   · `delete_point` and `delete_entity` — RETIRED in #11609 lane P6, the wave's second
+    #     unit, on a ruling the owner had ALREADY recorded: the canonical row is executed
+    #     by KEEPING the single `tortoise_delete` entry and WIDENING what it deletes
+    #     (#9660, `docs/product/canonical-mcp-tools.md`, amended 2026-10-25, principal
+    #     daniel-ospina — *"the absorbed names stay retired-forward entries, not new
+    #     siblings"*). `TortoiseSDK.delete` dispatches by LABEL (Point -> `delete_point`,
+    #     every other entity -> `delete_entity`), so the kept entry carries both doors'
+    #     whole capability, and both retire FORWARD into it above.
+    #   · `delete`, `create_edge`/`create_operator`, `events_poll`, `org_create`,
+    #     `ingest`, `list_graphs` — their destinations (`delete_knowledge`,
+    #     `link_entities`, `poll_events`, the tenancy pair and the builder-only
+    #     `write_knowledge_batch`) are NOT live on `main` yet, so there is no container to
+    #     answer through. `delete` itself is not a door to retire but the KEPT entry the
+    #     #9660 ruling keeps: it is the container the two names above retire INTO, which is
+    #     why it stays on this side of the line.
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
-    # the door calls. The names above plus these seven are 21 of the 21 live names
-    # off the 27-target — if you find a live name that is not on the target and not
-    # in that list, the list is incomplete and that name is NOT safe to retire.
-    # (It was 25 before the #11609 P1 and P2 waves left it there, with their arms:
-    # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2.)
+    # the door calls. ⛔ THEY ARE THE RETIRED SEVEN, NOT A SUM TO ADD TO THE HELD ONES: the
+    # `·` bullets above already enumerate every name that stays live, and a retired name is
+    # not one of them. The HELD names above are 17 of the 17 live names off the 27-target —
+    # if you find a live name that is not on the target and not in that list, the list is
+    # incomplete and that name is NOT safe to retire. (The earlier form of this sentence read
+    # "the names above PLUS these seven are 17 of the 17 live names" — it printed 17, but it
+    # folded the seven RETIRED rows INTO that 17, implying the held bullets above add up to 10
+    # when they add up to 17. The summands were 17 + 7 = 24 against a stated total of 17; a
+    # review of #13687 measured it and the clause was dropped.)
+    # (It was 25 before the #11609 P1, P2 and P6 waves left it there, with their arms:
+    # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2, the
+    # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 19 -> 17, one pair per
+    # unit. ⛔ THIS BLOCK STILL SAID 21 AND STILL LISTED BOTH P6 PAIRS AS HELD after #13626
+    # merged, which is why `tests/test_11609_door_retirement.py`'s population check (17/10/7)
+    # and this prose disagreed on `main` — #13626 review ISSUE 2.)
     # ⛔ ONE HOP to a live name in every pointer (GitHub's own
     # `DeprecatedToolAliases` states the limit: aliases are not transitive).
     # Arguments are named where dropping one changes the operation — `type=` and

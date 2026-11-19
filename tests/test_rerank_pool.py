@@ -1528,6 +1528,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # measures the rerank itself
         "tools/candidate_recall_11901.py": frozenset({"run", "window"}),
         "tools/rerank_calibration_12297.py": frozenset({"run"}),
+        # ⛔ A MIRROR of the shipped USER door, which keeps the lever ON: the arms pass the
+        # door's OWN arguments (no `_rerank_candidates` kwarg at all, because the MCP tool and
+        # `GET /v1/search` pass none either) and the shipped/armed split is decided by the
+        # `TORTOISE_FUSED_RERANK` env gate ONE FLAG apart (`user_search` vs
+        # `user_search_rerank`). Its whole subject is what the lever does to recall@k, so
+        # opting it out would measure a reader neither door runs — the same reason
+        # `tools/window_quality_m2.py` is on this list rather than opted out. The comment at
+        # its `_query_rows` states the argument as the SHIPPED CALL SHAPE, not as a value.
+        # `tortoise_fts_query` is the TRACING WRAPPER the capture prior goes through: it
+        # forwards its caller's kwargs and adds only `leg_trace`, so injecting an opt-out
+        # there would make the wrapper measure a different read than `_fts_rows` performs.
+        # ⛔ ITS ENTRY IS 47 LINES DOWN, not here: the merge of `origin/main` brought this
+        # registration and this branch carried its own for the same key, so a bare union
+        # would have been two dict keys with the same literal (ruff F601, and the second
+        # silently wins). The surviving entry is the branch's — it is main's pair PLUS `run`,
+        # whose warm-up argument is recorded there — and these lines keep main's rationale
+        # for registering the file at all.
         # ⛔ A MIRROR of `extractor_v2._fts_rows`, which keeps the rerank ON
         # DELIBERATELY: `sdk.py`'s `_rerank_candidates` docstring records the
         # departure verbatim — "the capture path (`extractor_v2._fts_rows`)
@@ -1544,6 +1561,38 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # this list can only say the file is ALLOWED to run the lever, so the
         # flags it actually passes are pinned against `_fts_rows`'s own.
         "tools/window_quality_m2.py": frozenset({"query"}),
+        # ⛔ A MIRROR of the shipped read, on the tool's OWN stated contract:
+        # "It calls the shipped read (``sdk.tortoise_fts_query``) exactly as M2
+        # did — same function, same ``limit``, same sanitiser — so the arms
+        # differ in the LEG, never in the query shape" (`claim_dense_leg_13732.py`
+        # docstring). Both sites are ``_query``: the dense/lexical arm and the
+        # designed-absence arm. Opting them out would make the paired recall
+        # figures describe a reader the shipped call does not run; that is the
+        # same grant `window_quality_m2.py` already holds for the same reason.
+        "tools/claim_dense_leg_13732.py": frozenset({"_query"}),
+        # ⛔ A MIRROR of the MCP tool's own door, and it must pass NO
+        # `_rerank_candidates` kwarg BECAUSE the tool passes none (the measured
+        # arm is the user's door — `sdk.tortoise_fts_query(entity_type='object',
+        # limit=15)`). Opting it out would make the capstone's 0.9700@3 / 0.9800@5
+        # describe a reader the tool does not run; the SHIPPED/ARMED split is the
+        # arm's own `TORTOISE_FUSED_RERANK` env flag one line apart
+        # (`user_search` OFF, `user_search_rerank` ON — that pair IS the +1.13 pt
+        # claim), which is exactly the reason the flag exists. `_TracedSdk` is the
+        # capture-prior mirror of `extractor_v2._fts_rows` and forwards the same
+        # one method, so it runs the same leg.
+        # `run` is the WARM-UP read (`sdk.tortoise_fts_query("warm", …)`,
+        # result discarded) issued before the index waits. Registered rather
+        # than disarmed because it must perform the SAME read the arms perform:
+        # disarming it would make the warm read a different call from the arms it
+        # precedes, and an ambient `TORTOISE_FUSED_RERANK` would then be warmed on
+        # a path no arm takes.
+        # ⛔ MEASURED LIMIT (review of #13778): this call runs BEFORE the per-arm
+        # env loop, so the lever is OFF there (`rerank_pool_enabled()` is
+        # fail-safe) and it does NOT warm the cross-encoder — no per-arm
+        # `elapsed_s` figure may be read as a warm start. The registration is
+        # about the CALL SHAPE, not about a warmed model.
+        "tools/capstone_12186_recall.py": frozenset({
+            "tortoise_fts_query", "_query_rows", "run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,

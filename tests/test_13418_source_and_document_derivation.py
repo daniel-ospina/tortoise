@@ -14,7 +14,7 @@ Two defects, one seam, one table (`record_writer._RECORD_EMBEDDING_TEXT`):
 2. **#13412 — a document's two stores encoded DIFFERENT text.** After #8419/PR
    #13290 the graph composes the document vector's input from
    `_build_search_text(title, summary, topics)` and writes it to `s._searchText`
-   (`projection/entities.py:5423`, `:5530`), while the record still folded
+   (`projection/entities.py:5488`, `:5606`), while the record still folded
    `title + content` — two different texts, two different vectors, for one row.
    `content` is not even a graph property post-D10 (`_DOC_RETIRED_KEYS`).
 
@@ -99,7 +99,7 @@ def test_a_document_derives_from_the_graphs_search_text(encoder):
 
     `_upsert_document` computes `st = _build_search_text(title, summary, topics)`
     on ONE line and reads it TWICE — for the vector and for `s._searchText`
-    (`projection/entities.py:5423`, `:5530`) — so the graph's dense and sparse
+    (`projection/entities.py:5488`, `:5606`) — so the graph's dense and sparse
     legs describe the same text by construction. The record must encode that
     text and no other, or one journal line yields two vectors (#13412).
     """
@@ -172,8 +172,8 @@ def test_the_document_rule_composes_from_the_graphs_fields_and_not_content():
 def test_a_plain_source_derives_from_the_text_the_RECORD_row_holds(encoder):
     """`_searchText` is the one text the row is known to hold — and it is enough.
 
-    `projection/entities.py:7106` composes `ev.get("_searchText") or ev.get("title")`
-    and writes it to the node at `:7194`; the record binds its own `_search_text`
+    `projection/entities.py:7198` composes `ev.get("_searchText") or ev.get("title")`
+    and writes it to the node at `:7286`; the record binds its own `_search_text`
     column from the payload's `_searchText` key (the split), so this is the one
     arm where the vector and the column are provably one datum. `#13418`.
     """
@@ -289,7 +289,7 @@ def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
     `is_episodic_source_node` reads `props["url"]` (the cache side's vocabulary),
     while a `:Source` key is `url OR id` on both other layers —
     `record_projection._key_value` ("`add_document` emits `id` and no `url` at
-    all") and `projection/entities.py:7081` (`raw_key = url or sid`). A payload
+    all") and `projection/entities.py:7173` (`raw_key = url or sid`). A payload
     that carries the identity in `id` therefore reached the predicate with no `url`
     and was classified as a PLAIN source: `public.source.embedding` would then hold
     the topic LEXICON, which is the one text §9.4 forbids for a session `:Source`.
@@ -308,7 +308,7 @@ def test_a_session_source_KEYED_BY_ID_is_still_a_session_source(encoder):
 def test_a_carried_source_vector_is_HONOURED_and_not_recomputed(encoder):
     """`_upsert_source` computes none, so a carried vector is the node's own.
 
-    `_SOURCE_EXTRA_PROPS` (`projection/entities.py:2111`) declares `embedding` a
+    `_SOURCE_EXTRA_PROPS` (`projection/entities.py:2142`) declares `embedding` a
     caller passthrough, so a caller-supplied vector lands on the node. Deriving
     over it in the record would give the two stores different vectors for the
     same source; the `EventRecorded` precedent is the same shape.
@@ -535,7 +535,7 @@ def test_the_event_rule_is_the_graph_folds_own_composition():
     The owner's 2026-11-18 ruling puts `:Event` and `:Source` on the same
     treatment as `:Object`/`:Subject`. For `:Event` that was already true: the
     graph composes `" ".join(filter(None, [subject, eventKind, object]))`
-    (`projection/entities.py:5803-5807`) and the record's rule names exactly
+    (`projection/entities.py:5891-5895`) and the record's rule names exactly
     those three keys in that order. This reads the GRAPH's own source rather than
     restating the literal, so a change on either side reds.
     """

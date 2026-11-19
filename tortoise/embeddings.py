@@ -848,12 +848,27 @@ class EmbeddingModel:
     """Lazy-loaded embedding model singleton.
 
     Loads BAAI/bge-small-en-v1.5 (384-dim, EMBEDDING_MODEL) via
-    sentence-transformers. Model loading
-    runs in a worker thread with a 90s timeout (#1349: bge-small cold load measured ~57s). In the hosted Docker image the
-    model is pre-downloaded at build time (Dockerfile.hosted) and pre-warmed at
-    container start (entrypoint.sh), so the first API request never hits a cold
-    start. Failures are NOT permanent — the next get() call creates a fresh
-    instance and retries.
+    sentence-transformers. Model loading runs in a worker thread bounded by
+    ``_LOAD_TIMEOUT_S`` — 300 s, derived from the MEASURED cold cost on the
+    production box (#13674; see that constant for the arithmetic).
+
+    In the hosted Docker image the model is pre-downloaded at build time
+    (Dockerfile.hosted) and the embedder's cold IMPORT + weights are paid at
+    container start, before ``exec`` (entrypoint.sh ``_prewarm_embedder``,
+    #13674) — so the in-process load that follows is the WARM construct
+    (measured 39.3 s, not 156.5 s of imports). ⛔ That boot pre-warm is a
+    PAGE-CACHE warmer in its own process: it cannot hand the loaded model to
+    the server, so this class still loads it — the promise the docstring used to
+    make ("pre-warmed at container start … the first API request never hits a
+    cold start") was never true of the old in-app-only warm-up and is stated
+    accurately here now.
+
+    Failures are NOT permanent — the next get() call creates a fresh instance
+    and retries — but a FAILED attempt is RECLAIMED before that retry (#13674):
+    a join timeout used to abandon its loader thread and start a fresh one after
+    the cooldown while the old one was still importing, and those CONCURRENT
+    allocations — not the 432 MB model — are the 3.66 GB that got the hosted
+    process OOM-killed. One attempt runs at a time, process-wide.
 
     Embeddings are OPTIONAL — unless a process armed
     ``TORTOISE_EMBEDDING_MODEL_REQUIRED``: point creation never depends on them,
@@ -866,11 +881,51 @@ class EmbeddingModel:
     _instance: "EmbeddingModel | None" = None  # noqa: UP037
     _model = None
     _lock = threading.Lock()
-    _LOAD_TIMEOUT_S = 90.0  # #1349: bge-small cold load measured ~57s on a
-    # contended machine (vs ~30s for the old MiniLM) — 30s caused silent
-    # TF-IDF degrade on cold caches; 90s covers the download+torch-import
-    # window. Pre-warmed at startup in hosted.
+    # ── #13674: the load bound, DERIVED from the measured cold cost ────────
+    # MEASURED 2026-11-19 on the production box (`tortoise-y4mjjq`,
+    # cpu_kind=shared, 2 cpus, 4096 MB) with the revision the image bakes:
+    #
+    #     import torch                                            24.1 s
+    #     from sentence_transformers import SentenceTransformer   132.4 s
+    #     imports alone, before one weight is read                156.5 s
+    #     full construct, warm page cache                          39.3 s
+    #     RSS after the load                                        432 MB
+    #
+    # A COLD load is therefore ≈ 156.5 + 39.3 = 195.8 s. The previous 90.0 s
+    # (#1349, from a ~57 s figure on a warm cache) was 2.2x BELOW the cold
+    # cost, so every attempt on a cold box timed out — and each timeout used to
+    # abandon an importer and start another.
+    #
+    # 300.0 = 195.8 s x 1.53, i.e. 104.2 s (53 %) of headroom over the measured
+    # cold cost for the contention the same box shows while serving traffic (the
+    # 39.3 s warm figure was IDLE; the intra-op pin stays 1, #10296, so a live
+    # box has no spare thread). It is the same number the hosted lifespan
+    # pre-warm already passed explicitly, so there is now ONE declared bound
+    # rather than a 90 s default nobody used on the hosted path and a 300 s
+    # literal beside it. `tests/test_13674_embedder_load_bound_and_reclaim.py`
+    # pins the derivation, so a future "tidy" back toward 90 fails.
+    #
+    # ⛔ `status()["load_timeout_s"]` publishes this value and the load's own
+    # elapsed time, so a slow load is visible BEFORE it becomes a timeout — the
+    # class of failure #1349 could not see.
+    _LOAD_TIMEOUT_S = 300.0
     _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
+    # ── #13674: reclaim-before-retry state (see `get()` / `__init__`) ──────
+    #: The loader thread of the most recent attempt. While it is ALIVE the
+    #: process must not start a second one: a timed-out attempt KEEPS ALLOCATING
+    #: (its import is 156.5 s and the join may have abandoned it at any point),
+    #: so a second attempt is a second copy of torch + the model — the measured
+    #: path from 432 MB to the 3.66 GB kill.
+    _load_attempt_thread: "threading.Thread | None" = None  # noqa: UP037
+    #: Set when an attempt's caller gave up (join timeout). The loader reads it
+    #: AFTER constructing the model and releases instead of publishing it, so an
+    #: overrun cannot leave a model that nothing will ever adopt.
+    _load_attempt_abandoned: "threading.Event | None" = None  # noqa: UP037
+    #: ``time.monotonic()`` at the start of the last attempt, and the elapsed
+    #: time of the last attempt that FINISHED (either outcome). Both are
+    #: observability, published by :meth:`status`.
+    _load_started_at: float | None = None
+    _load_elapsed_s: float | None = None
     _last_failed_at: float | None = None
     # (B) #2952 explicit warm-up state — see warm_up()/start_warm_up()/status().
     _WARM_UP_LOCK = threading.Lock()
@@ -1038,22 +1093,51 @@ class EmbeddingModel:
         return "no_embedder" if not kind or kind == "not_installed" else kind
 
     @classmethod
+    def load_attempt_in_flight(cls) -> bool:
+        """True while a load ATTEMPT's loader thread is still running (#13674).
+
+        This is the reclaim guard's read. It is deliberately about the THREAD,
+        not about ``_instance``: the whole defect is that the two disagree —
+        ``get()`` clears ``_instance`` on a timeout while the abandoned loader
+        keeps importing, so a retry saw "no instance" and allocated again.
+        """
+        thread = cls._load_attempt_thread
+        return thread is not None and thread.is_alive()
+
+    @classmethod
+    def _describe_load_attempt(cls) -> str:
+        """One line naming the in-flight attempt, for the reclaim refusal.
+
+        The elapsed time is the whole diagnosis: an attempt at 4 s is early in
+        its 156.5 s import and worth waiting for; one at 290 s of a 300 s bound
+        is about to be abandoned. Read-only.
+        """
+        started = cls._load_started_at
+        if started is None:
+            return "elapsed unknown"
+        return (f"elapsed {time.monotonic() - started:.1f}s of its "
+                f"{cls._LOAD_TIMEOUT_S:.0f}s bound")
+
+    @classmethod
     def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
-        Loads the model in a worker thread with a hard timeout. In the hosted
-        Docker image the model is pre-downloaded at build time (Dockerfile.hosted)
-        and pre-warmed at startup via the FastAPI lifespan background thread
-        (hosted_api.py _lifespan), so this path is only hit in dev or if the
-        pre-warm was skipped. Unlike the old implementation, we do NOT
-        permanently self-disable — a transient failure (OOM from a competing
-        process, slow I/O) is retried on the next call.
+        Loads the model in a worker thread bounded by ``_LOAD_TIMEOUT_S``
+        (300 s, derived from the measured cold cost — see that constant). In the
+        hosted Docker image the model is pre-downloaded at build time
+        (Dockerfile.hosted) and the embedder's cold import is paid at container
+        start, before ``exec`` (``entrypoint.sh`` ``_prewarm_embedder``,
+        #13674), so the load that follows is the WARM construct; the
+        background pre-warm below still loads it inside the app. Unlike the old
+        implementation, we do NOT permanently self-disable — a transient failure
+        (OOM from a competing process, slow I/O) is retried on the next call,
+        and a FAILED attempt is reclaimed before that retry (#13674).
 
         Args:
-            load_timeout: Override _LOAD_TIMEOUT_S. The lifespan pre-warm
-                passes a longer window (cold-start torch import on a 2GB VM
-                can exceed 30s, #545); request paths keep the default so
-                latency stays bounded.
+            load_timeout: Override ``_LOAD_TIMEOUT_S``. The lifespan pre-warm
+                takes the default (it used to pass its own 300.0 literal beside
+                a 90.0 product default — two numbers for one load; #13674 left
+                ONE declared bound), and request paths use the default too.
 
         Raises:
             EmbedderUnavailableError: when ``TORTOISE_EMBEDDING_MODEL_REQUIRED``
@@ -1068,9 +1152,9 @@ class EmbeddingModel:
         if cls._instance is None and cls._last_failed_at is not None and \
                 (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
             # Negative cache (code-review P2, #399): a load just failed — return
-            # None immediately instead of blocking up to 90s per request in a
-            # degraded environment (offline dev, cold CI, OOM). Retry after the
-            # cooldown window via the normal "retries on next get()" path.
+            # None immediately instead of blocking up to the bound per request
+            # in a degraded environment (offline dev, cold CI, OOM). Retry after
+            # the cooldown window via the normal "retries on next get()" path.
             return cls._unavailable(context="negative cache, load failed within cooldown")
         if cls._instance is None:
             with cls._lock:
@@ -1087,6 +1171,30 @@ class EmbeddingModel:
                             (now_locked - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
                         return cls._unavailable(
                             context="negative cache (in-lock), load failed within cooldown")
+                    # ── #13674: RECLAIM BEFORE RETRYING ────────────────────
+                    # A previous attempt timed out and its loader thread is
+                    # STILL RUNNING (importing torch, building the model). Its
+                    # memory is not dead yet — it is being allocated right now.
+                    # Starting a second attempt here is how one slow load became
+                    # 3.66 GB of concurrent copies; the measured model is
+                    # 432 MB. Refuse the second allocation and let the FIRST
+                    # attempt finish (it releases itself on completion, see
+                    # ``__init__``); the cooldown then brings the next retry.
+                    if cls.load_attempt_in_flight():
+                        cls._last_failure_kind = "load_timeout"
+                        cls._last_failed_at = time.monotonic()
+                        logger.warning(
+                            "embedder: a previous load attempt is STILL RUNNING "
+                            "(%s) — refusing to start a second one (#13674: "
+                            "concurrent attempts, not the 432 MB model, are what "
+                            "reached 3.66 GB). The in-flight attempt releases "
+                            "itself when it finishes; the next get() retries "
+                            "after the %.0fs cooldown.",
+                            cls._describe_load_attempt(), cls._FAIL_COOLDOWN_S,
+                        )
+                        return cls._unavailable(
+                            context="a previous load attempt is still running "
+                                    "(#13674 reclaim-before-retry)")
                     cls._instance = cls(load_timeout=timeout)
         model = cls._instance._model if (cls._instance and cls._instance._model) else None
         if model is None and cls._instance is not None:
@@ -1237,7 +1345,8 @@ class EmbeddingModel:
         (#2952) while this path logged WARNING.
 
         ⛔ THE DEFECT THIS EXISTS TO REMOVE. ``get()`` blocks its caller for up
-        to ``_LOAD_TIMEOUT_S`` (90 s) while the model loads, and during a warm
+        to ``_LOAD_TIMEOUT_S`` (300 s since #13674; 90 s when this was written)
+        while the model loads, and during a warm
         window it blocks on ``cls._lock`` for the WHOLE load — the caller's own
         ``load_timeout`` cannot bound it, because the time is spent waiting for
         a lock another thread holds, not in its own join. The hosted lifespan
@@ -1553,6 +1662,15 @@ class EmbeddingModel:
         instead of silently presenting a keyword-only result as hybrid:
         ``{"model", "available", "state" ∈ ready|cooldown|unavailable,
         "last_error", "cooldown_remaining_s"}``. Read-only, no side effects.
+
+        #13674 adds the three fields that make the LOAD BOUND and the elapsed
+        load time OBSERVABLE, so a slow load is visible before it becomes a
+        timeout (the #1349 failure class, which no surface could see):
+        ``load_timeout_s`` (the bound this process applies), ``load_elapsed_s``
+        (the last attempt that FINISHED, either outcome, ``None`` before any
+        attempt) and ``load_in_progress`` (a loader thread is alive — including
+        an ABANDONED one, the state the reclaim guard refuses a second attempt
+        in).
         """
         instance = cls._instance
         model = instance._model if instance is not None else None
@@ -1578,6 +1696,13 @@ class EmbeddingModel:
             # investigation reads it here instead of rediscovering torch's
             # default, which cost a required slow leg its whole watchdog.
             "threads": embed_thread_pin(),
+            # #13674: the bound, the last attempt's elapsed time, and whether
+            # an attempt (possibly ABANDONED) is still running. `state` alone
+            # cannot show "a load is 280 s into a 300 s bound" — this can.
+            "load_timeout_s": cls._LOAD_TIMEOUT_S,
+            "load_elapsed_s": (None if cls._load_elapsed_s is None
+                               else round(cls._load_elapsed_s, 3)),
+            "load_in_progress": cls.load_attempt_in_flight(),
         }
 
     @classmethod
@@ -1598,6 +1723,23 @@ class EmbeddingModel:
         cls._one_time_setup_started_at = None
         cls._one_time_setup_owner = None
         cls._one_time_setup_in_progress.clear()
+        # #13674: the reclaim state belongs to an attempt, so a reset must drop
+        # it too — but only what is STALE. A live loader thread cannot be
+        # "reset" away, and clearing its reference would hide an abandoned
+        # importer from the guard that refuses a second attempt.
+        #
+        # ⛔ A thread that is NO LONGER ALIVE is a different case, and leaving
+        # its reference behind is the leak the review caught (F5): the guard
+        # reads the thread, so a finished attempt left recorded makes the next
+        # `get()` (or the next reset+attempt in a fresh test) see "still
+        # running" forever. Clear the whole attempt on a dead thread; keep it
+        # while it is alive.
+        attempt = cls._load_attempt_thread
+        if attempt is None or not attempt.is_alive():
+            cls._load_attempt_thread = None
+            cls._load_attempt_abandoned = None
+            cls._load_started_at = None
+        cls._load_elapsed_s = None
         # #13224: re-arm the cold-write latch, so a test that resets the
         # embedder to observe a cold window gets its own line rather than
         # inheriting a previous test's already-reported state.
@@ -1610,6 +1752,11 @@ class EmbeddingModel:
         # that merely overlaps the pre-warm would be exempted.
         background = bool(getattr(_background_load_tls, "active", False))
         result: dict = {"model": None}
+        # #13674: THIS attempt's abandon signal. A FRESH Event per attempt, not
+        # a shared class attribute: a stale set left by a previous attempt would
+        # make a healthy load discard its own model.
+        abandoned = threading.Event()
+        _attempt_started_at = time.monotonic()
 
         def _load():
             # #10296: pin the intra-op pool BEFORE the encoder is built or
@@ -1622,7 +1769,7 @@ class EmbeddingModel:
                 logger.debug("embedder thread pin failed", exc_info=True)
             try:
                 SentenceTransformer = import_sentence_transformer()
-                result["model"] = SentenceTransformer(
+                loaded = SentenceTransformer(
                     EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError as e:
                 # Distinct the DESIGNED absence (package not installed — INFO)
@@ -1644,6 +1791,7 @@ class EmbeddingModel:
                     )
                     type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
+                return
             except Exception as e:  # noqa: BLE001, RUF100
                 # #880: a load failure (e.g. LocalEntryNotFoundError when the
                 # model is missing under HF_HUB_OFFLINE) is a real degrade —
@@ -1654,14 +1802,42 @@ class EmbeddingModel:
                 )
                 type(self)._last_failure_kind = "load_failed"
                 result["model"] = None
+                return
+            # ── #13674: RELEASE A MODEL NOBODY WILL ADOPT ──────────────────
+            # The caller's join timed out, so this instance was discarded by
+            # ``get()``. Publishing the model into ``result`` would keep it
+            # (and its torch allocations) alive in a closure with no reader;
+            # dropping the last reference here releases it NOW instead. That,
+            # plus the one-attempt-at-a-time guard in ``get()``, is what bounds
+            # RSS: without the guard, this attempt and a retry would both be
+            # resident.
+            if abandoned.is_set():
+                elapsed = time.monotonic() - _attempt_started_at
+                del loaded
+                logger.info(
+                    "embedder: an OVERRUN load attempt finished after %.1fs "
+                    "(bound %.0fs) — released rather than retained, so RSS "
+                    "does not carry a model nothing will adopt (#13674)",
+                    elapsed, timeout,
+                )
+                return
+            result["model"] = loaded
 
-        t = threading.Thread(target=_load, daemon=True)
+        t = threading.Thread(target=_load, daemon=True, name="tortoise-embedder-load")
+        # #13674: PUBLISH the attempt before the join. ``get()`` reads this to
+        # refuse a second attempt while an abandoned importer is still alive,
+        # and ``status()`` publishes it as ``load_in_progress``. Set on the
+        # class BEFORE ``t.start()`` so the guard can never see a window where a
+        # running thread is not yet recorded.
+        type(self)._load_attempt_thread = t
+        type(self)._load_attempt_abandoned = abandoned
+        type(self)._load_started_at = _attempt_started_at
         # #4055: stamp the attempt BEFORE the join so a wait-bound seam on the
         # event loop can see it while this thread blocks here, and clear it in
         # a ``finally`` so the stamp cannot outlive the join timeout. A
         # background pre-warm stamps nothing (it is not any request's setup).
         if not background:
-            type(self)._one_time_setup_started_at = time.monotonic()
+            type(self)._one_time_setup_started_at = _attempt_started_at
             # #4055 (P2): stamp WHO triggered this load — the request's owner
             # token, propagated into this (possibly worker) context by the
             # seam's ``request_load_owner`` binding. ``None`` when nothing is
@@ -1672,20 +1848,50 @@ class EmbeddingModel:
             t.start()
             t.join(timeout=timeout)
             if t.is_alive():
-                # Model load timed out — log and return None. Do NOT permanently
-                # self-disable: in the hosted container the model is pre-downloaded
-                # and pre-warmed at startup (entrypoint.sh), so this path means
-                # transient resource starvation (OOM, competing process). Next call
-                # will create a fresh instance and retry.
+                # ── #13674: ABANDON, and make the abandonment RECLAIM ───────
+                # Model load timed out. Do NOT permanently self-disable: in the
+                # hosted container the model is pre-downloaded and warmed at
+                # boot (entrypoint.sh), so this path means transient resource
+                # starvation (OOM, competing process).
+                #
+                # Two statements make the retry safe, and both matter:
+                #  1. ``abandoned.set()`` tells the still-running loader to DROP
+                #     the model it is about to finish building, so an overrun
+                #     leaves nothing resident (see ``_load``).
+                #  2. ``_load_attempt_thread`` stays pointing at the live thread,
+                #     so ``get()`` refuses to start a second attempt until this
+                #     one exits. That guard — not the drop — is what bounds RSS:
+                #     a cold import is 156.5 s and a 60 s cooldown retry used to
+                #     start a SECOND importer beside it.
+                abandoned.set()
+                type(self)._load_elapsed_s = time.monotonic() - _attempt_started_at
+                # ⛔ LOG THE BOUND THAT ACTUALLY FIRED (#13674). This line used
+                # to interpolate ``self._LOAD_TIMEOUT_S``, the CLASS default —
+                # so a caller that passed a longer window was told the default
+                # had been exceeded. Production logged "exceeded 90.0s" for a
+                # 300 s join, which sent the investigation at the wrong number.
                 logger.warning(
-                    "Embedding model load exceeded %ss — returning None "
-                    "(retries on next get() call).",
-                    self._LOAD_TIMEOUT_S,
+                    "Embedding model load exceeded the %.1fs bound (elapsed "
+                    "%.1fs) — returning None; the abandoned attempt is NOT "
+                    "reclaimed until it exits, and no second attempt will "
+                    "start before then (#13674).",
+                    timeout, type(self)._load_elapsed_s,
                 )
                 type(self)._last_failure_kind = "load_timeout"
                 self._model = None
                 return
             self._model = result["model"]
+            type(self)._load_elapsed_s = time.monotonic() - _attempt_started_at
+            if self._model is not None:
+                # #13674: the observable success line — elapsed against the
+                # bound, so a load creeping toward its bound is visible in the
+                # log BEFORE it becomes a timeout.
+                logger.info(
+                    "embedder: load OK in %.1fs of a %.0fs bound (%.0f%% of "
+                    "budget) — the dense leg is available",
+                    type(self)._load_elapsed_s, timeout,
+                    100.0 * type(self)._load_elapsed_s / timeout if timeout else 0.0,
+                )
         finally:
             type(self)._one_time_setup_in_progress.clear()
 

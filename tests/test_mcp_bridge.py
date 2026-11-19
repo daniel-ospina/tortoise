@@ -206,7 +206,7 @@ def test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close():
         encoding="utf-8")
     holders = (
         "test_the_store_fault_residual_names_a_home_this_fold_does_not_close",
-        "test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close",
+        "test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so",
     )
     for holder in holders:
         assert holder in relay, (
@@ -220,6 +220,23 @@ def test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close():
     assert "#10884" in relay, (
         "§8a's relay no longer names #10884 for the store-fault / keyless-re-entry "
         "residual, yet both code pins still declare that open home")
+
+    # ⛔ …and the relay must describe what the RE-STATED pin HOLDS. #10794 closed the
+    # whitespace ADOPTION arm, so crediting `…_is_CLOSED_and_says_so` for a residual that
+    # "reds when the unstripped adoption goes away" names a defect that can no longer
+    # recur and hides what the pin actually guards (the MAC gate in `start.ts`). Pin the
+    # MARKER the guard itself reads — a prose sentence outlived its subject here once
+    # already, which is the whole failure this relay check exists for (#13721 review P1).
+    assert "THE WHITESPACE ARM IS CLOSED by #10794" in relay, (
+        "§8a credits a pin for the #10884 half without saying what that pin now holds: the "
+        "whitespace ADOPTION arm is CLOSED by #10794, recorded as the `THE WHITESPACE ARM IS "
+        "CLOSED by #10794` marker in `presented_consent_attempt_key`'s docstring, and what "
+        "#10884 still tracks is the MINT arm. Name the marker, not the superseded prose.")
+    assert "unstripped adoption goes away" not in relay, (
+        "§8a still says the #10884 pins red when `unstripped adoption` goes away — that "
+        "residual was CLOSED by #10794 (`start.ts` adopts a presented key only when its MAC "
+        "verifies), so the sentence sends the next reader after a defect that cannot recur. "
+        "What remains on #10884 is the MINT arm")
 
 
 # ── A spec-shaped Streamable-HTTP upstream that records what it receives ──────

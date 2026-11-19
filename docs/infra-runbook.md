@@ -1927,7 +1927,7 @@ rationale are recorded at the end of this section.
 
 **Routing check — `[[services.tcp_checks]]`** (rides the service's
 `internal_port = 8000`; `interval = "15s"`, `timeout = "5s"`,
-`grace_period = "180s"`). This replaced `[[services.http_checks]]` +
+`grace_period = "420s"`). This replaced `[[services.http_checks]]` +
 `path = "/health"`.
 
 - A TCP check's connect is served by **the kernel** on the listening socket, so
@@ -1958,18 +1958,50 @@ rationale are recorded at the end of this section.
   zero headroom, so a hung probe consumed its whole period). A kernel accept is
   effectively instant (Fly's `tcp_checks` default timeout is 2 s); 5 s is
   generous headroom, not a latency budget.
-- `grace_period = "180s"` is a deliberately generous carry-over, not a
-  requirement of the TCP check. The app binds `0.0.0.0:8000` **immediately** on
-  start: `entrypoint.sh` states it, and `hosted_api._lifespan` spawns the ~85 s
-  torch/model pre-warm as a `daemon=True` thread that never blocks bind — so the
+- `grace_period = "420s"` (was `"180s"`; raised by **#13674**) is a
+  deliberately generous carry-over, not a requirement of the TCP check. The app
+  binds `0.0.0.0:8000` **immediately** on start: `entrypoint.sh` states it, and
+  `hosted_api._lifespan` spawns the ~85 s torch/model pre-warm as a
+  `daemon=True` thread that never blocks bind — so once `exec` runs, the
   listening socket exists within seconds and the model load does not gate a TCP
-  connect. Whether Fly honors the full 180 s is unresolved; see §6.4.1.
-  `[deploy] wait_timeout = "5m"` (CI passes 420 s) still exceeds boot +
-  `grace_period` under either reading of §6.4.1.
+  connect.
+
+  ⛔ **WHAT CHANGED AND WHY 180s STOPPED BEING SAFE.** #13674 moved the
+  embedder's COLD IMPORT in front of `exec`: `entrypoint.sh`'s
+  `_prewarm_embedder` now pays it before uvicorn binds, because that cost is
+  **156.5 s of imports alone** (`import torch` 24.1 s + `from
+  sentence_transformers import SentenceTransformer` 132.4 s, measured
+  2026-11-19 on `tortoise-y4mjjq`, `cpu_kind=shared`, 2 cpus), plus a 39.3 s
+  warm construct — ≈196 s before the app can bind at all. A 180 s grace expires
+  *inside* that window, so a perfectly healthy cold boot reports a failing
+  check; a boot that fails its checks is a restart loop, i.e. the same outage
+  wearing a different hat. 420 s = the 196 s measurement + the app's own start +
+  ~200 s headroom, and it sits **above the pre-warm's own 300 s bound**
+  (`TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S`), so a boot that hits that bound
+  still has ~120 s to bind and pass a check.
+
+  ⛔ **THE TWO BLOCKS ARE SEPARATE KEYS.** `[[services.tcp_checks]]` and
+  `[checks.loop_liveness]` each carry their own `grace_period`; they must be
+  raised together or whichever one is left behind still fires inside the boot
+  window. `tests/test_health_ready_nonblocking.py` grades **both** against the
+  pre-warm's own bound (not against a literal), so a future retune of the
+  pre-warm moves both assertions with it.
+
+  ⚠️ **OPEN CONSEQUENCE — the deploy wait was not raised in the same change.**
+  `[deploy] wait_timeout = "5m"` and CI's `flyctl deploy --wait-timeout 420`
+  (`.github/workflows/deploy-hosted.yml`) are now **not** above boot +
+  `grace_period` (≈196 s + 420 s ≈ 616 s), so the invariant this section used to
+  state no longer holds for a genuinely cold boot. Raising it is bounded by the
+  deploy workflow's own per-attempt `timeout -k 30s 11m` (660 s) and its
+  65-minute job cap, so it is a measured retune of all three numbers, **not** a
+  one-line edit — tracked separately rather than guessed here. Until it lands,
+  a cold-boot deploy relies on the workflow's 5-attempt retry loop.
 
 **Live — non-routing check, top-level `[checks.loop_liveness]` (#3447).** Shape:
 `type = "http"`, `port = 9090`, `path = "/healthz"`, `interval = "15s"`,
-`timeout = "5s"`, `grace_period = "180s"`. It shipped in `fly.toml` only after
+`timeout = "5s"`, `grace_period = "420s"` (#13674 raised it with the TCP check;
+see the boot-window derivation above — the two keys are separate and must be
+raised together). It shipped in `fly.toml` only after
 the §6.0 precondition was verified (2026-09-17: `00000000:2382` and `http=200`).
 
 - **Top-level checks do not affect request routing — but they DO gate
@@ -2008,20 +2040,25 @@ undocumented server-side clamp cannot be ruled out. The honest position is
 above must not be read as assuming either outcome:
 
 - **If no clamp exists** (what the documented field list implies): the effective
-  `grace_period` is the configured `"180s"` — generous headroom the TCP check
-  does not need. The listener exists within seconds of start (the ~85 s
-  torch/model load does not gate a connect), and the ~2 min FalkorDB DNS tail
+  `grace_period` is the configured `"420s"`. ⛔ **THE "BINDS WITHIN SECONDS"
+  PREMISE IS NO LONGER TRUE** (#13674): `entrypoint.sh` now runs
+  `_prewarm_embedder` BEFORE `exec`, so the socket does not exist for the ~196 s
+  the cold embedder import takes (156.5 s imports + 39.3 s construct, measured
+  2026-11-19). The 420 s grace exists precisely to cover that window; the
+  ~2 min FalkorDB DNS tail
   (#1381) is surfaced by the deploy workflow's DB health verification, not by this check.
-- **If the clamp exists**: the effective grace period is **60 s**, still far
-  longer than the seconds it takes the listener to bind, so the clamp is no
-  longer a cold-start hazard for the TCP check. The historical worry — that a
-  60 s clamp would mark every cold start unhealthy — applied to the old HTTP
-  check, whose probe depended on the boot-time model load; it does not carry
-  over to a kernel-connect check.
+- **If the clamp exists**: the effective grace period is **60 s**, and with the
+  pre-warm in front of `exec` that is now **shorter than a cold boot takes by a
+  factor of three** — so a clamp WOULD mark every cold start unhealthy. The
+  historical worry this bullet used to dismiss as "no longer a cold-start
+  hazard" has been RE-OPENED by #13674: it is the same hazard the old HTTP
+  check had, reached from the kernel-connect side. §6.9 carries the staging
+  test that would settle it, and it matters more now than when it was filed.
 
 **How to test it** (staging app only, never production). The check must be made
-to **fail deterministically** — with the normal image the socket binds within
-seconds, so the check passes and the clamp question is never exercised. Point
+to **fail deterministically** — with the normal image the pre-warm delays the
+socket by ~196 s but it does exist after that, so on a WARM cache the check
+passes and the clamp question is never exercised. Point
 the staging service's check at a deliberately **closed port** (or hold the app
 down), set `grace_period` above 60 s, start the machine, and record the delay
 from machine start to the first failed check in `fly checks list` / `fly logs`.

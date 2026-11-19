@@ -124,6 +124,7 @@ from .errors import (
     RESUME_ATTEMPTS_CAP,
     WriteStageRetriesExhausted,
     eval_failure_class,
+    failure_is_recoverable,
     fatal_census,
     retryable_transient,
 )
@@ -229,6 +230,11 @@ RESUME_CLAIM_TTL_S = 90 * 60
 #: Persisted failure-entry ``error`` repr cap (P2-7) — a multi-MB exception
 #: repr must not bloat the checkpoint or break the JSON round-trip.
 ERROR_REPR_CAP = 2000
+#: #8486 F2: cap on the persisted ``error_detail`` (the exception's OWN
+#: message). Sized for a FalkorDB/redis server sentence or a provider error
+#: body — long enough to tell a refused query from a deleted graph, short
+#: enough that a checkpoint carrying 500 failures stays a checkpoint.
+ERROR_DETAIL_CAP = 600
 
 #: #1786 (P2-6/P2-1): the shared resume-tier concurrency limiter — ≤ 2
 #: concurrent ~25-min re-ingests across BOTH tiers (R2 re-attempts inside
@@ -1217,8 +1223,11 @@ class CheckpointStaleError(RuntimeError):
 # ── #1786 (R3): failure-entry lifecycle + resume-claim helpers ────────────
 # The failure-entry schema (Task 1 Step 4, additive to the existing
 # ``error``/``error_class``/``failed_at_utc`` shape — no format bump):
-# ``{question_id, question_type, error, error_class, retryable, attempts,
-#  failed_at_utc, in_progress: {in_progress_utc, pid} | null}``.
+# ``{question_id, question_type, error, error_detail, error_class, retryable,
+#  attempts, failed_at_utc, in_progress: {in_progress_utc, pid} | null}``.
+# ``error_detail`` is #8486 F2 (additive, omitted when the exception carries no
+# message); a field list that claims to enumerate the record but omits it is the
+# same "record disagrees with the code" defect class this PR exists to close.
 
 
 def _utc_now() -> datetime:
@@ -1357,7 +1366,18 @@ def _retry_failed_skip_reason(entry: dict, *,
                 f"ingest:retries_exhausted entries are re-attempted "
                 f"(reader:/judge: entries stay permanently skipped)")
     if entry.get("retryable") is False:
-        return "retryable=false (deterministic failure — never re-attempted)"
+        # ⛔ NOT an enumeration of the excluded families. ``retryable: false``
+        # is also reached by families nobody would call deterministic — a
+        # provider ``requests.exceptions.HTTPError('503 …')`` at ingest grades
+        # ``ingest:retries_exhausted`` but ``retryable_transient`` refuses an
+        # ``HTTPError`` before any arm runs — so naming "deterministic bugs
+        # AND the transient-value redis refusals" told an operator triaging a
+        # provider 5xx that the cause was a bug in our code. Say what the flag
+        # means and point at the predicate; do not list what it excludes.
+        return ("retryable=false (not an infra failure — never re-attempted; "
+                "covers a deterministic bug in our own code and every family "
+                "errors.py::infra_failure does not name, which includes the "
+                "transient-value redis refusals)")
     if entry.get("retryable") is None and not _legacy_repr_match(
             str(entry.get("error") or "")):
         # Legacy entry without a 'retryable' field: the repr-string check is
@@ -1389,6 +1409,129 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
     return _retry_failed_skip_reason(entry) is None
 
 
+def _scrub(text: str) -> str:
+    """The PRODUCT's credential redactor, applied to anything persisted.
+
+    ``tortoise.security.redact_secrets`` replaces credential-shaped spans
+    (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
+    ``[REDACTED:<kind>]`` and leaves everything else byte-identical. ⚠️ It is
+    SHAPE-based, so it is not a guarantee that no secret survives — measured:
+    ``password=hunter2``, ``token=abc123…`` and an ``Authorization: Basic …``
+    header all pass through untouched. What it buys is that the shapes this repo
+    actually emits (a connection URL, an API key) cannot reach a record that is
+    both persisted and republished; a caller with a wider secret surface still
+    owns that.
+
+    ⚠️ The WHOLE text is scanned, deliberately, and the cost is linear in it
+    (measured 8 MB repr -> ~6.7 s, inside ``flock_exclusive``). Truncating the
+    input first to bound that cost is a LEAK, not an optimisation, and this
+    module tried it once: a credential whose terminator falls past the cut is
+    not recognised, and because an earlier span can compress ~100× (a PEM block
+    collapses to one token) its cleartext prefix lands inside the stored
+    ``ERROR_REPR_CAP``/``ERROR_DETAIL_CAP`` window — measured, a full
+    ``redis://user:password@host`` password persisted in ``error_detail``. The
+    premise that made it look safe ("the redactor only shortens a span") is
+    false too: the connection-URL rule LENGTHENS one. A bounded scrub needs
+    span-aware truncation, not a character cap; the linear cost is the price of
+    the guarantee until that exists (#8486 follow-up).
+    """
+    from tortoise.security import redact_secrets
+
+    scrubbed, _counts = redact_secrets(text)
+    return scrubbed
+
+
+def _scrub_exc_repr(exc: BaseException) -> str:
+    """``repr(exc)``, scrubbed WITHOUT repr's escape sequences hiding the secret.
+
+    A credential must not reach ``error`` (it is persisted to the checkpoint and
+    republished by ``report.py``), and scrubbing ``repr(exc)`` is HOW that is
+    done — but ``repr`` ESCAPES first, and the redactor's connection-URL anchor
+    is ``(?<![A-Za-z0-9])``. A newline in the message becomes the two characters
+    ``\\n``, whose trailing ``n`` IS alphanumeric, so a credential that begins a
+    line is invisible to a repr-only pass. Measured, on this head:
+
+    * ``ValueError("connect failed\\nredis://u:s3cr3t-pw@h:6379/0")`` persisted
+      ``s3cr3t-pw`` in cleartext in ``error``;
+    * the SAME message redacts cleanly when the redactor is handed the string
+      itself, and when the URL is preceded by a SPACE — which is why the
+      pre-existing repr pin, whose fixture keeps the URL on the message's first
+      line, never caught it.
+
+    So the MESSAGE is scrubbed BEFORE it is escaped, and the repr is rebuilt from
+    the scrubbed text. The rebuild happens only when that pass actually redacted
+    something: the common case keeps the exact ``repr`` bytes (and so the legacy
+    ``_legacy_repr_match`` substring, and every on-disk record's shape).
+
+    ⚠️ Residual, stated rather than implied: the blind spot is a property of any
+    ESCAPED text, and it is NOT confined to this pass — ``_error_detail`` scrubs
+    ``str(exc)``, which for a container argument is escaped text too, so the
+    same nested-``args`` credential survives there (measured). Covering it needs
+    the redactor to anchor after an escape sequence, which is a
+    product-redactor change (the capture path feeds it REAL newlines, where the
+    anchor is correct) and is deliberately not made here.
+    """
+    msg = str(exc) or ""
+    scrubbed_msg = _scrub(msg)
+    if scrubbed_msg != msg:
+        return _scrub(f"{type(exc).__name__}({scrubbed_msg!r})")
+    return _scrub(repr(exc))
+
+
+def _error_detail(exc: BaseException) -> str:
+    """The exception's OWN message, secret-scrubbed and bounded (#8486 F2).
+
+    Why it is not just ``str(exc)`` in the record, and why it is not ``repr``:
+
+    * ``redis.exceptions.RedisError.__repr__`` returns
+      ``f"{self.error_type.value}:{type(self).__name__}"`` — measured on the
+      installed driver: ``repr(ResponseError('Query timed out'))`` ==
+      ``'server:ResponseError'``. ``args`` is dropped, so the ONE thing that
+      makes a server failure diagnosable (`Query timed out` vs `graph was
+      deleted or replaced while the query was running, aborting` vs a
+      ``WRONGTYPE``/``maxmemory`` refusal) survives only in ``str(exc)``.
+    * The record is persisted to the checkpoint and republished in the report
+      (``report.py`` passes ``failures`` through verbatim), so the text is
+      scrubbed through the PRODUCT's credential redactor —
+      ``tortoise.security.redact_secrets`` — which replaces credential-shaped
+      spans (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
+      ``[REDACTED:<kind>]`` and leaves everything else byte-identical. ⚠️ NOT
+      an absolute guarantee, and the residual here is NOT the one
+      ``_scrub_exc_repr`` discloses: ``str(exc)`` on a container argument IS
+      escaped text (``ValueError(["a\nredis://u:pw@h/0"])``), so the
+      connection-URL anchor sees ``\n``'s trailing ``n`` and misses it —
+      measured, that password survives in BOTH fields. Every realistic shape is
+      covered (inline URL, URL at a line start in a real message, dict/tuple/
+      bytes args, PEM past the cap); the nested-``args`` shape is the known
+      hole, and closing it is a product-redactor change (anchor after an escape
+      sequence), not a local one.
+    * Whitespace is collapsed (a FalkorDB parse error echoes the query with
+      newlines) and the result is capped at ``ERROR_DETAIL_CAP``.
+
+    Returns ``""`` when the exception carries no message — the entry then omits
+    the key entirely rather than writing an empty string.
+    """
+    try:
+        text = str(exc) or ""
+        text = " ".join(text.split())
+        if not text:
+            return ""
+        # ⚠️ The REDACTOR is inside the guard, not after it (#8486 review round
+        # 2). ``redact_secrets`` walks arbitrary provider/FalkorDB text, so it
+        # is the same class of hazard as a broken ``__str__`` — and this
+        # builder's whole invariant is that a failure record never masks the
+        # failure. Failing closed (drop the detail) is safe because
+        # ``error``/``error_class``/``retryable`` still describe the failure;
+        # emitting the text UNSCRUBBED to stay available would trade a masked
+        # failure for a leaked credential, which is strictly worse.
+        text = _scrub(text)
+    except Exception:  # noqa: BLE001, RUF100 — nor is a broken redactor the failure
+        return ""
+    if len(text) > ERROR_DETAIL_CAP:
+        text = text[:ERROR_DETAIL_CAP] + "…<truncated>"
+    return text
+
+
 def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
                    stage: str, attempts: int, prior: dict | None = None,
                    usage: dict | None = None) -> dict:
@@ -1401,12 +1544,61 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     tier (``ingest:retries_exhausted``) stays tier-eligible even when a
     re-attempt fails at a NON-ingest stage (the re-extraction advances
     ``_stage`` to reader/judge — without preservation an LLM-provider
-    transient there would re-classify the entry and silently exclude it)."""
-    retryable = retryable_transient(exc)
+    transient there would re-classify the entry and silently exclude it).
+
+    #8486 F1 — the record must not contradict itself. ``retryable`` answers
+    one question: "may a ``--retry-failed`` resume re-attempt this question?"
+    It is therefore derived from the entry's OWN ``error_class`` via
+    :func:`errors.failure_is_recoverable` — never from ``retryable_transient``
+    ALONE. That predicate answers a DIFFERENT question ("may this WRITE be
+    retried at THIS layer now") and returns False for families that are
+    recoverable at a higher layer: a ``ResponseError('graph was deleted or
+    replaced…')`` is retried by ``retryable_aborted_write`` at the SDK write
+    seam and must not be retried again out here (``tortoise/retry.py``'s
+    docstring), yet the question it failed on IS recoverable. Borrowing it
+    here wrote ``error_class=ingest:retries_exhausted`` (recoverable) with
+    ``retryable: false`` in the 10-question smoke, and the resume silently
+    skipped the failure it exists to pick up.
+
+    ⚠️ The class is necessary but not sufficient. ``eval_failure_class``
+    widens every ``unknown``-class exception at ingest to
+    ``ingest:retries_exhausted``, so a deterministic bug in our own extractor
+    wears the same class as a refused query; ``failure_is_recoverable`` takes
+    the second condition (``errors.infra_failure``) so fixing this finding does
+    not quietly drop the plan's pinned exclusion of deterministic bugs
+    (``docs/plans/2026-08-27-1786-infra-resilience.md``, Task 2 Step 2) and
+    re-burn ~25 min twice over on them.
+
+    #8486 F2 — ``error`` is ``repr(exc)``, and ``redis.exceptions.RedisError``
+    overrides ``__repr__`` to ``f"{self.error_type.value}:{type(self).__name__}"``
+    (measured: ``repr(ResponseError('Query timed out'))`` ==
+    ``'server:ResponseError'``), DROPPING ``args``. The server's own sentence
+    therefore never reached the record, so a refused query and a deleted graph
+    were indistinguishable. ``error_detail`` carries it (scrubbed, bounded),
+    additively. ⚠️ ``error`` is scrubbed TOO (#8486 review round 2): it is
+    persisted and republished verbatim (``report.py`` passes ``failures``
+    through), so leaving ``repr(exc)`` raw makes this record the one place a
+    connection-string password or an ``sk-`` key survives — and the family that
+    cannot leak (``RedisError``, whose repr drops ``args``) is exactly the one a
+    credential test would naturally pick. ``redact_secrets`` replaces only
+    credential-SHAPED spans and leaves class names byte-identical, so the
+    legacy resume rescue (``_legacy_repr_match``, which looks for the
+    ``TimeoutError``/``ConnectionError`` substrings) is unaffected.
+    """
     error_class = eval_failure_class(exc, site=stage)
     if prior and prior.get("error_class") == "ingest:retries_exhausted":
         error_class = "ingest:retries_exhausted"
-    err = repr(exc)
+    retryable = failure_is_recoverable(exc, error_class=error_class)
+    # ⚠️ Guarded for the same reason as ``_error_detail``'s scrub (see there):
+    # an unguarded redactor failure HERE aborts the entry build and loses the
+    # failure record outright — the failure masked by its own report, which is
+    # the worst version of the defect this builder exists to prevent. The
+    # fallback is the exception's CLASS NAME: it cannot carry ``args``, so it
+    # cannot leak a credential, and it keeps the record inspectable.
+    try:
+        err = _scrub_exc_repr(exc)
+    except Exception:  # noqa: BLE001, RUF100 — a broken redactor is not the failure
+        err = type(exc).__name__
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
     entry = {
@@ -1419,6 +1611,9 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
         "failed_at_utc": _utc_now().isoformat(),
         "in_progress": None,
     }
+    detail = _error_detail(exc)
+    if detail:
+        entry["error_detail"] = detail
     # #2185: the qid's CUMULATIVE usage envelope rides the failure entry as
     # the kill-9-safe replica — present ONLY when an LLM was actually
     # called (the A4 load fold reads it; mock/failed-early runs stay
@@ -1434,13 +1629,16 @@ def _build_failure_entry(qid: str, question_type: str, exc: BaseException,
                          *, usage_env: dict | None = None) -> dict:
     """The run-loop failure-entry builder (module-level — B023-clean so the
     per-question loop can pass it via ``functools.partial``). Counter
-    semantics (P1-6): the in-run R2 increments the persisted counter (an
-    R2-exhausted entry starts at ``attempts=1``); a provider transient that
-    never entered the write-stage loop starts at ``attempts=0``; each failed
-    ``--retry-failed`` re-attempt increments from the ON-DISK ``prior``
-    (never the stale in-memory copy; never at claim — a kill -9 mid-attempt
-    leaves the counter untouched so the dead-pid re-claim stays admitted)."""
-    attempts = ((1 if r2_attempted else 0)
+    semantics (P1-6, #8486 F1): ``attempts`` counts the PIPELINE ATTEMPTS a
+    question has consumed — the initial attempt is 1 (a question that failed
+    after 12 minutes of ingest has obviously been tried once), the in-run R2
+    makes it 2, and each failed ``--retry-failed`` re-attempt increments from
+    the ON-DISK ``prior`` (never the stale in-memory copy; never at claim — a
+    kill -9 mid-attempt leaves the counter untouched so the dead-pid re-claim
+    stays admitted). A pre-fix entry recorded 0 in the first two cases, so the
+    same record claimed the retry budget was exhausted AND that nothing had
+    been attempted."""
+    attempts = ((1 + (1 if r2_attempted else 0))
                 if not resume_reattempt
                 else (int((prior or {}).get("attempts", 0) or 0) + 1))
     return _failure_entry(qid, question_type, exc, stage=stage,
@@ -6178,14 +6376,16 @@ def run_evaluation(
                     lme_usage.clear_question_key()
 
                     with _lock:
-                        # Counter semantics (P1-6): the in-run R2 DOES
-                        # increment the persisted counter (R2-exhausted
-                        # entry starts at attempts=1); a provider transient
-                        # that never entered the write-stage loop starts at
-                        # attempts=0; each failed --retry-failed re-attempt
-                        # increments from the ON-DISK prior (never the stale
-                        # in-memory copy; never at claim — a kill -9 mid-
-                        # attempt leaves the counter untouched).
+                        # Counter semantics (P1-6, #8486 F1): ``attempts``
+                        # counts PIPELINE ATTEMPTS — the initial attempt is 1,
+                        # the in-run R2 makes it 2, and each failed
+                        # --retry-failed re-attempt increments from the
+                        # ON-DISK prior (never the stale in-memory copy;
+                        # never at claim — a kill -9 mid-attempt leaves the
+                        # counter untouched). A record that says
+                        # ``ingest:retries_exhausted`` can no longer say
+                        # ``attempts: 0``: the class claims the budget burned
+                        # and the count now names how much of it did.
                         entry = _upsert_failure(
                             checkpoint, qid,
                             partial(_build_failure_entry, qid,
@@ -7641,8 +7841,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "ingest:retries_exhausted failure entries with "
                         "retryable=true (or a legacy transport repr) and "
                         f"attempts < {RESUME_ATTEMPTS_CAP}; attempts are "
-                        "bounded across resumes (the in-run whole-question "
-                        "retry counts as the first); on success the failure "
+                        "bounded across resumes (the initial attempt is 1, "
+                        "the in-run whole-question retry makes it 2); on "
+                        "success the failure "
                         "entry is removed in one flocked write and the report "
                         "grades the qid clean. NOT fingerprinted (a recorded "
                         "resume-mode — the revalidation protocol sets it); "
