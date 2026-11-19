@@ -1511,6 +1511,23 @@ class TestTheSeedReport:
         assert applied.acknowledge_plan == 3, applied
         assert (applied.org_id, applied.graph_id) == ("org-1", "graph-1"), applied
 
+    def test_no_tenant_is_a_VISIBLE_placeholder_never_a_guessed_id(self, tool_mod):
+        """⛔ The `--org-id`/`--graph-id` branch WITH no tenant is REACHABLE.
+
+        An ARMED record with an unresolved tenant is a real state: the seam refuses
+        the write `no_tenant`, that refusal sets `unprojected=1`, and this report
+        then has no ids to fill in. Emitting `<org-id>`/`<graph-id>` says "supply
+        this"; dropping the flags would emit a command argparse rejects, and
+        guessing an id would be the mis-scoped write `#9192` forbids.
+        """
+        payload = self._report(
+            tool_mod, record_applied=0, record_unprojected=1, org_id=None, graph_id=None
+        ).as_dict()
+        fold = payload["fold"]
+        assert "--org-id <org-id>" in fold["plan"], fold["plan"]
+        assert "--org-id <org-id>" in fold["apply"], fold["apply"]
+        assert payload["org_id"] is None and payload["graph_id"] is None, payload
+
     def test_an_unproven_position_on_an_ARMED_record_names_the_fold(self, tool_mod):
         """A record row with no journal_event row is UNPROJECTED to the read gate."""
         payload = self._report(

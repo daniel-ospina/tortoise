@@ -1457,9 +1457,15 @@ class SeedReport:
                     f"--org-id {shlex.quote(self.org_id)} --graph-id {shlex.quote(self.graph_id)}"
                 )
             else:
-                # Unreachable on the emitted path (an unprojected write requires an
-                # ARMING record, which requires a resolved tenant), and stated
-                # rather than guessed: a placeholder is visible, a wrong id is not.
+                # ⛔ REACHABLE, AND THAT IS WHY IT IS A PLACEHOLDER RATHER THAN AN
+                # OMISSION (review round 3, non-blocking). An ARMED record with an
+                # UNRESOLVED tenant is a real state: the seam refuses the write
+                # `no_tenant`, that refusal sets `unprojected=1`, and this report
+                # then has no ids to fill in. Emitting `<org-id>`/`<graph-id>` says
+                # "you must supply this" (and the `record_dense` arm is separately
+                # blocked `no_tenant`, so no figure depends on it); dropping the
+                # flags would emit a command argparse rejects, and guessing an id
+                # would be the mis-scoped write `#9192` forbids.
                 ident = "--org-id <org-id> --graph-id <graph-id>"
             payload["fold"] = {
                 "plan": (
