@@ -3509,7 +3509,10 @@ _NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
     "> ### v3.41 — a wording fix\n"
     "> The §4.5 sentence was corrected; no approval is recorded here.")
 # ⛔ AND A TABLE ROW, which is ONE OF THE BLOCK KINDS `_PARAGRAPH_START_RE` does not know
-# (review: measured PASS where `main` refused). Declared in the residual list; pinned green
+# (review: measured PASS). ⛔ NOT "where `main` refused" (review P2): `origin/main`'s own
+# suite calls the arm on this exact fixture UNGUARDED (`tests/test_session_schema_3554.py:4020`
+# at `origin/main`), i.e. main pins it GREEN, and no earlier main could have refused it — the
+# arm itself does not exist before #13643. Declared in the residual list; pinned green
 # so the gap is measured. `docs/ONTOLOGY-CHANGELOG.md` writes no tables.
 _APPROVAL_RECORD_IN_A_TABLE_ROW = (
     "> | **Owner approval of the exact changes** | given in-session, no comment cited |")
@@ -3707,10 +3710,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     An id in a LATER sentence belongs to whatever that sentence says.
     ⛔ THE SCOPE IS THE SENTENCE, NOT THE ATTRIBUTED-QUOTATION FORM, and the two were
     measured against the landed text before choosing. The attributed ``comment <id>:
-    "…"`` form the §4.3 pin demands would refuse FOUR of the six accepted records (only
-    **2** carry it — v3.38 and v3.36, measured; #13669 corrected this comment's earlier
-    "none"); the sentence scope accepts a bare ``comment <id>`` and still refuses the
-    borrow.
+    "…"`` form the §4.3 pin demands would refuse THREE of the six accepted records (only
+    **3** carry it — v3.38, v3.36 and v3.34, measured; #13669 corrected this comment's
+    earlier "none", and its review P2 corrected a later "FOUR … only 2" that was off by
+    one: v3.34 carries ``comment `6815950417`: *"`archived` does not close policy B"*``
+    too, and the count is now RE-DERIVED by the sweep below rather than restated); the
+    sentence scope accepts a bare ``comment <id>`` and still refuses the borrow.
     ⛔ WHAT A RECORD *IS* WAS RE-DECIDED IN #13669, because the phrase detector this arm
     shipped with was measurably vacuous. The shipped detector keyed on ``owner approval``
     followed by a COLON inside one sentence. Measured at the merged head ``6d761643``
@@ -3801,7 +3806,7 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
           taught `|\\s+` consumes the cell delimiter and closes the shape
           (``_APPROVAL_RECORD_IN_A_TABLE_ROW`` PASS → REFUSED, measured). The bare-`|` form
           that consumes no space changes nothing either, and is not a row start. Measured
-          PASS where `main` refused; the corpus writes no tables
+          PASS; the corpus writes no tables
           (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0);
         · the BREAK and the FENCE close through the SPLITTER only, and no stripper can reach
           them — there is no delimiter in front of the run, the block IS the delimiter.
@@ -4197,6 +4202,31 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     assert "<b>" not in landed_text and "<strong>" not in landed_text, (
         "the corpus now writes an HTML label — the arm's docstring states it never does, "
         "which is why an HTML label is a declared fail-OPEN rather than a handled shape")
+    # ⛔ THE THIRD NUMERAL, RE-DERIVED (#13669 review P2): the arm's docstring says the
+    # attributed form the §4.3 pin demands would refuse THREE of these SIX accepted records
+    # because only v3.38, v3.36 and v3.34 carry it. Before this the sentence claimed
+    # "FOUR … only 2 (v3.38 and v3.36)" and NOTHING read it — the same "a number the
+    # docstring promises and no test performs" drift the two asserts above exist to end.
+    # Read from the PIN ITSELF, not re-implemented: the set is the accepted blocks that
+    # PASS `_refuse_a_bare_or_disclaimed_citation`.
+    carrying_the_demanded_form: list[str] = []
+    for landed_block in landed_blocks:
+        if not [paragraph for paragraph in _quoted_paragraphs(landed_block)
+                if _opening_approval_label(paragraph)]:
+            continue
+        accepted_version = _BLOCK_VERSION_RE.match(landed_block)
+        assert accepted_version, "a labelled block must carry a readable version header"
+        if accepted_version.group(1) in refused_versions:
+            continue  # the two this arm refuses are not among the "accepted" six
+        try:
+            _refuse_a_bare_or_disclaimed_citation(landed_block)
+        except AssertionError:
+            continue
+        carrying_the_demanded_form.append(accepted_version.group(1))
+    assert sorted(carrying_the_demanded_form) == ["3.34", "3.36", "3.38"], (
+        "the docstring states the §4.3 pin's attributed form would refuse THREE of the six "
+        "accepted records because only v3.38, v3.36 and v3.34 carry it; that set changed "
+        f"— read: {carrying_the_demanded_form}")
     # NON-VACUITY: both shapes this release shipped are refused, verbatim.
     with pytest.raises(AssertionError) as refused:
         _refuse_an_approval_record_with_no_resolvable_home(_PREFIX_APPROVAL_RECORD)
