@@ -230,7 +230,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 0d5bb6506ff1c85e08ac8614816121a950579624
+cut_at_commit: 6238dde72a458448d247a951bf477668bc033ece
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1079,9 +1079,9 @@ response_fields:
     carrier — that carrier holds a NAME by ONTOLOGY §4.2/§4.3, so it is never served under an `…Id` key and an Object/Subject
     row has `successorId: null` beside its `successorName`**), `stage` {id, slot, outcome, since} on a record ended
     on the POSITION axis, `isClosed`/`outdated`, `endedAt` plus the raw `validTo`/`expiredAt`/`supersededAt`/`pipelineStageSince`/`updatedAt`
-    it was resolved from, and `linkedEvents` (the Events wired to the record of ANY kind — a mention as well as an
-    occurrence, so an empty list is **necessary but not sufficient**: the occurrence/mention split is
-    `planned_occurrence.OCCURRENCE_EVENT_KINDS`, #13128). Selection is the shared currency predicate `live._terminal_expression` in the positive direction, so
+    it was resolved from, and `linkedEvents` (the Events wired to the record of ANY kind — a mention as well as
+    an occurrence, so an empty list is **necessary but not sufficient**: the occurrence/mention split is `planned_occurrence.OCCURRENCE_EVENT_KINDS`,
+    #13128). Selection is the shared currency predicate `live._terminal_expression` in the positive direction, so
     no status list, slot literal or visibility field is added anywhere.'
   unchanged_when_off: 'yes — ended_scope defaults to False and the branch returns before any retrieval runs, so
     with the flag off the read is byte-identical to pre-#13302: same rows, same keys, same order. ⛔ Deliberately
@@ -1516,7 +1516,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:b3f090fa42c801f4
+  served_from: tortoise/mcp_server.py:9ef49600d5b49d45
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
