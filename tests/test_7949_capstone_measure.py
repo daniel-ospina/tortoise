@@ -16479,18 +16479,30 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # re-points, none of them that pair) and the document's own row reads `sdk.py:28718`. A phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
-    for stale in ("carries TWO numeric re-points", "a document that carries two"):
-        assert stale not in text, (
-            f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
-            "`:15202-15279` -> `:15225-15302` move it is paired with is `origin/main`'s "
-            "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
-            "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
-            "`:15225-15302`). Do not re-inflate the count")
-    assert "carries ONE numeric re-point" not in text, (
-        "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff. "
-        "Measured at this head: that file IS in `git diff --name-only origin/main...HEAD` (four "
-        "numeric re-points), the pair the clause used to name (`sdk.py:28559` -> `:28592`) is "
-        "none of them, and the document's own row reads `sdk.py:28718`")
+    # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
+    # This arm used to forbid the phrases "carries TWO numeric re-points" / "carries ONE
+    # numeric re-point" while its own message asserted FOUR, and both were wrong at the
+    # next head: `git diff origin/main...HEAD --numstat -- .../04-plan.md` measures `2 2`
+    # over two hunks, and only one of the four pairs the message listed was this diff's
+    # (two already read that way on `origin/main`, one named `:28607` where the base reads
+    # `:28682`, and the range's TARGET was typed as the base's own value). A count in
+    # prose AND a count in the guard is the same head-bound figure twice, which is D5's
+    # own thesis — so the PAIRS are pinned and every count spelling is refused.
+    for _stale_count in ("carries ONE numeric re-point", "carries TWO numeric re-point",
+                         "carries THREE numeric re-point", "carries FOUR numeric re-point",
+                         "a document that carries two"):
+        assert _stale_count not in text, (
+            f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
+            "figure and this arm has already been wrong in both directions; name the "
+            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
+            "`:15261-15338` -> `:15262-15339`), which `git diff --numstat` measures as "
+            "`2 2` over two hunks (#13750 review, cycle 3)")
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15261-15338` → `:15262-15339`"):
+        assert _pair in text, (
+            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
+            "this head. Both ends are pinned here because the range's TARGET was once "
+            "typed as the base's own value while its SOURCE was already re-derived "
+            "(#13750 review, cycle 3)")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
