@@ -1271,13 +1271,23 @@ class TestTheWiringTheReviewFixed:
 
 
 class _FakeGraph:
+    # The texts this run "seeded", set by `_drive`. Class-level because
+    # `run_measurement` constructs the SDK (and therefore this graph) itself.
+    # ⛔ IT ANSWERS THE ID-AND-TEXT QUERY HONESTLY RATHER THAN THE RUN STUBBING
+    # `graph_population_vectors`: stubbing it made the guard's enforcement
+    # unobservable — a run that swallowed the refusal kept the whole suite green
+    # (`#13745` review round 1, finding 1).
+    contents: ClassVar[dict[str, str]] = {}
+
     def __init__(self, rows: int):
         self._rows = rows
 
-    def query(self, _cypher):
-        # The run-level `graph_unseeded` guard reads this: a zero count refuses the
-        # RUN (the population was written without embeddings), so a fake that
-        # reports zero would never reach the arms this class is about.
+    def query(self, _cypher, params=None):
+        if params is not None and "ids" in params:
+            return types.SimpleNamespace(
+                result_set=[[i, self.contents.get(i)] for i in params["ids"]]
+            )
+        # The run's PREFIX-wide count: `graph_vectors`, the coverage DENOMINATOR.
         return types.SimpleNamespace(result_set=[[f"pt-12186{i:06d}"] for i in range(self._rows)])
 
 
@@ -1315,7 +1325,16 @@ class TestTheDocumentedRunPath:
         "and the graph's leg under the record's name is not this measurement"
     )
 
-    def _drive(self, tool_mod, monkeypatch, tmp_path, *, out: str, preregistered_n: int):
+    def _drive(
+        self,
+        tool_mod,
+        monkeypatch,
+        tmp_path,
+        *,
+        out: str,
+        preregistered_n: int,
+        seeded: int | None = None,
+    ):
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
         rows = [
@@ -1332,6 +1351,12 @@ class TestTheDocumentedRunPath:
         monkeypatch.setattr(tool_mod, "require_record", _no_record)
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
         monkeypatch.setattr(tool_mod, "_seed_graph", lambda _proj, pop: len(pop))
+        # ⛔ WHAT THE GRAPH "HOLDS" IS WHAT THIS RUN SEEDED — the `seeded` knob is
+        # how a partial seed is driven through the SHIPPED guard instead of
+        # stubbing it. `seeded` is the count of rows whose stored text is this
+        # run's text; the rest keep no vector (or an earlier text's).
+        keep = len(rows) if seeded is None else seeded
+        _FakeGraph.contents = {r["id"]: r["content"] for r in rows[:keep]}
         monkeypatch.setattr(
             tool_mod,
             "_read_arm",
@@ -1384,6 +1409,62 @@ class TestTheDocumentedRunPath:
         assert rc == 3
         assert json.loads(got.out)["arms"]["record_dense"]["blocked"] == "no_record_dsn"
         assert f"REFUSED[no_record_dsn]: {self.BLOCK_MESSAGE}" in got.err, got.err
+
+    def test_the_artifact_carries_BOTH_graph_counts(self, tool_mod, monkeypatch, tmp_path):
+        """Both counts, because the prefix-wide one cannot tell a full seed from a partial one.
+
+        ⛔ The README tells the reader the artifact "carries both counts", so the
+        claim needs a pin: a mutant that deletes these two fields, or that emits
+        the prefix count under both names, left the suite green.
+        """
+        target = tmp_path / "a.json"
+        self._drive(tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N)
+        artifact = json.loads(target.read_text())
+        pop = artifact["population"]
+        assert pop["graph_vectors"] == 3, pop  # the PREFIX-wide count (_FakeGraph)
+        assert pop["graph_population_vectors"] == 3, pop  # the id-and-text count (stub)
+        # ⛔ and the second field must carry the GUARD's measurement, not a second
+        # spelling of the prefix count — `"graph_population_vectors": graph_vectors`
+        # satisfies every assertion above while telling the reader nothing.
+        src = TOOL.read_text()
+        assert '"graph_population_vectors": graph_population' in src, (
+            "the artifact's id-and-text count must be `graph_population`, the value "
+            "the guard refused on — not `graph_vectors` under a second name"
+        )
+
+    def test_a_partly_seeded_graph_blocks_the_ARM_not_the_run(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """THE BEHAVIOUR, through the shipped guard: two arms still publish.
+
+        ⛔ `#13745` review round 1, finding 1: stubbing `graph_population_vectors`
+        in the run-path harness left the guard's enforcement unobservable — a run
+        that swallowed its refusal kept the suite green. This drives a PARTIAL
+        seed through the real `graph_population_vectors` + `require_graph_population`
+        and asserts what the run does with it.
+        """
+        target = tmp_path / "partial.json"
+        rc = self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, seeded=1
+        )
+        # ⛔ THE DISCRIMINATOR AGAINST RUN-LEVEL SCOPING: the artifact EXISTS and
+        # `lexical` is a REAL measurement. A run-level guard raises `Refused`
+        # before the first arm, so this path would exit 2 with NO artifact and
+        # nothing published — the failure the record gate was already moved out
+        # of. (In this harness `record_dense` is blocked for an unrelated reason,
+        # the deliberate `no_record_dsn` below, so the headline comparison is
+        # UNMEASURED here for THAT cause — the arm scoping is what keeps `lexical`
+        # on the page, which is the assertion that distinguishes the two designs.)
+        artifact = json.loads(target.read_text())
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        assert artifact["population"]["graph_population_vectors"] == 1
+        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
+        assert artifact["comparisons"]["graph_dense_vs_lexical"]["label"] == "UNMEASURED"
+        # and the run is INCOMPLETE and NAMED, not silent
+        assert rc == 3
+        assert any("BLOCKED[graph_population_absent]" in n for n in artifact["not_measured"]), (
+            artifact["not_measured"]
+        )
 
     def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
         self, tool_mod, monkeypatch, tmp_path
@@ -1592,3 +1673,220 @@ class TestContradictionTest:
     def test_it_reuses_the_m3_statistic_rather_than_copying_it(self):
         source = TOOL.read_text()
         assert "from tools.m3_fts_leg_recall import _binom_two_sided" in source
+
+
+# ── 5b. the GRAPH's membership of the population (id+text scoped, run-level) ──
+
+
+class _GraphResult:
+    def __init__(self, result_set):
+        self.result_set = result_set
+
+
+class _GraphStub:
+    def __init__(self, result_set=None, boom=None):
+        self.result_set = result_set
+        self.boom = boom
+        self.queries: list[tuple[str, object]] = []
+
+    def query(self, cypher, params=None):
+        self.queries.append((cypher, params))
+        if self.boom is not None:
+            raise self.boom
+        return _GraphResult(self.result_set)
+
+
+class _ProjStub:
+    def __init__(self, graph):
+        self.g = graph
+
+
+class TestGraphMembership:
+    """The population's OWN ids must carry THIS run's vector in the GRAPH.
+
+    ⛔ The run-level gate beside the seed is PREFIX-wide:
+    ``n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL``. That count is
+    above zero while the population is only PARTLY seeded — the apply-fold leaves
+    ``n.embedding`` unset for an operator point (every embed branch is gated on
+    ``not op``), for an identifier-only text the EMBED gate refuses (#5008), for a
+    width mismatch (``#5004``: it warns rather than write a vector the index
+    cannot hold), or after an ``encode_for_row`` failure swallowed by ``except
+    Exception: pass``. And ``n.embedding IS NOT NULL`` alone cannot tell THIS
+    run's vector from an EARLIER text's under the same deterministic id, which is
+    what a reused ``--graph`` produces. These cases red the mutants that make the
+    graph guard prefix-wide, id-only, or arm-scoped.
+    """
+
+    def _pop(self, n: int) -> list[dict]:
+        return [{"id": f"pt-12186{i:06d}", "content": f"claim {i}"} for i in range(n)]
+
+    def test_the_query_is_id_scoped_and_not_a_prefix_count(self, tool_mod):
+        pop = self._pop(3)
+        graph = _GraphStub(result_set=[[r["id"], r["content"]] for r in pop])
+        got = tool_mod.graph_population_vectors(_ProjStub(graph), pop)
+        assert got == 3
+        cypher, params = graph.queries[-1]
+        assert "n.id IN $ids" in cypher, cypher  # the ID SET is the predicate
+        assert "STARTS WITH" not in cypher, cypher  # ⛔ the prefix-wide mutant
+        assert "n.embedding IS NOT NULL" in cypher, cypher  # what the dense leg needs
+        assert "RETURN n.id, n.content" in cypher, cypher  # the PAIR, for the pairing below
+        assert params == {"ids": [r["id"] for r in pop]}
+
+    def test_an_earlier_texts_vector_under_the_same_id_is_not_counted(self, tool_mod):
+        """`--graph` re-runs collide on every id; the fold KEEPS the old vector.
+
+        `_upsert_point_props` rewrites `n.content=$content` unconditionally but
+        keeps `n.embedding` when the payload's vector was refused (the width
+        gate), so an id-only `IS NOT NULL` count passes over a vector that
+        belongs to the OLD text — and `graph_dense` then ranks by a vector this
+        run did not write. The pairing is the fix, and this is its red mutant.
+        """
+        pop = self._pop(2)
+        graph = _GraphStub(
+            result_set=[
+                [pop[0]["id"], pop[0]["content"]],  # this run's text — counted
+                [pop[1]["id"], "an earlier text"],  # stale vector — NOT counted
+            ]
+        )
+        assert tool_mod.graph_population_vectors(_ProjStub(graph), pop) == 1
+
+    def test_an_unreadable_graph_is_unmeasurable_not_empty(self, tool_mod):
+        graph = _GraphStub(boom=RuntimeError("no route to the graph"))
+        assert tool_mod.graph_population_vectors(_ProjStub(graph), self._pop(3)) is None
+
+    def test_a_malformed_row_is_unmeasurable_not_a_traceback(self, tool_mod):
+        """The row shape is the client's; an unexpected one must answer `None`.
+
+        ⛔ Outside the guard, `int(rows[0][0])` (or a 1-column row) raises out of
+        `graph_population_vectors` and then out of `run_measurement`, and `main()`
+        catches only `Refused` — the operator gets a traceback and exit 1 where
+        the artifact promises `REFUSED[...]`. Same shape as the `record_dsn`
+        finding. `[[0]]`-style scalar rows are refused as unmeasurable too: this
+        query RETURNS a pair, so a bare count is not an answer to it.
+
+        ⛔ AND THE SHORT-ROW CASE IS THE ONE THAT NEEDS THE EXPLICIT CHECK: most
+        malformed rows raise on their own (`row[1]` of a 1-element list is an
+        `IndexError`), which the `except` would catch anyway — `["not-a-row"]` is
+        the case that does NOT, because a long-enough STRING is indexable and
+        silently pairs two characters against nothing, returning `0`: an empty
+        graph. That is a wrong ANSWER, not a wrong shape, so it must be a refusal
+        and this row is the mutant that proves the check earns its line.
+        """
+        for bad in ([[None]], [["pt-1"]], [[0]], [None], ["not-a-row"], "not-a-row-list"):
+            assert (
+                tool_mod.graph_population_vectors(_ProjStub(_GraphStub(bad)), self._pop(1)) is None
+            ), bad
+
+    def test_an_empty_graph_is_a_measurement_of_zero_not_unmeasurable(self, tool_mod):
+        got = tool_mod.graph_population_vectors(_ProjStub(_GraphStub([])), self._pop(3))
+        assert got == 0, "an empty result is an empty graph; only a failure is unmeasurable"
+
+    def test_no_population_is_not_a_verdict(self, tool_mod):
+        assert tool_mod.graph_population_vectors(_ProjStub(_GraphStub([[0]])), []) is None
+
+    def test_guard_refuses_a_partly_seeded_population(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(785, 786)
+        assert ei.value.code == "graph_population_absent"
+        # the MECHANISMS are named, not just the arithmetic
+        assert "operator point" in ei.value.message
+        assert "WIDTH" in ei.value.message
+        assert "--graph" in ei.value.message
+
+    def test_guard_refuses_an_unmeasurable_graph(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(None, 786)
+        assert ei.value.code == "graph_population_unmeasurable"
+
+    def test_guard_refuses_an_empty_graph(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(0, 786)
+        assert ei.value.code == "graph_population_absent"
+
+    def test_guard_passes_a_fully_seeded_population(self, tool_mod):
+        tool_mod.require_graph_population(786, 786)  # no raise
+
+    def test_the_run_asks_the_graph_question_INSIDE_the_arm_loop(self):
+        """Wired over the population's own rows, and gating `graph_dense` alone.
+
+        ⛔ A guard nothing calls is the shape this finding started as. ⛔ AND THE
+        SCOPE IS THE RECORD GUARD'S, NOT THE RUN'S (`#13745` review round 1,
+        finding 2): a partly seeded graph degrades `graph_dense` ONLY — `lexical`
+        forces `EmbeddingModel.get()` to None and reads a full-text index built
+        from `n.content`, which the fold writes unconditionally, and
+        `record_dense` reads Postgres. Refusing the run over it therefore throws
+        away `record_dense_vs_lexical`, the lane's headline question, which is the
+        failure the record gate 40 lines up was already moved out of.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        calls = [n for n in ast.walk(run) if isinstance(n, ast.Call)]
+        named = [c for c in calls if isinstance(c.func, ast.Name)]
+        guard = [c for c in named if c.func.id == "require_graph_population"]
+        assert guard, "run_measurement never requires the graph's own cohort"
+        # ⛔ ARG 2 MUST BE THE POPULATION'S OWN LENGTH — a constant makes the
+        # guard a no-op.
+        n_arg = guard[0].args[1]
+        assert isinstance(n_arg, ast.Call), ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.func, ast.Name) and n_arg.func.id == "len", ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.args[0], ast.Name), ast.dump(n_arg)[:120]
+        assert n_arg.args[0].id == "population_ids", ast.dump(n_arg)[:120]
+        # ⛔ ARG 1 MUST BE THE ID-AND-TEXT MEASUREMENT, not the prefix-wide count
+        # the run already holds — `require_graph_population(graph_vectors, …)` is
+        # the exact bug this pin exists for.
+        matched = guard[0].args[0]
+        assert isinstance(matched, ast.Name), ast.dump(matched)[:120]
+        assert matched.id == "graph_population", ast.dump(matched)[:120]
+        bound = [
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "graph_population" for t in n.targets)
+        ]
+        assert bound, "graph_population is never bound in run_measurement"
+        value = bound[0].value
+        assert isinstance(value, ast.Call) and isinstance(value.func, ast.Name), ast.dump(value)[
+            :120
+        ]
+        assert value.func.id == "graph_population_vectors", ast.dump(value)[:120]
+        asked = value.args[1]
+        assert isinstance(asked, ast.Name) and asked.id == "population", ast.dump(asked)[:120]
+        # ⛔ AND IT MUST SIT INSIDE THE ARMS LOOP, UNDER `arm == ARM_GRAPH_DENSE`.
+        # At run level it refuses the two arms that need no graph vector at all;
+        # under any other arm it either blocks the wrong one or runs the dense
+        # arm on a cohort it never verified.
+        arms_loop = next(
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "ARMS"
+        )
+        in_loop = [
+            c
+            for c in ast.walk(arms_loop)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
+            and c.func.id == "require_graph_population"
+        ]
+        assert in_loop, (
+            "the graph guard must gate the `graph_dense` arm INSIDE the arms loop "
+            "— at run level it blocks `lexical` and `record_dense` too, which need "
+            "no graph vector, and discards the headline `record_dense_vs_lexical`"
+        )
+        parents = {}
+        for node in ast.walk(run):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        node = in_loop[0]
+        enclosures = []
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If):
+                enclosures.append(node)
+        assert any("ARM_GRAPH_DENSE" in ast.unparse(if_node.test) for if_node in enclosures), (
+            "the guard must be enclosed in `if arm == ARM_GRAPH_DENSE` — inside the "
+            "loop but ungated it blocks whichever arm is scored first"
+        )

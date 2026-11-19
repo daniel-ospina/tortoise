@@ -136,6 +136,45 @@ unmeasured is never zero). `coverage` itself is unchanged: widening it would rev
 decision and change every other label's reader, and the id-set half belongs in the instrument, which
 is the only place the population is known.
 
+⛔ **THE GRAPH HALF NEEDS THE SAME QUESTION, ASKED OF THE ID *AND THE TEXT*, AND AT RUN LEVEL**
+(`#13734` review, round 5). The gate beside the seed is **prefix-wide** —
+`MATCH (n:Point) WHERE n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL` — so it answers
+*"does this graph hold ANY embedded claim?"*, which stays above zero while the population is only
+**partly** seeded. Two mechanisms, both real: the apply-fold leaves `n.embedding` unset for a row it
+cannot vectorise (an operator point — every embed branch in `projection/entities.py` is gated on
+`not op`; an identifier-only text the EMBED gate refuses, `#5008`; an `encode_for_row` failure
+swallowed by `except Exception: pass`; or an embedding-**width mismatch**, which the fold warns about
+and leaves unset rather than write a vector the index cannot hold, `#5004`), and `--graph` names a
+graph a previous run already seeded.
+
+`graph_population_vectors` therefore asks the **id-and-text** question — one `IN $ids` round trip
+returning `(id, content)`, paired in Python against the text this run asked for — and
+`require_graph_population` refuses `graph_population_absent` (or `graph_population_unmeasurable`,
+because unmeasured is never zero). ⛔ **The text pairing is not decoration:** the fold rewrites
+`n.content` unconditionally but **keeps** `n.embedding` when the payload's vector was refused, and
+the population's ids are deterministic (`f"{ID_PREFIX['point']}{index:06d}"`), so on a reused
+`--graph` every id collides — an id-only `IS NOT NULL` count passes over the OLD text's vector and
+`graph_dense` ranks by a vector this run did not write. Residual, stated rather than papered over:
+the same id holding the **same** text with a vector from a different embedder of the same width is
+still indistinguishable without a model identity on the node (`_record_embedding_identity`, `#5004`).
+
+The guard gates the **`graph_dense` arm, not the run** — the same scope, for the same reason, as the
+record gate above (`#13745` review round 1, finding 2). A partly seeded graph does **not** degrade
+`lexical`: that arm forces `EmbeddingModel.get()` to `None` and the full-text index it reads is built
+from `n.content`, which the fold writes **unconditionally** — only the vector is held back. Nor does
+it degrade `record_dense`, which reads Postgres. So the graph cohort is a precondition of exactly one
+arm, and refusing the run over it would throw away `record_dense_vs_lexical` — the lane's own
+headline question — while looking like a strict gate. When the graph cannot hold the cohort, the arm
+is recorded `BLOCKED[graph_population_absent]` by name, the other two arms measure, the graph
+comparisons are `UNMEASURED`, and the run exits **3**.
+
+That replaces the `graph_vectors <= 0` branch that used to refuse the whole run when the graph held
+no vector at all: on a box that could still publish the lexical baseline and the record comparison,
+it published nothing. The zero case is now just the extreme of a partly seeded population. The
+artifact carries both counts — `graph_vectors` (prefix-wide, now the **coverage denominator** only)
+and `graph_population_vectors` (id-and-text scoped) — because the first alone cannot tell a full seed
+from a partial one.
+
 So the truth about this instrument, stated plainly: **it embeds and writes the population to the
 GRAPH, and it REQUIRES — never writes — the record's matching cohort.** `#13210` is the backfill's
 tool, and the record is a journal fold with no side door; a second writer for its population is the

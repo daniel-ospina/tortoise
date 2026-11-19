@@ -870,6 +870,119 @@ def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> 
             conn.close()
 
 
+def graph_population_vectors(proj, population: list[dict]) -> int | None:
+    """How many of THIS population's rows does the GRAPH hold THIS run's vector for?
+
+    The graph half of the same question :func:`record_population_vectors` asks
+    the record, and it exists because the run-level gate beside the seed asks a
+    PREFIX-wide question: ``MATCH (n:Point) WHERE n.id STARTS WITH … AND
+    n.embedding IS NOT NULL`` counts whatever the prefix happens to hold, not
+    what this run wrote. Two ways that count is above zero while the population
+    is only partly seeded, both of them real:
+
+    * the apply-fold leaves ``n.embedding`` UNSET for a row it cannot vectorise —
+      an operator point (every embed branch in ``projection/entities.py`` is
+      gated on ``not op``), an identifier-only text refused by the EMBED gate
+      (``#5008``), an ``encode_for_row`` failure swallowed by ``except
+      Exception: pass``, or an embedding-WIDTH mismatch, where the fold warns
+      and leaves the node's vector alone rather than write a vector the index
+      cannot hold (``#5004``);
+    * ``--graph`` names an EXISTING graph.
+
+    ⛔ AND THE ID IS NOT THE WHOLE PAIR — THE TEXT IS. ``n.embedding IS NOT NULL``
+    alone cannot tell THIS run's vector from an EARLIER one under the same id,
+    and on a reused graph every id collides (they are minted deterministically,
+    ``f"{ID_PREFIX['point']}{index:06d}"``). The fold rewrites ``n.content``
+    UNCONDITIONALLY but KEEPS ``n.embedding`` when the payload's vector was
+    refused — so a width mismatch on a reused graph leaves the OLD text's vector
+    on the node, an id-only count passes, and ``graph_dense`` ranks by a vector
+    this run did not write. The returned rows are therefore paired against the
+    text this run asked for, one ``IN $ids`` round trip, not a per-id loop.
+
+    Residual, stated rather than papered over: the pairing compares TEXT, so the
+    same id holding the SAME text with a vector from a DIFFERENT embedder (same
+    width, no index mismatch) is still indistinguishable. Detecting that needs a
+    model identity on the node (``_record_embedding_identity``, ``#5004``), which
+    the seed payload does not carry.
+
+    A ``graph_dense`` arm over a partially seeded population ranks only the
+    seeded part, so its delta against ``record_dense`` is a figure about the
+    seed step wearing the leg's name — the same false PASS the record-side guard
+    closes, one store over.
+
+    ``None`` for an UNREADABLE graph, never ``0``; an empty result is a real
+    measurement (``0``, an empty graph) and the guard refuses it by name.
+    """
+    if not population:
+        return None
+    expected = {row["id"]: row.get("content") for row in population}
+    try:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETURN n.id, n.content",
+            params={"ids": list(expected)},
+        ).result_set
+        # ⛔ THE WHOLE PAIRING IS INSIDE THE GUARD: a row shape this code does not
+        # expect must answer `None` (unmeasurable) like every other failure, not
+        # raise out of `run_measurement` as a traceback where the artifact
+        # promises `REFUSED[...]` — the record twin converts inside its own
+        # `try` for the same reason. AND a short row must not be read as "no
+        # nodes": a 1-column answer to a 2-column query is a client shape this
+        # code does not understand, and calling that an EMPTY graph would refuse
+        # the run with the wrong reason.
+        paired = set()
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                raise ValueError(f"unexpected graph row shape: {row!r}")
+            if expected.get(str(row[0])) == row[1]:
+                paired.add(str(row[0]))
+        return len(paired)
+    except Exception:  # noqa: BLE001, RUF100 — unmeasurable, not zero
+        return None
+
+
+def require_graph_population(matched: int | None, population_n: int) -> None:
+    """The GRAPH must hold THIS run's VECTOR for every id the arm would score.
+
+    ⛔ IT GATES THE ``graph_dense`` ARM, NOT THE RUN — and the reason is the one
+    the record gate beside it already states: a run-level refusal DISCARDS the
+    arms that do not depend on the thing that is missing. A partly seeded graph
+    does **not** degrade ``lexical``: that arm forces ``EmbeddingModel.get()`` to
+    ``None`` and the full-text index it reads is built from ``n.content``, which
+    the apply-fold writes UNCONDITIONALLY — only the vector is held back. And it
+    does not degrade ``record_dense`` either, which reads Postgres. So the graph
+    cohort is a precondition of exactly one arm, and refusing the run over it
+    would throw away ``record_dense_vs_lexical`` — the lane's own headline
+    question — while looking like a strict gate. That is the failure this file's
+    record gate was moved out of, and the graph gate starts where it ended.
+
+    Satisfiable, unlike the record's: this instrument SEEDS the graph itself, so
+    ``_seed_graph`` has already written the cohort by the time the arm consults
+    this. When the graph cannot hold the cohort, the arm is recorded
+    ``BLOCKED[graph_population_absent]`` by name and the run exits ``3``.
+    """
+    if matched is None:
+        raise Refused(
+            "graph_population_unmeasurable",
+            "how many of this population's ids the graph holds an embedding for "
+            "could not be measured — unmeasured is not zero, and it is not a "
+            "verdict",
+        )
+    if matched < population_n:
+        raise Refused(
+            "graph_population_absent",
+            f"the graph holds an embedding for {matched} of the {population_n} "
+            f"population row(s) this run would score — the apply-fold leaves "
+            f"`n.embedding` unset for a row it cannot vectorise (an operator "
+            f"point, a text refused by the EMBED gate, an embedding-WIDTH "
+            f"mismatch left unset rather than written, or a swallowed encode "
+            f"failure), and on `--graph` a node can keep an EARLIER text's "
+            f"vector under the same deterministic id, which the text pairing "
+            f"above refuses. A `graph_dense` arm over that population ranks only "
+            f"the seeded part, so its delta against `record_dense` is a figure "
+            f"about the seed step and not about the leg",
+        )
+
+
 def require_population_in_record(matched: int | None, population_n: int) -> None:
     """The record must hold a VECTOR for every id this run would score.
 
@@ -1170,22 +1283,25 @@ def run_measurement(args: argparse.Namespace) -> int:
     # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
     # than skipping it silently.
     population_ids = [row["id"] for row in population]
+    # ⛔ THE GRAPH HALF IS GUARDED BY THE ID-AND-TEXT QUESTION, AND IT GATES THE
+    # `graph_dense` ARM (not the run — see `require_graph_population`). The count
+    # above is PREFIX-wide, so it asks *"does this graph hold any embedded
+    # claim?"* — not *"did THIS run seed THIS population?"*. It passes over a
+    # partly seeded population (an operator point, an EMBED-gate refusal, a
+    # swallowed encode failure, a width mismatch) and over a `--graph` served
+    # from a previous run. `graph_population_vectors` asks the id-and-text scoped
+    # question; it is computed HERE because it needs the graph, and consumed
+    # INSIDE the arms loop, where only `graph_dense` reads graph vectors.
+    #
+    # ⛔ AND IT REPLACES THE `graph_vectors <= 0` BRANCH THAT USED TO SIT HERE.
+    # That branch refused the whole run when the graph held no vector at all, so
+    # a box that could still publish the lexical baseline and the record
+    # comparison published NOTHING. The zero case is now just the extreme of a
+    # partly seeded population: the arm is blocked by name, the other two
+    # measure, and the exit says the run is incomplete.
+    graph_population = graph_population_vectors(proj, population)
     coverage: dict = {}
     population_vectors: int | None = None
-    # ⛔ THE GRAPH HALF STAYS RUN-LEVEL. `graph_vectors <= 0` is a fact about the
-    # population THIS TOOL just seeded, not about the record — every arm would be
-    # measuring the lexical leg, so it refuses the run by name (the case
-    # `projection/entities.py` produces by warning and leaving `n.embedding`
-    # unset on an embedding-width mismatch, after `_seed_graph` looked fine).
-    # Caught into `record_blocked` it would have recorded a GRAPH fact as a
-    # record block and stopped refusing the one case it was written for.
-    if graph_vectors <= 0:
-        raise Refused(
-            "graph_unseeded",
-            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
-            f"population was written without embeddings, so no dense leg can "
-            f"find anything and every arm would measure the lexical leg",
-        )
     if record_blocked is None:
         try:
             coverage = require_coverage(
@@ -1208,19 +1324,27 @@ def run_measurement(args: argparse.Namespace) -> int:
 
     queries = [(row["id"], row["query"]) for row in population]
     arms: dict[str, dict] = {}
-    blocked: Refused | None = None
+    # ⛔ ONE BLOCKED-DICT, NOT ONE `blocked` — two arms can be blocked for two
+    # different reasons, and a single slot made the LAST one win: the artifact's
+    # `not_measured` note, the stderr line and the comparisons all reported one
+    # arm's cause as if it were the run's.
+    blockages: dict[str, Refused] = {}
+    if record_blocked is not None:
+        blockages[ARM_RECORD_DENSE] = record_blocked
     for arm in ARMS:
-        if arm == ARM_RECORD_DENSE:
-            gate = record_blocked
-            if gate is None:
-                try:
+        gate = blockages.get(arm)
+        if gate is None:
+            try:
+                if arm == ARM_RECORD_DENSE:
                     require_population_in_record(population_vectors, len(population_ids))
-                except Refused as exc:
-                    gate = exc
-            if gate is not None:
-                blocked = gate
-                arms[arm] = {"arm": arm, "blocked": gate.code, "message": gate.message}
-                continue
+                elif arm == ARM_GRAPH_DENSE:
+                    require_graph_population(graph_population, len(population_ids))
+            except Refused as exc:
+                gate = exc
+        if gate is not None:
+            blockages[arm] = gate
+            arms[arm] = {"arm": arm, "blocked": gate.code, "message": gate.message}
+            continue
         ranks, _traces, verdict = _read_arm(sdk, arm, queries, args.deep, _sanitise_query_text)
         arms[arm] = {
             "summary": summarise(ranks, K_PRIMARY),
@@ -1236,10 +1360,11 @@ def run_measurement(args: argparse.Namespace) -> int:
         (ARM_GRAPH_DENSE, ARM_RECORD_DENSE),
     ):
         key = f"{cand}_vs_{base}"
-        if ARM_RECORD_DENSE in (base, cand) and blocked is not None:
+        if any(a in blockages for a in (base, cand)):
             # A comparison against an arm that was blocked by name is
             # UNMEASURED — never an empty delta a reader could mistake for 0.0.
-            comparisons[key] = {"label": "UNMEASURED", "blocked": blocked.code}
+            blocking = next(blockages[a] for a in (base, cand) if a in blockages)
+            comparisons[key] = {"label": "UNMEASURED", "blocked": blocking.code}
             continue
         per_k = {
             f"k{k}": paired(arms[base]["_ranks"], arms[cand]["_ranks"], k, preregistered_n)
@@ -1296,7 +1421,17 @@ def run_measurement(args: argparse.Namespace) -> int:
             ),
         },
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
-        "population": {"built": len(population), "written": written},
+        "population": {
+            "built": len(population),
+            "written": written,
+            # ⛔ BOTH COUNTS, because they answer different questions and the
+            # prefix-wide one passes over a partly seeded population. A reader
+            # who sees only `graph_vectors` cannot tell a full seed from a
+            # partial one; `graph_population_vectors` is the id-scoped count
+            # `require_graph_population` refused on.
+            "graph_vectors": graph_vectors,
+            "graph_population_vectors": graph_population,
+        },
         "coverage": coverage,
         "preregistered": preregistration(preregistered_n),
         "population_mismatch": (
@@ -1326,18 +1461,17 @@ def run_measurement(args: argparse.Namespace) -> int:
             "any end-to-end answer quality: the queries are verbatim spans of "
             "the claim's own text (#12186's declared self-retrieval bound)",
         ]
-        + (
-            [
-                # ⛔ THE SENTENCE IS THE REFUSAL'S OWN. `blocked` can be any of a
-                # dozen codes (no_record_dsn, no_tenant, coverage_unverified,
-                # record_unseeded, graph_unseeded, …), and only the cohort pair
-                # supports prose about a cohort the record does not hold.
-                # Keying on the code family wrote a false cause for the rest.
-                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: {blocked.message}"
-            ]
-            if blocked is not None
-            else []
-        ),
+        + [
+            # ⛔ THE SENTENCE IS THE REFUSAL'S OWN. Each code can be any of a
+            # dozen (no_record_dsn, no_tenant, coverage_unverified,
+            # record_unseeded, graph_population_absent, …), and only some support
+            # prose about a cohort. Keying on the code family wrote a false cause
+            # for the rest. ONE NOTE PER BLOCKED ARM: two arms can be blocked for
+            # two reasons, and the earlier single-slot version reported whichever
+            # came last as if it were the run's only cause.
+            f"the `{arm}` arm — BLOCKED[{exc.code}]: {exc.message}"
+            for arm, exc in blockages.items()
+        ],
     }
     out = Path(args.out) if args.out else None
     text = json.dumps(artifact, indent=2, sort_keys=True)
@@ -1352,12 +1486,17 @@ def run_measurement(args: argparse.Namespace) -> int:
     # arm: it wrote the artifact, printed only `wrote …`, and reported success.
     # The one signal the run promises was dead on every documented invocation,
     # and it is the false-PASS class this file exists to close.
-    if blocked is not None:
+    for exc in blockages.values():
         # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The arms
-        # that need no record cohort are real measurements and are kept; the
+        # that need no blocked cohort are real measurements and are kept; the
         # exit says the run is INCOMPLETE, so no caller can mistake it for the
-        # paired answer the pre-registration exists to price.
-        print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
+        # paired answer the pre-registration exists to price. One line per
+        # blocked arm — a run with two different causes names both.
+        print(f"REFUSED[{exc.code}]: {exc.message}", file=sys.stderr)
+    # ⛔ DERIVED FROM `blockages`, WHICH IS SEEDED FROM `record_blocked` TOO — so
+    # this is the aggregate of every gate, not the DSN/tenant lookalike. The
+    # single `return _exit_code(blocked)` at the end stays the one exit.
+    blocked = next(iter(blockages.values()), None)
     return _exit_code(blocked)
 
 
