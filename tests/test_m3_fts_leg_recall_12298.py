@@ -1374,8 +1374,14 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # across `projection/__init__.py`. That is why every row here is re-derived
     # from the live file (`sed -n "<n>p" <file>`) and never nudged by a delta:
     # a constant copied off the row above is wrong for four of these seven.
-    ("tortoise/search_engine.py", 2888, "def run_fts_query(",
-     "`tortoise/search_engine.py:2888`"),
+    #
+    # Main's own drift, re-derived here after a forward-merge of `origin/main`
+    # reddened this pin for EVERY lane (the shard's last-failed cache then
+    # re-ran this one test to the exclusion of the rest, so one stale locator
+    # made the required matrix red repo-wide). Re-derived against the live
+    # file, not nudged by a constant, and the brief's §1 row moved with it.
+    ("tortoise/search_engine.py", 2945, "def run_fts_query(",
+     "`tortoise/search_engine.py:2945`"),
     # #11609 Phase 2 (PR #12951) repaired two comments inside this file, which
     # moves the two LATE rows and only them: the FTS call +1 and the rank loop
     # +2. Re-derived against the live file after the forward-merge, not nudged
@@ -1384,23 +1390,23 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # below are the only place this block may state one — the historical
     # numbers in the rows ABOVE are the record of a drift, not a locator to
     # trust.
-    ("tortoise/search_engine.py", 3100, "CALL db.idx.fulltext.queryNodes",
-     "`:3100-3109`"),
-    ("tortoise/search_engine.py", 2730, "def recency_tie_clause(",
-     "`search_engine.py:2730`"),
-    ("tortoise/search_engine.py", 5007,
+    ("tortoise/search_engine.py", 3157, "CALL db.idx.fulltext.queryNodes",
+     "`:3157-3166`"),
+    ("tortoise/search_engine.py", 2787, "def recency_tie_clause(",
+     "`search_engine.py:2787`"),
+    ("tortoise/search_engine.py", 5074,
      "for rank, (pid, _score) in enumerate(ranked):",
-     "`tortoise/search_engine.py:5007`"),
+     "`tortoise/search_engine.py:5074`"),
     # The three `projection/__init__.py` rows were stale on `main` too (both the
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so
     # the pin and §1 of the brief name the same lines as the code.
-    ("tortoise/projection/__init__.py", 20970, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20970`"),
-    ("tortoise/projection/__init__.py", 21413, "def _create_fulltext_index(",
-     "`:21413`"),
-    ("tortoise/projection/__init__.py", 21863,
-     "self._create_fulltext_index(label, fields)", "`:21863`"),
+    ("tortoise/projection/__init__.py", 20974, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:20974`"),
+    ("tortoise/projection/__init__.py", 21417, "def _create_fulltext_index(",
+     "`:21417`"),
+    ("tortoise/projection/__init__.py", 21867,
+     "self._create_fulltext_index(label, fields)", "`:21867`"),
 )
 
 
