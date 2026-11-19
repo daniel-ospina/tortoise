@@ -220,6 +220,53 @@ _PATH_REF = re.compile(r"(?<![\w/])(docs/[A-Za-z0-9_./-]+\.md):(\d+)(?:-(\d+))?"
 #: while leaving `` `317`-scoping:128 `` and `265 scoping:128` intact.
 _SHORT_REF = re.compile(r"(?<![\w-])`?(\d+)`?[-\s](scoping|research):(\d+)(?:-(\d+))?")
 
+#: The command whose output the `#7949` bundle's census paragraph quotes. It is named here
+#: (never interpolated from a measurement) because the arm below is a TEXT ban.
+_TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
+
+#: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
+#: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
+_TORTOISE_AFFIRMATIVE_SPELLINGS = (
+    "THREE are in this head",
+    "two comment-only `tortoise/` modules",
+    "prints exactly `tortoise/activation_scorecard.py`",
+    "which two `tortoise/` paths this diff carries",
+    "prints the two modules named above",
+    "`activation_scorecard.py` IS in the diff",
+)
+#: Spellings that state the NEGATIVE direction — that the set is EMPTY. Mirror images of the
+#: list above, and every bit as carryable: the set is a property of the HEAD the command was
+#: run at, so a verdict in either direction is stale one merge later.
+_TORTOISE_NEGATIVE_SPELLINGS = (
+    f"neither is `{_TORTOISE_CENSUS_CMD}`",
+    f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
+    f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
+    f"{_TORTOISE_CENSUS_CMD}` -> empty",
+    f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+)
+#: Both directions, because a ban that covers one of them is the defect this list records.
+_TORTOISE_MEMBERSHIP_SPELLINGS = (
+    *_TORTOISE_AFFIRMATIVE_SPELLINGS,
+    *_TORTOISE_NEGATIVE_SPELLINGS,
+)
+
+
+def _census_membership_verdicts(doc: str) -> list[str]:
+    """Every retired `-- tortoise/` membership verdict still spelled in `doc`.
+
+    ⛔ A TEXT BAN, AND THAT IS DELIBERATE (#13807 review, F1/F4 — settled together). The
+    set is HEAD-BOUND in both directions: it is a property of the head the command was run
+    at, so `#7949`'s own sentences about it go stale on the next merge. Judging them by
+    re-measuring the CURRENT head is therefore not a guard but a false-red generator — at
+    any head carrying a `tortoise/` path (i.e. essentially every product change) the
+    negative list would red a sentence that is true of the head it names. And under a
+    shallow checkout the measurement is unavailable at all, so a measurement-keyed arm
+    asserted NOTHING in the job that gates the merge (F1, measured: the three-dot walk
+    exits 128 with `fatal: bad revision`). Reading the document's TEXT needs neither the
+    merge base nor a data model, so this arm fires in every environment.
+    """
+    return [spelling for spelling in _TORTOISE_MEMBERSHIP_SPELLINGS if spelling in doc]
+
 
 def _in_scope(target: Path, root: Path) -> bool:
     """Is this citation's target one this guard owns?"""
@@ -534,10 +581,12 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           send the reader to the command, never away from it) and names every path
           `_note_paths` returns — the two `tortoise/` notes the verb grades and the test
           and tool rows it also lists — which is WHICH files the verdict is about;
-      (c) RETIRED SPELLINGS — the phrasings that were FALSE against this tree are
-          refused by name, so a hand edit cannot quietly restore one. If a future head
-          really does empty that path list, re-scope (c) deliberately instead of letting
-          the old sentence back in.
+      (c) RETIRED SPELLINGS — the phrasings that were FALSE against a head are refused by
+          name, in BOTH directions, from the document's TEXT alone. ⛔ It reads no
+          measurement of its own, on purpose (#13807 review, F1): a membership is
+          head-bound, so a measurement-keyed version both asserted nothing in the depth-1
+          checkout the gating job uses AND turned any code PR's head into a false red.
+          Retire a spelling here deliberately instead of letting an old sentence back in.
     """
     from tools.hosted_api_cite_census import _note_paths, _sweep, census
 
@@ -580,7 +629,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    #: One source of truth for the command: the module-level constant the retired-spelling
+    #: arm is built from (a second literal here would let the two drift apart).
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
         "the census verdict is about. Without it the reader cannot tell whether the two "
@@ -592,70 +643,46 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) BOTH DIRECTIONS, keyed on the MEASUREMENT — never on which direction it points.
-    # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
-    # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
-    # so at this head the command prints NOTHING and every one of those five spellings became
-    # the TRUE statement — the same class of error as the frozen sign this arm replaced
-    # (a guard that pins a MEASUREMENT has to READ it).
-    # ⛔ AND THE ONE-SIDED REPAIR WAS A NO-OP — an inert enforcer (#13746 review, re-measured
-    # at `b7c818d4ad`). The five negations are skipped when the set is empty, so at an EMPTY
-    # head this arm made no assertion at all, while the document's AFFIRMATIVE direction was
-    # the false one and NOTHING read it: `prints exactly `tortoise/activation_scorecard.py``
-    # and "which two `tortoise/` paths this diff carries" survived here for two merges past
-    # the head where they became false. A guard on a claim that flips with the tree must
-    # refuse the FALSE direction for the measured state, so the affirmative spellings are
-    # refused when the set is EMPTY and the negative ones when it is NOT.
-    _tortoise_probe = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
-        cwd=REPO, capture_output=True, text=True, check=False)
-    # ⛔ A FAILED MEASUREMENT IS NOT THE EMPTY ONE. Exit 0 with no stdout means "the set is
-    # empty"; a non-zero exit means "this checkout cannot answer" (no `origin/main` on a
-    # shallow clone), and reading those as the same thing would let an UNMEASURED head pick
-    # the affirmative ban — a fail-open guard. The arms run only on a real answer.
-    _tortoise_measured = _tortoise_probe.returncode == 0
-    _tortoise_set = _tortoise_probe.stdout.split() if _tortoise_measured else []
-    # Spellings that ASSERT a non-empty `-- tortoise/` set. They are false exactly when the
-    # measurement is empty, which is what makes them refutable rather than frozen.
-    _affirmative_spellings = (
-        "THREE are in this head",
-        "two comment-only `tortoise/` modules",
-        "prints exactly `tortoise/activation_scorecard.py`",
-        "which two `tortoise/` paths this diff carries",
-        "prints the two modules named above",
-        "`activation_scorecard.py` IS in the diff",
-    )
-    # Spellings that ASSERT an empty one. Mirror images, and every bit as carryable.
-    _negative_spellings = (
-        f"neither is `{_tortoise_cmd}`",
-        f"{_tortoise_cmd}` is NOT empty",
-        f"{_tortoise_cmd}` returns exactly those two",
-        f"{_tortoise_cmd}` -> empty",
-        f"{_tortoise_cmd}` prints NOTHING",
-    )
-    if not _tortoise_measured:
-        # Unmeasurable here (see above): neither direction is refutable, so neither is
-        # refused. The membership is ALSO read by every run with `origin/main` present,
-        # which is where a stale sentence is caught — this is the documented residual, not
-        # a silent pass.
-        pass
-    elif not _tortoise_set:
-        # The EMPTY reading is the measured one, so the affirmative sentences are the defect.
-        for _claim in _affirmative_spellings:
-            assert _claim not in doc, (
-                f"05-verify.md asserts {_claim!r}, which states a NON-EMPTY `{_tortoise_cmd}` "
-                "set. Measured here the command prints NOTHING, so the sentence is refuted "
-                "by the very command it names — and this is the direction the one-sided arm "
-                "left unread (it skipped the negations, so at an empty head it asserted "
-                "nothing at all). Delete the typed membership and keep the command "
-                "(#13746 review, finding 7)")
-    else:
-        for _claim in _negative_spellings:
-            assert _claim not in doc, (
-                f"05-verify.md asserts {_claim!r}. `{_tortoise_cmd}` prints "
-                f"{' '.join(_tortoise_set)!r}, so the sentence is refuted by the very "
-                "command it quotes (#13489 review, P1; #13750 review, cycle 1 — the empty "
-                "claim was true of an earlier head and is not true of this one)")
+    # (c) RETIRED MEMBERSHIP SPELLINGS — BOTH directions, refused BY NAME, from the TEXT.
+    # ⛔ THE HISTORY THIS ARM MUST CARRY, because each entry is how the other direction went
+    # wrong and each was measured on a real head:
+    #   • (#13746 review, finding 7) the list was five literals assuming a NON-EMPTY
+    #     `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census
+    #     figures, so at an EMPTY head every one of those five became the TRUE statement
+    #     while the AFFIRMATIVE direction — the false one — was read by nothing:
+    #     `prints exactly `tortoise/activation_scorecard.py`` and "which two `tortoise/`
+    #     paths this diff carries" survived two merges past the head where they became false.
+    #   • (#13807 review, F1) the repair that keyed the two lists on a LIVE measurement of
+    #     this command was an INERT ENFORCER where it actually runs: every job that runs this
+    #     file checks out at the default depth 1, which carries neither `origin/main` nor the
+    #     parents a three-dot walk needs, so the probe exits 128 (`fatal: bad revision`),
+    #     `_tortoise_measured` is False, and BOTH directions were skipped — zero assertions
+    #     in the gating job. The arm returned to making no assertion at all, which is the
+    #     exact defect it was written to remove.
+    # ⛔ SO IT READS NO MEASUREMENT, AND THAT IS THE FIX (F1 and F4 are settled together).
+    # A membership is HEAD-BOUND in both directions: the set is a property of the head the
+    # command was run at, so `#7949`'s sentences about it are stale one merge later, AND
+    # judging a sentence about THAT head by re-measuring THIS one is a false-red generator —
+    # at any head carrying a `tortoise/` path (essentially every product change) the
+    # negative list would red a sentence that is true of the head it names. The bundle's own
+    # rule is the one enforced here: state the COMMAND and read it at the head being merged,
+    # never a verdict — so every recorded verdict spelling, in EITHER direction, is retired
+    # by name. Being a text ban, it needs no merge base, so it fires in every environment
+    # (including the depth-1 shards) and cannot be satisfied by a checkout that cannot
+    # answer. `_census_membership_verdicts` is the whole arm; the injected-spelling test below
+    # pins that every row of BOTH lists is actually read.
+    _surviving = _census_membership_verdicts(doc)
+    assert not _surviving, (
+        f"05-verify.md spells a RETIRED `-- tortoise/` membership verdict: {_surviving!r}. "
+        f"`{_TORTOISE_CENSUS_CMD}` is HEAD-BOUND — the set is a property of the head it was "
+        "run at — so the document states the COMMAND and lets the reader read it at the head "
+        "being merged. These are the exact spellings that were FALSE at a head and survived "
+        "anyway: the affirmative ones for two merges on `main` because nothing read them "
+        "(#13746 review, finding 7), and the negative ones because no shallow checkout could "
+        "reach the arm that would have read them (#13807 review F1/F2). ⛔ This is a ban BY "
+        "NAME, in both directions: a paraphrase of the same verdict is outside its scope (the "
+        "section's own head-naming rule is what governs those), so the fix for a hit is to "
+        "delete the typed membership and keep the command.")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -672,6 +699,45 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
             "the merge-base command that prints its set) or the two module statements stay "
             "uncheckable (#13489 review, P1)")
+def test_the_retired_membership_spellings_are_read_in_both_directions():
+    """Arm (c) is a TEXT ban, so it is live in every clone — pinned, not reasoned about.
+
+    ⛔ TWO defects are pinned here, and neither is observable from the bundle alone:
+
+    1. **The arm must READ each spelling, in BOTH directions** (#13807 review, F1/F3). The
+       cut this replaces keyed the two lists on a live measurement, so in a depth-1 checkout
+       it read neither — and no row anywhere changed colour when it was broken, which is why
+       it took a fresh-context reviewer to find it. Each injected spelling below reds, so a
+       list that loses a row, or a direction that regains a measurement gate, reds HERE.
+    2. **The live bundle must carry none of them** (#13807 review, F2). `05-verify.md:147`
+       still described the OLD one-sided arm as vacuous at an empty head — a sentence that
+       licensed exactly the re-insertion the ban exists to stop.
+
+    The measurement the retired cut took is deliberately NOT re-taken: see
+    `_census_membership_verdicts` on why a head-relative re-measurement is both unreachable
+    in CI and a false-red generator on every code PR.
+    """
+    assert _TORTOISE_AFFIRMATIVE_SPELLINGS, "the affirmative list must not be empty"
+    assert _TORTOISE_NEGATIVE_SPELLINGS, "the negative list must not be empty"
+    for _spelling in _TORTOISE_MEMBERSHIP_SPELLINGS:
+        _injected = f"… and the earlier cut said {_spelling} about this bundle …"
+        assert _census_membership_verdicts(_injected) == [_spelling], (
+            f"arm (c) does not read the retired spelling {_spelling!r}. An unread row is "
+            "indistinguishable from a clean document — the inert-enforcer defect this arm "
+            "replaces (#13807 review, F1/F3)")
+    # The inverse: the COMMAND the document is supposed to keep is never itself a verdict.
+    assert _census_membership_verdicts(
+        f"read `{_TORTOISE_CENSUS_CMD}` at the head you merge") == [], (
+        "the arm flags the command itself, so the document could not state the measurement "
+        "it is required to state")
+
+    _bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+               / "05-verify.md").read_text(encoding="utf-8")
+    assert _census_membership_verdicts(_bundle) == [], (
+        "05-verify.md still spells a retired membership verdict: "
+        f"{_census_membership_verdicts(_bundle)!r}")
+
+
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
 
