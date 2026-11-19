@@ -2157,8 +2157,15 @@ def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None
 
 # ⛔ The DENIAL this PR exists to keep out of the contract artifacts: "every hard failure is a
 # page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
-# three words in order with ANY markup or whitespace between them, so the re-introduction cannot
-# evade the guard by wrapping the phrase, emphasising it, or hyphenating it.
+# three words in ORDER, with any run of non-word characters between them, so the re-introduction
+# cannot evade the guard by wrapping the phrase over a line, emphasising it, or hyphenating it.
+#
+# ⛔ AND THAT IS THE WHOLE CLAIM — it is a PHRASE match, not a semantic one. Two limits are known and
+# deliberate: markup that puts a WORD CHARACTER between them (`every <b>hard</b> failure`, where
+# `</b>` contains letters) does not match, and a different determiner (`all` / `each` / `any hard
+# failure`) is a different phrase. This guard pins the string this change retires; it does not claim
+# to catch a rephrased denial, and a comment that claimed it would be the class of over-claim this
+# PR exists to remove (review of #13712, F8).
 #
 # `IGNORECASE` rather than a `.lower()` copy of the corpus: lowercasing is not length-preserving for
 # every character, and the assertion below QUOTES the span it matched out of the ORIGINAL text, so
@@ -2244,7 +2251,8 @@ def _false_absolute_in(text: str) -> str | None:
 
 def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
-    claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
+    claim the route FALSIFIES — and pinning that PHRASE, in any spacing or markup, is what keeps it
+    corrected.
 
     Why a prose claim earns a guard here rather than a comment: this is not untidiness. #10865's
     owner comment records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the
@@ -2305,14 +2313,14 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
         if span is None:
             continue
         raise AssertionError(
-            f"`{name}` states the absolute: it says {span!r} and names nothing that still answers "
-            "JSON, while `start.ts` returns JSON from TWO places (the `400` caller error and the "
-            "terminal `200` flow state — see "
-            "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`). Say every "
-            "REFUSAL, or state the universal about the PAST and count the survivors (\"before "
-            "#13671, every hard failure … answered raw JSON; two arms still do\"): the terminal "
-            "`200` is #10865's recorded decision, and a summary that denies it invites converting "
-            "it.")
+            f"`{name}` carries the phrase {span!r}, which is the absolute this change retires: "
+            "`start.ts` returns JSON from TWO places (the `400` caller error and the terminal `200` "
+            "flow state — see "
+            "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`), so "
+            "\"hard failure\" is false of this route PAST OR PRESENT. Say every REFUSAL; a "
+            "historical sentence says `every REFUSAL … used to answer` (that is what the corpus "
+            "writes). The terminal `200` is #10865's recorded decision, and a summary that denies "
+            "it invites converting it.")
 
 
 # One row per shape the pattern must RED, run through the SAME shipped decision the corpus guard
@@ -2329,6 +2337,17 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 _SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
     # the denial itself, however it is dressed
     ("Every hard failure is a page, not a JSON blob.", "RED"),
+    # ⛔ AND HOWEVER IT IS SPELLED — the shape tolerance `_FALSE_ABSOLUTE_RE` exists for, which the
+    # rows below this one would NOT pin on their own: every other row carries the contiguous literal,
+    # so a table without these stayed all-green when the pattern was swapped back to the bare
+    # literal and the tie to F3's fix was lost (measured — review of #13712, F8). The assertion
+    # compares by ORDERED CONTAINMENT of the three words, not by equality, so a span carrying `**`
+    # or a line wrap is accepted here.
+    ("Every hard failure is a page, wrapped over a line:\n * every hard\n * failure is a page.", "RED"),
+    ("Every **hard** failure is a page, not a JSON blob.", "RED"),
+    ("Every hard-failure is a page, not a JSON blob.", "RED"),
+    ("Every\thard\tfailure is a page, not a JSON blob.", "RED"),
+    ("EVERY HARD FAILURE IS A PAGE, not a JSON blob.", "RED"),
     # ordinary-English clauses: a word list (`still` / `remains` / `survives`) exempted all three
     ("Every hard failure is a page; the consent cookie is still set before the flow starts.", "RED"),
     ("Every hard failure of the route is a page, and the store remains the source of truth.", "RED"),
@@ -2404,35 +2423,36 @@ def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(
     drive `_false_absolute_in` → `_absolute_violations`, the same decision the corpus guard calls —
     never a retyped copy of the loop.
 
-    ⛔ WHY THE EXEMPTION IS A SHAPE AND NOT A JUDGEMENT. Each of the four revisions before this one
+    ⛔ WHY EVERY ROW IS RED AND THERE IS NO EXEMPT COLUMN. Each of the four revisions before this one
     tried to DECIDE whether a sentence meant the past, and each failed OPEN on ordinary prose: a
     word list at `bf5202ce79`, a whole-sentence retro search at `4ab3033e32`, an unbounded tail
-    after that, and a clause-scoped `\w+ed` whose verdict turned on a comma (F6: the two paired RED
-    rows above are one sentence with and without it). "Does this sentence mean the past?" is a
-    semantic question; a prose lint that answers semantic questions fails open, which is the
-    direction this repo's A/B line rejects. So the exemption matches ONE anchored shape, and
-    everything else is the absolute.
+    after that, and a clause-scoped `\w+ed` whose verdict turned on a comma (the two paired rows
+    above are one sentence with and without it). A fifth, anchored historical shape did not fail
+    open — it made the guard VACUOUS, because `origin/main`'s own pre-fix sentence matched it. "Does
+    this sentence mean the past?" is a semantic question; a prose lint that answers semantic
+    questions has no safe answer, so the phrase is required to be ABSENT and a historical sentence
+    is REWORDED (the corpus writes "every REFUSAL … used to answer"). The cost is a false block,
+    never a false pass — the direction this repo's A/B line demands.
 
-    ⛔ THE COST IS THE SAFE ONE. A TRUE historical sentence in another shape now REDS, and the
-    assertion names the shape that is allowed. That is a false block (reword it), never a false
-    pass — and the corpus itself writes the allowed shape, so the allowance has a real user.
-    ⛔ Conversely, `origin/main`'s pre-fix header — "Every hard failure of that route used to answer
-    `json({error, reason})`" — matches the allowed shape, which is WHY the corpus guard's red must
-    come from somewhere else: it does, from the same file's opening sentence at head ("Every REFUSAL
-    on that route used to answer"), whose revert is what the guard measures. A red on any EXEMPT row
-    would be the false block F3 found; the negation form ("NOT every hard failure is a page") is
-    deliberately NOT exempt, because a mechanical negator test would exempt "not only is every hard
-    failure a page" — the fail-open direction.
+    ⛔ SO THE TABLE PINS THE PATTERN, INCLUDING ITS SHAPE TOLERANCE. Rows below carry the phrase
+    wrapped over a line, emphasised, hyphenated and tab-separated, because the assertion compares by
+    case-insensitive CONTAINMENT of `every`, `hard`, `failure` in order rather than by equality with
+    the bare literal: an equality check would reject the very variants `_FALSE_ABSOLUTE_RE` exists to
+    catch, leaving F3's fix unpinned (measured: with the literal regex swapped back in, an
+    equality-checking table stayed all green — review of #13712, F8).
+
+    ⛔ THE NEGATION FORM ("NOT every hard failure is a page") IS NOT EXEMPT, deliberately: a
+    mechanical negator test would exempt "not only is every hard failure a page", which is the
+    fail-open direction. Reword instead.
     """
     span = _false_absolute_in(sentence)
-    if expected == "EXEMPT":
-        assert span is None, (
-            f"the guard reds the CORRECT form {sentence!r} — F3's finding, re-opened")
-    else:
-        # The span is quoted out of the ORIGINAL text, so compare case-insensitively.
-        assert (span or "").lower() == "every hard failure", (
-            f"the guard FAILS OPEN on {sentence!r}: it states the denial and the exemption let it "
-            "through")
+    assert span is not None, (
+        f"the guard FAILS OPEN on {sentence!r}: it states the denial and nothing reds it")
+    # The span is quoted out of the ORIGINAL text, so compare case-insensitively and by ORDER, not
+    # by equality: a wrap/emphasis/hyphen variant spans more than the bare literal.
+    words = [w for w in re.findall(r"[a-z]+", span.lower()) if w in {"every", "hard", "failure"}]
+    assert words == ["every", "hard", "failure"], (
+        f"the guard matched {span!r} for {sentence!r}, which is not the phrase itself")
 
 
 def _key_from(location: str | None) -> str:
