@@ -174,9 +174,24 @@ _ENDING_BASE = (
 #:   the base verb must follow the pronoun IMMEDIATELY — a window let
 #:   `what do we do when we cancel a subscription` (a how-to question) through.
 #:
-#: ⛔ AND THE SHAPES ARE MATCHED ON THE FIRST CLAUSE (see ``detect_state_question``),
-#: so an ending asserted in a clause the caller tacked on does not carry the
-#: question: `what is the payment terms clause, given the contract was archived`.
+#: ⛔ NOTHING IS SPLIT OFF THE QUERY, and a first cut that did is recorded here
+#: because it is the shape a reader would otherwise re-add. It matched each shape
+#: against ``text.split(",")[0]`` on the theory that *"an ending asserted in a
+#: clause the caller tacked on does not carry the question"*. MEASURED (review
+#: P2-5), the split can never REFUSE anything: the three shapes anchored at the
+#: end (`wh_whole_question`, and the two noun shapes) are already blocked by any
+#: trailing clause whether or not it is split off — `what is the payment terms
+#: clause, given the contract was archived` keeps the relevance read with or
+#: without it — and the three that are not anchored at the end (`existence`,
+#: `which_predicate`, `do_support`) match the whole string exactly as they match
+#: its first clause. What it CAN do is ADMIT, and what it admitted was the mirror
+#: defect: a CONSTRAINT the caller appended after a comma is silently dropped, so
+#: `current commitments, in EMEA` routed while `current commitments in EMEA` did
+#: not — precisely what ``_COMMITMENT_SHAPES`` says must never happen.
+#:
+#: So the WHOLE query is matched. The cost is stated rather than discovered:
+#: `what ended, and what replaced it` keeps the relevance read, because only the
+#: whole question can be the question.
 #:
 #: THE POINT IS PRECISION, NOT RECALL — a misroute answers a content question
 #: with a population, which is the defect this whole change exists to remove, so
@@ -278,26 +293,31 @@ def detect_state_question(text: str | None) -> StateQuestion:
     and the mapping is unit-testable offline. A ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.
 
-    ``ENDED`` takes precedence over ``COMMITMENTS`` when both apply ("which
-    commitments were withdrawn?"): the ending is the more specific question, and
-    the ended population is the one that states how each record ended. The
-    reverse precedence would answer a withdrawal question with everything still
-    standing — the exact failure #13558 was filed for.
+    ``ENDED`` takes precedence over ``COMMITMENTS`` when BOTH tables match the
+    same question: the ending is the more specific question, and the ended
+    population is the one that states how each record ended — the reverse
+    precedence would answer a withdrawal question with everything still standing,
+    the exact failure #13558 was filed for.
 
-    Both tables are matched against the FIRST CLAUSE of the query (see
-    ``_ENDING_SHAPES``): a subordinate clause is a fact the caller mentioned, not
-    the question they asked.
+    ⛔ That precedence is OBSERVABLE, and the test that pins it says how (review
+    P2-4): a single-table example cannot falsify it — `which commitments were
+    withdrawn` matches only ``which_predicate``, so swapping the two loops moves
+    nothing. A COMPOUND question matches both (`what are we committed to and has
+    anything been withdrawn` is ``committed_to`` *and* ``existence``), and there
+    the ordering decides the answer.
+
+    The whole query is scanned; nothing is split off it (see ``_ENDING_SHAPES``
+    for the measured reason the first-clause split was removed).
     """
     if not text or not str(text).strip():
         return StateQuestion()
     t = " ".join(str(text).lower().split())
-    clause = t.split(",", 1)[0].split(";", 1)[0].strip()
     for shape, pattern in _ENDING_SHAPES:
-        m = pattern.search(clause)
+        m = pattern.search(t)
         if m:
             return StateQuestion(ENDED, shape, m.group(0))
     for shape, pattern in _COMMITMENT_SHAPES:
-        m = pattern.search(clause)
+        m = pattern.search(t)
         if m:
             return StateQuestion(COMMITMENTS, shape, m.group(0))
     return StateQuestion()
