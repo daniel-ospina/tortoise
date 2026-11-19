@@ -2157,13 +2157,51 @@ _READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s
 #: says `"three read sites" omits the bound pair` while discussing the wrong unit), so
 #: the lookbehind refuses a word inside quotes.
 _READER_STATED_COUNT_RE = re.compile(
-    r"(?<![\"\u201c'])\b(one|two|three|four|five|six|seven|eight|nine|ten)\b[\s*]*read[ -]sites?",
+    "(?<![\"\u201c'`])\\b(one|two|three|four|five|six|seven|eight|nine|ten|\\d{1,2})\\b[\\s*]*read[ -]sites?",
     re.IGNORECASE,
 )
 _NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
     "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
 }
+
+
+def _count_value(word: str) -> int:
+    """The integer a stated count spells, in words or digits.
+
+    DIGITS ARE ACCEPTED because the alternative is a silent hole, measured in round 8:
+    the runbook states its count twice, so `gates **6** read sites` beside the intact
+    `= five read sites` was read as "no word-form claim here" and left the list and the
+    prose contradicting each other with the suite green. A digit-only region reds on
+    `assert stated` instead — which is the same defect wearing the other face.
+    """
+    return int(word) if word.isdigit() else _NUMBER_WORDS[word.lower()]
+
+
+#: A parenthesised list of ordinals in the prose (`(1, 4, 5)`, `(2, 3)`): the runbook
+#: describes its own list that way, so these are references to entries and must point
+#: at entries that still exist. Numbers in a normal sentence are not matched — the
+#: form is specific on purpose, because a guard that reads every digit in prose is a
+#: false-red machine.
+_READER_ORDINAL_LIST_RE = re.compile(r"\(\s*(\d+(?:\s*,\s*\d+)+)\s*\)")
+
+
+def _stated_count_text(lines: list[str], start: int, end: int) -> str:
+    """The region's prose with fenced code blocks removed.
+
+    A count inside a fence is an EXAMPLE, not a claim about this list — and the runbook
+    is full of fences. Removing them (plus the backtick exclusion in the count regex)
+    keeps a documented `two read sites` from reddening the artifact that documents it.
+    """
+    kept: list[str] = []
+    fenced = False
+    for line in lines[start:end]:
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            kept.append(line)
+    return "\n".join(kept)
 
 
 def _resolver_definition_span() -> tuple[int, int]:
@@ -2325,9 +2363,51 @@ def _reader_citations(
         f"so two entries share a number (or one skipped a number) and the list no longer "
         f"pins one cite per reader"
     )
+    # ⛔ AND EACH ENTRY MUST NAME A DIFFERENT READER. Counting cites per entry says an
+    # entry HAS one; it cannot say the entry is still its own reader. Measured, round 8:
+    # replacing the manifest's reader 4 (the HOSTED production lifespan pre-warm) with a
+    # copy of entry 1 left ordinals 1..5, `FIVE read sites`, every needle and every
+    # name↔number binding green — and `hosted_api.py` gone from the region entirely,
+    # i.e. the reader "that runs on the deployed box" silently deleted from the list a
+    # reviewer reads. Only entries 2 and 3 were identity-bound (by the prose sentence),
+    # so distinctness is asserted for all of them, plus coverage of the files the block
+    # says carry readers.
+    repeated = sorted(
+        {sym for sym in by_ordinal.values() if list(by_ordinal.values()).count(sym) > 1}
+    )
+    assert not repeated, (
+        f"{artifact}: two numbered entries name the SAME reader — {repeated} — so the "
+        f"list claims {len(entry_order)} read sites while pinning fewer distinct ones "
+        f"(entries: {dict(sorted(by_ordinal.items()))}). A reader is not a slot"
+    )
+    cited_files = {fname for fname, _lo, _hi, _sym in cites}
+    fallen_out = sorted(set(_READER_NEEDLE) - cited_files)
+    assert not fallen_out, (
+        f"{artifact}: the reader list no longer cites any line in {fallen_out} — that "
+        f"surface's reader was dropped or replaced by a duplicate, so the list is no "
+        f"longer the blast radius it claims to be (cited files: {sorted(cited_files)})"
+    )
+    # ⛔ AND THE PROSE THAT POINTS AT ENTRIES BY ORDINAL MUST POINT AT ENTRIES THAT
+    # EXIST. The runbook explains its own list as `(1, 4, 5)` warm-up surfaces plus
+    # `(2, 3)` readiness bounds, and says `Number 4 is … the production pre-warm` — so
+    # deleting entry 4 and renumbering 5 to 4 (with both count words edited to match)
+    # left every earlier check green while the prose pointed at the shell pre-warm as
+    # though it were the production one. Measured, round 8.
+    region_text = _stated_count_text(lines, start, end)
+    referenced = {
+        int(number)
+        for group in _READER_ORDINAL_LIST_RE.findall(region_text)
+        for number in group.split(",")
+    } | {int(n) for n in re.findall(r"\bNumbers?\s+(\d+)\b", region_text)}
+    dangling = sorted(referenced - entry_ordinals)
+    assert not dangling, (
+        f"{artifact}: the prose refers to reader(s) {dangling} by ordinal, but the list "
+        f"has no such entr(y/ies) ({sorted(entry_ordinals)}) — an entry was deleted or "
+        f"renumbered and the sentences that describe what each one is were not updated"
+    )
     stated = [
-        (m.group(1).lower(), _NUMBER_WORDS[m.group(1).lower()])
-        for m in _READER_STATED_COUNT_RE.finditer("\n".join(lines[start:end]))
+        (m.group(1).lower(), _count_value(m.group(1)))
+        for m in _READER_STATED_COUNT_RE.finditer(_stated_count_text(lines, start, end))
     ]
     assert stated, (
         f"{artifact}: the region states no '<N> read sites' count — this guard binds the "
@@ -2466,9 +2546,12 @@ def _embedder_warmup_runbook_citations() -> list[tuple[str, int, int, str | None
             "docs/infra-runbook.md has no '### The embedder warm-up switch' section — "
             "the operator surface this citation list belongs to is gone"
         )
-    end = next(
-        (i for i in range(start + 1, len(lines)) if lines[i].startswith("**When to flip it")),
-        len(lines),
+    end = _region_marker(
+        lines,
+        "**When to flip it",
+        "docs/infra-runbook.md",
+        "the end of the operator section (the '**When to flip it.**' paragraph)",
+        after=start,
     )
     return _reader_citations(lines, start, end, "docs/infra-runbook.md")
 
@@ -3570,10 +3653,10 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
     relations, because any one alone has a hole: the quote must carry the IDENTIFIERS
     an operator acts on (the variable, and the issue ref or the file); it must be a
     prefix of the message that run emits for that order; and it must cover the
-    message's first `;`-delimited clause, which is the one that STATES the condition
-    and the remedy. A prefix alone is satisfied by the bare leader; identifiers alone
-    would not notice a reworded clause; and identifiers + prefix together are
-    satisfied by a quote that stops at the identifiers (#13814 review rounds 6 and 7).
+    message's first `;`-delimited clause, which is the one that STATES the condition.
+    A prefix alone is satisfied by the bare leader; identifiers alone would not notice
+    a reworded clause; and identifiers + prefix together are satisfied by a quote that
+    stops at the identifiers (#13814 review rounds 6 and 7).
     (`#13814` review P2-2: the previous version read only the two LEADERS out of
     the source, and both leaders occur many times there, so renaming the leader of
     the exact quoted message — or rewording its body — left this guard green.)
@@ -3612,15 +3695,17 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
         # ⛔ AND A PREFIX THAT STOPS AT THE IDENTIFIERS IS STILL TOO SHORT: the tokens
         # above are the first two clauses, so a quote ending right after them prefixes
         # the emitted message and passes both arms — leaving the STATING clause (what
-        # state the name is in, and what to do about it) free to be reworded under a
-        # green suite. Measured, round 7: truncating the STALE quote at `fly-only:#13674`
-        # AND rewording the gate's whole tail was 142 passed. The emitted message's
-        # first `;`-delimited clause is the state; the quote must cover it.
+        # state the name is in) free to be reworded under a green suite. Measured, round
+        # 7: truncating the STALE quote at `fly-only:#13674` AND rewording the gate's
+        # whole tail was 142 passed. The emitted message's first `;`-delimited clause is
+        # the condition; the quote must cover it. (The REMEDY lives in the clause after
+        # the `;` and is not claimed here — an earlier version of this comment said it
+        # was, which is exactly the prose/enforcement drift this test exists to refuse.)
         state_clause = emitted[leader].split(";", 1)[0]
-        assert len(quoted[leader]) >= len(state_clause), (
+        assert quoted[leader].startswith(state_clause), (
             f"the runbook's {leader!r} quote stops before the clause that states the "
-            f"condition — an operator sees the identifiers but not what is wrong or what "
-            f"to do. Quote at least through {state_clause!r}."
+            f"condition — an operator sees the identifiers but not what state the name is "
+            f"in. Quote at least through {state_clause!r}."
             f"\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
         )
 
