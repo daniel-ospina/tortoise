@@ -6817,8 +6817,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15264` (both needles are the file's only occurrences —
-    # `:15254` and `:15264` — so a later end cannot change the sum). Ends below `:15264` fail
+    # true for any end at or beyond `:15300` (both needles are the file's only occurrences —
+    # `:15290` and `:15300` — so a later end cannot change the sum). Ends below `:15300` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
     # end in `:15261`-`:15299` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15261` gives an EMPTY window. The end is therefore pinned by the
