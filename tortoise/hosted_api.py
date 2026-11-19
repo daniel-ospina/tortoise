@@ -3149,14 +3149,21 @@ async def _lifespan(app):
             def _prewarm_embeddings() -> None:
                 try:
                     from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
-                    # Longer window than request paths (30s): cold-start torch
-                    # import on a 2-core/2GB VM can exceed 30s (#545). The
-                    # thread is daemon + background, so it never blocks bind.
+                    # #13674: NO explicit ``load_timeout`` here — this call used
+                    # to pass a 300.0 literal beside a product default of 90.0,
+                    # so there were TWO declared bounds and the one the log
+                    # line reported was the 90 s default even when the join had
+                    # actually waited 300 s. ``EmbeddingModel._LOAD_TIMEOUT_S``
+                    # (now 300.0, derived from the measured cold cost) is the ONE
+                    # bound; the entrypoint's boot pre-warm has paid the cold
+                    # import before ``exec`` (#13674), so this load is the WARM
+                    # construct.
+                    # The thread is daemon + background, so it never blocks bind.
                     # #4055: mark it as BACKGROUND setup so the one-time load
                     # it starts is not attributed to (and cannot exempt) a
                     # request that merely overlaps this pre-warm.
                     with EmbeddingModel.background_load():
-                        model = EmbeddingModel.get(load_timeout=300.0)
+                        model = EmbeddingModel.get()
                     loaded_id = _probe_loaded_model_id(model)
                     if model is not None:
                         if loaded_id and loaded_id != EMBEDDING_MODEL:
@@ -5804,7 +5811,9 @@ def _embedder_load_in_flight() -> bool:
     every concurrent request that needs the embedder is refused by a bound it was
     never given a chance to meet — 1 attempt AND 1 breach each, and five in a
     window is ``share 1.0`` ⇒ red on a machine that is merely warming. Fly's
-    ``grace_period`` is 180 s, the load can exceed it, and the red then stays for
+    ``grace_period`` is 420 s (#13674: raised from 180 s so a boot that pays the
+    measured 156.5 s cold embedder import before ``exec`` still has headroom),
+    the load can exceed it, and the red then stays for
     the 120 s the window takes to age out — crossing the 5 min deploy allowance.
     """
     try:
@@ -8353,7 +8362,8 @@ async def health():
     at 60s" is UNCONFIRMED and possibly undocumented. It is NOT supported by
     Fly's public docs, and independent research could not find it in flyctl or
     fly-go either — treat it as folklore, not a contract (`fly.toml` here
-    configures `grace_period = "180s"`). To verify: deploy a machine whose
+    configures `grace_period = "420s"`, raised for the #13674 boot pre-warm). To
+    verify: deploy a machine whose
     check fails continuously past the configured grace period and observe
     whether Fly restarts it at 60s (machine event log / `flyctl machine
     status`) or honours the larger configured value. This note exists because
@@ -13051,8 +13061,9 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     ⛔ #4055 (review P1) — A REQUEST-OWNED ONE-TIME EMBEDDER LOAD IS SETUP, NOT
     THE WORK THIS BOUND MEASURES, and ``/v1/search``'s callable contains one:
     ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
-    the worker (a cold bge-small load is measured at ~57 s, budgeted
-    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by this lane's 8 s answers **503
+    the worker (a cold import is measured at 156.5 s on the production box,
+    budgeted ``_LOAD_TIMEOUT_S`` = 300 s since #13674). Judging that by this
+    lane's 8 s answers **503
     ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
     loading** — a capacity error naming the wrong dependency. The transport
     seam already refuses to make that mistake: ``mcp_auth.await_under_wait_bound``

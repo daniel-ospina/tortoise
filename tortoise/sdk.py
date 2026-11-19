@@ -45607,6 +45607,10 @@ class TortoiseSDK:
             _recency_factors,
             _trace_entry,
             VECTOR_LEG_BUDGET_MS,
+            # #13674: the non-raising mirror of #2952 — "which legs did this
+            # read actually use" as a word, so a query DECLARES ``hybrid``
+            # instead of leaving it to be inferred from a missing marker.
+            declared_retrieval_kind as _declared_retrieval_kind,
         )
         # W4 (#2101): the additive why-layer enrichment (shared assembly —
         # DM-1; lazy import — why.py pulls search_engine helpers only).
@@ -45622,6 +45626,9 @@ class TortoiseSDK:
             STATUS_DEGRADED as _STATUS_DEGRADED,
             classify_leg_trace as _classify_leg_trace,
         )
+        # #13674: the non-raising mirror of #2952 — "which legs did this read
+        # actually use" as a word. Taken from the SAME ``search_engine`` import
+        # above (one module, one import edge), not a second lazy import.
         # #7952 (§17.2 / §17.3): the COMPLETENESS MARKER's ONE home. The read
         # path CONSUMES it and mints no verdict of its own, exactly as it does
         # for the status vocabulary above — and `not-hot` is never a term of
@@ -45769,6 +45776,19 @@ class TortoiseSDK:
                         status, marker, record_consulted=False)
                     read_status_out[_RESIDENCY_FIELD] = marker
                 read_status_out["status"] = status
+                # #13674: DECLARE THE LEG THE READ ACTUALLY USED.
+                # ``status`` answers "did the store answer, and did anything
+                # degrade"; it cannot say whether the DENSE leg contributed —
+                # a healthy keyword-only read and a hybrid read share it. This
+                # key is #2952's mirror: with the embedder loaded and the vector
+                # leg healthy the read declares ``hybrid``, and when the dense
+                # leg did not contribute it says ``keyword_only`` instead of
+                # leaving the caller to infer it. Additive on the caller-owned
+                # sink, computed from the SAME predicates ``require_hybrid_read``
+                # uses (``search_engine.declared_retrieval_kind``), so a
+                # ``read_status_out=None`` caller is byte-identical.
+                read_status_out["retrieval"] = _declared_retrieval_kind(
+                    status_trace)
                 if _caller_trace is not None and _caller_trace is not status_trace:
                     _caller_trace.extend(status_trace or ())
             if (
