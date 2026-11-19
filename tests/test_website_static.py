@@ -303,24 +303,52 @@ def _strip_comment_lines(code: str) -> str:
                 continue
             in_block = False
             # The block closes here; anything after it is CODE on this line.
-            stripped = stripped[end + 2:].strip()
+            # NO indent is inherited: the leading whitespace on this line
+            # belongs to the comment's own continuation, not to the code.
+            line, stripped = _keep_code_indent(
+                line, stripped, end + 2, keep_indent=False)
             if not stripped:
                 continue
-            line = stripped
         if stripped.startswith("/*"):
             end = stripped.find("*/")
             if end == -1:
                 in_block = True
                 continue
             # A one-line block comment leading a line of code: keep the code.
-            stripped = stripped[end + 2:].strip()
+            line, stripped = _keep_code_indent(line, stripped, end + 2)
             if not stripped:
                 continue
-            line = stripped
         if stripped.startswith("//"):
             continue
         out.append(line.rstrip())
     return "\n".join(out)
+
+
+def _keep_code_indent(line: str, stripped: str, cut: int,
+                      keep_indent: bool = True) -> tuple[str, str]:
+    """`(line_with_comment_cut, code)`, keeping the line's own INDENT.
+
+    `_render_code` compares two pages' function bodies as STRINGS and its
+    contract says the pages may explain themselves differently — so cutting a
+    comment must not move the code. For a comment that OPENS on this line the
+    indent is the original line's leading whitespace, unchanged by inserting the
+    comment after it:
+
+        `        /* c */ code` → `        code`
+        `/* why */ run(x)` → `run(x)`
+
+    Taking it from the text after the comment instead would ADD an indent to a
+    line that had none; taking it from nowhere would drop the indent of an
+    indented line and red the render-equality row against a page whose code is
+    identical (#13696 round 8, P3 — measured both ways).
+
+    `keep_indent=False` is for a block comment that CLOSED on this line: its
+    leading whitespace indents the comment's continuation (` */ run(x)`), not
+    the code, so the code takes no indent from it.
+    """
+    code = stripped[cut:].strip()
+    indent = '' if not keep_indent else line[:len(line) - len(line.lstrip())]
+    return indent + code, code
 
 
 def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
@@ -7230,17 +7258,21 @@ def _pricing_source_includes(html: str) -> list[str]:
 
     - COMMENTED-OUT tags are excluded (`_without_html_comments`): they are not
       in the page, so a row that pins them must not see them.
-    - The attribute is parsed TOLERANTLY — `src="…"`, `src='…'` and
-      `src = "…"` all count. A stricter spelling does not merely misread the
-      attribute: the tag is then skipped by `_inline_scripts` (its
+    - The attribute is parsed TOLERANTLY — `src="…"`, `src='…'`,
+      `src = "…"` and an UNQUOTED `src=/assets/x.js` all count (unquoted
+      attribute values are legal HTML5). A stricter spelling does not merely
+      misread the attribute: the tag is then skipped by `_inline_scripts` (its
       `\\bsrc\\s*=` test still excludes it) and deleted by `_served`, so the
-      file it loads is in NO channel at all (measured, #13696 round 7: the same
-      price-bearing asset was read red under `src="…"` and left 219 rows green
-      under `src='…'`).
+      file it loads is in NO channel at all (measured, #13696 rounds 7 and 8:
+      the same price-bearing asset was read red under `src="…"` and left 219
+      rows green under `src='…'` and under `src=/assets/…`).
     """
-    return re.findall(
-        r"""<script\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""",
+    found = re.findall(
+        r"""<script\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""",
         _without_html_comments(html), re.I)
+    # `findall` yields one tuple per tag with exactly one group populated; the
+    # QUOTING cannot select whether the channel is read.
+    return [next(g for g in groups if g) for groups in found]
 
 
 #: ONE spelling of a price figure, shared by the rows that refuse a second copy
@@ -7259,6 +7291,12 @@ PRICE_FIGURE_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d")
 #: present-but-different; `_figures` normalises the match back to `$89` before
 #: any comparison.
 PRICE_ONLY_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*")
+
+#: A figure whose DIGIT RUN is interrupted by markup — `$15<b>9</b>`, which a
+#: reader sees as `$159` while every detector above can only read `$15`. The
+#: tag group in `PRICE_ONLY_RE` sits before the digits, so it cannot span one.
+#: Fail closed on the ambiguous spelling rather than guess which is meant.
+PRICE_SPLIT_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*(?:<[^>]+>\s*)+\d")
 
 
 def _figures(text: str) -> list[str]:
@@ -7768,6 +7806,18 @@ class TestPricingSourceIsShared:
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             section = unescape(_served(_pricing_section(
                 path.read_text(encoding="utf-8"))))
+            # A figure SPLIT by markup is refused rather than read as its
+            # prefix: `$15<b>9</b>` renders as `$159` to a reader but matched
+            # only `$15`, which IS an allowed figure — so an unapproved $159
+            # was invisible while both pages agreed on it (#13696 round 8).
+            # Fail closed: the ambiguous spelling must be written as one run.
+            split = PRICE_SPLIT_RE.search(section)
+            assert split is None, (
+                f"{name} splits a price figure across inline markup "
+                f"({split.group(0)!r}): a reader sees the digits joined, while "
+                "every row here can only read the prefix — so a figure the "
+                "shared source does not contain can ship. Write the number as "
+                "one run and wrap the WHOLE figure if it needs styling.")
             stray = sorted(set(_figures(section)) - allowed)
             assert not stray, (
                 f"{name} quotes {stray!r} inside `#pricing-section`, and the "
@@ -7943,7 +7993,13 @@ class TestConsentSeam:
         assert m, (
             f"no `function {name}(` at the page's script indent — this gate's "
             "subject moved, so it is no longer asserting the consent gate")
-        return m.group(0)
+        # ⛔ JS comments cut too, for the SAME reason `_function_body` uses
+        # `_code_only`: the rows below decide presence with `str.find`, which
+        # matches a MENTION in a comment. Without this, commenting out
+        # `if (!consented()) return;` in `track()` kept every row green — i.e.
+        # the pre-consent beacon this gate exists to prevent shipped green
+        # (#13696 round 8, P1).
+        return _code_only(m.group(0))
 
     def test_the_page_gates_every_capture_on_the_consent_state(self):
         """#13696 review finding 2: the page half of the seam is behavioural.
