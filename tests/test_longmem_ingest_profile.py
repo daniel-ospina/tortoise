@@ -160,3 +160,40 @@ def test_every_documented_turn_length_is_built():
         prof.SHORT_TURN_CHARS
     assert len(long["haystack_sessions"][0][0]["content"]) == \
         prof.HEADLINE_TURN_CHARS
+
+
+def test_the_embedded_arm_raises_the_redislite_start_budget(monkeypatch):
+    """The no-``--db`` arm carries the #1944 hardening, not just the parity claim.
+
+    ``run.py``'s ``_make_question_sdk`` raises the vendored redislite start
+    budget to 60 s because the 10 s default RACES on a contended box (the
+    falkordb.so module load + socket bind can exceed it) and
+    ``embedded_lifecycle`` reads that budget from the same class attribute.
+    The profiler exists to be run on exactly that box, so an embedded profile
+    that keeps the 10 s default dies on the FIRST rung with a
+    ``RedisLiteServerStartError`` that says nothing about ingest cost.
+
+    Non-vacuity: delete the ``if _rc.Redis.start_timeout < 60`` block from
+    ``_sdk``'s embedded arm and this test reds (the stub SDK means nothing else
+    can raise the value); set the budget above 60 and it stays at that value,
+    which is why the guard is a floor rather than an assignment.
+    """
+    import redislite.client as rc
+
+    class _StubSDK:
+        def __init__(self, *_a, **_kw):
+            pass
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setattr(rc.Redis, "start_timeout", 10, raising=False)
+
+    _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
+    assert rc.Redis.start_timeout == 60, (
+        "the embedded arm must carry run.py's #1944 start-budget floor")
+    cleanup()
+
+    # a budget already above the floor is left alone (floor, not override)
+    monkeypatch.setattr(rc.Redis, "start_timeout", 120, raising=False)
+    _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
+    assert rc.Redis.start_timeout == 120
+    cleanup()
