@@ -3196,6 +3196,22 @@ _APPROVAL_RECORD_AS_AN_ORDERED_ITEM = (
     "> **Changelog v3.39 (2026-11-19 — a wording fix):**\n"
     ">\n"
     "> 1. **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ …AND THE CITED FORM, kept as the ACCEPT direction (review round 6): the ordered
+# marker ends in a full stop, so the label sentence used to be cut down to `1.` and this
+# record — whose citation IS in the sentence — was refused. `- `, `- [ ] `, `### ` and
+# `1) ` never had the problem; only the `\d+[.)]` family did.
+_APPROVAL_RECORD_AS_A_CITED_ORDERED_ITEM = (
+    "> 1. **Owner approval of the exact changes**: comment `6993778525`.")
+# ⛔ THE REMAINING CONTAINERS (review round 6), each measured ACCEPTED when its
+# alternative is dropped while the whole suite stays green — so each is driven here.
+_APPROVAL_RECORD_AS_AN_ASTERISK_BULLET = (
+    "> * **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_AS_A_PLUS_BULLET = (
+    "> + **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_AS_A_PARENTHESISED_ITEM = (
+    "> 1) **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX = (
+    "> - [x] **Owner approval of the exact changes** — given in-session, no comment cited.")
 _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS = (
     "> *Owner approval of the exact changes* — given in-session, no comment cited.")
 _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS = (
@@ -3254,6 +3270,12 @@ _APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE = (
 # The arm's docstring names them as costs; these fixtures make the naming measurable.
 _APPROVAL_RECORD_AS_A_BOLD_DENIAL = (
     "> **Owner approval was not required.** The change is a wording fix.")
+# ⛔ THE NAMED FAIL-CLOSED COST OF THE SHARED SENTENCE SPLITTER (review round 6): an
+# initial before the citation cuts the label sentence, so a CITED record is refused. The
+# cost is named in the arm's residual list and driven here, so it is measured.
+_APPROVAL_RECORD_CUT_BY_AN_INITIAL = (
+    "> **Owner approval of the exact changes:** the owner (D. Ospina) ruled in-session; "
+    "the ruling is relayed as comment `6993778525`.")
 _TOPICAL_APPROVAL_MENTION_AS_A_BOLD_LABEL = (
     "> **Approval of spend** requires two owners and is unrelated to any changelog record.")
 # ⛔ THE NESTED-QUOTE DIRECTIONS (review round 4): the per-record loop reads a quoted older
@@ -3449,7 +3471,11 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
       - an id anywhere in the label's SENTENCE still satisfies it and therefore **PASSES**,
         so a contrastive parenthetical naming another id (v3.37's shape) is accepted, and
         telling WHICH of two ids records the approval needs the comment's own text — the
-        reviewer step recorded in #12068.
+        reviewer step recorded in #12068;
+      - a label sentence whose first sentence is cut by an initial or by ``etc.`` before
+        the citation (``… the owner (D. Ospina) ruled … comment `NNN```) is REFUSED —
+        fail-closed, and it is the SHARED reader's split that cuts it
+        (``_ABBREVIATION_RE`` masks only ``e.g.``/``i.e.``); driven as a fixture below.
     """
     # ⛔ THE RECORD IS READ FROM THE PARAGRAPH'S OPENING EMPHASIS RUN, on the rendered
     # text (review @ e4927f5f, @ 95a8df2f, then #13669): `**Owner approval` as a literal
@@ -3481,7 +3507,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         # the full-stop fixture below measures is the FAILURE TYPE, because the shipped
         # `next(...)` had no default and raised a bare `StopIteration` — an uncaught
         # non-AssertionError with no message, which `_assert_refused_by` cannot classify.
-        label = _sentences(record)[0]
+        # ⛔ THE MARKER IS STRIPPED BEFORE THE SPLIT (review round 6, measured): `1. `
+        # ends in a full stop, so `_sentences` cut the label sentence down to `1.` and a
+        # CITED ordered item — `1. **Owner approval …**: comment `6993778525`.` — was
+        # refused for a missing citation that was in the sentence. `- `, `- [ ] `, `### `
+        # and `1) ` never had the problem; only the `\d+[.)]` family did.
+        label = _sentences(_LEADING_LIST_MARKER_RE.sub("", record.strip()))[0]
         assert _CITATION_RE.search(label), (
             "the changelog block records an owner approval but names no comment "
             "id in the SENTENCE that records it, so the approval has no home a reader "
@@ -3747,6 +3778,10 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # measured ACCEPTED before the detector allowed a list marker and single-marker runs.
     for marked_up_label in (_APPROVAL_RECORD_AS_A_BULLET,
                             _APPROVAL_RECORD_AS_AN_ORDERED_ITEM,
+                            _APPROVAL_RECORD_AS_AN_ASTERISK_BULLET,
+                            _APPROVAL_RECORD_AS_A_PLUS_BULLET,
+                            _APPROVAL_RECORD_AS_A_PARENTHESISED_ITEM,
+                            _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
@@ -3781,6 +3816,17 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
             _NESTED_QUOTED_APPROVAL_WITHOUT_AN_ID)
     _assert_refused_by(
         nested_without_an_id, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and the CITED ordered item is GREEN (review round 6): the marker strip is what keeps
+    # `_sentences` from cutting the label sentence at the marker's own full stop.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_AS_A_CITED_ORDERED_ITEM)
+    # …and the NAMED COST of the shared splitter is measured, not merely claimed (review
+    # round 6): a cited label sentence cut by an initial is refused.
+    with pytest.raises(AssertionError) as cut_by_an_initial:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _APPROVAL_RECORD_CUT_BY_AN_INITIAL)
+    _assert_refused_by(
+        cut_by_an_initial, "_refuse_an_approval_record_with_no_resolvable_home")
     # NON-VACUITY, the F2 direction: an id that is NOT the approval's — the landed
     # record with its own relay deleted, only the incidental reference left. Pre-fix
     # this was GREEN (a paragraph-wide search found the borrowed id), so the arm could
