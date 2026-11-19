@@ -897,19 +897,32 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
     # fresh-context review, verified by execution). It used to assert the ABSENCE of
     # `git show {code_head[:12]}:` — that is `git show 31bce52ddbb3:`. The README's own
     # counter-example abbreviates to TEN characters (`31bce52ddb`), and a `git show
-    # <sha>` abbreviation is a prefix of ANY length >= 7, so rewriting that line into an
+    # <sha>` abbreviation is a prefix of ANY length >= 4 (git's minimum abbreviation
+    # input; `git rev-parse --short=4 31bce52ddb…` widens to the five-character
+    # `31bce`, which `git show 31bce:…` resolves), so rewriting that line into an
     # INSTRUCTION in the ten-character spelling left the suite GREEN at 47 passed. A
     # guard that matches a literal token can only ever see the one token it names, so
     # this now derives the forbidden set from `code_head` at EVERY abbreviation length
     # a reader could type, and refuses any `git show <hex>:` that is a prefix of it.
-    shown = set(re.findall(r"git show ([0-9a-f]{7,40}):", flat))
+    #
+    # ⛔ AND IT REACHES `code_head_note`, not only the README (fresh-context review,
+    # verified by execution). The builder's docstring says the guard "pins every
+    # `git show <hex>:` target in the document, and prose is not exempt" — but the scan
+    # read `flat`, which is the README only, so the exact string the note was corrected
+    # for could be re-introduced into `measurement.json`'s note (by the builder AND the
+    # committed copy) with the suite GREEN at 54 passed. The note is where a reader of
+    # the ARTIFACT learns what to run, and it is the field the defect lived in, so it is
+    # scanned with the same derivation: one `shown` set, both surfaces.
+    shown = set(re.findall(r"git show ([0-9a-f]{4,40}):", flat + " " + note))
     code_head = artifact["code_head"]
     for token in sorted(shown):
         # A sha abbreviation is a prefix; comparing with a common prefix of any length
-        # >= 7 closes the spelling hole the twelve-character form left open.
-        if len(token) >= 7 and code_head.startswith(token):
+        # >= 4 closes the spelling hole the twelve-character form left open, and >= 4 is
+        # the floor because git itself resolves from there.
+        if len(token) >= 4 and code_head.startswith(token):
             raise AssertionError(
-                f"README §6 still hands out an unresolvable command (`git show {token}:`), "
+                f"§6 or `code_head_note` still hands out an unresolvable command "
+                f"(`git show {token}:`), "
                 f"which is a {len(token)}-character abbreviation of `code_head` — that is "
                 f"exactly the defect this record was corrected for. Write reproduction "
                 f"commands against `HEAD`, or against the reachable equivalent the "
