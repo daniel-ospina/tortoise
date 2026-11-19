@@ -257,22 +257,48 @@ def _pricing_init_code(html: str, page: str = "product.html") -> str:
 
 
 def _strip_comment_lines(code: str) -> str:
-    """`code` with every line that is WHOLLY a JS comment removed.
+    """`code` with every WHOLLY-comment line removed and every comment SPAN cut.
 
-    Line-based on purpose. A regex `//`-strip would cut the `https://` inside
-    the self-host anchor and hide every mutation past it; in these bodies every
-    comment occupies a line of its own, so a per-line drop is exact.
+    ⛔ SPANS, not lines. Dropping a line because its stripped form merely
+    STARTS with `/*` also drops the code that follows the closing `*/` on that
+    same line, and continuing past `*/` when a block closes mid-line drops the
+    remainder with it — so `/* note */ labels.pro = 'Growth';` and a block whose
+    last line closes and then runs code were both invisible to every consumer
+    of this helper. Measured (`#13696` review, round 6): with the line-based
+    rule, a `$25/mo` literal behind a leading `/* x */` left BOTH
+    `test_no_page_quotes_a_price_inside_its_own_script` and
+    `test_the_two_pages_render_the_same_code` green while the page quoted a
+    price `/tortoise` does not. The tail after `*/` is now KEPT as code.
+
+    Line-based for the trailing `//` case only, on purpose. A regex `//`-strip
+    would cut the `https://` inside the self-host anchor and hide every
+    mutation past it; a `//` at the START of a stripped line really is wholly a
+    comment, so that branch stays a per-line drop.
     """
     out: list[str] = []
     in_block = False
     for line in code.splitlines():
         stripped = line.strip()
         if in_block:
-            in_block = "*/" not in stripped
-            continue
+            end = stripped.find("*/")
+            if end == -1:
+                continue
+            in_block = False
+            # The block closes here; anything after it is CODE on this line.
+            stripped = stripped[end + 2:].strip()
+            if not stripped:
+                continue
+            line = stripped
         if stripped.startswith("/*"):
-            in_block = "*/" not in stripped
-            continue
+            end = stripped.find("*/")
+            if end == -1:
+                in_block = True
+                continue
+            # A one-line block comment leading a line of code: keep the code.
+            stripped = stripped[end + 2:].strip()
+            if not stripped:
+                continue
+            line = stripped
         if stripped.startswith("//"):
             continue
         out.append(line.rstrip())
@@ -7163,9 +7189,29 @@ PRODUCT_PAGES_SHARING_PRICING = (
 )
 
 
+def _without_html_comments(markup: str) -> str:
+    """`markup` minus every HTML comment, including an UNTERMINATED opener.
+
+    `_served` is the right tool when the subject is markup a READER receives,
+    but it also deletes `<script>`/`<style>` bodies — and a `<script src=…>`
+    tag is exactly the subject of the rows below, so `_served` would empty them.
+    This variant keeps tags and script bodies and removes only what a browser
+    never parses. Same lesson as `_served`'s own docstring (#13696 review,
+    round 6): commenting a tag out is the natural way to disable it, and it
+    must not leave the row that pins it green.
+    """
+    markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
+    return re.sub(r"<!--.*", " ", markup, flags=re.S)
+
+
 def _pricing_source_includes(html: str) -> list[str]:
-    """The `src` of every `<script>` in the page, in source order."""
-    return re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', html, re.I)
+    """The `src` of every `<script>` the browser PARSES, in source order.
+
+    Commented-out tags are excluded: they are not in the page, so a row that
+    pins them must not see them (see `_without_html_comments`).
+    """
+    return re.findall(
+        r'<script\b[^>]*\bsrc="([^"]+)"', _without_html_comments(html), re.I)
 
 
 #: ONE spelling of a price figure, shared by the rows that refuse a second copy
@@ -7748,7 +7794,7 @@ class TestConsentSeam:
             "page-view capture waits for it, so with no emit every visit that "
             "does not re-decide consent is silently uncounted — clicks with no "
             "denominator (#13645)")
-        assert f"'{self.EVENT}'" in _product_teams_html(), (
+        assert f"'{self.EVENT}'" in _without_html_comments(_product_teams_html()), (
             f"the niche page no longer listens for `{self.EVENT}` — its page "
             "view would then fire only when the decision happens mid-visit")
 
@@ -7799,7 +7845,13 @@ class TestConsentSeam:
         to the matching close brace. Sliced by indentation rather than
         brace-counting: the literals inside these functions are the one place a
         naive counter would drift.
+
+        Comments are cut first (`_without_html_comments`), so a function that a
+        `<!-- … -->` comment has disabled is not read as if the browser still
+        ran it — otherwise this gate is satisfied by `function track(` inside a
+        comment while the page beacons nothing.
         """
+        src = _without_html_comments(src)
         m = re.search(
             rf"^( *)function {re.escape(name)}\(.*?\n\1\}}", src, re.S | re.M)
         assert m, (
@@ -8066,7 +8118,7 @@ class TestProductTeamsIdentity:
             "defect and an undercount (blocked requests read as nobody clicked)")
 
     def test_the_three_funnel_events_are_named_in_the_source(self):
-        html = _product_teams_html()
+        html = _without_html_comments(_product_teams_html())
         for event in PRODUCT_TEAMS_EVENTS:
             assert f"'{event}'" in html, (
                 f"the page never names the `{event}` event. The owner decision "
@@ -8093,7 +8145,7 @@ class TestProductTeamsIdentity:
 
     def test_the_page_links_to_the_canonical_product_page(self):
         """The owner's rule: this page does not re-tell /tortoise's story."""
-        html = _product_teams_html()
+        html = _without_html_comments(_product_teams_html())
         hrefs = [h.split("?", 1)[0] for h in re.findall(r'href="([^"]+)"', html)]
         assert "/tortoise" in hrefs, (
             "the niche page never links to /tortoise, whose full product story "
