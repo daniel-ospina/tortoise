@@ -395,8 +395,13 @@ record. Measured at this head, one mutant per arm, over
   assert the flag on entries whose failures ARE infra: that is the same
   property from the other end, not a second claim.
 - restore the `isinstance(exc, RedisError)` base-class arm -> all four
-  `DETERMINISTIC_REDIS_REFUSALS` rows and the three excluded
-  `TRANSIENT_VALUE_REDIS_FAMILIES` rows.
+  `DETERMINISTIC_REDIS_REFUSALS` rows, the three excluded
+  `TRANSIENT_VALUE_REDIS_FAMILIES` rows, and
+  `test_the_recovery_tier_preservation_stays_coherent` — that last one because
+  the arm REPLACES the three named predicates rather than widening them, so it
+  also drops `retryable_transient`'s provider-transient admission (the row's
+  failure is a `requests` `Timeout`), which is a second reason the arm is not a
+  restore.
 
 ⛔ The bullets name ROWS, not counts. Three successive drafts of this paragraph
 carried a number per bullet and every one of them was wrong at least once, in
