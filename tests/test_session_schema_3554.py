@@ -3455,6 +3455,15 @@ _APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN = (
 # (`[A-Z]{1,3}\d{0,3}\s*[—–-]` or `[—–-]`), which `1.` is not. So the remedy would be the
 # LEAD-IN class, not an end-of-paragraph boundary — and unlike the release-id lead-in
 # above (`R1 — Owner's approval …`, which IS read), this run is not read at all.
+# ⛔ THE LEAD-IN CLASS'S FALSE-BLOCK COST, DRIVEN (review P2, measured): the class is
+# `[A-Z]{1,3}\d{0,3}`, so it matches a short WORD as readily as a release id —
+# `**Fix — the approval flow was broken**` opens a paragraph with a bold run this reader
+# takes for an approval LABEL, and the arm then refuses it because the sentence cites an
+# issue (`#1234`) and no comment id. Measured REFUSED rather than asserted, so the cost of
+# the bound is a fixture and not a sentence; the digit-requiring alternative is named in
+# the residual list and rejected there for re-opening a fail-OPEN.
+_APPROVAL_RECORD_BEHIND_A_SHORT_WORD_LEAD_IN = (
+    "> **Fix — the approval flow was broken** and #1234 has the detail.")
 _APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN = (
     "> **1. Owner approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
@@ -3803,7 +3812,16 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
       - a BOLDED DENIAL that OPENS a paragraph (``**Owner approval was not required.**``)
         is read as a record and refused, and so is a bolded TOPICAL mention
         (``**Approval of spend** requires two owners``) — the cost of excluding negations
-        structurally (fail-closed);
+        structurally (fail-closed); ⛔ AND SO IS A SHORT-WORD LEAD-IN (review P2,
+        measured): ``**Fix — the approval flow was broken** and #1234 has the detail.`` is
+        read as a label and refused, because the lead-in class is ``[A-Z]{1,3}\\d{0,3}`` —
+        one to three LETTERS with the digits OPTIONAL — so ``Fix``, ``Bug`` and ``PR``
+        match it exactly as ``R1`` does. A digit-requiring class (``\\d{1,3}``) would leave
+        those three unread while still reading every documented id (measured), and it is
+        NOT taken because it re-opens the fail-OPEN this arm exists to close: a record
+        behind a word lead-in (``**Fix — Owner's approval of the exact changes**``) would
+        pass unread. The false block is therefore a stated cost rather than an unlisted
+        one, driven by ``_APPROVAL_RECORD_BEHIND_A_SHORT_WORD_LEAD_IN``;
       - a quotation of an older approval inside a nested ``> > `` run is read as a second
         record and its citation is demanded (fail-closed);
       - an HTML ``<b>`` / ``<strong>`` label (``<b>Owner approval …</b>``) is not an
@@ -3875,10 +3893,12 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         reviewer step recorded in #12068;
       - a LEAD-IN the bounded rule does not spell (``**v3.41 — Owner's approval …**``,
         ``**1. Owner approval …**``) is not read as a label and **PASSES** (fail-OPEN): the
-        lead-in class is a short alphanumeric id or a bare dash, deliberately narrow so it
-        cannot swallow prose, and widening it towards ``.*`` is what makes it read — BOTH
-        named shapes are driven, by ``_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN`` and
-        ``_APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN``;
+        lead-in class is one to three letters or a bare dash before one separator —
+        ``R1``, ``D2``, ``ID12``, the digits OPTIONAL, so a short WORD matches as readily
+        and that costs a false block (stated in the fail-CLOSED bullet above, not glossed
+        as "cannot swallow prose") — and widening it towards ``.*`` is what makes it
+        read; BOTH named shapes are driven, by ``_APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN``
+        and ``_APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN``;
       - a label sentence whose first sentence is cut by an initial or by ``etc.`` before
         the citation (``… the owner (D. Ospina) ruled … comment `NNN```) is REFUSED —
         fail-closed, and it is the SHARED reader's split that cuts it
@@ -3968,10 +3988,14 @@ _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
 # ['3.35','3.33','3.32'], and v3.33 never leaves (the anchor is unchanged, so widening can
 # only turn its `None` into a match and the set is monotone non-decreasing) — turning
 # v3.32's `Build record for v3.31 …` into a refused approval record as well. So the bound
-# is a short alphanumeric release id (`R1`, `D2`, `ID12` — `[A-Za-z]` under IGNORECASE) or a bare
-# dash, each followed by one separator. A lead-in outside that class (`v3.41 — `, `1. `)
-# stays fail-OPEN and is named in the residual list above, rather than widening this until
-# it catches prose.
+# is one to three letters with the digits optional (`[A-Z]{1,3}\d{0,3}` under IGNORECASE)
+# or a bare dash, each followed by one separator. ⛔ THE CLASS IS WIDER THAN "A RELEASE ID",
+# AND THAT IS A MEASURED FAIL-CLOSED COST rather than a rule that "cannot catch prose"
+# (review P2: the earlier wording said exactly that, and it is false — `Fix`, `Bug` and
+# `PR` are one to three letters, so `**Fix — the approval flow was broken**` is read as a
+# label and REFUSED). It is declared in the residual list above and driven by
+# `_APPROVAL_RECORD_BEHIND_A_SHORT_WORD_LEAD_IN`. A lead-in outside the class (`v3.41 — `,
+# `1. `) stays fail-OPEN and is named in the same list.
 _APPROVAL_LABEL_START_RE = re.compile(
     r"^(?:(?:[A-Z]{1,3}\d{0,3}\s*[\u2014\u2013-]\s*|[\u2014\u2013-]\s*))?"
     r"(?:(?:an?|the)\s+)?(?:owners?['\u2019]?s?\s+)?approval\b",
@@ -4389,7 +4413,11 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_WITH_AN_INDEFINITE_DETERMINER,
                             _APPROVAL_RECORD_WITH_A_RELEASE_ID_LEAD_IN,
                             _APPROVAL_RECORD_WITH_A_LEADING_DASH,
-                            _TOPICAL_APPROVAL_MENTION_WITH_AN_ARTICLE):
+                            _TOPICAL_APPROVAL_MENTION_WITH_AN_ARTICLE,
+                            # …and the LEAD-IN bound's own false block, measured (#13669
+                            # review P2): a short WORD lead-in is 1-3 letters, so it is
+                            # read as a label — the cost of the bound, not an oversight.
+                            _APPROVAL_RECORD_BEHIND_A_SHORT_WORD_LEAD_IN):
         with pytest.raises(AssertionError) as marked_up:
             _refuse_an_approval_record_with_no_resolvable_home(marked_up_label)
         _assert_refused_by(
