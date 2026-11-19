@@ -9,9 +9,17 @@ closes both:
    and the near-duplicate rule is a *choice* (`neardup-v1`) that a later
    "simplification" could change while every published number stayed put. The
    rule, the window arithmetic and the pin's refusals are asserted here.
-2. **The README drifts away from the artifact.** Every figure the README's table
-   states is recomputed from the committed artifact and compared, so the doc
-   cannot publish a number the evidence does not hold.
+2. **The README drifts away from the artifact.** Every figure in the README's
+   §2 recall, per-class and paired tables, and its §3a duplicate-rate and §3b
+   mint tables, is recomputed from the committed artifact CELL BY CELL and
+   compared, so the doc cannot publish a number the evidence does not hold.
+   ⛔ The claim stops there on purpose: §1's provenance field/value table and
+   §4's lever table are PROSE cells (a file count, a verbatim `evidence`
+   pointer), not re-derivable values, and they are not pinned here. An earlier
+   cut of this docstring said "every figure the README's table states", which was
+   a coverage claim with no pin behind it — §3a's `rows`/`near-duplicate
+   rows`/`pairs`/`queries affected` columns had NO assertion at all (measured:
+   `875` -> `999` and `11` -> `77` both stayed green).
 
 ⛔ Nothing here runs the measurement — it needs a live FalkorDB and ~10 minutes of
 queries. That is deliberate (the same reason
@@ -552,22 +560,118 @@ def test_the_readme_quotes_the_paired_deltas_the_artifact_holds(artifact):
             assert float(p) == pytest.approx(cell["p"])
 
 
+def _count(cell: str) -> int:
+    """A COUNT cell: emphasis/backticks/list-spacing stripped, thousands separators gone.
+
+    The README spells counts both ways in the same document (`875` and `1 452`),
+    so a count cell cannot go through `_number`, which keeps the space and then
+    refuses `1 452`. Kept separate from `_number` on purpose — widening `_number`
+    would change what every FLOAT pin above accepts.
+    """
+    clean = (cell.replace("*", "").replace("`", "").replace(",", "")
+             .replace("\u00a0", "").replace("\u202f", "").replace(" ", "").strip())
+    return int(float(clean))
+
+
 def test_the_readme_quotes_the_duplicate_rates_the_artifact_holds(artifact):
-    text = README.read_text()
+    """§3a, CELL BY CELL — the rate, and the three counts it is computed from.
+
+    This used to be `f"{rate:.4f}" in text`, which is the exact shape the block
+    above forbids. Measured at this head: `875` → `999` on the k=3 row's `rows
+    handed out` and `11` → `77` on its pair count both stayed GREEN, because the
+    pin compared a formatted float against the whole 226-line document and never
+    read the counts. A duplicate rate whose denominator can be misquoted is a
+    number nobody can re-derive, so the counts are pinned with it.
+    """
+    header, rows = _tables(README.read_text(), "rows handed out")
+    assert header[1:3] == ["rows handed out", "near-duplicate rows"], header
+    assert header[4:] == ["duplicate pairs", "queries affected"], header
+    assert len(rows) == len(cap.KS), ([r[0] for r in rows], list(cap.KS))
+    by_k = {r[0].replace("*", "").strip(): r for r in rows}
+    assert set(by_k) == {str(k) for k in cap.KS}, sorted(by_k)
     for k in cap.KS:
-        rate = artifact["arms"]["user_search"][
-            "duplicate_rate_in_window"][str(k)]["rate"]
-        assert f"{rate:.4f}" in text, f"README does not quote the dup rate at k={k}"
+        row = by_k[str(k)]
+        held = artifact["arms"]["user_search"]["duplicate_rate_in_window"][str(k)]
+        assert (_count(row[1]), _count(row[2])) == (
+            held["rows"], held["duplicate_rows"]), (
+            f"README dup row k={k} counts ({row[1]}, {row[2]}), artifact holds "
+            f"rows={held['rows']} duplicate_rows={held['duplicate_rows']}")
+        assert _number(row[3]) == pytest.approx(held["rate"]), (
+            f"README dup row k={k} rate {row[3]}, artifact holds {held['rate']}")
+        assert _count(row[4]) == held["pairs"], (
+            f"README dup row k={k} pairs {row[4]}, artifact holds {held['pairs']}")
+        affected = row[5].split("/")
+        assert len(affected) == 2, (k, row[5])
+        assert (_count(affected[0]), _count(affected[1])) == (
+            held["queries_with_any"], held["queries"]), (
+            f"README dup row k={k} affected {row[5]!r}, artifact holds "
+            f"{held['queries_with_any']}/{held['queries']}")
+
+
+#: The §3b mint table's two configuration rows, by the artifact key they carry.
+MINT_ROW_MARKERS: dict[str, tuple[str, ...]] = {
+    "norm_only": ("frozen pre-",),
+    "shipped": ("shipped matcher",),
+}
 
 
 def test_the_readme_quotes_the_mint_rates_the_artifact_holds(artifact):
-    text = README.read_text()
+    """§3b's configuration table, CELL BY CELL — `192 of 411` is the whole finding.
+
+    Cell-scoping matters for the rate here too, and was MEASURED missing: `0.5328`
+    is quoted a second time in §4's lever table, so mutating THIS table's cell to
+    `0.7777` stayed GREEN under the old whole-document substring check while the
+    document published two different mint rates for the shipped matcher.
+    """
     mint = artifact["arms"]["mint_rate"]
-    for cell in (mint["shipped"]["rate"], mint["norm_only"]["rate"]):
-        assert f"{cell:.4f}" in text, f"README does not quote mint rate {cell}"
-    for cls, row in mint["by_class"].items():
-        assert f"{row['shipped_mint_rate']:.4f}" in text, (
-            f"README does not quote the {cls} mint rate")
+    header, rows = _tables(README.read_text(), "canonical in window")
+    assert [h.replace("*", "").strip() for h in header[1:]] == [
+        "pairs", "canonical in window", "attached", "mint rate"], header
+    assert len(rows) == len(MINT_ROW_MARKERS), [r[0] for r in rows]
+    _assert_rows_cover(rows, MINT_ROW_MARKERS)
+    for key, marks in MINT_ROW_MARKERS.items():
+        row = _one_row(rows, marks, key)
+        assert _count(row[1]) == mint["pairs"], (key, row[1], mint["pairs"])
+        assert _count(row[2]) == mint["retrieval_in_window"], (
+            key, row[2], mint["retrieval_in_window"])
+        assert _count(row[3]) == mint[key]["attached"], (
+            f"README mint row {key!r} attaches {row[3]}, artifact holds "
+            f"{mint[key]['attached']}")
+        assert _number(row[4]) == pytest.approx(mint[key]["rate"]), (
+            f"README mint row {key!r} rate {row[4]}, artifact holds "
+            f"{mint[key]['rate']}")
+
+
+def test_the_readme_quotes_the_mint_rates_by_variant_class(artifact):
+    """§3b's per-variant-class table, cell by cell — where the remaining gap is NAMED.
+
+    `space-to-hyphen`'s 1.0000 is a recorded decision's boundary (`#12047` r4 f5),
+    so a reader has to be able to trust the row's own counts: `180` pairs, `175`
+    in window, `0` attached. Under the old whole-document check every one of those
+    counts could be wrong while the document still quoted the right rate somewhere.
+    """
+    by_class = artifact["arms"]["mint_rate"]["by_class"]
+    header, rows = _tables(README.read_text(), "variant class")
+    assert header[1:] == ["pairs", "in window", "shipped attaches",
+                          "mint rate"], header
+    assert len(rows) == len(by_class), ([r[0] for r in rows], sorted(by_class))
+    for cls, held in by_class.items():
+        matched = [r for r in rows if f"`{cls}`" in r[0]]
+        assert len(matched) == 1, (
+            f"expected exactly one README row for variant class {cls!r}, got "
+            f"{len(matched)}: {[r[0] for r in rows]}")
+        row = matched[0]
+        assert _count(row[1]) == held["pairs"], (
+            f"README {cls} pairs {row[1]}, artifact holds {held['pairs']}")
+        assert _count(row[2]) == held["retrieval_in_window"], (
+            f"README {cls} in-window {row[2]}, artifact holds "
+            f"{held['retrieval_in_window']}")
+        assert _count(row[3]) == held["shipped_attached"], (
+            f"README {cls} attaches {row[3]}, artifact holds "
+            f"{held['shipped_attached']}")
+        assert _number(row[4]) == pytest.approx(held["shipped_mint_rate"]), (
+            f"README {cls} mint rate {row[4]}, artifact holds "
+            f"{held['shipped_mint_rate']}")
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
