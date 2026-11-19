@@ -23868,7 +23868,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # addressable by its OWN value, so it rides the same id-keyed MERGE
             # with the raw value beside the string ones (a raw int matches its
             # own node and the string form never does, so neither arm can pick
-            # up the other's row).
+            # up the other's row) — and `attachment_target_ids` answers ONLY for
+            # string holders, so no string spelling of the raw value is emitted
+            # either: that spelling would address a TWIN whose id is literally
+            # "4242", a row the writer's name space never matched (#13724
+            # review; `test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge`).
             #
             # ⚠️ RESIDUAL: `follow_resolved_from` stringifies its argument on
             # entry (`entity_resolver.py:673` `current = str(node_id)`), so a

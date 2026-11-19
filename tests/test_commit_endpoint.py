@@ -5804,6 +5804,58 @@ class TestThe12244TheHostedAnchorCollapsesAMergedPair:
             f"`aboutObject` edge (edges={edges}); the string spelling of "
             "4242 names no node")
 
+    def test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge(self, client):
+        """#12244: the raw arm restored the edge; it must not hand one to a TWIN.
+
+        The sibling above keeps a legacy `Object {id: 4242}` addressable by its
+        own value. That value is fed to the id-keyed MERGE *beside* the collapse's
+        answer, and the collapse answers in the STRING spelling (the hop does
+        `str(node_id)` at its entry). Left in, that string addresses a DIFFERENT
+        row — any node whose id is literally `"4242"` — which the writer's name
+        space never matched: the twin took an edge main never wrote, i.e. exactly
+        the over-attachment class this PR removes.
+
+        So the fix is that a non-string holder is not ANSWERED at all
+        (`entity_identity.attachment_target_ids`); this anchor's own raw arm is
+        what keeps the legacy row addressable. Measured pre-fix: `twin=1`.
+        """
+        sdk = _team_sdk()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'active'}) "
+                "CREATE (b:Object {id:'4242', name:'Unrelated Twin', "
+                "canonical_name:'unrelated twin', status:'active'})")
+            assert g.query(
+                "MATCH (o:Object) WHERE o.id = 4242 OR o.id = '4242' "
+                "RETURN count(o)").result_set == [[2]], "fixture drift"
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-twin",
+            entities=[{"name": "Legacy Int", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Int"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        twin_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:'4242'}) "
+            "RETURN count(o)").result_set[0][0]
+        assert twin_edges == 0, (
+            "the anchor attached to the STRING twin of a legacy non-string id — "
+            "a row the writer's name space never matched "
+            f"(twin_edges={twin_edges})")
+        int_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.id = 4242 RETURN count(o)").result_set[0][0]
+        assert int_edges == 1, (
+            "the legacy row itself must keep its edge "
+            f"(int_edges={int_edges})")
+
 
 class TestThe12120HostedAboutObjectAnchor:
     """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).

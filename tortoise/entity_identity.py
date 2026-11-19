@@ -521,6 +521,19 @@ def attachment_target_ids(g, label: str, holder_ids) -> list[str]:
       its own right and the CALLER keeps its own id-less arm over the same space
       (``link_entity`` MERGEs on ``{id:…}``; the hosted anchor's single MERGE
       attaches id-less rows). They are simply not represented in this answer.
+    * it does NOT answer for a holder id that is not a STRING. The hop is
+      string-keyed — ``follow_resolved_from`` does ``str(node_id)`` at its own
+      entry — so a non-string ``id`` can never be followed, and answering it
+      with ``str(holder)`` names a DIFFERENT row: the writers match on ``id``,
+      so ``"4242"`` addresses any node whose id is literally that string (a
+      *twin* the writer's name space never matched), which took an edge main
+      never wrote. Measured (review of #13724, then the pin
+      ``TestThe12244ANonStringHolderIsNotAnswered`` in
+      ``tests/test_entity_identity.py``): the pre-fix answer for ``[4242]`` was
+      ``['4242']``. Such a row is left to the caller's own
+      arm, on the same footing as an id-less stub: the hosted anchor attaches
+      it by its RAW value (``_raw_addressable``), and the two local sites
+      attached nothing for it before #12244 either (parity, unchanged).
     * it is STATUS-BLIND, like the sites that use it: a terminal-only holder is
       still linked, which is what ``apply_merge_union`` documents. See
       :func:`_collapse_resolved_holders`'s ``drop_retired_survivors`` — the live
@@ -552,8 +565,18 @@ def attachment_target_ids(g, label: str, holder_ids) -> list[str]:
     above is built on).
     """
     _require_identity_label(label)
+    # ⛔ NON-STRING holder ids are filtered OUT of the hop rather than answered
+    # with ``str(holder)``: the hop stringifies at its own entry
+    # (``entity_resolver.follow_resolved_from``), so a non-string id can never
+    # be followed — and its string spelling is a DIFFERENT row's id, so an
+    # answer built from it attaches to a twin the writer's name space never
+    # matched. See this function's docstring. The hosted anchor keeps such a row
+    # addressable through ``_raw_addressable`` (its raw value); the two local
+    # sites attach nothing for it, which is what they did before #12244.
+    addressable = [holder for holder in holder_ids
+                   if isinstance(holder, str)]
     return [str(holder) for holder in _collapse_resolved_holders(
-        g, label, holder_ids, drop_retired_survivors=False) if holder]
+        g, label, addressable, drop_retired_survivors=False) if holder]
 
 
 def _name_holder_ids_same_entity(g, label: str, name: str, *,
