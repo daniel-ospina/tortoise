@@ -487,9 +487,13 @@ prose inside a docstring; `flag_in_shipped_configs` is `:911`), and it attribute
 `03-scope.md:66` only).
 
 **F2 — `docs/architecture/SUBSTRATE-REBUILD-MAP.md` states the opposite of this artifact's existence**
-(`:84` *"No test-design issue and no capstone exist for E4"*, `:324` ❌, and the **D6** row at `:438` —
-*"no epic has a test-design map or a capstone"* — re-derived by content at this head, `grep -n '^| \*\*D6\*\*' docs/architecture/SUBSTRATE-REBUILD-MAP.md`, which returns that one line; the sentence
-used to cite `:375`, a blank line at `main` and here). That was true when
+(`:84` *"No test-design issue and no capstone exist for E4"*, the "test-design / integration-surface
+map: ❌ none" row at `:385`, and the **D6** row at `:438` — *"no epic has a test-design map or a
+capstone"*). ⛔ All three are re-derived by CONTENT at this head, never by an offset: the sentence
+used to cite `:322` for the ❌ row (that has been the `tests/test_substrate_map.py` re-derivation
+sentence since before it was written; the ❌ row was `:383` on `main`, `:385` here) and `:375` for
+D6, which is a blank line at `main` and here (the D6 row is `grep -n '^| \*\*D6\*\*'` -> `:438`).
+That was true when
 it was cut (`4f68a2aa7`); **#11084 now exists and this is its artifact.** Recorded here rather than
 edited into a dated, test-guarded cut — a lane reading the substrate map should follow the pointer, not
 find a second, competing status cell. The capstone half of the claim **remains true** (`#11089` is
