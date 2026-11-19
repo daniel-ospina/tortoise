@@ -2033,6 +2033,33 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
         "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
 
 
+#: A summary claiming a UNIVERSAL the route falsifies. The NEGATION is deliberately NOT matched:
+#: "not every hard failure is a page" is the CORRECTED claim, so a guard that rejected it would
+#: block the very fix it exists to protect. Matched as a PROPOSITION rather than one spelling — a
+#: substring test let "all hard failures of this route are pages" straight through (measured).
+_UNIVERSAL_PAGE_CLAIM = re.compile(
+    r"(?<!not\s)\b(?:every|all|each)\s+hard\s+failures?\b[^.\n]{0,40}?\b(?:is|are)\s+"
+    r"(?:a\s+)?pages?\b",
+    re.IGNORECASE,
+)
+
+#: Measured BOTH ways, which is the only form in which a guard's power claim is falsifiable at the
+#: point a reader meets it: each RED sample is wording this fold had to remove, each GREEN sample is
+#: a corrected or qualified sentence the guard must NOT block.
+_UNIVERSAL_PAGE_CLAIM_RED = (
+    "**Every hard failure is a PAGE, not a JSON blob**",
+    "Every hard failure of the carriage is a page.",
+    "All hard failures of this route are pages.",
+    "each hard failure is a page",
+)
+_UNIVERSAL_PAGE_CLAIM_GREEN = (
+    "Not every hard failure is a page: the `400` and the terminal `200` stay JSON.",
+    "NOT ALL hard failures are pages.",
+    "Every REFUSAL is a page, and two `json(...)` returns survive.",
+    "a hard failure of the carriage is answered with a page",
+)
+
+
 def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
     claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
@@ -2046,9 +2073,21 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
     sentence appears there legitimately, as the thing being narrowed.
 
-    Non-vacuous: it REDS on the pre-#10884 `start.ts`, whose header read
-    `**Every hard failure is a PAGE, not a JSON blob**`.
+    Non-vacuous, and the WITNESS is inside this fold rather than on the base: the absolute was
+    authored here (`87383d13`, the route header `**Every hard failure is a PAGE, not a JSON blob**`)
+    and narrowed four commits later (`21d6dbf6`), so `main` is GREEN for this phrase by
+    construction — only `consent-refusal.ts`'s entry paragraph still carried it when `a52c5494`
+    landed. The RED/GREEN fixtures below are the falsifiable form of that claim; an earlier cut of
+    this docstring cited the pre-#10884 base as the witness, which no reader could reproduce.
     """
+    for red in _UNIVERSAL_PAGE_CLAIM_RED:
+        assert _UNIVERSAL_PAGE_CLAIM.search(red), (
+            f"the guard does not catch {red!r} — a guard that pins ONE spelling lets a paraphrase of "
+            "a claim the route falsifies through, which is the defect it was added to stop")
+    for green in _UNIVERSAL_PAGE_CLAIM_GREEN:
+        assert not _UNIVERSAL_PAGE_CLAIM.search(green), (
+            f"the guard blocks {green!r}, and that sentence is TRUE — a guard that rejects the "
+            "corrected or qualified claim would force the next lane back to the absolute")
     corpus = {
         "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
         "consent-refusal.ts": (FUNCTIONS / "_shared/auth/consent-refusal.ts").read_text(
@@ -2057,12 +2096,12 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                                       "consent-identity-bridge.md").read_text(encoding="utf-8"),
     }
     for name, text in corpus.items():
-        lowered = text.lower()
-        assert "every hard failure" not in lowered, (
-            f"`{name}` claims EVERY HARD FAILURE is a page, and `start.ts` returns JSON from TWO "
-            "places (the `400` caller error and the terminal `200` flow state — see "
-            "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL: the terminal `200` "
-            "is #10865's recorded decision, and a summary that denies it invites converting it.")
+        found = _UNIVERSAL_PAGE_CLAIM.search(text)
+        assert not found, (
+            f"`{name}` claims EVERY HARD FAILURE is a page ({found.group(0)!r}), and `start.ts` "
+            "returns JSON from TWO places (the `400` caller error and the terminal `200` flow state "
+            "— see `test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL: the terminal "
+            "`200` is #10865's recorded decision, and a summary that denies it invites converting it.")
 
 
 def _key_from(location: str | None) -> str:
