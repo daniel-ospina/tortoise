@@ -16,21 +16,35 @@ closes both:
    tabular ones, CLAUSE-scoped for the abstract's three sentences, and
    ROW-scoped with digit-bounded tokens for the prose rows — so no figure in those
    places can disagree with the evidence.
-   ⛔ **This is the boundary of the claim, and it is deliberately narrower than
-   "the whole document".** Figures in §5's declared limits and §6's run metadata
-   are NOT pinned. Every earlier cut of this paragraph claimed more than it
-   enforced, and each gap was found by mutating the document: the first said
-   "every figure the README's tables state" while §3a's count columns had no
-   assertion at all; the second left §1 and §4 unpinned while calling them "not
-   re-derivable" (they are, and §4 holds the SECOND quotation of the mint rate);
-   the third pinned only §4's figures and left its `shipped state` and verdict
-   WORD unpinned, so `OFF by default` could become `ON by default`; the fourth
-   pinned the word but not the phrase, so `n/a — no code shipped` became
-   `n/a — code shipped`; and it pinned the abstract's figures against the WHOLE
-   paragraph, so `0 lost` in one clause satisfied the loss count of another.
-   **A claim wider than its measurement is the defect this file exists to avoid**,
-   so when adding a row here, mutate the cell first — and mutate a digit upward,
-   which is the bump a substring check misses.
+   ⛔ **This is the boundary of the claim, and it is not "the whole document".**
+
+   PINNED: every figure in the tables named above; the plain-language summary's three
+   lever clauses and its three-lever counts; and three §2/§3 NARRATIVE restatements that
+   repeat a tabulated figure (`+53.3 points`, the `0.8` Jaccard, `192 of 411`).
+
+   NOT PINNED, and the list is deliberate: narrative prose elsewhere in §1-§4 — the
+   per-arm degradation counts quoted in §2a's commentary, `~2.3 %`, `+1.7 and +6.7
+   points`, `0 gains, 0 losses across 272`, `282/300`, `34 of 300` — plus §5's declared
+   limits and §6's run metadata. A reader who needs a figure guarded must check it is in
+   a pinned table; do NOT read this module as "the document is enforced".
+
+   Every earlier cut of this paragraph claimed more than it enforced, and each gap was
+   found by mutating the document: the first said "every figure the README's tables
+   state" while §3a's count columns had no assertion at all; the second left §1 and §4
+   unpinned while calling them "not re-derivable" (they are, and §4 holds the SECOND
+   quotation of the mint rate); the third pinned only §4's figures and left its `shipped
+   state` and verdict WORD unpinned; the fourth pinned the word but not the phrase; the
+   fifth pinned the abstract's figures but not its CAPABILITY statement (`not visible to
+   a user, because it is off by default` was invertible) and declared a boundary that
+   excluded only §5/§6 while §1-§4 narrative prose was also unpinned; the sixth
+   clause-scoped that abstract but left its HEADLINE sentence — where all three
+   visibility COUNTS are stated — unpinned, so `one of the merged levers is visible to a
+   user, one is not,` could become `all of the merged levers are visible to a user,` with
+   every pin green, and left §4's verdict check PREFIX-scoped while its message claimed a
+   whole-cell guarantee.
+   **A claim wider than its measurement is the defect this file exists to avoid**, so when
+   adding a row here, mutate the cell first — and mutate a digit upward, which is the
+   bump a substring check misses.
 
 ⛔ Nothing here runs the measurement — it needs a live FalkorDB and ~10 minutes of
 queries. That is deliberate (the same reason
@@ -307,14 +321,33 @@ def test_a_binding_that_is_not_the_measured_call_never_renders_as_measured():
         "sdk.tortoise_fts_query = MCP tortoise_search / REST GET /v1/search")
 
 
-def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch):
-    """`run()` must not write an artifact it cannot back with the binding."""
+def test_run_refuses_a_binding_that_is_not_the_users_door(monkeypatch, capsys):
+    """`run()` must not write an artifact it cannot back with the binding.
+
+    ⛔ THE REASON IS ASSERTED, NOT ONLY THE EXIT CODE. `run()` has four `return 3`
+    arms and the `TORTOISE_DB_URI` guard sits a few lines below the door guard and
+    returns 3 too, so an exit-code-only assertion is satisfied by the very mutant
+    this test exists to catch — measured: with `if not user_door.get(
+    "matches_measured_call")` deleted, the test still passed (`rc=3`, the URI arm
+    answering). That matters HERE specifically because the manifest declares this
+    file hermetic (`config/ci-surfaces.yml`: "no DB, no graph, no docker, no
+    network, no model call"), which is exactly the environment where the URI arm can
+    answer for the door arm — so the environment is pinned EMPTY as well.
+    """
     import argparse
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setattr(cap, "_user_door_binding",
                         lambda: {"tool": "tortoise_search", "present": False})
     args = argparse.Namespace(pin=str(PIN), graph="cap-test", namespace=None,
                               out=None)
     assert cap.run(args) == 3
+    err = capsys.readouterr().err
+    assert "does not resolve to the call the arms make" in err, (
+        f"`run()` returned 3 for a reason other than the door guard — the refusal "
+        f"that fired was not the one this test names: {err!r}")
+    assert "no live FalkorDB" not in err, (
+        f"the URI guard answered instead of the door guard, so deleting the door "
+        f"guard would leave this test green: {err!r}")
 
 
 def test_the_artifact_declares_the_graph_residue(artifact):
@@ -589,12 +622,41 @@ def _clause(paragraph: str, marker: str) -> str:
     rerank clause, so `41 queries gained, none lost` -> `41 queries gained, 9 lost`
     in the underscore clause stayed green (measured). Clause-scoping is what makes a
     figure belong to the lever it is stated about.
+
+    ⛔ Two hazards this handles, both measured:
+    - a naive `split(". ")` breaks on an abbreviation (`i.e.`, `e.g.`, `vs.`, `etc.`),
+      turning a correct clause into an "omits 83.4%" red — a false red is as bad as a
+      false pass;
+    - a rewording that MERGES two clauses would let one sentence satisfy two lever
+      markers, silently destroying the attribution this helper exists to provide.
+      So the selected sentence may mention no OTHER lever.
     """
-    sentences = [s for s in paragraph.split(". ") if marker in s]
+    sentences = [s for s in re.split(r"(?<!\b[A-Za-z])\.\s+", paragraph)
+                 if marker in s]
+    others = [m for m in ("#12368", "#12343", "#12304") if m != marker]
     assert len(sentences) == 1, (
         f"expected exactly one sentence mentioning {marker!r}, got "
         f"{len(sentences)} in {paragraph!r}")
+    assert not any(m in sentences[0] for m in others), (
+        f"the sentence for {marker!r} also mentions another lever, so one sentence "
+        f"is satisfying two markers: {sentences[0]!r}")
     return _flat(sentences[0])
+
+
+def _paragraph(text: str, marker: str) -> str:
+    """The blank-line-delimited BLOCK of `text` that mentions `marker`, flattened.
+
+    A whole-document substring is the shape this file's header forbids: the refusal
+    pin used `"0.7133" in text`, and the baseline occurs in three places, so the
+    refusal paragraph could lose its own copy while the check stayed green
+    (measured). Block-scoping is the smallest honest unit for prose that is itself a
+    paragraph.
+    """
+    blocks = [b for b in text.split("\n\n") if marker in " ".join(b.split())]
+    assert len(blocks) == 1, (
+        f"expected exactly one paragraph mentioning {marker!r}, got "
+        f"{len(blocks)}")
+    return _flat(blocks[0])
 
 
 def _count(cell: str) -> int:
@@ -911,7 +973,11 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
             f"§4 `{key}` verdict {row[2]!r} does not start with {want_verdict!r} "
             "— a lever's verdict cannot be qualified or reversed by a prose edit")
         if key in LEVER_DECLARATION_ROWS:
-            assert "visible" not in verdict, (
+            #: Reject only an UN-NEGATED visibility claim. `"visible" not in verdict`
+            #: reds a strictly more correct negation (`… so it is not visible to a
+            #: user`) — a false red — while the phrase prefix above already carries the
+            #: fail-closed part (measured).
+            assert not re.search(r"(?<!not )(?<!no )\bvisible\b", verdict), (
                 f"§4 `{key}` is a DECLARATION row but its verdict now claims "
                 f"visibility: {row[2]!r}")
 
@@ -983,8 +1049,28 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
         (f"+{rerank['delta_pts_clean']:.2f}points",
          f"{rerank['gains']}gained",
          f"{rerank['losses']}lost",
-         f"p={rerank['p_display']}"),
+         f"p={rerank['p_display']}",
+         #: The CAPABILITY statement, derived from the artifact — without these the
+         #: abstract's conclusion was invertible: `not visible to a user, because it
+         #: is off by default` -> `visible … on by default` stayed green (measured).
+         f"{visibility['fused_rerank_shipped_default'].lower()}bydefault",
+         "notvisibletoauser"),
         "the abstract's rerank clause")
+
+    #: The three-lever summary sentence. Its counts are DECLARED here and tied to the
+    #: §4 verdicts immediately below, so `one … is visible` -> `two … are visible`
+    #: cannot pass while §4 still says one YES-user, one NO and one write-path.
+    for key, want in (("underscore", "YES"), ("rerank", "NO"),
+                      ("fold", "YESonthewritepath")):
+        assert LEVER_COLUMNS[key][1].startswith(want), (
+            f"the abstract's three-lever sentence no longer matches §4's `{key}` "
+            f"verdict {LEVER_COLUMNS[key][1]!r}")
+    _assert_mentions(
+        _flat(paragraph),
+        ("oneofthemergedleversisvisibletoauser",
+         "oneisnot",
+         "oneisonlyvisibleonthewritepath"),
+        "the abstract's three-lever sentence")
 
     _assert_mentions(
         _clause(paragraph, "#12304"),
@@ -994,7 +1080,42 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
-    """The artifact refuses it; the prose must not invite it either."""
-    text = README.read_text()
-    assert "0.7133" in text
-    assert "refuses that comparison" in text or "not a comparison to the 0.7133" in text
+    """The artifact refuses it; the REFUSAL paragraph must not invite it either.
+
+    This used to be `"0.7133" in text` over the whole 226-line document — the shape
+    the header above forbids. The baseline occurs in three places, so the refusal
+    paragraph could lose its own copy while the check stayed green (measured).
+    """
+    block = _paragraph(README.read_text(), "refuses that comparison")
+    assert "0.7133" in block, f"the refusal paragraph no longer names 0.7133: {block!r}"
+    assert ("refusesthatcomparison" in block
+            or "notacomparisontothe0.7133" in block), block
+
+
+def test_the_readme_narrative_cannot_contradict_its_own_tables(artifact):
+    """The three §2/§3 NARRATIVE restatements of a tabulated figure.
+
+    These are the prose places that repeat a number the tables already hold, and
+    each survived unpinned (measured): `+53.3 points at k=3` -> `+43.3` contradicted
+    the per-class table two lines above it; the near-duplicate rule's
+    `Jaccard >= 0.8` -> `0.5` contradicted `cap.NEARDUP_JACCARD` IN A PARAGRAPH THAT
+    SAYS IT IS PINNED BY THIS FILE; and `192 of 411` -> `291 of 411` contradicted
+    §3b's own row.
+
+    Whole-document and digit-bounded, deliberately: each token is a two-number phrase
+    or a comparison operator that occurs exactly once, so the masking a bare
+    substring allows (a second occurrence satisfying the pin) is closed by the
+    uniqueness assertion, and the tables carrying the same figures are cell-pinned.
+    """
+    text = _flat(README.read_text())
+    ident = artifact["arms"]["user_search"]["by_class"]["ident"]
+    pre = artifact["arms"]["user_search_pre_lever"]["by_class"]["ident"]
+    mint = artifact["arms"]["mint_rate"]
+    tokens = (f"{(ident['3'] - pre['3']) * 100:.1f}points",
+              f"\u2265{cap.NEARDUP_JACCARD}",
+              f"{mint['shipped']['attached']}of{mint['pairs']}")
+    for token in tokens:
+        assert text.count(token) == 1, (
+            f"expected exactly one occurrence of {token!r} in the README, found "
+            f"{text.count(token)} — a second occurrence can mask a drifted first")
+    _assert_mentions(text, tokens, "the README's §2/§3 narrative")
