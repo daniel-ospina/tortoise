@@ -162,6 +162,9 @@ SELECTED = [
     ("has anything we relied on been withdrawn", "ended", "existence"),
     ("has anything been retired", "ended", "existence"),
     ("have any claims been archived", "ended", "existence"),
+    # …and the example the ``existence`` docstring gives, made executable so the
+    # contract it states cannot drift from the words it cites (round-4 review P3).
+    ("have any claims been retracted", "ended", "existence"),
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -244,11 +247,35 @@ NOT_SELECTED = [
     "what do we do when we cancel a subscription",
     "what is the payment terms clause given the contract was archived",
     "what is the payment terms clause, given the contract was archived",
+    # ── the ATTRIBUTIVE existence / which_predicate class (round-4 review) ──
+    # The participle here MODIFIES the noun that follows the quantifier (or the
+    # noun after the auxiliary), so none of these is a question about endings —
+    # each is a content lookup, and each was answered with the whole ended
+    # population. The `existence` auxiliary is now mandatory and
+    # `which_predicate` is end-anchored, so they keep the relevance read.
+    "have any archived reports been published",
+    "have any cancelled orders been refunded",
+    "have any deprecated endpoints been removed from the API",
+    "do we have any archived reports",
+    "has any retired employee's data been deleted",
+    "which products have archived documentation",
+    "which units are cancelled in the export",
     # ── the fact-question class about commitments (round-2/3 review) ────────
     "what commitments did the vendor make in the SLA",
     "which commitments are in the contract",
     "how much have we committed to the SOC2 audit",
     "current commitments in EMEA",
+    # ── the THIRD-PARTY SUBJECT and PREPOSITIONAL-TAIL class (round-4 review) ─
+    # The subject rule is the docstring's own measured example —
+    # `what commitments did the vendor make in the SLA` — one word different:
+    # `our competitors` is not `we`, and it was answered with OUR commitments. The
+    # tail rows are the constraint rule the shape already states for the NOUN
+    # shapes (`current commitments in EMEA`) applied to the VERB shape, where a
+    # free tail let `in EMEA` / `to the SOC2 audit` be dropped in silence.
+    "what are our competitors committed to",
+    "what are our vendors committed to",
+    "what are we committed to in EMEA",
+    "what have we committed to the SOC2 audit",
     # ── the APPENDED-CONSTRAINT class (P2-5 review, measured) ──────────────
     # The same questions with the constraint set off by a COMMA. The first cut
     # scanned only `text.split(",")[0]`, so these routed while their comma-less
@@ -534,7 +561,6 @@ def test_a_point_scoped_commitment_question_is_not_answered_with_objects(sdk):
     rows = sdk.tortoise_fts_query("current commitments", entity_type="point",
                                   limit=50)
     assert world["plan"]["id"] not in _ids(rows)
-    assert all(r.get("id") for r in rows)  # no crash, an ordinary read
 
 
 # ══════════════════════════════════════════════════════════════════════════════

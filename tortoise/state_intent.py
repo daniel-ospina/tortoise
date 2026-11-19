@@ -161,15 +161,31 @@ _ENDING_BASE = (
 #: and none of them matches a word that is merely PRESENT:
 #:
 #: * ``existence`` — "has anything we relied on BEEN withdrawn",
-#:   "have any claims been retained". An auxiliary plus an existential quantifier
+#:   "have any claims been retracted". An auxiliary plus an existential quantifier
 #:   is a question about whether such a record EXISTS; the relative clause between
 #:   them is the thing asked about, and it is the only place a window is allowed.
+#:   ⛔ THE AUXILIARY IS MANDATORY, and that is the ATTRIBUTIVE discriminator
+#:   (round-4 review, P1). An ending word that MODIFIES a following noun is not a
+#:   predicate — `have any archived reports been published` and
+#:   `do we have any archived reports` are content lookups in which `archived` is
+#:   a modifier. With an OPTIONAL auxiliary the participle could sit straight
+#:   after the quantifier, where it can only be attributive, and all of those
+#:   were answered with the whole ended population. Requiring
+#:   `been|already|ever` immediately before the participle is the predicative
+#:   test: the participle is then the head of the verb phrase, not a modifier of
+#:   the noun that follows the quantifier.
 #: * ``wh_whole_question`` — the WHOLE question is "what (has been) <participle>":
 #:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
 #:   constraint (`what is the archived pricing document`) cannot reach it.
 #: * ``which_predicate`` — the wh-word's OWN predicate: "which claims were
 #:   archived". Anchored at the start and requiring the auxiliary immediately, so
 #:   `which archived report has the Q3 numbers` (an attributive use) cannot.
+#:   ⛔ AND ANCHORED AT THE END (round-4 review, P1), for the same reason: with
+#:   nothing required after the participle, `which products have archived
+#:   documentation` and `which units are cancelled in the export` fired, and in
+#:   both the participle modifies the noun that follows it. Requiring the
+#:   participle to END the question admits the wh-word's own predicate ("which
+#:   claims were archived") and refuses the attributive use.
 #: * ``do_support`` — "what did WE <base verb>", "did we retire …". Anchored, and
 #:   the base verb must follow the pronoun IMMEDIATELY — a window let
 #:   `what do we do when we cancel a subscription` (a how-to question) through.
@@ -216,7 +232,7 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # asked about.
     ("existence", re.compile(
         rf"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)"
-        rf"\b[^?]{{0,60}}?\b(?:been\s+|already\s+|ever\s+)?(?:{_ENDING_WORDS})\b")),
+        rf"\b[^?]{{0,60}}?\b(?:been|already|ever)\s+(?:{_ENDING_WORDS})\b")),
     # "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
     # question, anchored at both ends, so a trailing constraint ("what is the
     # archived pricing document") and a wh-word in a subordinate clause cannot
@@ -228,7 +244,7 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # wh-word's own predicate, anchored at the start of the question.
     ("which_predicate", re.compile(
         rf"^which\b[^?]{{0,30}}?\b(?:is|are|was|were|has|have|had)\s+"
-        rf"(?:been\s+)?(?:{_ENDING_WORDS})\b")),
+        rf"(?:been\s+)?(?:{_ENDING_WORDS})\s*[?.!]*$")),
     # "what did we archive last quarter" / "did we retire the onboarding flow".
     # ⛔ THE BASE VERB MUST FOLLOW THE PRONOUN IMMEDIATELY. A window let a
     # subordinate clause through: `what do we do when we cancel a subscription`
@@ -255,11 +271,34 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: a wrong answer that looks right). The verb phrase is anchored to "what
 #: are/have we|our …" for the same reason — `how much have we committed to the
 #: SOC2 audit` is a scalar question, not a request for the population.
+#:
+#: ⛔ TWO MORE RULES ON THE SET-QUESTION, both round-4 review (P1), and both are
+#: the SAME class the paragraph above records — one word different:
+#:
+#: * the PRONOUN and the VERB are adjacent apart from ADVERBS. A free window let
+#:   an intervening noun become the subject, so `what are our competitors
+#:   committed to` and `what are our vendors committed to` were answered with OUR
+#:   commitments. Adverbs still pass (`we currently committed`), because an
+#:   adverb cannot be the subject.
+#: * a PREPOSITIONAL TAIL is a CONSTRAINT, not the idiom. `committed to in EMEA`
+#:   and `committed to the SOC2 audit` narrow the request, and the population
+#:   cannot apply a narrowing — so they keep the relevance read rather than
+#:   having it dropped in silence. The pinned Q1 spelling (`committed to —
+#:   pricing, …`) is an APPOSITIVE elaboration, and `committed to and has
+#:   anything been withdrawn` is a COMPOUND question, so the tail is admitted
+#:   when what follows the verb is punctuation, a conjunction, or the end of the
+#:   question — and refused when it is a content word. That is stated as an
+#:   allow-list rather than a preposition list because `to` belongs to the idiom
+#:   itself: a deny-list of prepositions would have refused the compound question
+#:   on its `to and` (measured — this was the first cut's regression).
 _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "what are we (currently) committed to" / "what have we committed to"
     ("committed_to", re.compile(
-        r"\bwhat\b[^?]{0,16}?\b(?:are|have|had)\s+(?:we|our)\b[^?]{0,16}?"
-        r"\bcommitt(?:ed|ing)\b")),
+        r"\bwhat\b[^?]{0,16}?\b(?:are|have|had)\s+(?:we|our)\b"
+        r"(?:\s+(?:[a-z]+ly|still|also|now|ever)){0,2}\s+"
+        r"\bcommitt(?:ed|ing)\b"
+        r"\s*(?:to\b)?"
+        r"(?=\s*(?:[—–\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
     # "current commitments" / "live commitments" / "outstanding commitments"
     ("scoped_noun", re.compile(
         r"\b(?:current|live|active|open|outstanding)\s+commitments\s*[?.!]*$")),
