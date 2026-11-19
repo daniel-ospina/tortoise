@@ -214,9 +214,12 @@
        The component is investors.html's `.doc-grid` + `figure.video`, reused
        rather than re-invented: same 9/16 frame, same poster, same owned
        <video> (no third-party chrome) and the same real <button> play control.
-       ⛔ NOT a nested <section>: the hero must stay ONE section element
-       (`tests/test_website_docs_consistency.py::test_product_hero_offers_the_blog`
-       reds on a nested section, and section slicing elsewhere assumes one). */
+       ⛔ NOT a nested <section>: the hero must stay ONE section element,
+       because a slice that stops at the first `</section>` would then cover only
+       part of it. `tests/test_website_static.py::TestProductTeamsIdentity::
+       test_the_hero_is_one_section_element` holds THIS page to that; the sibling
+       gates `_pricing_section` / `_automate_beat_markup` carry the same rule for
+       product.html. */
     #beat-hero { padding-top: 5rem; }
     .doc-grid {
       display: grid;
