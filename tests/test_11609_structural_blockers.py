@@ -288,6 +288,19 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     rebind `A` to the adapter before the call — a false PASS, identical on `main`, filed as
     **#13656** rather than left silent. (`except … as A` cannot occur for this alias: the adapter
     is not an exception class, so no live shape exists for it.)
+
+    ⛔ AND a SECOND hole in the model, the same direction: a CLASS body is read **order-blind**.
+    Class scope is genuinely not function scope — the body executes once in its own namespace and
+    an unbound local there is looked up in the GLOBALS (§4.2.2) — but this reader treats a class
+    block like a function block for every rebinding spelling, so a trailing or branch-nested
+    rebinding does not stop an EARLIER read in the same body from resolving to the module
+    binding. `class K: z = A(app)` followed by `A = object` / `(A := object)` / `for A in …` /
+    `with … as A` / `if flag: A = object` / `flag and (A := object)` reports `[]` while the
+    adapter really IS constructed — a false PASS, identical on `main`, filed as **#13670** rather
+    than left silent. The `del` spelling of the same class is the one instance FIXED here: the
+    `ast.Delete` arm skips a class block, because noting the binding made the body own the name
+    for its whole text and DROPPED a real site (`#13639` review round 3 F1 — a regression against
+    `main`, measured). That skip is minimal and correct; it does not make class bodies positional.
     """
     tree = ast.parse(source)
 
@@ -320,6 +333,19 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case,
                 # `and`/`or` and `a if c else b` are SHORT-CIRCUIT: a binding inside one runs on
                 # only SOME executions, exactly as an `if` STATEMENT does (#13639 review P1).
+                # ⛔ …AND IT MARKS THE PARTS THAT **ALWAYS** EVALUATE TOO (`#13639` review round 3
+                # F4). `_walk` marks the WHOLE node, so `values[0]` of a `BoolOp` and the `test`
+                # of an `IfExp` — both evaluated on EVERY execution — are over-approximated as a
+                # JOIN as well. Measured: `(A := object) and True`, `(A := object) or True` and
+                # `1 if (A := object) else 2`, each followed by `A(app)`, all report `[3]` while
+                # the `A = object` spelling of the same unconditional rebinding reports `[]` and
+                # the runtime is `TypeError` (0 constructions) — a FALSE BLOCK, i.e. a re-read.
+                # That is the sanctioned direction and NOT a regression (`main` answers `[3]` on
+                # all four), and the choice is pinned by
+                # `test_the_adapter_reading_is_not_spelling_blind`'s declared-over-read row. The
+                # exact alternative is to mark only `IfExp.body`/`.orelse` and
+                # `BoolOp.values[1:]`, so the always-evaluated part REPLACEs — a behaviour change
+                # beyond this PR's scope.
                 ast.IfExp, ast.BoolOp)
 
     def _chain(node: ast.AST) -> tuple[ast.AST, ...]:
@@ -654,19 +680,43 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
             if node.name:
                 _note_binding(node.name, chain)
         elif isinstance(node, ast.Delete):
-            # ⛔ `del` MAKES A NAME LOCAL (`#13639` review round 2, Execution model §4.2.1: "If a
-            # name is bound in a block, it is a local variable of that block"). CPython counts a
-            # deleted-anywhere name as local to its block, so it is a BINDING for scope purposes
-            # even though it yields no value — and `binds` is exactly what `_env_key`'s
-            # `nonlocal` arm asks to find the OWNER of a name. Without this arm, `nonlocal tr` in
-            # an inner function reached PAST a `mid` that `del`s `tr` and filed the value in
-            # `outer`, reporting a call that at runtime raises `AttributeError` — a false BLOCK
-            # (a re-read, not a lost wiring) and a regression the `binds`-based owner search
-            # introduced. No value is recorded because a delete has none: the name stays
-            # `{SHADOWED}` in its block, which is what a delete leaves behind.
-            for target in node.targets:
-                for name in _target_names(target):
-                    _note_binding(name, chain)
+            # ⛔ `del` MAKES A NAME LOCAL — IN A FUNCTION BLOCK (`#13639` review round 2,
+            # Execution model §4.2.1: "A target occurring in a `del` statement is also considered
+            # bound for this purpose (though the actual semantics are to unbind the name)").
+            # CPython counts a deleted-anywhere name as local to its block, so it is a BINDING for
+            # scope purposes even though it yields no value — and `binds` is exactly what
+            # `_env_key`'s `nonlocal` arm asks to find the OWNER of a name. Without this arm,
+            # `nonlocal tr` in an inner function reached PAST a `mid` that `del`s `tr` and filed
+            # the value in `outer`, reporting a call that at runtime raises `AttributeError` — a
+            # false BLOCK (a re-read, not a lost wiring) and a regression the `binds`-based owner
+            # search introduced.
+            #
+            # ⛔ …BUT A CLASS BODY IS NOT A LOCALITY SCOPE (`#13639` review round 3 F1, §4.2.2:
+            # "Class definition blocks and arguments to `exec()` and `eval()` are special in the
+            # context of name resolution … with an exception that unbound local variables are
+            # looked up in the global namespace"). A class body has no local-DECLARATION rule, so
+            # `del A` there is a sequential namespace operation, not a claim on the whole body:
+            # `class K: z = A(app)` / `del A` really instantiates the adapter from the GLOBALS
+            # (measured with a recording stub: `constructed=1`, then `NameError`) and
+            # `origin/main` reports `[3]`. Noting the binding anyway made the class body own `A`
+            # for its whole text and dropped that site — a false PASS, a REGRESSION against
+            # `main`, and the one direction this reader must never get wrong. So the class block
+            # is skipped here and its read resolves as it does today; making class bodies
+            # POSITIONAL (which would also hold the `del`-then-read order) is a separate,
+            # measured hole — **#13670**.
+            #
+            # ⛔ NO VALUE IS RECORDED, because a delete has none (`#13639` review round 3 F2:
+            # the sentence that stood here claimed the name "stays `{SHADOWED}` in its block",
+            # which the code has never done — this arm touches `binds` and nothing else). An
+            # earlier value in `envs` therefore stays in force, and a `del` AFTER a binding still
+            # reports: `B = FastAPIRouterAdapter` / `del B` / `B(app)` answers `[5]` here and on
+            # `main` while the runtime is `UnboundLocalError` — an over-read (a re-read), the
+            # sanctioned direction.
+            innermost = chain[-1] if chain else None
+            if not isinstance(innermost, ast.ClassDef):
+                for target in node.targets:
+                    for name in _target_names(target):
+                        _note_binding(name, chain)
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             for generator in node.generators:
                 # ⛔ the target belongs to the COMPREHENSION's block, not the enclosing one
@@ -2050,6 +2100,25 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ), ("the `if`-STATEMENT control for the rows above — the `=` spelling of the same conditional "
         "rebinding must report the site too, or the pair is two absences, not a discrimination")
+    # ⛔ …AND THE ALWAYS-EVALUATED OPERAND IS A DECLARED OVER-READ (`#13639` review round 3 F4).
+    # `branches` marks the WHOLE `BoolOp`/`IfExp`, so the LEFT operand of `and`/`or` and the TEST
+    # of a ternary — both of which run on EVERY execution — are JOINed instead of REPLACEd. Two
+    # spellings of one unconditional rebinding therefore disagree with each other: the `=` control
+    # above answers `[]` and this row reports. Measured: runtime is `TypeError` (0 constructions)
+    # for `(A := object) and True`, `(A := object) or True` and `1 if (A := object) else 2`, and
+    # `main` answers `[3]` on all four — so this is a FALSE BLOCK (a re-read), the sanctioned
+    # direction, and NOT a regression. The row asserts the over-read ON PURPOSE: making it exact is
+    # the `conditional`-on-`values[1:]`/`IfExp.body` change the `branches` comment declines.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "(A := object) and True\n"
+        "A(app)\n"
+    ), ("DECLARED OVER-READ: the LEFT operand of `and` always runs, so this is the `=` control's "
+        "shape and the honest answer is `[]`; `branches` marks the whole `BoolOp` and reports it "
+        "anyway — a re-read, identical on `main`, and strictly safer than losing a site")
+    # (no second `=` control here: the one above, "the `=` CONTROL for the row above", IS this
+    # pair's control — the same unconditional rebinding without the short-circuit spelling, `== []`.)
+
     # ⛔ `del` MAKES A NAME LOCAL AND HAS NO VALUE (`#13639` review round 2). The `nonlocal` owner
     # search asks `binds`, and `binds` did not know `del` — so `nonlocal tr` in `inner` reached
     # PAST a `mid` that deletes `tr` and filed the value in `outer`, reporting a call that at
@@ -2086,6 +2155,47 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "    return tr.FastAPIRouterAdapter(1)\n"
     ), ("the CONTROL for the `del` row: the same depth-3 `nonlocal` without a `del` must still "
         "resolve to the owner and report the site")
+    # ⛔ …AND A CLASS BODY IS NOT A LOCALITY SCOPE (`#13639` review round 3 F1). The arm above
+    # notes the binding for every block kind, which is right for a FUNCTION body (`del` anywhere
+    # in it makes the name local, so every read there is `UnboundLocalError`) and was still right
+    # for the depth-3 case — but a class body has no local-declaration rule (§4.2.2: unbound
+    # locals are looked up in the GLOBALS), so `del A` there does not shadow the body's earlier
+    # read. Measured with a recording stub: the adapter IS constructed, then `NameError`, and
+    # `origin/main` reports `[3]`; noting the binding made this head answer `[]` — a false PASS and
+    # a REGRESSION against `main`, the direction that must never ship. This row is the site itself
+    # (not `== []`), so it reds if the class skip is removed.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "class K:\n"
+        "    z = A(app)\n"
+        "    del A\n"
+    ), ("a `del` in a CLASS body shadowed the whole body — §4.2.2: a class block has no "
+        "locality rule and unbound locals are looked up in the GLOBALS, so the read BEFORE the "
+        "delete instantiates the adapter (`origin/main` `[3]`; a recording stub counts 1 "
+        "construction before the `NameError`)")
+    # …the `if`-spelled instance of the same defect: the Delete arm notes the binding
+    # UNCONDITIONALLY (`conditional` is never consulted), so a branch-nested class-body `del`
+    # dropped the site exactly as the unconditional one did.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "class K:\n"
+        "    z = A(app)\n"
+        "    if flag:\n"
+        "        del A\n"
+    ), ("a BRANCH-NESTED `del` in a class body dropped the earlier read too — the class body "
+        "owns no such name, and the arm must not note it conditionally or otherwise")
+    # ⛔ THE CONTROL: it pins the OVER-READ this fix ACCEPTS, not `== []`. `class K: del A` /
+    # `z = A(app)` raises `NameError` at runtime (0 constructions), so `main`'s `[4]` over-reads.
+    # Skipping the class note reverts this head to exactly `main`'s answer, and the assertion is
+    # deliberately TRUTHY so a future "fix" of #13670 cannot silently turn it into a false PASS.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "class K:\n"
+        "    del A\n"
+        "    z = A(app)\n"
+    ), ("the CONTROL for the two class rows above — runtime is `NameError`, and the declared "
+        "over-read (`main` `[4]`) reports it anyway because a class body is resolved "
+        "order-blind; #13670 is where that becomes exact")
     # ⛔ THE UNREADABLE-DESTRUCTURING BRANCH IS PINNED BY A TARGET IT CAN ACTUALLY SEE
     # (`#13585 review 94361b8f` P3#2). The existing row for it uses `b, c = build_pair()`, whose
     # NAMES are `b` and `c` — so reverting the branch to a blanket `SHADOWED` claim reded nothing
