@@ -3714,6 +3714,13 @@ def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
     place exactly the mapping the literal forms already refuse. Measured fail-OPEN at
     `8637df0f`: all of them certified the writer. Same rule, one spelling over.
 
+    ⛔ AND ONE CONSTRUCTOR SPELLING OVER (`#13788`, measured at `c54b8d4b`): `fromkeys` builds
+    the same mapping from `(KEYS, VALUE)` instead of a dict operand, so the include list that
+    named `dict`/`defaultdict`/`Counter`/`ChainMap` did not cover it — `props |=
+    dict.fromkeys(["embedding"], vec)` CERTIFIED a stop arm while `props |=
+    {"embedding": vec}` was refused. `_fromkeys_stores_the_vector` reads the keys literal as
+    an ELEMENT (a bare string is not the key) and requires a non-constant value.
+
     ⛔ AND ONE EXPRESSION FORM OVER (`98eec2ca`). Beyond those mutators, three ways a
     mapping is REBUILT — `props = {**props, "embedding": …}`, `props = props |
     {"embedding": …}`, and the writer being HANDED either — plus the keyword mutator
@@ -4218,6 +4225,50 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= _collections.OrderedDict(_collections.OrderedDict({**{"embedding": _encode(ev)}}))
+        return None
+    _write(props)
+""",
+        # ⛔ AND A CONSTRUCTOR THAT TAKES `(KEYS, VALUE)` IS A CONSTRUCTOR (`#13788`, measured
+        # at `c54b8d4b` — the review cycle that closed F2/F3 one name list over). The INCLUDE
+        # list named the builders that take DICT OPERANDS, so `fromkeys` — which builds the
+        # SAME mapping from a keys literal and a value — placed the vector while nothing
+        # asked: the operand rule saw no mapping operand and the pairs rule saw no pair. All
+        # five rows below CERTIFIED a stop arm that stores, and its bare-literal twin
+        # (`props |= {"embedding": vec}`) was refused; the keyword form is the same call.
+        # The keys OPERAND is read as an ELEMENT — `dict.fromkeys("embedding", vec)` builds
+        # the keys `"e"`, `"m"`, … — so a string is in the accepted controls below.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"], _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict.fromkeys(("embedding",), _encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = dict.fromkeys(["embedding"], _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write(dict.fromkeys(["embedding"], _encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"], value=_encode(ev))
         return None
     _write(props)
 """,
@@ -5286,6 +5337,40 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= _collections.Counter({"embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ AND A `fromkeys` THAT PLACES NOTHING STAYS CERTIFIED (`#13788`, measured at
+        # `c54b8d4b`): the value operand is what places the vector, so its DEFAULT (`None`,
+        # the pre-guard reset), a `None` operand, a keys literal that names another property,
+        # and a keys operand this check cannot read (`_keys(ev)`) all stay honest write-stops.
+        # Without these the new arm is an inert-by-over-refusal rule that costs a writer its
+        # gate.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict.fromkeys(["embedding"]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding"], None)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(["embedding_model"], _m())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(_keys(ev), _encode(ev))
         return None
     _write(props)
 """,

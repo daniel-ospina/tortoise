@@ -1543,12 +1543,47 @@ def _mapping_operand_stores_the_vector(node) -> bool:
 #: would re-open the hole at the next spelling nobody thought of. The `endswith("Dict")`
 #: suffix still carries the CamelCase `collections` family (`OrderedDict`, `UserDict`, and a
 #: project's own `*Dict` subclass) — the lowercase/other-named ones have to be named here.
-_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap")
+#: ⛔ AND `fromkeys` IS ONE (`#13788`, measured at this head): it builds a mapping too, from
+#: `(KEYS, VALUE)` rather than a dict operand — see `_fromkeys_stores_the_vector` for why the
+#: list was the hole and not the operand rule.
+_MAPPING_CONSTRUCTORS = ("dict", "defaultdict", "Counter", "ChainMap", "fromkeys")
 
 
 def _is_mapping_constructor(name: str) -> bool:
     """Does this callee name build a MAPPING — a merge source, not a pairs iterable alone?"""
     return name.endswith("Dict") or name in _MAPPING_CONSTRUCTORS
+
+
+def _fromkeys_stores_the_vector(call) -> bool:
+    """Does this `fromkeys` call place the vector — `dict.fromkeys(["embedding"], vec)`?
+
+    ⛔ IT BUILDS A MAPPING AND IT CERTIFIED A STOP ARM (measured at this head, `#13788`):
+    `props |= dict.fromkeys(["embedding"], _encode(ev))` and its `props.update(…)` twin
+    both left `REFUSE_WRITE_STILL_EMITS` lifted, while `props |= {"embedding": …}` and
+    `props.update([("embedding", …)])` were refused. The INCLUDE list named the
+    constructors that take DICT operands, and `fromkeys` takes `(KEYS, VALUE)` — so the
+    operand rule saw no mapping operand and the pairs rule saw no pair, and nothing asked.
+    Same argument that put `Counter`/`ChainMap` in the list: the question is "does this call
+    build a MAPPING", and this one builds it from a literal this check can read.
+
+    ⛔ THE FIRST OPERAND IS THE **KEYS**, so it is read as an ELEMENT, not as a value: a bare
+    string is NOT the key — `dict.fromkeys("embedding", vec)` yields the keys `"e"`, `"m"`,
+    … and places nothing named `embedding` — so only a LIST/TUPLE/SET literal that names the
+    property exactly counts. The value must be a NON-CONSTANT operand:
+    `dict.fromkeys(["embedding"])` defaults it to `None`, the pre-guard reset, which places
+    nothing.
+    """
+    import ast
+
+    keys = call.args[0] if call.args else None
+    if not isinstance(keys, ast.List | ast.Tuple | ast.Set):
+        return False
+    if not any(isinstance(element, ast.Constant) and element.value == EMBEDDING_PROPERTY
+               for element in keys.elts):
+        return False
+    value = call.args[1] if len(call.args) > 1 else next(
+        (keyword.value for keyword in call.keywords if keyword.arg == "value"), None)
+    return value is not None and not isinstance(value, ast.Constant)
 
 
 def _constructor_stores_the_vector(call) -> bool:
@@ -1575,7 +1610,14 @@ def _constructor_stores_the_vector(call) -> bool:
     `REFUSE_WRITE_STILL_EMITS` on a writer that stores exactly when the gate says stop.
 """
     import ast
-    if not _is_mapping_constructor(_callee_name(call)):
+    name = _callee_name(call)
+    # ⛔ `fromkeys` IS A CONSTRUCTOR WITH ITS OWN OPERAND SHAPE (`#13788`, measured at this
+    # head): `(KEYS, VALUE)`, so the operand/pairs rules below cannot see the key it builds.
+    # Asked here rather than at each site, because this helper is the ONE recognition of the
+    # constructor spelling for the `|=`/assign/`update(…)`/hand-off positions alike.
+    if name == "fromkeys":
+        return _fromkeys_stores_the_vector(call)
+    if not _is_mapping_constructor(name):
         return False
     return (_mapping_argument_stores_the_vector(call)
             # …and EACH OPERAND BY THE *OPERAND* RULE, not the ARGUMENT rule (`#13788` F1,
