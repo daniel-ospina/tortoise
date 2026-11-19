@@ -268,6 +268,7 @@ def _label_hits_reads(
     *,
     attribute_to: str | None = _LABEL_HITS_FRAME,
     during=None,
+    everything: list | None = None,
 ) -> list[Path]:
     """Every path `_label_hits()` read via `Path.read_text`, in read order.
 
@@ -277,7 +278,7 @@ def _label_hits_reads(
     teardown (pytest's own documented behaviour: the attribute is replaced, not a
     per-thread view of it) — every OTHER reader in the window is recorded as if
     the function under test had read it. `_label_hits` calls `path.read_text(...)`
-    itself (`:219`), so its own reads are exactly the ones whose caller frame is
+    itself (`:221`), so its own reads are exactly the ones whose caller frame is
     `_label_hits`.
 
     Measured on CI rather than argued, TWICE, and the second one is why the
@@ -301,11 +302,19 @@ def _label_hits_reads(
 
     `attribute_to=None` records EVERY read in the window, which is what the
     non-vacuity arms need: a scoping rule is only safe if the recorder it scopes
-    demonstrably saw the read it is excluding.
+    demonstrably saw the read it is excluding. Prefer `everything`, which yields
+    the SAME evidence from ONE patch — a non-vacuity arm that patched twice in a
+    row added a second variable (what the previous patch left installed) to a
+    test whose whole point is to be deterministic.
 
     `during` runs after the patch is installed and before `_label_hits()`, so a
     caller can stage an unrelated read deterministically instead of hoping for
     one.
+
+    `everything` receives `(path, caller frame name)` for EVERY read in the
+    window, attributed or not — so a test can assert that the read it means to
+    exclude was really made (`… and was seen`), which is what stops the
+    exclusion assertions from being vacuously true.
     """
     read: list[Path] = []
 
@@ -314,6 +323,8 @@ def _label_hits_reads(
             caller = sys._getframe(1).f_code.co_name
         except ValueError:  # pragma: no cover - a spy always has a caller frame
             caller = "<no frame>"
+        if everything is not None:
+            everything.append((self, caller))
         if attribute_to is None or caller == attribute_to:
             read.append(self)
         return _REAL_READ_TEXT(self, *args, **kwargs)
@@ -1342,9 +1353,9 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
     defect behind it.
 
     Both halves are asserted, so this cannot regress in either direction: the
-    UNscoped recorder DOES see the other thread's read (the race is reproduced
-    deterministically through `during`, not assumed), and the scoped one — the
-    one the population control uses — does not.
+    recorder `everything` list DOES see the other thread's read (the race is
+    reproduced deterministically through `during`, not assumed), and the
+    attributed population — the one the population control uses — does not.
 
     ⛔ The scoping is by CALLER FRAME (`_label_hits_reads`), not by thread, and
     that is what makes this arm's sibling (`test_a_same_thread_ambient_read_is_
@@ -1371,16 +1382,16 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
             "test would prove nothing about what a concurrent read is attributed to"
         )
 
-    unscoped = _label_hits_reads(
-        monkeypatch, attribute_to=None, during=_another_thread_reads
+    everything: list = []
+    scoped = _label_hits_reads(
+        monkeypatch, during=_another_thread_reads, everything=everything
     )
-    assert foreign in unscoped, (
-        "the unscoped recorder did not see the other thread's read, so the "
-        "contamination this test guards against was not reproduced — the "
-        "scoped assertion below would then be vacuous"
+    assert foreign in [p for p, _ in everything], (
+        "the recorder did not see the other thread's read, so the contamination "
+        "this test guards against was not reproduced — the exclusion assertion "
+        "below would then be vacuous"
     )
 
-    scoped = _label_hits_reads(monkeypatch, during=_another_thread_reads)
     assert scoped, "`_label_hits` read no files at all on the calling thread"
     assert foreign not in scoped, (
         "a read made on ANOTHER thread was attributed to `_label_hits`, which "
@@ -1411,10 +1422,12 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     happens on the thread the recorder was scoped to — a synchronous reaper path,
     a fixture, a `gc`-driven finalizer — thread scoping excludes nothing, the
     path is recorded as `_label_hits`'s own, and the required `test` job reds with
-    no defect behind it. The file is `core`-registered on two rows
-    (`config/ci-surfaces.yml:8735`, `:10880`), so it runs in EVERY shard: one such
-    race reds most of a run's shards at once, which is why #13699 is a repo-wide
-    merge blocker rather than a one-shard nuisance.
+    no defect behind it. This file is registered in `tier1` and on the `core`
+    surface (`config/ci-surfaces.yml:8810`, `:10968`), and is in NEITHER
+    `slow_files` nor `carve_out`, so it runs in every fast `test (x)` shard — not
+    the `slow`/`carve-out` legs. The red reaches `python-ci-gate`, which gates
+    every PR, so one occurrence is a repo-wide merge blocker rather than a
+    one-shard nuisance.
 
     The read is STAGED through `during` rather than raced, so the reproduction is
     deterministic: pre-fix the staged path is recorded and this reds, post-fix it
@@ -1422,8 +1435,9 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     `/proc/<pid>/stat` so the read itself SUCCEEDS on every platform — an
     `OSError` would leave it arguable whether the recorder saw a read at all.
 
-    Both directions are asserted: the unscoped recorder sees the staged read (so
-    the exclusion below is not vacuous), and the attributed one does not.
+    Both directions are asserted: the recorder's `everything` list sees the
+    staged read (so the exclusion below is not vacuous), and the attributed
+    population does not.
     """
     ambient = tmp_path / "an-ambient-same-thread-read.txt"
     ambient.write_text("read by a helper on the RECORDING thread\n", encoding="utf-8")
@@ -1435,14 +1449,13 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     def _an_ambient_read() -> None:
         ambient.read_text(encoding="utf-8")
 
-    unscoped = _label_hits_reads(monkeypatch, attribute_to=None, during=_an_ambient_read)
-    assert ambient in unscoped, (
-        "the unscoped recorder did not see the same-thread read, so the "
-        "contamination this test guards against was not reproduced — the "
-        "attributed assertion below would then be vacuous"
+    everything: list = []
+    read = _label_hits_reads(monkeypatch, during=_an_ambient_read, everything=everything)
+    assert ambient in [p for p, _ in everything], (
+        "the recorder did not see the same-thread read, so the contamination "
+        "this test guards against was not reproduced — the exclusion assertion "
+        "below would then be vacuous"
     )
-
-    read = _label_hits_reads(monkeypatch, during=_an_ambient_read)
     assert read, "`_label_hits` read no files at all on the recording thread"
     assert ambient not in read, (
         "a read made by ANOTHER FRAME on the recording thread was attributed to "
@@ -1476,15 +1489,18 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
     about the guard against a `_label_hits` that wandered off its population.
     """
     stray = REPO / "tests" / "test_substrate_map.py"
-    population = globals()["_tracked_files_under"]
-    assert stray not in population(_TRACKED_DIR), (
+    real_population = _tracked_files_under
+    assert stray not in real_population(_TRACKED_DIR), (
         "the fixture file is already in the tracked population, so it cannot "
         "stand in for a read that has wandered off it"
     )
 
     def _widened(rel: str) -> list[Path]:
-        return [*population(rel), stray]
+        return [*real_population(rel), stray]
 
+    #: Patch the NAME `_label_hits` resolves, for the recording only: the read of
+    #: `stray` must come from `_label_hits`'s own frame, or the attribution rule
+    #: (correctly) refuses it and this control pins nothing.
     with monkeypatch.context() as inside:
         inside.setattr(sys.modules[__name__], "_tracked_files_under", _widened)
         read = _label_hits_reads(monkeypatch)
