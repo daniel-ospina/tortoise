@@ -6589,7 +6589,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
         # further down), so the span moves by a uniform +66, and then by a further +18 when
-        # `#13845` inserted its D5 formatting guard — a UNIFORM +84 in total — and is
+        # `#13841` inserted its D5 formatting guard — a UNIFORM +84 in total — and is
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
@@ -16673,7 +16673,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
     # carries ~50 numbers — so `:20329` was "read" from an unrelated clause denotating a
-    # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20329` too), while the
+    # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
     # regex binds the number to the sentence that gives the number its meaning, so a future
     # `+N` above `org_info` reds the CLAIM instead of pairing a fresh number with a rotted
@@ -16684,6 +16684,20 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         r"and `:(?P<n>\d+)` is `if count \+ est > max_points:` at THIS head",
         "hosted_api",
         "if count + est > max_points:",
+    ),
+    # ⛔ THE `sdk.py` EMPTY-GATE RETURN DICT, the clause that shares `:20311` with the row
+    # above — and the reason this row exists (#13878 review, P1). A blanket "+18 on every
+    # `:20311` on the D5 line" re-point hit BOTH occurrences and turned this CORRECT cite
+    # into `:20329`, which is `errors: list[str] = []`. Every arm stayed green: the quota
+    # guard row still found its own number, the dict clause was read by nothing, and the
+    # two numbers happened to be the SAME at one head — which is exactly what made the
+    # blanket replace look safe. This row binds the dict clause to its own sentence, so the
+    # two `:20311` occurrences can never again be re-pointed as one.
+    (
+        "the `sdk.py` empty-gate return dict",
+        r"the empty-gate return dict it was quoting \([^)]*\) is at `:(?P<n>\d+)`",
+        "sdk",
+        '"provider": None, "route": None, "failover_used": False,',
     ),
 )
 

@@ -121,7 +121,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (it is `scored.append({`), nor on `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
+    # head (a blank line here — `scored.append({` moved to `:57284` with `#13833`'s +194), nor on `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
     # integration inserted 186 lines above it, later merges 147 more, and `#13833` 194 more — 527 in all). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
     # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57617` is
