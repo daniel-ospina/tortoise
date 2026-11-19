@@ -23,7 +23,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_a_graph_only_node_and_removes_nothing` | the parity refusal is BEFORE the first write | the only copy of a fingerprint is removed, or removed before the refusal |
 | `test_execute_refuses_while_the_write_path_still_emits_vectors` | the write gate | a strip runs into a live writer and is silently undone |
 | `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` / `…cannot_be_imported` | fail-closed in every unknown | an unreadable gate reads as permission |
-| `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last step before the delete licence | the arm is inverted or deleted, so an unmapped type is answered by whatever population joins `None` |
+| `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last step before the delete licence | the arm is inverted or deleted, so an unmapped type is CERTIFIED by the steps below it (the arm is defence in depth plus an accurate reason, not the only refusal — measured, see the test) |
 | `test_label_write_gate_requires_every_entity_type_addressing_the_label` | `:Source` serves TWO types | a strip lands on the document half while `source` still writes |
 | `test_execute_strips_the_planned_set_and_reports_the_count` | the batched `REMOVE` | a partial strip reports a complete one |
 | `test_execute_refuses_an_empty_plan_unless_expect_empty` | "nothing to strip" is a refusal | an empty plan reports a finished retirement |
@@ -543,30 +543,44 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     reachable: the record predicate answers `False` for an unmapped type exactly as it does
     for a mapped one.
 
-    ⛔ AND THE ARM IS NOT A FORMALITY ONE DECLARATION AWAY. `LABELS_AT_RUNTIME` joins EVERY
-    label's population, so without this arm `_writers_for(None)` stops being empty while
-    `affected_entity_types(None)` is `[]` — nothing is `missing`, nothing is `ungated`, and
-    the fold gate certifies the unmapped type. The second half of this test drives that
-    population on purpose: with the arm deleted it answers `emits is False`, i.e. a delete
-    licence minted for a label nothing serves.
+    ⛔ WHAT THIS ARM IS *NOT*, MEASURED, because an earlier revision of this docstring
+    claimed it and the claim was false. It is NOT the only thing standing between an
+    unmapped type and a delete licence: with the arm **deleted**, `write_gate("no_such…")`
+    still answers `emits is True`, refused one step further down — by `_writers_for`'s
+    empty-population branch (`_register_writers(None)` is `()`, because 0 of the 24 live
+    `EMBED_WRITER_CLASSES` declarations carry `LABELS_AT_RUNTIME`), and, with a population
+    forced, by `_fold_consults_gate`'s ungated branch (`affected_entity_types(None)` is
+    `[]`, so every writer lands in `ungated`). So the arm is *defence in depth plus an
+    accurate reason*, not the sole refusal — and the difference matters, because a
+    maintainer who believed the stronger claim would delete the arm, expect a red, and
+    find only the message moved.
+
+    What the second half therefore asserts is the POLARITY the arm owns: with everything
+    below it forced to CERTIFY (`_fold_consults_gate` answering `(True, …)`), the arm is
+    the only remaining refusal. Arm present → `emits is True` and this reason; arm deleted
+    → `emits is False`, i.e. a delete licence minted for a label nothing serves (measured).
     """
     from tortoise import record_vector
 
     monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
                         raising=False)
 
-    emits, reason = strip.write_gate("no_such_entity_type_13647")
-    assert emits is True, f"an unmapped entity_type licensed a delete ({reason})"
-    assert "no declared graph label" in reason
-
-    # …and the refusal survives the population that makes the hole reachable.
-    monkeypatch.setattr(strip, "_register_writers",
-                        lambda label: ("tortoise.sdk::_runtime_only",))
-    monkeypatch.setattr(strip, "_writer_consults_gate", lambda *a, **k: (True, "asks"))
+    # ⛔ POLARITY FIRST, so the DELETION of the arm reds on the VERDICT and not merely on the
+    # message text: every step below the arm is forced to certify, leaving it the only refusal.
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every {label!r} writer calls the gate"))
     emits, reason = strip.write_gate("no_such_entity_type_13647")
     assert emits is True, (
-        "a runtime-labels writer made an unmapped entity_type look write-stopped, so the "
-        f"strip would be licensed on a label nothing serves ({reason})")
+        "with every step below it certifying, an unmapped entity_type was still let through, "
+        f"so the strip would be licensed on a label nothing serves ({reason})")
+    assert "no declared graph label" in reason
+
+    # …and the refusal needs no forcing at all: on this tree every step below already declines.
+    monkeypatch.undo()
+    monkeypatch.setattr(record_vector, "mirror_required", lambda entity_type: False,
+                        raising=False)
+    emits, reason = strip.write_gate("no_such_entity_type_13647")
+    assert emits is True, f"an unmapped entity_type licensed a delete ({reason})"
     assert "no declared graph label" in reason
 
 
