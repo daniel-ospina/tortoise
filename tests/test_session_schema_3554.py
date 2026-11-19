@@ -3038,6 +3038,17 @@ _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE = (
 _PREFIX_APPROVAL_RECORD_WITH_AN_ARTICLE_OF_THE_OWNERS_APPROVAL = (
     "> **The owner's approval of the exact changes** — given in-session on 2026-11-18.\n"
     "> The artifact is the text itself.")
+# ⛔ AND THE POSSESSIVE LABEL WITH NO TAIL (review of this PR, finding 1's mirror consequence):
+# the TAIL-QUALIFIED alternative only sees labels that carry ``of the exact changes``, so the
+# ANCHORED alternative is what refuses a possessive label with no such tail — and every
+# branch of it owes a direction of its own or it is dead weight. This fixture carries all
+# three at once (an ARTICLE, a PLURAL possessive and the TYPOGRAPHIC apostrophe) and no tail,
+# so deleting the article branch, narrowing ``owners?`` to ``owner``, or dropping U+2019 from
+# the class each leaves this record ACCEPTED with no citation. Measured: refused at the head
+# by the anchored alternative alone (the tail-qualified one cannot reach it).
+_PREFIX_APPROVAL_RECORD_WITH_A_POSSESSIVE_LABEL_AND_NO_TAIL = (
+    "> **The owners\u2019 approval** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
 # ⛔ AND THE MIRROR DIRECTION: the same possessive label carrying its citation is GREEN, so
 # the widening cannot be satisfied by refusing every possessive.
 _APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME = (
@@ -3050,9 +3061,14 @@ _APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME = (
 _A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL = (
     "> **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — two texts are PARKED\n"
     "> awaiting the owner's approval):** the edits are not landed.")
-# ⛔ AND ITS DECLARED COST, driven as a direction: a possessive label behind a LEAD-IN inside
-# the run is not read (GREEN with no citation), because the alternative is anchored. Closing
-# the lead-in would re-admit the v3.32 false block, so the direction is asserted as it is.
+# ⛔ AND THE LEAD-IN DIRECTION, which the anchor alone left FAIL-OPEN (review of this PR,
+# finding 1): the possessive alternative is anchored to the run's START, so
+# ``**R1 — Owner's approval of the exact changes**`` — a bolded approval label behind a
+# lead-in, in the very position the two-word form refuses — was ACCEPTED with no citation,
+# and one apostrophe flipped the verdict against the strictly weaker shape. It is REFUSED
+# now, by the TAIL-QUALIFIED alternative in ``_OWNER_APPROVAL_LABEL_RE``: every label that
+# owes a citation carries ``approval of the exact changes``, while the v3.32 false-block
+# shape below carries no tail, so the two classes separate without a grammar.
 _A_POSSESSIVE_LABEL_WITH_A_LEAD_IN = (
     "> **R1 — Owner's approval of the exact changes** given in-session.")
 # ⛔ AND THE MIRROR DIRECTION (review @ 95a8df2f): an id that follows an ABBREVIATION in
@@ -3443,7 +3459,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
 
 _OWNER_APPROVAL_LABEL_RE = re.compile(
     r"\bowner\s+approval\b"
-    r"|^(?:the\s+)?owners?['\u2019]?s?\s+approval\b", re.IGNORECASE)
+    r"|^(?:the\s+)?owners?['\u2019]?s?\s+approval\b"
+    r"|\bowners?['\u2019]?s?\s+approval\s+of\s+the\s+exact\s+changes\b", re.IGNORECASE)
 # ⛔ THE POSSESSIVE AND BOTH APOSTROPHES ARE PART OF THE RENDERED LABEL (measured on
 # `dfb26ad7`, the head this fix lands on): `**Owner's approval …**`, `**Owners'
 # approval …**` and `**Owner\u2019s approval …**` (a TYPOGRAPHIC apostrophe, U+2019) all
@@ -3458,13 +3475,21 @@ _OWNER_APPROVAL_LABEL_RE = re.compile(
 # refuses it (a false block on landed text, measured), while the two-word form keeps the
 # unanchored `search` the arm already had, because THAT pattern cannot match
 # ``the owner's approval``.
-# ⛔ AND WHAT THE ANCHOR PUTS OUT OF SCOPE, stated because the file states its boundaries:
-# a possessive label behind a LEAD-IN inside the run (``**R1 — Owner's approval …**``,
-# ``**— Owner's approval …**``) is NOT detected — measured GREEN with no citation, while the
-# unanchored two-word form refuses the same position. Anchoring is what avoids the v3.32
-# false block above, so this is declared rather than fixed here; closing it needs a rule for
-# ``awaiting the owner's approval`` vs ``R1 — Owner's approval``, which the run's plain text
-# does not carry.
+# ⛔ THE THIRD ALTERNATIVE IS A TAIL-QUALIFIED LABEL, and it exists to close a fail-open the
+# ANCHOR otherwise creates (review of this PR, finding 1). An earlier cut DECLARED that gap
+# rather than fixing it — *"closing it needs a rule for ``awaiting the owner's approval`` vs
+# ``R1 — Owner's approval``, which the run's plain text does not carry"* — and that claim was
+# FALSIFIED by the corpus it was written against: the false-block shape (the landed v3.32
+# build record) reads ``… PARKED awaiting the owner's approval):`` with NO tail, while every
+# label that renders as an approval record — landed and fixture alike — carries
+# ``approval of the exact changes``. So one UNANCHORED, TAIL-QUALIFIED alternative separates
+# the two classes with no grammar at all: a possessive approval phrase followed by
+# ``of the exact changes`` is a label wherever it sits in the run, including behind a LEAD-IN
+# (``**R1 — Owner's approval of the exact changes**``), the position the anchored alternative
+# cannot see. Read against the corpus it cannot false-block: the changelog's only two
+# possessive occurrences are the v3.31 build record's ``awaiting the owner's approval)`` (no
+# tail) and a plain-prose ``… requires the owner's approval of the *exact* changes —``, which
+# is NOT inside an emphasis run at all (`docs/ONTOLOGY-CHANGELOG.md`).
 # ⛔ AN EMPHASIS RUN, ``**…**`` or ``__…__``. BOLD is this file's own label convention (all
 # 7 landed approval records open with one), so it is the detector's boundary — see the
 # arm's docstring for what that puts out of scope and why.
@@ -3666,6 +3691,7 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                       _PREFIX_APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE,
                       _PREFIX_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE,
                       _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE,
+                      _PREFIX_APPROVAL_RECORD_WITH_A_POSSESSIVE_LABEL_AND_NO_TAIL,
                       _PREFIX_APPROVAL_RECORD_WITH_AN_ARTICLE_OF_THE_OWNERS_APPROVAL):
         with pytest.raises(AssertionError) as rendered:
             _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
@@ -3679,12 +3705,16 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # build record of that shape stays green — the anchor's direction.
     _refuse_an_approval_record_with_no_resolvable_home(
         _A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL)
-    # …and the DECLARED consequence of that anchor is driven, so it cannot drift silently: a
-    # possessive label behind a LEAD-IN is not detected (GREEN with no citation), which the
-    # constant's comment names. Closing the lead-in would re-admit the v3.32 false block, so
-    # the direction is asserted as it is rather than hoped away.
-    _refuse_an_approval_record_with_no_resolvable_home(
-        _A_POSSESSIVE_LABEL_WITH_A_LEAD_IN)
+    # …and a possessive label behind a LEAD-IN inside the run, with no citation, is REFUSED —
+    # the fail-open this PR's anchor created while it closed the false-block direction (review
+    # of this PR, finding 1). Both directions live in this one suite on purpose: the
+    # tail-qualified alternative must close this one WITHOUT reopening the v3.32 false block
+    # asserted green just above.
+    with pytest.raises(AssertionError) as lead_in:
+        _refuse_an_approval_record_with_no_resolvable_home(
+            _A_POSSESSIVE_LABEL_WITH_A_LEAD_IN)
+    _assert_refused_by(
+        lead_in, "_refuse_an_approval_record_with_no_resolvable_home")
     # …and the BOLDED LABEL WITH NO COLON — the em-dash form, the ``is on record`` form,
     # and the LANDED v3.32 shape with its id deleted. Each was measured GREEN while the
     # detector required ``…changes:``, so the arm was vacuous on five of its own seven
