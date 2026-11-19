@@ -90,6 +90,15 @@ if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packag
 
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
+# The ONE pricing source (#13645). Both product pages load this file; the tier
+# table used to be inlined in product.html, and `/tortoise-for-product-teams`
+# renders the same prices, so a second copy would be two prices that can drift
+# with nothing red. See `TestPricingSourceIsShared`.
+PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
+# The niche product page (#13645) — a GTM experiment added ALONGSIDE
+# `/tortoise`, served at the company root (`premiselabs.co/tortoise-for-product-
+# teams`), not under the `/tortoise` prefix.
+PRODUCT_TEAMS_HTML = REPO_ROOT / "website" / "tortoise-for-product-teams.html"
 # The investor one-pager (PR #9283): its Progress section carries owner copy and
 # a left/right cell order that is pure DOM order — see TestInvestorsProgressCopy.
 INVESTORS_HTML = REPO_ROOT / "website" / "investors.html"
@@ -109,21 +118,28 @@ PUBLIC_TIERS = frozenset({"free", "solo", "pro", "team"})
 
 
 def _extract_pricing_object() -> dict:
-    """Parse the `const PRICING = {...}` object from product.html.
+    """Parse the `window.TORTOISE_PRICING = {...}` object from the ONE source.
+
+    ⛔ It is NOT in product.html any more (#13645). The tier table moved to
+    `website/assets/tortoise-pricing.js` because `/tortoise-for-product-teams`
+    renders the same prices, and the owner's decision named a second copy as
+    the defect: two prices that can drift with nothing red.
+    `TestPricingSourceIsShared` holds both pages to this one file; everything
+    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`,
+    `tests/test_tier_naming.py`) now reads the shared source, so the mirror
+    parity it asserts is a property of the ONE table every page renders.
 
     Raises AssertionError (with the source context) when the block cannot be
     located — a renamed/moved constant must fail loudly, not skip.
     """
-    src = PRODUCT_HTML.read_text(encoding="utf-8")
-    start = src.index("const PRICING = {")
+    src = PRICING_SOURCE.read_text(encoding="utf-8")
+    start = src.index("window.TORTOISE_PRICING = {")
     obj_start = src.index("{", start)
-    end_marker = "let currentBilling"
-    obj_end = src.index(end_marker, obj_start)
-    block = src[obj_start:obj_end].rstrip()
-    # Strip the trailing `};` (block ends with the object's closing brace)
-    if block.endswith("};"):
-        block = block[:-1]
-    return json.loads(_normalize_js_object(block))
+    # The object closes on a line of its own (`};` at column 0); every nested
+    # object is indented, so the first unindented `\n};` marks the end and the
+    # object's own `}` is the character before it.
+    end = src.index("\n};", obj_start)
+    return json.loads(_normalize_js_object(src[obj_start:end + 2]))
 
 
 def _normalize_js_object(src: str) -> str:
@@ -708,18 +724,22 @@ def _served_without_comments(markup: str) -> str:
     return re.sub(r"<!--.*", "", markup, flags=re.S)
 
 
-def _pricing_section() -> str:
+def _pricing_section(html: str | None = None) -> str:
     """The `#pricing-section` region as a reader receives it.
 
     Sliced on the STRIPPED document (not on a sentinel comment), so a comment
     that disables part of the section removes it from this gate too. Stops at
     the first `</section>`, so the nested-section guard below keeps a claim in a
     nested section from being invisible here.
+
+    `html` defaults to product.html — the page this gate was written for. It is
+    parameterized because #13645's second product page renders the SAME pricing
+    section, and `TestPricingSourceIsShared` holds the two to each other.
     """
-    src = _served(PRODUCT_HTML.read_text(encoding="utf-8"))
+    src = _served(html if html is not None else PRODUCT_HTML.read_text(encoding="utf-8"))
     marker = 'id="pricing-section"'
     assert marker in src, (
-        "website/product.html lost #pricing-section — this gate's subject moved")
+        "the page lost #pricing-section — this gate's subject moved")
     start = src.index(marker)
     section = src[start:src.index("</section>", start)]
     assert "<section" not in section[section.index(">") + 1:], (
@@ -729,9 +749,9 @@ def _pricing_section() -> str:
     return section
 
 
-def _static_pricing_grid() -> str:
+def _static_pricing_grid(html: str | None = None) -> str:
     """The static cards: between `#pricing-grid` and the usage line."""
-    section = _pricing_section()
+    section = _pricing_section(html)
     start = section.index('id="pricing-grid"')
     end = section.index('id="pricing-usage-line"')
     assert end > start, "#pricing-usage-line no longer follows #pricing-grid"
@@ -779,7 +799,7 @@ def _render_facts(fn: str) -> dict:
     }
 
 
-def _static_cards() -> list[dict]:
+def _static_cards(html: str | None = None) -> list[dict]:
     """One dict per static `.pricing-card`, in DOM order.
 
     Every field the JS render writes is captured, including the CTA, the
@@ -788,7 +808,7 @@ def _static_cards() -> list[dict]:
     drifted to `href="/signup"`, or while "Overage" was re-rendered with a green
     check on the one tier that does not include it (both measured).
     """
-    grid = _static_pricing_grid()
+    grid = _static_pricing_grid(html)
     cards = []
     for chunk in grid.split('<div class="pricing-card')[1:]:
         features_block = re.search(r'<div class="features">(.*?)</div>\s*<a ', chunk, re.S)
@@ -824,21 +844,21 @@ def _static_cards() -> list[dict]:
     return cards
 
 
-def _static_usage_line() -> str:
+def _static_usage_line(html: str | None = None) -> str:
     m = re.search(r'<p class="pricing-usage" id="pricing-usage-line">(.*?)</p>',
-                  _pricing_section(), re.S)
+                  _pricing_section(html), re.S)
     assert m, "#pricing-usage-line lost its static content"
     return _beat_text(m.group(1))
 
 
-def _static_selfhost_block() -> str:
+def _static_selfhost_block(html: str | None = None) -> str:
     """The `#selfhost-section` element, closed by its OWN `</div>`.
 
     Sliced by depth rather than "to the end of the section": a link added later
     inside `#pricing-section` (a "Talk to sales" line, say) would otherwise fail
     this gate although the block it tests did not change.
     """
-    section = _pricing_section()
+    section = _pricing_section(html)
     marker = section.index('id="selfhost-section"')
     # Start at the `<div` that OPENS the element, not at the id inside its
     # tag — otherwise the first balanced child (`.actions`) closes the slice.
@@ -2960,6 +2980,24 @@ class TestPageHeadingOutline:
                 f"website/product.html skips a heading level: h{prev} -> h{cur} "
                 f"(levels: {levels})")
 
+    def test_the_niche_product_page_does_not_skip_a_heading_level(self):
+        """#13645: same outline contract, one page over.
+
+        The owner's PDF has ONE h1 (the hero) and an h2 per step, plus the
+        heading-less intro and compute beats — so the expected shape is
+        h1, h2, h2, h2, h2, h2, h2 and no level skips. A step rendered as an h3
+        (an easy slip when a beat is pasted in) is an accessibility regression
+        here exactly as it is on the product page.
+        """
+        levels = _heading_levels(PRODUCT_TEAMS_HTML.read_text(encoding="utf-8"))
+        assert levels and levels[0] == 1, (
+            "website/tortoise-for-product-teams.html's first heading is not h1 "
+            f"(levels: {levels})")
+        for prev, cur in pairwise(levels):
+            assert cur <= prev + 1, (
+                "website/tortoise-for-product-teams.html skips a heading level: "
+                f"h{prev} -> h{cur} (levels: {levels})")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 10. Short-viewport beats must scroll, not clip (PR #9813 review, P2)
@@ -2980,6 +3018,12 @@ SHORT_VIEWPORT_BEATS = (
     (INDEX_HTML, "#beat-cta", "the company waitlist form + its legal line"),
     (INDEX_HTML, "#beat-tortoise", "the company closing pitch + its CTA"),
     (PRODUCT_HTML, "#beat-hero", "the product hero + its CTA"),
+    # #13645: the niche page's hero is a SPLIT — copy beside an owned 9/16 video
+    # (398 px tall on its own), so it is taller than any text-only hero here.
+    (PRODUCT_TEAMS_HTML, "#beat-hero", "the split hero: copy + the 9/16 video"),
+    # …and its compute beat carries a paragraph PLUS the six-row ↑/↓ grid, which
+    # is the other beat that overruns a landscape phone.
+    (PRODUCT_TEAMS_HTML, "#beat-compute", "the compute claim + the ↑/↓ outcomes grid"),
 )
 
 #: A landscape phone is ~390-430 px tall, so a hatch that only fires below this
@@ -4701,6 +4745,9 @@ class TestSiteIconAndSocialPreviewContract:
         "404.html", "contact.html", "design-partners-intro.html", "docs.html",
         "dpa.html", "faq.html", "index.html", "investors.html", "license.html",
         "privacy.html", "product.html", "security.html", "self-hosted.html",
+        # #13645: the niche product page. ADDED, not moved — a top-level served
+        # document at the company root, so every head/card guard below covers it.
+        "tortoise-for-product-teams.html",
         "tos.html",
     )
 
@@ -7016,3 +7063,519 @@ class TestProductSetIsServedUnderTheOneHost:
                 f"{name} is no longer at website/{name} — the prefix is served by the "
                 "middleware rewrite, so moving the file changes which pages the marketing "
                 "guards can see")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. ONE pricing source for every page that quotes a price (#13645)
+# ═══════════════════════════════════════════════════════════════════════════════
+# The owner's decision on #13645 recorded the defect this section exists to
+# stop, in its own words: a new page that carries its own copy of the `PRICING`
+# object is "two prices that can drift with nothing red". A niche campaign page
+# quoting a stale price is worse than no campaign page, so the two pages are
+# held to ONE source and to each other — not merely each held to a copy.
+#
+# The division of labour, so a later reader knows which gate answers what:
+#   * `PRICING_SOURCE` (`website/assets/tortoise-pricing.js`) is the ONE table;
+#   * `TestPricingSourceIsShared` (below) proves BOTH pages load it, neither
+#     re-declares it, and the pricing markup a reader receives is IDENTICAL on
+#     the two pages;
+#   * `TestStaticPricingFallback` proves that markup equals the numbers in the
+#     shared source (so the identical copy is also the correct one);
+#   * `TestMirrorNumericParity` + `tests/test_tier_naming.py` prove the shared
+#     source still mirrors `product/pricing.json` and the dashboard's labels.
+
+PRODUCT_PAGES_SHARING_PRICING = (
+    ("website/product.html", PRODUCT_HTML),
+    ("website/tortoise-for-product-teams.html", PRODUCT_TEAMS_HTML),
+)
+
+
+def _pricing_source_includes(html: str) -> list[str]:
+    """The `src` of every `<script>` in the page, in source order."""
+    return re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', html, re.I)
+
+
+class TestPricingSourceIsShared:
+    """#13645: `/tortoise` and `/tortoise-for-product-teams` cannot disagree.
+
+    The assertion is deliberately structural rather than "each page contains
+    the right numbers": a test of the second kind passes on two copies that
+    happen to match today, which is exactly the state the defect looks like
+    until someone edits one of them.
+    """
+
+    def test_both_product_pages_load_the_same_pricing_source(self):
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            srcs = _pricing_source_includes(path.read_text(encoding="utf-8"))
+            hits = [s for s in srcs if s == "/assets/tortoise-pricing.js"]
+            assert len(hits) == 1, (
+                f"{name} loads the shared pricing source {len(hits)} time(s) "
+                f"(script srcs: {srcs!r}). Both product pages must render "
+                "prices from /assets/tortoise-pricing.js — ONE source — which "
+                "is what makes the two pages' prices agree by construction "
+                "instead of by a copy that can rot.")
+        assert PRICING_SOURCE.is_file(), (
+            "the shared pricing source is gone; both product pages would "
+            "render no prices at all")
+
+    def test_neither_page_declares_its_own_tier_table(self):
+        """The defect itself: a second `PRICING` object inside a page.
+
+        Three shapes are refused, because any one of them is a price table a
+        page could drift on: re-assigning `window.TORTOISE_PRICING`, a
+        `tiers: {` map, and a `price: <number>` entry. The render code that
+        READS the table (`t.price`, `fmtPrice(t.price)`) is untouched by all
+        three, so a legitimate refactor of either page's render is not redded
+        here.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            assert "TORTOISE_PRICING = {" not in html, (
+                f"{name} assigns `window.TORTOISE_PRICING` itself. The ONE "
+                "source is /assets/tortoise-pricing.js; a page that re-declares "
+                "the table is the drift this gate exists to stop (#13645).")
+            for pattern, what in (
+                (r"\btiers\s*:\s*\{", "a `tiers: {...}` table"),
+                (r"\bprice\s*:\s*\d", "a `price: <number>` entry"),
+                (r"\bfeatures\s*:\s*\[", "a `features: [...]` list"),
+            ):
+                assert re.search(pattern, html) is None, (
+                    f"{name} carries {what}, so it has its own copy of the "
+                    "price table. Both product pages must render from "
+                    "/assets/tortoise-pricing.js only (#13645).")
+
+    def test_the_two_pages_render_the_same_pricing_markup(self):
+        """The prices a READER gets are identical — that is 'the pages agree'.
+
+        The static cards are what a no-JS reader, a crawler and a link-preview
+        scraper see, and they are the copy most likely to rot; the usage line
+        and the self-host block are the two other facts the section states.
+        Compared as SERVED markup (`_served`), so a comment or a `<script>` that
+        no reader receives cannot satisfy it.
+        """
+        by_name = {name: _served(path.read_text(encoding="utf-8"))
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        left, right = by_name[left_name], by_name[right_name]
+        for slice_fn, what in (
+            (_static_pricing_grid, "the static pricing cards"),
+            (_static_usage_line, "the overage line"),
+            (_static_selfhost_block, "the self-hosted block"),
+        ):
+            assert slice_fn(left).strip() == slice_fn(right).strip(), (
+                f"{what} differs between {left_name} and {right_name}. The "
+                "pricing section is forked, not rewritten: both pages must show "
+                "one set of prices from the shared source (#13645).\n"
+                f"--- {left_name} ---\n{slice_fn(left)}\n"
+                f"--- {right_name} ---\n{slice_fn(right)}")
+
+    def test_the_static_cards_on_both_pages_carry_the_shared_numbers(self):
+        """…and the identical copy is also the CORRECT one.
+
+        `TestStaticPricingFallback` derives product.html's cards from the
+        shared source; this holds the other page's cards to the same source
+        directly, so a drift where BOTH pages are edited together (and so stay
+        identical) still reds here rather than needing the mirror test to
+        notice a page it does not read.
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        mode = "annual" if pricing["display"]["annual_default"] else "monthly"
+        order = ("free", "solo", "pro", "team")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            cards = _static_cards(html)
+            assert len(cards) == len(order), (
+                f"{name} renders {len(cards)} static cards for {len(order)} tiers")
+            for tier_name, card in zip(order, cards, strict=True):
+                tier = pricing["tiers"][tier_name]
+                big, total = _fmt_price(tier["price"], mode, disc)
+                assert card["big"] == big, (
+                    f"{name} / {tier_name}: static price {card['big']!r} != "
+                    f"{big!r} from the shared source ({mode})")
+                assert card["billing"] == total, (
+                    f"{name} / {tier_name}: billing line {card['billing']!r} != "
+                    f"{total!r} from the shared source")
+                assert card["included"] == tier["features"], (
+                    f"{name} / {tier_name}: features {card['included']!r} != the "
+                    f"shared source's {tier['features']!r}")
+                assert card["excluded"] == tier["excluded"], (
+                    f"{name} / {tier_name}: exclusions {card['excluded']!r} != the "
+                    f"shared source's {tier['excluded']!r}")
+
+    def test_the_pages_format_prices_through_the_shared_function(self):
+        """The rounding contract is ONE implementation, too.
+
+        Two pages can share a table and still disagree if each formats it: the
+        annual per-month figure is `round(price * 12 * (1 - disc) / 12)` with
+        the total DERIVED from it, and a page that re-derives it differently
+        prints `$15 / $180` beside `$15 / $186`. So both pages call
+        `window.tortoiseFmtPrice`, and the source defines it.
+        """
+        assert "window.tortoiseFmtPrice = function" in PRICING_SOURCE.read_text(
+            encoding="utf-8"), (
+            "the shared source no longer defines `window.tortoiseFmtPrice` — "
+            "the rounding contract has no home, so each page would re-implement it")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            assert "window.tortoiseFmtPrice(" in html, (
+                f"{name} does not call `window.tortoiseFmtPrice` — it formats "
+                "the shared numbers itself, which is the drift one step past "
+                "the table (#13645)")
+            assert "Math.round(price * 12" not in html, (
+                f"{name} re-derives the annual per-month price instead of "
+                "delegating to `window.tortoiseFmtPrice`")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. The niche product page's identity and its owner copy (#13645)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: The page's stable identity attribute. Pinned rather than trusted because the
+#: repo keys its guards and the served-root contract on `data-page`, and this
+#: page's own deploy/preflight story is the `::warning::` one: a silent loss of
+#: the attribute makes the tortoise-host half of the E2E suite SKIP green.
+PRODUCT_TEAMS_DATA_PAGE = "product-teams"
+
+#: The URL the owner asked for, and the one the sitemap advertises.
+PRODUCT_TEAMS_URL = "https://premiselabs.co/tortoise-for-product-teams"
+
+#: The three funnel events the page names in its own source (owner decision,
+#: 2026-11-12: the experiment must carry a denominator).
+PRODUCT_TEAMS_EVENTS = (
+    "product_teams_view",
+    "product_teams_cta_primary",
+    "product_teams_cta_secondary",
+)
+
+
+def _product_teams_html() -> str:
+    return PRODUCT_TEAMS_HTML.read_text(encoding="utf-8")
+
+
+def _element_by_id(html: str, element_id: str) -> str:
+    """The whole element whose `id` is `element_id`, brace-counted by TAG.
+
+    Sliced by balanced tags rather than "to the next `</section>`": the beats
+    contain `<div>`s, and a slice that stopped at the first close would hide
+    most of the beat from a copy pin.
+    """
+    served = _served(html)
+    marker = f'id="{element_id}"'
+    assert marker in served, f"no element with {marker} — this gate's subject moved"
+    at = served.index(marker)
+    start = served.rindex("<", 0, at)
+    tag = re.match(r"<([a-zA-Z0-9]+)", served[start:])
+    assert tag, f"could not read the opening tag before {marker}"
+    name = tag.group(1)
+    depth = 0
+    for m in re.finditer(rf"<{name}\b|</{name}>", served[start:]):
+        depth += 1 if m.group(0) != f"</{name}>" else -1
+        if depth == 0:
+            return served[start:start + m.end()]
+    raise AssertionError(f"<{name} id={element_id}> has no balanced closing tag")
+
+
+class TestProductTeamsIdentity:
+    """The repo obligations that fail QUIETLY when a new page omits them.
+
+    Each assertion below is one of them, named with the failure it prevents.
+    The head/card/icon walkers in this file cover this page automatically (it is
+    in `PAGES_AT_11762`); what follows is the part that is specific to a page
+    that is ADDED ALONGSIDE another one rather than replacing it.
+    """
+
+    def test_the_identity_attribute_is_pinned(self):
+        root = _root_element(_product_teams_html(), "website/tortoise-for-product-teams.html")
+        assert f'data-page="{PRODUCT_TEAMS_DATA_PAGE}"' in root, (
+            "website/tortoise-for-product-teams.html lost "
+            f'data-page="{PRODUCT_TEAMS_DATA_PAGE}" from its <html> tag '
+            f"({root!r}). That attribute is how a page is identified without "
+            "reading its copy; losing it is silent (the deploy preflight's miss "
+            "branch is a ::warning::, and the tortoise-host E2E then SKIPS "
+            "green).")
+
+    def test_the_identity_attribute_does_not_collide_with_the_product_root(self):
+        """`product-teams` must not satisfy the product ROOT marker's grep.
+
+        `PRODUCT_ROOT_MARKER` is the literal `data-page="product"`, and the
+        deploy preflight greps for it with `grep -F`. A prefix collision would
+        make the preflight pass on THIS page, so the tortoise-host suite would
+        run its product assertions against a page that is not the product page.
+        """
+        marker = _product_root_marker()
+        assert marker not in _product_teams_html(), (
+            f'the niche page carries the product ROOT marker ({marker!r}), so '
+            "the tortoise-host preflight and `_assert_serves_product` cannot "
+            "tell the two pages apart")
+        assert f'data-page="{PRODUCT_TEAMS_DATA_PAGE}"' not in PRODUCT_HTML.read_text(
+            encoding="utf-8"), (
+            "website/product.html carries the niche page's identity attribute")
+
+    def test_the_canonical_names_the_url_that_serves_it(self):
+        html = _product_teams_html()
+        canon = re.search(r'<link[^>]*rel="canonical"[^>]*href="([^"]+)"', html)
+        assert canon, "the page declares no canonical"
+        assert canon.group(1) == PRODUCT_TEAMS_URL, (
+            f"canonical is {canon.group(1)!r}, not {PRODUCT_TEAMS_URL!r}. The "
+            "page is served at the company ROOT by Pages' pretty-URL "
+            "resolution — NOT under `/tortoise`, so a `/tortoise/...` canonical "
+            "would name a URL the middleware 404s.")
+
+    def test_the_sitemap_advertises_it_and_the_decision_is_indexed(self):
+        """The index/noindex decision, in the three places it has to agree.
+
+        INDEXED on purpose (an experiment nobody can find has no traffic to
+        measure), so the page must NOT declare noindex and a sitemap must carry
+        its URL. The reverse mutation — flipping the page to noindex and
+        leaving the `<loc>` — is caught by
+        `test_website_docs_consistency.py::test_no_sitemap_advertises_a_page_
+        that_is_deleted_or_noindex`; this is the half that reads the DECISION
+        itself rather than the sitemap.
+        """
+        html = _product_teams_html()
+        assert not re.search(
+            r'<meta\s[^>]*name\s*=\s*["\']?robots["\']?[^>]*noindex', html, re.I), (
+            "the page declares noindex. That is a legitimate decision, but it "
+            "is not the one recorded for #13645 (a GTM experiment needs to be "
+            "findable): if it is being changed, remove the sitemap <loc> and "
+            "this assertion together, and say why.")
+        locs = [loc for sm in sorted((REPO_ROOT / "website").glob("sitemap-*.xml"))
+                for loc in re.findall(r"<loc>\s*([^<]+?)\s*</loc>",
+                                      sm.read_text(encoding="utf-8"))]
+        assert PRODUCT_TEAMS_URL in locs, (
+            f"no sitemap advertises {PRODUCT_TEAMS_URL} — an indexable page "
+            "with no <loc> is invisible to a crawler")
+
+    def test_the_page_loads_the_consent_module(self):
+        """Every named event must be gated, so the gate must be loaded."""
+        srcs = _pricing_source_includes(_product_teams_html())
+        assert "/consent.js" in srcs, (
+            "the page does not load /consent.js, so its three funnel events "
+            "have no consent gate: a pre-consent beacon is both a privacy "
+            "defect and an undercount (blocked requests read as nobody clicked)")
+
+    def test_the_three_funnel_events_are_named_in_the_source(self):
+        html = _product_teams_html()
+        for event in PRODUCT_TEAMS_EVENTS:
+            assert f"'{event}'" in html, (
+                f"the page never names the `{event}` event. The owner decision "
+                "on #13645 requires the funnel to be visible in the page's OWN "
+                "source — page view with the campaign parameters, primary-CTA "
+                "click, secondary-CTA click — so a later reader does not have "
+                "to open a dashboard config to learn what is measured.")
+        assert "tortoise:consent" in html, (
+            "the page does not wait for /consent.js's decision event, so a "
+            "visitor who accepts the banner AFTER the page ran would have their "
+            "page view dropped — clicks with no denominator")
+        assert "consentState" in html, (
+            "the page never reads the consent state itself; every capture must "
+            "be gated on it, not merely deferred")
+
+    def test_the_campaign_tags_point_at_the_canonical_url(self):
+        html = _product_teams_html()
+        assert "utm_campaign=tortoise-for-product-teams" in html, (
+            "the links this page controls carry no utm_campaign, so its traffic "
+            "is not separable from /tortoise's in the same PostHog project — "
+            "the experiment would have no denominator")
+        for utm in ("utm_source=", "utm_medium="):
+            assert utm in html, f"the campaign links carry no {utm.rstrip('=')}"
+
+    def test_the_page_links_to_the_canonical_product_page(self):
+        """The owner's rule: this page does not re-tell /tortoise's story."""
+        html = _product_teams_html()
+        hrefs = [h.split("?", 1)[0] for h in re.findall(r'href="([^"]+)"', html)]
+        assert "/tortoise" in hrefs, (
+            "the niche page never links to /tortoise, whose full product story "
+            "it does not duplicate. The owner's decision requires the canonical "
+            "page to stay reachable from here (footer → Product).")
+
+    def test_the_three_step_story_replaced_the_fourth_beat(self):
+        """`#beat-automate` is ABSENT here and PRESENT on `/tortoise`.
+
+        Both halves are asserted, because this is the question
+        `TestAutomateBeatCopy` was retired-or-not on: the PDF has THREE steps,
+        and this page is a NEW file alongside `/tortoise` rather than a rewrite
+        of it. So the webhook beat (and its owner-ruled copy) is untouched on
+        the canonical page and simply not part of this one. ⛔ That copy is an
+        owner ruling (#8466 OVERRIDES): do not "fix" it here or there.
+        """
+        teams = _product_teams_html()
+        assert 'id="beat-automate"' not in teams, (
+            "the niche page carries the `04 · Automate` beat, but the owner's "
+            "PDF has three steps — so either the copy was invented or a beat "
+            "was copied from /tortoise")
+        assert 'id="beat-automate"' in PRODUCT_HTML.read_text(encoding="utf-8"), (
+            "website/product.html lost its `#beat-automate` beat. That beat "
+            "carries the owner's webhook paragraph (#8466 OVERRIDES) and is "
+            "pinned by TestAutomateBeatCopy — this page's three steps do not "
+            "retire it, because /tortoise is not being rewritten")
+
+
+class TestProductTeamsCopy:
+    """The owner's PDF copy, VERBATIM, section by section.
+
+    This is the pin the page most needs: the copy is the owner's prose, the
+    build was instructed to reproduce it unchanged, and nothing else in this
+    repo reads it (the product page's guard deliberately stopped pinning copy in
+    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
+    reason beside them — a builder "fixing" them is the failure this class
+    exists to catch.
+    """
+
+    #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
+    #: colour, so the pin is the rendered text either way.
+    H1 = "A Superbrain for Founders & Product Teams"
+    HERO_SUB = "A million moving pieces. One coherent & logical picture."
+
+    #: page 1 — the intro block (after the PDF's hairline rule).
+    INTRO = (
+        "Free up time from repetitive explaining, supervision, and managing dependencies.\n"
+        "When agents (and people) understand goal cascades, root causes, trade-offs, "
+        "and dependencies, they autonomously and reliably advance your business.\n"
+        "Tortoise builds a logical model of your business, product, and code. It "
+        "connects goals, insights and analytics, decisions, and execution so you, "
+        "your team, and agents have the whole context, current and logical."
+    )
+
+    #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
+    COMPUTE = (
+        "Tortoise then computes over this context, analysing hundreds or even "
+        "millions of variables so you and your agents make decision with "
+        "superintelligence."
+    )
+    OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
+    OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
+
+    #: pages 2-3 — the three steps, then onboarding.
+    STEPS = (
+        ("beat-ingest", "01 · Ingest Any Source",
+         "Automatically ingest agent sessions from any harness, GitHub issues, "
+         "documents, chat messages, systems of record, BI, or any other data you "
+         "want to connect."),
+        ("beat-organize", "02 · Organize Your Knowledge",
+         "Our ontology engine builds a logical model of how your business, product, "
+         "and code work, turning loose facts into knowledge. With deduplication and "
+         "superseding. This logical model enables your agents to not just retrieve "
+         "facts but understand your logic, eliminating drift and regressions."),
+        ("beat-reason", "03 · Reason",
+         "Improve decision-making with super intelligence, grounded in your "
+         "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
+         "inspired by interconnected prediction markets, Tortoise can compute "
+         "hundreds or even millions of data points."),
+    )
+    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI."
+    ONBOARD_P = (
+        "Tortoise connects via MCP or SDK, so you and your agents can use it in "
+        "Codex, Claude Code & Web, ChatGPT, Cursor, Pi, or any other harness."
+    )
+
+    def test_the_hero_carries_the_owners_headline_and_subtitle(self):
+        hero = _element_by_id(_product_teams_html(), "beat-hero")
+        h1 = re.search(r"<h1>(.*?)</h1>", hero, re.S)
+        assert h1, "#beat-hero has no <h1>"
+        assert _beat_text(h1.group(1)) == self.H1, (
+            f"the hero h1 reads {_beat_text(h1.group(1))!r}; the owner's page 1 "
+            f"reads {self.H1!r}. The copy is the owner's prose — reproduce it, "
+            "do not rewrite it.")
+        assert self.HERO_SUB in " ".join(_beat_text(p) for p in
+                                        re.findall(r"<p[^>]*>.*?</p>", hero, re.S)), (
+            f"the hero subtitle is not {self.HERO_SUB!r}")
+        assert "Connect your agent →" in _beat_text(hero), (
+            "the hero lost the owner's primary CTA label (`Connect your agent →`, "
+            "bracketed in the PDF = a button)")
+
+    def test_the_intro_block_carries_the_three_paragraphs(self):
+        intro = _element_by_id(_product_teams_html(), "beat-intro")
+        paragraphs = [_beat_text(p) for p in re.findall(r"<p[^>]*>.*?</p>", intro, re.S)]
+        assert "\n".join(paragraphs) == self.INTRO, (
+            f"the intro block reads {paragraphs!r}; the owner's page 1 reads "
+            f"{self.INTRO!r}")
+
+    def test_the_compute_claim_is_verbatim_including_its_defect(self):
+        """⛔ "make decision with superintelligence" is NOT a typo to fix.
+
+        The PDF reads "so you and your agents make decision with
+        superintelligence." (singular `decision`). It is a defect a copy editor
+        would flag, and the scoping recommended normalising it — but the owner
+        did not rule, and this lane's instruction is verbatim. So it ships as
+        written, and this pin is what keeps the next reader from "correcting"
+        it silently: if the owner rules, change the copy AND this pin together.
+        """
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
+        assert first, "#beat-compute has no paragraph"
+        assert _beat_text(first.group(1)) == self.COMPUTE, (
+            f"the compute claim reads {_beat_text(first.group(1))!r}; the "
+            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
+            "(singular) is the owner's text, not a builder typo.")
+
+    def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        up = re.findall(r'<ul class="up">(.*?)</ul>', compute, re.S)
+        down = re.findall(r'<ul class="down">(.*?)</ul>', compute, re.S)
+        assert up and down, (
+            "#beat-compute has no `.up`/`.down` lists — the ↑/↓ grid is the "
+            "investors.html `.outcomes` component and the PDF's own figure")
+        def labels(chunk: str) -> tuple[str, ...]:
+            return tuple(_beat_text(m) for m in
+                         re.findall(r'<span class="a">[^<]*</span><span>(.*?)</span>',
+                                    chunk, re.S))
+        assert labels(up[0]) == self.OUTCOMES_UP, (
+            f"the ↑ column reads {labels(up[0])!r}; the PDF reads "
+            f"{self.OUTCOMES_UP!r} (row order matters — each ↑ is paired with "
+            "the ↓ beside it)")
+        assert labels(down[0]) == self.OUTCOMES_DOWN, (
+            f"the ↓ column reads {labels(down[0])!r}; the PDF reads "
+            f"{self.OUTCOMES_DOWN!r}")
+
+    def test_the_three_steps_are_verbatim(self):
+        html = _product_teams_html()
+        for section_id, heading, paragraph in self.STEPS:
+            beat = _element_by_id(html, section_id)
+            h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+            assert h2, f"#{section_id} has no <h2>"
+            assert _beat_text(h2.group(1)) == heading, (
+                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; the "
+                f"PDF reads {heading!r}")
+            body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
+            assert body == [paragraph], (
+                f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
+                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
+                "is the owner's spelling.")
+
+    def test_the_onboarding_beat_is_verbatim(self):
+        beat = _element_by_id(_product_teams_html(), "beat-onboard")
+        h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+        assert h2, "#beat-onboard has no <h2>"
+        assert _beat_text(h2.group(1)) == self.ONBOARD_H2, (
+            f"the onboarding heading reads {_beat_text(h2.group(1))!r}; the PDF "
+            f"reads {self.ONBOARD_H2!r}")
+        body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
+        assert body == [self.ONBOARD_P], (
+            f"the onboarding paragraph reads {body!r}; the PDF reads "
+            f"[{self.ONBOARD_P!r}]")
+
+    def test_the_beat_order_is_the_pdfs_section_order(self):
+        """Hero → intro → compute → 01 → 02 → 03 → onboarding, then pricing.
+
+        A re-order is invisible to every other assertion here (each beat's copy
+        is pinned in isolation) and to the heading outline (all h2s), so the
+        narrative could be shuffled with nothing red.
+        """
+        html = _served(_product_teams_html())
+        order = re.findall(r'<section id="(beat-[a-z]+)"', html)
+        assert order == ["beat-hero", "beat-intro", "beat-compute", "beat-ingest",
+                         "beat-organize", "beat-reason", "beat-onboard"], (
+            f"the beats are ordered {order!r}. The PDF's section order is hero, "
+            "intro, compute + the ↑/↓ block, 01, 02, 03, onboarding — the "
+            "narrative the owner wrote runs in that order.")
+        # The beat list lives in the SCRIPT, which `_served` strips — read the
+        # raw document for it.
+        raw = _product_teams_html()
+        listed = BEAT_LIST_RE.search(raw)
+        assert listed, "the script declares no `const beats = [...]` list"
+        assert re.findall(r"'([a-z-]+)'", listed.group(1)) == order, (
+            f"the script's scrubbed beat list {listed.group(1)!r} does not "
+            f"match the beat order {order!r}, so the wrong panel fades in for "
+            "the scroll position")

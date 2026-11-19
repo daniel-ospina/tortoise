@@ -75,6 +75,26 @@
     lastFocused = null;
   }
 
+  // ── Consent-decision seam (#13645) ──────────────────────────────────────
+  // PostHog is loaded opted OUT, so a page that captures on load loses the
+  // page view of every visitor who accepts the banner AFTER it ran — the
+  // funnel then shows clicks with no denominator, and a pre-consent beacon
+  // would be the privacy defect this module exists to prevent. A page cannot
+  // see the decision through `consentState()` alone (it is a poll), so emit
+  // it: `tortoise:consent` with `{ state: "granted" | "denied" }`, dispatched
+  // AFTER the opt-in/opt-out has been applied and after the consent-gated
+  // loaders have been activated. Listeners registered before this module runs
+  // (an inline page script, since this file is deferred) receive it, and the
+  // ALREADY-CONSENTED path at the bottom of `init()` emits it too, so a
+  // return visit is counted without a second decision.
+  function announceConsent(state) {
+    try {
+      window.dispatchEvent(new CustomEvent("tortoise:consent", { detail: { state: state } }));
+    } catch (e) {
+      /* no CustomEvent (very old browser): the page simply gets no event */
+    }
+  }
+
   function onAccept() {
     try {
       localStorage.setItem(STORAGE_KEY, "granted");
@@ -88,6 +108,7 @@
     // Consent granted — activate the consent-gated GTM container + Meta
     // loader too (GTM carries GA4; X/LinkedIn tags when they are added).
     loadConsentedAnalytics();
+    announceConsent("granted");
   }
 
   function onDecline() {
@@ -100,6 +121,7 @@
       window.posthog.opt_out_capturing();
     }
     hideBanner();
+    announceConsent("denied");
   }
 
   // Banner markup lives here (shared module) and is injected at runtime —
@@ -329,10 +351,14 @@
       }
       // Consent already given — activate the consent-gated loaders too.
       loadConsentedAnalytics();
+      // …and tell the page (see `announceConsent`): a return visit is counted
+      // without a second decision.
+      announceConsent("granted");
     } else if (state === "denied") {
       if (window.posthog && typeof window.posthog.opt_out_capturing === "function") {
         window.posthog.opt_out_capturing();
       }
+      announceConsent("denied");
     } else {
       // Undecided — stay opted out by default; show the banner.
       renderBanner();
