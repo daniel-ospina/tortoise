@@ -1964,6 +1964,37 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         assert declared[name] == f"gh-secret:{name}", declared[name]
         assert name in workflow_refs, f"deploy-hosted.yml never references secrets.{name}"
         assert name in module.workflow_secret_refs(REAL_WORKFLOW.read_text())
+    # ── #13721 review Issue 1: the CONSENT KEY SET's AS half ──────────────────
+    # §2.3 step 1 instructs an operator to add the new kid to `CONSENT_TOKEN_KEYS`
+    # "on **both** halves". Before this arm existed neither new name had a managing
+    # source on the Fly app — `CONSENT_TOKEN_SECRET` was the only consent name
+    # declared — so that instruction had no route, and the one remaining route (a
+    # hand-set value on the app) is exactly what THIS gate refuses as UNDECLARED.
+    # The promised rotation window was therefore built in Python and TypeScript and
+    # undeliverable to the deployment it exists for, with every check green.
+    #
+    # The names are READ FROM the module that consumes them, so a rename in
+    # `tortoise/consent_token.py` reds here instead of silently orphaning the
+    # declaration and re-opening the same hole.
+    from tortoise import consent_token as _ct
+
+    assert declared[_ct._SECRET_ENV] == f"gh-secret:{_ct._SECRET_ENV}", declared[_ct._SECRET_ENV]
+    assert declared[_ct._KEYS_ENV] == f"gh-secret:{_ct._KEYS_ENV}", declared[_ct._KEYS_ENV]
+    assert _ct._KEYS_ENV in workflow_refs, (
+        "deploy-hosted.yml never references the key set's GitHub secret, so the set can "
+        "only reach the AS by hand — i.e. §2.3 step 1 still has no operable route "
+        "(#13721 review, Issue 1)")
+    assert _ct._CURRENT_KID_ENV in workflow_refs or _ct._CURRENT_KID_ENV in env_keys
+    # The kid NAME is a `[A-Za-z0-9_-]{1,64}` name, not secret material, so it takes
+    # the versioned `[env]` route — which is also what makes a Fly SECRET of that
+    # name fail as a shadow. The KEY MATERIAL takes the opposite route: a set written
+    # into `fly.toml` would be a credential in the repository.
+    assert declared[_ct._CURRENT_KID_ENV] == "fly-toml-env", declared[_ct._CURRENT_KID_ENV]
+    assert _ct._CURRENT_KID_ENV in env_keys, (
+        f"{_ct._CURRENT_KID_ENV} is declared fly-toml-env but is not an assigned key in "
+        "fly.toml [env] — the declaration cannot be honoured")
+    assert _ct._KEYS_ENV not in env_keys, (
+        f"{_ct._KEYS_ENV} carries KEY MATERIAL and must never be versioned in fly.toml")
     # The one decision-backed exception — and it must stay an exception, i.e. a
     # ref to the issue carrying the ruling (#661's OVERRIDES marker).
     assert declared["REGISTRY_STREAM_KEY"] == "fly-only:#661"

@@ -3473,23 +3473,44 @@ def test_an_UNKNOWN_kid_is_REFUSED_and_never_falls_back_to_a_single_key(monkeypa
         f"{refused.value.status} {refused.value.error!r}")
 
 
-def test_a_TAMPERED_kid_is_refused(monkeypatch) -> None:
-    """`kid` is inside the SIGNED header, so rewriting it must break the MAC.
+def test_the_mint_REFUSES_to_stamp_a_kid_the_set_does_not_hold(monkeypatch) -> None:
+    """The minting side of "an unknown kid is refused, never defaulted".
 
-    Pinned in the OTHER direction from the test above: there the kid selected no key; here it
-    selects a REAL one, so the only thing standing between the attacker and acceptance is that the
-    header bytes are covered by the signature.
+    ⛔ THIS REPLACES `test_a_TAMPERED_kid_is_refused`, which asserted that rewriting the `kid` in a
+    signed token breaks the MAC. That assertion could not vary under ANY mutation of this change:
+    the MAC was computed over the ORIGINAL header and the verifier recomputes over the RECEIVED
+    one, so the mismatch is unconditional whichever key the kid selects — including the pre-change
+    "one secret" behaviour. It was JWS's property for free, not this change's (review rule 3: a
+    comment explaining why an assertion cannot fail is not a fix).
+
+    What `kid` becoming load-bearing DOES add is the minter's half: naming a kid the set does not
+    hold must be a refusal, not a token signed with the CURRENT key and stamped with a name no
+    verifier can select (`401 invalid_token` on every redemption, while the mint answers 200).
     """
     from tortoise import consent_token
 
     _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
-    token = _signed(_claim_set(_BIND_FOR_KEYS), secret=_KEY_OLD, kid="old")
-    header, payload, mac = token.split(".")
-    swapped = ".".join((_seg({"alg": "HS256", "typ": "JWT", "kid": "new"}), payload, mac))
-    assert header != swapped.split(".")[0]
-    with pytest.raises(Exception) as refused:
-        consent_token.verify_consent_token(swapped, presented=_BIND_FOR_KEYS)
-    assert "signature does not verify" in str(refused.value), refused.value
+    with pytest.raises(ValueError) as refused:
+        consent_token.mint_consent_token(user_id="u1", email=None, bind=_BIND_FOR_KEYS,
+                                        kid="not-in-the-set")
+    assert "not a kid this deployment holds" in str(refused.value), refused.value
+
+    # …and the control: every kid the set DOES hold mints, signed with THAT kid's key — which is
+    # what makes the refusal above a rule about the set rather than a rule about the argument.
+    # The MAC is checked against the named kid's bytes, so a mint that stamped the kid and signed
+    # with the CURRENT key (the mutant this test exists for) reds here.
+    for kid, key in (("old", _KEY_OLD), ("new", _KEY_NEW)):
+        token = consent_token.mint_consent_token(user_id="u1", email=None, bind=_BIND_FOR_KEYS,
+                                                 kid=kid, jti=f"j-{kid}")
+        header_seg, payload_seg, mac_seg = token.split(".")
+        assert json.loads(base64.urlsafe_b64decode(header_seg + "=="))["kid"] == kid
+        expected = base64.urlsafe_b64encode(
+            hmac.new(key.encode(), f"{header_seg}.{payload_seg}".encode(), hashlib.sha256)
+            .digest()).rstrip(b"=").decode()
+        assert mac_seg == expected, (
+            f"the mint stamped kid {kid!r} but did not sign with {kid!r}'s key — the token "
+            "verifies nowhere except by coincidence")
+        assert consent_token.verify_consent_token(token, presented=_BIND_FOR_KEYS)["sub"] == "u1"
 
 
 def test_the_SINGLE_SECRET_path_is_BYTE_IDENTICAL_to_today(monkeypatch) -> None:
@@ -3663,7 +3684,16 @@ def test_a_TAMPERED_attempt_key_is_refused(monkeypatch) -> None:
     _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
     minted = consent_token.mint_attempt_key()
     kid, random_part, mac = minted.split(".")
-    assert consent_token.verify_attempt_key(f"{kid}.{random_part[:-1]}A.{mac}") is None, (
+    # ⛔ THE MUTATION MUST BE A REAL ONE, and the LAST character cannot carry one. `random_part` is
+    # `token_urlsafe(32)` = 43 base64url chars for 32 bytes, so the 43rd char holds only the 4
+    # significant bits of the final byte — its 6-bit value is always `4k`, i.e. it is always one of
+    # `A E I M Q U Y c g k o s w 0 4 8`, and it is `"A"` ~1 time in 16. Pinning `…[:-1] + "A"`
+    # therefore produced a value BYTE-IDENTICAL to `minted` on that run, `verify_attempt_key`
+    # correctly returned the random part, and the assertion failed at 6% accusing the MAC of not
+    # covering the random part. Same guard as the MAC arm below, and on a position that can vary.
+    edited_random = ("A" if random_part[0] != "A" else "B") + random_part[1:]
+    assert edited_random != random_part, "the test's own mutation was a no-op"
+    assert consent_token.verify_attempt_key(f"{kid}.{edited_random}.{mac}") is None, (
         "editing the RANDOM part left the MAC valid — the MAC does not cover it")
     assert consent_token.verify_attempt_key(f"old.{random_part}.{mac}") is None, (
         "editing the KID left the MAC valid — the kid is not selected before the comparison")

@@ -101,9 +101,13 @@ OPERATOR REQUIREMENT (§8) — the token arm is LIVE the moment these are set on
     at it; from then on the new key mints and the old one still verifies. (2) Wait out the longest
     in-flight lifetime — ≤120 s for a consent assertion, ≤15 min for an attempt key. (3) Remove the
     old kid from ``CONSENT_TOKEN_KEYS`` on both halves; from then on a value it signed is refused as
-    an UNKNOWN kid rather than silently accepted. Set ``CONSENT_TOKEN_SECRET`` to the CURRENT kid's
-    value throughout, so a half that has not learned about key sets yet (an older deployment, a
-    stale preview) still signs and verifies with the current key.
+    an UNKNOWN kid rather than silently accepted. ⛔ While ANY half is still un-migrated (no key set),
+    that half accepts exactly one kid — ``consent-1`` — and stamps it, so the migrated half's set must
+    NAME ``consent-1`` and ``CONSENT_TOKEN_SECRET`` must keep the bytes that entry holds. A set that
+    omits ``consent-1`` is correct only once every half is on the set; publishing it early refuses
+    every token the un-migrated half mints. The ordering (ship the code with no set, Fly first with
+    ``consent-1`` spelled out, then Pages, then retire) is §2.3's, and `kid` being load-bearing is what
+    makes it order-sensitive.
   * ``CONSENT_TOKEN_ISSUER`` — optional, defaults to ``https://app.premiselabs.co`` (the session
     origin). A token whose `iss` differs is refused, so this must match the minting origin.
   * the shared `jti` store — installed from `hosted_api._lifespan` (above). If nothing is
@@ -1157,14 +1161,35 @@ def mint_consent_token(*, user_id: str, email: str | None, bind: dict,
 
     ``kid`` defaults to the deployment's CURRENT kid (`consent_token_current_kid`), which is
     ``consent-1`` on a single-secret deployment — byte-identical to what this function always
-    stamped. A caller may still name one (a test building a previous-kid token); it must be a kid
-    this deployment ACCEPTS, which the verifier enforces by refusing an unnamed one.
+    stamped. A caller may still name one (a test building a previous-kid token), and it must be a
+    kid this deployment ACCEPTS: the kid SELECTS the signing key here, exactly as it does in
+    `mint_attempt_key`, so naming a kid the set does not hold is refused rather than stamped with
+    the current key. (A caller that passes ``secret`` explicitly is minting on ANOTHER deployment's
+    behalf — the "minted elsewhere, this AS has no key" state §8's checklist warns about — so its
+    kid is not checked against this deployment's set.)
     """
-    key = secret if secret is not None else consent_token_secret()
-    if not key:
-        raise ValueError(f"{_SECRET_ENV} is not set, so no consent token can be signed")
     if kid is None:
         kid = consent_token_current_kid() or LEGACY_KID
+    if secret is not None:
+        key = secret
+    else:
+        # ⛔ THE KID SELECTS THE KEY, as in `mint_attempt_key`. Stamping a caller-supplied kid on a
+        # token signed with the CURRENT key emitted a value that verifies NOWHERE unless the two
+        # kids happen to share bytes — and the request path that produces such a token answers 200,
+        # so the symptom is `401 invalid_token` on every redemption with no other trace. Refusing
+        # here is what makes the minter's contract match the verifier's ("an unknown kid is
+        # refused, never defaulted").
+        keys = consent_token_keys()
+        if not keys:
+            raise ValueError(f"{_SECRET_ENV} is not set, so no consent token can be signed")
+        key = keys.get(kid)
+        if key is None:
+            raise ValueError(
+                f"{kid!r} is not a kid this deployment holds — {_KEYS_ENV} is the set a verifier "
+                "selects by, so a token stamped with an unknown kid is refused everywhere "
+                "(401 invalid_token) while this mint would answer 200")
+    if not key:
+        raise ValueError(f"{_SECRET_ENV} is not set, so no consent token can be signed")
     if set(bind) != set(BIND_FIELDS):
         raise ValueError(f"bind must be exactly {BIND_FIELDS}, got {sorted(bind)}")
     issued_at = time.time() if now is None else float(now)

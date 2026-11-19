@@ -768,12 +768,14 @@ function randomHex(bytes: number): string {
  *   - `sub` — the identity, and the ONLY thing the AS may take from this token. `email` is
  *     display-only and never an authorization input.
  *
- * `kid` is fixed to `consent-1` here and accepted FOR PRESENCE ONLY by the verifier. §2.3 states a
- * `kid`-scoped rotation as the goal, but that allowlist is deliberately NOT BUILT (one
- * `CONSENT_TOKEN_SECRET` is configured, so a two-`kid` window cannot exist): a rotation today is a
- * VALUE SWAP that invalidates in-flight assertions for their 120 s TTL. Do not read this line as
- * the rotation property — it is the seam for it (docs/engineering/auth/consent-identity-bridge.md
- * §9 step 1 records the allowlist as unbuilt).
+ * ⛔ `kid` IS LOAD-BEARING SINCE #10794, and this paragraph used to say the opposite. The AS
+ * SELECTS the key by it and refuses one it cannot find (`tortoise/consent_token.py`
+ * `verify_consent_token` — "kid is not in the configured key set"), so the kid a token is stamped
+ * with decides WHICH key must have signed it. A rotation is now a `kid`-scoped OVERLAP window —
+ * publish the new kid beside the old in `CONSENT_TOKEN_KEYS` on both halves, wait out the longest
+ * in-flight lifetime, then retire the old one — not the value swap it used to be. Do not read this
+ * as a description of the pre-#10794 seam: the mechanism is BUILT
+ * (docs/engineering/auth/consent-identity-bridge.md §2.3, §9 step 1b).
  */
 export async function mintConsentToken(input: {
   secret: string;
@@ -795,7 +797,16 @@ export async function mintConsentToken(input: {
   if (!input.secret) {
     // Fail closed and named: an EMPTY key would sign a token anyone could forge, and a
     // hardcoded default would be a forgeable consent (§2.3). Callers answer 503 instead.
-    throw new Error("CONSENT_TOKEN_SECRET is not set");
+    // ⛔ The message must name BOTH sources, because under a key set `CONSENT_TOKEN_SECRET` is not
+    // what the minter reads: `consentSecret`/`consentKeySet` resolve the CURRENT kid out of
+    // `CONSENT_TOKEN_KEYS` (falling back to the single secret only when the set is absent), so
+    // "CONSENT_TOKEN_SECRET is not set" pointed an operator at a variable that may be set and
+    // irrelevant. This function receives the resolved value; naming the resolution above is the
+    // only accurate diagnosis it can give.
+    throw new Error(
+      "no usable consent signing key: CONSENT_TOKEN_KEYS is unset/malformed or names a "
+      + "CONSENT_TOKEN_CURRENT_KID it does not hold, and CONSENT_TOKEN_SECRET is unset/empty",
+    );
   }
   const issuedAt = Math.floor((input.now ?? Date.now()) / 1000);
   const exp = issuedAt + CONSENT_TOKEN_TTL_S;

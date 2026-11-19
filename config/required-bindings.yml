@@ -384,20 +384,31 @@ projects:
           `invalid_token` with no other symptom.
           ⛔ WHEN `CONSENT_TOKEN_KEYS` IS SET THIS VALUE IS NOT A SIGNING KEY —
           the set is authoritative (it is never merged with this one). Keep it
-          holding the CURRENT kid's value anyway: a half that has not learned
-          about key sets yet (an older deployment, a stale preview) signs and
-          verifies with it, and this binding is still `required` so the
+          holding the value of the kid the LEAST-MIGRATED half stamps (`consent-1`)
+          while any half is still un-migrated: a half with no key set accepts exactly
+          one kid, `consent-1`, and `kid` is load-bearing, so a half that has not
+          learned about key sets yet SIGNS with this value but does NOT verify a
+          token stamped with a kid its own one-element set does not name. Once every
+          half is on the set this variable is inert, and it stays `required` so the
           preflight keeps demanding SOMETHING there.
 
       # #10794: the `kid`-KEYED key set — §2.3's rotation window, BUILT. Both are `recommended`
       # because absence is the single-secret deployment and is fully supported: `CONSENT_TOKEN_KEYS`
       # unset means "one key, kid `consent-1`, exactly as before this change". Declared rather than
-      # left silent so the deploy preflight can SEE them — an operator who sets a key set on one half
-      # and not the other gets a split the fingerprint reports (it publishes the CURRENT kid's key).
-      # ⛔ The SAME names must be set on the hosted API (Fly): the AS mints the attempt key and the
-      # app half verifies it, so this is now a THIRD consumer of the same key material and a rotation
-      # touches both halves — see `docs/engineering/auth/consent-identity-bridge.md` §2.3 for the
-      # publish-new / accept-both / retire-old procedure and its bounded window.
+      # left silent so the deploy preflight can SEE them.
+      # ⛔ The SAME names must be set on the hosted API (Fly): the AS mints the attempt key AND
+      # selects the verification key by `kid`, so this is now a third consumer of the same key
+      # material and a rotation touches both halves — see
+      # `docs/engineering/auth/consent-identity-bridge.md` §2.3 for the publish-new / accept-both /
+      # retire-old procedure, its bounded window, and the ordering a MIXED deployment requires
+      # (step 0: ship the code with the set ABSENT; step 1: Fly first, with the legacy kid spelled
+      # out). The Fly half is managed from version control like this one —
+      # `.github/scripts/fly-managed-secrets.txt` declares `CONSENT_TOKEN_KEYS` as `gh-secret:` and
+      # `CONSENT_TOKEN_CURRENT_KID` as `fly-toml-env` — so §2.3 step 1 has an operable route and a
+      # hand-set value on Fly is refused by the provenance gate rather than silently drifting.
+      # ⛔ The key-drift fingerprint does NOT monitor a `kid` split (it compares the CURRENT kid's
+      # key BYTES only): a half whose set omits `consent-1` while its secret still holds those bytes
+      # reads AGREE in front of a bridge on which nothing completes. §2.5 states the scope.
       - name: CONSENT_TOKEN_KEYS
         kind: recommended
         type: env_vars

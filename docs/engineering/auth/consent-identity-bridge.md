@@ -335,12 +335,50 @@ the tokens a running deployment already holds keep verifying.
    refused as an **unknown kid** — not silently accepted, which is the property the pre-set verifier
    never had.
 
-Throughout, keep `CONSENT_TOKEN_SECRET` holding the **current** kid's value: a half that has not learned
-about key sets yet (an older deployment, a stale preview) still signs and verifies with it. That value is
-**not** itself a verification key while `CONSENT_TOKEN_KEYS` is set — the two are never merged, so "still
-in the environment" never means "still accepted". The key-drift fingerprint (§2.5) compares the **current**
-kid's key, so a correct rotation reads `AGREE` once both halves are on the same current kid and a
-half-migrated one reads `MISMATCH` — which is the reading an operator wants during step 1.
+Throughout, keep `CONSENT_TOKEN_SECRET` holding the value of the kid the **least-migrated** half
+stamps — on any half that is not yet on a key set that is `consent-1`, so **not** the new kid's value.
+Once every half is on the set the variable is inert (the set is authoritative and never merged with it,
+so "still in the environment" never means "still accepted"), but it must stay non-empty because the
+Pages binding is `required`.
+
+> ⛔ **A half-migrated deployment works ONLY if the set NAMES the kid the un-migrated half stamps.**
+> This is the part of §2.3 that is easy to get backwards, and the cost of getting it backwards is a
+> total, silent 401 on every redemption. `kid` is load-bearing (the AS *selects* the key by it), so:
+>
+> * a half with **no** `CONSENT_TOKEN_KEYS` accepts exactly one kid, `consent-1`, with the bytes in its
+>   `CONSENT_TOKEN_SECRET`, and stamps `consent-1` no matter what its key is;
+> * a half **with** `CONSENT_TOKEN_KEYS` accepts **only** the kids in it, and refuses anything else as
+>   an unknown kid.
+>
+> So the migration order is fixed, and step 1 is not the first step:
+>
+> 0. **Ship the code, not the config.** Deploy this change to both halves with `CONSENT_TOKEN_KEYS`
+>    **unset**. That deploy is byte-identical to the pre-set behaviour, so it cannot break anything —
+>    and it is what makes the halves able to understand a set at all. A set published to a half that
+>    does not understand it is a value nothing reads.
+> 1. **Fly (the AS) first, with the legacy kid spelled out:** `CONSENT_TOKEN_KEYS` on the AS must
+>    contain **`consent-1=<old bytes>`** alongside the new kid for as long as Pages may still be
+>    stamping `consent-1`. Omit it and every token the un-migrated Pages half mints is
+>    `401 invalid_token: kid is not in the configured key set`. (This is the reverse of what this
+>    section said before the #10794 review: a set that does NOT name `consent-1` is only correct once
+>    every half is on the set.)
+> 2. **Then Pages**, with the same set string. From here both halves mint the new kid and the legacy
+>    entry is dead weight — retire it (step 3 of the list above).
+>
+> ⚠️ **The key-drift fingerprint (§2.5) does NOT see a `kid` split, and must not be read as a
+> migration monitor.** It compares `sha256(key)[:12]` of the **current kid's key bytes only** —
+> `kid` is deliberately not in the comparison (`consent_token.py::CONSENT_KEY_FINGERPRINT_HEX_CHARS`
+> and `consent-bridge.ts::consentKeyFingerprint` both say so). A half whose set omits `consent-1` while
+> its `CONSENT_TOKEN_SECRET` still holds those same bytes reports the SAME fingerprint as the AS: it
+> reads **AGREE** in front of a bridge on which nothing can complete. Read the verdict as what it is —
+> one comparison of *bytes*:
+>
+> * `MISMATCH` ⇒ the halves sign with different bytes (a genuine split; investigate).
+> * `AGREE` ⇒ **the current key bytes agree.** It is not a statement that the halves can complete a
+>   flow: it does not check the kid, and it cannot see a kid the set does not hold.
+>
+> The kid half of the question is answered by construction (the ordering above) and by an end-to-end
+> reading — a real mint plus a redemption — not by the fingerprint.
 
 ### 2.4 Consent fixation — the attack this contract **adds**, and which half defeats it
 
@@ -402,6 +440,14 @@ whether they agree:
 |---|---|---|
 | AS | `GET {api}/health` → the `consent_token_key` block | `{key_fingerprint, configured, reason}` |
 | Pages | `GET {app}/api/consent/key` — **a new route** | the same three keys, as the whole body |
+
+⛔ **What the comparison cannot see — stated here because it is the whole scope of the signal.**
+`kid` is deliberately **not** in it: the fingerprints are of the **current kid's key bytes only**, and
+neither health payload publishes a kid. So `AGREE` means "the two halves' current keys are the same
+bytes", never "the two halves can complete a flow" — a deployment whose key set does not NAME the kid
+the other half stamps reads `AGREE` and refuses every redemption with `401 invalid_token: kid is not in
+the configured key set`. That failure belongs to the migration procedure (§2.3 step 0-2), which `kid`
+being load-bearing is what makes order-sensitive; do not read this field as its monitor.
 
 The AS side is an **added block on an existing endpoint** (the convention the `build` block established,
 §"Which build is serving"), and it is deliberately **not** folded into `/health`'s `status`: a split must not

@@ -2128,8 +2128,12 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return(monkeypa
     other half of that biconditional — one test would be satisfied by adopting everything, the
     other by adopting nothing.
 
-    Non-vacuity: as a PIN this still passes on the PRE-FIX tree for any non-empty value. The fix's
-    proof is the refusal test, which FAILS there.
+    Non-vacuity: this one is a PIN, not the fix's proof — and it cannot even RUN on the PRE-FIX tree,
+    in either direction. `_as_minted_key` calls `consent_token.mint_attempt_key()`, which does not
+    exist there (`git show origin/main:tortoise/consent_token.py | grep -c mint_attempt_key` → 0),
+    so the pre-fix tree raises `AttributeError` rather than passing. The fix's proof is the refusal
+    test (`test_start_refuses_a_presented_key_the_AS_did_not_mint`), which reds on that tree because
+    `start.ts` adopted whatever it was handed.
     """
     presented = _as_minted_key(monkeypatch)
     first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
