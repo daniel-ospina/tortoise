@@ -33,7 +33,7 @@ WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
 -----------------------------------------------------------
 The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/start` renders a page
 for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
-`x-consent-refusal` — `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`
+`x-consent-refusal` — `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`
 enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
 purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
 the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
@@ -722,11 +722,15 @@ console.log("RESULT " + JSON.stringify(out));
 
 
 def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
-    """A hard failure of the carriage is a PAGE — with the status and the reason UNCHANGED.
+    """A REFUSAL of the carriage is a PAGE — with the status and the reason UNCHANGED.
 
     #10884 (the `503` store arms) and #10865 arm B (the `403`) are one root: `start` answered a
     browser with `json({error, reason})`, so a person saw a JSON blob on a blank page with no way
-    forward. The fix is deliberately presentation-only, and this helper is where that is enforced:
+    forward. "REFUSAL" is the load-bearing word: `start.ts` still returns JSON from the `400`
+    caller error and the terminal `200` flow state, so this helper does NOT assert that every hard
+    failure of the route is a page — `test_the_route_has_NO_JSON_FAILURE_ARM_LEFT` is where those
+    two survivors are counted and classified. The fix is deliberately presentation-only, and this
+    helper is where that is enforced:
 
       * the STATUS is exactly what it was — the `403`'s deliberate, recorded exemption from §2.3's
         no-oracle rule is carried by the code, so a page that answered `200` would retire a refusal;
@@ -758,11 +762,40 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         "invites a guess")
     assert "no-store" in (out.get("cacheControl") or ""), (
         f"{reason}: a refusal is cacheable ({out.get('cacheControl')!r}) and its URL carried a key")
-    # …and it DECIDES NOTHING: no script, no external asset, no echo of the request.
+    # …and it DECIDES NOTHING: no script, no external asset, no link, no echo of the request.
     assert "<script" not in body.lower(), f"{reason}: the refusal page carries script"
     assert "http://" not in body and "https://" not in body, (
         f"{reason}: the refusal page names an origin (an external asset, or an echoed URL)")
-    for echoed in ("state-xyz", "client-abc", "attempt_key", "code_challenge"):
+    # ⛔ NO AFFORDANCE THAT CAN BE TALKED INTO A DESTINATION. The module docstring says the retry
+    # is PROSE, not an `href`, "because any `href` would have to echo the query or choose a
+    # target" — and a relative `href` satisfies both assertions above, so the property had no
+    # guard at all. The sibling page this one is modelled on DOES carry one (`<a href="/contact">`
+    # in `website/functions/_middleware.ts`), which makes a copy-paste from the precedent the exact
+    # edit that would ship it green.
+    for forbidden in ("<a ", "href=", "<form"):
+        assert forbidden not in body.lower(), (
+            f"{reason}: the refusal page carries {forbidden!r} — the retry affordance must be prose, "
+            "because any link would have to echo the query or choose a destination")
+    # The VALUES, not only the param NAMES. `attempt_key` (the name) is not a substring of the key
+    # the arms actually present (`b-attempt-key`, `ak-guessed`), so a name-only tuple left a mutant
+    # that interpolates `url.searchParams.get(ATTEMPT_KEY_PARAM)` into the copy fully GREEN — and
+    # that key is the one secret this page's CSP + `Referrer-Policy` exist to keep out of a third
+    # party's log. Every value the harness can put in the query is covered, so a new arm that
+    # presents a different key is pinned by adding it here rather than by remembering to.
+    for echoed in (
+        _PARAMS["client_id"],
+        _PARAMS["redirect_uri"],
+        _PARAMS["state"],
+        _PARAMS["code_challenge"],
+        # the attempt keys the arms present (the one credential, #10487/#10884)
+        "b-attempt-key",
+        "ak-guessed",
+        # the param NAMES too: cheap, and it pins that the page never prints a query skeleton
+        "attempt_key",
+        "code_challenge",
+        "redirect_uri",
+        "client_id",
+    ):
         assert echoed not in body, f"{reason}: the page ECHOES {echoed!r} from the request"
 
 
@@ -1879,21 +1912,28 @@ _FOREIGN_OWNED_ROW = [{
                          "params": dict(_PARAMS, attempt_key="b-attempt-key")},
      "flow_not_yours", 403),
 ])
-def test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status(
+def test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status(
     scenario: str, opts: dict, reason: str, status: int,
 ) -> None:
-    """#10884 + #10865 arm B, one root, ONE assertion: EVERY hard failure is a page.
+    """#10884 + #10865 arm B, one root, ONE assertion: EVERY REFUSAL is a page.
 
     The four `json({error, reason})` bodies were the defect: a person in a browser got a JSON blob
     and no way forward. Pinning only the arms the issues name by line would let the NEXT refusal
-    added to this route ship as JSON again — the root is "the carriage's failure states were never
+    added to this route ship as JSON again — the root is "the carriage's refusal states were never
     given a user-facing face", not "this arm at this line" — so the whole family is enumerated and
     each one is held to the same four properties (status unchanged, page, reason in a header, body
     not JSON) by ONE helper.
 
+    ⛔ The name says REFUSAL, and the narrowing is not pedantry: `return json(` still survives in
+    TWO places in `start.ts` (the `400` caller error, the terminal `200` flow state) and both reach
+    a browser, so "every hard failure is a page" was a claim the route falsified — and believing it
+    invites converting the terminal `200`, which #10865's owner comment records as a DIFFERENT
+    CONTRACT. The survivors are counted and classified by
+    `test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`.
+
     ⚠️ `as_origin_misconfigured` is included deliberately and is NOT named by either issue: it is
     the same route, the same class, and the same one-line fix. Leaving it as JSON would make the
-    claim "every hard failure of this route is a page" false, which is the kind of half-face that
+    claim "every REFUSAL of this route is a page" false, which is the kind of half-face that
     produced these issues in the first place.
     """
     _assert_refusal_page(_run(scenario, **opts), reason, status)
@@ -1991,6 +2031,38 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
         f"`start.ts` returns JSON from {len(jsons)} place(s), not the 2 accounted for — a hard "
         "failure of the carriage is being answered with a JSON body again; render it with "
         "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
+
+
+def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
+    """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
+    claim the route FALSIFIES — and pinning the DENIAL, not a wording, is what keeps it corrected.
+
+    Why a prose claim earns a guard here rather than a comment: this is not untidiness. #10865's
+    owner comment records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the
+    absolute would "finish" the job by converting an arm the owner ruled out — the false summary
+    actively steers a future lane to reverse a recorded decision, which no arm-level test can see.
+
+    The files scanned are the ones a reader takes the CONTRACT from: the route, the page builder
+    (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
+    sentence appears there legitimately, as the thing being narrowed.
+
+    Non-vacuous: it REDS on the pre-#10884 `start.ts`, whose header read
+    `**Every hard failure is a PAGE, not a JSON blob**`.
+    """
+    corpus = {
+        "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
+        "consent-refusal.ts": (FUNCTIONS / "_shared/auth/consent-refusal.ts").read_text(
+            encoding="utf-8"),
+        "consent-identity-bridge.md": (REPO / "docs" / "engineering" / "auth" /
+                                      "consent-identity-bridge.md").read_text(encoding="utf-8"),
+    }
+    for name, text in corpus.items():
+        lowered = text.lower()
+        assert "every hard failure" not in lowered, (
+            f"`{name}` claims EVERY HARD FAILURE is a page, and `start.ts` returns JSON from TWO "
+            "places (the `400` caller error and the terminal `200` flow state — see "
+            "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL: the terminal `200` "
+            "is #10865's recorded decision, and a summary that denies it invites converting it.")
 
 
 def _key_from(location: str | None) -> str:
@@ -2373,7 +2445,7 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     raises. ⚠️ Read the biconditional for what it actually holds: it is the ARM
     that is still emitted, not the raw body. Since #10884/#10865 arm B the
     `start` leg renders that arm as a PAGE (`x-consent-refusal: …`, asserted by
-    `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`),
+    `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`),
     and the mint leg (`token.ts`) still answers JSON — deliberately, because the
     AS page's `fetch()` is its reader and that page renders the human copy.
     The CONDITION is what is unfixed: which store call raises is not
