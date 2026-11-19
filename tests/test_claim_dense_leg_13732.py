@@ -1527,6 +1527,10 @@ class TestTheDocumentedRunPath:
         _FakeGraph.down = graph_down
 
         def _seed(_proj, pop):
+            if graph_down:
+                # a store that will not accept the write either: the realistic
+                # dead-graph case, and the one the READ guard cannot see
+                raise RuntimeError("no route to the graph")
             keep = len(pop) if seeded is None else seeded
             _FakeGraph.contents = {r["id"]: r["content"] for r in pop[:keep]}
             return len(pop)
@@ -1823,8 +1827,45 @@ class TestTheDocumentedRunPath:
                 record_ok=True,
                 graph_down=True,
             )
-        assert ei.value.code == "graph_unreadable"
+        assert ei.value.code == "graph_unwritable"
         assert not (tmp_path / "down.json").exists(), "a refused run publishes nothing"
+
+    def test_a_ZERO_denominator_does_not_publish_a_verified_gate(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ `record_vectors >= 0` is a TAUTOLOGY, not a verification.
+
+        Dropping the run-level `graph_vectors <= 0` refusal made a zero
+        denominator reachable, and `record_vector.coverage` then answers VERIFIED
+        for any record at all — so the artifact would publish a verified gate off
+        the exact state this file calls "a gate that can be satisfied by two
+        zeros" (`#13745` review round 13). The RECORD arm is blocked by name; the
+        graph arm has its own block; `lexical` still measures.
+        """
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 0)
+        target = tmp_path / "zero.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            record_ok=True,
+            seeded=0,  # the graph holds none of this run's vectors either
+        )
+        artifact = json.loads(target.read_text())
+        # the gate is recorded as UNVERIFIABLE, never as a pass
+        assert artifact["coverage"]["verified"] is None, artifact["coverage"]
+        assert artifact["coverage"]["reason"] == "denominator_zero"
+        assert "tautology" in artifact["coverage"]["note"]
+        # …and the arms still do what they can: the graph arm is blocked (its own
+        # cohort is empty), the RECORD arm measures off its id-scoped guard, and
+        # the headline comparison survives
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        assert "summary" in artifact["arms"]["record_dense"]
+        assert "summary" in artifact["arms"]["lexical"]
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
+        assert rc == 3
 
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.

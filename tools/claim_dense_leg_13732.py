@@ -1064,8 +1064,32 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
         )
 
 
-def require_coverage(verdict) -> dict:
-    """The per-label coverage verdict must be VERIFIED for the claim label."""
+def require_coverage(verdict, denominator: int | None = None) -> dict:
+    """The per-label coverage verdict must be VERIFIED for the claim label.
+
+    ⛔ A ZERO DENOMINATOR VERIFIES NOTHING (`#13745` review round 13). The gate
+    decides ``record_vectors >= graph_vectors``, so a graph holding no vector
+    makes it ``>= 0`` — TAUTOLOGICALLY verified for any record at all — and the
+    artifact would publish ``verified: true`` off the exact state this module
+    calls "a gate that can be satisfied by two zeros". It is recorded as
+    ``verified: None`` with its reason instead: unmeasured is not a pass, and the
+    record arm keeps its real protection (the id-scoped cohort guard plus its own
+    mechanism check), so the headline comparison still publishes.
+    """
+    if denominator is not None and denominator <= 0:
+        return {
+            "label": "point",
+            "verified": None,
+            "reason": "denominator_zero",
+            "note": (
+                f"the graph holds {denominator} vector-bearing claim(s), so "
+                f"`record_vectors >= graph_vectors` is a tautology — this gate is "
+                f"UNVERIFIABLE, not verified; the record arm's cohort is asserted "
+                f"by the id-scoped guard instead"
+            ),
+            "record_vectors": getattr(verdict, "record_vectors", None),
+            "graph_vectors": getattr(verdict, "graph_vectors", denominator),
+        }
     if not getattr(verdict, "verified", False):
         raise Refused(
             "coverage_unverified",
@@ -1298,7 +1322,24 @@ def run_measurement(args: argparse.Namespace) -> int:
     graph_name = args.graph or f"claimdense_{os.getpid()}"
     sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
     proj = sdk._get_proj()
-    written = _seed_graph(proj, population)
+    # ⛔ THE WRITE IS A STORE OPERATION TOO, AND IT FAILS FIRST ON A DEAD STORE
+    # (`#13745` review round 13). Guarding the prefix READ but not the seed left
+    # the realistic case — a graph that will not answer at all — still producing
+    # exit 1, a traceback and no artifact, because `main()` catches only
+    # `Refused`. The read guard covers a store that accepts writes and refuses
+    # reads; this one covers a store that is simply down.
+    try:
+        written = _seed_graph(proj, population)
+    except Refused:
+        raise
+    except Exception as exc:
+        raise Refused(
+            "graph_unwritable",
+            f"the population could not be written to the graph "
+            f"({exc.__class__.__name__}: {exc}) — no arm can be measured against a "
+            f"store that will not hold the cohort, so this run publishes no artifact "
+            f"rather than a result about a graph that was never seeded",
+        ) from exc
 
     # ⛔ THE PREFIX COUNT IS A READ TOO, AND AN UNREADABLE GRAPH MUST BE A NAMED
     # REFUSAL, NOT A TRACEBACK (`#13745` review round 12). This count is the
@@ -1365,7 +1406,8 @@ def run_measurement(args: argparse.Namespace) -> int:
     if record_blocked is None:
         try:
             coverage = require_coverage(
-                record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
+                record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn),
+                denominator=graph_vectors,
             )
             require_record_measured(coverage["record_vectors"])
             # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed
