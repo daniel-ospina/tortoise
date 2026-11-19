@@ -976,6 +976,15 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
             include_terminal=False,
             _record_reads=False,
             _valid_time_rerank=False,
+            # ⛔ AND THE PAGE RE-PICK, for the SAME reason this file opts out of
+            # the valid-time rerank: what this instrument measures is the ORDER
+            # (`rank_of`) at a fixed `limit`, so a lever that re-picks which rows
+            # survive that limit would make every figure here a composition of
+            # the two legs AND the rerank, undisclosed. Both arms opt out, so
+            # the comparison stays about the leg — `tests/test_rerank_pool.py`'s
+            # census requires that opt-out from every diagnostic that prints an
+            # order, as the `docs/runbook` / `docs/evidence` probes already do.
+            _rerank_candidates=False,
             leg_trace=trace,
         )
     from tortoise import embeddings
@@ -992,6 +1001,7 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
             include_terminal=False,
             _record_reads=False,
             _valid_time_rerank=False,
+            _rerank_candidates=False,   # see the lexical arm's note above
             leg_trace=trace,
         )
     finally:
