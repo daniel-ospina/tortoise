@@ -408,12 +408,10 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     accepted — it cannot be told apart from an accident, and refusing it costs a refactor
     rather than a strip.
     """
-    import ast
-
     wanted = set(entity_types)
     for sub in _reachable_ifs(node):
-        if isinstance(sub.test, ast.Constant):
-            continue                          # `if False:` — dead, decides nothing
+        if _statically_falsy(sub.test):
+            continue                          # `if False:` / `if not True:` — dead
         if not _asks_about(sub.test, wanted):
             continue
         # ⛔ THE GUARDED BODY MUST **STORE**, NOT MENTION. An `if` that asks and then logs
@@ -457,9 +455,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         #        STOP mirroring, so it must REMOVE the property. Counting a STORE here is
         #        the polarity inversion; refusing the removal shut the gate on the dict
         #        writer whose only write-stop IS this shape.
-        if polarity > 0 and any(
-                _stores_embedding(statement) or _returns_a_write(statement)
-                for statement in sub.body):
+        if polarity > 0 and any(_stores_embedding(statement) for statement in sub.body):
             return True                      # the mirror arm: writing here is correct
         if polarity < 0 and any(_removes_embedding(statement) for statement in sub.body):
             return True
@@ -488,12 +484,20 @@ def _is_write_stop_exit(statement) -> bool:
     return False
 
 
-def _returns_a_write(statement) -> bool:
-    """`return self._write(ev)` — a write on the arm it sits in, i.e. the mirror arm."""
+def _statically_falsy(test) -> bool:
+    """Is this test a constant that is False — `False`, `0`, or `not True`?
+
+    ⛔ ONE HELPER FOR BOTH ARMS. The `if` arm recognised only `ast.Constant`, so `if not
+    True:` kept a dead guard (fail-open, mild) while `if False:` pruned it, and the `while`
+    arm had its own copy — two spellings that could disagree. `not True` is `False` to the
+    compiler and to a reader.
+    """
     import ast
 
-    return (isinstance(statement, ast.Return) and statement.value is not None
-            and any(isinstance(node, ast.Call) for node in _own_walk(statement.value)))
+    if isinstance(test, ast.Constant):
+        return not test.value
+    return (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Constant) and bool(test.operand.value))
 
 
 def _own_walk(node):
@@ -625,9 +629,10 @@ def _reachable_ifs(node):
             continue                      # likewise: a class body does not run here
         if isinstance(current, ast.If):
             yield current
-            if isinstance(current.test, ast.Constant):
-                # Only the taken branch can run; `if 0:` still runs `orelse`.
-                stack.extend(current.orelse if not current.test.value else current.body)
+            if _statically_falsy(current.test):
+                stack.extend(current.orelse)      # `if False:` / `if not True:` — only else runs
+            elif isinstance(current.test, ast.Constant):
+                stack.extend(current.body)        # a TRUTHY literal: only the body runs
             else:
                 stack.extend(current.body)
                 stack.extend(current.orelse)
@@ -637,7 +642,7 @@ def _reachable_ifs(node):
             # `while True:` like `while False:` and dropped a reachable guard — the
             # fail-closed direction, but a state the docstring did not name.
             test = current.test if isinstance(current, ast.While) else current.iter
-            if isinstance(test, ast.Constant) and not test.value:
+            if _statically_falsy(test):
                 continue                  # `while False:` / `for x in []` never runs
             for field in ("body", "orelse"):
                 stack.extend(getattr(current, field, []) or [])
@@ -649,6 +654,15 @@ def _reachable_ifs(node):
                 stack.extend(handler.body)
             continue
         if isinstance(current, ast.IfExp):
+            continue
+        if isinstance(current, ast.Match):
+            # ⛔ `ast.match_case` IS NOT AN `ast.stmt`, so the generic arm dropped every case
+            # body — a guard inside a `match` was invisible, and a real write-stop was
+            # refused. A case guard is code only when it is not a constant.
+            for case in current.cases:
+                stack.extend(case.body)
+                if case.guard is not None and not _statically_falsy(case.guard):
+                    stack.append(case.guard)
             continue
         stack.extend(child for child in ast.iter_child_nodes(current)
                      if isinstance(child, ast.stmt))
@@ -730,6 +744,10 @@ def _stores_embedding(node) -> bool:
             # says.
             if _sets_embedding_clause(value):
                 return True               # `q = "SET n.embedding = $e"`
+            if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
+                    and _dict_stores_the_vector(sub.value):
+                # `props |= {"embedding": vec}` — a merge that places the vector.
+                return True
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
             if not all(_names_embedding(target) for target in targets):
                 continue
@@ -746,6 +764,23 @@ def _stores_embedding(node) -> bool:
                     if keyword.arg == EMBEDDING_PROPERTY \
                             and not isinstance(keyword.value, ast.Constant):
                         return True
+                # ⛔ THE MAPPING FORM IS THE SAME STORE: `props.update({"embedding": vec})`.
+                # Accepting only the keyword spelling refused a dict writer that used the
+                # other one — with a message claiming it had no gate `if` at all.
+                for argument in sub.args:
+                    if isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument):
+                        return True
+    return False
+
+
+def _dict_stores_the_vector(node) -> bool:
+    """Does this dict LITERAL set the vector to a non-constant value?"""
+    import ast
+
+    for key, value in zip(node.keys, node.values, strict=False):
+        if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
+                and not isinstance(value, ast.Constant)):
+            return True
     return False
 
 
@@ -878,19 +913,29 @@ def _fold_consults_gate(label: str) -> tuple[bool, str]:
     if refusal:
         return False, refusal
     entity_types = tuple(parity.affected_entity_types(label))
-    # ⛔ EVERY ENTITY TYPE THE LABEL SERVES, not just one of them. `:Source` is addressed as
-    # both `document` and `source`, so a writer whose only stop asks
-    # `_derived_mirror_required("document")` leaves the `source` half writing — the same
-    # label-blindness this gate already fixed once, one level down. `_writer_consults_gate`
-    # is called once per type for that reason.
+    # ⛔ COVERAGE IS A UNION ACROSS WRITERS, NOT A CROSS-PRODUCT. `:Source` is addressed as
+    # both `document` and `source`, and its writers are SPLIT: `_upsert_document` writes only
+    # the document's vector, `_upsert_source` only the provenance source's. Requiring each to
+    # ask about both was over-strict in the one direction that matters — the only spelling
+    # that satisfied it was a `document` fold keyed on the SOURCE coverage predicate, which
+    # stops document writes the moment source coverage verifies, leaving a vector in neither
+    # store (#11395). So: every served type must be asked about by SOME writer that stores it
+    # (below), and each writer must ask about at least one of the label's types.
     ungated: list[str] = []
+    asked: set[str] = set()
     for key in writers:
         module_name, _, symbol = key.partition("::")
-        for entity_type in entity_types:
-            gated, why = _writer_consults_gate(module_name, symbol, (entity_type,))
-            if not gated:
-                ungated.append(why)
-                break
+        answered = [t for t in entity_types
+                    if _writer_consults_gate(module_name, symbol, (t,))[0]]
+        if not answered:
+            ungated.append(_writer_consults_gate(
+                module_name, symbol, entity_types)[1])
+        asked.update(answered)
+    missing = [t for t in entity_types if t not in asked]
+    if missing:
+        ungated.append(
+            f"no writer asks `{WRITE_GATE_SYMBOL}` about {', '.join(missing)}, so those "
+            "vectors are still written by an ungated fold")
     if ungated:
         return False, (
             f":{label} has {len(ungated)} writer(s) that do not ask the gate, so a strip "

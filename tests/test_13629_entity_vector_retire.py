@@ -879,6 +879,61 @@ def _upsert_object(ev):
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is False, f"a VACUOUS store opened the gate: {source!r}"
 
+    # ⛔ A `return <call>` IS NEITHER AN EXIT NOR A STORE. Counting any call as a write
+    # accepted `if gate(l): return len(vec)` followed by an unconditional store — the vector
+    # was still written on the stop arm, and the gate certified "write-stopped".
+    for source in ("""
+def _upsert_object(props, vec):
+    if _derived_mirror_required("object"):
+        return len(vec)
+    props["embedding"] = vec
+    return _write(props)
+""", """
+def _upsert_object(ev):
+    if _derived_mirror_required("object"):
+        return logger.info(ev)
+    return _write(ev)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, f"a `return <call>` opened the gate: {source!r}"
+
+    # …while the forms that really do place the vector are accepted: the mapping spellings
+    # of a dict store, and a stop inside a `match` case (an `ast.match_case` is not an
+    # `ast.stmt`, so the guard walk used to drop every case body).
+    for source in ("""
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props.update({"embedding": _encode(props)})
+    return _write(props)
+""", """
+def _upsert_object(props):
+    if _derived_mirror_required("object"):
+        props |= {"embedding": _encode(props)}
+    return _write(props)
+""", """
+def _upsert_object(props, kind):
+    match kind:
+        case "object":
+            if not _derived_mirror_required("object"):
+                props.pop("embedding", None)
+    return _write(props)
+"""):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(
+            module, "_upsert_object", ("object",))[0] is True, f"a real store was refused: {source!r}"
+
+    # …and `if not True:` is DEAD like `if False:`, so a guard inside it is not a stop.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    if not True:
+        if mirror_required("object"):
+            embedding = _encode(ev)
+    return _write(ev)
+""")
+    assert strip._writer_consults_gate(
+        module, "_upsert_object", ("object",))[0] is False, "`if not True:` was treated as live"
+
     # ⛔ THE PROPERTY NAME MUST BE EXACT ON THE STORE SIDE TOO. A substring match accepted
     # `props["embedding_model"] = current_model()` — the identity triple this repo stores
     # while KEEPING the vector — so a writer that set its identity inside the guard cleared
@@ -2017,26 +2072,45 @@ def test_an_edited_plan_cannot_acknowledge_its_own_narrowing(stores, monkeypatch
     assert strip.result_exit_code(result) == 5
 
 
-def test_a_writer_must_ask_about_EVERY_type_the_label_serves(monkeypatch, tmp_path):
-    """⛔ `:Source` is addressed as BOTH `document` and `source`. A writer whose only stop asks
-    about `document` leaves the `source` half writing, so checking one type and assuming the
-    other is how a strip half-lands on the document half of `:Source`.
+def test_every_type_a_label_serves_must_be_asked_about_BY_SOME_WRITER(monkeypatch, tmp_path):
+    """⛔ `:Source` is addressed as BOTH `document` and `source`, and its writers are SPLIT.
+
+    A single document-only stop leaves the `source` half writing, so coverage is required per
+    TYPE — but as a UNION across writers, not a cross-product: `_upsert_document` writes only
+    the document's vector and `_upsert_source` only the provenance source's, so demanding that
+    EACH ask about BOTH would only be satisfied by a document fold keyed on the SOURCE
+    predicate (stopping document writes as soon as source coverage verifies — a vector in
+    neither store, #11395). Both directions are asserted below.
     """
-    module = _fake_writer_module(tmp_path, monkeypatch, """
+    document_only = _fake_writer_module(tmp_path, monkeypatch, """
 def _upsert_document(ev):
     if not _derived_mirror_required("document"):
         props.pop("embedding", None)
     return _write(props)
 """)
     monkeypatch.setattr(strip, "_writers_for",
-                        lambda label: ((f"{module}::_upsert_document",), None))
-    gated, _why = strip._fold_consults_gate("Source")
+                        lambda label: ((f"{document_only}::_upsert_document",), None))
+    gated, why = strip._fold_consults_gate("Source")
     assert gated is False, "a document-only stop cleared the `source` half of :Source"
-    # The per-type loop is what refuses it: the SAME function answers gated for `document`.
-    assert strip._writer_consults_gate(
-        module, "_upsert_document", ("document",))[0] is True
-    assert strip._writer_consults_gate(
-        module, "_upsert_document", ("source",))[0] is False
+    assert "source" in why, "the refusal must name the type nobody asks about"
+
+    # …and the NATURAL split population opens the gate: one writer per type.
+    split = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_document(ev):
+    if not _derived_mirror_required("document"):
+        props.pop("embedding", None)
+    return _write(props)
+
+
+def _upsert_source(ev):
+    if not _derived_mirror_required("source"):
+        props.pop("embedding", None)
+    return _write(props)
+""", name="fake_writer_13629_split")
+    monkeypatch.setattr(strip, "_writers_for", lambda label: (
+        (f"{split}::_upsert_document", f"{split}::_upsert_source"), None))
+    gated, why = strip._fold_consults_gate("Source")
+    assert gated is True, f"the natural split population was refused: {why}"
 
 
 def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):
