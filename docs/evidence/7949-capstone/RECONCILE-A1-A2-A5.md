@@ -795,7 +795,18 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # because this branch's own added rows move the scan
                                                           # line — so it was RE-DERIVED (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`, measured
-                                                          # at the merge, `:15228` on the resolved tree) rather than side-picked.
+                                                          # at the merge, `:15425` on the resolved tree) rather than side-picked.
+                                                          # ⛔ AND THE SAME RULE APPLIES TO THIS NUMBER ITSELF (#13845
+                                                          # review, cycle 4 P2): the value this line carried, `15228`,
+                                                          # did not resolve to `_self_scan_line` on ANY head this tree
+                                                          # can read — `origin/main` reads `15417`
+                                                          # (`git show origin/main:tests/test_7949_capstone_measure.py
+                                                          # | grep -n '_self_scan_line = next('`), and this head reads
+                                                          # `15425` — so it was already stale when the block was written,
+                                                          # and the row added above it has since moved it again. A cite
+                                                          # INSIDE the block that teaches re-derivation was the one place
+                                                          # the rule was not applied; it is now re-derived BY CONTENT
+                                                          # (`grep -n '_self_scan_line = next('`), not by a delta.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the

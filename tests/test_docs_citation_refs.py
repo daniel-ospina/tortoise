@@ -504,7 +504,9 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
-def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
+def _typed_answers_to_tortoise_cmd(
+        doc: str, cmd: str, *, with_spans: bool = False
+) -> list[tuple[str, bool]] | list[tuple[str, bool, int, int]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
 
     The SHAPE is what is matched — the command, then an ANSWER FORM immediately after it
@@ -552,7 +554,6 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     numerals `one`…`ten` and `single` are therefore IN the class, and the `one`-word
     mutation is pinned as a witness below.
     """
-    answers: list[tuple[str, bool]] = []
     # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
     # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
     # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
@@ -567,8 +568,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
     # rather than implying the class is closed over every way a document can point at the
     # command. The residual is a sentence that refers to the measurement without naming it
-    # at all, which is why the live document carries a HEAD LABEL on each such sentence and
-    # that is checked by reading, not by an assertion.
+    # at all; the caller can only test whether such a sentence carries a REVISION, which is
+    # what `_revision_labelled` does (#13845 review, P2 — see its docstring for what it can
+    # and cannot establish).
+    #
+    # ⛔ `with_spans` (#13845 review, P1/P2): a caller that wants to know WHICH head a claim
+    # is about needs the match OFFSETS, because the label is positional. Returning only
+    # `(window, claims_empty)` forced the head-label test to be applied to a STRING, and a
+    # string that occurs twice is graded twice the same way — measured: an unlabelled false
+    # claim was rescued by a labelled twin elsewhere in the document.
+    _spans: list[tuple[str, bool, int, int]] = []
     for match in re.finditer(
             r"`?" + re.escape(cmd)
             + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
@@ -659,7 +668,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 continue
             if negated:
                 claims_empty = not claims_empty
-        answers.append((window, claims_empty))
+        _spans.append((window, claims_empty, match.start(), match.end()))
+    if with_spans:
+        return _spans
+    answers: list[tuple[str, bool]] = []
+    answers.extend((_w, _e) for _w, _e, _s, _t in _spans)
     return answers
 
 
@@ -838,6 +851,51 @@ def test_an_unmeasurable_tortoise_set_is_not_rendered_as_empty():
     assert "128" in str(_raised.value), (
         "the unmeasurable error does not name the exit code, so the reason a reader sees "
         "cannot tell `origin/main` is absent from a failed read of any other kind")
+
+
+_HEAD_LABEL = re.compile(r"\b[0-9a-f]{7,40}\b")
+# Between a revision and the command it labels there may be only the command's own tail
+# (`origin/main...`, a rev-range's `...`, backticks, whitespace). ⛔ A sentence terminator
+# followed by whitespace is NOT that tail: `... was read at `2584a86ec1`. `-- tortoise/`
+# returns ONE path` is an UNLABELLED claim that merely FOLLOWS a revision, and the first cut
+# of this rule rescued it — a bypass one layer in.
+_TAIL_OK = re.compile(r"[\s`*_/\-.]*")
+
+
+def _revision_labelled(text: str, anchor_start: int, anchor_end: int) -> bool:
+    """True when THIS occurrence carries a REVISION label after it, or immediately before it.
+
+    ⛔ A head label is a revision (`[0-9a-f]{7,40}`), never a deictic: `at this head` points at
+    the head under test, so it cannot excuse a claim about that same head — accepting it made
+    the guard pass the commonest present-tense spelling in the document it grades (#13845
+    review, P1). ⛔ And it is POSITIONAL per occurrence, not per needle: a claim that appears
+    twice, once labelled and once in the present tense, must still red (#13845 review, P2).
+
+    DECLARED RESIDUAL: the revision is not resolved through git, so a FABRICATED sha would also
+    excuse a claim. Bounded (it must appear in the claim's own clause, so it cannot be silent)
+    and tracked on #13818, not pretended away.
+    """
+    post = re.split(r"[.;|)\n]", text[anchor_end:anchor_end + 80])[0]
+    if _HEAD_LABEL.search(post):
+        return True
+    pre = text[max(0, anchor_start - 80):anchor_start]
+    for hit in _HEAD_LABEL.finditer(pre):
+        tail = pre[hit.end():]
+        # ⛔ A NEWLINE IS A CLAUSE BOUNDARY TOO (#13845 review, P2 — measured by this
+        # function's own synthetic row): `... is EMPTY at `2584a86ec1`` on one line and an
+        # UNLABELLED claim on the next was rescued, because the tail `\`` + newline satisfied
+        # the tail allow-list. Markdown prose in this document is one line per clause, so a
+        # label on a DIFFERENT line is a label for a different claim.
+        if _TAIL_OK.fullmatch(tail) and "\n" not in tail and not re.search(r"[.;:]\s", tail):
+            return True
+    return False
+
+
+def _revision_labelled_pair(text: str, needle: str) -> bool:
+    """True only when EVERY occurrence of `needle` in `text` carries its own revision label."""
+    hits = list(re.finditer(re.escape(needle), text))
+    return bool(hits) and all(
+        _revision_labelled(text, h.start(), h.end()) for h in hits)
 
 
 def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
@@ -1060,57 +1118,81 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "(#13795 review, finding 1)")
     _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
 
-    def _head_labelled_at(needle: str) -> bool:
-        """True when a HEAD LABEL sits within 120 characters of `needle` (#13845 review, P2).
+    # ⛔ A HEAD LABEL IS A REVISION, NOT A DEICTIC (#13845 review, P1) — and it must belong to
+    # the OCCURRENCE under test, not merely to the document (#13845 review, P2). Both rules are
+    # positional, and both were measured wrong before they were right:
+    #
+    #   * the first cut accepted `at this head` as a label, so the COMMONEST present-tense
+    #     spelling in this very document rescued itself — a silent fail-open on the shape the
+    #     arm exists to catch (measured: a present-tense `... prints NOTHING at this head` was
+    #     rescued). Only a REVISION (`[0-9a-f]{7,40}`) is a head label now; a deictic points at
+    #     the head under test, which is precisely what cannot excuse a claim.
+    #   * the first cut graded the NEEDLE, not the occurrence, so a claim present twice — once
+    #     with a sha, once in the present tense — passed on its labelled twin (measured).
+    #     `_revision_labelled_pair` requires EVERY occurrence to carry its OWN label.
+    #
+    # DECLARED RESIDUAL: nothing here checks that the revision is REAL, or that the claim was
+    # true at it — the arm is deliberately git-free (see this module's docstring). So an agent
+    # could attach a FABRICATED sha to a false claim and escape grading. That is a known gap,
+    # not a covered case: it is bounded to claims whose own clause names a revision, so it
+    # cannot be done silently, and closing it means resolving the revision through git, which
+    # is the separate arm tracked on #13818.
 
-        ⛔ The literal arm below is a substring test, so without this it pins the SIGN of a
-        head-bound measurement: a TRUE claim that names its head (`... was EMPTY at
-        `2584a86ec1``) was refused because THIS head's set is non-empty, which is the exact
-        false block the docstring says the class does not commit. A claim carrying a head
-        label is a claim about THAT head and this head's measurement cannot refute it —
-        measured: the live document's own head-labelled sentence was refused before this
-        guard and passes after it; the same sentence with its head label removed still
-        reds. RESIDUAL, stated: a claim labelled with THE VERY HEAD under test would also
-        be skipped, because reading "is this label this head" would make the arm a git
-        client — the live document labels history with other heads, and a present-tense
-        claim carries no label at all, which is the shape this arm exists to catch.
-        """
-        for _m in re.finditer(re.escape(needle), doc):
-            # ⛔ THE LABEL MUST BELONG TO THE CLAIM, not merely sit nearby — measured twice:
-            # a 120-character window found SOME sha in the surrounding prose and let an
-            # UNLABELLED claim through (the mutation below stayed green, a bypass), and a
-            # wider clause window leaked the preceding clause's `NOT at this head:` into the
-            # pre-position (same bypass, one layer in). The rule is now positional: a label
-            # AFTER the claim, in the rest of its sentence, or a label BEFORE it that nothing
-            # asserts over (no `:`, `**` or em dash between the label and the claim).
-            _label = r"\b[0-9a-f]{7,40}\b|at (?:that|this|the) head\b"
-            _post = re.split(r"[.;|)]", doc[_m.end():_m.end() + 60])[0]
-            if re.search(_label, _post):
-                return True
-            _pre = doc[max(0, _m.start() - 30):_m.start()]
-            # ⛔ ANY clean label counts, not the FIRST one — measured: `re.search` took the
-            # earliest match, which was the PREVIOUS clause's `NOT at this head:`, and its
-            # tail was an assertion boundary, so a genuinely head-labelled claim was refused
-            # (a false block, the one direction this guard must never take).
-            for _hit in re.finditer(_label, _pre):
-                if not re.search(r"[:*\u2014]", _pre[_hit.end():]):
-                    return True
-        return False
+    # ⛔ THE HELPERS ARE MODULE-LEVEL AND UNIT-PINNED (#13845 review, P2): at a head where none
+    # of the literal claims below is present they are never called, so a claim about what they
+    # did to the live document is unreproducible. Their assertions are synthetic text instead.
+    for _synthetic, _needle, _want, _why in (
+            ("the `tortoise/` set above is EMPTY at `2584a86ec1`", "the `tortoise/`", True,
+             "a claim whose OWN sentence names a revision must be excused as head-bound — the "
+             "false block this helper exists to remove (#13845 review, P2)"),
+            ("git diff --name-only e61694255a...2584a86ec1 -- tortoise/ prints FIVE paths",
+             "-- tortoise/", True,
+             "a rev-range immediately before the command must excuse the answer: a claim about "
+             "THAT range is not refuted by this head (#13845 review, P2)"),
+            ("`-- tortoise/` returns ONE path at this head", "-- tortoise/", False,
+             "`at this head` is a DEICTIC pointing at the head under test, so it must NOT "
+             "excuse a claim — accepting it was a silent fail-open on the commonest "
+             "present-tense spelling in this document (#13845 review, P1)"),
+            ("was read at `2584a86ec1`. `-- tortoise/` returns ONE path", "-- tortoise/", False,
+             "a revision in a PREVIOUS sentence is not this claim's label — the first cut "
+             "rescued it, the same bypass one layer in (#13845 review, P2)"),
+            ("`-- tortoise/` returns ONE path at `2584a86ec1`\n`-- tortoise/` returns nothing",
+             "-- tortoise/", False,
+             "one unlabelled occurrence reds the pair even when another occurrence is "
+             "labelled — grading the NEEDLE instead of the OCCURRENCE let a false claim "
+             "pass on its labelled twin (#13845 review, P2)"),
+    ):
+        assert _revision_labelled_pair(_synthetic, _needle) is _want, _why
 
+
+    # ⛔ AND THE PARAPHRASE, IN BOTH DIRECTIONS AND BOTH SPELLINGS (#13845 review, P2): the
+    # two literal forms that used to sit in the claim tuple above named ONE paraphrase in ONE
+    # direction (`the `tortoise/` set above is EMPTY`), while the live document carried the
+    # OTHER (`… is this branch's own comment/docstring-only edits`) and nothing graded it.
+    # Enumerating paraphrases is the arm class that grows one literal per review cycle, so the
+    # SHAPE is read instead: the set named, then `is <answer>`, classified by the same
+    # emptiness/membership vocabulary the command arm uses. One owner for both directions.
+    for _set_match in re.finditer(
+            r"the `tortoise/` set above is\s+\**`?(?P<ans>[^.;|)\n`]*)", doc):
+        _ans = _set_match.group("ans").strip().lower()
+        if re.match(r"(?:empty\b|nothing\b|none\b|zero\b|blank\b|no\b)", _ans):
+            _paraphrase_is_empty = True
+        elif _ans:
+            _paraphrase_is_empty = False
+        else:
+            continue
+        assert _paraphrase_is_empty != bool(_tortoise_set) or _revision_labelled(
+            doc, _set_match.start(), _set_match.end()), (
+            f"05-verify.md asserts the `tortoise/` set {_set_match.group('ans').strip()!r} — "
+            f"the same answer as `{_tortoise_cmd}`, which prints {_measured} at this head, in "
+            "the direction the measurement refutes, and carrying no revision label of its "
+            "own (#13845 review, cycle 4 P2: the literal list named one paraphrase in one "
+            "direction while the document carried the other, ungraded)")
     for _claim, _claim_is_empty in (
             *((_c, True) for _c in (
                 f"neither is `{_tortoise_cmd}`",
                 f"{_tortoise_cmd}` -> empty",
                 f"{_tortoise_cmd}` prints NOTHING",
-                # ⛔ AND THE PARAPHRASE THAT NAMES NO VERB (#13845 review, P2) — measured:
-                # the three command-shaped spellings above were all the arm read, and the
-                # live document stated the same refuted direction as "the `tortoise/` set
-                # above is EMPTY", which no entry matches: the shape detector needs an
-                # answer form immediately after the command, so a sentence that refers to
-                # the set by NAME rather than re-running the command is invisible to it.
-                # Mutation-pinned: restoring that spelling in a doc whose set is non-empty
-                # reds HERE and nowhere else.
-                "the `tortoise/` set above is EMPTY",
                 # …and the two the SECOND review cycle measured, both abbreviations of
                 # the same command: one names it by pronoun ("the command this clause
                 # prescribes"), the other shortens it to `` `-- tortoise/` ``. Pinned as
@@ -1124,7 +1206,6 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                 f"{_tortoise_cmd}` returns exactly those two",
                 f"{_tortoise_cmd}` prints the two COMMENT-ONLY modules",
                 f"{_tortoise_cmd}` prints exactly `tortoise/activation_scorecard.py`",
-                "the `tortoise/` set above is the two COMMENT-ONLY modules",
                 "which two `tortoise/` paths this diff carries",
             )),
     ):
@@ -1136,7 +1217,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         # AND a claim carrying a HEAD LABEL is not refuted by THIS head, which the sign-only
         # test cannot see (#13845 review, P2).
         _consistent = _claim_is_empty != bool(_tortoise_set)
-        assert _consistent or _claim not in doc or _head_labelled_at(_claim), (
+        assert _consistent or _claim not in doc or _revision_labelled_pair(doc, _claim), (
             f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
             f"direction the tree refutes at this head, where that command prints "
             f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
@@ -1153,14 +1234,25 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # such claims (`05-verify.md:102` naming no pathspec, `:134` naming
     # `-- tests/test_7949_capstone_measure.py`) were false at that head and invisible here.
     # The repair is a general arm deriving the pathspec from the claim, not N more literals.
-    for _answer, _claims_empty in (
-            *_typed_answers_to_tortoise_cmd(doc, _tortoise_cmd),
-            *_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")):
-        assert _claims_empty != bool(_tortoise_set), (
-            f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
-            f"prints {_measured} at this head — a typed present-tense ANSWER to a head-bound "
-            "measurement, in the direction the measurement refutes (#13728 review, "
-            "finding 4)")
+    #
+    # ⛔ AND THE SPANS ARE GRADED, NOT THE STRINGS (#13845 review, P1): the shape loop used to
+    # abort on its first contradiction and consult no head label at all, so a TRUE claim that
+    # named its rev-range (`git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints
+    # FIVE paths) was refused — the false block this helper exists to remove, one arm over.
+    # Each match now carries its own offsets and is excused only when THAT occurrence is
+    # labelled. The filter runs over EVERY match instead of short-circuiting, so the error
+    # names all of them rather than the first in document order.
+    _refuted: list[str] = []
+    for _answer, _claims_empty, _start, _end in (
+            *_typed_answers_to_tortoise_cmd(doc, _tortoise_cmd, with_spans=True),
+            *_typed_answers_to_tortoise_cmd(doc, "-- tortoise/", with_spans=True)):
+        if _claims_empty == bool(_tortoise_set) and not _revision_labelled(doc, _start, _end):
+            _refuted.append(_answer)
+    assert not _refuted, (
+        f"05-verify.md types {_refuted} as the answer to `{_tortoise_cmd}`, which prints "
+        f"{_measured} at this head — a typed present-tense ANSWER to a head-bound "
+        "measurement, in the direction the measurement refutes, and carrying no revision "
+        "label of its own (#13728 review, finding 4; #13845 review, cycle 4 P1/P2)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
