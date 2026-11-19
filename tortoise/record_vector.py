@@ -906,11 +906,17 @@ def coverage_verified(label: str, scope: _Scope | tuple[str, str] | None = None,
     """Is this label's coverage VERIFIED for ``scope``? Read-only, CACHE-ONLY.
 
     ⛔ **IT IS A VIEW, NOT A DECISION — do not decide anything from it.** It answers only
-    "was a verified verdict already taken for this (dsn, tenant, label)", and it knows
-    nothing about the four conservative gates :func:`mirror_verdict` applies
-    (`COVERAGE_GATED_LABELS`, :func:`cutover_armed`, a resolvable record leg, a resolvable
-    tenant). A caller that reads it as *the* predicate would, for instance, treat a
-    verified verdict as actionable on a deployment whose arm has since been rolled back.
+    "was a verified verdict already taken for this (dsn, tenant, label)", and it applies
+    NONE of :func:`mirror_verdict`'s two DECISION gates: `COVERAGE_GATED_LABELS` (does the
+    record even serve this label?) and :func:`cutover_armed` (is the arm still on?). Those
+    are the two that can make a cached ``verified`` verdict survive into a permission it no
+    longer licenses — a rolled-back deployment, or a label nobody gates — so a caller that
+    reads this as *the* predicate would act on exactly those two stale states. It DOES
+    apply the tenant and record-leg resolution, conservatively
+    (:func:`_declared_scope` returning ``None``, or an unresolvable DSN inside
+    :func:`_coverage_key`, both answer ``False``), so it never answers ``True`` for a
+    tenant or a record it could not scope.
+
     That is why the WRITE path asks :func:`mirror_required` — which is
     :func:`mirror_verdict`'s boolean — and why it is `mirror_verdict`'s cache-only arm that
     repeats this function's two-line body rather than calling it: the arm needs the

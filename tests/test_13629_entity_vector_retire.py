@@ -1969,6 +1969,113 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
     assert "has not proved" not in blocked, blocked
 
 
+# ── #13796: the CLIs must hand the gate THEIR OWN measurement context ───────
+
+
+def _cli_harness(monkeypatch, graph):
+    """Point both CLIs at ``graph`` through a projection DOUBLE that can also count.
+
+    ⛔ THE DOUBLE EXPOSES `_label_vector_count`, WHICH IS THE POINT. Every other
+    `main`-level test's `_Proj` carries only `g`, so `graph_vector_population(proj)`
+    answers `None` there and a reverted CLI wiring would look identical — which is how
+    the central hop of this fix came to have no falsifier at all (found in review of
+    this change, by two independent reviewers, measured: deleting
+    `graph_population=population` from `main` left the suite at 105 passed).
+    """
+    class _Proj(_Projection):
+        def __init__(self, target):
+            super().__init__(target)
+            self.g = target
+
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj(graph)),
+                                       "__init__": lambda self, *a, **k: None}))
+    monkeypatch.setattr(parity.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(parity.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(parity.census_mod, "empty_graph_target_flag", lambda *a, **k: None)
+    monkeypatch.setattr(strip, "_fold_consults_gate",
+                        lambda label: (True, f"every :{label} writer calls the gate"))
+
+
+def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
+        stores, monkeypatch, capsys):
+    """⛔ #13796's CENTRAL HOP, pinned from the CLI: a reverted `main` must RED.
+
+    The plan tests pass `graph_population=` themselves, so they pin `build_plan` and not
+    the hop that supplies it. Here `main` is driven end-to-end with a covering record and
+    a projection double that CAN count: if `main` stops handing its own population and
+    tenant to the gate, the row falls back to "this process has taken no verdict" and the
+    measured sentence disappears from the printed plan.
+
+    Mutation (measured): delete `graph_population=population` from `main`'s `build_plan`
+    call and this test reds on the absent sentence while the rest of the file stays green.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    _cli_harness(monkeypatch, graph)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--label", "Object"]) == 0
+    out = capsys.readouterr().out
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+        "the preview plan did not carry the measurement — `main` stopped handing the gate "
+        f"its own projection/tenant, and #13796 is back ({out})")
+    assert "has not proved" not in out, out
+
+
+def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
+        stores, monkeypatch):
+    """The same hop on the CENSUS tool, and it is a separate call site.
+
+    ⛔ `_write_gate` IS A FUNCTION OF THE RUN'S PROJECTION, TENANT AND DSN SINCE #13796, and
+    a census main that calls it with no arguments restores the defect the pair exists to
+    fix — for the report an operator reads FIRST. Measured: reverting
+    `_write_gate(proj, org_id=…, graph_id=…, record_dsn=…)` to `_write_gate()` left
+    `test_13629 + test_13685` at 144 passed, 2 skipped. The probe `census()` receives is
+    captured here and asked directly, so the argument expression is what is pinned.
+
+    ⛔ `ready` IS STILL FALSE HERE, AND THAT IS NOT A REGRESSION: the census's gate is the
+    stripper's, so it runs BOTH halves — the coverage half clears (below) and `#13647`'s
+    writer check refuses `:Object` because its writers are ungated on this tree (`#13806`).
+    The discriminator is therefore the MEASUREMENT, not the verdict: an unwired gate answers
+    "not proved" and carries no counts; a wired one carries them. (The two module objects
+    are also why this test cannot simply force the writer half closed the way the sibling
+    does — the census resolves the stripper by its top-level name.)
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    _cli_harness(monkeypatch, graph)
+
+    captured: dict = {}
+    real_census = parity.census
+
+    def _spy(**kwargs):
+        captured["strip_readiness"] = kwargs["strip_readiness"]
+        return real_census(**kwargs)
+
+    monkeypatch.setattr(parity, "census", _spy)
+
+    assert parity.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                        "--record-dsn", "postgresql://localhost/record",
+                        "--org-id", "o", "--graph-id", "g",
+                        "--label", "Object"]) == 0
+    probe = captured["strip_readiness"]
+    _ready, reason = probe("Object")
+    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+        "the census's gate was not given the run's projection/tenant, so it answers "
+        f"\"not proved\" for a covered label (#13796's symptom): {reason}")
+    assert "has not proved" not in reason, reason
+
+
 # ── preview is the default and writes nothing ───────────────────────────────
 
 
