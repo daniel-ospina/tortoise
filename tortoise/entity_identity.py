@@ -407,11 +407,18 @@ def _collapse_resolved_holders(g, label: str, holder_ids, *,
 
     ``drop_retired_survivors`` (#12244) — whether the LIVE filter below runs.
     It exists for the WRITE path: a create must not MERGE onto a retired
-    incarnation (round 9). An ATTACHMENT site is STATUS-BLIND by its own
-    recorded disposition (``near_dup_merge.apply_merge_union``: "a terminal-only
-    holder IS linked"), so it passes ``False`` and takes the hop without the
-    filter — via :func:`attachment_target_ids`, which is the only sanctioned
-    caller. ⛔ The filter is ALL-OR-NOTHING for the call and not per entity: it
+    incarnation (round 9). The three ``aboutObject`` attachment sites that pass
+    ``False`` are STATUS-BLIND by their own recorded disposition
+    (``near_dup_merge.apply_merge_union``: "a terminal-only holder IS linked"),
+    so they take the hop without the filter — via
+    :func:`attachment_target_ids`, which is the only sanctioned caller.
+    ⛔ This is PER CALLER, not per "attachment site" (#13724 review P2): the Event
+    exact arm (``hosted_api``'s ``_exact_rows`` anchor) is ALSO an attachment
+    site and keeps the default ``True`` on purpose — its own DECLARED DIVERGENCE
+    note states it is live-only because the resolver it narrows is. Reading this
+    paragraph as "attachment ⇒ ``False``" and "correcting" that arm would attach
+    a terminal-only survivor the folded arm deliberately refuses.
+    ⛔ The filter is ALL-OR-NOTHING for the call and not per entity: it
     drops every collapsed id that is not live once ANY holder hopped, so a
     status-blind caller that used it would silently lose an unrelated terminal
     holder it is supposed to link. That is why the flag exists rather than the
@@ -455,6 +462,18 @@ def _collapse_resolved_holders(g, label: str, holder_ids, *,
         # #12244 review P1: a pointer whose target no node of THIS label holds
         # must not DELETE the attachment — see this function's docstring. Only
         # the attachment path is here; the create path keeps dropping (round 9).
+        #
+        # ⚠️ RESIDUAL, SURVIVOR side (#13724 review P2): the probe compares the
+        # hop's answer against `n.id`, and `follow_resolved_from` answers
+        # `str(target)` — so a survivor whose STORED id is a legacy NON-STRING is
+        # read as ABSENT here, the pair falls back to the retired CARRIER, and the
+        # edge lands on the carrier and not on the survivor (the #12244 shape, for
+        # that one row). Narrow precondition (a legacy int-id survivor), and the
+        # fix is not local: it needs the id-normalisation decision — whether an id
+        # IS a string with `int` a legacy rendering — which this attachment fix
+        # deliberately does not make. The mirror case (a non-string HOLDER) is
+        # stated at the hosted anchor, which is the only site that can address such
+        # a row at all (`hosted_api`'s `_raw_addressable` note).
         ids = [str(res) for _holder, res in pairs if res]
         if ids:
             present = {str(row[0]) for row in g.query(

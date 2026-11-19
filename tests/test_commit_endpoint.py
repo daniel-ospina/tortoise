@@ -5856,6 +5856,61 @@ class TestThe12244TheHostedAnchorCollapsesAMergedPair:
             "the legacy row itself must keep its edge "
             f"(int_edges={int_edges})")
 
+    def test_an_IDLESS_legacy_row_is_ADOPTED_before_the_anchor_runs(self, client):
+        """The id-less arm has no end-to-end row HERE, and this pins why.
+
+        #13724's review asked for a row per site that reddens when an id-less
+        attachment arm is deleted. At the two local sites that row exists (`see
+        test_12047_entity_resolution.py::…::test_an_IDLESS_stub_still_gets_its_edge`).
+        At THIS anchor it cannot exist, and the reason is a property of the
+        endpoint, not of the test: a reference reaches the anchor only because it
+        is DECLARED in the payload's `entities`, and the entity step runs first —
+        measured here: the raw id-less row seeded below is gone after the commit
+        and exactly one `Object` remains in that name space, carrying a minted
+        `id`. So no id-less HOLDER is in `_holders` when the anchor runs, the arm
+        cannot fire, and the collapsed/raw arms address the adopted row.
+
+        Both halves are asserted, because the second is the one a user can lose:
+        no id-less row survives into the anchor, AND the edge is not dropped.
+        Deleting the arm therefore reddens NOTHING at this site — stated here so
+        the next reader does not hunt a pin that cannot exist (#3442's intent is
+        "no SILENT guard", not "an unreachable row must be faked"). The arm is
+        kept as defence for a graph whose row the entity step does not adopt.
+        """
+        sdk = _team_sdk()
+        try:
+            g = sdk._get_proj().g
+            g.query("CREATE (o:Object {name:'Legacy Idless', "
+                    "canonical_name:'legacy idless', status:'active'})")
+            assert g.query(
+                "MATCH (o:Object) WHERE o.id IS NULL "
+                "AND o.name = 'Legacy Idless' RETURN count(o)"
+            ).result_set == [[1]], "fixture drift: the raw stub was not minted"
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-idless",
+            entities=[{"name": "Legacy Idless", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Idless"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Object) WHERE o.name = 'Legacy Idless' "
+            "RETURN o.id, o.id IS NULL").result_set
+        assert rows and all(not r[1] for r in rows), (
+            "an id-less row survived into the about-anchor, so the id-less arm "
+            f"IS reachable here and needs its own end-to-end row: {rows}")
+        edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Legacy Idless' RETURN count(o)").result_set[0][0]
+        assert edges == 1, (
+            "the adopted row lost its `aboutObject` edge — the class #12244 "
+            f"removes (edges={edges}; rows={rows})")
+
 
 class TestThe12120HostedAboutObjectAnchor:
     """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).

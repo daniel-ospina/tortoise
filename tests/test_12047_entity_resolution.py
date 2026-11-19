@@ -2899,6 +2899,77 @@ class TestThe12244TheCaptureAnchorCollapsesAMergedPair:
         finally:
             sdk.close()
 
+    def test_an_IDLESS_stub_still_gets_its_edge(self, tmp_path, monkeypatch):
+        """The id-less arm is load-bearing at this site too, and has no other row.
+
+        `link_entity` MERGEs on `{id:…}`, so an `Object` with NO `id` cannot be
+        addressed by the collapsed answer at all; the name-based arm below the
+        loop is the only writer that can give that row an edge, over the same
+        widened space. #13724's review measured that deleting the arm reddened
+        NOTHING here (#3442: a guard with no attributable row is a finding), which
+        is the SILENT zero this PR exists to remove — a legacy id-less carrier
+        loses its `aboutObject` attribution with no warning and no skipped-link
+        record.
+
+        The row is seeded RAW (`CREATE` without an `id`) — every in-tree writer
+        now sets one — so this pins the legacy shape the arm still serves. It
+        shares the merged pair's folded key on purpose: the survivor and the
+        id-less stub take one edge each and the retired carrier takes none, which
+        is what makes this a collapse and not a wider attach.
+        """
+        import tortoise.extractor_v2 as ev2
+        from tortoise.entity_resolver import apply_entity_merge
+        from tortoise.sdk import TortoiseSDK
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        embed = {
+            "entities": [{"name": "team", "kind": "core:thing",
+                          "lifecycle": "created", "supersedes": None,
+                          "note": None}],
+            "events": [],
+            "points": [{"content": "the team ships in Q3",
+                        "pointKind": "statement",
+                        "about_entities": ["team"]}],
+            "operators": [], "chain_notes": [], "link_before_create": [],
+        }
+        payload = ev2.execute_embed(embed, {}, session_id="s-12244-idless")["payload"]
+        monkeypatch.setattr(
+            ev2, "extract_session_v2",
+            lambda *a, **k: {"payload": payload, "errors": [], "warnings": []})
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            survivor = sdk.create_object("Acme Holdings")
+            carrier = sdk.create_object("The Team")
+            apply_entity_merge(sdk, carrier["id"], survivor["id"],
+                               method="exact", similarity=1.0)
+            g = sdk._get_proj().g
+            g.query("CREATE (o:Object {name:'team', status:'live'})")
+            assert g.query(
+                "MATCH (o:Object) WHERE o.id IS NULL AND o.name = 'team' "
+                "RETURN count(o)").result_set == [[1]], (
+                "fixture drift: the raw id-less stub was not minted")
+            sdk._extract_session_v2(
+                [{"role": "user", "content": "the team ships in Q3"}],
+                "s-12244", "2026-01-01T00:00:00Z")
+            linked = {r[0] for r in g.query(
+                "MATCH (:Point)-[:aboutObject]->(o:Object) RETURN o.id"
+            ).result_set}
+            assert carrier["id"] not in linked, (
+                "the captured claim attached to the carrier the merge retired "
+                f"({carrier['id']}) — the writer resolves that name onto the "
+                "survivor")
+            assert linked == {survivor["id"], None}, (
+                "expected exactly the survivor and the id-less stub — an id-less "
+                "`Object` has no id to MERGE on, so the name-based arm is its "
+                f"only writer: {linked}")
+        finally:
+            sdk.close()
+
 
 _PIPELINE_DECL = {
     "defaultStage": "stg_contact",
