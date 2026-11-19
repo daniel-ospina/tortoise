@@ -192,6 +192,8 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -1205,6 +1207,26 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         "ledger above now polices a string the document does not contain and the ban is "
         "blind to the real command (#13807 review round 3, F2)")
 
+    # ⛔ AND THE ROW TEXT IS PINNED BY SOMETHING THE EDIT CANNOT REACH (#13807 review round
+    # 5, F2 — MEASURED). The whole-tuple pins above are each a byte-identical copy of the
+    # ledger they check, so the realistic bypass is a GLOBAL edit: `sed -i 's/all three/all
+    # THREE/'` rewrites both copies, the tuple still equals itself, the test passes — and the
+    # ledger now carries a spelling the document no longer contains, so the ban returns `[]`
+    # over the retired phrasing. Deleting a row from both copies behaves the same way. A
+    # digest is independent DATA, not a second copy of the same text: it cannot be edited by
+    # a substitution that does not also deliberately recompute it. A legitimate ledger change
+    # therefore updates the ledger, its readable tuple AND this digest — which is the point.
+    assert hashlib.sha256("\n".join(_TORTOISE_MEMBERSHIP_SPELLINGS).encode()).hexdigest() == (
+        "157672680550c5feed848cc4ade6ff96b27f762b4c91e0a08b5277aaae0280ec"), (
+        "the membership ledger's TEXT changed. If that was deliberate, recompute this digest "
+        "and the tuple above; if it was a find-and-replace across the file, it just silently "
+        "narrowed the ban (#13807 review round 5, F2)")
+    assert hashlib.sha256("\n".join(_TORTOISE_EMPTY_SPELLINGS).encode()).hexdigest() == (
+        "15aae3a6f9bfe9ec0c1b3690834ccaaa755e8fc8f4a9bedaadae5d49a56cb276"), (
+        "the emptiness ledger's TEXT changed. If that was deliberate, recompute this digest "
+        "and the tuple above; if it was a find-and-replace across the file, it just silently "
+        "narrowed the ban (#13807 review round 5, F2)")
+
     for _spelling in _TORTOISE_RETIRED_SPELLINGS:
         _injected = f"… and the earlier cut said {_spelling} about this bundle …"
         assert _spelling in _census_membership_verdicts(_injected), (
@@ -1217,12 +1239,22 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     # subprocess seam explode and require the SAME verdict.
     def _explode(*_a, **_k):
         raise AssertionError("(c-i) shelled out; it must read the document's TEXT only")
-    monkeypatch.setattr(subprocess, "run", _explode)
+    # ⛔ THE WHOLE FAMILY, NOT ONE NAME (#13807 review round 5, F3 — MEASURED). Patching only
+    # `subprocess.run` left the regression undetected when re-introduced as
+    # `subprocess.check_output`, which called the three-dot walk on every invocation and
+    # swallowed its errors while every pin in this file stayed green. The seam is "a child
+    # process", not one function, so every primitive that reaches one explodes.
+    for _seam in ("run", "check_output", "check_call", "Popen", "getoutput", "call"):
+        monkeypatch.setattr(subprocess, _seam, _explode, raising=False)
+    monkeypatch.setattr(os, "popen", _explode, raising=False)
+    monkeypatch.setattr(os, "system", _explode, raising=False)
     _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
     assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
-        "arm (c-i) stopped answering from the document's text when `subprocess.run` was "
-        "unavailable — a clone-dependent arm is unreachable at the depth-1 checkout the "
-        "gating job uses and asserts nothing there (#13807 review, F1)")
+        "arm (c-i) stopped answering from the document's text when a child-process seam "
+        "was unavailable — a clone-dependent arm is unreachable at the depth-1 checkout "
+        "the gating job uses and asserts nothing there (#13807 review, F1; the family is "
+        "patched rather than one name because `check_output` slipped past the single-name "
+        "pin, round 5 F3)")
 
     # The inverse: the COMMAND the document is supposed to keep is never itself a verdict.
     assert _census_membership_verdicts(
