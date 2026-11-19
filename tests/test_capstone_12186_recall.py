@@ -391,7 +391,7 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
         f"\"limit=15 is not a shipped window\" caveat is stale")
 
     # …and the note says so, in the terms a reader needs.
-    assert f"entity_type='object'" in note, (
+    assert "entity_type='object'" in note, (
         f"the note must state the `entity_type` the arms actually pass: {note!r}")
     assert f"limit={cap.KMAX}" in note, (
         f"the note must state the `limit` the arms actually pass: {note!r}")
@@ -431,7 +431,7 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
     door_para = " ".join(readme[
         readme.index("**First, the boundary on the door itself"):
         readme.index("**Not a production census.**")].split())
-    assert f"entity_type='object'" in door_para, (
+    assert "entity_type='object'" in door_para, (
         f"README §5 must state the `entity_type` the arms pass: {door_para!r}")
     assert f"limit={cap.KMAX}" in door_para, (
         f"README §5 must state the `limit` the arms pass ({cap.KMAX}): {door_para!r}")
@@ -1411,9 +1411,9 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
     rules = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["rules"], "rules")[1])
     _assert_mentions(
         rules,
-        [rules_pin["harness"].rsplit("/", 1)[-1].removesuffix(".py")]
-        + list(rules_pin["imported"])
-        + ["imported", "notre-implemented"],
+        [rules_pin["harness"].rsplit("/", 1)[-1].removesuffix(".py"),
+         *rules_pin["imported"],
+         "imported", "notre-implemented"],
         "§1 rules row")
 
     queries = _flat(_one_row(rows, PROVENANCE_ROW_MARKERS["queries"], "queries")[1])
