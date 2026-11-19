@@ -142,6 +142,23 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_12855_outdated_rewrite.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
     ],
+    # #12186: the capstone-measurement file is declared HERMETIC (no DB, no graph,
+    # no docker, no network, no model call) in `config/ci-surfaces.yml`, and its
+    # three sites exist to pin the `run()` ARM that answers — not to reach a
+    # database. (1) `delenv` at the door test: `run()` has four `return 3` arms, so
+    # with an ambient URI the URI arm can answer for the door arm and the test
+    # stays green over a deleted door guard (measured in its own docstring); the
+    # environment is therefore pinned EMPTY. (2)+(3) `setenv`: one `rediss://` URI
+    # to prove execution reaches `FalkorProjection.from_uri` at all (the assertion
+    # is the raised sentinel, not a message), and one `postgres://` URI for the
+    # inverse — an unsupported scheme must refuse WITH its reason, or
+    # `_uri_refusal` could return `None` unconditionally and stay decorative.
+    # Every site uses `monkeypatch`, so no lane state leaks, and none of them
+    # constructs anything: the ports are stubbed above the driver.
+    "test_capstone_12186_recall.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
     # #2944: the two embedded allow-path tests force the embedded lane so the
