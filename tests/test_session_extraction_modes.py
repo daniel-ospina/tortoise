@@ -910,7 +910,7 @@ def test_the_runbook_venice_row_states_the_lane_each_rule_holds_for(monkeypatch)
     The row this replaces said "a venice key present alongside a legacy key
     NEVER takes the capture over" as a flat statement about the product. On the
     hosted deployment — the default lane, and the one this PR newly gives the
-    key to (``deploy-hosted.yml:944``) — that is false: with three keys set the
+    key to (``deploy-hosted.yml:1203``) — that is false: with three keys set the
     pool is ``RotatingModel``, venice-first at weight 0.50. An operator sets the
     key expecting a fallback and gets ~half of session extraction served by
     venice at a different cost/quality mix.

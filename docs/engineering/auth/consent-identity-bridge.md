@@ -552,9 +552,13 @@ deployment existed — Pages bakes env at deploy time. So:
 ⚠️ **With `CONSENT_TOKEN_KEYS` set (§2.3, #10794) a rotation is NO LONGER a coordinated value swap** —
 that is the whole point of the set. The three steps below are still how a value reaches both halves;
 the `kid` set is what makes step 2 survivable, because the old key stays ACCEPTED while the new one is
-being published, and the fingerprint compares the CURRENT kid's key on each half (so a half-migrated
-deployment reads `MISMATCH` until both are moved — the reading an operator wants mid-rotation, not a
-regression). While `CONSENT_TOKEN_KEYS` is unset the old single-secret rule applies unchanged: the swap
+being published. ⛔ **The fingerprint does NOT track that window, and this paragraph used to say it did.**
+It compares the CURRENT kid's key **bytes** on each half, and `kid` is deliberately NOT in the comparison
+(`consent_token.py`, `consent-bridge.ts`), so a half-migrated deployment **CAN read `AGREE` while the
+accepted kid sets differ and nothing can complete** — §2.3's box states the fixed migration order that
+keeps such a split harmless, and the fingerprint is not the monitor for it. Read `MISMATCH` as "the
+current key bytes differ" and `AGREE` as "the current key bytes agree", nothing more. While
+`CONSENT_TOKEN_KEYS` is unset the old single-secret rule applies unchanged: the swap
 must land on both halves together and kills in-flight assertions for their ≤120 s TTL.
 
 1. **Rotate the GitHub repo secret** — `gh secret set CONSENT_TOKEN_SECRET` (prompts; or `--body "$NEW"`) — then land (or
@@ -575,9 +579,12 @@ Then run `uv run python tools/consent_key_check.py` and require `AGREE`. Both fi
 the reading can be reconciled against a dashboard by eye — and against the operator's own copy with the
 one-liner in §8.
 
-⛔ **BETWEEN STEP 1 AND STEP 3 THE CHECK READS `MISMATCH`, AND THAT IS THE ROTATION, NOT A REGRESSION.** The
-monitor will fire during that window: its issue body says so explicitly, so the two cannot be read as
-different stories. Finish step 3 rather than rotating again; the window ends when the redeploy lands.
+⛔ **ON THE SINGLE-SECRET PATH, BETWEEN STEP 1 AND STEP 3 THE CHECK READS `MISMATCH`, AND THAT IS THE
+ROTATION, NOT A REGRESSION.** The monitor will fire during that window: its issue body says so explicitly,
+so the two cannot be read as different stories. Finish step 3 rather than rotating again; the window ends
+when the redeploy lands. (Under a key set the verdict is `MISMATCH` only while the two halves' CURRENT
+kid's key **bytes** differ; a kid-only split reads `AGREE` — see §2.3, and do not read that `AGREE` as
+"the bridge works".)
 
 **What is still invisible after this lands (stated, not implied):**
 

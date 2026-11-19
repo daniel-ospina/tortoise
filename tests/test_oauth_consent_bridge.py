@@ -1499,6 +1499,34 @@ def test_the_spec_names_the_behavioural_guard_for_all_four_properties() -> None:
     )
 
 
+def test_the_spec_does_not_promise_the_fingerprint_CAN_SEE_a_kid_split() -> None:
+    """§2.5 must not restore the MISMATCH guarantee that §2.3 corrects (#10794 review, P1-1).
+
+    ⛔ THE PRE-FIX TEXT IS WHY THIS PIN EXISTS. §2.5 said the key-drift check's comparison of the
+    CURRENT kid's key on each half meant "a half-migrated deployment reads `MISMATCH` until both are
+    moved — the reading an operator wants mid-rotation, not a regression". That is FALSE for a
+    `kid`-scoped migration: both halves can publish the SAME current-kid key BYTES while their
+    accepted kid SETS differ, so the check reads `AGREE` in front of a bridge on which nothing can
+    complete (the #10488 fingerprint deliberately excludes `kid`; `consent_token.py`,
+    `consent-bridge.ts` and `api/consent/key.ts` all say so). The review corrected §2.3 for this and
+    left §2.5 — in the SAME document, 180 lines apart — asserting the guarantee, which is the
+    paragraph an operator reads *during* a rotation.
+
+    DENYLIST, not an absence check: it goes red on the pre-fix sentence, so it pins the correction
+    rather than merely pinning that some paragraph exists.
+    """
+    spec = " ".join(SPEC.read_text().split())
+    assert "a half-migrated deployment reads `MISMATCH`" not in spec, (
+        "§2.5 has re-asserted the fingerprint's MISMATCH guarantee over a half-migrated deployment "
+        "— AGREE compares the CURRENT kid's key BYTES only and cannot see a kid split (§2.3 states "
+        "the scope and the fixed migration order). State the scope, do not restore the guarantee"
+    )
+    assert "does NOT see a `kid` split" in spec, (
+        "the spec no longer says the fingerprint cannot see a kid split — that one sentence is "
+        "what stops an operator reading `AGREE` as 'the bridge works'"
+    )
+
+
 def _section_23_jti_store(spec: str) -> str:
     """§2.3's `jti`-store paragraph, located by its own subject, and asserted found.
 
