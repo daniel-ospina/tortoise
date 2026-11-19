@@ -17,6 +17,7 @@ Exit contract (fail-closed, mirrors check-migration-drift):
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -2148,6 +2149,45 @@ _READER_SYMBOL_RESET_RE = re.compile(
 #: Without this the ranges could only be needle-checked, and the needle passes a
 #: range re-pinned onto ANY flag-reading line, the wrong reader included.
 _READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s+(\d+)")
+#: The COUNT each artifact states for itself ("FIVE read sites", "gates **five** read
+#: sites", "= five read sites"). Bound to the parse below: the stated word must equal
+#: the number of numbered entries, because a list that LOST an entry still reads as a
+#: claim about every reader the prose names — and `uncovered` cannot see it (the entry
+#: took its own ordinal with it). A QUOTED phrase is a mention, not a claim (the runbook
+#: says `"three read sites" omits the bound pair` while discussing the wrong unit), so
+#: the lookbehind refuses a word inside quotes.
+_READER_STATED_COUNT_RE = re.compile(
+    r"(?<![\"\u201c'])\b(one|two|three|four|five|six|seven|eight|nine|ten)\b[\s*]*read[ -]sites?",
+    re.IGNORECASE,
+)
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def _resolver_definition_span() -> tuple[int, int]:
+    """1-based (first, last) line of the flag resolver's own definition.
+
+    DERIVED FROM THE SOURCE, never written as a literal here: both artifacts tell a
+    maintainer that "the line numbers are a convenience and they move whenever
+    `embeddings.py` grows — re-pin them on a merge", so a hard-coded tuple turns
+    that documented maintenance step into a FALSE RED (#13814 review round 7: a
+    correct re-pin after a 5-line insertion reddened, while the runbook copy — which
+    names the function inline — passed, so the two copies could no longer be
+    re-pinned together as the block instructs).
+    """
+    body = (REPO_ROOT / "tortoise" / "embeddings.py").read_text()
+    # `ast`, not indentation heuristics: the span must be the function's OWN body,
+    # so a blank line, a comment block or a decorator below it can never extend it.
+    for node in ast.parse(body).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_embedder_warmup_enabled":
+            assert node.end_lineno is not None
+            return node.lineno, node.end_lineno
+    raise AssertionError(
+        "tortoise/embeddings.py has no `def _embedder_warmup_enabled` — the resolver "
+        "this whole block documents is gone, so every cite below is stale"
+    )
 
 
 def _reader_citations(
@@ -2166,9 +2206,16 @@ def _reader_citations(
     non-vacuity floor (`len(cites) >= N`) passes a list with a reader's own cite
     edited out, because the floor was always BELOW the real count — so the
     article's claim "re-reads every cite above" was vacuous for whichever cite
-    vanished (#13814 review round 6). Every numbered entry that names a reader
-    must therefore still contribute at least one cite to THAT entry, asserted
-    below against the parse itself rather than against a number in the test.
+    vanished (#13814 review round 6). Every NUMBERED ENTRY must therefore still
+    contribute at least one cite of its own, asserted below against the parse —
+    the entry LINES this function sees — rather than against a number in the test.
+
+    ⛔ AND THE INVARIANT IS KEYED ON THE ENTRY LINE, NEVER ON THE `::name`. Keyed
+    on the inline function name it was vacuous in the one direction that matters:
+    an entry that loses its `::name` AND its cite leaves the named-reader set and
+    the coverage check silently agrees with itself (measured, round 7: three
+    natural-reading edits, all green). A numbered entry is a claim whether or not
+    it still spells the function, so the entry LINE is what must carry a cite.
 
     `symbol` is the function named for that cite (`::start_warm_up` and so on), or
     `None` where none is named INLINE. The numbered-list symbol is tracked per
@@ -2186,10 +2233,16 @@ def _reader_citations(
     #: numbered ENTRY -> the reader that entry names, so the prose's ranges can be
     #: bound to the readers ITS OWN SENTENCE names for them.
     by_ordinal: dict[int, str] = {}
-    #: numbered ENTRY -> how many cites IT contributed. A reader named by an entry
-    #: whose own cite was edited out has 0 here, which is the deletion the count
-    #: floor could never see.
+    #: every ordinal a numbered ENTRY line declared, whether or not that entry still
+    #: spells its function: the set the coverage invariant is measured against.
+    entry_ordinals: set[int] = set()
+    #: numbered ENTRY -> how many cites IT contributed. An entry whose own cite was
+    #: edited out has 0 here, which is the deletion the count floor could never see.
     entry_cites: dict[int, int] = {}
+    #: every ordinal a numbered ENTRY declared, in order: a LIST, not a set, because a
+    #: renumbered entry (two `4.`s) dedupes to a contiguous set and would otherwise read
+    #: as healthy while the list has silently lost a number.
+    entry_order: list[int] = []
     #: readers named by ordinal whose range cites have not been reached yet. The
     #: sentence wraps across lines in BOTH artifacts, so this outlives one line.
     pending: list[str] = []
@@ -2204,6 +2257,8 @@ def _reader_citations(
         if entry:
             symbol = None
             ordinal = int(entry.group(1))
+            entry_ordinals.add(ordinal)
+            entry_order.append(ordinal)
         if _READER_SYMBOL_RESET_RE.search(ln.replace("*", "")):
             symbol = None
             ordinal = None
@@ -2234,21 +2289,59 @@ def _reader_citations(
             if bound is None and pending:
                 bound = pending.pop(0)
                 ordinal_bound += 1
-            if ordinal is not None and symbol is not None:
-                # The cite belongs to the numbered ENTRY that named this reader.
+            if ordinal is not None:
+                # The cite belongs to the numbered ENTRY it sits under — the entry
+                # LINE, not its `::name` (see the docstring: keying on the name let
+                # an entry drop both and leave this check vacuously satisfied).
                 entry_cites[ordinal] = entry_cites.get(ordinal, 0) + 1
             cites.append((current, lo, hi, bound))
-    # DELETION: every entry that named a reader must still carry at least one cite
-    # of its own. Editing a reader's cite out leaves the artifact telling a
-    # reviewer that N readers are pinned while the list pins N-1 — the shape a
-    # count floor cannot detect (#13814 review round 6: deleting reader 3's
-    # `:1592` from the manifest numbered list left all 142 tests green).
-    uncovered = sorted(set(by_ordinal) - set(entry_cites))
+    # DELETION: every numbered entry must still carry at least one cite of its own.
+    # Editing a reader's cite out leaves the artifact telling a reviewer that N
+    # readers are pinned while the list pins N-1 — the shape a count floor cannot
+    # detect (#13814 review round 6: deleting reader 3's `:1592` from the manifest
+    # numbered list left all 142 tests green). Measured against the ENTRY LINES,
+    # not against `by_ordinal` (round 7: keyed on the `::name`, an entry that lost
+    # its name AND its cite left this check vacuously satisfied — three green
+    # mutants, including "the HOSTED lifespan pre-warm in `tortoise/hosted_api.py`").
+    uncovered = sorted(entry_ordinals - {n for n, count in entry_cites.items() if count})
     assert not uncovered, (
-        f"{artifact}: the numbered list names a reader for entry {uncovered}, but no cite "
-        f"in that entry is attributed to it — a cite was edited out, so the list claims a "
-        f"reader it no longer pins (per-entry cites: {dict(sorted(entry_cites.items()))})"
+        f"{artifact}: numbered entry/entries {uncovered} carry no cite at all, so the list "
+        f"claims a reader it no longer pins — a cite (or the whole entry's citation) was "
+        f"edited out (per-entry cites: {dict(sorted(entry_cites.items()))})"
     )
+    assert entry_ordinals, f"{artifact}: found no numbered entries at all — the region reader is wrong"
+    # ⛔ AND THE LIST ITSELF MUST STILL BE ONE PER READER. Deleting an entry WHOLE
+    # (its number, its name and its cite together) leaves `entry_ordinals` minus that
+    # ordinal and `entry_cites` minus the same key, so the coverage check above agrees
+    # with itself — while the paragraph around the list still says how many readers
+    # there are. Measured, round 7: deleting the manifest's reader 4 (`the HOSTED
+    # (production) lifespan pre-warm` — the one that runs on the deployed box) left the
+    # whole suite green. Two checks, both derived from the artifact:
+    #   (a) the ordinals are exactly 1..N in order — a renumbering or a gap reds;
+    #   (b) the artifact's OWN count word equals N — a lost entry reds even when the
+    #       survivors still read 1..N, because the prose still claims the old number.
+    assert entry_order == list(range(1, len(entry_order) + 1)), (
+        f"{artifact}: the numbered reader entries are not 1..N in order — {entry_order} — "
+        f"so two entries share a number (or one skipped a number) and the list no longer "
+        f"pins one cite per reader"
+    )
+    stated = [
+        (m.group(1).lower(), _NUMBER_WORDS[m.group(1).lower()])
+        for m in _READER_STATED_COUNT_RE.finditer("\n".join(lines[start:end]))
+    ]
+    assert stated, (
+        f"{artifact}: the region states no '<N> read sites' count — this guard binds the "
+        f"stated count to the numbered entries, so a section that stops stating it makes "
+        f"the list's completeness unverifiable"
+    )
+    wrong_counts = sorted({w for w, n in stated if n != len(entry_order)})
+    assert not wrong_counts, (
+        f"{artifact}: the region says {wrong_counts} read site(s) but lists "
+        f"{len(entry_order)} numbered reader entries — an entry was deleted (with its own "
+        f"number, which is why the coverage check above cannot see it) or added without "
+        f"the count"
+    )
+    assert by_ordinal, f"{artifact}: no entry named its reader inline — the region reader is wrong"
     # Non-vacuity, and it is the whole point: if that sentence is deleted or
     # reworded the ranges silently fall back to the needle-only check, which
     # passes a range re-pinned onto ANY flag-reading line — the wrong reader
@@ -2267,26 +2360,86 @@ def _reader_citations(
     # unbound SET is the thing to pin: only the resolver's own definition may stay
     # unbound, because the block names no reader for `:40-50` anywhere.
     unbound = {(fname, lo, hi) for fname, lo, hi, sym in cites if sym is None}
-    assert unbound <= {("embeddings.py", 40, 50)}, (
-        f"{artifact}: only the resolver's own `:40-50` definition may stay unbound, so "
-        f"these cites are either an entry's cite that lost its reader (reflowed above "
-        f"its `::name`, or edited out) or the resolver span re-pinned off `(40, 50)` — "
-        f"in both cases the pin no longer says what the prose says it says: {sorted(unbound)}"
+    # ⛔ The resolver's span is DERIVED from the `def`, not pinned as a literal here:
+    # a literal would make the documented re-pin (both artifacts say the numbers move
+    # when `embeddings.py` grows) a false red, and would pin the manifest's copy harder
+    # than the runbook's — which names the function inline — so the two copies could not
+    # be re-pinned together (#13814 review round 7). What the invariant keeps is the
+    # property that matters: a cite naming no reader must land in the RESOLVER, so
+    # re-pointing it at another reader's gate line still reds.
+    resolver_lo, resolver_hi = _resolver_definition_span()
+    # Non-vacuity for the ceiling below: with NO cite resolving to the resolver the
+    # `outside` check passes on an empty set, so a block that lost its resolver cite
+    # altogether would read clean. The two artifacts reach it differently — the
+    # manifest with a BARE span (unbound) and the runbook with the function named
+    # inline (bound) — so the floor is presence, not unboundedness.
+    resolver_cites = sorted(
+        (fname, lo, hi)
+        for fname, lo, hi, _sym in cites
+        if fname == "embeddings.py" and lo >= resolver_lo and hi <= resolver_hi
+    )
+    assert resolver_cites, (
+        f"{artifact}: no cite lands on the flag resolver's own definition "
+        f"(`tortoise/embeddings.py:{resolver_lo}-{resolver_hi}`, derived from the `def` at "
+        f"check time) — the block no longer points at the code that decides what the flag "
+        f"is, so the list of readers has no subject"
+    )
+    outside = sorted(
+        (fname, lo, hi)
+        for fname, lo, hi in unbound
+        if fname != "embeddings.py" or lo < resolver_lo or hi > resolver_hi
+    )
+    assert not outside, (
+        f"{artifact}: a cite that names no reader must land inside the flag resolver's own "
+        f"definition (`tortoise/embeddings.py:{resolver_lo}-{resolver_hi}`, derived from the "
+        f"`def` at check time, not from a literal in this test). These do not: {outside} — "
+        f"either an entry's cite lost its reader (reflowed above its `::name`, or edited "
+        f"out), or the resolver span was pointed at another reader's gate line"
     )
     return cites
 
 
+def _region_marker(
+    lines: list[str], marker: str, artifact: str, what: str, after: int = 0,
+) -> int:
+    """The index of the line carrying `marker`, or a NAMED failure.
+
+    A bare `next(...)` raises `StopIteration` — a red with no diagnosis, which reads as
+    a broken test rather than as "the region this guard slices is gone, re-pin the
+    marker". The runbook arm has always raised a named `AssertionError`; this mirrors
+    it for the manifest (measured, round 7).
+    """
+    index = next((i for i in range(after, len(lines)) if marker in lines[i]), None)
+    if index is None:
+        raise AssertionError(
+            f"{artifact}: no line carries {marker!r}, so {what} cannot be sliced — the "
+            f"paragraph was reworded or deleted, and this guard is now reading nothing "
+            f"(re-pin the marker to text that still exists, or restore the paragraph)"
+        )
+    return index
+
+
 def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
-    """The cites in the MANIFEST's #13674 block (the inventory a reviewer reads)."""
+    """The cites in the MANIFEST's #13674 block (the inventory a reviewer reads).
+
+    Starts at the block's FIRST line, not at the numbered list: the block opens by
+    restating the resolver's span, and a slice that began below it left that cite
+    unparsed — so the block's own claim that the test "re-reads every cite above"
+    was false for the one cite at the top of it (measured, round 7: deleting it was
+    green). Two occurrences of the same span are one set element below, so the
+    widening costs nothing.
+    """
     lines = REAL_MANIFEST.read_text().splitlines()
-    start = next(
-        i for i, ln in enumerate(lines)
-        if "is the resolver's DEFINITION; the readers are" in ln
+    start = _region_marker(
+        lines, "the embedder warm-up's EMERGENCY SWITCH", "the manifest", "the #13674 block"
     )
     # Past the numbered list AND the two range cites below it.
-    end = next(
-        i for i, ln in enumerate(lines)
-        if "Two records in the tree understate the set" in ln
+    end = _region_marker(
+        lines,
+        "Two records in the tree understate the set",
+        "the manifest",
+        "the end of the #13674 block (the 'Two records …' paragraph)",
+        after=start,
     )
     return _reader_citations(lines, start, end, "the manifest")
 
@@ -2361,6 +2514,51 @@ def _assert_every_citation_reads_the_flag(
         )
 
 
+def test_the_manifest_list_intro_cites_the_resolver_it_names():
+    """The sentence that gives the numbered list its subject must carry the span.
+
+    The block opens by restating the resolver's span, so "does the block cite the
+    resolver SOMEWHERE" is satisfied by that opening line alone: deleting the span
+    from `… is the resolver's DEFINITION; the readers are:` then stayed green while
+    the pointer a reader follows BEFORE the numbered list was gone (measured, round
+    7 — the same review round that found the note's own prose supplying the cite).
+
+    The runbook reaches the same information with the function named inline on the
+    line above its count, so this arm is the manifest's: the sentence here SAYS the
+    span is the definition, and a sentence that says so must name it. The permitted
+    span is derived from the `def` at check time, never written here.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    start = _region_marker(
+        lines, "the embedder warm-up's EMERGENCY SWITCH", "the manifest", "the #13674 block"
+    )
+    end = _region_marker(
+        lines,
+        "Two records in the tree understate the set",
+        "the manifest",
+        "the end of the #13674 block",
+        after=start,
+    )
+    intro = [ln for ln in lines[start:end] if "is the resolver's DEFINITION" in ln]
+    assert intro, (
+        "the manifest no longer has the sentence that gives the numbered list its subject "
+        "(… is the resolver's DEFINITION; the readers are:) — this guard is slicing a "
+        "region it no longer recognises, so re-pin its marker"
+    )
+    resolver_lo, resolver_hi = _resolver_definition_span()
+    spans = [
+        (int(match.group(1)), int(match.group(2) or match.group(1)))
+        for line in intro
+        for match in _READER_CITE_RE.finditer(line)
+    ]
+    assert any(lo >= resolver_lo and hi <= resolver_hi for lo, hi in spans), (
+        f"the sentence introducing the numbered list no longer cites the resolver's span. "
+        f"That line is the pointer a reader follows BEFORE the list, so it must carry "
+        f"`embeddings.py:{resolver_lo}-{resolver_hi}` (derived from the `def` at check "
+        f"time). Cites on it: {spans}"
+    )
+
+
 def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
     """#13814: every cited line in the MANIFEST block MUST read the flag.
 
@@ -2392,6 +2590,47 @@ def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
     """
     _assert_every_citation_reads_the_flag(
         _embedder_warmup_runbook_citations(), "docs/infra-runbook.md"
+    )
+
+
+def test_the_citation_guard_note_is_not_itself_a_citation():
+    """The paragraph that DESCRIBES this guard must not be read BY it.
+
+    The note below the numbered list sits inside the region the two arms above
+    slice, and the parser has no way to tell documentation from a claim: a span
+    written into that prose in the colon form becomes a cite like any other. That
+    is not hypothetical — it happened in the commit that added the note (`#13814`
+    review round 7), where the paragraph's own example supplied the resolver cite,
+    so DELETING the operative one from the block's opening sentence left the whole
+    suite green while the block still claimed to point at the definition.
+
+    Prose is the wrong place for this to be caught by counting, so the property is
+    stated directly: the note block contains no citation at all. Its own rule
+    sentence — "describe a span without the colon form" — is now enforced instead
+    of advised.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    start = _region_marker(
+        lines, "re-reads every cite above", "the manifest", "the citation-guard note"
+    )
+    end = _region_marker(
+        lines,
+        "'s operator section carries the SAME numbers",
+        "the manifest",
+        "the end of the citation-guard note",
+        after=start,
+    )
+    note = "\n".join(lines[start:end])
+    # Non-vacuity: a slice that found the wrong lines would pass this trivially.
+    assert "cite" in note and "colon form" in note, (
+        f"the citation-guard note was not found where this test slices — it reads {note!r}"
+    )
+    found = sorted(m.group(0) for m in _READER_CITE_RE.finditer(note))
+    assert not found, (
+        "the paragraph that documents this guard writes a line span in the COLON form, "
+        "so the parser reads it as a citation — the note then satisfies the pin it is "
+        "describing, and deleting the block's real cite stays green. Describe the span "
+        f"as 'lines N-M' instead. Cites found in the note: {found}"
     )
 
 
@@ -3327,11 +3566,14 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
     failure read as "the revert broke something" (#13674, measured on the issue).
 
     The runbook's quotes are bound to the gate's ACTUAL output, end-to-end, so this
-    cannot stay green while it quotes a sentence the gate no longer prints. TWO
-    relations, because either alone has a hole: the quote must carry the IDENTIFIERS
-    an operator acts on (the variable, and the issue ref or the file), AND it must be
-    a prefix of the message that run emits for that order. A prefix alone is satisfied
-    by the bare leader; identifiers alone would not notice a reworded clause.
+    cannot stay green while it quotes a sentence the gate no longer prints. THREE
+    relations, because any one alone has a hole: the quote must carry the IDENTIFIERS
+    an operator acts on (the variable, and the issue ref or the file); it must be a
+    prefix of the message that run emits for that order; and it must cover the
+    message's first `;`-delimited clause, which is the one that STATES the condition
+    and the remedy. A prefix alone is satisfied by the bare leader; identifiers alone
+    would not notice a reworded clause; and identifiers + prefix together are
+    satisfied by a quote that stops at the identifiers (#13814 review rounds 6 and 7).
     (`#13814` review P2-2: the previous version read only the two LEADERS out of
     the source, and both leaders occur many times there, so renaming the leader of
     the exact quoted message — or rewording its body — left this guard green.)
@@ -3366,6 +3608,20 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
             f"the runbook quotes a {leader!r} state the gate no longer prints. The runbook "
             "is read by an operator mid-revert, so it must quote the message they will "
             f"actually see.\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
+        )
+        # ⛔ AND A PREFIX THAT STOPS AT THE IDENTIFIERS IS STILL TOO SHORT: the tokens
+        # above are the first two clauses, so a quote ending right after them prefixes
+        # the emitted message and passes both arms — leaving the STATING clause (what
+        # state the name is in, and what to do about it) free to be reworded under a
+        # green suite. Measured, round 7: truncating the STALE quote at `fly-only:#13674`
+        # AND rewording the gate's whole tail was 142 passed. The emitted message's
+        # first `;`-delimited clause is the state; the quote must cover it.
+        state_clause = emitted[leader].split(";", 1)[0]
+        assert len(quoted[leader]) >= len(state_clause), (
+            f"the runbook's {leader!r} quote stops before the clause that states the "
+            f"condition — an operator sees the identifiers but not what is wrong or what "
+            f"to do. Quote at least through {state_clause!r}."
+            f"\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
         )
 
 
