@@ -3955,6 +3955,62 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and the same sequence BUILT OR WRAPPED, each of which was CERTIFIED while the
+        # bare literal was refused: concatenation and repetition (`+ []`, `* 1`), a `Starred`
+        # element splicing it in, a comprehension over it, and a MAPPING CONSTRUCTOR
+        # (`OrderedDict` is a dict subclass, so `|=` merges it exactly as it merges a dict).
+        # Also the pairs rule ONE ARM OVER: `update(...)` shares
+        # `_mapping_operand_stores_the_vector`, which now ends in the same unwrapper — without
+        # that, `update([...].copy())` was CERTIFIED while `update([...])` was refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))] + []
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))] * 1
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (*[("embedding", _encode(ev))],)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [x for x in [("embedding", _encode(ev))]]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict([("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([("embedding", _encode(ev))].copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([("embedding", _encode(ev))] if _flag(ev) else [])
+        return None
+    _write(props)
+""",
         # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
         # in all three spellings the review of this branch measured CERTIFIED: the functional,
         # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
