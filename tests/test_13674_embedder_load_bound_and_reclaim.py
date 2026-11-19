@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import inspect
 import logging
 import os
 import subprocess
@@ -98,6 +99,24 @@ class _Sentinel:
     def __init__(self, mb: int):
         self.buf = _touch(bytearray(mb * 1024 * 1024))
         self.mb = mb
+
+
+class _RecordingLock:
+    """A lock wrapper that records how many times it is currently held."""
+
+    def __init__(self, real):
+        self.real = real
+        self.held = 0
+
+    def __enter__(self):
+        self.real.acquire()
+        self.held += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.held -= 1
+        self.real.release()
+        return False
 
 
 class _Frame:
@@ -478,9 +497,9 @@ class TestTheBoundAndElapsedAreObservable:
             self, monkeypatch, clean_embedder):
         """ONE snapshot, so the pair cannot tear (#13819 review F1).
 
-        The bug: `status()` called `load_attempt_in_flight()` and then
-        `load_attempt_elapsed_s()`, which reads the thread a SECOND time. A
-        loader that dies between the two reads published
+        The bug: `status()` read the thread once for `load_in_progress` and
+        then AGAIN (through a helper) for `load_in_progress_s`. A loader that
+        dies between the two reads published
         `load_in_progress: true` beside `load_in_progress_s: null` — a pair no
         state of the machine produces, on the surface #13674 exists to make
         readable.
@@ -740,6 +759,171 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "read as 'a previous attempt is still running' (#13674 F5)"
         )
         assert EmbeddingModel.load_attempt_in_flight() is False
+
+    def test_the_attempt_clear_happens_under_the_publish_lock(
+            self, monkeypatch, clean_embedder):
+        """The clear must contend on the lock the PUBLISHER holds (#13841).
+
+        `get()` publishes the attempt record while holding `cls._lock` (it holds
+        it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
+        write). Clearing outside that lock left a window in which a reset could
+        read a published-but-not-yet-started thread (`is_alive()` False), drop
+        the record, and leave a LIVE loader unreferenced: the reclaim guard
+        disarmed, and the block reporting `load_in_progress: false` while a
+        loader runs (a silent false negative).
+
+        Nothing pinned it — re-indenting the block out of `with cls._lock:` left
+        every row green. This row records whether the lock was HELD at the
+        moment `is_alive()` is consulted.
+        """
+        proxy = _RecordingLock(EmbeddingModel._lock)
+        seen = {}
+
+        class _DeadStub:
+            def is_alive(self):
+                seen["held"] = proxy.held
+                return False
+
+        monkeypatch.setattr(EmbeddingModel, "_lock", proxy)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", _DeadStub())
+
+        EmbeddingModel._reset()
+
+        assert seen.get("held") == 1, (
+            "the attempt record was cleared with `_lock` NOT held — a reset can "
+            "race the publisher (`get()` holds it across `__init__`'s write) and "
+            "leave a live loader unreferenced, disarming the reclaim guard "
+            f"(held={seen.get('held')!r})"
+        )
+
+    def test_a_live_attempt_keeps_its_own_bound_across_a_reset(
+            self, monkeypatch, clean_embedder):
+        """The LIVE mirror of the dead-attempt row below (#13841 review).
+
+        Clearing the bound is conditional on the attempt being DEAD: a live
+        overrunning loader must keep the bound IT ran under, because
+        `_describe_load_attempt()` quotes it in the reclaim refusal. Hoisting the
+        `_load_attempt_timeout_s = None` line out of the `if attempt is None or
+        not attempt.is_alive():` block left every row green (measured), and it
+        resurrects #13819 F3 — the warning would name the class default instead
+        of the bound that actually fired.
+        """
+        release = threading.Event()
+        live = threading.Thread(target=release.wait, daemon=True)
+        live.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while not live.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert live.is_alive(), "the stub thread never started"
+
+            EmbeddingModel._reset()
+            EmbeddingModel._load_attempt_thread = live
+            EmbeddingModel._load_attempt_timeout_s = 7.0
+            EmbeddingModel._reset()
+
+            _in_flight, _elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+            assert bound == 7.0, (
+                f"a LIVE attempt's bound was reset away ({bound!r}s) — the "
+                f"reclaim refusal would then quote the class default instead of "
+                f"the bound this attempt ran under (#13819 F3)"
+            )
+        finally:
+            release.set()
+            live.join(30)
+            EmbeddingModel._load_attempt_thread = None
+            EmbeddingModel._reset()
+
+    def test_the_attempts_clock_is_published_before_its_thread(self):
+        """The WRITER's order is what makes the lock-free reader consistent.
+
+        `load_attempt_snapshot()` takes no lock (it must not: `get()` holds
+        `cls._lock` for the whole load) and reads `_load_attempt_thread` BEFORE
+        `_load_started_at`. Published the other way round, a reader preempted
+        between those two reads pairs the new thread with the PREVIOUS attempt's
+        start — a huge elapsed — or with `None`, publishing
+        `load_in_progress: true` beside `load_in_progress_s: null`: the pair the
+        snapshot exists to make impossible, and the reading an operator uses to
+        decide whether to restart a machine mid-import.
+
+        The invariant is TWO-SIDED — the snapshot's own docstring says reordering
+        *either* side restores the tear — so BOTH sides are pinned here, and the
+        reader's THREE field reads are pinned pairwise against the field the
+        writer publishes LAST. Swapping any reader read ahead of the THREAD read
+        left every row green (measured: the clock swap at #13841 review, and the
+        bound swap at #13841 round 5) — the same class of tear, and the reason the
+        bound is pinned explicitly rather than assumed covered by the clock
+        assertion. A reader that reads the BOUND first pairs a live NEW thread
+        with the PREVIOUS attempt's bound (or with `None` → the 300 s default),
+        which is the #13819 F3 misdirection back on the reclaim warning path.
+
+        Pinned as an ORDER IN THE SOURCE, the same way
+        `test_the_call_sits_before_the_topology_sentinel` pins `entrypoint.sh`: a
+        class-attribute write cannot be intercepted by a descriptor (``type(self)
+        ._load_started_at = …`` goes through the metaclass, not the class dict),
+        so the pins are the order of the statements in each function's source.
+        """
+        source = inspect.getsource(EmbeddingModel.__init__)
+        clock = source.index("_load_started_at = _attempt_started_at")
+        thread = source.index("_load_attempt_thread = t")
+        bound = source.index("_load_attempt_timeout_s = timeout")
+        assert clock < thread, (
+            "the attempt's THREAD is published before its CLOCK — "
+            "`load_attempt_snapshot()` takes no lock and reads the thread "
+            "FIRST, so it can pair a live thread with the PREVIOUS attempt's "
+            "start time (a huge elapsed) or with None: `load_in_progress: "
+            "true` beside `load_in_progress_s: null` (#13841 review)"
+        )
+        assert bound < thread, (
+            "the attempt's BOUND is published AFTER its thread — the reader "
+            "reads thread then clock then bound, so a lock-free read can pair a "
+            "live NEW thread with the PREVIOUS attempt's bound (or with None → "
+            "the 300 s default, which is the #13819 F3 misdirection back on the "
+            "warning path). Write the bound FIRST (#13841 review)"
+        )
+
+        reader = inspect.getsource(EmbeddingModel.load_attempt_snapshot)
+        read_thread = reader.index("thread = cls._load_attempt_thread")
+        read_clock = reader.index("started = cls._load_started_at")
+        read_bound = reader.index("bound = cls._load_attempt_timeout_s")
+        assert read_thread < read_clock, (
+            "`load_attempt_snapshot()` reads the CLOCK before the THREAD — the "
+            "writer publishes clock-then-thread, so a reader that reads in that "
+            "same order can pair the PREVIOUS attempt's start with the NEW "
+            "attempt's live thread: a `load_in_progress_s` far past the bound, "
+            "i.e. a false ABANDONED verdict on a load that just started "
+            "(#13841 review)"
+        )
+        assert read_thread < read_bound, (
+            "`load_attempt_snapshot()` reads the BOUND before the THREAD — the "
+            "writer publishes the bound FIRST, precisely so a lock-free reader "
+            "that can already see the thread sees that attempt's own bound. "
+            "Read in the other order, a reader preempted between the two reads "
+            "pairs a live NEW thread with the PREVIOUS attempt's bound (or with "
+            "None → the 300 s default), publishing the WRONG bound on the "
+            "reclaim warning: the #13819 F3 misdirection (#13841 review)"
+        )
+
+    def test_a_reset_drops_the_dead_attempts_bound_too(
+            self, monkeypatch, clean_embedder):
+        """The attempt's own bound must not outlive the attempt (#13819 review).
+
+        `_reset()` clears the record of a DEAD attempt; the bound recorded with
+        that attempt is part of the record, or a later snapshot quotes a stale
+        override that no longer applies. Nothing pinned the line, so deleting it
+        left the whole file green — measured, not assumed.
+        """
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", None)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_timeout_s", 7.0)
+
+        EmbeddingModel._reset()
+
+        _in_flight, elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+        assert (_in_flight, elapsed) == (False, None)
+        assert bound == EmbeddingModel._LOAD_TIMEOUT_S, (
+            f"a dead attempt's bound ({bound!r}s) outlived `_reset()` — the next "
+            f"diagnosis would quote it as the bound in force"
+        )
 
     def test_a_live_attempt_survives_a_reset(self):
         """The mirror of the assertion above: a live importer is not reset away.

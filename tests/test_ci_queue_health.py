@@ -2970,7 +2970,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
         # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
         # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
-        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1629` (measured; the coordinate
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:2003` (measured; the coordinate
         # moves with this file's own line count — it reds nothing if it drifts, so it is
         # cheapest to re-check when the module above it changes), and (ii) a
         # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
@@ -5354,3 +5354,63 @@ def test_round4_the_not_a_flood_dominance_count_is_the_one_COMPARED():
         "20 is the excluded residue's feed count, not any live workflow's")
     # The feed fact is still reported, under its own name, one reason line up.
     assert "global_max_queued=20" in joined
+
+
+# ── review round 3 (#13825): what the exclusion cannot see about ITSELF. Each arm
+# names its mutation.
+def test_round3_an_all_abstained_probe_pass_is_VISIBLE_on_the_state_line(monkeypatch):
+    """A pass that RAN, reached suspects and proved NONE used to render byte-identically
+    to the pre-#13825 reading — measured: one eligible 18-day suspect with every probe
+    unreadable printed `CI: PR-STARVED(queued=1, …)` and said nothing about it. A
+    permanently starving probe budget therefore made the whole fix inert and invisible on
+    the one string the fleet samples.
+
+    Mutation: gate `_never_dispatched_token` on a POSITIVE count again — this reds (the
+    token is empty).
+    """
+    old = {"id": 1, "name": "Python CI", "event": "pull_request",
+           "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
+           "run_attempt": 1}
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: (([old] if status == "queued" else []), False))
+
+    # `None` is the read's own "could not measure" answer (a failed/short payload);
+    # a raising stub would be a `MeasureError` and would correctly abort the reading.
+    monkeypatch.setattr(Q, "read_run_job_count", lambda *a, **k: None)
+    health = Q.read_health("o/r", NOW, state_file=None)
+    assert health.pr_never_dispatched == 0, "nothing was proved"
+    assert health.pr_never_dispatched_unread == 1
+    assert "never_dispatched_unproven=1" in health.state_line
+    joined = " ".join(health.reasons)
+    assert "UNPROVEN" in joined and "counted as WAITING" in joined
+    # A reading that never probed keeps the pre-#13825 line, byte for byte.
+    legacy = Q.classify_queue([Q.QueuedRun(
+        id=1, name="Python CI", event="pull_request",
+        created_at="2026-10-01T00:00:00Z", run_attempt=1, run_started_at="",
+        updated_at="2026-10-01T00:00:00Z")], [], NOW)
+    assert "never_dispatched_unproven" not in legacy.state_line
+
+
+def test_round3_the_store_write_is_atomic_PER_PROCESS(tmp_path, monkeypatch):
+    """A FIXED `.tmp` sibling is atomic only for one writer: two processes sharing one
+    state path interleave the same temp file and `os.replace` publishes the merge —
+    reproduced with three writers as `JSONDecodeError: Extra data:` on the final file,
+    which the loader then drops as corrupt and the next pass rewrites from its own set,
+    losing the whole accumulated population.
+
+    Mutation: `tmp = f"{path}.tmp"` again — the pid assertion reds.
+    """
+    seen = []
+    real_replace = Q.os.replace
+
+    def spy(src, dst):
+        seen.append(src)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(Q.os, "replace", spy)
+    path = tmp_path / "never-dispatched.json"
+    assert Q._save_queue_proofs(str(path), "o/r", {}) is None
+    assert seen, "the write must publish via os.replace"
+    assert str(Q.os.getpid()) in seen[0], (
+        "the temp file must be per-process, not a shared `{path}.tmp`")
