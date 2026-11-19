@@ -653,7 +653,8 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     assert "no declared graph label" in reason
 
 
-def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
+def test_write_gate_does_not_trust_the_record_predicate_alone(
+        monkeypatch, tmp_path):
     """⛔ THE P1 FINDING, AS A FALSIFIER: coverage is a READ fact, not a WRITE fact.
 
     On the tree that introduces `mirror_required` (`#13610`'s write half), the predicate
@@ -664,6 +665,17 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     `:Event` write-stopped and strip it into a live writer.
 
     A mutation that drops the `_fold_consults_gate` call reds this test.
+
+    ⛔ RE-DRIVEN AT `#13626`, AND THE FALSIFIER IS NOW A POPULATION RATHER THAN A LABEL.
+    Every declared writer of every retired label asks the gate on this tree, so "the
+    predicate says not-required while a writer still stores" is no longer reachable from
+    the shipped source — asserting it against `object` would now pin the OPPOSITE of the
+    tree. What the arm has to be shown is the invariant it enforces: with the predicate
+    answering `False`, a population that contains ONE ungated writer still emits, and the
+    refusal NAMES that writer. The population is supplied explicitly (the shape every
+    census test here uses) so the assertion is about the arm and not about today's
+    `entities.py`; `test_every_declared_writer_of_a_retired_label_asks_the_gate`
+    pins the shipped population in the other direction.
     """
     from tortoise import record_vector
 
@@ -671,45 +683,75 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
                         lambda entity_type: False, raising=False)
     # The recorded predicate says "not required" for every label; that is a READ fact and
     # the gate must still answer "emits" while a writer exists that nobody stopped.
+    ungated = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    return _write(ev)
+""", name="fake_writer_13629_trusts_predicate")
+    # The FOLD MAP is emptied on purpose: the refusal below must come from the REGISTERED
+    # writer, i.e. from a population `FOLD_WRITERS` alone does not enumerate.
+    monkeypatch.setattr(strip, "FOLD_WRITERS", {})
+    monkeypatch.setattr(strip, "_writers_for", lambda label: (
+        (f"{ungated}::_upsert_object",), None))
     emits, reason = strip.write_gate("object")
     assert emits is True
     assert "writes `embedding` without an `if`" in reason
-    # ⛔ ASSERT ON THE WRITER THAT MUST STILL BE UNGATED, NOT ON THE FOLD.
-    # `_upsert_object`/`_upsert_subject` are exactly what `#13617` write-stops, so pinning
-    # the refusal to THEM makes this test red the moment #13617 lands — whichever PR merges
-    # second inherits a failure caused by the other. `sdk::_update_entity` stores the
-    # property through `SET n += $props` and is not part of #13617, so a set-based
-    # assertion stays true before AND after it.
-    # ⛔ ONE ASSERTION, AND IT CARRIES BOTH CLAIMS: the writer must be named at all, and it
-    # must be one the FOLD MAP ALONE MISSED — `sdk::_update_entity` re-adds a
-    # caller-supplied `embedding` through `SET n += $props`, so a gate that cleared the
-    # `entities.py` folds alone would license a strip its own refusal claims to prevent.
-    # The register-vs-fold-map population is pinned by
-    # `test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map`, which can
-    # fail independently; an assertion repeated here could only fail when this one does.
-    assert "_update_entity" in reason
+    # ⛔ AND THE REFUSAL NAMES THE WRITER that still stores. This is the sentence an
+    # operator reads when the gate shuts, so an accurate population is a diagnosis, not
+    # a courtesy.
+    assert "_upsert_object" in reason
 
 
 def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
     """⛔ F3's real fold: the witness is a CALL, and `entities.py` is the tree under test.
 
-    The two gate tests above drive fake modules; this one pins the REAL module, because the
-    only way to know the check can read `entities.py` at all is to point it there. On this
-    tree the folds do not consult the gate, so the answer must be "still emits" AND the
-    reason must name `entities.py` — if the AST walk silently failed to find the fold, an
-    "ABSENT" reason would pass a weaker assertion.
+    The gate tests above drive fake modules; this one pins the REAL module, because the only
+    way to know the check can read `entities.py` at all is to point it there — and since
+    `#13626` that direction is the CERTIFYING one: `_upsert_event` DOES ask, so the answer
+    must be "gated". If the AST walk silently failed to find the fold, the "no `if`" refusal
+    would come back and red this test.
 
     ⛔ AND IT MUST PASS THE LABEL'S `entity_types`. Without them `_writer_consults_gate`
     computes `wanted = ()` and `wanted and _asks_the_gate(...)` short-circuits, so the
-    refusal comes from the empty-`wanted` arm and says nothing about the AST walk: a
-    `_asks_the_gate -> True` mutant leaves the assertion green (round 8's F2). With
-    `("event",)` the mutant reds this test.
+    answer does not depend on the AST walk at all: a `_asks_the_gate -> True` mutant leaves
+    an unfalsifiable assertion green (round 8's F2). With `("event",)` a mutant that stops
+    matching THIS label's gate call reds it.
     """
     gated, why = strip._writer_consults_gate(
         "tortoise.projection.entities", "_upsert_event", ("event",))
-    assert gated is False
+    assert gated is True, why
     assert "tortoise.projection.entities::_upsert_event" in why
-    assert "without an `if`" in why
+
+    # …and a prose mention in a writer that stores is still a refusal, on the same helper.
+    prose = _fake_writer_module(tmp_path, monkeypatch, WRITER_PROSE_ONLY,
+                               name="fake_writer_13629_prose_only")
+    assert strip._writer_consults_gate(prose, "_upsert_object", ("object",))[0] is False
+
+
+def test_every_declared_writer_of_a_retired_label_asks_the_gate():
+    """⛔ `#13626`'s DELIVERABLE, AS A CENSUS OVER THE REAL TREES.
+
+    The strip's own refusal counts writers that do not ask; this test counts the same thing
+    from the other side, for EVERY declared writer of every label the tool may strip, and
+    names each one that fails. Without it `strip_ready` would be the only witness — and it
+    is answered from a process whose gate may be unarmed, which says nothing about the
+    source.
+
+    Mutation: un-wire any single writer (drop its `if _derived_mirror_required(...)`, or its
+    `props.pop("embedding")` stop arm) and the label it serves reds here with its name.
+    """
+    ungated: dict[str, list[str]] = {}
+    for _table, label, _key in parity.RETIRED:
+        writers, refusal = strip._writers_for(label)
+        assert refusal is None, f":{label} population unreadable: {refusal}"
+        types = tuple(parity.affected_entity_types(label))
+        for key in writers:
+            module_name, _, symbol = key.partition("::")
+            if not any(strip._writer_consults_gate(module_name, symbol, (t,))[0]
+                       for t in types):
+                ungated.setdefault(label, []).append(key)
+    assert ungated == {}, (
+        "a declared writer of a retired label still sets `embedding` without asking the "
+        f"gate, so a strip would be undone by its next call: {ungated}")
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -1431,16 +1473,30 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     folds alone would license the strip its own refusal claims to prevent.
 
     Mutation: drop `_register_writers` from `_writers_for` and this test reds.
+
+    ⛔ AND SINCE `#13626` ALL OF THEM ASK, so the assertion moved from "the refusal names
+    them" to "the population CONTAINS them and the gate CLEARS them" — the same population
+    fact, read in the direction the tree now answers. The identity of the population is what
+    this test exists for: a label cleared on the folds alone is the strip-licensing defect
+    the register was added to prevent, and `_fold_consults_gate` clearing is only meaningful
+    because the population it cleared is the register's.
     """
     writers, refusal = strip._writers_for("Event")
     assert refusal is None
     assert "tortoise.sdk::_update_entity" in writers
     assert "tortoise.hosted_backup::restore_graph" in writers
     assert "tortoise.projection.entities::_upsert_event" in writers
+    # The five `:Event` writers that are NOT folds — the population the fold map alone misses.
+    for outside in ("tortoise.sdk::_session_event_write",
+                    "tortoise.sdk::_embedding_repair_attempt",
+                    "tortoise.sdk::_event_raw_write_door",
+                    "tortoise.sdk::ingest_corpus",
+                    "tortoise.session_indexer::main"):
+        assert outside in writers, outside
 
     gated, why = strip._fold_consults_gate("Event")
-    assert gated is False
-    assert "do not ask the gate" in why
+    assert gated is True, why
+    assert "every :Event writer (9) calls the gate" in why, why
 
 
 def test_the_record_still_requiring_the_copy_keeps_the_gate_SHUT(monkeypatch, tmp_path):
@@ -2935,11 +2991,13 @@ def test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH(tmp_path, monk
         "`_upsert_source` was dropped from :Source's declared writers, so a strip would "
         "be undone by the next caller-supplied embedding")
 
-    # …and the operator-facing refusal reason says so, because it is the sentence an
-    # operator reads when the gate shuts: an inaccurate writer list is a diagnosis bug.
+    # …and the fold ASKS THE GATE ABOUT THAT STORE (`#13626`), which is what lets the
+    # label clear at all — the population fact above and this write-stop are two halves of
+    # one guarantee: named while it could store, gated so the store can be declined.
+    assert strip._writer_consults_gate(
+        "tortoise.projection.entities", "_upsert_source", ("source",))[0] is True
     gated, why = strip._fold_consults_gate("Source")
-    assert gated is False
-    assert "tortoise.projection.entities::_upsert_source" in why
+    assert gated is True, why
 
 
 def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):

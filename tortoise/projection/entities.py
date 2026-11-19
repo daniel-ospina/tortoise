@@ -94,9 +94,18 @@ def _derived_mirror_required(entity_type: str) -> bool:
     fold from crashing if the record's arming module cannot be imported, which is
     a WRITE-path fault and must never take a write down.
 
-    ⛔ AND THIS GUARDS THE FOLD ONLY. A `:Point`'s vector is RECORD TRUTH (`#5004`)
-    and is never derived, so nothing here may touch it; the document/Event/Source
-    arms this issue does not retire are untouched too.
+    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS ONLY. A `:Point`'s vector is
+    RECORD TRUTH (`#5004`) and is never derived, so nothing here may touch it.
+
+    ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
+    why it is imported rather than re-spelled: `sdk::_update_entity`,
+    `sdk::_event_raw_write_door`, `sdk::_session_event_write`,
+    `sdk::_embedding_repair_attempt`, `sdk::ingest_corpus`,
+    `session_indexer::main` and `hosted_backup::restore_graph` all write the same
+    derived `embedding` property, so each must ask the SAME predicate — the one
+    `record_vector.mirror_required` owns — and each has the same reason to survive an
+    unreadable gate rather than take its write down. A second spelling in each of
+    those modules would be a second predicate, and `#13610` forbids exactly that.
     """
     try:
         from tortoise.record_vector import mirror_required
@@ -5505,7 +5514,14 @@ class _EntityHandlers:
         #     which is the exact stall #13224/#13229 removed. Nothing in this
         #     PR's test set would red on that loss, because this PR replaced the
         #     code path, so no test on either side pins `bounded` on `st`.
-        if not ev.get("suppress_embedding") and st and st.strip():
+        # #13626: AND NOT AT ALL ONCE THE RECORD OWNS THE `document` VECTOR. This fold
+        # still writes the `:Source` ROW — only the vector is omitted — because the
+        # `:Source` node is the document's identity and `set_embedding_clause`'s
+        # preserve-on-null leaves a stored vector alone. The conjunct sits in the TEST
+        # rather than around the block so the write-stop is the encode itself, the same
+        # shape `_upsert_subject` / `_upsert_object` use.
+        if (not ev.get("suppress_embedding") and st and st.strip()
+                and _derived_mirror_required("document")):
             # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
                 # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
@@ -5893,7 +5909,15 @@ class _EntityHandlers:
                 inner.get("eventKind", ""),
                 inner.get("object", ""),
             ]))
-            if event_content.strip():
+            # #13626: the DERIVED half of this fold's write-stop. The carried half
+            # (`inner["embedding"]`, the journal's replay carrier) is gated where it is
+            # actually stored — `_event_plain_merge`, which is declared as a writer of
+            # `:Event` in its own right — so one ask covers the payload and this conjunct
+            # covers the encode. `mirror_required("event")` answering False means the
+            # record proved it holds this label's vectors, so a second copy on the graph
+            # is rent and `e.embedding` stays as it was (`set_embedding_clause`'s
+            # preserve-on-null); the ROW is written either way.
+            if event_content.strip() and _derived_mirror_required("event"):
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
                     # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The text is
@@ -6427,6 +6451,19 @@ class _EntityHandlers:
         an in-repo producer that sets ``objectType`` today, so this is a residual
         closed, not a live defect fixed.
         """
+        # ── #13626: the WRITE-STOP for this fold's vector (#13610 option 2) ──
+        # The vector is a PARAMETER here (the caller encoded it, or the journal carried
+        # it), so the stop is not a skipped encode but a skipped STORE: `embedding` is
+        # what the two clauses below are handed, and on the stop verdict it is None.
+        # "Write none" is exactly what `set_embedding_clause`'s preserve-on-null CASE and
+        # `clear_embedding`'s null guard already do, so a stored vector is left untouched
+        # rather than deleted — this issue retires the WRITE, not the property.
+        # ⛔ The ROW is still written: every other property in `$props`, the edges and the
+        # document `:Source` below are untouched by this answer.
+        caller_vector = embedding
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = caller_vector
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
         # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
@@ -7526,9 +7563,21 @@ class _EntityHandlers:
         _allow = self._SOURCE_EXTRA_PROPS
         if ev.get("_stub_completion"):
             _allow = _allow | self._SOURCE_CAPTURE_REPLAY_PROPS
+        # ── #13626: the WRITE-STOP for the caller-supplied vector ──
+        # `embedding` is on `_SOURCE_EXTRA_PROPS` (declared beside `domain`/`summary`),
+        # so the passthrough below is a REAL store of a vector this fold never encodes
+        # — `create_source(url, props={"embedding": [...]})` lands it, which is why
+        # `:Source` could not open while this fold was ungated. The stop is a `pop` on a
+        # COPY of the event, so the vector is absent from the SET and the ROW (identity,
+        # version, `_searchText`, every other extra) is written exactly as before; the
+        # caller's own dict is left alone because the live door journals it.
+        _extra = ev
+        if not _derived_mirror_required("source"):
+            _extra = dict(ev)
+            _extra.pop("embedding", None)
         _persisted = self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED, allow_keys=_allow,
+            _extra, self._SOURCE_HANDLED, allow_keys=_allow,
         )
         _denied = {
             k for k in ev

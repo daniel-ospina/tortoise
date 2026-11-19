@@ -1706,22 +1706,33 @@ AND read — until it does. Concretely, five facts a reader can hold against the
 3. **Every served label is gated, not two.** The narrow {object, subject} cut was wrong for the
    gate's own reason: the record is a fold with no backfill, so an ungated `point`/`operator`/
    `event`/`document` read would be answered from a possibly-short record reported as `ok`.
-4. **The WRITE half is narrower than the read half, by design.** `_upsert_subject`/`_upsert_object`
-   stop ENCODING once the count proves the record holds the vector (nothing is deleted — the property
-   is simply not written); the other five folds keep writing their graph vector. That is option 2's
-   transitional double-storage: the round trip is always "the read stops trusting the graph last".
+4. **Every writer of a gated label asks, not just the folds** (`#13626`). `_upsert_subject`,
+   `_upsert_object`, `_upsert_event`, `_upsert_document`, `_upsert_source` and `_event_plain_merge`
+   stop STORING once the count proves the record holds the vector (nothing is deleted — the property
+   is simply not written, and the ROW is written either way), and so does every writer outside the
+   folds that sets the same property: `sdk::_update_entity` (the caller-prop door, asked per label),
+   `sdk::_event_raw_write_door`, `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`,
+   `sdk::ingest_corpus`, `session_indexer::main` and `hosted_backup::restore_graph`. One ungated
+   writer would re-add the vector on its next call and undo a strip, which is why
+   `tools/strip_graph_entity_vectors.py`'s census — not this document — is the authority on whether
+   a label may be stripped: it reads each declared writer's own source and refuses while one still
+   stores unconditionally. ⛔ A restore is the one verb whose completeness is at stake: it asks the
+   same gate, which answers "keep the vector" whenever the tenant is unknown (the normal DR
+   posture), and on the verdict it acts it drops ONLY the vector, keeps the node and reports it.
    ⛔ **And both halves resolve ONE tenant.** A fold has no SDK handle, so the write door installs
    the request's by-value tenant (`sdk._record_tenant`, the hosted REST lane) as the ambient carrier
    for the length of that one graph write (`TortoiseSDK._record_tenant_scope`) — the same
    `use_record_tenant` primitive the MCP lane installs per request. Without it the write gate would
    answer "no tenant" on every hosted write and keep the mirror for ever, while the read half of the
    same request cut over.
-   ⛔ **And the no-fallback CONTRACT is narrower than the gate, by exactly this fact.** The gate
-   covers all seven because a short count declining to a still-written graph loses nothing; the
-   contract — refuse the graph, seal the answer — is claimed only for the labels whose fold really
-   stops encoding (`record_vector.MIRROR_RETIRED_LABELS`: `object`, `subject`). For the other five a
-   record blip keeps the named `scan_fallback`, because their graph copy is still being fed and
-   refusing it would empty the dense leg for `point` on the default posture (`#13617` review F1).
+   ⛔ **And the no-fallback CONTRACT is still narrower than the gate, by exactly this fact.** The
+   gate covers all seven because a short count declining to a still-written graph loses nothing; the
+   contract — refuse the graph, seal the answer — is claimed only for the labels whose writers
+   really stop storing (`record_vector.MIRROR_RETIRED_LABELS`: `object`, `subject`, `event`,
+   `document`, `source` since `#13626`). For `point` and `operator` a record blip keeps the named
+   `scan_fallback`, because a `:Point`'s vector is record TRUTH (`#5004`) and no writer gates it, so
+   their graph copy is still being fed and refusing it would empty the dense leg for `point` on the
+   default posture (`#13617` review F1).
 5. **The in-graph index is retired only on an EXPLICIT arm.** `vector_index_retired()` is
    `VECTOR_INDEX_RETIRED ∧ DSN ∧ an operator SPELLED the switch` (`record_vector.arm_is_explicit`,
    `#13631`). An UNSET switch is armed for the READ and silent for the DROP, so a default-armed
