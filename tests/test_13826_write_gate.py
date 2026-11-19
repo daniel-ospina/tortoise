@@ -103,6 +103,26 @@ def _node_exists(g, match: str) -> bool:
 # ── 1. the `:Event` folds ───────────────────────────────────────────────
 
 
+def _count_session_embedding(monkeypatch):
+    """Stub the session embedder AND count its calls.
+
+    ⛔ Owning the count is what separates a WRITER from its DOOR (#13854 review, P3): the
+    raw `:Event` door now gates too, so a writer whose own ask was deleted still stores no
+    vector — the store cannot tell the two apart. Call this AFTER
+    `_stub_session_metadata` (the later patch wins).
+    """
+    import tortoise.session_indexer as indexer
+
+    calls: list[str] = []
+
+    def _fake(*a, **k):
+        calls.append("encode")
+        return list(VEC)
+
+    monkeypatch.setattr(indexer, "compute_session_embedding", _fake, raising=True)
+    return calls
+
+
 def _never_encode(monkeypatch):
     """A stub embedder that records the texts it was asked to encode."""
     from tortoise import derived_embedding
@@ -360,7 +380,9 @@ def test_the_embedding_repair_asks_the_gate(sdk, monkeypatch):
     """A repair is a write; with the mirror retired there is nothing to repair.
 
     It must not be reported as a FAILURE either — the caller treats "failed" as retryable,
-    and a gated deployment would re-walk every such file on every sweep.
+    and a gated deployment would re-walk every such file on every sweep. And it must not be
+    reported as WORK: `healed` tells the caller a write happened, and a retirement writes
+    neither the Event nor a vector (#13826 review).
     """
     _stub_session_metadata(monkeypatch)
     monkeypatch.setattr(TortoiseSDK, "_session_embedding",
@@ -377,9 +399,10 @@ def test_the_embedding_repair_asks_the_gate(sdk, monkeypatch):
     g.query("CREATE (e:Event {eventId: 'ev-13826-repair-drop', eventKind: 'AgentSession'})")
     attempt = sdk._embedding_repair_attempt(
         "ev-13826-repair-drop", {"title": "B Session"}, "body", "B Session", 24, None)
-    assert attempt[0] == "healed", (
-        "the retired mirror was reported as a FAILED repair, which the sweep retries for "
-        f"ever: {attempt}")
+    assert attempt[0] == "retired", (
+        "the retired mirror was reported as a FAILED repair (which the sweep retries for "
+        "ever) or as `healed`, which the caller reports as `updated` for a run that wrote "
+        f"neither the Event nor a vector: {attempt}")
     assert _prop(g, "(n:Event {eventId:'ev-13826-repair-drop'})", "embedding") is None
     assert _prop(g, "(n:Event {eventId:'ev-13826-repair-drop'})",
                  "embeddingRepairFailedAt") is None, (
@@ -393,6 +416,7 @@ def test_the_embedding_repair_asks_the_gate(sdk, monkeypatch):
 def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
     """The frozen legacy branch is a declared `:Event` writer, so it asks too."""
     _stub_session_metadata(monkeypatch)
+    calls = _count_session_embedding(monkeypatch)
     corpus = tmp_path / "corpus-13826"
     corpus.mkdir()
     (corpus / "sess.md").write_text(
@@ -409,6 +433,8 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
                    ).result_set
     assert rows and rows[0][0] is not None, (
         f"the mirror arm of the legacy corpus ingest stored no vector: {rows}")
+    assert calls, "the mirror arm spent no encode — the fixture never exercised it"
+    calls.clear()
 
     g.query("MATCH (e:Event) DETACH DELETE e")
     _gate(monkeypatch, False)
@@ -419,6 +445,11 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
     assert rows, "the ROW was not written on the stop arm"
     assert rows[0][0] is None, "the legacy corpus ingest stored a retired vector"
     assert rows[0][1] == "indexed", rows
+    # ⛔ THE STORE ALONE DOES NOT DISCRIMINATE (#13854 review, P3): the raw `:Event` door
+    # gates too, so a writer whose OWN gate was deleted would compute a vector, hand it to
+    # the door, and still store none — green. The COUNT is what pins the writer.
+    assert calls == [], (
+        f"the legacy corpus ingest computed a vector the record already owns: {calls}")
 
     # ⛔ THE UPDATE ARM IS A SEPARATE WRITER (#13828 review, P2): the two runs above both
     # took the CREATE arm because the node was absent (the first run created it, the
@@ -440,6 +471,9 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
     assert rows[0][0] is None, (
         "the legacy corpus ingest's UPDATE arm re-minted a retired vector — it is a "
         "separate writer from the create arm and was ungated here")
+    assert calls == [], (
+        "the legacy corpus ingest's UPDATE arm still computed a vector on the stop "
+        f"arm: {calls}")
 
     (corpus / "sess.md").write_text(
         "---\ntitle: A Session\nsessionId: sess-13826\n---\nuser: hi a third time\n",
@@ -463,8 +497,11 @@ def test_the_session_indexer_cli_asks_the_gate(sdk, monkeypatch, capsys, tmp_pat
     from tortoise import session_indexer
 
     _stub_session_metadata(monkeypatch)
+    calls = _count_session_embedding(monkeypatch)
     monkeypatch.setattr(sdk_module, "TortoiseSDK", lambda *a, **k: sdk, raising=True)
     g = sdk._get_proj().g
+    keep_calls: list[int] = []
+    stop_calls: list[int] = []
     for _ in range(2):
         session = tmp_path / f"sess-{_}.md"
         session.write_text("---\ntitle: A Session\n---\nuser: hi\n", encoding="utf-8")
@@ -477,13 +514,21 @@ def test_the_session_indexer_cli_asks_the_gate(sdk, monkeypatch, capsys, tmp_pat
             "--no-llm",
         ])
         _gate(monkeypatch, _ == 0)
+        calls.clear()
         session_indexer.main()
+        (keep_calls if _ == 0 else stop_calls).append(len(calls))
 
     rows = g.query("MATCH (e:Event {eventKind:'AgentSession'}) "
                    "RETURN e.embedding ORDER BY e.source_file").result_set
     assert len(rows) == 2, rows
     assert rows[0][0] is not None, "the mirror arm of the CLI stored no vector"
     assert rows[1][0] is None, "the CLI stored a retired vector"
+    # ⛔ The STORE cannot tell the CLI's own ask from the door's (#13854 review, P3): the
+    # vector is handed to `_event_raw_write_door`, which gates `:Event` as well, so a CLI
+    # whose gate was deleted would still store none. What the CLI owns is the COMPUTE.
+    assert keep_calls == [1], f"the mirror arm did not encode exactly once: {keep_calls}"
+    assert stop_calls == [0], (
+        f"the CLI computed a vector the record already owns: {stop_calls}")
     capsys.readouterr()
 
 

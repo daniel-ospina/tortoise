@@ -58673,6 +58673,11 @@ class TortoiseSDK:
                         gate["marker"])
                     if attempt == "healed":
                         repair_work = True
+                    elif attempt == "retired":
+                        # the record serves this label's vectors: nothing was
+                        # written and nothing is owed — fall through and let the
+                        # SOURCE MERGE decide the status, never a repair claim.
+                        pass
                     else:
                         # failed OR suppressed → skipped embedding-unavailable
                         # (a failed repair performs NO unit-completion write →
@@ -59199,7 +59204,7 @@ class TortoiseSDK:
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:
         """Embedding repair (sessions; §5.1 pin (a) cycle-6/7/8). Returns
-        (attempt, marker_ts): 'healed' | 'suppressed' | 'failed'.
+        (attempt, marker_ts): 'healed' | 'retired' | 'suppressed' | 'failed'.
 
         Backoff: a FAILED repair attempt records e.embeddingRepairFailedAt
         (targeted SET touching no other key) and reports skipped
@@ -59225,12 +59230,13 @@ class TortoiseSDK:
         # because an Event's vector could be missing while the graph was the answering
         # leg; once the record has proved it holds this label's vectors, re-deriving one
         # for the graph is rent and the next strip would have to remove it again. The
-        # answer is a WRITE-STOP, not a failure: the unit is reported `healed` (its
-        # embedding clause is satisfied by the retirement), no repair marker is written
-        # and no model call is spent — where treating it as "failed" would retry this
-        # file for ever.
+        # answer is a WRITE-STOP, not a failure: no repair marker is written and no
+        # model call is spent — where treating it as "failed" would retry this file for
+        # ever. It is ALSO not work: `retired` is its own verdict because a caller that
+        # reads `healed` as "something was written" reports the unit `updated` for a run
+        # that wrote neither the Event nor a vector (#13826 review).
         if not _derived_mirror_required("event"):
-            return ("healed", None)
+            return ("retired", None)
         try:
             metadata = _kw_fallback(text)
             embedding = self._session_embedding(
