@@ -2515,17 +2515,19 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     # files this lane may legitimately edit, so an overlap test would re-arm the false
     # block for any PR that touches one of them (and this fix edits
     # `tests/test_paired_expansion_ab_2518.py` itself).
-    # ⛔ BOTH owner paths, not one (#13572 review, P2): the record's change is the brief
-    # AND the probe it reports (`tools/paired_expansion_ab_2518.py`), so arming on the
-    # brief alone let a probe-only PR reach the `tortoise/` claim below unarmed — a gap,
-    # not vacuity, since the owning PR carries both. A PR that merely edits a test file
-    # the cell names still skips; that is what the narrow trigger is FOR.
+    # ⛔ ARMED BY THE RECORD'S DOCUMENT, and by that alone (#13572 review round 2, P2).
+    # `tools/paired_expansion_ab_2518.py` is ITSELF one of the paths the cell enumerates,
+    # so arming on it too would make any ordinary follow-up fix to that instrument red on
+    # the eleven paths a one-file diff cannot carry — the same false block this change
+    # exists to remove, re-created one layer in (measured: armed on a probe-only diff,
+    # `extra` = 11). The residual is deliberate and named: a probe-only PR is NOT checked
+    # by this pin, because the claim below is about the change the brief records, and the
+    # brief is the record. A PR that merely edits a test file the cell names still skips.
     brief_dir = _DOCS.relative_to(repo).as_posix() + "/"
-    probe_path = "tools/paired_expansion_ab_2518.py"
-    if not [p for p in diff if p.startswith(brief_dir) or p == probe_path]:
-        pytest.skip("this branch's diff carries neither the research brief this cell "
-                    "records nor the probe it reports (the cell describes one PR's "
-                    "change) — the set is re-read by a reviewer at each head")
+    if not [p for p in diff if p.startswith(brief_dir)]:
+        pytest.skip("this branch's diff does not carry the research brief this cell "
+                    "records (the cell describes one PR's change) — the set is "
+                    "re-read by a reviewer at each head")
 
     assert not [p for p in diff if p.startswith("tortoise/")], (
         "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
