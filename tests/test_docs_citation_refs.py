@@ -192,6 +192,8 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -725,6 +727,72 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     return answers
 
 
+def _census_agreement_verdict() -> int:
+    """The verdict `--check` prints, measured on the SAME path the verb takes.
+
+    ⛔ `census()` DEFAULT-ARGUMENTS the frozen `DEFAULT_PIVOT` (`census(pivot: int =
+    DEFAULT_PIVOT, ...)`), while the verb's `--check` path calls `census(sites[0])` with
+    `sites = lifetime_query_sites()`. Measuring `census()` therefore asserted agreement on a
+    path the named verb does not take. MEASURED (#13807 review round 7, P1): with the frozen
+    literal one line behind the tree, `_sweep(census())` -> `0` while
+    `_sweep(census(lifetime_query_sites()[0]))` -> `1` — the arm reported "agreement" over a
+    tree the verb it names reported as STALE, i.e. the false PASS the arm exists to refuse,
+    reproduced inside the arm. The shape `--check` refuses (more than one site) is refused
+    here rather than silently graded on the wrong pivot.
+
+    ⛔ NOT A STYLE CHOICE — a union merge resolution (`49fe860faa`) dropped this derivation
+    and restored the frozen call into the merged file, so the repair is pinned by
+    `test_the_agreement_arm_reads_the_derived_pivot_not_the_frozen_default` rather than
+    left to a reader of the diff.
+    """
+    from tools.hosted_api_cite_census import _sweep, census, lifetime_query_sites
+
+    _lifetime_sites = lifetime_query_sites()
+    assert len(_lifetime_sites) == 1, (
+        f"{len(_lifetime_sites)} `query(LIFETIME_MEMORY_QUERY)` sites in "
+        f"`tortoise/hosted_api.py` ({_lifetime_sites}). `--check` refuses to run on that "
+        "shape, so this arm cannot claim the verdict that verb prints "
+        "(#13807 review round 7, P1)")
+    return _sweep(census(_lifetime_sites[0]), refresh=False)
+
+
+def test_the_agreement_arm_reads_the_derived_pivot_not_the_frozen_default(monkeypatch):
+    """The agreement arm must measure the pivot `--check` DERIVES, not the frozen literal.
+
+    ⛔ NON-VACUITY IS THE POINT, so the probe does not assume which path is green: it
+    replaces `lifetime_query_sites` with a value one line away from `DEFAULT_PIVOT` and
+    records the pivot the arm actually passes to `census`. Both legs are required — (a) the
+    probe must SEPARATE the two paths, or the test would pass on an arm that ignores the
+    pivot, and (b) the arm must take the DERIVED one. Restoring `verdict = _sweep(census())`
+    reds (b), which is the regression the `49fe860faa` union resolution introduced.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    derived = census_mod.DEFAULT_PIVOT + 1
+    calls: list[int] = []
+    _real_census = census_mod.census
+
+    def _spy(pivot: int = census_mod.DEFAULT_PIVOT, *a, **k):
+        calls.append(pivot)
+        return _real_census(pivot, *a, **k)
+
+    monkeypatch.setattr(census_mod, "lifetime_query_sites", lambda *a, **k: [derived])
+    monkeypatch.setattr(census_mod, "census", _spy)
+    _census_agreement_verdict()
+
+    assert calls and calls[0] != census_mod.DEFAULT_PIVOT, (
+        "the probe did not separate the derived pivot from the frozen `DEFAULT_PIVOT` "
+        f"(the arm called `census` with {calls!r}), so this test could pass on an arm that "
+        "ignores the pivot entirely")
+    assert calls == [derived], (
+        "the agreement arm measured `census` with "
+        f"{calls!r}; `--check` derives the pivot via `lifetime_query_sites()` "
+        f"({derived!r} here), so an arm reading the frozen `DEFAULT_PIVOT` reports agreement "
+        "over a tree the verb it names reports as STALE — the false PASS the arm exists to "
+        "refuse (#13807 review round 7, P1; re-introduced by the `49fe860faa` union "
+        "resolution and pinned here)")
+
+
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -783,13 +851,16 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           an UNMEASURABLE set now SKIPS that test instead of being read as "empty"
           (#13795 review, findings 1 and 2).
     """
-    from tools.hosted_api_cite_census import _note_paths, _sweep, census
+    from tools.hosted_api_cite_census import _note_paths
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
 
-    # (a) AGREEMENT, measured in-process by the checker the document quotes.
-    verdict = _sweep(census(), refresh=False)
+    # (a) AGREEMENT, measured in-process by the checker the document quotes — ON THE PATH
+    # `--check` TAKES. See `_census_agreement_verdict`: `census()`'s default is the FROZEN
+    # `DEFAULT_PIVOT`, and measuring that compared the notes against themselves (#13807
+    # review round 7, P1).
+    verdict = _census_agreement_verdict()
     _green_claims = (
         "--check` exits 0",
         "--check` reports every stated figure `== measured`",
@@ -824,7 +895,11 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    # ⛔ THE CONSTANT, NOT A SECOND LITERAL (#13807 review round 3, F2 — re-applied; the
+    # union merge had re-inlined this copy). While the arm carries its own copy of the string,
+    # editing `_TORTOISE_CENSUS_CMD` leaves `assert _tortoise_cmd in doc` green against the
+    # OLD command while the ledger polices a command the document never contained.
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
         "the census verdict is about. Without it the reader cannot tell whether the two "
@@ -1040,7 +1115,10 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    # ⛔ THE CONSTANT, NOT A SECOND LITERAL (#13807 review round 3, F2 — re-applied; the
+    # union merge had re-inlined this copy). A private copy means the detector can be told a
+    # command the document does not contain while `_TORTOISE_CENSUS_CMD` moves.
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
 
     # NON-VACUITY (#13728 review, finding 4): the detector must SEE an answer in both
     # directions and must read a NEGATION as a membership claim, or the arm below is inert
@@ -1516,6 +1594,21 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
             f"{_sdk[_n - 1].strip()!r} — that cite does not name the content it is "
             "for, so a reader who follows it lands on an unrelated line "
             "(#13746 review, round 3, P2; scoped by #13802 review, finding 2)")
+
+    # ⛔ THE RETIRED SIDE OF THE SAME PAIR, AND IT NEEDS NO BASE REF EITHER (#13802
+    # review, P2 — the leg `main`'s deleted arm carried, measured open at the pre-fix head:
+    # injecting `sdk.py:21604` alongside the surviving `sdk.py:21715` left this suite green).
+    # A re-point moves a cite FORWARD, so the index carrying one of these again means the
+    # file was reverted or a stale figure was pasted back in — either way a reader follows a
+    # cite to the wrong line. If this reds on a deliberate revert, update `_RETIRED_INDEX_CITES`
+    # and say which head restored it; do not widen the tuple to "the current value".
+    _resurrected = [c for c in _RETIRED_INDEX_CITES if c in index]
+    assert not _resurrected, (
+        f"`docs/00_index.md` carries the RETIRED cite(s) {_resurrected!r} again, "
+        "alongside or instead of the value the row was re-pointed to. A re-point moves a "
+        "cite forward only, so this is either a revert or a pasted-back stale figure: a "
+        "reader following it lands on a line that does not name that row's content "
+        "(#13802 review, P2 — the absence leg `main`'s deleted arm carried, restored here)")
 
     # ─────────────────────────────────────────────────────────────────────────────
     # ARMS THAT NEED THE BASE REF (#13802 review, finding 3 — P1, blocking).
@@ -2221,15 +2314,37 @@ def _measured_index_word_diff(
 #: checks the CONTENT a cite resolves to wherever the file carries that cite, instead of
 #: mandating a phrasing that attributes `main`'s move to this diff.
 #:
-#: ⛔ AND THAT IS NARROWER THAN WHAT IT REPLACES — stated, not papered over (#13802 merge
-#: round P2). The deleted arm also asserted the OLD cite was ABSENT; nothing enforces that
-#: now, measured: injecting `sdk.py:21604` into `docs/00_index.md` ALONGSIDE the surviving
-#: `sdk.py:21715` leaves the suite green. It is not re-added here because "is it absent" is
-#: a property of `docs/00_index.md`'s own content rather than a claim about this diff, and
-#: because `main` re-deriving that row again is the normal case this PR exists to stop
-#: reding on. Recorded here rather
-#: than in a comment beside a deleted function, because a reader must be able to see WHY
-#: `main`'s arm is gone without diffing two heads.
+#: ⛔ THE ABSENCE LEG IS RESTORED, AND `_RETIRED_INDEX_CITES` BELOW IS HOW (#13802
+#: review, P2 — measured). The deleted arm also asserted the OLD cite was ABSENT, and the
+#: merge that dropped it disclosed the hole without closing it: MEASURED at the pre-fix
+#: head, injecting `sdk.py:21604` into `docs/00_index.md` ALONGSIDE the surviving
+#: `sdk.py:21715` left the guard suite green (`18 passed`). The stated reason for not
+#: re-adding it — that "`main` re-deriving that row again is the normal case this PR exists
+#: to stop reding on" — does not hold for an ABSENCE assertion: a re-point moves a cite
+#: FORWARD (`:21556` -> `:21604` -> `:21679` -> `:21715`), so a legitimate head can only
+#: retire MORE of these, never restore one. Only a deliberate revert can, and a revert is a
+#: decision a guard should make a lane state explicitly.
+#:
+#: ⛔ WHY A TYPED LITERAL IS RIGHT HERE IN A FILE WHOSE THESIS IS "TYPE NO HEAD-BOUND
+#: ANSWER": these are not ANSWERS about the current head (which rot the moment `main`
+#: moves) — they are RETIRED values, each falsified by CONTENT and each carrying the PR
+#: that retired it. "The index does not carry this any more" is stable in exactly the way a
+#: current address is not.
+_RETIRED_INDEX_CITES = (
+    # the `#7949`/`#9080` capstone row's `sdk.py` receipt cite: #13551 `:21556`->`:21604`,
+    # #13755 `:21604`->`:21679`, #13750 `:21679`->`:21715`.
+    "sdk.py:21556", "sdk.py:21604", "sdk.py:21679",
+    # the `#12296` entity-verdict row's filter cite: #13551 `:28019`->`:28067`, then
+    # `b68883c11b` ->`:28142`, then #13724 ->`:28178`.
+    "sdk.py:28019", "sdk.py:28067", "sdk.py:28142",
+)
+#: ⛔ AND THAT IS STILL NARROWER THAN WHAT IT REPLACES — stated, not papered over (#13802
+#: merge round P2). The rest of what the deleted arm did is not restored: it DERIVED the
+#: old cite from the document's own `from **`:OLD`** … to **`:NEW`**` phrasing, which this
+#: PR deletes, so the pair is a fixed list here and a NEWLY retired cite is not caught
+#: until it is added above. The restoration lives in the arm that reads the document (not in
+#: a comment beside a deleted function), because a reader must be able to see WHY `main`'s
+#: arm is gone without diffing two heads.
 _ATTRIBUTION_PHRASES = (
     "re-pointing that row's `sdk.py` cite from",
     "and THAT shift is this repair",
@@ -2405,6 +2520,190 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
             "at the head being merged, and state the command rather than a head-bound "
             "pair (#13746 review, round 3, finding 4)")
 
+
+def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
+    """Arm (c-i) is a TEXT ban, so it fires in every clone — pinned, not reasoned about.
+
+    ⛔ THREE things are pinned here, and none of them is observable from the bundle alone:
+
+    1. **BOTH lists are read, in BOTH directions, and neither may SHRINK** (#13807 review,
+       F1; the SHRINK half is finding 5). The cut this replaces keyed the lists on a live
+       measurement, so in the depth-1
+       checkout the `test` job uses it read neither — and no row anywhere changed colour when
+       it was broken, which is why it took a fresh-context reviewer to find it. Each injected
+       spelling below reds.
+    2. **The CONTENT is pinned, not the size** (#13807 review, finding 5). Length assertions
+       left eight of the membership rows unpinned: appending one character to an unpinned
+       row kept every count, every membership test and the injection loop green — because the
+       loop iterates the MUTATED list — while that retired phrasing could be re-inserted into
+       `05-verify.md` uncaught. That is the realistic bypass: a fixer loop "fixing" a doc hit
+       by tweaking the spelling. Pinning the tuples WHOLE subsumes the counts.
+    3. **The arm must not consult the clone** (F1's root; #13807 review, finding 4). It is a
+       text ban, and the pin is BEHAVIOURAL rather than a grep of its source: an
+       `inspect.getsource` check was under-inclusive (`subprocess.run` behind an alias, or a
+       `_run_git()` helper, contains neither needle) and over-inclusive (a comment mentioning
+       `git diff` inside the arm false-reds) — so it could not red the regression it claimed
+       to pin. Making `subprocess.run` explode and asserting the arm STILL reds the same
+       spelling is the property that actually matters: the document is its only input.
+
+    The measurement the retired cut took is deliberately NOT re-taken: a membership is
+    head-bound in both directions, so re-measuring THIS head both asserted nothing at depth 1
+    and turned any code PR's head into a false red (#13807 review, F1, and the false-red
+    direction recorded in `_census_membership_verdicts`).
+    """
+    assert (
+        "THREE are in this head",
+        "two comment-only `tortoise/` modules",
+        "prints exactly `tortoise/activation_scorecard.py`",
+        "which two `tortoise/` paths this diff carries",
+        "prints the two modules named above",
+        "`activation_scorecard.py` IS in the diff",
+        f"{_TORTOISE_CENSUS_CMD}` is NOT empty",
+        f"{_TORTOISE_CENSUS_CMD}` returns exactly those two",
+        f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
+        f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
+        "the `tortoise/` set above is the two COMMENT-ONLY modules",
+        "`-- tortoise/` returns ONE module",
+        "carries `tortoise/` paths",
+    ) == _TORTOISE_MEMBERSHIP_SPELLINGS, (
+        "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
+        "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
+        "ban the document can be re-inserted past (#13746 review, finding 7; #13807 review, "
+        "finding 5). Retiring a NEW spelling means adding it; it never means re-wording one.")
+    assert (
+        f"neither is `{_TORTOISE_CENSUS_CMD}`",
+        f"{_TORTOISE_CENSUS_CMD}` -> empty",
+        f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+        "prints NO path at all",
+        "the `tortoise/` set above is EMPTY",
+        "returns NOTHING AT ALL",
+        "`-- tortoise/` returns NOTHING",
+        "that command returns nothing for all three",
+        "contributes no `tortoise/` path at all",
+    ) == _TORTOISE_EMPTY_SPELLINGS, (
+        "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
+        "retired for the same reason — head-bound in both directions (#13807 review, F1). "
+        "The rows after the first three sit beside an ABBREVIATED command or none at all "
+        "(#13807 review round 3 F1, round 4 finding 1); they were the answers a "
+        "command-scoped ban could not see, and each was measured live in the document.")
+    # ⛔ THE COMMAND ITSELF IS PINNED (#13807 review round 3, F2 — MEASURED). Both sides of
+    # every `f"{_TORTOISE_CENSUS_CMD}…"` row render from this ONE constant, and the injection
+    # loop iterates the tuples, so editing the constant re-renders ledger AND witnesses
+    # together and reds NOTHING: measured, retyping it as `-- docz/` left `2 passed` while
+    # `_census_membership_verdicts` went blind to the real command (`[]` for a document that
+    # spelled it). 3 of 3 emptiness rows and 5 of the membership rows went dead silently. The
+    # literal below is the INDEPENDENT copy that makes the drift red.
+    assert _TORTOISE_CENSUS_CMD == "git diff --name-only origin/main...HEAD -- tortoise/", (
+        "`_TORTOISE_CENSUS_CMD` no longer names the command the `#7949` bundle quotes, so the "
+        "ledger above now polices a string the document does not contain and the ban is "
+        "blind to the real command (#13807 review round 3, F2)")
+
+    # ⛔ AND THE ROW TEXT IS PINNED BY SOMETHING THE EDIT CANNOT REACH (#13807 review round
+    # 5, F2 — MEASURED). The whole-tuple pins above are each a byte-identical copy of the
+    # ledger they check, so the realistic bypass is a GLOBAL edit: `sed -i 's/all three/all
+    # THREE/'` rewrites both copies, the tuple still equals itself, the test passes — and the
+    # ledger now carries a spelling the document no longer contains, so the ban returns `[]`
+    # over the retired phrasing. Deleting a row from both copies behaves the same way. A
+    # digest is independent DATA, not a second copy of the same text: it cannot be edited by
+    # a substitution that does not also deliberately recompute it. A legitimate ledger change
+    # therefore updates the ledger, its readable tuple AND this digest — which is the point.
+    assert hashlib.sha256("\n".join(_TORTOISE_MEMBERSHIP_SPELLINGS).encode()).hexdigest() == (
+        "641b5c03277de43cf4410a8743029da3af02a56685b0b6c11be69bfe54b5943e"), (
+        "the membership ledger's TEXT changed. If that was deliberate, recompute this digest "
+        "and the tuple above; if it was a find-and-replace across the file, it just silently "
+        "narrowed the ban (#13807 review round 5, F2)")
+    assert hashlib.sha256("\n".join(_TORTOISE_EMPTY_SPELLINGS).encode()).hexdigest() == (
+        "15aae3a6f9bfe9ec0c1b3690834ccaaa755e8fc8f4a9bedaadae5d49a56cb276"), (
+        "the emptiness ledger's TEXT changed. If that was deliberate, recompute this digest "
+        "and the tuple above; if it was a find-and-replace across the file, it just silently "
+        "narrowed the ban (#13807 review round 5, F2)")
+
+    for _spelling in _TORTOISE_RETIRED_SPELLINGS:
+        _injected = f"… and the earlier cut said {_spelling} about this bundle …"
+        assert _spelling in _census_membership_verdicts(_injected), (
+            f"arm (c-i) does not read the retired spelling {_spelling!r}. An unread row is "
+            "indistinguishable from a clean document — the inert-enforcer defect this arm "
+            "replaces (#13807 review, F1; each row pinned by name is finding 5)")
+
+    # ⛔ CLONE-INDEPENDENCE, PINNED BEHAVIOURALLY (#13807 review, finding 4). If a probe is
+    # ever reintroduced, this arm stops answering from the injected text alone — make the
+    # subprocess seam explode and require the SAME verdict.
+    def _explode(*_a, **_k):
+        raise AssertionError("(c-i) shelled out; it must read the document's TEXT only")
+    # ⛔ THE WHOLE FAMILY, NOT ONE NAME (#13807 review round 5, F3 — MEASURED). Patching only
+    # `subprocess.run` left a regression undetected whenever it reached a child process by a
+    # primitive that does not go through the module-global `run`. ⛔ WHAT THIS PATCH ACTUALLY
+    # BOUGHT, CORRECTED IN ROUND 6 (#13807 review round 6, F5 — MEASURED): an earlier cut of
+    # this comment named `subprocess.check_output` as the bypass, and that is WRONG —
+    # `check_output` dispatches to the module-global `run` at CALL time, so the single-name
+    # patch already covered it. The genuinely NEW coverage is `Popen`, `os.popen` and
+    # `os.system` (each measured: passing pre-patch, raising post-patch); `check_call` and
+    # `call` are built on `Popen`, so they are reached through it. The seam is "a child
+    # process", not one function, so every primitive IN THE LIST BELOW explodes. ⛔ "IN THE LIST
+    # BELOW" IS THE HONEST SCOPE (#13807 review round 7, F2 — MEASURED): an earlier cut said
+    # "every primitive that reaches one", which `os.fork` / `os.execv*` / `os.spawn*` refute,
+    # and this file's own rule is that a guard "may be narrow; what it may not do is describe
+    # itself as complete".
+    for _seam in ("run", "check_output", "check_call", "Popen", "getoutput", "call"):
+        monkeypatch.setattr(subprocess, _seam, _explode, raising=False)
+    monkeypatch.setattr(os, "popen", _explode, raising=False)
+    monkeypatch.setattr(os, "system", _explode, raising=False)
+    # ⛔ AND A BLACKLIST OF PRIMITIVES CANNOT CLOSE AN ALIAS (#13807 review round 6, F4 —
+    # MEASURED). The patches above set ATTRIBUTES, so a probe bound at import time
+    # (`from subprocess import Popen as _P`, `_os_system = os.system`) reads the ORIGINAL
+    # object and stays green — which is the very shape this pin's docstring names as the one
+    # it is defending against. The whitelist below is the closure FOR GLOBAL NAME LOOKUPS: the
+    # arm's bytecode may reach ONE global name, the ledger it ban-matches, and nothing else.
+    # ⛔ TWO SCOPES ARE STATED RATHER THAN IMPLIED (#13807 review round 7, F2 — MEASURED):
+    # `co_names` is a lookup table, so it does NOT see a seam captured in a DEFAULT ARGUMENT
+    # (positional OR keyword-only) or a closure cell — `def arm(doc, _run=subprocess.run)`
+    # satisfies `co_names` byte-for-byte while holding the PRE-patch `run` in
+    # `__defaults__`, and `def arm(doc, *, _run=subprocess.run)` does the same and hides in
+    # `__kwdefaults__` (#13807 review round 8, F3 — MEASURED: the earlier cut of this
+    # assertion read `__defaults__` only, and the keyword-only form passed it). Those channels
+    # are closed by the assertion BELOW, so the pair — not `co_names` alone — is the closure;
+    # an earlier cut of this comment claimed `co_names` alone was it, which is the "describe
+    # itself as complete" this file forbids by name.
+    assert _census_membership_verdicts.__code__.co_names == (
+        "_TORTOISE_RETIRED_SPELLINGS",
+    ), (
+        "arm (c-i) reaches a global name beyond its own ledger, so it can obtain a "
+        "subprocess (or any other seam) behind an import-time alias — which the attribute "
+        "patches above cannot see. Keep the arm a pure function of the document's TEXT "
+        "(#13807 review round 6, F4)")
+    assert (
+        _census_membership_verdicts.__defaults__ is None,
+        _census_membership_verdicts.__kwdefaults__ is None,
+        not _census_membership_verdicts.__code__.co_freevars,
+        not [
+            _const for _const in _census_membership_verdicts.__code__.co_consts
+            if hasattr(_const, "co_names")
+        ],
+    ) == (True, True, True, True), (
+        "arm (c-i) captures a seam in a DEFAULT ARGUMENT (positional or keyword-only), a "
+        "closure cell or a nested code object. `co_names` is a LOOKUP table and cannot see "
+        "any of those, so the global-name whitelist alone would report clean over an arm that "
+        "holds the pre-patch `subprocess.run` in `__defaults__` / `__kwdefaults__` "
+        "(#13807 review round 6, F4; round 8, F3)")
+    _probe = f"… {_TORTOISE_EMPTY_SPELLINGS[-1]} …"
+    assert _census_membership_verdicts(_probe) == [_TORTOISE_EMPTY_SPELLINGS[-1]], (
+        "arm (c-i) stopped answering from the document's text when a child-process seam "
+        "was unavailable — a clone-dependent arm is unreachable at the depth-1 checkout "
+        "the gating job uses and asserts nothing there (#13807 review, F1; the family is "
+        "patched rather than one name because `Popen` and `os.popen` do not go through the "
+        "patched `run`, round 5 F3 — corrected round 6 F5)")
+
+    # The inverse: the COMMAND the document is supposed to keep is never itself a verdict.
+    assert _census_membership_verdicts(
+        f"read `{_TORTOISE_CENSUS_CMD}` at the head you merge") == [], (
+        "the arm flags the command itself, so the document could not state the measurement "
+        "it is required to state")
+
+    _bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+               / "05-verify.md").read_text(encoding="utf-8")
+    assert _census_membership_verdicts(_bundle) == [], (
+        "05-verify.md still spells a retired membership verdict: "
+        f"{_census_membership_verdicts(_bundle)!r}")
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-q"])
