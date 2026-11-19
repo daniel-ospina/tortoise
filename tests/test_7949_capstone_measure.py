@@ -6588,13 +6588,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moves by a uniform +66 and is
+        # further down), so the span moves by a uniform +66, and then by a further +18 when
+        # `#13845` inserted its D5 formatting guard — a UNIFORM +84 in total — and is
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
-        # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15406`).
-        # The three offsets (+29 `nodes_used` -> `:15357`, +39 `max_nodes` -> `:15367`, +77 END)
+        # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
+        # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
-        # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
+        # than nudged — a uniform +84 on both ends, and the offsets re-measured rather than
         # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
         # `nodes_used` read at all (`grep -c 'nodes_used = await asyncio.to_thread'` over those
         # lines -> 0), which is why carrying it would have been a false pin.
@@ -6843,10 +6844,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15367` (both needles are the file's only occurrences —
-    # `:15357` and `:15367` — so a later end cannot change the sum). Ends below `:15367` fail
+    # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
+    # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15367` gives a non-empty window that lacks at least the second needle,
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
