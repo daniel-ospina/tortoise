@@ -142,8 +142,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
     # ⛔ The Object half of the same declaration had NO row, and that absence is ISSUE 1 of the
-    # `#13489` review: §2.5's header cited `:6869`, which `:6984`/`:6985`/`:6990` had left 64/65/70
-    # lines behind — and `:6989` is the `("Object", ["name"])` row that had no pin at all, so the
+    # `#13489` review: §2.5's header cited `:6869`, which the block's PRE-MOVE addresses
+    # (`:6933`/`:6934`/`:6939`, 64/65/70 lines below it) had left behind — the deltas belong to
+    # THOSE addresses: against the re-pointed `:6984`/`:6985`/`:6990` they are 115/116/121, so
+    # quoting 64/65/70 beside the new numbers would misattribute them. And `:6989` is the
+    # `("Object", ["name"])` row that had no pin at all, so the
     # one sibling a reader would actually chase was the uncovered one. An absent pin is not
     # coverage; the header now names it beside its three siblings and this row resolves it.
     (_AUDIT, "`:6989`", _PI, 6989, '("Object", ["name"])'),
