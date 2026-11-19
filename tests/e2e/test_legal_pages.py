@@ -1827,6 +1827,20 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     assert "__META_PIXEL_ID__" in js, \
         "consent.js missing the dormant Meta Pixel stub (placeholder ID, fail-safe)"
 
+    # #13645: the module must EMIT the decision, not merely store it. The niche
+    # product page's only page-view capture listens for this event, so a module
+    # that writes localStorage and stops leaves every returning visitor's view
+    # uncounted (clicks with no denominator) — and no other row reads it. The
+    # ORDER of the emit relative to `opt_in_capturing()` cannot be seen in a
+    # served-bytes match; it is pinned statically in
+    # tests/test_website_static.py::TestConsentSeam.
+    assert "tortoise:consent" in js, \
+        "consent.js never dispatches the tortoise:consent event (a page that " \
+        "waits for it would capture nothing on a return visit)"
+    assert 'announceConsent("granted")' in js, \
+        "consent.js has no granted announcement — a visitor who accepts has no " \
+        "page view counted (#13645)"
+
     # /welcome is excluded: since #3501 it is a pure server redirect, so this
     # request would follow it to /auth (already in this tuple) and re-assert
     # /auth's consent tag under a /welcome label. /auth and /signup moved to the

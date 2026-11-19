@@ -95,6 +95,10 @@ PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
 # renders the same prices, so a second copy would be two prices that can drift
 # with nothing red. See `TestPricingSourceIsShared`.
 PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
+# The shared consent module (#658/#736). It GAINED a behaviour for #13645 — the
+# `tortoise:consent` event — and the niche page's whole funnel reads it, so the
+# seam is pinned here: see `TestConsentSeam`.
+CONSENT_JS = REPO_ROOT / "website" / "consent.js"
 # The niche product page (#13645) — a GTM experiment added ALONGSIDE
 # `/tortoise`, served at the company root (`premiselabs.co/tortoise-for-product-
 # teams`), not under the `/tortoise` prefix.
@@ -7222,9 +7226,105 @@ class TestPricingSourceIsShared:
                 f"{name} does not call `window.tortoiseFmtPrice` — it formats "
                 "the shared numbers itself, which is the drift one step past "
                 "the table (#13645)")
-            assert "Math.round(price * 12" not in html, (
+            # Whitespace-insensitive on purpose: the literal refused above is
+            # only ONE spelling of the same re-derivation, so `price*12` (or
+            # `price *12`) would slip past a plain substring check — and the
+            # re-derivation, not its spacing, is the defect.
+            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", html), (
                 f"{name} re-derives the annual per-month price instead of "
                 "delegating to `window.tortoiseFmtPrice`")
+
+
+class TestConsentSeam:
+    """#13696 review finding 1: the `tortoise:consent` seam has an assertion.
+
+    `website/consent.js` gained a real behaviour for #13645: it dispatches
+    `tortoise:consent` with `{ state: "granted" | "denied" }`, and the niche
+    page's only page-view capture listens for it
+    (`window.addEventListener('tortoise:consent', trackView)`). The seam is
+    load-bearing in the PR's own words: without it a visitor who accepts the
+    banner AFTER the page ran has their page view dropped, so the experiment
+    has clicks with no denominator.
+
+    Nothing asserted it. The page-side rows only prove the page LISTENS
+    (`test_the_three_funnel_events_are_named_in_the_source`), which a module
+    that never emits satisfies; and the guard that owns this file
+    (`tests/e2e/test_legal_pages.py::test_consent_js_served_and_banner_present`)
+    pinned no line of it. Deleting the dispatch therefore reddened zero rows.
+
+    Two halves, because they fail differently:
+
+    * `test_the_module_emits_the_event_the_page_listens_for` — the event NAME
+      is shared between two files, so it is asserted in both rather than
+      trusted to stay equal.
+    * `test_the_granted_event_is_dispatched_after_the_opt_in` — the ORDER is
+      the contract ("dispatched AFTER the opt-in/opt-out has been applied"),
+      and order is invisible to any assertion that only looks for the string.
+      A reordering re-introduces the pre-consent beacon the seam exists to
+      prevent, which is a privacy defect, not a cosmetic regression.
+    """
+
+    EVENT = "tortoise:consent"
+
+    #: Each `announceConsent("granted")` call site is the LAST statement of a
+    #: granted path, so its enclosing function also holds the opt-in it must
+    #: follow. Named rather than counted: a path that disappears reds here, and
+    #: a THIRD path added later is not refused by an expected-count pin.
+    GRANTED_PATHS = ("onAccept", "init")
+
+    @staticmethod
+    def _function_body(src: str, name: str) -> str:
+        """The body of the module-level `function <name>(…)`, by indentation.
+
+        consent.js is one IIFE whose own functions sit at two-space indent, so a
+        block runs from `  function <name>(` to the next line that opens a
+        sibling. Sliced by indentation rather than brace-counting: braces inside
+        the module's regex/string literals would break a naive counter.
+        """
+        starts = [m for m in re.finditer(r"^  function (\w+)\(", src, re.M)]
+        for i, m in enumerate(starts):
+            if m.group(1) != name:
+                continue
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(src)
+            return src[m.start():end]
+        raise AssertionError(
+            f"no `function {name}(` at the module's own indent in consent.js — "
+            "this gate's subject moved, so it is no longer asserting order")
+
+    def test_the_module_emits_the_event_the_page_listens_for(self):
+        js = CONSENT_JS.read_text(encoding="utf-8")
+        assert f'"{self.EVENT}"' in js, (
+            f"consent.js never dispatches `{self.EVENT}`. The niche page's only "
+            "page-view capture waits for it, so with no emit every visit that "
+            "does not re-decide consent is silently uncounted — clicks with no "
+            "denominator (#13645)")
+        assert f"'{self.EVENT}'" in _product_teams_html(), (
+            f"the niche page no longer listens for `{self.EVENT}` — its page "
+            "view would then fire only when the decision happens mid-visit")
+
+    def test_the_granted_event_is_dispatched_after_the_opt_in(self):
+        js = CONSENT_JS.read_text(encoding="utf-8")
+        for path in self.GRANTED_PATHS:
+            body = self._function_body(js, path)
+            granted = body.find('announceConsent("granted")')
+            assert granted != -1, (
+                f"`{path}` grants consent but never dispatches "
+                f"`{self.EVENT}` with state `granted`: a visitor who accepts "
+                "the banner here has their page view dropped (#13645)")
+            opt_in = body.find("opt_in_capturing()")
+            assert opt_in != -1, (
+                f"`{path}` no longer calls `opt_in_capturing()` — the path "
+                "this gate measures the ordering against moved")
+            assert opt_in < granted, (
+                f"`{path}` dispatches `{self.EVENT}` with state `granted` "
+                "BEFORE calling `opt_in_capturing()`. The event tells a page "
+                "consent has been applied, so announcing first is the "
+                "pre-consent beacon this seam exists to prevent — the page "
+                "would capture before the opt-in landed")
+            assert body.find("loadConsentedAnalytics()") < granted, (
+                f"`{path}` dispatches `{self.EVENT}` before activating the "
+                "consent-gated loaders (GTM/Meta), so a listener acts on a "
+                "decision the tags have not followed yet")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
