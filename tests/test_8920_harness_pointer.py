@@ -77,8 +77,10 @@ PRODUCTION_DIR = ROOT / "tortoise"
 #: data-file clause with `_classify` in front of you: a data file is suppressed
 #: by the EVIDENCE conjunct (the file exists), not by an extension list, so the
 #: silence it promises holds only while the target is on disk — a pointer to a
-#: generated-or-absent fixture is asserted, and reds. That is the same residual
-#: `_NOT_A_SYMBOL`'s note states for the `.py` shape.
+#: generated-or-absent fixture is asserted, and reds. That is an ADJACENT residual,
+#: opposite in direction: the `.py` shape fails SILENT (a pointer to a deleted
+#: `.py` test stays green — #13765), while this one fails LOUD. Neither is a
+#: reason to trust the other.
 _POINTER = re.compile(
     r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+)\.(?P<dsym>[A-Za-z0-9_]+)"
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
@@ -195,7 +197,12 @@ CONSUMERS = tuple(CONSUMER_FIXTURES)
 def _classify(
     written: str, symbol: str, tests_dir: Path | None = None
 ) -> tuple[str, str]:
-    """Classify a SLASH-form pointer: ("symbol", dotted) or ("file", named path).
+    """Classify a pointer token, EITHER spelling: ("symbol", module) or ("file", named path).
+
+    Shared by both spellings on purpose — `_production_pointers` calls it for the
+    slash form and for the dotted form, so there is ONE rule and no drift between
+    them. The body is form-neutral: a dotted module name carries no `/`, so the
+    `replace` is a no-op for it.
 
     EVIDENCE-POSITIVE, and that is the whole point. A token is a FILE pointer
     only when `tests/<written>.<symbol>` IS a file — any extension, so the rule
@@ -215,9 +222,9 @@ def _classify(
     return "symbol", f"tests.{written.replace('/', '.')}"
 
 
-def _production_pointers() -> tuple[
-    list[tuple[Path, str, str, str]], list[tuple[Path, str, str]]
-]:
+def _production_pointers(
+    production_dir: Path | None = None, tests_dir: Path | None = None
+) -> tuple[list[tuple[Path, str, str, str]], list[tuple[Path, str, str]]]:
     """(symbol pointers, file pointers) written into production source.
 
     A SYMBOL pointer is (file, token, module, symbol) and is resolved by
@@ -233,15 +240,22 @@ def _production_pointers() -> tuple[
     (`tests.x.json`, `tests.x.py`) is LISTED, and a dotted module pointer is
     imported and looked up — one rule, not two.
     """
+    #: ⚠️ EXACTLY `rglob`, and the DIRECTORY SEAM is why this is testable: the
+    #: real tree carries no dotted FILE pointer, so a regression in the dotted
+    #: branch would be invisible to every assertion made against the real tree.
+    #: `production_dir`/`tests_dir` let a `tmp_path` tree drive the ROUTING (not
+    #: just `_classify`), which is where the branch actually lives.
+    production_dir = PRODUCTION_DIR if production_dir is None else production_dir
+    tests_dir = TESTS_DIR if tests_dir is None else tests_dir
     symbols: list[tuple[Path, str, str, str]] = []
     files: list[tuple[Path, str, str]] = []
-    for path in sorted(PRODUCTION_DIR.rglob("*.py")):
+    for path in sorted(production_dir.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for match in _POINTER.finditer(text):
             dotted = match.group("dotted")
             if dotted:
                 dsym = match.group("dsym")
-                kind, target = _classify(dotted, dsym)
+                kind, target = _classify(dotted, dsym, tests_dir)
                 if kind == "file":
                     files.append((path, match.group(0), target))
                 else:
@@ -249,7 +263,7 @@ def _production_pointers() -> tuple[
                 continue
             written = match.group("path")
             symbol = match.group("psym")
-            kind, target = _classify(written, symbol)
+            kind, target = _classify(written, symbol, tests_dir)
             if kind == "symbol":
                 symbols.append((path, match.group(0), target, symbol))
             else:
@@ -316,12 +330,13 @@ def test_the_split_is_evidence_positive_so_a_renamed_module_still_reds(tmp_path:
 
 
 def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
-    """Both classification branches are exercised on a synthetic tree.
+    """Both branches of the PREDICATE, on a synthetic tree.
 
-    The real tree carries no slash-form SYMBOL pointer at this head (all four
-    come from the dotted branch), so `assert pointers` in the resolve test is
-    satisfied WITHOUT the slash rule ever deciding True. A unit test is the only
-    thing that pins that branch's rule rather than trusting it.
+    Measured split at this head: of the four real SYMBOL pointers, ONE is dotted
+    (`tests.fake_control_plane.FakeControlPlane`) and THREE are slash-form
+    (`tests/_embedded._projection_host`, and two in `tests/_http_fixtures`). So
+    the real tree does exercise the slash rule — but it never sends a FILE token
+    through the slash branch's POSITIVE side, which is what these cases pin.
     """
     (tmp_path / "test_present.py").write_text("X = 1\n", encoding="utf-8")
     (tmp_path / "harness.mjs").write_text("// js\n", encoding="utf-8")
@@ -342,10 +357,53 @@ def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
         "tests/test_present.py",
     )
     assert _classify("x", "py", tests_dir=tmp_path) == ("file", "tests/x.py")
-    # a dotted file pointer goes through the SAME rule, and is listed not asserted
-    assert _classify("harness", "mjs", tests_dir=tmp_path) == (
-        "file",
-        "tests/harness.mjs",
+
+
+def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path):
+    """The ROUTING, not just the predicate: `_production_pointers` on a synthetic tree.
+
+    `_classify` takes no spelling, so asserting on it twice pins nothing about
+    the dotted branch — that branch lives one level up, in
+    `_production_pointers`, and the real tree carries no dotted FILE pointer to
+    drive it. Measured, this is the only assertion shape that fails when the
+    dotted branch is reverted to `dsym in _NOT_A_SYMBOL`, or replaced with a
+    fail-open that lists every dotted token: a dotted FILE pointer must be
+    LISTED, and a renamed-away pointer must be ASSERTED in EITHER spelling.
+    """
+    prod = tmp_path / "prod"
+    tests = tmp_path / "tests"
+    prod.mkdir()
+    tests.mkdir()
+    (tests / "harness.mjs").write_text("// js\n", encoding="utf-8")
+    (tests / "test_present.py").write_text("X = 1\n", encoding="utf-8")
+    (prod / "probe.py").write_text(
+        "`tests.harness.mjs` `tests.test_present.py` `tests.test_present.X`\n"
+        "`tests.test_dotted_away.SomeSymbol`\n"
+        "`tests/test_slash_away.SomeSymbol`\n",
+        encoding="utf-8",
+    )
+    syms, files = _production_pointers(production_dir=prod, tests_dir=tests)
+    file_targets = {target for _, _, target in files}
+    sym_modules = {modname for _, _, modname, _ in syms}
+
+    # dotted FILE pointers are LISTED, never imported
+    assert "tests/harness.mjs" in file_targets, (
+        f"a dotted file pointer was not listed as a file: files={sorted(file_targets)}"
+    )
+    assert "tests/test_present.py" in file_targets, (
+        f"the dotted bare-file pointer was not listed: files={sorted(file_targets)}"
+    )
+    # renamed-away pointers are ASSERTED in BOTH spellings — i.e. they reach the
+    # import, fail it, and red. A branch that lists them silently fails here.
+    assert "tests.test_dotted_away" in sym_modules, (
+        f"the DOTTED renamed-away pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    assert "tests.test_slash_away" in sym_modules, (
+        f"the SLASH renamed-away pointer stopped being asserted: syms={sorted(sym_modules)}"
+    )
+    # a dotted module pointer that DOES exist is asserted, not listed
+    assert "tests.test_present" in sym_modules, (
+        f"the dotted module pointer stopped being asserted: syms={sorted(sym_modules)}"
     )
 
 
