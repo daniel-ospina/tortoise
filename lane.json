@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-13734-1795072091-p2889144-df107573",
+  "_sha": "00691e0e4c7fd6bab5090c98515c473267553f9c",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-13734.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/13732-claim-recall-dense-leg"
+    },
+    {
+      "kind": "sha",
+      "value": "7151e023d7657faf0a7fa210a310f06e3b2b5e11"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-13734"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 3935,
+  "ended_at": 1795076026,
+  "exit_code": 0,
+  "heartbeat_at": 1795076026,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-13734-1795072091-p2889144-df107573",
+  "lease_until": 1795112626,
+  "pid": 2889144,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795072091,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-13734",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-13734"
+}
