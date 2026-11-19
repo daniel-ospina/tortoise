@@ -1444,9 +1444,12 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
 
     The read is STAGED through `during` rather than raced, so the reproduction is
     deterministic: pre-fix the staged path is recorded and this reds, post-fix it
-    is not. The path is a `tmp_path` file OUTSIDE the checkout rather than
-    `/proc/<pid>/stat` so the read itself SUCCEEDS on every platform — an
-    `OSError` would leave it arguable whether the recorder saw a read at all.
+    is not. The path is a real `tmp_path` file OUTSIDE the checkout rather than
+    `/proc/<pid>/stat` because the staged read is NOT wrapped in
+    `contextlib.suppress(OSError)` — a read that raised would propagate out of
+    `during()` and ERROR this test, where the assertion it is here to make never
+    runs. (Contrast the sibling arm, which DOES suppress: the recorder appends
+    before it performs the read, so an `OSError` there is still a recorded read.)
 
     Both directions are asserted: the recorder's `everything` list sees the
     staged read (so the exclusion below is not vacuous), and the attributed
