@@ -286,8 +286,8 @@ count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
 the pre-D10 dump/restore refusal and repair prose — #11682's BM25 corpus-join
-comment (`tortoise/search_engine.py:3451` — the counted `:Document` line; the block opens at
-`:3449`, one added line in an existing file, re-measured at this head because the
+comment (`tortoise/search_engine.py:3508` — the counted `:Document` line; the block opens at
+`:3506`, one added line in an existing file, re-measured at this head because the
 `:2107`/`:2109` this sentence used to carry was true only at `d06c001ff9` and had
 drifted since) — #12015's edge-vector prose, which added three lines to that same
 `hosted_backup.py` bound and one to `tortoise/cache_projection.py` (a file the
@@ -302,10 +302,16 @@ map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
 `tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4382`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4430`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:36687,36718`, one line each in a file this population already
-reached, whose
+`tortoise/sdk.py:37108` and `_file_human_approval`'s `:37150`, one line each in a file this population already
+reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
+DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
+`:Document` retirement prose is at `:4430`; `sdk.py:36687` is a
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36718`
+is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
+`:Document` docstring lines are `:37108` in `record_decision` (opening `:37088`)
+and `:37150` in `_file_human_approval` (opening `:37128`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
