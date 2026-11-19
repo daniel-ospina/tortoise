@@ -2591,7 +2591,7 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     # asking a live branch's diff whether it touches `tortoise/` is a different assertion —
     # and a false block on every unrelated PR that legitimately edits the product, which is
     # one of the shapes this lane exists to remove. What still guards the surface: this arm
-    # reds the moment the cell names a `tortoise/` path, and the three set assertions above
+    # reds the moment the cell names a `tortoise/` path, and the TWO set assertions above (`extra` and `missing` — the `dirs` arm sits BELOW this one) 
     # red on any edit to the cell that is not also made to the frozen record.
     assert not [p for p in named if p.startswith("tortoise/")], (
         "the R3 claim is 'no retrieval behaviour changed', and the cell now names "

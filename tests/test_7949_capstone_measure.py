@@ -6734,6 +6734,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             "if the line moved, re-derive EVERY statement of it, because a half-done move "
             "leaves the document asserting two numbers for one `git grep` hit")
 
+    # ⛔ AND THE TWIN SPELLINGS OF THE `register_source` FACT (#13572 review round 6, P2).
+    # The two branches of the same sentence state it twice more, in a phrasing the loop above
+    # does not match — so before this arm, re-pointing BOTH twins to a wrong number left the
+    # suite GREEN (measured: `:9999` in both twins -> 422 passed) while the row asserted two
+    # numbers for one `git grep` hit, which is exactly the defect `count == 1` exists to
+    # catch. `count == 2` makes a half-move red (1) and an all-move red (0).
+    _twin = "sits at `:9715` at this head and on `origin/main` alike"
+    assert _d5.count(_twin) == 2, (
+        f"05-verify.md states the `register_source(..., raw_state=...)` line at `:9715` in this "
+        f"phrasing {_d5.count(_twin)} time(s), and it must be stated exactly twice. Re-derive "
+        "BOTH twins from the tree (`sed -n 'Np' tortoise/sdk.py`) — the row's own rule is that "
+        "one present-tense fact carries one number")
+
     # ⛔ THE OTHER THREE `_honours` CURRENCY CLAIMS ON D5, READ BY A DERIVED LITERAL (#13494
     # review cycles 4 and 5). The `_pin_row_failures` row added for this clause is scoped to the
     # phrase `is at \`:22327\` at THIS head`, and THAT PHRASE CONTAINS THE NUMBER IT GATES —
