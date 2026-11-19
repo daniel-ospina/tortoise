@@ -569,6 +569,43 @@ def test_the_default_dedup_arm_honours_the_same_verdict(journal_sdk):
         f"the declined cache write left no record of the revision: {revised!r}")
 
 
+def test_the_temporal_refusal_arm_spends_the_verdict_it_never_folds(journal_sdk):
+    """The OTHER arm that returns before a consumer: the #7819 temporal refusal.
+
+    A dedup hit onto a TERMINAL point carrying a temporal prop applies NOTHING
+    (#7819) — it does not fold, so `update_point`'s consumer never runs, and it
+    returns NORMALLY to the caller (so the MCP door's own entry clear is not what
+    bounds it). Under a published verdict that arm left the denial set for the
+    next fold in the context to consume: the same "publish without a guaranteed
+    consumer" defect the bare/refused-hit arm pins, on an arm reachable by an
+    over-cap tenant that re-writes a retracted claim with a window.
+
+    Mutant this reddens on: delete the `_discard_published_cache_fold_denial()`
+    on this arm — the fold assertions still pass (nothing was applied, which is
+    the pre-existing behaviour) and only the leak shows.
+    """
+    sdk, _events = journal_sdk
+    content = "a terminal claim the fold must not re-stamp (#13829)"
+    first = sdk.create_point("statement", content)
+    sdk.retract_point(first["id"])          # terminal: the #7819 fold is refused
+
+    enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
+                       meters=OVER_CAP, truth_carried=True)
+
+    reply = sdk.create_point("statement", content, dedup=True,
+                             validFrom="2020-01-01T00:00:00Z")
+
+    # The refusal is the PRE-EXISTING behaviour, unchanged: nothing applied, and
+    # the caller is told why.
+    assert reply["id"] == first["id"]
+    assert any(a.get("code") == "temporal_not_applied"
+               for a in reply.get("advisories") or [])
+    # … and the verdict did not outlive the write it describes.
+    assert cache_fold_denial() is None, (
+        "the #7819 refusal returned without spending the verdict: the next fold "
+        "in this context is denied a cache write nobody capped (#13829)")
+
+
 def test_the_mcp_gate_defaults_to_the_protective_arm():
     """`_quota_gated` must default to ``truth_carried=False``, never the inverse.
 

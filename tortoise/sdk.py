@@ -17676,6 +17676,16 @@ class TortoiseSDK:
                     # betrayal the ruling's §0 orders refused (#9202).
                     # `temporal_not_applied` is the honest signal here, and
                     # it rides this same reply.
+                    # ⛔ #13829 (review P2, PR #13835) — THIS ARM WRITES NOTHING,
+                    # SO IT MUST NOT KEEP THE VERDICT. It returns NORMALLY to the
+                    # caller (unlike a raise, which the door's own consume and the
+                    # MCP door-entry clear bound), and it is reachable under a
+                    # published verdict: an over-cap tenant re-writing a TERMINAL
+                    # claim with a temporal prop lands here. Left set, the verdict
+                    # would deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge the
+                    # sibling `else:` arm below closes for the bare/refused hit.
+                    _discard_published_cache_fold_denial()
                     return _with_end_receipt({
                         **self.get_point(pid),
                         **_merge_advisories(
