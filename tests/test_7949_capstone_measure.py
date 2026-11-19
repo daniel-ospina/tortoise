@@ -16481,9 +16481,18 @@ def test_the_D5_row_is_still_one_table_row():
 #: Readings this row carried that a MEASUREMENT refuted, each kept beside the measurement
 #: that killed it (#13794). ⛔ An ABSENCE pin, deliberately: the three defects below are
 #: PROSE, so there is no tree line to bind them to, and the only rot-proof assertion is
-#: that the refuted reading is not stated again. A reword is free — this fires only when
-#: the claim comes BACK. ⛔ No literal `hosted_api.py:<n>` token is spelled here: the
-#: census greps every tracked file, so one would join the population it measures.
+#: that the refuted reading is not stated again. ⛔ The rule is QUOTING, not the literal's
+#: shape: this document family marks a retraction by QUOTING the wording it deletes
+#: (`… the sentence an earlier cut carried here, "X", is DELETED …`), so every
+#: double-quoted span is stripped before the test and only an UNQUOTED occurrence counts
+#: as the claim coming BACK. That is deliberately symmetric across all three entries —
+#: binding one entry to an "asserting frame" while the others stay bare is what made two
+#: of them red on a correct, quoted retraction (#13809 review, P2; reproduced).
+#: ⛔ STATED LIMIT: an assertion written INSIDE quotation marks is not caught. That is the
+#: price of never redding a repair, and it is the right side of the trade for a prose
+#: pin: a false red refuses a correct edit, which is how a guard gets weakened or deleted.
+#: ⛔ No literal `hosted_api.py:<n>` token is spelled here: the census greps every tracked
+#: file, so one would join the population it measures.
 _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
     (
         "is a bare `#` comment marker",
@@ -16500,11 +16509,9 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "prints (#13794 measurement, P2)",
     ),
     (
-        # ⛔ The ASSERTING frame, not the bare phrase: a retraction legitimately QUOTES
-        # this claim (the repair writes `the sentence an earlier cut carried here,
-        # "AND THE BOX IS NO LONGER SHALLOW", is DELETED`), so a bare-substring pin would
-        # red on the REPAIR itself. The `, so` continuation is what makes it an assertion
-        # about this box.
+        # ⛔ bare phrase on purpose: the quote-strip below is what keeps a marked,
+        # QUOTED retraction from redding this pin, so no entry needs a frame — and
+        # giving only SOME entries one is precisely the asymmetry that broke it.
         "AND THE BOX IS NO LONGER SHALLOW, so",
         "measured on the clone this row was repaired on: "
         "`git rev-parse --is-shallow-repository` -> `true` and "
@@ -16513,6 +16520,11 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "property of the clone (#13794 measurement, P2)",
     ),
 )
+
+
+#: A double-quoted span, stripped before the absence test: in this document family that
+#: is how a RETRACTION marks the wording it deletes, so a quotation is never an assertion.
+_D5_QUOTED_SPAN = re.compile(r'"[^"]*"')
 
 
 def test_the_D5_row_does_not_restate_a_refuted_reading():
@@ -16525,8 +16537,10 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
     `git merge-base 2584a86ec1 origin/main` -> rc=1). No guard in the tree read any of
     the three, which is how they survived nine heads while the suite was green.
 
-    A reword is free here: the assertion is that the refuted READING is not stated again,
-    not that any particular sentence survives.
+    A reword is free here, and so is any marked retraction: the assertion is that the
+    refuted READING is not stated again UNQUOTED, not that any particular sentence
+    survives and not that a repair may not quote the wording it deletes. See the tuple's
+    STATED LIMIT for the one thing this cannot catch.
     """
     d5 = [
         line for line in
@@ -16534,8 +16548,9 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
         if line.lstrip().startswith("| **D5** |")
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    asserted = _D5_QUOTED_SPAN.sub("", d5[0])
     restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
-                if claim in d5[0]]
+                if claim in asserted]
     assert not restated, (
         "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated))
 
