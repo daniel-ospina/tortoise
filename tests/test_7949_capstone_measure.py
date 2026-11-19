@@ -6587,7 +6587,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
         # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
         # `org_info`, so the span is `:15262-15339` at THIS head — the START is the `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line (`:15262`), and the END is
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line, and the END is
         # the blank line before `return OrgInfoResponse(` (`:15339`, measured at this head).
         # The three offsets (+29 `nodes_used` -> `:15291`, +39 `max_nodes` -> `:15301`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
@@ -6817,10 +6817,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15300` (both needles are the file's only occurrences —
-    # `:15290` and `:15300` — so a later end cannot change the sum). Ends below `:15300` fail
+    # true for any end at or beyond `:15301` (both needles are the file's only occurrences —
+    # `:15291` and `:15301` — so a later end cannot change the sum). Ends below `:15301` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15262`-`:15300` gives a non-empty window that lacks at least the second needle,
+    # end in `:15262`-`:15301` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15262` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -16571,8 +16571,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while that file IS in this diff (four numeric
-    # re-points, none of them that pair) and the document's own row reads `sdk.py:28718`. A phrase-only assertion was green over that,
+    # re-point — `sdk.py:28559` → `:28592`", while that file is NOT in this diff at all
+    # (`git diff --name-only origin/main...HEAD -- …/04-plan.md` is EMPTY, measured at this
+    # head — its `2 2` numstat is two OTHER lines) and the document's own row reads
+    # `sdk.py:28718`. A phrase-only assertion was green over that,
     # re-landed, and was green again: that is the class this pin exists to close. No count
     # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
     # ⛔ NO COUNT IS ASSERTED, IN EITHER DIRECTION (#13750 review, cycle 3 — MEASURED).
