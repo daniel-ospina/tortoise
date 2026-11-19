@@ -2432,9 +2432,12 @@ def main(argv: list[str] | None = None) -> int:
     # ⛔ THE JOURNAL DECLARATION IS THIS RUN'S, FOR THE LENGTH OF THIS RUN (#13830).
     # `run_measurement` sets it (`--journal` is enough to write, but the record arm's
     # readiness gate reads only the env name, so the two must agree); restoring the
-    # caller's value here keeps a library caller — and every test that calls
-    # `run_measurement` directly — from inheriting a path for a journal this process
-    # happened to seed. The import is LOCAL so `--preregister` stays store-free.
+    # caller's value here keeps a `main()` CALLER from inheriting a path for a
+    # journal this process happened to seed. ⚠️ SCOPE, STATED EXACTLY (the previous
+    # sentence claimed `run_measurement` callers too, which is false — the restore
+    # lives HERE): a caller that invokes `run_measurement` DIRECTLY still inherits
+    # both declarations, which is why a test that drives it directly owns its own
+    # `monkeypatch`. The import is LOCAL so `--preregister` stays store-free.
     from tortoise import record_vector
     from tortoise.record_writer import RECORD_DSN_ENV
 

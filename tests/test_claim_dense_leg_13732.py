@@ -1384,9 +1384,10 @@ class TestTheJournalDeclaration:
         """⛔ The declaration is the RUN's, not the process's (#13830).
 
         `run_measurement` sets `TORTOISE_RECORD_JOURNAL` so the record arm's
-        readiness gate measures the journal this run seeded; leaving it set would
-        hand a library caller — and any test that calls `run_measurement` directly
-        — a path for a journal that process never wrote.
+        readiness gate measures the journal this run seeded, and `main()` puts the
+        caller's value back. ⚠️ The restore lives in `main()`, so it covers a
+        `main()` caller — NOT one that calls `run_measurement` directly (that
+        caller inherits the declaration, and the comment in `main()` says so).
         """
         from tortoise import record_vector
 
