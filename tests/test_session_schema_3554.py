@@ -3032,6 +3032,12 @@ _PREFIX_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE = (
 _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE = (
     "> **Owner\u2019s approval of the exact changes** — given in-session on 2026-11-18.\n"
     "> The artifact is the text itself.")
+# ⛔ AND THE ARTICLE (review of this PR, measured): the alternative admits ``the owner's
+# approval``, and nothing drove that branch — deleting ``(?:the\s+)?`` left the whole suite
+# GREEN while this shape went from REFUSED to ACCEPTED, the same artifact one article away.
+_PREFIX_APPROVAL_RECORD_WITH_AN_ARTICLE_OF_THE_OWNERS_APPROVAL = (
+    "> **The owner's approval of the exact changes** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
 # ⛔ AND THE MIRROR DIRECTION: the same possessive label carrying its citation is GREEN, so
 # the widening cannot be satisfied by refusing every possessive.
 _APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME = (
@@ -3044,6 +3050,11 @@ _APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME = (
 _A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL = (
     "> **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — two texts are PARKED\n"
     "> awaiting the owner's approval):** the edits are not landed.")
+# ⛔ AND ITS DECLARED COST, driven as a direction: a possessive label behind a LEAD-IN inside
+# the run is not read (GREEN with no citation), because the alternative is anchored. Closing
+# the lead-in would re-admit the v3.32 false block, so the direction is asserted as it is.
+_A_POSSESSIVE_LABEL_WITH_A_LEAD_IN = (
+    "> **R1 — Owner's approval of the exact changes** given in-session.")
 # ⛔ AND THE MIRROR DIRECTION (review @ 95a8df2f): an id that follows an ABBREVIATION in
 # the label sentence is still in that sentence to a reader, so it must resolve. Before
 # the splitter stopped treating `e.g.`'s final dot as a terminator the arm refused it.
@@ -3447,10 +3458,17 @@ _OWNER_APPROVAL_LABEL_RE = re.compile(
 # refuses it (a false block on landed text, measured), while the two-word form keeps the
 # unanchored `search` the arm already had, because THAT pattern cannot match
 # ``the owner's approval``.
-_EMPHASIS_RUN_RE = re.compile(r"(\*\*|__)(.+?)\1", re.S)
+# ⛔ AND WHAT THE ANCHOR PUTS OUT OF SCOPE, stated because the file states its boundaries:
+# a possessive label behind a LEAD-IN inside the run (``**R1 — Owner's approval …**``,
+# ``**— Owner's approval …**``) is NOT detected — measured GREEN with no citation, while the
+# unanchored two-word form refuses the same position. Anchoring is what avoids the v3.32
+# false block above, so this is declared rather than fixed here; closing it needs a rule for
+# ``awaiting the owner's approval`` vs ``R1 — Owner's approval``, which the run's plain text
+# does not carry.
 # ⛔ AN EMPHASIS RUN, ``**…**`` or ``__…__``. BOLD is this file's own label convention (all
 # 7 landed approval records open with one), so it is the detector's boundary — see the
 # arm's docstring for what that puts out of scope and why.
+_EMPHASIS_RUN_RE = re.compile(r"(\*\*|__)(.+?)\1", re.S)
 # ⛔ THE PHRASE IN EITHER WORD ORDER (review @ 9d34e510, finding 2): ``its own issue`` was
 # the only order the regex knew, so ``an issue of its own`` and ``a tracking issue of its
 # own`` — the same pointer, the same defect — were ACCEPTED (measured). The window between
@@ -3647,7 +3665,8 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                       _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS,
                       _PREFIX_APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE,
                       _PREFIX_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE,
-                      _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE):
+                      _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE,
+                      _PREFIX_APPROVAL_RECORD_WITH_AN_ARTICLE_OF_THE_OWNERS_APPROVAL):
         with pytest.raises(AssertionError) as rendered:
             _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
         _assert_refused_by(
@@ -3660,6 +3679,12 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # build record of that shape stays green — the anchor's direction.
     _refuse_an_approval_record_with_no_resolvable_home(
         _A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL)
+    # …and the DECLARED consequence of that anchor is driven, so it cannot drift silently: a
+    # possessive label behind a LEAD-IN is not detected (GREEN with no citation), which the
+    # constant's comment names. Closing the lead-in would re-admit the v3.32 false block, so
+    # the direction is asserted as it is rather than hoped away.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _A_POSSESSIVE_LABEL_WITH_A_LEAD_IN)
     # …and the BOLDED LABEL WITH NO COLON — the em-dash form, the ``is on record`` form,
     # and the LANDED v3.32 shape with its id deleted. Each was measured GREEN while the
     # detector required ``…changes:``, so the arm was vacuous on five of its own seven
