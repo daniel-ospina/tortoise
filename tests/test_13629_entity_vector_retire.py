@@ -29,6 +29,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_target_drift` | a plan is an authority over ONE graph | it is applied to a different graph of the same shape |
 | `test_the_refusal_set_is_closed` | the token set is closed and published | a refusal is raised with an unpublished token |
 | `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
+| `test_the_collision_clause_of_at_parity_stands_alone` | each `at_parity` clause has its OWN falsifier | the `render_collision == 0` clause is deleted and only `graph_only` refuses |
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
@@ -2629,6 +2630,37 @@ def test_parity_requires_a_READABLE_ROW_PER_GRAPH_VECTOR():
     assert row.at_parity is False
     row.record_vectors = 2
     assert row.at_parity is True
+
+
+def test_the_collision_clause_of_at_parity_stands_alone():
+    """The COLLISION clause of `at_parity`, asserted directly so it cannot be deleted quietly.
+
+    `#13647`'s instrument is a false-PASS gate, so it states the render-collision invariant
+    more than once on purpose: `census()` folds the collision excess into `graph_only`
+    (which is what the OTHER consumers, including `execute`'s live parity re-check, read),
+    and `at_parity` states it again on the typed count. That redundancy is the point — the
+    two statements are deleted independently — but it also means the verdict-level test
+    (`test_a_render_collision_is_not_parity`) does NOT redden when this clause alone is
+    removed, because `graph_only > 0` still refuses. MEASURED at `426568fe`: dropping
+    `and self.render_collision == 0` left the whole file green (83 passed), i.e. an
+    unreddened guard.
+
+    So this asserts the clause on the one shape only it covers: a row whose `graph_only`
+    and `unkeyed` are clean and whose counts agree, leaving the collision bucket as the
+    sole evidence. The control at the end keeps it from being an always-False assertion.
+
+    Adopted from the predecessor lane's rescued tree
+    (`refs/wip/issue-13629-retire-entity-vectors`, `2fc26874fc`): its measurement reproduced
+    here before the test was taken, and the test reddens when the clause is dropped.
+    """
+    row = parity.LabelCensus(label="Object", table="object", entity_types=["object"],
+                             graph_vectors=2, record_vectors=2, render_collision=1)
+    assert row.graph_only == 0 and row.unkeyed_graph_nodes == 0
+    assert row.graph_vectors <= row.record_vectors
+    assert row.at_parity is False, "a render collision read as parity"
+    assert row.verdict == "RENDER-COLLISION(1)"
+    row.render_collision = 0
+    assert row.at_parity is True, "the control: without the collision this row IS at parity"
 
 
 def test_a_store_or_exit_behind_a_LIVE_condition_does_not_certify_the_arm(tmp_path,

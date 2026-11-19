@@ -285,6 +285,13 @@ class LabelCensus:
         its own rows the two agree — but this class is also built by hand (and by a
         future caller), and an invariant that only holds because one producer happens to
         maintain another field is a coincidence, not a rule.
+
+        ⛔ EACH CLAUSE CARRIES ITS OWN FALSIFIER, MEASURED: deleting `render_collision == 0`
+        left the whole file green at `426568fe` (`graph_only` still refuses, which is what
+        the verdict-level test asserts), so that clause had no pin of its own until
+        `test_the_collision_clause_of_at_parity_stands_alone` was added. The count clause's
+        pin is `test_parity_requires_a_READABLE_ROW_PER_GRAPH_VECTOR`, and the bucket folded
+        into `graph_only` is pinned by `test_a_render_collision_is_not_parity`.
         """
         return (self.graph_only == 0 and self.unkeyed_graph_nodes == 0
                 and self.render_collision == 0
