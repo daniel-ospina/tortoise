@@ -85,6 +85,11 @@ _PARAMS = {
     "scope": "mcp",
 }
 
+# A `resource` (RFC 8707) audience in a NON-http scheme. It is a real destination the page could be
+# talked into carrying and one the `http://`/`https://` origin assertion cannot see, which is why it
+# gets its own row in the echoed-value tuple below.
+_RESOURCE = "cursor://tools.internal/v1"
+
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
   if (specifier.startsWith("./") || specifier.startsWith("../")) {
@@ -805,6 +810,9 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         _PARAMS["code_challenge"],
         _PARAMS["scope"],
         _PARAMS["code_challenge_method"],
+        # `resource` is the sixth validated param and the only one that can carry a destination in
+        # a non-http scheme (RFC 8707 audiences are URIs), so it needs the same row.
+        _RESOURCE,
         # the attempt keys the arms present (the one credential, #10487/#10884)
         "b-attempt-key",
         "ak-guessed",
@@ -1928,6 +1936,13 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
+    # `resource` (RFC 8707) is the SIXTH validated param `start.ts` carries, and it is deliberately
+    # NOT in `_PARAMS`: that dict is compared byte-exactly by the recorded-row assertions, so the
+    # arm that presents it spreads a copy. It matters because it is a DESTINATION with no scheme
+    # the origin assertion can see — `cursor://…` is not `http(s)://` — so a refusal page that
+    # interpolated it would carry a target the `http://`/`https://` check cannot stop.
+    ("start_signed_in", {"storeThrows": True, "params": dict(_PARAMS, resource=_RESOURCE)},
+     "consent_store_unavailable", 503),
     # #10865 arm B — the `403`.
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
                          "params": dict(_PARAMS, attempt_key="b-attempt-key")},
