@@ -67,11 +67,18 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     `--expect-empty` when an empty population is the intended state. Derived from the
     plan's ENTRY list, never from its `total_nodes` count — a count is a field a hand can
     edit into a plan whose set is empty.
+``REFUSE_WRITE_ERROR``
+    A removal statement raised on the FIRST batch, so **no node was stripped**. Exit is
+    ``2`` like every other pre-write refusal: the state is exactly "nothing was written,
+    safe to retry once the store error is understood", which is what a wedge, a timeout or
+    an oversized ``--batch`` actually produces.
 ``REFUSE_WRITE_FAILED``
-    A removal statement raised AFTER earlier batches had already been stripped. Exit is
+    A removal statement raised AFTER at least one batch had already been stripped. Exit is
     ``6``, not ``2``: the graph is PART-STRIPPED, and the only correct next action is to
-    re-plan. Reusing the generic refusal code would tell a caller "nothing happened, safe
-    to retry" about the one state where retrying the same plan is wrong.
+    re-plan. Reusing the generic code would tell a caller "nothing happened, safe to
+    retry" about the one state where retrying the same plan is wrong. ⛔ The COUNT decides
+    which token is raised — a zero-stripped failure that reported "part-stripped" would
+    teach an operator to distrust exit 6 on the one occasion it matters.
 
 THE REMOVAL ITSELF
 ==================
@@ -173,6 +180,7 @@ REFUSE_GRAPH_ONLY = "REFUSE_GRAPH_ONLY"
 REFUSE_WRITE_STILL_EMITS = "REFUSE_WRITE_STILL_EMITS"
 REFUSE_TARGET_DRIFT = "REFUSE_TARGET_DRIFT"
 REFUSE_NOTHING_TO_STRIP = "REFUSE_NOTHING_TO_STRIP"
+REFUSE_WRITE_ERROR = "REFUSE_WRITE_ERROR"
 REFUSE_WRITE_FAILED = "REFUSE_WRITE_FAILED"
 
 REFUSALS = (
@@ -185,6 +193,7 @@ REFUSALS = (
     REFUSE_WRITE_STILL_EMITS,
     REFUSE_TARGET_DRIFT,
     REFUSE_NOTHING_TO_STRIP,
+    REFUSE_WRITE_ERROR,
     REFUSE_WRITE_FAILED,
 )
 
@@ -320,10 +329,18 @@ def _asks_the_gate(node) -> bool:
     * **dead code** — ``if False: mirror_required(...)``.
 
     So a mention is not evidence and a call is not sufficient: the call must sit in a
-    position whose value DECIDES something — an ``if``/``while``/conditional-expression
-    test (that is not a constant), a boolean operator, a negation, or a value that is
-    assigned or returned. Reachability of a NON-constant branch is not decidable here and
-    is not claimed: this answers *"does the code ask"*, never *"does the answer hold"*.
+    position whose value DECIDES something: an ``if``/``while``/conditional-expression
+    test that is not a constant, or a returned value. Reachability of a NON-constant branch
+    is not decidable here and is not claimed: this answers *"does the code ask"*, never
+    *"does the answer hold"*.
+
+    ⛔ AN ASSIGNMENT DOES **NOT** COUNT, and the earlier version of this function accepted
+    ``x = mirror_required(...)`` — a call whose answer is then discarded while the write
+    runs unconditionally. That is the same "dying declaration" the paragraph above refuses,
+    one line longer. A value that reaches an ``if`` through a local name is therefore not
+    recognised (the docstring's alias caveat applies here too): the accepted shapes are
+    spelled with the call IN the deciding position, which costs a refactor and never a
+    strip.
     A DYNAMIC form (``getattr(record_vector, "mirror_required")(…)``) is deliberately not
     accepted — it cannot be told apart from an accident, and refusing it costs a refactor
     rather than a strip.
@@ -334,12 +351,14 @@ def _asks_the_gate(node) -> bool:
         if isinstance(sub, ast.If | ast.While | ast.IfExp):
             if isinstance(sub.test, ast.Constant):
                 continue                      # `if False:` — dead, decides nothing
+            # ⛔ THE TEST SUBTREE covers the boolean/negation forms (`not g(...)`,
+            # `g(...) and _write()`), because the call sits INSIDE the test. Reading
+            # `BoolOp.value`/`UnaryOp.value` — as an earlier version did — read a field
+            # those nodes do not have, so both promised arms were dead code.
             if _gate_call(sub.test):
                 return True
-        elif isinstance(sub, ast.BoolOp | ast.UnaryOp | ast.Return
-                        | ast.Assign | ast.AnnAssign | ast.AugAssign):
-            value = getattr(sub, "value", None)
-            if value is not None and _gate_call(value):
+        elif isinstance(sub, ast.Return):
+            if sub.value is not None and _gate_call(sub.value):
                 return True
     return False
 
@@ -850,18 +869,28 @@ def execute(*, g: Any, plan: dict, record_dsn: str, org_id: str, graph_id: str,
                 result = g.query(statement, params={"keys": chunk})
                 seen = int(result.result_set[0][0]) if result.result_set else 0
             except Exception as exc:  # report, never swallow
-                # ⛔ A DISTINCT TOKEN AND A DISTINCT EXIT CODE. This is NOT
-                # `REFUSE_GRAPH_ONLY` (parity is fine — the answer is "re-plan", not
-                # "backfill") and NOT the generic exit 2 ("refused, nothing written" —
-                # the graph is already PART-STRIPPED). A caller that gates on either
-                # would be misrouted by the exact state that most needs a human.
+                # ⛔ THE COUNT DECIDES THE TOKEN, and getting this wrong is worse than not
+                # having the distinction at all. A first-chunk failure — the state a store
+                # wedge, a timeout or a `--batch` too large for the driver actually
+                # produces — has removed NOTHING, so exit 2 is exactly true and a retry is
+                # safe. Only a failure AFTER at least one batch landed is part-stripped.
+                # Claiming "part-stripped" on the zero case teaches an operator to distrust
+                # exit 6 on the one occasion it matters.
+                stripped = sum(removed.values())
+                if stripped == 0:
+                    raise Refusal(
+                        REFUSE_WRITE_ERROR,
+                        f"the removal statement FAILED on {label} at offset {start} "
+                        f"({type(exc).__name__}: {exc}) and NO node was stripped — the "
+                        "failure was on the first batch, so nothing was removed and "
+                        "re-running once the store error is understood is safe.") from exc
                 raise Refusal(
                     REFUSE_WRITE_FAILED,
                     f"the removal statement FAILED on {label} at offset {start} "
-                    f"({type(exc).__name__}: {exc}). {sum(removed.values())} node(s) "
-                    "were ALREADY STRIPPED before the failure — the graph is "
-                    "part-stripped, which is why this is not a plain refusal. Nothing "
-                    "further was removed; re-plan to see the current set.") from exc
+                    f"({type(exc).__name__}: {exc}). {stripped} node(s) were ALREADY "
+                    "STRIPPED before the failure — the graph is part-stripped, which is "
+                    "why this is not a plain refusal. Nothing further was removed; "
+                    "re-plan to see the current set.") from exc
             removed[label] += seen
             # `REMOVE` of an absent property is a no-op, so a shortfall is benign — but
             # it is also the signal that the population moved under us, so it is
@@ -1000,6 +1029,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.batch <= 0:
         parser.error("--batch must be > 0")
+    if args.execute and args.label:
+        # ⛔ THE PLAN'S DIGEST IS THE AUTHORITY AT EXECUTE TIME, so a narrowing flag here is
+        # a contradiction, not a filter: argparse would validate `--label` and then the run
+        # would strip the WHOLE approved plan while the operator believes it stripped one
+        # label. Refusing is the only honest reading.
+        parser.error(
+            "--label is a PLAN-time narrowing and cannot narrow --execute — the plan's "
+            "digest authorises an exact set. Build a narrowed plan with --label, then "
+            "execute that plan.")
+    if args.execute and args.plan_out:
+        parser.error(
+            "--plan-out is a PLAN-time flag; --execute writes no plan. Remove it.")
+
     record_dsn = args.record_dsn or os.environ.get("TORTOISE_RECORD_DSN", "")
     if not record_dsn:
         sys.stderr.write(

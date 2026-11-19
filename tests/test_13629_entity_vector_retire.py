@@ -184,6 +184,7 @@ class Record:
             "unreadable": sum(1 for k, (r, p) in rows.items()
                               if p and not r and k in wanted),
             "record_readable_total": sum(1 for r, _p in rows.values() if r),
+            "record_unreadable_total": sum(1 for r, p in rows.values() if p and not r),
             "rows": len(wanted & set(rows)),
         }
 
@@ -1429,13 +1430,19 @@ def test_the_removal_never_re_reads_a_key_set_it_is_about_to_strip(stores, monke
     assert graph.vector_keys("Subject") == set()
 
 
-def test_a_removal_that_raises_is_exit_SIX_not_the_generic_refusal(stores, monkeypatch):
-    """⛔ F4.2 — the difference exit 6 exists for, now driven.
+def test_a_removal_that_raises_splits_on_whether_anything_was_stripped(stores,
+                                                                     monkeypatch):
+    """⛔ THE COUNT DECIDES THE TOKEN, and the wrong reading is worse than none.
 
-    Exit 2 promises "refused, nothing written", which a caller may treat as safe to retry.
-    A removal statement that raises MID-RUN has already stripped earlier batches, so the
-    only correct next action is a re-plan. Mutations that red this: `REFUSE_WRITE_FAILED →
-    REFUSE_GRAPH_ONLY` in `execute`, or `return 6 → return 2` in the mapping.
+    Exit 2 promises "refused, nothing written, safe to retry"; exit 6 promises "part of the
+    graph is already stripped, re-plan". A first-batch failure — what a store wedge, a
+    timeout or an oversized `--batch` actually produces — has removed NOTHING, so it must
+    be exit 2. Reporting "part-stripped" there teaches an operator to distrust exit 6 on
+    the one occasion it matters.
+
+    Both arms are driven, because a test that only covers the part-stripped case pins a
+    message the zero case then contradicts (the previous version of this test did exactly
+    that).
     """
     _ready(monkeypatch)
     graph, record = stores
@@ -1444,18 +1451,58 @@ def test_a_removal_that_raises_is_exit_SIX_not_the_generic_refusal(stores, monke
         record.holds("object", key)
     plan = _plan(graph, labels=["Object"], batch=1)
 
+    # ── ARM 1: the FIRST batch fails ⇒ nothing was removed ⇒ exit 2 ──────────
     graph.fail_removal = True
-    with pytest.raises(strip.Refusal) as excinfo:
+    with pytest.raises(strip.Refusal) as first:
         _execute(graph, plan, batch=1)
-    assert excinfo.value.token == strip.REFUSE_WRITE_FAILED
-    # …and the message says the graph is PART-STRIPPED, because that is the fact a caller
-    # must not read as "nothing happened".
-    assert "ALREADY STRIPPED" in str(excinfo.value)
+    assert first.value.token == strip.REFUSE_WRITE_ERROR
+    assert "NO node was stripped" in str(first.value)
+    assert graph.vector_keys("Object") == {"obj-1", "obj-2", "obj-3"}
+    assert strip.refusal_exit_code(strip.REFUSE_WRITE_ERROR) == 2
 
-    # The mapping is a table, so the two promises cannot drift apart.
+    # ── ARM 2: the failure lands AFTER a batch ⇒ part-stripped ⇒ exit 6 ──────
+    graph.fail_removal = False
+    calls = {"n": 0}
+    original = graph._answer
+
+    def _fail_second(cypher, params, *, write):
+        if write and "REMOVE n.embedding" in cypher:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated store failure on batch 2")
+        return original(cypher, params, write=write)
+
+    graph._answer = _fail_second            # type: ignore[method-assign]
+    with pytest.raises(strip.Refusal) as second:
+        _execute(graph, plan, batch=1)
+    assert second.value.token == strip.REFUSE_WRITE_FAILED
+    assert "ALREADY STRIPPED" in str(second.value)
+    # One node really is gone — that is what makes exit 6 honest here.
+    assert graph.vector_keys("Object") == {"obj-2", "obj-3"}
     assert strip.refusal_exit_code(strip.REFUSE_WRITE_FAILED) == 6
+
+    # The rest of the mapping is unchanged: everything else is a pre-write refusal.
     assert strip.refusal_exit_code(strip.REFUSE_GRAPH_ONLY) == 2
     assert strip.refusal_exit_code(strip.REFUSE_PLAN_STALE) == 2
+    assert strip.refusal_exit_code(strip.REFUSE_NOTHING_TO_STRIP) == 2
+
+
+def test_narrowing_flags_are_REFUSED_on_execute_rather_than_silently_dropped(capsys):
+    """⛔ `--label` narrows the PLAN; at execute time the digest is the authority.
+
+    Accepting `--label` on `--execute` and ignoring it strips the WHOLE approved plan
+    while the operator believes one label was targeted — an argparse-validated parameter
+    that the run never reads.
+    """
+    base = ["--uri", "docker://h/g", "--record-dsn", "postgresql://x",
+            "--org-id", "o", "--graph-id", "g", "--execute",
+            "--plan", "/tmp/p.json", "--confirm-plan-digest", "sha256:x"]
+    for extra in (["--label", "Object"], ["--plan-out", "/tmp/out.json"]):
+        with pytest.raises(SystemExit) as excinfo:
+            strip.main([*base, *extra])
+        assert excinfo.value.code == 2          # argparse usage error, before any store
+        err = capsys.readouterr().err
+        assert extra[0] in err
 
 
 def test_census_main_separates_parity_from_the_strip_precondition(monkeypatch,
