@@ -35,7 +35,8 @@ The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/star
 for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
 `x-consent-refusal` — `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`
 enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
-purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
+purpose and are classified in the guard's own docstring
+(`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`):
 the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
 different contract).
 
@@ -94,7 +95,7 @@ _RESOURCE = "cursor://tools.internal/v1"
 # parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
 # `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
 # harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED value
-# in `_CROSS_HALF_URIS` at `:1465`, the accepted row at `:1475`). `cursor://…` carries no
+# in `_CROSS_HALF_URIS` at `:1473`, the accepted row at `:1483`). `cursor://…` carries no
 # `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
 # `client.example/cb` tail row: a page that rendered it passed every assertion in
 # `_assert_refusal_page` GREEN (review of #13712, F1).
@@ -781,7 +782,8 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     browser with `json({error, reason})`, so a person saw a JSON blob on a blank page with no way
     forward. "REFUSAL" is the load-bearing word: `start.ts` still returns JSON from the `400`
     caller error and the terminal `200` flow state, so this helper does NOT assert that every hard
-    failure of the route is a page — `test_the_route_has_NO_JSON_FAILURE_ARM_LEFT` is where those
+    failure of the route is a page —
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left` is where those
     two survivors are counted and classified. The fix is deliberately presentation-only, and this
     helper is where that is enforced:
 
@@ -2035,7 +2037,7 @@ def test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status(
     a browser, so "every hard failure is a page" was a claim the route falsified — and believing it
     invites converting the terminal `200`, which #10865's owner comment records as a DIFFERENT
     CONTRACT. The survivors are counted and classified by
-    `test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`.
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`.
 
     ⚠️ `as_origin_misconfigured` is included deliberately and is NOT named by either issue: it is
     the same route, the same class, and the same one-line fix. Leaving it as JSON would make the
@@ -2105,7 +2107,7 @@ def test_the_refusal_page_makes_NO_outbound_request_and_carries_no_referrer() ->
         assert (out.get("referrerPolicy") or "").lower() == "no-referrer", (opts, out.get("referrerPolicy"))
 
 
-def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
+def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None:
     """The class, not the instances: a NEW refusal added as `json(...)` reds here.
 
     The parametrised test enumerates the arms that exist TODAY. That is the right shape for
@@ -2153,13 +2155,20 @@ _FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
 # sentence this change asks an author to write states the universal about the PAST and then names
 # what survives — "before #13671, every hard failure of this route answered raw JSON; two arms still
 # do" — and a phrase-only match failed it while reporting that the file "claims EVERY HARD FAILURE
-# is a page", the opposite of what that sentence says (review of #13712, F3). A sentence that NAMES
-# the survivors is not suppressing them, so it is exempt; a sentence that states the universal
-# without naming them is the absolute, whatever predicate it uses to spell it.
+# is a page", the opposite of what that sentence says (review of #13712, F3).
+#
+# ⛔ AND THE EXEMPTION IS TWO CONDITIONS, NOT A WORD LIST. An earlier revision exempted any sentence
+# containing `still`, `survives` or `remains` — ordinary English, tied to nothing — so the absolute
+# went GREEN on sentences this repo actually writes: "every hard failure of this route is a page,
+# and the status is still unchanged", "…the no-store header survives", "…the CSP remains strict"
+# (review of #13712, F4; measured through these very patterns, not by inspection). A guard one
+# adverb defeats is not a guard. A sentence is exempt only when it BOTH states the universal in the
+# PAST — so it is a claim about what used to be true — AND names a COUNTED survivor, so the reader
+# is told what still answers JSON. Neither condition alone exempts anything.
 _SURVIVORS_NAMED_RE = re.compile(
-    r"\bstill\b|\bsurviv|\bremains?\b"
-    r"|\b(?:two|2|both)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
+    r"\b(?:two|both|\d+)\b[^.\n]{0,40}\b(?:arms?|returns?|places?|browsers?)\b",
     re.IGNORECASE)
+_PAST_UNIVERSAL_RE = re.compile(r"\b(?:used to|previously|before)\b", re.IGNORECASE)
 
 
 def _sentence_around(text: str, start: int, end: int) -> str:
@@ -2206,9 +2215,12 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     author to write — the universal stated about the PAST, with the survivors named ("before
     #13671, every hard failure … answered raw JSON; two arms still do"). A phrase-only match failed
     that sentence and reported that the file "claims EVERY HARD FAILURE is a page", the opposite of
-    what it says (review of #13712, F3). So a match is exempt when its OWN sentence names the
-    survivors, and the message QUOTES the span it matched — a red can no longer be read as a claim
-    about a sentence nobody wrote.
+    what it says (review of #13712, F3). So a match is exempt only when its OWN sentence does BOTH
+    things — states the universal about the PAST and names a COUNTED survivor (`_PAST_UNIVERSAL_RE`
+    and `_SURVIVORS_NAMED_RE`, both required; review of #13712, F4 measured a one-word list being
+    the whole exemption and defeatable by "…is a page, and the status is still unchanged") — and the
+    message QUOTES the span it matched, so a red can no longer be read as a claim about a sentence
+    nobody wrote.
 
     Non-vacuous, and where the red actually lands: `origin/main`'s
     `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
@@ -2228,7 +2240,11 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
     }
     for name, text in corpus.items():
         for m in _FALSE_ABSOLUTE_RE.finditer(text):
-            if _SURVIVORS_NAMED_RE.search(_sentence_around(text, m.start(), m.end())):
+            sentence = _sentence_around(text, m.start(), m.end())
+            # BOTH, never either: without the past marker this is a present-tense absolute that
+            # merely mentions an adverb; without the counted survivor the reader is not told what
+            # still answers JSON (review of #13712, F4).
+            if _PAST_UNIVERSAL_RE.search(sentence) and _SURVIVORS_NAMED_RE.search(sentence):
                 continue
             # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can
             # tell which sentence earned the red instead of being told what it supposedly claims.
@@ -2236,7 +2252,8 @@ def test_NO_summary_claims_a_universal_the_two_JSON_arms_FALSIFY() -> None:
                 f"`{name}` states the absolute: it says {text[m.start():m.end()]!r} and names "
                 "nothing that still answers JSON, while `start.ts` returns JSON from TWO "
                 "places (the `400` caller error and the terminal `200` flow state — see "
-                "`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`). Say every REFUSAL, or name the "
+                "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`). Say "
+                "every REFUSAL, or name the "
                 "survivors: the terminal `200` is #10865's recorded decision, and a summary that "
                 "denies it invites converting it.")
 
