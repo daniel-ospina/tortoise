@@ -165,7 +165,8 @@ a reused `--graph` every id collides). It does **not** catch a preserved VECTOR:
 vector and the pair matches anyway — an id-only `IS NOT NULL` count would agree with it.
 Residual, stated rather than papered over: the pairing compares TEXT only, so on a re-run whose
 population text is unchanged a preserved vector is indistinguishable **whatever its width or
-embedder** — the text test catches only a node whose text CHANGED, and this guard reads no vector.
+embedder** — the text test catches only a node whose text CHANGED, and this guard reads no
+vector's VALUE or identity (it filters on `n.embedding IS NOT NULL` and returns `(id, content)`).
 That residual is closable without touching the store, which is worth saying because the earlier
 text of this paragraph implied it was not: `_upsert_point_props` already RETURNS whether the row's
 vector was written (`(embedding is not None, …)`, `projection/entities.py:3339`) and `_seed_graph`

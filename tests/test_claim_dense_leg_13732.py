@@ -1488,13 +1488,22 @@ class TestTheDocumentedRunPath:
             monkeypatch.setattr("tortoise.record_vector.reset_coverage_cache", lambda: None)
             monkeypatch.setattr(tool_mod, "record_population_vectors", lambda _ids, _scope, _dsn: 3)
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
-        monkeypatch.setattr(tool_mod, "_seed_graph", lambda _proj, pop: len(pop))
-        # ⛔ WHAT THE GRAPH "HOLDS" IS WHAT THIS RUN SEEDED — the `seeded` knob is
-        # how a partial seed is driven through the SHIPPED guard instead of
-        # stubbing it. `seeded` is the count of rows whose stored text is this
-        # run's text; the rest keep no vector (or an earlier text's).
-        keep = len(rows) if seeded is None else seeded
-        _FakeGraph.contents = {r["id"]: r["content"] for r in rows[:keep]}
+        # ⛔ WHAT THE GRAPH "HOLDS" IS WRITTEN BY THE SEED STUB, NOT PRE-SET HERE.
+        # Pre-setting it made the graph independent of whether the seed ran, so a
+        # count taken BEFORE `_seed_graph` — which on a first run blocks
+        # `graph_dense` on every box — stayed green across the whole suite
+        # (`#13745` review round 4, finding 1: the `stub the outcome` shape round 1
+        # fixed for `graph_population_vectors`, reintroduced one level up).
+        # `seeded` is how many of this run's rows the seed lands; the rest keep no
+        # vector (or an earlier text's).
+        _FakeGraph.contents = {}  # nothing is in the graph until the seed writes it
+
+        def _seed(_proj, pop):
+            keep = len(pop) if seeded is None else seeded
+            _FakeGraph.contents = {r["id"]: r["content"] for r in pop[:keep]}
+            return len(pop)
+
+        monkeypatch.setattr(tool_mod, "_seed_graph", _seed)
         monkeypatch.setattr(
             tool_mod,
             "_read_arm",
