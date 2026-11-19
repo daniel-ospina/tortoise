@@ -6778,11 +6778,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING (`:28067` is the file's only `dedup_reviewed IS NULL`),
+    # named`, which is DISCRIMINATING (`:28142` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28067` four times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28142` three times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
-    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28067`" left the
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28142`" left the
     # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
     # source, so both halves are graded: a source move the document did not follow reds, and
     # a document re-point the source did not make reds.
@@ -16486,13 +16486,14 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                     f"`sdk.py`'s `{number}` is {actual.strip()[:90]!r} — the anchor is "
                     f"at {hits}")
 
-    # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
+    # ⛔ The `04-plan.md` clause. FOUR wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while after the rebase that file is not in
-    # this diff at all (`git diff --name-only origin/main...HEAD` does not list it) and the
-    # document's own row reads `sdk.py:28607`. A phrase-only assertion was green over that,
-    # re-landed, and was green again: that is the class this pin exists to close. No count
-    # of the diff's paths is typed here — that is the head-bound figure the D5 row forbids.
+    # re-point — `sdk.py:28559` → `:28592`", and it twice claimed this file is absent from
+    # `git diff --name-only origin/main...HEAD` — refuted at this head, where that command
+    # DOES list it and this diff carries its re-points; its row reads `sdk.py:28682`.
+    # A phrase-only assertion was green over that, re-landed, and was green again: that is
+    # the class this pin exists to close. No count of the diff's paths is typed here —
+    # that is the head-bound figure the D5 row forbids.
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
         assert stale not in text, (
             f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
@@ -16501,9 +16502,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
             "`:15225-15302`). Do not re-inflate the count")
     assert "carries ONE numeric re-point" not in text, (
-        "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff. "
-        "Measured after the rebase: that file is not in `git diff --name-only "
-        "origin/main...HEAD` at all, so this diff contributes NO re-point there — and the "
+        "D5 states that `04-plan.md` carries ONE numeric re-point in this PR's diff. "
+        "Measured at this head: `git diff --name-only origin/main...HEAD` DOES list that "
+        "file, and this diff IS what carries its re-points, so the clause is refused for "
+        "its typed count and its stale pair — not because the file is absent. The "
         "pair the clause used to name (`sdk.py:28559` -> `:28592`) does not describe the "
         "document either, whose row reads `sdk.py:28682`")
     assert "sdk.py:28682" in text, (
