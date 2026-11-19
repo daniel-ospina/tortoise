@@ -325,8 +325,8 @@ def test_the_file_pointer_split_is_what_makes_the_mjs_pointer_sane():
     """The `.mjs` pointer that motivated the split is classified as a FILE, not a module.
 
     A class-complete check cannot be a list of extensions: such a set is only as
-    complete as today's citations (`tests/` carries `.jsonl`, `.sh`, `.c`,
-    `.html`). So this pins the DECISION for the pointer that broke first: it is
+    complete as today's citations (`tests/` carries `.jsonl`, `.sh`, `.c`).
+    So this pins the DECISION for the pointer that broke first: it is
     classified as a FILE pointer, and the import assertion therefore never sees
     it. (Whether a file pointer's target exists is a different question, and is
     NOT asserted here.)
