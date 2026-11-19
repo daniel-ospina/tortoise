@@ -91,15 +91,20 @@
 # and `create_subject`/`create_object`/`create_event`/`create_document` →
 # `create_entity(type=...)`. NO row was archived: the archive is for doors with NO
 # destination (`archive/README.md`), and a forwarded name is still served.
-# ⛔ WHY ONLY SEVEN. The other 25 live names absent from the 27-target are each protected by a
+# ⛔ WHY ONLY SEVEN. The other 17 live names absent from the 27-target are each protected by a
 # RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the new rows so the
 # next lane does not re-derive it: six READ doors + `check_structure` + `calibrate_summary`
-# keep their `-> list[dict]` envelope (the #8482 repair), `issue_insight`/`session_context`/
-# `search` keep a `rest_spec` (retiring the entry deletes a REST route), `query` is the paged
-# destination of two already-retired pointers, `create_point`/`diary_write`/
-# `compute_confidence` have no arm on their container, and nine destinations are not live on
-# `main` yet. Lowering the pin to the LIVE count is what keeps it a growth pin: at 55 it would
-# carry seven slots of slack and re-adding any of the seven would read green.
+# keep their `-> list[dict]` envelope (the #8482 repair), `search` keeps that envelope AND a
+# `rest_spec` (`GET /v1/search`) — the ONLY `rest_spec` holder now, because `issue_insight`/
+# `session_context` were RETIRED in lane P6 once lane P4 measured the coupling FALSE (no
+# product module derives a route from a registry row; both routes are hand-written decorators
+# that call the SDK directly) — `query` is the paged destination of two already-retired
+# pointers, the `no arm on their container` category is EMPTY (`create_point`/`diary_write`
+# retired in P1, `compute_confidence`/`recall` in P2 — each in the batch that BUILT the arm its
+# reason denied — and `delete_point`/`delete_entity` in P6 on the #9660 ruling), and SEVEN
+# destinations are not live on `main` yet. Lowering the pin to the LIVE count is what keeps it
+# a growth pin: the pin IS the live 40, so at 55 it would carry fifteen slots of slack and
+# re-adding any of the seven would read green.
 #
 # THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so
 # drift is visible (tools/surface-guard.py). The approved TARGET is recorded in

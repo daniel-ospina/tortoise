@@ -735,12 +735,14 @@ class TestProtectedDoorsStayLive:
     """A recorded decision, asserted against the code that makes it true.
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
-    named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
-    retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
-    (`issue_insight`, `session_context`) and then TWO more (`delete_point`, `delete_entity`)
-    by lane P6 in the changes that acted on P4's measurement that the `rest_spec` reason was
-    false and on the #9660 ruling that keeps `tortoise_delete` and widens it, so the
-    population is 17 and TEN
+    named 25 live doors off the 27-target and four PAIRS have left it since — the chain
+    `25 -> 23 -> 21 -> 17` the block itself states. TWO (`create_point`, `diary_write`) were
+    retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO
+    (`compute_confidence`, `recall`) by lane P2 in the change that gave `check_confidence` its
+    recompute/recall arms, and TWO more (`issue_insight`, `session_context`) plus the LAST TWO
+    (`delete_point`, `delete_entity`) by lane P6 — the first pair on lane P4's measurement that
+    the `rest_spec` reason was false, the second on the #9660 ruling that keeps
+    `tortoise_delete` and widens it — so the population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
