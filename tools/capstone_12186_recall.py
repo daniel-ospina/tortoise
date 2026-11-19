@@ -427,10 +427,14 @@ def _query_rows(door: str, ctx: dict, query: str, limit: int) -> tuple[list[dict
         rows = ctx["fts_rows"](_TracedSdk(ctx["sdk"], trace), "object",
                                query, limit=limit)
     else:
-        # ⛔ The literal `_rerank_candidates=True` is NOT passed: the arm's own
-        # gate (`TORTOISE_FUSED_RERANK`) decides, and passing the kwarg would
-        # make the rerank arm and its control the same call. This is the shape
-        # the MCP tool produces — it sets no such private kwarg either.
+        # ⛔ The literal `_rerank_candidates=True` is NOT passed, and the reason is
+        # the SHAPE OF THE CALL, not the value: the MCP tool passes no such
+        # private kwarg either, so omitting it is what makes this arm the tool's
+        # call. The kwarg's SDK default is already `True`
+        # (`tortoise/sdk.py::tortoise_fts_query`), so the SHIPPED/ARMED split is
+        # decided by the arm's own `TORTOISE_FUSED_RERANK` gate, not by this line —
+        # which is why `user_search` is the shipped OFF arm and
+        # `user_search_rerank` is the armed one from one env flag apart.
         rows = ctx["sdk"].tortoise_fts_query(query, entity_type="object",
                                              limit=limit, leg_trace=trace)
     from tortoise.exceptions import HybridReadUnavailableError
