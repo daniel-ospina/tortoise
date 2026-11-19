@@ -164,8 +164,14 @@ def infra_failure(exc: BaseException) -> bool:
       predicate (``tortoise/retry.py``); an extractor LLM transient
       (``requests.Timeout``/``URLError``) is in scope by the plan's P2-2 pin.
     * ``graph_abort_family(exc)`` — the engine ABORTED the statement because the
-      graph was deleted or replaced (``_GRAPH_ABORT_RE``). This is the smoke's
-      OWN failure, and the reason finding 1 exists.
+      graph was deleted or replaced (``_GRAPH_ABORT_RE``). This is the family
+      the smoke's record is MOST CONSISTENT WITH, and the reason finding 1
+      exists. ⚠️ Consistency, not identification: ``repr(ResponseError)`` is
+      ``'server:ResponseError'`` and drops the server's sentence, which is
+      finding 2's own premise, so the record cannot name which family the
+      smoke hit — a bare query timeout would persist the identical record and
+      is deliberately left excluded below. The mandated rung-10 re-run is what
+      confirms it; nothing here claims it has been confirmed.
     * ``retryable_aborted_write(exc)`` — the write-slot refusal and the
       MISCONF/disk-full family (``_WRITE_LOCK_RE`` / ``_MISCONF_RE``), which
       the plan's P1-7 pin already treats as re-attemptable. ``graph_exists`` is

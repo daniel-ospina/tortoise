@@ -5,7 +5,7 @@ The 10-question smoke (``--limit 10 --retrieval-only``, main ``7d3470909a``)
 persisted this entry for question ``c5e8278d``::
 
     error        server:ResponseError
-    error_class  ingest:retries_exhausted      # recoverable  (errors.py:155)
+    error_class  ingest:retries_exhausted      # recoverable  (eval_failure_class)
     retryable    false                          # ...so a resume SKIPPED it
     attempts     0                              # ...as if nothing was tried
 
@@ -37,7 +37,12 @@ import requests
 from tools.longmem_eval import errors as lme_errors
 from tools.longmem_eval import run as runner
 
-#: The exact exception the smoke recorded: a bare ``ResponseError``. Its repr is
+#: The exception SHAPE the smoke's record is consistent with: a bare
+#: ``ResponseError``. ⚠️ Consistency, not identification — the record's ``error``
+#: field is ``server:ResponseError`` and carries no server sentence (that is
+#: finding 2's premise), so a query timeout would persist the identical record.
+#: This fixture therefore models the shape; the rung-10 re-run is what names the
+#: family. Its repr is
 #: ``server:ResponseError`` (redis-py overrides ``__repr__``), its class is
 #: ``ingest:retries_exhausted`` (unknown at ingest → recoverable, #1776), and
 #: ``retryable_transient`` says False (it is not a write-layer retry) — which is
@@ -80,9 +85,9 @@ def _entry(exc, *, stage="ingest", prior=None,
 def test_retryable_agrees_with_the_graded_class(label, exc, site,
                                                 expected_class):
     """A WIRING pin, not the falsifier: ``_failure_entry`` computes exactly
-    this expression (``run.py:1506``), so the row proves the entry is wired to
-    ``failure_is_recoverable`` rather than to ``class_is_recoverable`` or to a
-    constant -- it reds if that call is replaced. It does NOT pin which
+    this expression (``run._failure_entry``), so the row proves the entry is
+    wired to ``failure_is_recoverable`` rather than to ``class_is_recoverable``
+    or to a constant -- it reds if that call is replaced. It does NOT pin which
     failures are recoverable: a mutation of ``infra_failure`` leaves all rows
     green. The falsifiers for that are the two tables below
     (``DETERMINISTIC_REDIS_REFUSALS`` and ``INFRA_REDIS_FAMILIES``), and
@@ -430,9 +435,10 @@ def test_the_legacy_rescue_still_matches_after_scrubbing():
     """Redaction must not remove the transport CLASS NAME from ``error``.
 
     This is an over-redaction guard, not a rescue-path guard: ``_legacy_repr_match``
-    is consulted only when ``retryable is None`` (``run.py:1367``), and every
-    entry ``_failure_entry`` writes carries a bool, so no entry this version
-    scrubs can reach that branch. What it pins is the weaker property that makes
+    is consulted only when ``retryable is None``
+    (``run._retry_failed_skip_reason``), and every entry ``_failure_entry``
+    writes carries a bool, so no entry this version scrubs can reach that
+    branch. What it pins is the weaker property that makes
     the legacy path safe to keep: ``redact_secrets`` rewrites credential-SHAPED
     spans only, so the substring ``TimeoutError`` survives byte-identical. A
     redactor that rewrote whole tokens would break the legacy read of an

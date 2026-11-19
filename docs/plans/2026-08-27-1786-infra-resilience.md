@@ -370,19 +370,29 @@ transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
 re-attemptable) both still hold. What is PINNED, precisely, so a successor can
 tell an arm from a claim — by ROW, not by a failure count, because the counts
 move every time a row is added and a stale count is its own kind of false
-record. Measured at this head, one mutant per arm: neutralise
-`retryable_transient` and `TRANSIENT_VALUE_REDIS_FAMILIES[loading]` plus
-`test_the_recovery_tier_preservation_stays_coherent` red (the `misconf` row
-stays GREEN, because MISCONF also routes through `retryable_aborted_write` —
-that over-claim is why this is stated per row); neutralise `graph_abort_family`
-and `INFRA_REDIS_FAMILIES[graph-aborted]` plus the smoke, deterministic-bug and
-R2 pins red; neutralise `retryable_aborted_write` and
-`INFRA_REDIS_FAMILIES[write-lock]` reds alone; make `infra_failure` return
-`False` outright and all three `INFRA_REDIS_FAMILIES` rows,
-`TRANSIENT_VALUE_REDIS_FAMILIES[loading]` and the smoke record red; restore the
-`isinstance(exc, RedisError)` base-class arm and all four
-`DETERMINISTIC_REDIS_REFUSALS` rows plus the three excluded
-`TRANSIENT_VALUE_REDIS_FAMILIES` rows red. The THREE-arm shape is pinned by the
+record. Measured at this head, one mutant per arm, over
+`tests/test_longmem_failure_record_coherence.py` (green before each mutant):
+
+- neutralise `retryable_transient` -> `[loading]` and
+  `test_the_recovery_tier_preservation_stays_coherent` red. ⚠️ The `misconf`
+  row stays GREEN, because MISCONF also routes through
+  `retryable_aborted_write`; naming it here would be the over-claim this
+  paragraph exists to prevent.
+- neutralise `graph_abort_family` -> `[graph-aborted]`, plus the smoke,
+  deterministic-bug and R2 coherence pins (4).
+- neutralise `retryable_aborted_write` -> `[write-lock]` ALONE (1), which is
+  what makes the third arm load-bearing rather than decorative.
+- make `infra_failure` return `False` -> all three `INFRA_REDIS_FAMILIES` rows,
+  `[loading]`, the smoke record and the deterministic-bug, recovery-tier and R2
+  coherence pins (8). The three coherence pins red here (and under the two
+  single-arm mutants above) because they assert the flag on entries whose
+  failures ARE infra: that is the same property from the other end, not a
+  second claim.
+- restore the `isinstance(exc, RedisError)` base-class arm -> all four
+  `DETERMINISTIC_REDIS_REFUSALS` rows and the three excluded
+  `TRANSIENT_VALUE_REDIS_FAMILIES` rows (7).
+
+The THREE-arm shape is pinned by the
 write-slot literal, whose only
 route to `true` is `retryable_aborted_write` — MISCONF reaches `true` through
 `retryable_transient` as well, so a MISCONF row alone would stay green with
