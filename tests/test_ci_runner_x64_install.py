@@ -2949,12 +2949,12 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `MODE = …` block ref must land on that block's own `if [ "$MODE" = … ]` line, and "the refusal
     dies at `:NNN`" must land on a `die`, not on the comment that explains it.
 
-    Non-vacuity (measured, each mechanism in isolation): the pre-fix pair `:545`/`:550` reds on the
-    unknown-number check — "cites installer line(s) this pin does not know: [529, 534]". Supply table
-    entries that ACCEPT those lines and the two sentence checks still catch it on their own: the
-    `MODE = install` claim reds on `:545` (the `--print-labels` prelude comment) and the refusal
-    claim reds on `:550` (`# every install.`). The same holds for a number this pin already knows:
-    `:578` swapped for `:551` (the `--print-labels` block) reds only the sentence check.
+    Non-vacuity (measured, each mechanism in isolation): citing a number the supply table does not
+    know reds on the unknown-number check — "cites installer line(s) this pin does not know: [...]".
+    Supply table entries that ACCEPT those lines and the two sentence checks still catch it on their
+    own: the `MODE = install` claim reds when its ref lands on a comment instead of the
+    `if [ "$MODE" = … ]` line, and the refusal claim reds when its ref lands on the comment instead of
+    the `die`. A number this pin already knows, swapped for another known one, reds only the check.
 
     ⛔ THE RANGE HALF IS PINNED BY CONTENT TOO, AND BY A RELATION, BECAUSE A NUMBER KEY CANNOT BE
     TRUSTED ALONE (review round 5). `range_ends` pins each span's TRAILING line(s) against a token

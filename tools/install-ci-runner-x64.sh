@@ -206,12 +206,12 @@ MEM_RESERVE_GB="${CI_RUNNER_MEM_RESERVE_GB:-4}"
 # of forking that template, so every runner version bump stays upstream's problem.
 #
 # ⛔ THE MEMORY BOUND IS A TAIL BOUND, NOT A CALIBRATION. `MEM_PER_RUNNER_GB` above is the box
-# SIZING unit (its only consumer is the capacity arithmetic); `MEM_PER_RUNNER_GB × this factor` is a
-# per-unit `MemoryMax=` so ONE runaway job is stopped inside the runner's own cgroup instead of the
-# host kernel choosing a victim among co-tenant runners. The default (4) is above the worst case
-# recorded on this fleet so far (5.2 GB, a `test (k)` shard; the only record of it is pi-cell-4's
-# hand-written drop-in header — treat it as unvalidated) and it bounds nothing at the box level:
-# docker containers run in `docker-*.scope`, OUTSIDE the unit's cgroup.
+# SIZING unit **and the operand of this bound** (it feeds the headroom arithmetic AND `MEM_MAX_GB=`),
+# so lowering it to pass the headroom gate ALSO tightens a live unit's `MemoryMax=` by this factor on
+# `daemon-reload`, no restart needed. `× this factor` is a per-unit cap, so ONE runaway job dies
+# inside the runner's own cgroup instead of the kernel choosing among co-tenants. The default (4) is
+# above the fleet's worst case (5.2 GB, a `test (k)` shard; only record: pi-cell-4's drop-in header —
+# unvalidated); it bounds nothing at box level — docker containers run in `docker-*.scope`.
 RESTART_SEC="${CI_RUNNER_RESTART_SEC:-30s}"
 START_LIMIT_INTERVAL="${CI_RUNNER_START_LIMIT_INTERVAL:-1h}"
 START_LIMIT_BURST="${CI_RUNNER_START_LIMIT_BURST:-20}"
@@ -420,11 +420,11 @@ write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
 
 # Remove OUR drop-in only. ⛔ NEVER `rm -rf` the `.d` directory: other drop-ins may live there and
 # removing one is not this installer's decision (pi-cell-4 carries a hand-written `restart.conf` in
-# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ WHAT KEEPS A MISSING
-# `.d` DIRECTORY FROM BECOMING rc=3 IS NOT THE `[ -d ]` GUARD — that is the `2>/dev/null || true` on the
-# `rmdir` line (measured: delete the guard and this still returns 0, because `sudo rm -f` on an absent
-# path exits 0 and rmdir's ENOENT is swallowed). The existence check afterwards stops `rm -f`'s status
-# being swallowed; the guard's real benefit is that a target with nothing of ours gets no `sudo` at all.
+# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ NOTHING HERE MAKES
+# rc=3 REACHABLE — the terminal `return 0` below is what makes a clean uninstall report 0, and it
+# does so with or without the `[ -d ]` guard or `rmdir`'s `|| true` (measured: delete the guard and
+# this still returns 0; delete the guard AND the `|| true` and it STILL returns 0). The guard's real
+# benefit is narrower: a target with nothing of ours gets no `sudo` at all.
 remove_unit_dropin() { # $1 = unit name (NOT the instance name)
   local unit="$1" dropin
   dropin="$UNIT_DIR/$unit.d/10-restart-and-memory.conf"

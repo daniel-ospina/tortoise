@@ -95,9 +95,11 @@ aggregate. Stated here, in R4 and in the runbook step.
 13. **Implement** — uninstall loop, guarded and VERIFIED: `[ -d "$UNIT_DIR/$unit.d" ] && { sudo rm -f
     "$UNIT_DIR/$unit.d/10-restart-and-memory.conf"; sudo rmdir --ignore-fail-on-non-empty "$UNIT_DIR/$unit.d";
     [ -e "$UNIT_DIR/$unit.d/10-restart-and-memory.conf" ] && { say "WARNING: could not remove the drop-in for
-    $unit — remove it by hand"; rc=3; }; }` — the `[ -d ]` guard is not cosmetic: `--ignore-fail-on-non-empty`
-    ignores ONLY `ENOTEMPTY`, and on a target with no `.d/` directory it exits **1** with `No such file or
-    directory` (measured), so an unguarded call would report a clean uninstall as rc=3; and the verify step is
+    $unit — remove it by hand"; rc=3; }; }` — the `[ -d ]` guard is NOT what makes rc=3 unreachable, and
+    an earlier draft of this plan said otherwise: every path through the function ends in `return 0`
+    (measured — delete the guard and the uninstall still reports 0; delete the guard AND the
+    `2>/dev/null || true` and it STILL reports 0), so the guard only saves a `sudo` on a target with
+    nothing of ours, while `2>/dev/null || true` swallows `rmdir`'s ENOENT for a `.d/` that is already gone; and the verify step is
     what stops the same flag from swallowing our own failed `rm`. The orphan-unit branch (`:1558-1561`) does the same
     and its printed remedy (`sudo rm -f $UNIT_DIR/$u`) is extended to name the drop-in
     **[cycle-3 fix: `ENOENT` is not ignored by that flag; and add the no-`.d/` case to step 7's arm]**.
