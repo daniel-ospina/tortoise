@@ -192,12 +192,12 @@ async function assetsFetch(assetUrl) {
   return new Response("Not Found", { status: 404 });
 }
 
-function ctx(urlStr) {
+function ctx(urlStr, method = "GET") {
   const u = new URL(urlStr);
   return {
     request: {
       url: urlStr,
-      method: "GET",
+      method,
       headers: new Headers({ host: u.host }),
     },
     env: { ASSETS: { fetch: assetsFetch } },
@@ -223,17 +223,23 @@ function ctx(urlStr) {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
       // ⛔ `/contact`'s form posts to `functions/contact/submit.ts`, which is a Pages
-      // FUNCTION and so resolves ABOVE the asset router. It refuses every method but
-      // POST with 405 (`Allow: POST, OPTIONS`) — so this mock answers it the same way.
-      // Modelled (review finding): without it `/contact/submit` fell through to this
-      // router's bare 404, and the arm below only asserted "not a 301/302" — i.e. it
-      // was green over an endpoint nothing served, proving "un-redirected" while its
-      // comment claimed "reached".
+      // FUNCTION and so resolves ABOVE the asset router. Its contract is TWO-branch
+      // (`submit.ts:392-399`): `OPTIONS` answers **204** with `Allow: POST, OPTIONS`
+      // (the CORS preflight), and every OTHER non-POST method is refused with **405**.
+      // Modelled faithfully on both — ⛔ "refuses every method but POST with 405"
+      // would be false for `OPTIONS`, the very method its own `Allow` names, and a mock
+      // that 405'd the preflight would let a later CORS arm here encode a behaviour the
+      // Function does not have (review finding, cycle 2).
+      //
+      // Modelled AT ALL because (review finding, cycle 1) without this branch
+      // `/contact/submit` fell through to this router's bare 404 and the arm below only
+      // asserted "not a 301/302" — i.e. it was green over an endpoint nothing served,
+      // proving "un-redirected" while its comment claimed "reached".
       if (u.pathname === "/contact/submit") {
-        return new Response("method_not_allowed", {
-          status: 405,
-          headers: { Allow: "POST, OPTIONS" },
-        });
+        const allow = { Allow: "POST, OPTIONS" };
+        return method === "OPTIONS"
+          ? new Response(null, { status: 204, headers: allow })
+          : new Response("method_not_allowed", { status: 405, headers: allow });
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
@@ -249,8 +255,8 @@ function ctx(urlStr) {
   };
 }
 
-async function hit(urlStr) {
-  const res = await onRequest(ctx(urlStr));
+async function hit(urlStr, method = "GET") {
+  const res = await onRequest(ctx(urlStr, method));
   return { status: res.status, location: res.headers.get("location") };
 }
 
@@ -389,17 +395,30 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
         `a GET and drops the body (got ${status})`,
     );
     assertEq(location, null, `${from} emits no Location`);
-    // ⛔ AND IT MUST BE REACHED, not merely un-redirected (review finding). The mock now
-    // answers the Function as `submit.ts` does for a non-POST, so a 405 is positive
-    // evidence the request ARRIVED. Without this the arm was green on the mock's bare
-    // 404 — "not a 3xx" over an endpoint nothing served, which is the silent-gap shape
-    // this whole file exists to refuse.
+    // ⛔ AND IT MUST BE REACHED, not merely un-redirected (review finding, cycle 1).
+    // The mock answers the Function as `submit.ts` does for a non-POST, so a 405 is
+    // positive evidence the request ARRIVED. Without this the arm was green on the
+    // mock's bare 404 — "not a 3xx" over an endpoint nothing served, which is the
+    // silent-gap shape this whole file exists to refuse.
     assertEq(
       status,
       405,
       `${from} must be REACHED — the Function answers a GET with 405 (POST only), so ` +
         `anything else means the request never arrived`,
     );
+    // ⛔ AND THE CORS PREFLIGHT MUST BE REACHED TOO, with the Function's OWN status —
+    // `OPTIONS` is the one method `Allow` names besides POST, and `submit.ts:392-396`
+    // answers it 204 rather than 405 (review finding, cycle 2). A redirect here breaks
+    // the preflight the form's cross-origin POST depends on just as surely as a 301 on
+    // the POST does.
+    const preflight = await hit(`https://${PRODUCT}${from}`, "OPTIONS");
+    assertEq(
+      preflight.status,
+      204,
+      `${from} preflight (OPTIONS) must be REACHED — the Function answers 204 ` +
+        `(\`Allow: POST, OPTIONS\`), so anything else means it was intercepted`,
+    );
+    assertEq(preflight.location, null, `${from} preflight emits no Location`);
   }
 
   // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
