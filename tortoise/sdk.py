@@ -12761,6 +12761,43 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     }
 
 
+def _published_cache_fold_denial():
+    """CONSUME the derived cache's over-cap verdict for the write in flight.
+
+    ``allowance_gate.cache_fold_denial`` is the gate's published verdict (#13829),
+    and a missing/unimportable meter module must never fail a write whose journal
+    line and record row are ALREADY committed — that is the hazard the guarded
+    imports in ``live_write.py`` and ``mcp_server.py`` each cite as their reason
+    for existing. This is the same guard, in one place, so the SDK's call sites
+    cannot drift from it (PR #13835 review, P3: one of them was bare, and it ran
+    after the outbox commit).
+
+    Answers ``None`` on every write whose door published nothing — the unarmed,
+    un-tenanted (stdio/operator) and not-truth-carried cases alike.
+    """
+    try:
+        from .allowance_gate import cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable gate must not fail a committed write
+        return None
+    return cache_fold_denial()
+
+
+def _discard_published_cache_fold_denial() -> None:
+    """Forget a published verdict on a write arm that never touches the cache.
+
+    A verdict is published for exactly ONE write; an arm that writes nothing to
+    the cache has no consumer, so the verdict would outlive the write it
+    describes and deny the NEXT fold in this context (#13829, PR #13835 review
+    P2: a bare dedup hit is that arm). Guarded for the same reason as
+    :func:`_published_cache_fold_denial`.
+    """
+    try:
+        from .allowance_gate import clear_cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — a gate that will not import cannot publish
+        return
+    clear_cache_fold_denial()
+
+
 def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
     """Merge the #9202 shaping RECEIPT into a write-door reply (in-band).
 
@@ -18010,9 +18047,23 @@ class TortoiseSDK:
                     # (tortoise#11863). `None` money members were dropped above,
                     # because a CREATE never deletes.
                     try:
+                        # ⛔ #13829 (review P2, PR #13835): this verb's own cache
+                        # leg consumes the published verdict — that is what makes
+                        # the cap bind on THIS arm (the default MCP dedup shape)
+                        # instead of being skipped by it.
                         self.update_point(pid, **props)
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
+                else:
+                    # ⛔ #13829 (review P2, PR #13835) — NO CACHE WRITE ON THIS
+                    # ARM. A bare dedup hit (no props, no applied word) only READS
+                    # the cache, and a terminal-refused hit writes nothing, so the
+                    # published verdict has no consumer here. Left set, it would
+                    # deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge
+                    # `enforce_allowances`' own `except BaseException` arm exists to
+                    # close.
+                    _discard_published_cache_fold_denial()
                 return _with_end_receipt(
                     {**self.get_point(pid),
                      # `_merge_advisories`, never a second `**` splat: BOTH the
@@ -18539,8 +18590,12 @@ class TortoiseSDK:
         # to the record, and the outcome is NAMED on the returned `LiveWrite`
         # (`cache_fold`) rather than being silent. #10976 is untouched — no byte is
         # deleted here, the cache simply stops growing.
-        from .allowance_gate import cache_fold_denial
-        _cache_denial = cache_fold_denial()
+        # ⚠️ The import lives in `_published_cache_fold_denial`, GUARDED, and for
+        # the same reason the sibling sites in `live_write.py` / `mcp_server.py`
+        # guard theirs: this line runs AFTER the outbox commit, so an
+        # `ImportError` here would hand the caller an error for a write that
+        # landed (PR #13835 review, P3).
+        _cache_denial = _published_cache_fold_denial()
         # ⛔ #13829 — THE SKIP NEEDS PROOF, NOT JUST A VERDICT.
         # `truth_carried=True` is the DOOR's declaration; `_record_committed` is
         # the ANSWER, and it is `None` on a journal-less deployment: `_emit_event`
@@ -22920,6 +22975,14 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ⛔ #13829 (review P2, PR #13835) — ASK BEFORE THIS DOOR TOUCHES THE
+        # CACHE. Consumed ONCE, here, at the top of the method, so every exit of
+        # this verb — the absent/no-op returns included — leaves no verdict
+        # behind, and the cache leg below honours it. `update_point` writes the
+        # derived graph directly (`SET n += $props`, `_sync_tags`,
+        # `_mark_dirty`) and never goes through `live_write`'s fold, so the
+        # chokepoint's consumer does NOT cover it.
+        _cache_fold_denial = _published_cache_fold_denial()
         # ⛔ #13143 review (F1, P1): FIRST, before any of this door's own
         # `'status' in props` arms — they test the LITERAL name while the
         # transport applies `str(key)`, so a renderer-named key was written as
@@ -23729,6 +23792,43 @@ class TortoiseSDK:
                 raise WriteNotLandedError(
                     id, getattr(proj, "graph_name", None),
                     operation="update_point")
+
+        # ⛔ #13829 (review P2, PR #13835) — THE CACHE DECLINES HERE TOO.
+        # The verdict published for this write had two holes on the DEFAULT MCP
+        # door: `create_point(dedup=True)` (the default shape) folds a dedup hit
+        # through THIS verb and returns ~500 lines above `create_point`'s own
+        # consumption, so an over-cap cache kept taking writes — the cap was
+        # skipped, not enforced — and the verdict stayed set for a later fold in
+        # this context to consume. Consuming it at this verb's cache leg closes
+        # both: the record already holds the revision (the append above is the
+        # commit point, #7951), so the cache may lag and `derived = replay(
+        # journal)` heals it.
+        #
+        # The reply on that arm is the record's view — the point as the cache last
+        # held it, overlaid with the properties this call RECORDED — because the
+        # cache row was deliberately not written.
+        #
+        # ⚠️ STATED RESIDUAL: the PROMOTE arm (`status` in props) is APPLY-FIRST by
+        # decision (#8830). Its record is appended only after a guarded `SET` that
+        # can legitimately match nothing, so skipping the cache there would drop
+        # the transition with NO record at all — a worse defect than a stale
+        # cache. That arm therefore consumes the verdict and proceeds: the cap
+        # does not bind for it.
+        if _cache_fold_denial is not None:
+            if _promote_arm:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The status arm is APPLY-FIRST (#8830), so its cache write "
+                    "rides through: the cap does not bind on that arm.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+            else:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The record holds the revision; the point is served from the "
+                    "record until a replay folds it.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+                return _with_end_receipt(
+                    {**self.get_point(id), **emit_props}, _end_receipt)
 
         # #7405: the property writes below ride the bounded write retry —
         # `update_point` is the SDK's most common mutation door

@@ -341,12 +341,21 @@ def test_create_point_asks_the_fold_before_it_touches_the_cache():
         "the verdict is consumed AFTER the cache write it must guard (#13829)")
 
 
-def test_create_point_appends_before_it_writes_the_cache():
-    """The other half of the opt-in's proof: the RECORD precedes the cache.
+def test_the_record_append_precedes_the_cache_write():
+    """A PRE-EXISTING invariant, kept as one — NOT the opt-in's proof.
 
     ``_emit_event`` (journal append + record projection) must come before the
     ``CREATE (:Point)`` block, or skipping the fold would leave a write whose
-    only durable copy is the cache we just declined.
+    only durable copy is the cache we just declined. It is worth pinning for that
+    reason — and it is NOT evidence about this change: the identical line ordering
+    holds on ``origin/main`` (``_emit_event`` at 1604 vs
+    ``_live_write_scope("create_point")`` at 1618 of the same slice), so no
+    mutation of this diff can move it. The opt-in's actual proof is the
+    BEHAVIOURAL pair below —
+    ``test_the_door_serves_the_write_the_record_holds`` and
+    ``test_the_door_serves_the_write_the_cache_declined`` — plus
+    ``test_the_default_dedup_arm_honours_the_same_verdict`` (PR #13835 review, P3:
+    presenting this assertion as proof was what misled).
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -461,6 +470,103 @@ def test_a_journal_less_door_keeps_the_refusal(tmp_path):
         assert cache_fold_denial() is None
     finally:
         sdk.close()
+
+
+def test_clearing_the_verdict_really_clears_it():
+    """``clear_cache_fold_denial`` is load-bearing, not a docstring.
+
+    Mutant this reddens on: make the body ``pass``. Nothing else in the suite
+    notices — the #13829 file's own autouse fixture calls it for isolation, and
+    consume-once means the tests still pass with it inert (PR #13835 review, P3
+    row A7).
+    """
+    clear_cache_fold_denial()
+    enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
+                       meters=OVER_CAP, truth_carried=True)
+
+    clear_cache_fold_denial()
+
+    assert cache_fold_denial() is None, (
+        "a cleared verdict was still consumable: `clear_cache_fold_denial` no "
+        "longer clears, so every door entry silently inherits the previous "
+        "write's denial (#13829)")
+
+
+def test_the_mcp_door_entry_clears_a_verdict_it_did_not_consume(monkeypatch):
+    """The door's FIRST act is to forget the previous write's verdict (row A6).
+
+    ``mcp_server._enforce_quota`` clears before its early returns, so a stdio /
+    no-org call cannot leave a verdict behind either. Mutant this reddens on:
+    delete the ``clear_cache_fold_denial()`` call at the door entry (PR #13835
+    review, P3 row A6) — nothing else in the suite sees it, and a stale verdict
+    would then deny the NEXT fold a cache write nobody capped.
+    """
+    from tortoise import mcp_auth, mcp_server
+
+    class _Fixed:
+        def __init__(self, value):
+            self._value = value
+
+        def get(self):
+            return self._value
+
+    # `_enforce_quota` imports the ContextVar from `mcp_auth` INSIDE the call.
+    monkeypatch.setattr(mcp_auth, "_current_org_id", _Fixed(None))
+
+    enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
+                       meters=OVER_CAP, truth_carried=True)
+
+    mcp_server._enforce_quota("points")  # no org context: returns before the gate
+
+    assert cache_fold_denial() is None, (
+        "a verdict published for the PREVIOUS write survived door entry — the "
+        "next fold in this context is denied a cache write nobody capped")
+
+
+def test_the_default_dedup_arm_honours_the_same_verdict(journal_sdk):
+    """The MCP DEFAULT arm (``dedup=True``) honours the verdict too (row A8).
+
+    ⛔ THE HOLE THIS PINS (review P2, PR #13835). A dedup hit folds through
+    ``update_point`` and returns ~500 lines ABOVE ``create_point``'s own
+    consumption point, and ``update_point`` writes the derived graph directly
+    (``SET n += $props``) without ever meeting ``live_write``'s consumer. So on
+    the default MCP shape an over-cap cache kept taking writes — the cap was
+    SKIPPED there, not enforced — and the published verdict was left set for a
+    later fold in the same context to consume.
+
+    Mutants this reddens on:
+
+    * **drop the consumption in ``update_point``'s cache leg** → the revision
+      reaches the cache and the cache assertion below goes red;
+    * **skip only the consumption without skipping the write** → same row;
+    * **leave the verdict set** → the ``cache_fold_denial() is None`` assertion
+      goes red.
+    """
+    sdk, events = journal_sdk
+    content = "the dedup arm writes the cache (#13829)"
+    first = sdk.create_point("statement", content, custom_field="before")
+    assert sdk.get_point(first["id"])["custom_field"] == "before"
+
+    enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
+                       meters=OVER_CAP, truth_carried=True)
+
+    reply = sdk.create_point("statement", content, dedup=True,
+                             custom_field="after")
+
+    # It IS the dedup hit, not a second point.
+    assert reply["id"] == first["id"]
+    # THE CACHE DECLINED the revision …
+    assert sdk.get_point(first["id"])["custom_field"] == "before", (
+        "the over-cap derived cache took the dedup arm's write: the cap is "
+        "skipped on the default MCP shape (#13829)")
+    # … and the verdict did not outlive the write it describes.
+    assert cache_fold_denial() is None
+    # … AND THE RECORD TOOK IT, measured — otherwise "no cache write" would be
+    # satisfied by a write that never happened at all.
+    revised = [e for e in _journal(events)
+               if e.get("type") == "PointRevised" and e.get("id") == first["id"]]
+    assert any(e.get("custom_field") == "after" for e in revised), (
+        f"the declined cache write left no record of the revision: {revised!r}")
 
 
 def test_the_mcp_gate_defaults_to_the_protective_arm():
