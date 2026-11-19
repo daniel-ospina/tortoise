@@ -1210,10 +1210,29 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
             for value in node:
                 yield from _artifact_strings(value)
 
+    # ⛔ AND THE SPELLING IS NOT JUST THE CASE OR THE LENGTH (this lane, measured at
+    # `98804c4971`). Appending, to the README,
+    #
+    #     To inspect the instrument as it ran: git show '31bce52ddbb3:tools/capstone_12186_recall.py'.
+    #
+    # left the suite GREEN at **58 passed**. Shell-quoting the target is the ordinary way
+    # a command goes into prose, and `git show '<sha>:path'` is exactly as unresolvable
+    # as the unquoted form — but the previous pattern demanded the hex to begin
+    # immediately after ONE space and to be followed by `:`, so the opening quote hid the
+    # token entirely. This is the fourth spelling axis this one guard has had to learn
+    # (length ≥ 4, both cases, every surface, now the quote), and each earlier one was
+    # found the same way: by writing the defect back in and watching the pin stay green.
+    #
+    # The scan therefore anchors on the COMMAND and then takes the target, tolerating any
+    # run of whitespace, an optional opening quote/backtick, and NO requirement that a
+    # `:` follows — `git show <sha> -- <path>` is the other way to hand a reader the same
+    # unresolvable target and it carries no colon at all. `code_head` itself is never a
+    # `git show` argument here (the record's commands are `HEAD`-anchored), so widening
+    # the match cannot make this pin read its own subject as a violation.
+    _git_show_target = re.compile(r"""git\s+show\s+["'`]?([0-9a-fA-F]{4,40})""")
     artifact_text = " ".join(_artifact_strings(artifact))
     shown = {tok.lower() for tok in
-             re.findall(r"git show ([0-9a-fA-F]{4,40}):",
-                        flat + " " + artifact_text)}
+             _git_show_target.findall(flat + " " + artifact_text)}
     code_head = artifact["code_head"]
     for token in sorted(shown):
         # A sha abbreviation is a prefix; comparing with a common prefix of any length
