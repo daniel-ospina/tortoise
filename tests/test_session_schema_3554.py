@@ -3446,9 +3446,15 @@ _APPROVAL_RECORD_WITH_AN_UNREAD_LEAD_IN = (
 # names BOTH `**v3.41 — Owner's approval …**` and `**1. Owner approval …**`, but only the
 # first had a fixture — the ordinal half was prose, so it could move in silence in a file
 # whose stated discipline is that every residual shape is driven. Measured at this head:
-# the ordinal form PASSES (fail-open) and `_opening_approval_label` returns None for it,
-# because the paragraph OPENS with `1.`, not with the bold run — the same reading as the
-# release-id lead-in above.
+# the ordinal form PASSES (fail-open), and the cause is the LABEL pattern, NOT the
+# paragraph boundary (review P1 — the first version of this comment claimed the opposite):
+# the paragraph DOES open with the bold run (`_OPENING_EMPHASIS_RE` matches it and the
+# rendered paragraph starts with `**`), and no list marker is ever involved, because `1.`
+# sits INSIDE the emphasis. What fails is `_APPROVAL_LABEL_START_RE.match("1. Owner
+# approval of the exact changes")` → False: its lead-in class requires a `—`/`-` separator
+# (`[A-Z]{1,3}\d{0,3}\s*[—–-]` or `[—–-]`), which `1.` is not. So the remedy would be the
+# LEAD-IN class, not an end-of-paragraph boundary — and unlike the release-id lead-in
+# above (`R1 — Owner's approval …`, which IS read), this run is not read at all.
 _APPROVAL_RECORD_WITH_AN_ORDINAL_LEAD_IN = (
     "> **1. Owner approval of the exact changes** — given in-session, no comment cited.")
 # ⛔ THE POINTER'S FORWARD FORM NAMING A CONTAINER (#13669 cycle 5): ``its own issue
@@ -3549,8 +3555,15 @@ _APPROVAL_RECORD_IN_A_TABLE_ROW = (
 # (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED), while these two close only through
 # the SPLITTER — an END-of-paragraph boundary in `_quoted_paragraphs` (the
 # `_HEADING_START_RE` shape, because a break is a whole block, CommonMark §4.1). Teaching
-# `_PARAGRAPH_START_RE` their STARTS alone moves nothing (measured: both still PASS — that
-# pattern is consulted on the NEXT line, which is the label), and no stripper can reach
+# `_PARAGRAPH_START_RE` their STARTS alone moves nothing, and the reason is measured per
+# shape rather than "that pattern is consulted on the NEXT line" (review P2, which was
+# false for both): a start taught for the BREAK sits on the block's FIRST line, where
+# `current` is still empty, so `_quoted_paragraphs` creates no boundary and the marker
+# simply stays inside the paragraph (measured: the paragraph is unchanged); for the FENCE
+# the pattern IS consulted on the CLOSING fence line and DOES split it (measured:
+# '``` x' / '``` **Owner approval …'), but the surviving paragraph still OPENS with that
+# fence, so the label is still unread. Either way the label needs an END boundary — which
+# is why the splitter is the remedy and the starts are not — and no stripper can reach
 # them either: there is no delimiter in front of the run to strip. `docs/ONTOLOGY-CHANGELOG.md`
 # writes neither shape.
 _APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK = (
@@ -3927,8 +3940,16 @@ _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
 # anchored on the phrase alone, `**The owner's approval …**` — and `**R1 — Owner's
 # approval …**` — opened the paragraph in bold and PASSED unread, so the same record sat
 # one typed word away from being detected. Both are read now. The lead-in is deliberately
-# BOUNDED, because a wide prefix would swallow mid-sentence emphasis: a short
-# alphanumeric release id (`R1`, `D2`, `ID12` — `[A-Za-z]` under IGNORECASE) or a bare
+# BOUNDED, and the cost of widening it is a FALSE BLOCK, not a mid-sentence read (review
+# P2 — the earlier reason, "a wide prefix would swallow mid-sentence emphasis", is
+# measurably wrong: `_opening_approval_label` anchors on the paragraph's OPENING emphasis
+# run, so a mid-paragraph bold run returns None before this pattern is ever consulted —
+# measured, `The change landed. **Owner approval …**` → None under both the bounded and a
+# `.*`-prefixed pattern). What an unbounded prefix actually does is read a PORTRAIT-
+# OPENING mention that records nothing: measured, a `.*` lead-in with no separator
+# requirement changes the landed refusal set from ['3.35','3.33'] to ['3.35','3.32'],
+# turning v3.32's `Build record for v3.31 …` into a refused approval record. So the bound
+# is a short alphanumeric release id (`R1`, `D2`, `ID12` — `[A-Za-z]` under IGNORECASE) or a bare
 # dash, each followed by one separator. A lead-in outside that class (`v3.41 — `, `1. `)
 # stays fail-OPEN and is named in the residual list above, rather than widening this until
 # it catches prose.
