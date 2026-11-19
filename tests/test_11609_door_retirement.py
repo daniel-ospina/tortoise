@@ -31,7 +31,7 @@ those are what this file measures:
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
-Twenty-three live names are absent from the approved 27-target and are STILL LIVE
+Seventeen live names are absent from the approved 27-target and are STILL LIVE
 after this wave, each for a reason already recorded elsewhere.
 `TestProtectedDoorsStayLive` asserts the reasons hold in the code — if one stops
 holding, that door becomes retirable and this test should be updated IN THE BATCH
@@ -40,8 +40,12 @@ THAT UNBLOCKS IT, not silently:
   · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `issue_insight`, `session_context`, `search` carry a `rest_spec`, so retiring the
-    registry entry deletes a public REST route with it;
+  · `search` carries a `rest_spec`, so retiring the registry entry deletes a
+    public REST route with it. `issue_insight` and `session_context` carried one too and
+    left on the same terms in lane P6 — lane P4 MEASURED that coupling FALSE (no product
+    module derives a route from a registry row; both routes are hand-written decorators in
+    `hosted_api.py`), so the reason stopped holding and the doors retired in the batch that
+    acted on the measurement;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -54,12 +58,14 @@ THAT UNBLOCKS IT, not silently:
     leave the held list only in the batch that makes its stated reason untrue, with a
     test behind it, not silently and not in two steps.
 
-  8 (envelope) + 1 (rest_spec: `search` — the other two retired in lane P6) + 1 (paged
-  destination) + 0 (no arm) + 9 (destination not an MCP door yet) = 19, and
+  8 (envelope) + 1 (rest_spec: `search` — `issue_insight`/`session_context` retired in lane P6)
+  + 1 (paged destination) + 0 (no arm) + 7 (destination not an MCP door yet — the DELETE pair
+  retired in the same lane) = 17, and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
-⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, AND 19 UNTIL LANE P6. `create_point` and
+⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, AND 17 AFTER IT
+(P6 retired TWO pairs: the `rest_spec` pair, then the DELETE pair). `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -70,9 +76,16 @@ their arms (`check_confidence(recompute=True)` / `check_confidence(recall=True)`
 retired both. `issue_insight` and `session_context` were two of the remaining twenty-one
 and left on the same terms in lane P6: their recorded reason (`rest_spec` — *the row IS the
 REST route*) was MEASURED FALSE by lane P4, and P6 is the batch that acts on that
-measurement. The arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the
-population 25 became 23 became 19 — a count left at 21 would have been a table claiming
-two names that are no longer live, which is the rot the population check exists to red.
+measurement. `delete_point` and `delete_entity` were two of the remaining nineteen and left
+in the same lane, on the owner's #9660 ruling: the canonical row is executed by KEEPING the
+single `tortoise_delete` entry and widening what it deletes, so `delete_knowledge` — the
+destination both were held against — was never going to arrive as its own row. The
+arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the population 25 became
+23 became 21 became 17 — a count left at 19 would have been a table claiming two names that
+are no longer live, which is the rot the population check exists to red. ⛔ THIS PROSE SAID
+19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the assertions
+were right and the prose was pre-DELETE-pair, which is the shape a lane "restores" to a red
+(#13626 review ISSUE 4).
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -244,7 +257,7 @@ PROTECTED = {
     # grew the arms. Do not restore them without first removing those arms.
 }
 
-#: The other NINE of the registry block's 19: live, off the 27-target, and held for a
+#: The other SEVEN of the registry block's 17: live, off the 27-target, and held for a
 #: reason with no PROPERTY to assert — their recorded destination is not live on `main`
 #: yet, so there is no container to answer through and nothing that can be measured
 #: beyond "still live, still not retired" (which `TestProtectedDoorsStayLive` pins for
@@ -252,7 +265,7 @@ PROTECTED = {
 #: `PROTECTED`, because `PROTECTED`'s contract is a retaining artefact this file READS
 #: BACK from the code; a name here has none, and pretending otherwise would make the
 #: table's own docstring false. What the split buys: `len(PROTECTED) + len(NO_CONTAINER_YET)
-#: == 25` turns the registry's prose enumeration into a checked POPULATION, so a live
+#: == 17` turns the registry's prose enumeration into a checked POPULATION, so a live
 #: door dropped from either table reds here instead of surviving as a comment.
 NO_CONTAINER_YET = {
     # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` USED to sit here (held by
@@ -416,13 +429,14 @@ class TestEveryPointerResolvesInOneHop:
             f"lands on another shim (aliases are not transitive): {strays}")
 
     def test_the_live_count_moved_strictly_lower(self):
-        """#11609's arithmetic: 55 → 48 → 46 → 44 advertised, no container row arriving.
+        """#11609's arithmetic: 55 → 48 → 46 → 44 → 40 advertised, no container row arriving.
 
         Each retiring wave removes doors into arms its container had to grow for them
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
         `recompute=True` / `recall=True`), so the count can only fall and no container is
-        added. The two waves are independent subtractions on the same base surface —
-        48 minus 2 minus 2 — because each merged on its own; the pin is the SUM, which is
+        added. The waves are independent subtractions on the same base surface — 48 minus
+        2 minus 2, then 44 minus 4 — because each merged on its own; the pin is the SUM,
+        which is
         what the merged registry actually advertises.
         """
         assert len(TOOL_REGISTRY) == 40, (
@@ -723,8 +737,10 @@ class TestProtectedDoorsStayLive:
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
     named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
     retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
-    (`issue_insight`, `session_context`) by lane P6 in the change that acted on P4's
-    measurement that their `rest_spec` reason was false, so the population is 19 and TEN
+    (`issue_insight`, `session_context`) and then TWO more (`delete_point`, `delete_entity`)
+    by lane P6 in the changes that acted on P4's measurement that the `rest_spec` reason was
+    false and on the #9660 ruling that keeps `tortoise_delete` and widens it, so the
+    population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
@@ -748,10 +764,10 @@ class TestProtectedDoorsStayLive:
         which prove the reason false AT the container instead of trusting the table's
         silence.
 
-    The other NINE (`NO_CONTAINER_YET`) have no live container at all, so the only thing
+    The other SEVEN (`NO_CONTAINER_YET`) have no live container at all, so the only thing
     to measure is "still live, still not retired" — pinned below for them too. The two
     tables together are what make the enumeration checkable as a POPULATION; neither
-    alone is 21 of 21.
+    alone is 17 of 17.
     """
 
     def test_the_two_tables_cover_the_enumerated_population_and_do_not_overlap(self):
