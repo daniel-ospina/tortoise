@@ -8926,6 +8926,20 @@ class TestPricingSourceIsShared:
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             section = unescape(_served(_pricing_section(
                 path.read_text(encoding="utf-8"))))
+            # …and the OTHER half of the same vacuity (#13696 round 7, P2 #7):
+            # `allowed` being non-empty says nothing about what the page
+            # RENDERS. A section that stopped carrying `$` figures at all left
+            # this row GREEN while it read nothing — `stray` is then empty by
+            # construction, so the row cannot disagree with the source. The
+            # neighbour rows spell this guard out; this one did not.
+            rendered_figures = _figures(section)
+            assert rendered_figures, (
+                f"{name} renders NO `$` figure inside `#pricing-section`, so "
+                "this row reads nothing and cannot disagree with the shared "
+                "source — it would pass over a section that renders no price "
+                "at all. Either the section stopped carrying its figures (a "
+                "render regression no other row names) or the extractor is "
+                "reading the wrong slice (#13696 round 7, P2 #7).")
             # A figure SPLIT by markup is refused rather than read as its
             # prefix: `$15<b>9</b>` renders as `$159` to a reader but matched
             # only `$15`, which IS an allowed figure — so an unapproved $159
@@ -8938,7 +8952,7 @@ class TestPricingSourceIsShared:
                 "every row here can only read the prefix — so a figure the "
                 "shared source does not contain can ship. Write the number as "
                 "one run and wrap the WHOLE figure if it needs styling.")
-            stray = sorted(set(_figures(section)) - allowed)
+            stray = sorted(set(rendered_figures) - allowed)
             assert not stray, (
                 f"{name} quotes {stray!r} inside `#pricing-section`, and the "
                 f"shared source can produce only {sorted(allowed)!r}. Both "
