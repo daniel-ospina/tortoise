@@ -921,7 +921,7 @@ def test_a_row_the_fold_will_refuse_is_never_read_as_open(sdk):
             # ⚠️ NOT a fold REFUSAL: `outdated` is absent from the fold's set
             # (`commit_ops.OBJECT_TERMINAL_STATUSES`), so the fold does not refuse
             # this row — the CLOSE fold is never DISPATCHED for it (no live holder,
-            # read at `entities.py:6198-6199`). It belongs in this dict because the read must
+            # read at `entities.py:6254-6255`). It belongs in this dict because the read must
             # not call it OPEN, which is the dict's real contract.
             "SET o.outdated=true, o.pipelineStageId='in_progress', "
             "o.pipelineSlot='active', o.isClosed=false"),
@@ -978,10 +978,10 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
 
     The mirror of the pin above. `_fold_object_stage` returns BEFORE
     `apply_stage_fold` when the Object's `status` is in the fold's OWN latch set
-    (`entities.py:6292`, `excluded = _terminal_object_statuses()` at `:5958` =
+    (`entities.py:6348`, `excluded = _terminal_object_statuses()` at `:6014` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:55358-55367`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:55469-55478`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,10 +1100,10 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:55358-55367`) — so each poll minted another `-reopened`
+    `sdk.py:55469-55478`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
-    (`entities.py:6292`).
+    (`entities.py:6348`).
 
     A LATCHED row now answers `None` — this module's "no opinion" — so no
     transition is minted in EITHER direction, the only stable answer while the
@@ -1182,7 +1182,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
     """#13289 round-4 finding 2: the two folds refuse ASYMMETRICALLY on `outdated`.
 
     `_fold_object_stage`'s latch is `commit_ops.OBJECT_TERMINAL_STATUSES`
-    (`projection/entities.py:6292`), which has no `outdated` member — but the two
+    (`projection/entities.py:6348`), which has no `outdated` member — but the two
     folds that consume these transitions are dispatched under DIFFERENT rules, so
     neither single answer serves both directions:
 
@@ -1191,7 +1191,7 @@ def test_an_outdated_row_answers_the_position_axis(sdk):
       (`live.py` `TERMINAL_EXCLUDED_STATUSES` + the flag conjunct), so such a row has
       NO live holder and the close fold is NEVER dispatched. Nothing can close it, so
       any state this read answers about it re-fires once per poll, without bound;
-    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6223-6226`), which
+    * the REOPEN fold takes `_reopen_targets_closed` (`entities.py:6279-6282`), which
       bypasses the live-holder requirement for a single registered incarnation — so it
       IS dispatched, and it APPLIES, because the latch is that narrower set.
 
@@ -1284,7 +1284,7 @@ def test_a_POSITIONLESS_wide_term_row_answers_one_direction_only(sdk):
     the read fell through to `_STATUS_TO_STATE` and answered `"open"`, so a GitHub
     close minted `-closed` on every poll against a row whose close fold can never be
     dispatched (no live holder — `resolve_fold_name` → `live._terminal_excluded`,
-    which carries the `outdated` conjunct; `entities.py:6222-6226`).
+    which carries the `outdated` conjunct; `entities.py:6278-6282`).
 
     The rule is per-direction. Withhold ONLY where the word says `open`; any other
     word — including one OUTSIDE `_STATUS_TO_STATE` (`outdated`, or a NULL status
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:55206-55208`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:55317-55319`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3187,30 +3187,30 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    ("entities.py", 5137, 5139): (
+    ("entities.py", 5193, 5195): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
-    ("entities.py", 5958, 5958): ("excluded = _terminal_object_statuses()", None),
-    ("entities.py", 6040, 6041): (
+    ("entities.py", 6014, 6014): ("excluded = _terminal_object_statuses()", None),
+    ("entities.py", 6096, 6097): (
         "pipeline_key=target_kind,", "decl=index.pipeline_for(target_kind),"),
-    ("entities.py", 6198, 6199): (
+    ("entities.py", 6254, 6255): (
         "_live_holders = _live_holders_same_entity(", 'self.g, "Object", name)[0]'),
-    ("entities.py", 6222, 6226): (
+    ("entities.py", 6278, 6282): (
         "_reopen_targets_closed = (", "and isinstance(_held[0], str))"),
-    ("entities.py", 6222, 6227): (
+    ("entities.py", 6278, 6283): (
         "_reopen_targets_closed = (", "if _reopen_targets_closed:"),
-    ("entities.py", 6222, 6228): (
+    ("entities.py", 6278, 6284): (
         "_reopen_targets_closed = (", "object_id = _held[0]"),
-    ("entities.py", 6223, 6226): (
+    ("entities.py", 6279, 6282): (
         "bool(builtin_fold_reopens(event_kind))", "and isinstance(_held[0], str))"),
-    ("entities.py", 6230, 6232): (
+    ("entities.py", 6286, 6288): (
         "object_id = resolve_fold_name(",
         "mention=bool(_held) and not _live_holders)"),
-    ("entities.py", 6251, 6251): ("declared_kinds=sorted(index.kind_forms))", None),
-    ("entities.py", 6283, 6288): ("row = self.g.query(", ").result_set"),
-    ("entities.py", 6292, 6292): (
+    ("entities.py", 6307, 6307): ("declared_kinds=sorted(index.kind_forms))", None),
+    ("entities.py", 6339, 6344): ("row = self.g.query(", ").result_set"),
+    ("entities.py", 6348, 6348): (
         "if status is not None and status in excluded:", None),
-    ("entities.py", 6303, 6305): (
+    ("entities.py", 6359, 6361): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
     ("cache_projection.py", 811, 811): (
@@ -3261,11 +3261,33 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props`, which occurs **once**.
     # A row recorded as "found by its pinned text" must name text that actually finds
     # it, or the record does not reproduce the address it explains.
-    ("sdk.py", 55206, 55208): (
+    #
+    # ⛔ RE-DERIVED AGAIN (#13728) at `main` `a6fed32ab4` — the merge base this branch
+    # is 0 behind — because every row above had gone stale there: the required `test
+    # (d)` shard was RED on `main` itself, with all four inputs
+    # (`tortoise/projection/entities.py`, `tortoise/sdk.py`, this file, and the pin
+    # walker's own `tortoise/indexer/github_indexer.py` apart from comment prose) byte-
+    # identical to `main`, so nothing in this diff could have moved them. Same method:
+    # each address was FOUND by searching its own pinned FIRST-line text (and, where
+    # the row has one, its own LAST-line text) at the tree about to be committed.
+    #   · `entities.py` — uniform **+56**: 5193-5195 (status latch), 6014, 6096-6097,
+    #     6254-6255, 6278-6284 / 6278-6283 / 6279-6282 (the three reopen spans),
+    #     6286-6288, 6307, 6339-6344, 6348, 6359-6361.
+    #   · `sdk.py` — **+111** for 55317-55319 (non-scalar refusal), 55469-55478
+    #     (un-supersede arm) and 55918; **+75** for `update_knowledge` (22593-22768),
+    #     its end again located as the function's own last line `return
+    #     self._update_entity_any(id, **props)` rather than computed.
+    #   · `cache_projection.py` — unchanged at 811 (that module did not move).
+    # The citations in `tortoise/indexer/github_indexer.py` and in this file were
+    # re-pointed by the SAME map, because every address they write is a pin key (the
+    # first assertion above), so one derivation keeps the two halves consistent.
+    # `SET n += $props` is still the non-unique case and `55918` was again located by
+    # its per-label write, which occurs once.
+    ("sdk.py", 55317, 55319): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 55358, 55367): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22518, 22693): ("def update_knowledge(", None),
-    ("sdk.py", 55807, 55807): ("SET n += $props", None),
+    ("sdk.py", 55469, 55478): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22593, 22768): ("def update_knowledge(", None),
+    ("sdk.py", 55918, 55918): ("MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
 
@@ -3280,7 +3302,7 @@ def _citations_in(module: Path) -> set[tuple[str, int, int]]:
     larger surface (a follow-up), not a claim this pin makes.
 
     A BARE `:NNN` inherits the filename last named on its line — the
-    ``entities.py:6292`` / ``:5958`` shape, which is how one round of this review
+    ``entities.py:6348`` / ``:6014`` shape, which is how one round of this review
     wrote a second address two words after the first.
     """
     found: set[tuple[str, int, int]] = set()
