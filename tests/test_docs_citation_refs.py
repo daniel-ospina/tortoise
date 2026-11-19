@@ -623,8 +623,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
 
 
 #: The command whose output the `#7949` bundle's census paragraph quotes. Named here (never
-#: interpolated from a measurement) because the arm below is a TEXT ban.
+#: interpolated from a measurement) because the arm below is a TEXT ban. ⛔ IT IS PINNED
+#: VERBATIM BELOW (#13807 review, round 2, P2-1): five of the spellings are f-string-derived
+#: from it, so editing it silently re-renders the whole ban while every other assertion stays
+#: green — the same bypass the whole-tuple pins close, one level up.
 _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
+
+#: The SUBJECTS a typed answer can hang off. The document does not always spell the full
+#: command before the answer — it also writes the bare token `-- tortoise/` and the anaphor
+#: `the `tortoise/` set above` — and a ban that keyed only on the full command read NONE of
+#: those forms (#13807 review, round 2, P1-1: the document typed four verdicts that way and
+#: both arms were green over them).
+_TORTOISE_ANSWER_SUBJECTS = (
+    _TORTOISE_CENSUS_CMD,
+    "-- tortoise/",
+    "the `tortoise/` set above",
+)
 
 #: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
 #: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
@@ -676,6 +690,23 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     command, which a shape match cannot reach.
     """
     return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
+
+
+def _tortoise_typed_answers(doc: str) -> list[tuple[str, bool]]:
+    """Every typed answer to the `-- tortoise/` measurement, over EVERY subject form.
+
+    The shape matcher takes its subject as a parameter, and the document writes the subject
+    three ways: the full command, the bare token `-- tortoise/`, and the anaphor
+    `the `tortoise/` set above`. Scanning only the full command left four typed verdicts
+    unread — measured, both arms green over them (#13807 review, round 2, P1-1) — so the
+    scan covers all three. Matches are de-duplicated by the answer text, because a sentence
+    spelling the full command also contains the bare token inside it.
+    """
+    seen: dict[str, bool] = {}
+    for _subject in _TORTOISE_ANSWER_SUBJECTS:
+        for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _subject):
+            seen.setdefault(_answer, _claims_empty)
+    return list(seen.items())
 
 
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
@@ -772,7 +803,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
         "the census verdict is about. Without it the reader cannot tell whether the two "
@@ -823,7 +854,12 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "could reach the arm that would have read them (#13807 review F1/F2). ⛔ This is a "
         "ban BY NAME, in both directions: a paraphrase of the same verdict is (c-ii)'s "
         "business, so the fix for a hit is to delete the typed membership and keep the "
-        "command.")
+        "command. ⛔ AND A RETRACTION MUST NOT QUOTE THE SPELLING VERBATIM (#13807 review, "
+        "round 2, P2-2): this is a substring ban, so it cannot tell an ASSERTION from a "
+        "QUOTED RETRACTION — the sibling shape arm can, and documents that it does. The "
+        "house style of this document is to quote a refuted sentence verbatim, so describe "
+        "the retired wording instead of reproducing it; otherwise the only way to go green "
+        "is to delete the history the row exists to keep.")
 
     # ⛔ A HISTORICAL STATEMENT MUST NAME THE HEAD IT WAS MEASURED AT (#13489 review, P1).
     # The module claim below is TRUE of the MERGE head and FALSE of this one, so without a
@@ -843,7 +879,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
 
 
 class _Unmeasurable(RuntimeError):
-    """The `-- tortoise/` set could not be MEASURED here, so its direction is UNKNOWN."""
+    """A `git diff origin/main...HEAD` reading could not be TAKEN here, so it is UNKNOWN.
+
+    ⛔ It is raised by the index-cite re-point leg (`_measured_index_word_diff`), which
+    reads the `sdk.py:<n>` tokens a diff adds to `docs/00_index.md`. The `-- tortoise/`
+    census arm no longer raises it — that arm takes no measurement at all (#13807 review,
+    round 2, P2-4: this docstring described the deleted mechanism).
+    """
 
 
 def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
@@ -874,7 +916,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
 
     # NON-VACUITY (#13728 review, finding 4): the detector must SEE an answer in both
     # directions and must read a NEGATION as a membership claim, or the arm below is inert
@@ -1043,16 +1085,25 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # neither is adjudicated against this tree: the document states the command and types
     # no answer, and this arm enforces exactly that. That is why it needs no merge base and
     # therefore does not SKIP at the depth-1 checkout the gating job uses.
-    _typed = _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd)
+    _typed = _tortoise_typed_answers(doc)
     assert not _typed, (
         f"05-verify.md types {[' '.join(_a.split()) for _a, _e in _typed]!r} as the answer "
-        f"to `{_tortoise_cmd}` ({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed]}"
-        " at this head). That command is HEAD-BOUND — its output is a property of the head it"
-        " was run at — so a typed verdict is stale one merge later, in EITHER direction, and"
-        " `#7949`'s own sentences about it are true of the head they name rather than of this"
-        " one. State the COMMAND and let the reader read it at the head being merged"
-        " (#13489 review, P1; #13746 review, finding 7; #13728 review, finding 4; #13807"
-        " review, findings 2 and F4)")
+        f"to the `-- tortoise/` measurement "
+        f"({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed]} at this head). "
+        "That measurement is HEAD-BOUND — its output is a property of the head it was run "
+        "at — so a typed verdict is stale one merge later, in EITHER direction, and "
+        "`#7949`'s own sentences about it are true of the head they name rather than of this "
+        "one. State the COMMAND and let the reader read it at the head being merged "
+        "(#13489 review, P1; #13746 review, finding 7; #13728 review, finding 4; #13807 "
+        "review, findings 2, F4 and round-2 P1-1 — the subject forms this scans are the full "
+        "command, the bare `-- tortoise/` token and the `the `tortoise/` set above` anaphor)")
+    # ⛔ AND THE DOCUMENT-LEVEL ASSERTION IS ITSELF PINNED (#13807 review, round 2, note):
+    # every witness above exercises the DETECTOR on a synthetic string, so nothing used to
+    # fail if this `assert` were ever deleted. Feeding it the bundle plus one typed answer
+    # is what makes its silence mean something.
+    assert _tortoise_typed_answers(doc + f"\n… and `{_tortoise_cmd}` prints exactly one module.\n"), (
+        "the arm's own document assertion does not fire on a bundle carrying a typed answer, "
+        "so its green is indistinguishable from an unread document (#13807 review, round 2)")
 
 
 def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
@@ -1083,6 +1134,38 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     head-bound in both directions, so re-measuring THIS head both asserted nothing at depth 1
     and turned any code PR's head into a false red (#13807 review, F1/F4).
     """
+    # ⛔ THE KEY ITSELF IS PINNED (#13807 review, round 2, P2-1). Five of the spellings are
+    # f-string-derived from `_TORTOISE_CENSUS_CMD` and the shape arm scans it as its first
+    # subject, so editing the constant re-renders the ban and re-points the shape scan WHILE
+    # every row assertion stays satisfied — measured: appending one character to it left all
+    # three tests GREEN. That is finding 5's bypass one level up: pinning the rows is not
+    # pinning the key they are rendered from.
+    assert _TORTOISE_CENSUS_CMD == "git diff --name-only origin/main...HEAD -- tortoise/", (
+        "the `-- tortoise/` command changed. Every command-qualified spelling in both ledgers "
+        "AND the shape arm's first subject are derived from it, so a change here re-renders "
+        "the ban and re-points the scan without reddening a single row (#13807 review, "
+        "round 2, P2-1)")
+    assert _TORTOISE_ANSWER_SUBJECTS == (
+        _TORTOISE_CENSUS_CMD,
+        "-- tortoise/",
+        "the `tortoise/` set above",
+    ), (
+        "the set of SUBJECTS the answer can hang off changed. The document writes the subject "
+        "three ways, and a scan covering fewer of them reads fewer verdicts "
+        "(#13807 review, round 2, P1-1)")
+
+    # ⛔ THE SHORT FORMS ARE ACTUALLY SCANNED (#13807 review, round 2, P1-1). Both are forms
+    # this document HAS used to state the verdict, and both were invisible while the scan
+    # keyed on the full command alone.
+    for _short_subject, _typed_answer in (
+            ("-- tortoise/", "returns NOTHING at this head"),
+            ("the `tortoise/` set above", "is EMPTY at this head")):
+        assert _tortoise_typed_answers(f"… `{_short_subject}` {_typed_answer} …"), (
+            f"the arm does not read a typed answer hanging off the subject "
+            f"{_short_subject!r} — the document states verdicts exactly this way, and a "
+            "ban keyed on the full command alone read none of them (#13807 review, "
+            "round 2, P1-1)")
+
     assert _TORTOISE_MEMBERSHIP_SPELLINGS == (
         "THREE are in this head",
         "two comment-only `tortoise/` modules",
