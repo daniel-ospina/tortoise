@@ -66,9 +66,9 @@ payload was the production one, and it was right.
 ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
 population does not fail the coverage gate, it *passes* it and is then served by a
-leg whose trace does not say the cohort was empty: ``empty_results`` from the record
+leg whose trace never names the two-zero state — ``empty_results`` from the record
 where the contract owns the label, ``no_embeddings``/``degraded=True`` from the graph
-everywhere else, and never a token that names the two zeroes. That is why the
+everywhere else. That is why the
 zero-zero state is refused from BOTH sides before an arm runs — by
 :func:`require_record_measured` for the record and by
 :func:`require_graph_population` for the graph. One function asserting both was

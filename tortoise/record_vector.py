@@ -891,10 +891,9 @@ def _record_vector_count(label: str, scope: _Scope, *,
     numerator taken over the whole table would let a record holding only plain
     points verify `operator` on a SURPLUS of plain points, and the kind-filtered
     read would then answer with zero rows of that kind while the COUNT called the
-    label covered — an empty answer that cannot carry `reason=ok` (`:4229` needs
-    non-empty rows): it is `empty_results` where the contract owns the label and a
-    fall-through to the graph (`no_embeddings`, `degraded=True`) everywhere else, so
-    the shortfall would be silent in every trace. One-sided on purpose: the graph
+    label covered — and an empty answer from the RECORD cannot carry `reason=ok`
+    (`:4229` needs non-empty rows), so nothing on the record leg reports the
+    shortfall. One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
     count), so the comparison for those two labels is not merely HARDER to pass —
     for `document`/`source` it is UNREACHABLE whenever the other kind carries an
