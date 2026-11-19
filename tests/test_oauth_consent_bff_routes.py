@@ -764,7 +764,10 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         f"{reason}: a refusal is cacheable ({out.get('cacheControl')!r}) and its URL carried a key")
     # …and it DECIDES NOTHING: no script, no external asset, no link, no echo of the request.
     assert "<script" not in body.lower(), f"{reason}: the refusal page carries script"
-    assert "http://" not in body and "https://" not in body, (
+    # `body.lower()` on BOTH sides of the pair: the affordance loop below is case-insensitive, so a
+    # scheme assertion over the raw body let an echoed `HTTPS://…` through the very property it
+    # guards (review of #13712, P2).
+    assert "http://" not in body.lower() and "https://" not in body.lower(), (
         f"{reason}: the refusal page names an origin (an external asset, or an echoed URL)")
     # ⛔ NO AFFORDANCE THAT CAN BE TALKED INTO A DESTINATION. The module docstring says the retry
     # is PROSE, not an `href`, "because any `href` would have to echo the query or choose a
@@ -772,7 +775,12 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # guard at all. The sibling page this one is modelled on DOES carry one (`<a href="/contact">`
     # in `website/functions/_middleware.ts`), which makes a copy-paste from the precedent the exact
     # edit that would ship it green.
-    for forbidden in ("<a ", "href=", "<form"):
+    # `http-equiv`/`src=` close the two ways to carry a destination with none of the three forms
+    # above: `<meta http-equiv="refresh" content="0;url=/contact">` is a redirect the page's CSP
+    # (`default-src 'none'`, no `navigate-to`) does not block, and a protocol-relative `<img src>`
+    # or `<iframe src>` is a subresource with no scheme. `<meta charset>`/`<meta name=viewport>`
+    # stay legal, which is what the page actually needs.
+    for forbidden in ("<a ", "href=", "<form", "http-equiv", "src="):
         assert forbidden not in body.lower(), (
             f"{reason}: the refusal page carries {forbidden!r} — the retry affordance must be prose, "
             "because any link would have to echo the query or choose a destination")
@@ -783,16 +791,20 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # party's log. These are the values a mutant can interpolate into the copy and still slip past
     # every assertion above — a new arm that presents a different key is pinned by adding it here
     # rather than by remembering to. ⛔ `redirect_uri` appears only as its SCHEME-LESS tail: the full
-    # literal is `https://client.example/cb`, and #767 already forbids `https://` in the body, so the
-    # whole URL would be a row that can never be the failing one (the red would land on the origin
-    # assertion instead). `scope` ("mcp") and `code_challenge_method` ("S256") are deliberately NOT
-    # here — the copy legitimately renders "MCP client", so a query-value assertion over them would
-    # read as coverage without being able to fire.
+    # literal is `https://client.example/cb`, and the origin assertion above (`#13671`) already
+    # forbids `https://` in the body, so the whole URL would be a row that can never be the failing
+    # one (the red would land on the origin assertion instead). `scope` ("mcp") and
+    # `code_challenge_method` ("S256") ARE here: this assertion is case-SENSITIVE over the raw body
+    # and the copy renders "MCP" (upper) and never "S256", so both rows are green today and DO fire
+    # on an echo — measured by mutating the 503 arm to interpolate `searchParams.get("scope")`, which
+    # survived every other assertion (review of #13712, P1).
     for echoed in (
         _PARAMS["client_id"],
-        "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme #767 already forbids
+        "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme the origin assert forbids
         _PARAMS["state"],
         _PARAMS["code_challenge"],
+        _PARAMS["scope"],
+        _PARAMS["code_challenge_method"],
         # the attempt keys the arms present (the one credential, #10487/#10884)
         "b-attempt-key",
         "ak-guessed",
