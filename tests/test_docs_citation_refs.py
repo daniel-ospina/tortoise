@@ -725,9 +725,10 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # ─────────────────────────────────────────────────────────────────────────────
     # ARMS THAT NEED NO BASE REF, ORDERED FIRST ON PURPOSE (#13802 review, finding 3).
     # Both read THIS tree and THIS document, so they are answerable in EVERY checkout.
-    # Ordering them above the `pytest.skip` below is what keeps the skip from carrying
-    # them away with it: pytest skips only if execution REACHES the skip, so a failure
-    # in either arm still reds the row in the depth-1 checkout that cannot compare sets.
+    # They stay ABOVE the two cite-set arms because those take the unconditional
+    # direction when the base is unreadable (`_base_ref_absent_detail`, #13802 review
+    # P1 — the inert-enforcer shape, `426d0c0c45`), and an arm that fails must fail on
+    # its own evidence, not on whether a later arm bailed out first.
     # ─────────────────────────────────────────────────────────────────────────────
 
     # ⛔ HOISTED OUT OF THE SET-EQUALITY GUARD (#13802 review, finding 2 — FAIL-OPEN).
