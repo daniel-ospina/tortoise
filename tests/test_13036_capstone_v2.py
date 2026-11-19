@@ -81,6 +81,32 @@ listed in ``UNDRIVEN`` with the reason, and ``test_every_live_tool_is_accounted_
 asserts the union covers the registry exactly. A tool added without a case fails
 that test — the surface cannot grow silently past this row. An ``UNDRIVEN`` entry
 is **not** a pass, and this file does not claim those tools' payloads.
+
+THIS SUITE WAS PROVEN ABLE TO FAIL (mutation record)
+====================================================
+
+A payload suite that has never reddened is an untested test. Two mutations were
+applied to ``tortoise/mcp_server.py``, observed red, and reverted — the tree was
+confirmed clean between them:
+
+1. **Right door, right TYPE, empty payload.** ``tortoise_list_knowledge`` returned
+   ``[]`` for ``kind='source'`` before delegating — the exact "the query lost its
+   ``WHERE``" failure this row exists for, and one that a dispatch/substitution
+   test and an ``advertised == served`` test both pass. Reddened
+   ``test_source_kind_contains_the_seeded_source`` (``AssertionError: []``) and
+   **only** that test — the neighbouring ``pointkinds`` case stayed green, so the
+   assertion is targeted rather than blunt.
+2. **Right door, right shape, WRONG NODE.** ``tortoise_get_entity(type='point')``
+   returned the seeded node's properties with its ``id`` replaced by
+   ``"wrong-id-not-the-seeded-one"``. Reddened both
+   ``test_each_type_arm_returns_the_seeded_node[point…]`` **and**
+   ``test_entity_write_returns_an_id_the_get_lane_reads_back[point…]`` — which is
+   what makes the write→read direction an IDENTITY assertion and not merely a
+   "something came back" assertion.
+
+Neither mutation was a crash or an exception: both returned a well-formed payload
+of the correct type. That is the point. A suite that only catches crashes cannot
+see the failure class this row owns.
 """
 
 from __future__ import annotations
@@ -296,17 +322,14 @@ def test_undriven_entries_name_a_mechanism():
 
 
 def _driven_tool_names():
-    """The tools this file calls over the transport, read off the case tables."""
-    names = set()
-    for row in CAPSTONE_CASES:
-        names.add(row[0])
-    for test in _DRIVEN_BY_TEST:
-        names.add(test)
-    return names
+    """The tools this file calls over the transport, read off its case list."""
+    return set(_DRIVEN_BY_TEST)
 
 
-#: Tools driven by the per-family tests further down, grouped so this module can
-#: assert coverage without importing pytest's collection.
+#: Tools driven by the per-family tests in this file. Listed here so the
+#: accounting gate can assert coverage without importing pytest's collection —
+#: the alternative (trusting the tests to remember) is what lets a new tool slip
+#: past a row unnoticed.
 _DRIVEN_BY_TEST = (
     "tortoise_list_knowledge", "tortoise_search_knowledge", "tortoise_search",
     "tortoise_query", "tortoise_get_entity", "tortoise_create_entity",
@@ -325,11 +348,6 @@ _DRIVEN_BY_TEST = (
     "tortoise_graph_set_recording", "tortoise_manage_sources",
     "tortoise_mine_knowledge_from_session",
 )
-
-#: (tool, arguments, name of the asserted payload property) — the row's table,
-#: in the form the report quotes. `CAPSTONE_CASES` is consumed by the accounting
-#: gate; the readable assertions live in the tests below.
-CAPSTONE_CASES: list[tuple[str, dict, str]] = []
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -371,15 +389,17 @@ class TestGetReturnsSeededNode:
         assert out.get("id") == s["claim"], out
         assert out.get("content", "").startswith("The capstone V2 lane")
 
-    def test_governance_arm_answers_with_its_own_shape(self, seeded):
-        """`type='governance'` on a Point is legitimately empty (no owned
-        entities). Asserting the SHAPE, not emptiness-instead-of-a-crash.
-        """
+    def test_governance_arm_returns_no_owned_entities_for_a_point(self, seeded):
+        """`type='governance'` answers the entities a Subject OWNS. The seed's
+        claim is a Point owned by nobody, so the correct payload is an EMPTY
+        LIST — asserted as that value, not as "something non-None came back"."""
         door, s, _ = seeded
         status, out = door.call("tortoise_get_entity",
                                 {"id": s["claim"], "type": "governance"})
         assert status == 200
-        assert out in ([], {}) or isinstance(out, (list, dict)), out
+        assert out == [], (
+            "a Point owns no entities, so the governance arm must answer []; "
+            f"got {out!r}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -440,17 +460,16 @@ class TestListKnowledgeKinds:
         assert names, out
         assert all(isinstance(n, str) and n for n in names), out
 
-    def test_topic_kind_requires_entity_id_and_answers_for_the_seeded_entity(
-            self, seeded):
-        """`kind='topic'` is a PER-ENTITY read; driven for the seeded claim."""
+    def test_topic_kind_answers_the_seeded_entitys_profile(self, seeded):
+        """`kind='topic'` is a PER-ENTITY read: it must echo the entity it was
+        asked about, and report its neighbourhood."""
         door, s, _ = seeded
         status, out = door.call("tortoise_list_knowledge",
                                 {"kind": "topic", "entity_id": s["claim"]})
         assert status == 200
-        # Either the topic profile or an explicit "nothing yet" shape — both are
-        # payloads; a transport error or a None is not.
-        assert out is not None, out
-        assert isinstance(out, (dict, list)), out
+        assert isinstance(out, dict), out
+        assert out.get("id") == s["claim"], out
+        assert "neighbors" in out, out
 
     def test_diary_kind_reads_the_seeded_author(self, seeded):
         """`kind='diary'` is PER-AUTHOR. Seed one entry so the arm is not vacuous."""
@@ -738,10 +757,30 @@ _OVERVIEW_SECTIONS = (
 
 class TestGraphOverviewSections:
     """Part A records `section=` as this target's discriminator — 14 absorbed
-    sources, so `claim`-style single-arm proof would be a token gesture."""
+    sources, so a single-arm proof would be a token gesture.
 
-    @pytest.mark.parametrize("section", _OVERVIEW_SECTIONS)
-    def test_each_section_answers_its_own_shape(self, seeded, section):
+    Each arm is asserted against the SHAPE ITS OWN DOOR returns, read off the
+    live surface — not against a shared "something came back". An arm that
+    drifted to another door's shape (a dict where a list belongs) fails.
+    """
+
+    @pytest.mark.parametrize("section,expected", [
+        ("taxonomy", dict),
+        ("structure", dict),
+        ("structure_check", list),
+        ("pointkinds", list),
+        ("tags", list),
+        ("sources", list),
+        ("namespaces", list),
+        ("graphs", list),
+        ("topics", dict),
+        ("health", dict),
+        ("status", dict),
+        ("stale", dict),
+        ("validate_domain", dict),
+        ("audit", dict),
+    ])
+    def test_each_section_answers_its_own_type(self, seeded, section, expected):
         door, s, _ = seeded
         args = {"section": section}
         if section == "validate_domain":
@@ -750,9 +789,71 @@ class TestGraphOverviewSections:
             args["entity_id"] = s["claim"]
         status, out = door.call("tortoise_graph_overview", args)
         assert status == 200
-        assert out is not None, f"section={section!r} answered nothing"
-        assert not (isinstance(out, dict) and "unknown" in str(
-            out.get("error", "")).lower()), out
+        assert isinstance(out, expected), (
+            f"section={section!r} answered {type(out).__name__}, expected "
+            f"{expected.__name__}: {out!r}")
+
+    def test_structure_section_counts_the_seeded_operator(self, seeded):
+        """The seeded IMPL operator must be visible here — that is the arm's
+        whole question."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "structure"})
+        assert out.get("operators") == 1, out
+        assert out.get("total", 0) >= 3, out
+
+    def test_pointkinds_section_counts_the_seeded_statements(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "pointkinds"})
+        assert isinstance(out, list) and out, out
+        by_kind = {row["kind"]: row["count"] for row in out
+                   if isinstance(row, dict) and "kind" in row}
+        assert by_kind.get("statement", 0) >= 2, out
+
+    def test_status_section_names_the_served_graph(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "status"})
+        assert out.get("connected") is True, out
+        assert isinstance(out.get("counts"), dict), out
+        assert out.get("total_entities", 0) > 0, out
+        assert out.get("namespace"), out
+
+    def test_topics_section_echoes_the_seeded_entity(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "topics",
+                                 "entity_id": s["claim"]})
+        assert out.get("id") == s["claim"], out
+        assert "neighbors" in out, out
+
+    def test_validate_domain_accepts_a_real_domain(self, seeded):
+        """`validate_domain` takes a DOMAIN NAME from the pack set; `core` is
+        not one and is refused by name. Proving the arm needs a real domain."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "validate_domain",
+                                 "domain": "dev"})
+        assert out.get("domain") == "dev", out
+        assert out.get("ok") is True, out
+        assert isinstance(out.get("violations"), list), out
+
+    def test_unknown_domain_is_refused_naming_the_valid_set(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "validate_domain",
+                                 "domain": "core"})
+        assert isinstance(out, dict) and "error" in out, out
+        assert "known:" in out["error"], out
+
+    def test_audit_section_walks_the_seeded_nodes(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "audit"})
+        assert out.get("node_count", 0) >= 3, out
+        assert out.get("edge_count", 0) >= 2, out
+        assert isinstance(out.get("checks"), list), out
 
     def test_combined_summary_counts_the_seeded_nodes(self, seeded):
         """No `section=` → the combined summary. It must COUNT the seed: a
@@ -766,14 +867,9 @@ class TestGraphOverviewSections:
         assert taxonomy.get("Point", 0) >= 3, out
         assert taxonomy.get("Source", 0) >= 1, out
         assert taxonomy.get("Object", 0) >= 1, out
-
-    def test_taxonomy_section_names_the_seeded_kinds(self, seeded):
-        door, s, _ = seeded
-        status, out = door.call("tortoise_graph_overview",
-                                {"section": "taxonomy"})
-        assert isinstance(out, dict), out
-        assert out.get("Point", 0) >= 3, out
-        assert out.get("Operator", 0) + out.get("structure_operator", 0) >= 0
+        # every section folded into the summary keeps its own shape
+        for key in ("structure", "pointkinds", "tags", "sources"):
+            assert key in out, f"combined summary dropped {key!r}: {out}"
 
     def test_health_section_reports_ok_against_the_seeded_graph(self, seeded):
         door, s, _ = seeded
@@ -814,8 +910,10 @@ class TestConfidenceArms:
         assert isinstance(out, list) and out, out
         assert s["claim"] in _ids(out), out
 
-    def test_claim_id_arm_returns_confidence_for_the_calibrated_claim(
-            self, seeded):
+    def test_claim_id_arm_returns_the_confidence_FOR_that_claim(self, seeded):
+        """The calibrated seed must produce real confidence numbers — a claim
+        id that came back with the uncalibrated refusal would mean the arm
+        cannot serve the happy path at all."""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence",
                                 {"claim_id": s["calibrated"]})
@@ -824,7 +922,10 @@ class TestConfidenceArms:
         assert "error" not in out, (
             "the calibrated seed must not trip the uncalibrated refusal: "
             f"{out}")
-        assert out.get("id", s["calibrated"]) in (s["calibrated"], None) or True
+        assert 0.0 <= float(out["mean"]) <= 1.0, out
+        assert float(out["variance"]) >= 0.0, out
+        assert float(out["alpha"]) > 0 and float(out["beta"]) > 0, out
+        assert float(out["effective_n"]) > 0, out
 
     def test_claim_id_arm_refuses_an_uncalibrated_point_BY_NAME(self, seeded):
         """The refusal IS the payload here: it must name the point and the
@@ -850,7 +951,8 @@ class TestConfidenceArms:
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence", {"calibrate": True})
         assert status == 200
-        assert isinstance(out, (list, dict)), out
+        assert isinstance(out, list), out
+        assert s["claim"] in _ids(out), out
 
     def test_calibrate_summary_lists_the_seeded_claim(self, seeded):
         door, s, _ = seeded
@@ -945,6 +1047,7 @@ class TestRelationshipsAndRemainingReads:
         assert status == 200
         rows = out.get("results") if isinstance(out, dict) else out
         assert isinstance(rows, (list, tuple)), out
+        assert rows == [], out
 
     def test_check_connection_reports_the_seeded_graph(self, seeded):
         door, s, _ = seeded
@@ -953,13 +1056,14 @@ class TestRelationshipsAndRemainingReads:
         assert out.get("connected") is True, out
         assert isinstance(out.get("graph"), dict), out
 
-    def test_check_structure_answers_its_shape(self, seeded):
-        """No gates are seeded, so an empty report is correct — asserted as the
-        documented shape (an empty dict/list), so a crash or `None` fails."""
+    def test_check_structure_answers_a_report(self, seeded):
+        """No epistemic gates are seeded, so the correct report is EMPTY —
+        asserted as the list the door returns, so a crash/None fails."""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_structure", {})
         assert status == 200
-        assert out is not None, out
+        assert isinstance(out, list), out
+        assert out == [], out
 
     def test_graph_set_recording_round_trips(self, seeded):
         door, s, _ = seeded
