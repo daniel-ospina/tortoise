@@ -66,7 +66,9 @@ read needs:
 * one source,
 * one operator between two claims (``IMPL``),
 * one agent session (an ``AgentSession`` Event — the kind ``get_session`` reads),
-* one topic-tagged claim (for the ``check_confidence(topic=...)`` arm),
+* one topic OBJECT plus a ``decision`` Point ``aboutObject``-linked to it (for the
+  ``check_confidence(topic=...)`` arm, which resolves the topic as an ENTITY and
+  walks that edge — a Point carrying a ``topic=`` PROPERTY is not a topic),
 * one calibrated claim (for the ``check_confidence(claim_id=...)`` happy path).
 
 Assertions read these ids back out of the answers. A payload is "correct" when it
@@ -124,7 +126,12 @@ tests assert COUNTS and IDS rather than "no error":
 * ``calibrate_summary``, five of six ``search_knowledge`` ``mode=`` arms, and the
   ``session``/``topic``/``recompute`` confidence arms asserted ``out is not None``
   or ``isinstance(out, (list, dict))`` — satisfied by every branch the payload
-  helper can return. Each now asserts its own shape and seeded content.
+  helper can return. Each now asserts its own shape and seeded content. ⛔ That
+  sentence was FALSE of ``topic`` and ``recompute`` when it was written: the next
+  review round found both still unable to fail (an unreachable ``None`` guard on
+  ``recompute``, and a ``topic`` arm whose empty answer was a SEED-shape mismatch
+  recorded as a measurement). Both are fixed in the round whose record sits at
+  ``ARM_GAPS``, and only now is this claim true of the code.
 * ``source_reliability`` used ``out.get("url", <seed>)``, whose default made a
   payload MISSING the field pass. It now has no default.
 * ``create_edge``, ``write_question``, ``record_decision`` and ``ingest`` asserted
