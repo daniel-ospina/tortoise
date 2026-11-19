@@ -27,8 +27,14 @@ the remaining blocker is a projection/coverage question, not this tool's.
 2026-11-18 note compared 45,979 graph-side vectors with 36,873 in the record and
 inferred ~9,106 Points held a vector in the graph and none in the record. The tool's own
 measurement says otherwise — `Point graph=31,610 record=36,942 fillable=0
-unmatched=16,982 existing=14,628`: the graph count is LOWER, and the intersection it
-would fill is EMPTY. `:Point` is still in this tool's DEFAULT population, because the
+unmatched=16,982 existing=14,628`, and the intersection it would fill is EMPTY. ⚠️ That
+run was made BEFORE `#13647` narrowed the census's `record_vectors` to the label's graph
+keys, so `record=36,942` there is the TENANT-WIDE readable count and is NOT what this
+tool prints now: the population-scoped figure is the `existing=14,628` one, while the
+~22.3k difference is `record_only` (readable rows this graph holds no `:Point` for). The
+paragraph's refutation does not depend on either reading of `record=` — `fillable=0` and
+`unmatched=16,982` are what refute the "~9,106 graph-only" inference, and neither moved.
+`:Point` is still in this tool's DEFAULT population, because the
 change is harmless and additive (this tool only FILLS, `WHERE … embedding IS NULL`) and
 `#13685`'s scope-addition comment asks for it — not because it holds a copyable gap. See
 :data:`BACKFILLED` for why it lives here and NOT in the census's `RETIRED`.
@@ -299,7 +305,10 @@ PLAN_VERSION = 3
 #: tool only FILLS (`UPDATE … WHERE embedding IS NULL`), so the same label is safe
 #: here and `#13685`'s scope comment asks for it. ⚠️ Its measured `fillable` on
 #: production was **0** (`Point graph=31,610 record=36,942 unmatched=16,982 existing=
-#: 14,628`): the graph-only Points have NO RECORD ROW AT ALL, so this label is additive
+#: 14,628`, the `record=` figure being the TENANT-WIDE readable count as the tool
+#: reported it before `#13647` narrowed that field to the label's graph keys — the
+#: population-scoped value in that run is `existing=14,628`): the graph-only Points have
+#: NO RECORD ROW AT ALL, so this label is additive
 #: and harmless rather than a fix for a copyable gap — see the module docstring. One
 #: population, derived once, and
 #: `tests/test_13685_entity_vector_backfill.py` iterates THIS constant.
@@ -893,9 +902,12 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     read_graph_vector_keys` — its aggregate-vs-paged cross-check included, which is
     what makes FalkorDB's SILENT `RESULTSET_SIZE` shortfall loud), and the numbers are
     built with the census's own definitions: `graph_only = |keyed graph keys − record
-    keys with a readable vector| + unkeyed`, and `record_vectors` is the count of rows
-    whose GENERATED `embedding_vec` is present — `embedding IS NOT NULL` is NOT the
-    parity test, because a payload the converter refuses answers no dense query.
+    keys with a readable vector| + unkeyed`, and `record_vectors` is the count of THIS
+    LABEL'S GRAPH KEYS the record can answer with a readable generated `embedding_vec`
+    (⛔ population-scoped, not the tenant-wide readable total — see the paragraph below
+    and `entity_vector_parity_census`'s own definition of the same field).
+    `embedding IS NOT NULL` is NOT the parity test either way, because a payload the
+    converter refuses answers no dense query.
 
     ⚠️ THAT DEFINITION IS NOT CURRENTLY THE CENSUS'S, AND THE DIFFERENCE IS MEASURED
     (`#13647` moved it under this tool). The census now joins on the RENDERED identity
