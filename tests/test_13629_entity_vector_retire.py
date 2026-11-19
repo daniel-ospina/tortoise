@@ -23,7 +23,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_execute_refuses_a_graph_only_node_and_removes_nothing` | the parity refusal is BEFORE the first write | the only copy of a fingerprint is removed, or removed before the refusal |
 | `test_execute_refuses_while_the_write_path_still_emits_vectors` | the write gate | a strip runs into a live writer and is silently undone |
 | `test_write_gate_is_fail_closed_when_the_symbol_is_absent` / `…raises` / `…cannot_be_imported` | fail-closed in every unknown | an unreadable gate reads as permission |
-| `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last step before the delete licence | the arm is inverted or deleted, so an unmapped type is CERTIFIED by the steps below it *when those are forced to certify* (unforced they refuse one step further down, so only the forced half pins the arm) |
+| `test_write_gate_refuses_an_entity_type_with_no_declared_graph_label` | the `entity_type`→label mapping is the last refusal that can fire without a label | INVERT it and the arm itself certifies the unmapped type; DELETE it and certification comes from the steps below once those are forced (unforced they refuse one step further down, so only the forced half pins the arm) |
 | `test_label_write_gate_requires_every_entity_type_addressing_the_label` | `:Source` serves TWO types | a strip lands on the document half while `source` still writes |
 | `test_execute_strips_the_planned_set_and_reports_the_count` | the batched `REMOVE` | a partial strip reports a complete one |
 | `test_execute_refuses_an_empty_plan_unless_expect_empty` | "nothing to strip" is a refusal | an empty plan reports a finished retirement |
@@ -513,9 +513,11 @@ def test_write_gate_is_fail_closed_when_the_gate_raises(monkeypatch):
 def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monkeypatch):
     """⛔ THE THIRD UNKNOWN, and the one with no falsifier at all.
 
-    `write_gate` looks the module up inside its own `try` so an unlanded symbol cannot hide
-    behind an `ImportError` — but the IMPORT ITSELF can raise, and that arm is a different
-    unknown from `…raises` (which drives a gate that raises *after* a successful import).
+    `write_gate` imports the MODULE inside its own `try` (so a failed import becomes a
+    fail-closed answer instead of an `ImportError`) and resolves the SYMBOL by name outside
+    it (`getattr(record_vector, WRITE_GATE_SYMBOL, None)`), so an unlanded symbol answers
+    "ABSENT" rather than raising — and the IMPORT ITSELF raising is a different unknown
+    again, from `…raises` (which drives a gate that raises *after* a successful import).
     Inverting its polarity to `return False` left the whole file **green (measured: 90
     passed)**, and the polarity here is the deliberate inversion the docstring states: a
     module we cannot import proves nothing about any writer, so it must never licence a
@@ -535,9 +537,8 @@ def test_write_gate_is_fail_closed_when_the_gate_module_cannot_be_imported(monke
 
 
 def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypatch):
-    """⛔ The `entity_type`→label mapping is the last step before the delete licence.
-
-    Everything below this arm — `_fold_consults_gate(label)` and its population check — is
+    """⛔ The `entity_type`→label mapping is the last refusal that can fire WITHOUT a label:
+    everything below this arm — `_fold_consults_gate(label)` and its population check — is
     asked about a LABEL, and there is exactly one way to get one. Inverting the arm to
     `return False` left the whole file **green (measured: 90 passed)**, and the arm is
     REACHABLE — but only because this test drives the predicate that gates it, and that is
@@ -547,15 +548,20 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     `ENTITY_TYPE_LABELS`, so "unmapped" IS "not coverage-gated" — measured). Unpatched,
     `write_gate("no_such_entity_type_13647")` therefore refuses one step ABOVE this arm, at
     `if needed:`, with the `answers True` reason. Driving the predicate to `False` below is
-    what makes the arm the deciding step — the state an operator reaches once the cutover is
-    armed and the record has proved coverage.
+    what makes the arm the deciding step — and ⛔ it is a state NO OPERATOR REACHES TODAY:
+    `mirror_required` short-circuits `if entity_type not in COVERAGE_GATED_LABELS: return
+    True` *before* arming and coverage are ever consulted, so with the armed-and-covered
+    state forced true end-to-end an unmapped type still answers `True` (measured). The stub
+    therefore exercises this arm as DEFENCE IN DEPTH against a future cover/type divergence,
+    not as a refusal an operator gets.
 
     ⛔ WHAT THIS ARM IS *NOT*, MEASURED, because an earlier revision of this docstring
     claimed it and the claim was false. It is NOT the only thing standing between an
     unmapped type and a delete licence: with the arm **deleted**, `write_gate("no_such…")`
     still answers `emits is True`, refused one step further down — by `_writers_for`'s
-    empty-population branch (`_register_writers(None)` is `()`, because 0 of the 24 live
-    `EMBED_WRITER_CLASSES` declarations carry `LABELS_AT_RUNTIME`), and, with a population
+    empty-population branch (`_register_writers(None)` is `()`, because 0 of the 24 DECLARED
+    `EMBED_WRITER_CLASSES` entries — 10 with a live label tuple, 14 declared `NO_LIVE_VECTOR`
+    — carry `LABELS_AT_RUNTIME`), and, with a population
     forced, by `_fold_consults_gate`'s ungated branch (`affected_entity_types(None)` is
     `[]`, so every writer lands in `ungated`). So the arm is *defence in depth plus an
     accurate reason*, not the sole refusal — and the difference matters, because a
@@ -567,7 +573,8 @@ def test_write_gate_refuses_an_entity_type_with_no_declared_graph_label(monkeypa
     answering `(True, …)`), the arm is the only remaining refusal. Arm present → `emits is
     True` and this reason; arm deleted → `emits is False`, i.e. a delete licence minted for a
     label nothing serves (measured). The UNFORCED half that follows is a different claim —
-    that on this tree the refusal needs no forcing at all — and it cannot pin the arm: with
+    that with the predicate already driven to `False` the FOLD needs no forcing (it already
+    declines) — and it cannot pin the arm: with
     the arm deleted it still answers `emits is True` and only its message assertion reds. So
     ⛔ do not drop the forcing half as redundant: that is exactly the message-text-only kill
     this test exists to replace.
