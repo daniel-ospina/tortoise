@@ -1853,8 +1853,14 @@ class _Projection:
         return int(rows[0][0])
 
 
+#: The tenant the LAST `_record_vector_count` call was asked about, so the ORDER of the
+#: declared pair is observable (`#13796` review rounds 5-7: the half-tenant guard, then its
+#: mirrored form, then the pair's ordering — each a one-token edit on one line).
+ASKED_SCOPE: dict = {}
+
+
 def _fresh_record_leg(monkeypatch, *, record_vectors: int,
-                     graph_vectors: int | None = None):
+                      graph_vectors: int | None = None):
     """An EMPTY coverage cache, an armed leg, and the record's aggregate stubbed.
 
     ⛔ THE EMPTY CACHE IS THE POINT. `#13796`'s defect needs no fault: a process that has
@@ -1871,8 +1877,16 @@ def _fresh_record_leg(monkeypatch, *, record_vectors: int,
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     record_vector.reset_coverage_cache()
+    # ⛔ THE COUNT STUB CAPTURES THE SCOPE IT WAS ASKED ABOUT (review round 7). Every
+    # `_record_vector_count` stub in this file used `lambda *a, **k:` and threw the scope
+    # away, so `scope=(graph_id, org_id)` — the two halves interchanged on the line this
+    # series edits — measured a DIFFERENT tenant and left **148 passed** across both suites.
+    # A swapped pair is accepted silently by `_declared_scope` (both halves are non-empty
+    # strings), so the order has to be asserted, not assumed.
     monkeypatch.setattr(record_vector, "_record_vector_count",
-                        lambda *a, **k: record_vectors, raising=True)
+                        lambda _label, scope=None, **k: (
+                            ASKED_SCOPE.update(scope=scope), record_vectors)[1],
+                        raising=True)
     return lambda _entity_type: graph_vectors
 
 
@@ -1912,6 +1926,17 @@ def test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_suppli
     assert "has not proved" not in reason, reason
     assert "the record holds 9200 vector(s) for object, the graph serves 9200" in reason, (
         f"the measured arm did not report the two counts it compared: {reason}")
+    # ⛔ AND THE TENANT WAS ASKED FOR IN THE DECLARED ORDER (review round 7). A swapped
+    # `scope=(graph_id, org_id)` measures a DIFFERENT tenant — both halves are non-empty
+    # strings, so `_declared_scope` accepts it silently and the gate answers from the wrong
+    # record. Measured: the swap left both suites at 148 passed before this assertion.
+    asked = ASKED_SCOPE.get("scope")
+    assert asked is not None, (
+        "the record count was taken with no scope at all — the declared tenant never "
+        f"reached the query: {ASKED_SCOPE!r}")
+    assert (asked.org_id, asked.graph_id) == ("org", "graph"), (
+        "the tenant's two halves reached the record query INTERCHANGED, so the count came "
+        f"from a different tenant: {asked!r}")
 
 
 def test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason(monkeypatch):
