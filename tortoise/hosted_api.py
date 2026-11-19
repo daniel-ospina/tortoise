@@ -98,6 +98,7 @@ from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
 )
 from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
     AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    attachment_target_ids,  # #12244: the merge collapse, for the about-anchor
     name_key_space_same_entity,  # #12120: the writer's key space, for node-returning reads
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
@@ -1592,24 +1593,34 @@ _ALLOWED_ORIGINS = [
     "https://api.premiselabs.co",
     # #11767: KEEP, do not sweep. `tortoise.premiselabs.co` outlives the pages this
     # entry was added for: a tab opened against it before the cutover still
-    # preflights against it, and the host still ANSWERS for some paths — re-measured
-    # 2026-11-12 after #11763's map and #12031's host inversion shipped:
+    # preflights against it, and the host still ANSWERS for every path — re-measured
+    # 2026-11-12 after #11763's map and #12031's host inversion shipped, and again
+    # after #13636 moved the last page that was still served twice:
     #   `/`          -> 301 to https://premiselabs.co/tortoise
-    #   `/contact`   -> 200, serving `website/contact.html`, which carries a <script>
-    #   `/404`       -> 200 (no script); `/404.html` -> 308 to `/404`
-    # so the host is NOT "a scriptless 404 and nothing else". ⛔ An earlier revision
-    # of this comment claimed `website/404.html` was ALL this host still served, and
-    # made THAT the safety argument. It was false: `_middleware.ts`'s product-host
-    # block does not intercept `/contact`, and `website/_redirects` maps
-    # `/contact.html` host-agnostically, so `/contact` falls through and is served.
-    # A sweep reading the false version could satisfy its own condition (c) from a
-    # premise that was never true. The entry is safe to keep for a DIFFERENT and
-    # durable reason: this host serves only THIS repository's own static pages (no
-    # third-party content is hosted there), so the entry grants nothing to anyone
-    # else — it exists so a legacy tab's preflight is not refused.
+    #   `/contact`   -> 301 to https://premiselabs.co/contact (#13636)
+    #   `/404`       -> 200 text/html (scriptless); `/404.html` -> 308 to `/404`
+    # so the host is NOT "a scriptless 404 and nothing else": every marketing URL
+    # terminates on the company host, and what this host still answers itself is the
+    # 404 document plus the static assets BOTH hosts share. ⛔ An earlier revision of
+    # this comment claimed `website/404.html` was ALL this host still served, and
+    # made THAT the safety argument. It was FALSE — `_middleware.ts`'s product-host
+    # block did not intercept `/contact`, so that path fell straight through to
+    # `context.next()` and Pages served `website/contact.html`, a `<script>`-bearing
+    # page, from this host as well as from the company one. A sweep reading the false
+    # version could satisfy its own condition (c) from a premise that was never true.
+    # #13636 closed the ROUTING (that path is a one-hop 301 now, pinned
+    # behaviourally by `tests/test_middleware_host_consolidation.mjs`); what stays
+    # recorded here is the false ARGUMENT, because a sweep that re-derives it lands in
+    # the same trap.
+    # The entry is safe to keep for a DIFFERENT and durable reason: this host serves
+    # only THIS repository's own static pages (no third-party content is hosted
+    # there), so the entry grants nothing to anyone else — it exists so a legacy
+    # tab's preflight is not refused.
     # Removal trigger (all four MEASURED, not judgement): (a) #11763's redirect map
-    # covers every path that still answers 200 here (`/contact` is NOT covered
-    # today — reported on #11762); (b) >=30 days after children 1-3 are live;
+    # covers every marketing page that used to be served from this host, and
+    # `/contact` joined it in #13636 (pinned behaviourally, not by this comment);
+    # what a 200 still serves there is the 404 document and the assets the two hosts
+    # share, never a second copy of a page; (b) >=30 days after children 1-3 are live;
     # (c) a probe shows the host answers 200 `text/html` for NO path — not merely
     # that `website/404.html` is scriptless, which is why the old wording had to go;
     # (d) a production probe shows no request FROM that origin. Also note
@@ -3100,10 +3111,25 @@ async def _lifespan(app):
     # SENTRY_DSN). Initialize before the app starts serving so captures are
     # armed from the first request. Hosted-only concern: local SDK/self-host
     # never sets the DSN, so this is inert there.
+    #
+    # ⛔ #13665: this call is SLOW AND SYNCHRONOUS — it must NOT run on the loop.
+    # Measured on the deployed box: `/health` → `loop_blocks` captured
+    # `max_age_s: 5.212` with `sentry_sdk/integrations/mcp.py:36 in <module>` →
+    # `package_version` → `_generate_installed_modules` → `importlib.metadata.
+    # metadata` → `read_text` on the stack, i.e. Sentry's `init()` building its
+    # whole installed-distribution index (because `auto_enabling_integrations`
+    # defaults to True) while the event loop was held. A held loop cannot run a
+    # timer callback or send a byte, so anything already on the loop stalls — in
+    # SERVICE that is `HTTP 000`: no answer, no legible refusal, because
+    # `WaitBoundMiddleware`'s deadline is itself a loop callback. ⛔ NOT in this
+    # window: uvicorn binds only after this half returns (#2953), so no request is
+    # read yet and this does NOT move first-answer time — it stops the loop being
+    # held during boot. `init_off_loop` keeps the ordering guarantee and moves only
+    # the THREAD; `tortoise/sentry.py` carries the measured breakdown and #10602.
     try:
-        from tortoise.sentry import init as _sentry_init
+        from tortoise.sentry import init_off_loop as _sentry_init
 
-        _sentry_init()
+        await _sentry_init()
     except Exception:  # noqa: BLE001, RUF100 — init is guarded internally; belt-and-suspenders
         pass
 
@@ -3149,14 +3175,21 @@ async def _lifespan(app):
             def _prewarm_embeddings() -> None:
                 try:
                     from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
-                    # Longer window than request paths (30s): cold-start torch
-                    # import on a 2-core/2GB VM can exceed 30s (#545). The
-                    # thread is daemon + background, so it never blocks bind.
+                    # #13674: NO explicit ``load_timeout`` here — this call used
+                    # to pass a 300.0 literal beside a product default of 90.0,
+                    # so there were TWO declared bounds and the one the log
+                    # line reported was the 90 s default even when the join had
+                    # actually waited 300 s. ``EmbeddingModel._LOAD_TIMEOUT_S``
+                    # (now 300.0, derived from the measured cold cost) is the ONE
+                    # bound; the entrypoint's boot pre-warm has paid the cold
+                    # import before ``exec`` (#13674), so this load is the WARM
+                    # construct.
+                    # The thread is daemon + background, so it never blocks bind.
                     # #4055: mark it as BACKGROUND setup so the one-time load
                     # it starts is not attributed to (and cannot exempt) a
                     # request that merely overlaps this pre-warm.
                     with EmbeddingModel.background_load():
-                        model = EmbeddingModel.get(load_timeout=300.0)
+                        model = EmbeddingModel.get()
                     loaded_id = _probe_loaded_model_id(model)
                     if model is not None:
                         if loaded_id and loaded_id != EMBEDDING_MODEL:
@@ -5804,7 +5837,9 @@ def _embedder_load_in_flight() -> bool:
     every concurrent request that needs the embedder is refused by a bound it was
     never given a chance to meet — 1 attempt AND 1 breach each, and five in a
     window is ``share 1.0`` ⇒ red on a machine that is merely warming. Fly's
-    ``grace_period`` is 180 s, the load can exceed it, and the red then stays for
+    ``grace_period`` is 420 s (#13674: raised from 180 s so a boot that pays the
+    measured 156.5 s cold embedder import before ``exec`` still has headroom),
+    the load can exceed it, and the red then stays for
     the 120 s the window takes to age out — crossing the 5 min deploy allowance.
     """
     try:
@@ -8353,7 +8388,8 @@ async def health():
     at 60s" is UNCONFIRMED and possibly undocumented. It is NOT supported by
     Fly's public docs, and independent research could not find it in flyctl or
     fly-go either — treat it as folklore, not a contract (`fly.toml` here
-    configures `grace_period = "180s"`). To verify: deploy a machine whose
+    configures `grace_period = "420s"`, raised for the #13674 boot pre-warm). To
+    verify: deploy a machine whose
     check fails continuously past the configured grace period and observe
     whether Fly restarts it at 60s (machine event log / `flyctl machine
     status`) or honours the larger configured value. This note exists because
@@ -13051,8 +13087,9 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     ⛔ #4055 (review P1) — A REQUEST-OWNED ONE-TIME EMBEDDER LOAD IS SETUP, NOT
     THE WORK THIS BOUND MEASURES, and ``/v1/search``'s callable contains one:
     ``sdk.tortoise_fts_query`` calls ``EmbeddingModel.get()`` synchronously in
-    the worker (a cold bge-small load is measured at ~57 s, budgeted
-    ``_LOAD_TIMEOUT_S`` = 90 s). Judging that by this lane's 8 s answers **503
+    the worker (a cold import is measured at 156.5 s on the production box,
+    budgeted ``_LOAD_TIMEOUT_S`` = 300 s since #13674). Judging that by this
+    lane's 8 s answers **503
     ``graph_unavailable`` for a HEALTHY graph while the embedder is merely
     loading** — a capacity error naming the wrong dependency. The transport
     seam already refuses to make that mistake: ``mcp_auth.await_under_wait_bound``
@@ -23785,7 +23822,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # `resolve_entity_id_same_entity` would make an attribution edge
             # REFUSE where capture writes — two live same-name carriers — silently
             # losing an attachment on the hosted path only. Widening the spelling
-            # set picks no identity, so that objection does not apply.
+            # set picks no identity, so that objection does not apply. ⛔ #12244:
+            # "one entity, two rows" is a DIFFERENT question from "two carriers",
+            # and the collapse below answers only that one (see the note at the
+            # read).
             _space, _space_params = name_key_space_same_entity("o", str(name))
             if not _space:
                 continue
@@ -23797,12 +23837,96 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if _fold(str(name)) in subject_entity_names_folded:
                 _space = f"({_space}) AND o.name = $exact"
                 _space_params = {**_space_params, "exact": str(name).strip()}
-            proj.g.query(
-                f"MATCH (p:Point {{id:$pid}}), (o:Object) "
-                f"WHERE {_space} "
-                f"MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, **_space_params},
-            )
+            # ⛔ #12244: the MERGE-COLLAPSE half. The space above is the writer's
+            # SPELLING space, and `apply_entity_merge` is non-destructive — a
+            # merged pair is ONE entity with TWO live rows under one folded key
+            # (the retired carrier keeps its name and gains `resolved_from`; the
+            # survivor records the candidate's folded key in `aliases`). A single
+            # MERGE over that space therefore wrote the edge onto BOTH, including
+            # the node the writer would never resolve to. Read the holders, map
+            # them through `entity_identity.attachment_target_ids` (the hop has
+            # ONE definition), then attach per ENTITY.
+            #
+            # ⛔ The recorded dispositions still hold: attach-to-every-carrier is
+            # unchanged for every DISTINCT entity (the collapse dedupes only rows
+            # the merge's own pointer joins, so no identity is picked and a second
+            # live same-name carrier keeps its edge); the anchor stays
+            # STATUS-BLIND (a terminal-only holder is still linked —
+            # `attachment_target_ids` applies no live filter); and the id-less
+            # arm below is kept because the recorded shape of this site is ONE
+            # `Object` MERGE that attaches id-less rows too, and `link_entity`
+            # cannot address them (it MERGEs on `{id:…}`).
+            _holders = [(_r[0] if _r else None) for _r in proj.g.query(
+                f"MATCH (o:Object) WHERE {_space} RETURN o.id",
+                params=_space_params).result_set]
+            # ⛔ An ID-LESS row has no `id` at all; a row whose `id` is present
+            # but NOT a string is a different shape: `link_entity`/the id arm
+            # address ids as strings, so the collapse answers with the string
+            # form and an `o.id IN $ids` match finds nothing — measured: an
+            # `Object {id: 4242}` matched by the name space dropped its edge at
+            # this anchor while the pre-#12244 single MERGE wrote it. It is
+            # addressable by its OWN value, so it rides the same id-keyed MERGE
+            # with the raw value beside the string ones (a raw int matches its
+            # own node and the string form never does, so neither arm can pick
+            # up the other's row) — and `attachment_target_ids` answers ONLY for
+            # string holders, so no string spelling of the raw value is emitted
+            # either: that spelling would address a TWIN whose id is literally
+            # "4242", a row the writer's name space never matched (#13724
+            # review; `test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge`).
+            #
+            # ⚠️ RESIDUAL: `follow_resolved_from` stringifies its argument on
+            # entry (`entity_resolver.py:673` `current = str(node_id)`), so a
+            # holder whose `id` is NON-STRING can never have its `resolved_from`
+            # followed — `hopped` stays False, this arm re-attaches that row
+            # as-is, including a carrier a merge retired (#12244 survives for
+            # that shape), and because no hop happened the presence filter at
+            # `entity_identity.py:455-465` is not reached either, so nothing
+            # corrects it here. Left as the pre-fix attachment deliberately: the
+            # alternative (normalise the id before the hop) changes the shared
+            # hop every writer uses, which is not this lane's blast radius.
+            #
+            # `_idless` is deliberately NARROWER than "not a string", and the
+            # narrowing has NO observable effect — it is defence-in-depth, not a
+            # behaviour change: the id-less arm's predicate (`o.id IS NULL OR
+            # o.id = ''`) cannot match a non-string id, and every row it CAN
+            # match is already a `None`/`''` element of `_holders`. So the two
+            # spellings of this flag are equivalent and no test can pin the
+            # difference; it is written this way because "id-less" is what the
+            # flag means (a non-string id is covered by the raw arm above).
+            _idless = any(_h is None or _h == "" for _h in _holders)
+            _raw_addressable = [_h for _h in _holders
+                                if _h is not None and _h != ""
+                                and not isinstance(_h, str)]
+            try:
+                _targets = attachment_target_ids(proj.g, "Object", _holders)
+            except Exception as _col_exc:  # noqa: BLE001, RUF100
+                # Never sink the commit on a collapse that cannot be computed:
+                # fall back to the pre-#12244 attachment set and say so.
+                _targets = [_h for _h in _holders
+                            if isinstance(_h, str) and _h]
+                _logger.warning(
+                    "about-anchor collapse failed for %r: %s: %s — attached "
+                    "to every matched carrier",
+                    name, type(_col_exc).__name__, _col_exc)
+            _targets = [*_targets, *_raw_addressable]
+            if _targets:
+                proj.g.query(
+                    "MATCH (p:Point {id:$pid}), (o:Object) "
+                    "WHERE o.id IN $ids "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, "ids": _targets},
+                )
+            if _idless:
+                # An id-less name stub (minted by the capture wiring
+                # `MERGE (o:Object {name:$name})`) has no id to attach by, so it
+                # keeps main's name-based MERGE over the SAME widened space.
+                proj.g.query(
+                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                    f"WHERE {_space} "
+                    "AND (o.id IS NULL OR o.id = '') "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, **_space_params},
+                )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a
         # point this commit actually WROTE, and only against the id the write
@@ -50676,7 +50800,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 189 tracked files (708 distinct
+# ABSOLUTE line number from 196 tracked files (736 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

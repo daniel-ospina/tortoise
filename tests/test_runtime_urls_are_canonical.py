@@ -235,10 +235,12 @@ RETIRED_HOST_ALLOWLIST = {
         "nothing to a third party; it exists so a legacy tab's preflight is not "
         "refused (#11762 keeps the hostname attached to the Pages project). "
         "⛔ Do NOT restate 'the host still serves website/404.html forever' here: "
-        "that premise is FALSE — `/contact` is a 200 carrying a `<script>`, and "
-        "`/404.html` is a 308 to `/404` — and hosted_api.py's own comment retracts "
-        "it in terms. A sweep reading the false version could satisfy its own "
-        "removal condition (c) from a premise that was never true, so keeping the "
+        "that premise is FALSE — `/404.html` is a 308 to `/404`, every marketing "
+        "page is a one-hop 301, and `/contact` — the last MARKETING document that was "
+        "served from two hosts, until #13636 gave it a row here (`/404` still answers "
+        "there too, but it is the 404 document, not a page) — and hosted_api.py's own comment "
+        "retracts it in terms. A sweep reading the false version could satisfy its "
+        "own removal condition (c) from a premise that was never true, so keeping the "
         "false reason here would re-plant the trap the code had to dig out."),
     "supabase/functions/waitlist-subscribe/handle.ts": (
         1,
@@ -758,61 +760,51 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
     # ⛔ THE TRIGGER'S PREMISE IS PINNED TOO (#11767 review, P2 — measured). The
     # first version of this block argued the entry was safe to leave because
     # `website/404.html` was the ONE document left on the host. It was
-    # false: `tortoise.premiselabs.co/contact` answers **200** with a `<script>`
-    # (`_middleware.ts`'s product-host block does not intercept it and
-    # `website/_redirects` maps `/contact.html` host-agnostically), so a sweep
-    # reading it could have satisfied its own condition (c) from a premise that
-    # never held. The substring asserts above could not catch that — they pin
-    # TOKENS, and `404.html` appears in the true and the false version alike.
+    # false: the product-host block did not intercept `/contact`, so that path was
+    # served here as well as on the company host (`website/_redirects` maps
+    # `/contact.html` host-agnostically, which collapses SPELLINGS and never moves a
+    # page between hosts), and a sweep reading it could have satisfied its own
+    # condition (c) from a premise that never held. The substring asserts above
+    # could not catch that — they pin TOKENS, and `404.html` appears in the true and
+    # the false version alike.
     #
-    # What follows is a STRONGER pin than those tokens, and deliberately not a
-    # claim that it is a complete one: a later review showed a paraphrase which
-    # merely NAMED `/contact` stayed green over a false argument, so the measured
-    # pair — the `200` and the `<script` — has to appear on the SAME line as the
-    # path. That binds the assertion to the fact the argument rests on instead of
-    # to a word the argument can borrow.
+    # So the measurement is pinned as well — but pinned to what the host does NOW,
+    # not to the fact that falsified the old argument. #13636 gave that page a
+    # redirect row, so "`/contact` answers 200 with a `<script>`" is the superseded
+    # state; keeping it here would leave this test pinning a claim the deployed host
+    # contradicts, which is the same defect one turn of the wheel later. What a sweep
+    # needs is to be able to tell "covered by the map" from "reported and still
+    # open": the `/contact` line must carry the ONE-HOP 301 and the issue number, and
+    # it must NOT re-assert a 200 for that path (the pre-#13636 measurement, which is
+    # also the state the retracted argument rested on — its return must not be green).
     contact_lines = [ln for ln in block.splitlines() if "/contact" in ln]
     assert contact_lines, (
-        "the trigger must name the path that keeps this host live — `/contact` "
-        "answers 200 there, so 'a scriptless 404 and nothing else' is not the reason "
-        "the entry is safe to keep")
-    assert any("200" in ln and "<script" in ln for ln in contact_lines), (
-        "the `/contact` line must carry the MEASUREMENT that makes it matter (it "
-        "answers 200 and serves a page with a <script>). Naming the path alone is "
-        "the same token-level pin that stayed green over the retracted premise")
-    # `"script" in "no script"` is True, so a NEGATED line — the shape of the
-    # retracted premise itself, and the shape `/404 -> 200 (no script)` in the
-    # same block already uses — would satisfy a bare token pin while INVERTING the
-    # fact. A fixed list of phrasings was not enough: the block BACKTICKS its own
-    # identifiers, so `no \`<script>\`` and `\`<script>\`-free` walked straight
-    # through it (measured). So normalise the line (drop backticks, fold
-    # whitespace, lowercase) and refuse any negation token.
-    #
-    # ⛔ SCOPED TO THE MEASUREMENT, and the scope is the whole point: a first cut
-    # refused a negation token ANYWHERE on a `/contact` line and false-redded an
-    # honest sentence in this very block — `_middleware.ts`'s product-host `block
-    # does not intercept /contact` (measured: 1 failed, its own author's line).
-    # A pin that reds true prose gets deleted or weakened by whoever meets it
-    # next, which is a worse outcome than the paraphrase it was guarding against.
-    # So the refusal is bound to the claim under attack: a line that mentions the
-    # `<script` AND carries a negation is refused, in any spelling.
-    negations = ("no ", "not ", "never", "without", "absent", "-free",
-                 "scriptless", "none")
+        "the trigger must name the path this comment's history is about — `/contact` "
+        "was the last marketing document served from TWO hosts (#13636), so an "
+        "unnamed correction loses the reason the entry could not be swept on "
+        "'the host serves a scriptless 404 and nothing else'")
+    assert any("301" in ln and "premiselabs.co/contact" in ln for ln in contact_lines), (
+        "the `/contact` line must carry the CURRENT measurement — the retired host "
+        "301s it to `https://premiselabs.co/contact` (#13636). Without it a sweep "
+        "cannot distinguish a covered path from a still-open duplicate")
+    assert any("#13636" in ln for ln in contact_lines), (
+        "the `/contact` line must name the issue that moved it — an unnamed "
+        "correction cannot be re-measured or re-opened")
     for ln in contact_lines:
         flat = " ".join(ln.replace("`", "").lower().split())
-        if "script" not in flat:
-            continue
-        hit = next((n for n in negations if n in flat), None)
-        assert hit is None, (
-            f"the `/contact` line negates its own measurement ({hit!r} in "
-            f"{flat!r}) — it answers 200 and serves a page WITH a <script>, so a "
-            "negated line is the retracted argument wearing the tokens this pin "
-            "looks for")
+        assert "200" not in flat, (
+            f"the `/contact` line claims a 200 ({flat!r}) — this host 301s that path "
+            "since #13636, so the line is a stale measurement. Describe the redirect "
+            "here; the pre-fix measurement belongs on #13636 and in "
+            "`tests/test_middleware_host_consolidation.mjs`'s own comment, where a "
+            "behavioural red carries it")
     for retracted in ("only remaining document", "only non-redirect HTML"):
         assert retracted not in block, (
-            f"the retracted premise is back ({retracted!r}): the host serves more "
-            "than `website/404.html` (measured: `/contact` -> 200 with a <script>), "
-            "so an argument built on that premise is an argument from a false one")
+            f"the retracted premise is back ({retracted!r}): the argument for keeping "
+            "this entry cannot rest on 'the host serves nothing but `website/404.html`' "
+            "— the host terminated every marketing URL in a 301 and still answers "
+            "`/404` itself, and the last duplicate page (`/contact`) was only closed in "
+            "#13636")
 
 
 # ── A5b — the Supabase edge-function allowlists, pinned ──────────────────────

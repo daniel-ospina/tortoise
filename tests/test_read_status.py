@@ -959,32 +959,69 @@ def test_the_test_lane_never_out_budgets_the_hosted_prewarm():
     an unrelated `x.get(load_timeout=...)` must not be able to satisfy a budget
     guard. An int literal is accepted deliberately — `300` and `300.0` are the same
     budget, and rejecting the int would fail on a cosmetic edit rather than a real
-    drift."""
+    drift.
+
+    ⛔ #13674 CHANGED THE SHAPE THIS PINS, DELIBERATELY: the hosted pre-warm no
+    longer passes a numeric ``load_timeout=`` at all. It used to pass a 300.0
+    literal beside a 90.0 product default, so TWO declared bounds described one
+    load and the timeout log named the wrong one. With the override gone the
+    pre-warm inherits ``EmbeddingModel._LOAD_TIMEOUT_S`` itself, so "this lane
+    does not out-budget the pre-warm" holds BY CONSTRUCTION. This test keeps its
+    teeth for the shape that can still drift — an explicit override reappearing
+    at a LOWER value — and asserts the no-override shape against the PRODUCT
+    default read from a fresh interpreter, not this lane's raised override.
+    """
     import ast
+    import subprocess as _subprocess
+    import sys as _sys
     from pathlib import Path
 
     from tortoise.embeddings import EmbeddingModel
 
     tree = ast.parse((Path(__file__).resolve().parent.parent
                       / "tortoise/hosted_api.py").read_text())
-    hosted = [
-        float(kw.value.value)
+    calls = [
+        node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id == "EmbeddingModel"
+    ]
+    assert calls, "the hosted pre-warm's load budget moved or was renamed"
+    hosted = [
+        float(kw.value.value)
+        for node in calls
         for kw in node.keywords
         if kw.arg == "load_timeout"
         and isinstance(kw.value, ast.Constant)
         and isinstance(kw.value.value, (int, float))
         and not isinstance(kw.value.value, bool)
     ]
-    assert hosted, "the hosted pre-warm's load budget moved or was renamed"
-    # MIN, not max: the invariant is that this lane does not out-budget the
-    # pre-warm. Taking the max would let a second, more patient call site mask
-    # the real pre-warm being lowered — the drift this guard exists to catch.
-    assert min(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
-        f"this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s but a hosted "
-        f"pre-warm waits only {min(hosted)}s for the same cold import"
+    if hosted:
+        # MIN, not max: the invariant is that this lane does not out-budget the
+        # pre-warm. Taking the max would let a second, more patient call site
+        # mask the real pre-warm being lowered — the drift this guard catches.
+        assert min(hosted) >= EmbeddingModel._LOAD_TIMEOUT_S, (
+            f"this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s but a hosted "
+            f"pre-warm waits only {min(hosted)}s for the same cold import"
+        )
+        return
+    # The ONE-bound shape (#13674): no override, so the pre-warm applies the
+    # PRODUCT default. Read that default from a fresh interpreter — this process
+    # carries `tests/conftest.py`'s raised test-lane override (#6960), which the
+    # server never sees.
+    probe = _subprocess.run(
+        [_sys.executable, "-c",
+         "from tortoise.embeddings import EmbeddingModel as E\n"
+         "print(float(E._LOAD_TIMEOUT_S))"],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        capture_output=True, text=True, timeout=120)
+    assert probe.returncode == 0, (
+        f"could not read the product's default load bound: {probe.stderr[-500:]}")
+    product_default = float(probe.stdout.strip().splitlines()[-1])
+    assert product_default >= EmbeddingModel._LOAD_TIMEOUT_S, (
+        f"the hosted pre-warm applies the product default {product_default}s "
+        f"while this lane waits {EmbeddingModel._LOAD_TIMEOUT_S}s for the same "
+        f"cold import"
     )

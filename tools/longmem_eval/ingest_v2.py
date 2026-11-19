@@ -1046,7 +1046,9 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         except Exception as ex:  # noqa: BLE001, RUF100
             # #1786 (P2-2): a provider transient must RE-RAISE out of the
             # worker so it reaches the run.py handler (retryable=True /
-            # attempts=0 → --retry-failed eligible) — ``_ex.map`` re-raises
+            # attempts=1 → --retry-failed eligible; the counter was 0 before
+            # #8486 changed it to count the initial attempt) — ``_ex.map``
+            # re-raises
             # the first future's exception during iteration. Deterministic
             # extractor bugs ride the result and Phase C does the EXACT
             # sequential bookkeeping (error list + census + llm call).

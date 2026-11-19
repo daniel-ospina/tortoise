@@ -320,3 +320,129 @@ The eval pipeline loses questions when the shared FalkorDB container stalls unde
 ---
 <!-- plan-review: cycles=5, status=capped, version=2.3.0 -->
 <!-- Recovery: 5-cycle cap reached with 16 remaining issues → orchestrator deep-fix (16 fixed) → second-model gate deepseek-v4-pro 2 cycles (8 issues fixed, final gate clean) → final verification 2 cycles (7 issues fixed, final pass clean). All reviewer cycles' issues resolved; plan converged. -->
+
+## 12. Amendments after the fact
+
+**2026-11-19 — `RESUME_ATTEMPTS_CAP` is 3, and `attempts` counts PIPELINE ATTEMPTS
+(#8486, PR #13742).** Task 2 Step 3 above names `RESUME_ATTEMPTS_CAP = 2` and
+pins "a provider-transient entry created WITHOUT an R2 starts at `attempts=0`".
+The 10-question smoke measured what that accounting produced in practice: a
+question whose ingest failed after ~12 minutes persisted
+`error_class=ingest:retries_exhausted` — "the retry budget burned" — next to
+`attempts: 0`, "nothing was tried". Two numbers, three wrong readings. The
+constant is now **3** and the field counts attempts MADE: the initial attempt is
+1, the in-run R2 makes it 2, and each failed `--retry-failed` re-attempt adds
+one.
+
+The budget this plan pins is UNCHANGED — still **2 × ~25 min** worst case. What
+moves is which counter values spell it: a question that exhausted the
+write-stage retries and its in-run R2 (attempts 2) gets ONE resume (3), and a
+plain initial failure (attempts 1) gets TWO (2, then 3), because the gate admits
+while `attempts < 3`. The 3 × case this plan rules out remains ruled out for the
+same reason it did before: the R2 marker is disarmed during resume re-attempts,
+so a resume can never fire an R2. A checkpoint written under the old accounting
+is REFUSED by the fingerprint rather than misread — `resume_attempts_cap` rides
+it, so the value change is the refusal mechanism, and that is the intended
+outcome for numbers that would otherwise be read two ways.
+
+**The `retryable` source, and the deterministic guard.** Task 2 Step 3 pins
+`retryable` as "evaluated at write time from Task 1's `retryable_transient`".
+That predicate cannot stay the source: it answers *may this WRITE be retried at
+THIS layer now*, and it returns False for the replaced-graph / write-lock
+`ResponseError` family on purpose (the SDK write seam retries those), so it wrote
+`retryable: false` on a question the resume exists to recover — the silent skip
+the smoke recorded. `retryable` is now derived from the entry's `error_class`
+AND an infra predicate (`tools/longmem_eval/errors.py::failure_is_recoverable`),
+where infra means this repo's own named families: `retryable_transient`,
+`graph_abort_family`, `retryable_aborted_write`.
+
+The PROPERTY this plan pins is preserved, not reversed: "deterministic extractor
+bugs (`retryable=False`) remain excluded — that is the guard against re-burning
+~25 min on deterministic failures that also widen to `retries_exhausted`". It
+had to be re-expressed because the class cannot express it —
+`eval_failure_class` widens every `unknown`-class exception at ingest to
+`ingest:retries_exhausted`, so a `RuntimeError` in our own extractor and a
+replaced graph wear the same key. The guard is now the infra predicate, and it
+refuses the deterministic redis refusals too (`WRONGTYPE`, `NOPERM`, `ERR
+unknown command`, and redis-py's client-side `DataError`), which a coarser
+`isinstance(exc, RedisError)` reading would have re-admitted. P2-2 (provider
+transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
+re-attemptable) both still hold. What is PINNED, precisely, so a successor can
+tell an arm from a claim — by ROW, not by a failure count, because the counts
+move every time a row is added and a stale count is its own kind of false
+record. Measured at this head, one mutant per arm, over
+`tests/test_longmem_failure_record_coherence.py` (green before each mutant):
+
+- neutralise `retryable_transient` -> `[loading]` and
+  `test_the_recovery_tier_preservation_stays_coherent` red. ⚠️ The `misconf`
+  row stays GREEN, because MISCONF also routes through
+  `retryable_aborted_write`; naming it here would be the over-claim this
+  paragraph exists to prevent.
+- neutralise `graph_abort_family` -> `[graph-aborted]`, plus
+  `test_the_smoke_record_is_now_coherent`, `test_a_deterministic_bug_stays_excluded`,
+  `test_r2_counts_a_second_pipeline_attempt` and
+  `test_a_redactor_failure_does_not_mask_the_failure`.
+- neutralise `retryable_aborted_write` -> `[write-lock]` ALONE, which is what
+  makes the third arm load-bearing rather than decorative (the `misconf` row
+  stays green here too, for the reason above).
+- make `infra_failure` return `False` -> the union of the three bullets above,
+  named explicitly because the union is what a reader checks against: the three
+  `INFRA_REDIS_FAMILIES` rows, `TRANSIENT_VALUE_REDIS_FAMILIES[loading]`, and
+  FIVE coherence pins — `test_the_smoke_record_is_now_coherent`,
+  `test_a_deterministic_bug_stays_excluded`,
+  `test_the_recovery_tier_preservation_stays_coherent`,
+  `test_r2_counts_a_second_pipeline_attempt` and
+  `test_a_redactor_failure_does_not_mask_the_failure`. ⛔ The enumeration is
+  load-bearing: the recovery-tier pin was missing from it in the previous two
+  revisions (it reds under M1 as well), and the redactor pin was missing twice
+  before that, because it builds its entry from the same smoke exception as the
+  `graph_abort_family` bullet. The coherence pins red under several mutants
+  because they assert the flag on entries whose failures ARE infra: that is the
+  same property from the other end, not a second claim.
+- restore the `isinstance(exc, RedisError)` base-class arm -> all four
+  `DETERMINISTIC_REDIS_REFUSALS` rows, the three excluded
+  `TRANSIENT_VALUE_REDIS_FAMILIES` rows, and
+  `test_the_recovery_tier_preservation_stays_coherent` — that last one because
+  the arm REPLACES the three named predicates rather than widening them, so it
+  also drops `retryable_transient`'s provider-transient admission (the row's
+  failure is a `requests` `Timeout`), which is a second reason the arm is not a
+  restore.
+
+⛔ The bullets name ROWS, not counts. Three successive drafts of this paragraph
+carried a number per bullet and every one of them was wrong at least once, in
+the under-stated direction, because a new row silently joins a mutant's red set.
+A reader who needs the count can run the mutant; a reader who needs to know
+which arm is load-bearing reads the rows.
+
+The THREE-arm shape is pinned by the
+write-slot literal, whose only
+route to `true` is `retryable_aborted_write` — MISCONF reaches `true` through
+`retryable_transient` as well, so a MISCONF row alone would stay green with
+that arm deleted. Every arm names `tortoise/retry.py`'s own regexes; none is a
+taxonomy invented here.
+
+**The one narrowing this makes, stated rather than implied — three
+transient-VALUE families leave the recoverable set, and `LOADING` does not.**
+The removed `isinstance(exc, RedisError)` arm admitted every redis exception,
+so `ResponseError('Query timed out')`, `ReadOnlyError` and `OutOfMemoryError`
+now persist `retryable: false` where that arm — which existed only on this PR's
+own round-1 head, never on `main`, since `main` derives the flag from
+`retryable_transient` alone — said `true`. `LOADING` is NOT one of them:
+`redis.exceptions.BusyLoadingError` subclasses `ConnectionError`, so
+`retryable_transient` admits it and the flag stays `true`. The direction is
+deliberate (a persisted `true` is what spends ~25 min per attempt, and `false`
+leaves a retained entry an operator can see and hand-recover), and it is NOT a
+claim of equivalence: a query timeout at ingest is genuinely transient, and a
+`--retry-failed` resume skips it until someone admits that family explicitly.
+That admission is a separate decision with its own budget question (`READONLY`
+is a replica configuration and re-attempting it is pointless; `OOM` and
+`LOADING` usually clear on their own), so this amendment records the narrowing
+instead of settling it.
+
+Pinned both ways by
+`tests/test_longmem_failure_record_coherence.py::test_the_transient_value_redis_families`
+(four rows: the three excluded families AND the `LOADING` admission, so neither
+a widened arm nor a blanket `return False` can pass), with the deterministic-
+family REFUSE table and the infra-family ADMIT table beside it as the other two
+halves. The earlier version of this paragraph named `LOADING` as excluded — it
+was false, which is why the rows exist now.

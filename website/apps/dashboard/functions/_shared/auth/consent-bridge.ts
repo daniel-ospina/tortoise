@@ -440,6 +440,72 @@ export async function attemptKeyHash(key: string): Promise<string> {
  */
 export const CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12;
 
+/** The kid a SINGLE-secret deployment's tokens carry — mirrors `consent_token.py::LEGACY_KID`.
+ *
+ * It is what `mintConsentToken` has always stamped and what the AS synthesises when it has no key
+ * set, so a deployment that sets only `CONSENT_TOKEN_SECRET` keeps minting a token the AS accepts.
+ */
+export const LEGACY_KID = "consent-1";
+
+/** The env this half reads key material from. Narrow on purpose: one shape, one reader. */
+export interface ConsentKeyEnv {
+  CONSENT_TOKEN_SECRET?: string;
+  CONSENT_TOKEN_KEYS?: string;
+  CONSENT_TOKEN_CURRENT_KID?: string;
+}
+
+/** A kid is a NAME, not secret material — `[A-Za-z0-9_-]`, 1–64, and never the `.` separator. */
+const KID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The `kid`-keyed key set (#10794) — `<kid>=<secret>,<kid>=<secret>`, or `null` when unusable.
+ *
+ * ⛔ THIS IS THE MIRROR OF `tortoise/consent_token.py::parse_consent_token_keys`, and the two must
+ * agree about WHICH BYTES a kid names or a rotation becomes a silent 401 (the #10488 class, one field
+ * along). The same rules, in the same order: split on each entry's FIRST `=` (so a base64 secret keeps
+ * its padding byte-exact), a kid shaped `[A-Za-z0-9_-]{1,64}`, no duplicate kid, no empty secret —
+ * and `CONSENT_TOKEN_KEYS` ABSENT means the single-secret deployment, under `LEGACY_KID`.
+ *
+ * `null` is "this deployment has no usable key material", the state that answers 503 rather than
+ * signing with a value nobody can verify. A malformed set is `null` rather than a partial one: a
+ * half-set silently drops keys, and the dropped key is an in-flight flow.
+ */
+export function consentKeySet(env: ConsentKeyEnv): { keys: Map<string, string>; currentKid: string } | null {
+  const keys = new Map<string, string>();
+  const raw = env.CONSENT_TOKEN_KEYS ?? "";
+  if (!raw.trim()) {
+    // The single-secret shape this half has always had. `if (!secret)` — an EMPTY value cannot sign.
+    const secret = env.CONSENT_TOKEN_SECRET;
+    if (!secret) return null;
+    keys.set(LEGACY_KID, secret);
+    return { keys, currentKid: LEGACY_KID };
+  }
+  for (const entry of raw.split(",")) {
+    const at = entry.indexOf("=");
+    if (at < 0) return null;
+    const kid = entry.slice(0, at).trim();
+    const secret = entry.slice(at + 1);
+    if (!KID_RE.test(kid)) return null;
+    if (keys.has(kid)) return null;
+    if (!secret) return null;
+    keys.set(kid, secret);
+  }
+  if (keys.size === 0) return null;
+  // Declared order, exactly as the Python half resolves it — an operator who wants another one says
+  // so, and a rotation is then one variable's value rather than a guess.
+  const configured = (env.CONSENT_TOKEN_CURRENT_KID ?? "").trim();
+  const currentKid = configured || keys.keys().next().value as string;
+  // A current kid that names nothing would MINT under a name no verifier can select — the state the
+  // AS reports as unprovisioned, so this half must refuse it too rather than sign into a void.
+  if (!keys.has(currentKid)) return null;
+  return { keys, currentKid };
+}
+
+/** The kid that MINTS on this deployment, or `undefined` when there is no usable key set. */
+export function consentCurrentKid(env: ConsentKeyEnv): string | undefined {
+  return consentKeySet(env)?.currentKid;
+}
+
 /**
  * THE ONE PLACE THIS DEPLOYMENT READS THE SIGNING KEY OUT OF THE ENVIRONMENT.
  *
@@ -455,9 +521,15 @@ export const CONSENT_KEY_FINGERPRINT_HEX_CHARS = 12;
  *
  * A single accessor is the smallest thing that makes the invariant checkable: one function, one
  * phrase, and a test that neither route contains its own `env.CONSENT_TOKEN_SECRET` read.
+ *
+ * ⛔ UNDER A KEY SET (#10794) IT ANSWERS THE **CURRENT** KEY — the one that SIGNS. `consentKeySet`
+ * is the verifying question ("which kids does this deployment accept"); this is the signing one, and
+ * collapsing them would let a rotation keep minting under the key it just retired. Its consumer set
+ * is unchanged: the mint, the fingerprint route, and the attempt-key MAC.
  */
-export function consentSecret(env: { CONSENT_TOKEN_SECRET?: string }): string | undefined {
-  return env.CONSENT_TOKEN_SECRET;
+export function consentSecret(env: ConsentKeyEnv): string | undefined {
+  const set = consentKeySet(env);
+  return set === null ? undefined : set.keys.get(set.currentKid);
 }
 
 /**
@@ -482,11 +554,117 @@ export async function consentKeyFingerprint(secret: string | undefined): Promise
     .slice(0, CONSENT_KEY_FINGERPRINT_HEX_CHARS);
 }
 
-/** A fresh attempt key: 32 random bytes, base64url — the encoding both halves already share. */
+/** The RANDOM PART of an attempt key: 32 CSPRNG bytes, base64url (§2.3, #10794).
+ *
+ * This is the entropy — not the whole key. Since #10794 a key is `<kid>.<random>.<mac>` and this
+ * value is what the MAC covers, so it is the half a caller CANNOT choose and the half the AS's
+ * `newAttemptKey()` mints on the bounce leg.
+ */
 export function newAttemptKey(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return b64url(bytes);
+}
+
+/** Domain separation for the attempt key's MAC — mirrors `consent_token.py::ATTEMPT_KEY_DOMAIN`.
+ *
+ * ⛔ The `v1` is inside the MAC INPUT, not only in this comment: a later change to the covered
+ * bytes is a NEW domain string, so an in-flight value minted under the old rule is refused rather
+ * than reinterpreted under the new one. It also keeps a consent-token signature from being replayed
+ * as an attempt key (and the reverse) even though both use the same key set and the same HMAC.
+ */
+export const ATTEMPT_KEY_DOMAIN = "attempt_key|v1|";
+
+/** `<kid>.<random>.<mac>` — the kid charset excludes `.`, so the parse is unambiguous by design. */
+export const ATTEMPT_KEY_SEPARATOR = ".";
+
+/** The EXACT bytes both halves MAC. ⛔ Mirrors `consent_token.py::attempt_key_mac_input` BYTE FOR
+ * BYTE: change one side alone and every AS-minted key silently fails here (an unverifiable key is
+ * treated as absent and replaced, so the symptom is the #10487 dead end, not a MAC error). */
+export function attemptKeyMacInput(randomPart: string): Uint8Array {
+  return utf8(ATTEMPT_KEY_DOMAIN + randomPart);
+}
+
+/** Import the HMAC key for the attempt-key MAC. One helper, both directions of the same primitive. */
+async function attemptKeyHmac(secret: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", utf8(secret), { name: "HMAC", hash: "SHA-256" },
+                                 false, ["sign", "verify"]);
+}
+
+/** base64url → bytes, or `null` for anything that is not base64url (`atob` alone is not a gate). */
+function fromB64url(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/")
+      + "=".repeat((4 - (value.length % 4)) % 4);
+    const binary = atob(padded);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mint a SIGNED attempt key with this deployment's CURRENT kid (#10794) — `null` when unprovisioned.
+ *
+ * ⛔ THE APP HALF MINTS THESE TOO, and that is not duplication: the entry leg still has to invent a
+ * key when it is handed none, and an UNSIGNED invention would be refused by the very verification
+ * this function's twin performs on the next leg of the same flow (`/auth` → `start`), turning the
+ * fix into the #10487 dead end. So both halves mint, with the same format and the same MAC input.
+ */
+export async function mintAttemptKey(env: ConsentKeyEnv): Promise<string | null> {
+  const set = consentKeySet(env);
+  if (set === null) return null;
+  const secret = set.keys.get(set.currentKid);
+  if (!secret) return null;
+  const randomPart = newAttemptKey();
+  const mac = await crypto.subtle.sign("HMAC", await attemptKeyHmac(secret),
+                                       attemptKeyMacInput(randomPart));
+  return [set.currentKid, randomPart, b64url(new Uint8Array(mac))].join(ATTEMPT_KEY_SEPARATOR);
+}
+
+/** A signed attempt key for a fresh flow, or the pre-#10794 unsigned value when unprovisioned.
+ *
+ * The fallback is deliberate and it is the OLD behaviour, not a half-measure: an unprovisioned
+ * deployment cannot verify anything either, so a value it mints verifies nowhere and the next leg
+ * replaces it. Failing the request instead would turn a missing binding into a broken consent flow
+ * for every visitor — and `CONSENT_TOKEN_SECRET` is a `required` Pages binding, so that state is
+ * meant to be impossible in production.
+ */
+export async function mintedAttemptKey(env: ConsentKeyEnv): Promise<string> {
+  return (await mintAttemptKey(env)) ?? newAttemptKey();
+}
+
+/**
+ * Verify a presented attempt key (#10794) — its RANDOM PART, or `null`.
+ *
+ * ⛔ THIS IS THE FIX, AND IT MUST NOT BE A SHAPE CHECK. RFC 9700 asks an AS to detect CONSTANT or
+ * REUSED values; a well-formed 43-character CHOSEN key passes every shape test and is still a key
+ * the client chose. Only a MAC over bytes this deployment's key set can produce distinguishes a
+ * minted value from a chosen one, and RFC 9126 §2 says the flow reference "must not be
+ * client-chosen". So `null` here means "not provably ours", and the caller treats it as ABSENT.
+ *
+ * Accepted: any kid in the ACTIVE set — a rotation keeps in-flight flows alive. Refused, all as
+ * `null`: no usable key set, an unknown kid, a malformed value, a MAC that does not match.
+ * ⛔ An unknown kid is never compared against a default key: that would make `kid` decorative and
+ * make the rotation window permanent.
+ */
+export async function verifyAttemptKey(env: ConsentKeyEnv, presented: string): Promise<string | null> {
+  if (!presented) return null;
+  const parts = presented.split(ATTEMPT_KEY_SEPARATOR);
+  if (parts.length !== 3) return null;
+  const [kid, randomPart, mac] = parts;
+  if (!randomPart || !mac || !KID_RE.test(kid)) return null;
+  const set = consentKeySet(env);
+  const secret = set === null ? undefined : set.keys.get(kid);
+  if (!secret) return null;
+  const macBytes = fromB64url(mac);
+  if (macBytes === null) return null;
+  const ok = await crypto.subtle.verify("HMAC", await attemptKeyHmac(secret), macBytes,
+                                        attemptKeyMacInput(randomPart));
+  return ok ? randomPart : null;
 }
 
 /**
@@ -590,15 +768,25 @@ function randomHex(bytes: number): string {
  *   - `sub` — the identity, and the ONLY thing the AS may take from this token. `email` is
  *     display-only and never an authorization input.
  *
- * `kid` is fixed to `consent-1` here and accepted FOR PRESENCE ONLY by the verifier. §2.3 states a
- * `kid`-scoped rotation as the goal, but that allowlist is deliberately NOT BUILT (one
- * `CONSENT_TOKEN_SECRET` is configured, so a two-`kid` window cannot exist): a rotation today is a
- * VALUE SWAP that invalidates in-flight assertions for their 120 s TTL. Do not read this line as
- * the rotation property — it is the seam for it (docs/engineering/auth/consent-identity-bridge.md
- * §9 step 1 records the allowlist as unbuilt).
+ * ⛔ `kid` IS LOAD-BEARING SINCE #10794, and this paragraph used to say the opposite. The AS
+ * SELECTS the key by it and refuses one it cannot find (`tortoise/consent_token.py`
+ * `verify_consent_token` — "kid is not in the configured key set"), so the kid a token is stamped
+ * with decides WHICH key must have signed it. A rotation is now a `kid`-scoped OVERLAP window —
+ * publish the new kid beside the old in `CONSENT_TOKEN_KEYS` on both halves, wait out the longest
+ * in-flight lifetime, then retire the old one — not the value swap it used to be. Do not read this
+ * as a description of the pre-#10794 seam: the mechanism is BUILT
+ * (docs/engineering/auth/consent-identity-bridge.md §2.3, §9 step 1b).
  */
 export async function mintConsentToken(input: {
   secret: string;
+  /**
+   * ⛔ THE KID IS NOW LOAD-BEARING (#10794). The AS SELECTS the key by it and refuses one it cannot
+   * find, so a minter that stamped a constant would mint tokens no key-set deployment can ever
+   * redeem — `401 invalid_token` on every redemption, with the mint still answering 200. The caller
+   * passes `consentCurrentKid(env)`; the default is the legacy kid, which is what a single-secret
+   * deployment resolves to anyway.
+   */
+  kid?: string;
   issuer: string;
   userId: string;
   email: string | null;
@@ -609,14 +797,23 @@ export async function mintConsentToken(input: {
   if (!input.secret) {
     // Fail closed and named: an EMPTY key would sign a token anyone could forge, and a
     // hardcoded default would be a forgeable consent (§2.3). Callers answer 503 instead.
-    throw new Error("CONSENT_TOKEN_SECRET is not set");
+    // ⛔ The message must name BOTH sources, because under a key set `CONSENT_TOKEN_SECRET` is not
+    // what the minter reads: `consentSecret`/`consentKeySet` resolve the CURRENT kid out of
+    // `CONSENT_TOKEN_KEYS` (falling back to the single secret only when the set is absent), so
+    // "CONSENT_TOKEN_SECRET is not set" pointed an operator at a variable that may be set and
+    // irrelevant. This function receives the resolved value; naming the resolution above is the
+    // only accurate diagnosis it can give.
+    throw new Error(
+      "no usable consent signing key: CONSENT_TOKEN_KEYS is unset/malformed or names a "
+      + "CONSENT_TOKEN_CURRENT_KID it does not hold, and CONSENT_TOKEN_SECRET is unset/empty",
+    );
   }
   const issuedAt = Math.floor((input.now ?? Date.now()) / 1000);
   const exp = issuedAt + CONSENT_TOKEN_TTL_S;
   // Key order mirrors `mint_consent_token` exactly; the verifier recomputes the MAC over the
   // RECEIVED segment, so only the VALUES are its contract — but keeping the order identical is
   // what makes a cross-language diff of the two tokens readable.
-  const header = { alg: "HS256", typ: "JWT", kid: "consent-1" };
+  const header = { alg: "HS256", typ: "JWT", kid: input.kid ?? LEGACY_KID };
   const payload = {
     iss: input.issuer,
     aud: CONSENT_TOKEN_AUDIENCE,

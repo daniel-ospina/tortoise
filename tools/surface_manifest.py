@@ -242,6 +242,85 @@ RENDERED_FILE = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 # comments, so without this a re-cut would silently delete the OVERRIDES marker (and every
 # other explanatory line above the first key). The marker's durable homes are the tool
 # docstrings; this is the copy a reader of the ARTIFACT sees, kept across re-cuts.
+#: The per-row PROVENANCE record — a RECORD, not a value (#13626 review ISSUE 3). It lives in
+#: the header because `cut` re-emits the header alone; as a per-row comment a re-cut deletes it,
+#: which is what happened to it under #13626. Held as its own string so the guard below reads
+#: the exact bytes the artifact carries.
+_PROVENANCE_RECORD = """\
+#
+# ⛔ PROVENANCE OF THE PER-ROW CELLS — a RECORD, not a value, and it lives HERE because `cut`
+# re-emits this header ALONE. Every `served_from` in the rows below is `_code_digest` of its
+# handler's CODE OBJECT: a re-cut writes it, and a DECLARATION change may re-stamp it by hand (see
+# the `#12547` note above, where exactly that happened) — it is never typed from memory. Until
+# #13626 this record sat as a per-row comment above the
+# `tortoise_query` row, which is the only form a re-cut DELETES: that PR's `cut` took 53 per-row
+# `  #` lines with it — including the file's copy of the generated-artifact `OVERRIDES:` marker
+# below, one of the four the merge base carried (that cut left three) — and nothing reds on a
+# comment, so the loss was silent (review ISSUE 3). It is in the header now so
+# that the next cut re-emits it instead of charging the next lane to re-derive it.
+#
+# WHY A CELL CAN GO STALE. `#13075` (`a09a0b3840`, "the currency rule reads the position axis")
+# edited `def tortoise_query` IN PLACE — its diff is three hunks INSIDE the handler, four in the
+# file, the fourth being the module-level `from tortoise.live import is_terminal_status` import,
+# so that count is scoped to the handler and no reader should take it as the file's total.
+# `served_from` is `_code_digest` of that handler's CODE OBJECT, so an edit inside it re-stamps
+# the cell, and that row went stale: `surface_manifest.py check --provenance-strict` read it as a
+# FAIL on `main` ITSELF — measured on pristine `main` worktrees at `55ec2c71b1` and at
+# `3d437429e9` (the commit whose ONLY changed file was `config/ci-surfaces.yml` — a `cut` by
+# definition also writes THIS file, so that commit cannot have refreshed the row, which is what
+# makes the reading a FAIL on `main` rather than a stale probe): rc=1, and the identical
+# `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8` pair. Re-derive it with that command;
+# never type a digest from memory.
+#
+# ⛔ THREE SEPARATE EVENTS, which the old per-row copy ran together. (a) The CELL moved in
+# `#13052`'s cut (`4a5ffa0a14a0`), which re-stamped this row `5864fd98a914f746 ->
+# 59f8f7e5957d81d8`. (b) The RECORD was CREATED by #11609 P2's commit `2c1065a52ed8` — that
+# batch GREW `tortoise_check_confidence` (the RECOMPUTE/RECALL arms, then the refusal that an
+# arm-only argument names its arm), so ITS cell moved (`2457694ae1e3fd91 -> 4f5930ddfee59b8c`)
+# and the prose explaining the practice was added BESIDE this row; the manifest already carried
+# `59f8f7e5957d81d8` for `tortoise_query` in P2's parent, so P2 neither moved nor hand-held this
+# cell. (c) The DELETION came later, from #13626's re-cut, which is why the record lives in the
+# header now — nothing in P2 deleted it. In every case the cell was WRITTEN BY THE GENERATOR,
+# exactly as "Derived files re-cut, never hand-edited" says to.
+#
+# ⛔ A LATER `main` LANE RESTATED THIS AND GOT IT WRONG, so its block is folded into this one
+# instead of being kept twice. `#13000`'s `980f271acc` added eleven lines saying that row was
+# "refreshed here to the value the tree derives" and quoting `at 55` tools as "unchanged" —
+# but that commit changes no `served_from` line at all (the refresh was `#13052`'s `cut`, landed
+# earlier the same morning), and `#13052` had ALREADY retired seven doors, so 55 was a door count
+# behind on the day it was written (`counts.tools` was 48 in `980f271acc`) and 44 is what `rows`
+# carried only after the NEXT two batches retired four more (#11609 P1 two, P2 two; 40 live at
+# P6). Keeping both blocks
+# would leave this file asserting a count its own `rows` does not have — which is exactly what
+# `test_no_per_row_comment_quotes_a_stale_surface_count` reds on. The measurement it quoted is
+# preserved rather than erased: a pristine `main` at `2390101f68` read the same recorded/derived
+# pair this block already names two paragraphs up, so what is dropped here is the stale COUNT and
+# the wrong verb, not the fact.
+#
+# A full `cut` is deliberately NOT run from a docs branch. It is NOT owner-only — `p_cut.add_
+# argument("--commit", …)` carries no `required=True` and `build_doc` falls back to
+# `git rev-parse HEAD`, and `cmd_cut` carries no identity check — but it is gated on the owner's
+# approval DOCUMENT: `read_approval` reads `docs/product/canonical-mcp-tools.md` and `build_doc`
+# REFUSES when that file is missing (`_frontmatter` raises `SurfaceEvidenceUnreadable`) or
+# carries no `approval_status`. The operative reason here is narrower: a re-cut rewrites the
+# served-file digests (`served_from`/`served_attributes`), and with `--refresh-observations` it
+# ALSO re-derives every row's observed-usage columns from THIS machine's call log (without that
+# flag the committed evidence is carried forward) — a large, unreviewable diff either way, to buy
+# back a cell that is already correct on `main`. ⛔ And a re-cut no longer deletes this record
+# (that is why it lives here), so "protect the block" is not a reason to run one at all.
+#
+# OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the
+# source and RE-RUN the generator (buf/protoc baselines and the mainstream codegen convention
+# all state it, and it is the right default) — because a digest a generator can produce is only
+# half of this file's provenance: WHY a cell went stale, and which measurement resolved it, exist
+# only in prose, and a `cut` deletes every per-row block (so that prose lives in this header,
+# which a cut RE-EMITS, instead). "Just regenerate it" therefore regenerates the VALUE and
+# silently drops the record. The VALUE itself is still never hand-derived — it is the digest
+# `check --provenance-strict` compares. A reader holding the "always regenerate" page should put
+# it down here, not "fix" a row by cutting.
+"""
+
+
 MANIFEST_HEADER = (
     "# OVERRIDES: the frozen-snapshot-as-approval-baseline practice — a snapshot of the implementation cannot be the approved target; the target is read from docs/product/canonical-mcp-tools.md (owner, 27 MCP tools) and from the declared SDK surface in tortoise/__all__.py (owner, 40 methods; cross-checked against docs/product/beta-sdk-surface.md) — never from a count beside them.\n"
     "#\n"
@@ -334,15 +413,28 @@ MANIFEST_HEADER = (
     "# and `create_subject`/`create_object`/`create_event`/`create_document` →\n"
     "# `create_entity(type=...)`. NO row was archived: the archive is for doors with NO\n"
     "# destination (`archive/README.md`), and a forwarded name is still served.\n"
-    "# ⛔ WHY ONLY SEVEN. The other 25 live names absent from the 27-target are each protected by a\n"
-    "# RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the new rows so the\n"
-    "# next lane does not re-derive it: six READ doors + `check_structure` + `calibrate_summary`\n"
-    "# keep their `-> list[dict]` envelope (the #8482 repair), `issue_insight`/`session_context`/\n"
-    "# `search` keep a `rest_spec` (retiring the entry deletes a REST route), `query` is the paged\n"
-    "# destination of two already-retired pointers, `create_point`/`diary_write`/\n"
-    "# `compute_confidence` have no arm on their container, and nine destinations are not live on\n"
-    "# `main` yet. Lowering the pin to the LIVE count is what keeps it a growth pin: at 55 it would\n"
-    "# carry seven slots of slack and re-adding any of the seven would read green.\n"
+    "# ⛔ WHY ONLY SEVEN. At that cut the other 25 live names absent from the 27-target were each\n"
+    "# protected by a RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the\n"
+    "# new rows so the next lane does not re-derive it. ⛔ IT IS 17 NOW — and a CHECKED POPULATION,\n"
+    "# not prose: `tests/test_11609_door_retirement.py` asserts that the 10 `PROTECTED` names plus\n"
+    "# the 7 `NO_CONTAINER_YET` names COVER it (10 + 7 = 17), so a live door dropped from either\n"
+    "# table reds there instead of surviving as a comment. `PROTECTED` holds a retaining property:\n"
+    "# six READ doors plus `check_structure` and `calibrate_summary` keep their `-> list[dict]`\n"
+    "# envelope (the #8482 repair), `search` is held by that envelope and no longer by its\n"
+    "# `rest_spec` (`GET /v1/search` is a hand-written route the row does not create — §1.5\n"
+    "# measured the coupling false; the CELL is recorded, the ROUTE is not a retention reason),\n"
+    "# and `query` is the paged destination of two already-retired pointers.\n"
+    "# `NO_CONTAINER_YET` holds a destination that is not live on `main` yet: `delete`,\n"
+    "# `create_edge`/`create_operator`, `events_poll`, `org_create`, `ingest`, `list_graphs`.\n"
+    "# ⛔ `issue_insight`/`session_context`, `create_point`/`diary_write` and\n"
+    "# `compute_confidence`/`recall` are NOT held names any more: #11609 lanes P6, P1 and P2 retired\n"
+    "# each pair FORWARD in the batch that made its stated reason UNTRUE — for the P1/P2 pairs that\n"
+    "# batch BUILT the missing arm; for the P6 `rest_spec` pair lane P4 MEASURED the coupling false\n"
+    "# and P6 ACTED on the measurement, which the door-retirement file and the lane-E block state\n"
+    "# in those words. So a lane that restores one reverses a recorded decision and reds the\n"
+    "# door-retirement file it is editing.\n"
+    "# Lowering the pin 55 → 48 AT THAT CUT is what keeps it a growth pin: 48 was the live count\n"
+    "# then, so at 55 the seven slots that wave vacated would have read green if re-filled.\n"
     "#\n"
     "# THE BASELINE BELOW IS A FREEZE OF WHAT EXISTS, NOT THE APPROVED TARGET. It exists so\n"
     "# drift is visible (tools/surface-guard.py). The approved TARGET is recorded in\n"
@@ -387,7 +479,7 @@ MANIFEST_HEADER = (
     "# `status=ahead, behind=0` is an ancestor and `status=diverged` is a lane commit that will\n"
     "# exist nowhere once its branch is deleted (a lane SHA still RESOLVES today, so a check that\n"
     "# only asks that question calls it fine — which is why this record also asks about ancestry).\n"
-)
+) + _PROVENANCE_RECORD
 
 
 class SurfaceEvidenceUnreadable(Exception):
@@ -714,11 +806,37 @@ _REMOTE_HAS_NO_SUCH_OBJECT = re.compile(
     r"not our ref|couldn't find remote ref", re.IGNORECASE)
 
 
+#: Our own sentinel for "git did not answer inside `_GIT_TIMEOUT_S`", and the bound itself.
+#: ⛔ A BOUNDED git call is what keeps this gate from HANGING a required check: every
+#: `_git` call here asks about ONE object, and on a `blob:none` promisor clone an absent
+#: object makes git ask the remote and then walk the local pack store — measured 2026-11-19
+#: on the `cmux` cell: `git cat-file -e deadbeef…` burned 115 s of CPU and still had not
+#: returned, because that checkout's object store had grown to 27,394 packfiles (a
+#: multi-pack-index does NOT help: the cost is the per-pack walk, not the lookup). With no
+#: bound, `surface-guard` blocks until pytest's own 300 s timeout — so the guard does not
+#: refuse, it never answers. A bound converts that into the verdict this function already
+#: has for "this clone cannot answer": UNPROVABLE, which is printed and is never a pass.
+_GIT_TIMEOUT_S = 30
+_GIT_TIMED_OUT_RC = 124
+
+
 def _git(*args: str) -> tuple[int, str, str]:
-    """(rc, stdout, stderr) for one `git` run rooted at ROOT; rc 127 when git is absent."""
+    """(rc, stdout, stderr) for one `git` run rooted at ROOT.
+
+    rc 127 when git is absent; `_GIT_TIMED_OUT_RC` when it did not answer inside
+    `_GIT_TIMEOUT_S` (see `cut_commit_verdict`'s arm for that sentinel — git itself never
+    returns 124, so the value cannot be mistaken for one of its own failures).
+    """
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+            ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return _GIT_TIMED_OUT_RC, "", (
+            f"git {' '.join(args)} did not answer within {_GIT_TIMEOUT_S}s and was abandoned — a "
+            "partial/promisor clone can block here while it asks the remote for an object it "
+            "does not have"
         )
     except OSError as exc:  # no git binary, or no repository to run it in
         return 127, "", str(exc)
@@ -748,8 +866,9 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
       and its absence is PROVEN: either the repository is not shallow (nothing is missing
       for it to hide in), or a promisor remote was asked and answered that it has no such
       object. A fabricated provenance is a refusal.
-    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered.
-      NOT a pass, and never silent: `cmd_check` prints the arm it took.
+    * `unprovable` — git is unavailable, or this clone is shallow and no remote answered, or
+      the probe was abandoned on the clock (`_git`'s bound). NOT a pass, and never silent:
+      `cmd_check` prints the arm it took.
     """
     # ⛔ ONE shape predicate, not two (#11057 review P2): this arm has its own history — an
     # inline 40-char regex — while `cmd_cut`'s write gate and `provenance_report`'s arm used
@@ -767,12 +886,32 @@ def cut_commit_verdict(sha: str) -> tuple[str, str]:
         return CUT_RESOLVED, ""
     if rc == 127:
         return CUT_UNPROVABLE, f"git is not runnable here ({stderr.splitlines()[-1:] or ['']})"
+    # ⛔ ORDERED BEFORE the remote-disproof and non-shallow arms: a git call that was
+    # ABANDONED on the clock (`_git`'s own sentinel) answered nothing, so it can neither
+    # prove the object exists nor prove it does not. Reading it as `fabricated` would be a
+    # FALSE REFUSAL on a healthy tree whose lookups are merely slow; reading it as
+    # `resolved` would be a false pass. It is exactly `unprovable` — and never silent, since
+    # `cmd_check` prints the arm it took.
+    if rc == _GIT_TIMED_OUT_RC:
+        return CUT_UNPROVABLE, (
+            f"`git cat-file` did not answer within {_GIT_TIMEOUT_S}s, so this clone cannot say "
+            f"whether it holds that commit ({stderr.splitlines()[0] if stderr else '(no output)'})"
+        )
     if _REMOTE_HAS_NO_SUCH_OBJECT.search(stderr):
         return CUT_FABRICATED, (
             "`git cat-file` asked the remote for it and the remote answered that it has no "
             f"such object — git said: {stderr.splitlines()[0] if stderr else '(no output)'}"
         )
     rc_shallow, shallow, _ = _git("rev-parse", "--is-shallow-repository")
+    # ⛔ THE SAME ARM ON THE SECOND PROBE. `_git` bounds both calls, so a `rev-parse` that was
+    # ABANDONED on the clock (rc 124) answers nothing about shallowness — and falling through to
+    # the arms below would report `fabricated`, i.e. a PROVEN ABSENCE from a probe that never
+    # ran, which the block above says must never happen. A shallow probe timing out is as
+    # unprovable as the object probe timing out.
+    if rc_shallow == _GIT_TIMED_OUT_RC:
+        return CUT_UNPROVABLE, (
+            f"`git rev-parse --is-shallow-repository` did not answer within {_GIT_TIMEOUT_S}s, "
+            "so this clone cannot say whether the object is merely unfetched")
     if rc_shallow == 0 and shallow == "true":
         return CUT_UNPROVABLE, (
             "this clone is SHALLOW, so the object may simply not have been fetched (git "

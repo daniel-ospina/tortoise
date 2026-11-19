@@ -100,6 +100,14 @@ export interface Env {
   /** #3524 §9: the consent bridge's HMAC key. Absent ⇒ the mint route answers 503 (§2.3). */
   CONSENT_TOKEN_SECRET?: string;
   /**
+   * #10794 — the `kid`-keyed key SET: `<kid>=<secret>,<kid>=<secret>`. When set it is AUTHORITATIVE
+   * and replaces `CONSENT_TOKEN_SECRET` for signing and verification (never merged). Absent ⇒ the
+   * single-secret deployment, exactly as before this change.
+   */
+  CONSENT_TOKEN_KEYS?: string;
+  /** #10794 — which kid in the set MINTS. Unset ⇒ the first kid in `CONSENT_TOKEN_KEYS`. */
+  CONSENT_TOKEN_CURRENT_KID?: string;
+  /**
    * #3524 §2.1 `iss` — the minting origin the AS accepts. The AS resolves this from the SAME knob
    * and the same literal default, and compares it byte-exactly, so this is deliberately NOT derived
    * from `APP_ORIGIN` — set it only when the AS's own `CONSENT_TOKEN_ISSUER` is set to match.

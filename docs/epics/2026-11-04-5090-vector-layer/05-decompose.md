@@ -144,7 +144,7 @@ claim and not an assertion:
   [comment `6779662659`](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6779662659),
   `#7879` → [comment `6779663836`](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6779663836) —
   to *"location decided (Postgres, `pgvector`, 2026-11-07); the work is `#4051`'s"*, each carrying the two
-  caveats the old wording could not: **decided is not in force** (`TORTOISE_RECORD_VECTOR_LEG` defaults off)
+  caveats the old wording could not: **decided is not in force** (`TORTOISE_RECORD_VECTOR_LEG` defaults ON since `#13610`, with `=0` as the rollback — the read is gated per label on a coverage count, so the default is not the same as the record answering)
   and **V1 did not decide V3**. ⚠️ **Corrected while closing out `#11395`:** a lane that cites `#4051`
   comment `6713312036` as the ruling inherits a **withdrawn** scope — its v1 *"search AND traversal in
   Postgres"* was withdrawn by `#4051` comment `6713838871` — and the live ruling is `SEARCH-ARCHITECTURE.md`

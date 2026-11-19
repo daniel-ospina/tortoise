@@ -1067,8 +1067,9 @@ def _sanitize_for_log(value: str) -> str:
 # comment 5845912938: "Option 2 — lift the one-time load out of the bounded
 # section"). The collision it fixes: the first embedding request after a
 # process start runs ``EmbeddingModel.get()``, whose one-time load is sized
-# above this bound by the codebase's own constant (``_LOAD_TIMEOUT_S``, 90.0;
-# 270.0 in the test lane, #6960) and measured ~27s cold — so the request was
+# above this bound by the codebase's own constant (``_LOAD_TIMEOUT_S``, 300.0
+# since #13674; 90.0 when this was written, 270.0 in the test lane, #6960) and
+# measured ~27s cold — so the request was
 # refused 504 while the load still ran, order- and env-dependently (the
 # rotating `python-ci` red on `main`).
 #

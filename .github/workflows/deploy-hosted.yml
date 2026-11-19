@@ -705,6 +705,16 @@ jobs:
           # until this probe line exists AND the GitHub secret exists — a `gh-secret:`
           # declaration with no probe line reads as ABSENT (#4334).
           [ -n "$CONSENT_TOKEN_SECRET" ] && GH_PRESENT="$GH_PRESENT CONSENT_TOKEN_SECRET"
+          # #10794: the OPTIONAL key set (§2.3's rotation window). Optional is why it is
+          # GUARDED rather than unconditional: with no GitHub secret the AS stages nothing and
+          # stays on the single-secret shape, which is a fully supported deployment. It is
+          # declared anyway, because the alternative is what §2.3 step 1 met before the review —
+          # a value with NO managing source, whose only route was a hand-set value on the app
+          # that the provenance gate below refuses as UNDECLARED (#13721 review, Issue 1).
+          # ⛔ Do NOT spell the flyctl incantation in this `run:` block: the provenance checker
+          # classifies a step as a PROPAGATION step by matching that command anywhere in its shell
+          # text, comments included, and would then execute THIS block as a payload.
+          [ -n "$CONSENT_TOKEN_KEYS" ] && GH_PRESENT="$GH_PRESENT CONSENT_TOKEN_KEYS"
           [ -n "$TORTOISE_RECORD_DSN" ] && GH_PRESENT="$GH_PRESENT TORTOISE_RECORD_DSN"
           [ -n "$TORTOISE_SECRET_PEPPER" ] && GH_PRESENT="$GH_PRESENT TORTOISE_SECRET_PEPPER"
           [ -n "$TURNSTILE_SECRET_KEY" ] && GH_PRESENT="$GH_PRESENT TURNSTILE_SECRET_KEY"
@@ -788,6 +798,8 @@ jobs:
           # #3524 §9 step 1 — CONSENT_TOKEN_SECRET is read by the provenance gate's probe
           # above, so it must be in scope for this step as well as the propagation step.
           CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
+          # #10794 — read by the probe line above, so it must be bound here too.
+          CONSENT_TOKEN_KEYS: ${{ secrets.CONSENT_TOKEN_KEYS }}
           TORTOISE_RECORD_DSN: ${{ secrets.TORTOISE_RECORD_DSN }}
           TORTOISE_SECRET_PEPPER: ${{ secrets.TORTOISE_SECRET_PEPPER }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
@@ -978,6 +990,11 @@ jobs:
           # exactly — the propagation is a permanent no-op that stages nothing, the deploy
           # stays green, and the verifier answers 503 forever with no gate able to see it.
           CONSENT_TOKEN_SECRET: ${{ secrets.CONSENT_TOKEN_SECRET }}
+          # #10794: the key SET's own binding in the PROPAGATION step's env. Same reasoning as
+          # the line above — the `ARGS+=` below reads `$CONSENT_TOKEN_KEYS` from THIS block, and
+          # an unbound variable would make the propagation a permanent no-op. Guarded, so an
+          # absent GitHub secret stages nothing and the AS keeps the single-secret shape.
+          CONSENT_TOKEN_KEYS: ${{ secrets.CONSENT_TOKEN_KEYS }}
           GH_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_CALLBACK_URL: ${{ secrets.GH_CALLBACK_URL }}
@@ -1280,6 +1297,13 @@ jobs:
           # answers a typed 503 `temporarily_unavailable` (fail-closed) rather than minting
           # against a default. A HARDCODED default here would be a forgeable consent.
           [ -n "$CONSENT_TOKEN_SECRET" ] && ARGS+=(CONSENT_TOKEN_SECRET="$CONSENT_TOKEN_SECRET")
+          # #10794: the key set, staged like the single secret above. Guarded — an absent GitHub
+          # secret stages nothing, so the AS stays on the single-secret shape (fully supported)
+          # rather than being handed an empty set (which is a malformed set, i.e. unprovisioned).
+          # CONSENT_TOKEN_CURRENT_KID is NOT staged here: it is non-secret config, so it lives in
+          # `fly.toml [env]` and is declared `fly-toml-env` in the manifest — a Fly SECRET of that
+          # name would shadow the versioned value and the provenance gate refuses that.
+          [ -n "$CONSENT_TOKEN_KEYS" ] && ARGS+=(CONSENT_TOKEN_KEYS="$CONSENT_TOKEN_KEYS")
           [ -n "$SENTRY_DSN" ] && ARGS+=(SENTRY_DSN="$SENTRY_DSN")
           # #9548 / epic #7879 R1: the Postgres record's arming surface.
           # Presence-based (`record_writer.RECORD_DSN_ENV`) — unset ⇒ NOT_ARMED ⇒

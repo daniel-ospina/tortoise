@@ -61,6 +61,12 @@ public license.html
 public logo.png
 public privacy.html
 public product.html
+# The niche product page (#13645). Served at the COMPANY ROOT
+# (`premiselabs.co/tortoise-for-product-teams`) by Pages' pretty-URL resolution
+# of this asset — NOT under `/tortoise` (see `_middleware.ts`'s `ROOT_PAGE`).
+# `public` because the deploy MUST stage it: an excluded row here is a 404 on
+# the URL the owner asked for.
+public tortoise-for-product-teams.html
 public robots.txt
 public security.html
 public self-hosted.html

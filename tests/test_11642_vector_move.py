@@ -417,21 +417,48 @@ def test_the_migration_declares_the_one_embedding_width():
 
 # ── the arming surface ─────────────────────────────────────────────────────
 
-def test_the_cutover_is_OFF_by_default(monkeypatch):
-    """The record is a fold with NO backfill, so it cannot be the only source.
+def test_the_cutover_is_ON_by_default_and_an_explicit_OFF_is_the_rollback(monkeypatch):
+    """#13610: the arm is the DEFAULT; an explicit falsy is the way back.
 
-    Until the existing vectors are in the record, making it the dense leg's sole
-    source would drop every pre-existing point out of the pool — silently, since
-    the shortfall assertion counts `available` with the record's own predicate
-    and so cannot see material only the graph holds (`#5090` Q2). So arming is a
-    deliberate act, on the same posture as `TORTOISE_EMBED_GATE` and
-    `record_serve.SERVE_MODE`.
+    ⛔ THIS PIN USED TO ASSERT THE OPPOSITE, AND THE INVERSION IS THE ISSUE, not a
+    settled question re-opened by a lane. While the arm was opt-in the target
+    design was reachable only by an env var a customer had to discover, so every
+    deployment that had not discovered it kept storing AND serving the graph's own
+    copy — the move was deployed and never taken (`#13610`). The old pin's REASON
+    still holds and is now answered where it belongs:
+
+    * it said *"the record is a fold with NO backfill, so it cannot be the only
+      source"* — true, and it is why the default is paired with
+      :func:`record_vector.coverage`: the gated labels are only served from the
+      record once a COUNT proves the record holds a vector for every vector-bearing
+      node the graph has, and until then the graph branch answers and the graph
+      write is retained (`mirror_required`). The default decides WHICH STORE
+      ANSWERS first, never WHICH ONE IS TRUSTED;
+    * it said a default-on move *"would silently drop every vector the record does
+      not yet hold"* — it would, if the arm were unconditional. It is not: with no
+      `graph_population` the count cannot be taken, coverage is UNVERIFIED, and the
+      gated labels decline to the graph. See
+      `tests/test_13610_graph_vector_copy.py::
+      test_unverified_coverage_answers_from_the_graph_and_not_a_short_record`.
+
+    ⛔ AND #11660's requirement is kept by the switch's OTHER direction being a real
+    rollback: an explicit `0` restores the pre-#13610 posture whole — the graph arms
+    answer again AND the graph write resumes — without dropping a stored vector.
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.delenv("TORTOISE_RECORD_JOURNAL", raising=False)
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
-    assert record_vector.searcher(carried=("o", "g")) is None, (
-        "the cutover armed itself — a default-on move would silently drop every "
-        "vector the record does not yet hold")
+    # A record DSN and a tenant but NO arming variable: the default is ON.
+    assert record_vector.cutover_armed() is True
+    assert record_vector.searcher(carried=("o", "g")) is not None, (
+        "the cutover is the default again — an unset deployment is meant to serve "
+        "goals/people from the record")
+
+    # The ROLLBACK: explicit falsy, every spelling the one resolver accepts.
+    for spelling in ("0", "false", "no", "off"):
+        monkeypatch.setenv(record_vector.ARMING_ENV, spelling)
+        assert record_vector.cutover_armed() is False, spelling
+        assert record_vector.searcher(carried=("o", "g")) is None, spelling
 
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     assert record_vector.searcher(carried=("o", "g")) is not None
@@ -450,8 +477,14 @@ def test_the_gap_level_follows_the_cutover_not_the_dsn(monkeypatch):
     says the read *is* served from Postgres. The one line an operator reads in
     an incident said the opposite of the truth.
 
-    Falsifiable: the pre-fix predicate returned True on the first case below, so
-    the first assertion fails.
+    Falsifiable: the pre-fix predicate returned True on the rollback case below,
+    so the middle assertion fails.
+
+    ⛔ #13610 MOVED THE FIRST CASE'S SPELLING, NOT ITS MEANING. "DSN set, cutover
+    unset" is now the ARMED posture (the default), so the unarmed store this pin is
+    about is written ``TORTOISE_RECORD_VECTOR_LEG=0`` — the rollback. The claim is
+    unchanged and still falsifiable in the same direction: a DSN alone must not earn
+    the exemption, and on the rollback posture it still does not.
     """
     from tortoise import projection
 
@@ -460,15 +493,34 @@ def test_the_gap_level_follows_the_cutover_not_the_dsn(monkeypatch):
         "moved, the three cases below answer False for a different reason")
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setenv(record_vector.ARMING_ENV, "0")
+    assert projection.vector_index_retired() is False, (
+        "a DSN alone muted #4997's WARNING on a ROLLED-BACK store — the index is "
+        "dropped and nothing replaced it, which is the state the warning is FOR")
+
+    # ⛔ #13610'S THIRD CONDITION, and it is the OPERATOR'S WORD, not the request's
+    # tenant (#13631). `#13610` made the arm the DEFAULT, which collapsed
+    # `DSN ∧ armed` back to "a DSN resolves" — the false "yes" #11660 round 6 P1-3
+    # is about — because `_ensure_indexes()` runs at construction, BEFORE any
+    # coverage can exist, and at that moment every served label is declining to the
+    # GRAPH. So the DROP asks a question knowable at setup and store-scoped: did the
+    # deployment SPELL the arm? An unset switch is armed for the READ and silent for
+    # the DROP.
     monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
     assert projection.vector_index_retired() is False, (
-        "a DSN alone muted #4997's WARNING on an unarmed store — the index is "
-        "dropped and nothing replaced it, which is the state the warning is FOR")
+        "an ARMED-BY-DEFAULT store retired its in-graph index — at setup no coverage "
+        "exists, every gated label is still answering from the GRAPH, and the move "
+        "takes the index off the answering leg (#4997's defect with its alarm "
+        "muted). The drop is an operator statement: spell the arm (#13631)")
+
+    monkeypatch.setenv(record_vector.ARMING_ENV, "0")
+    assert projection.vector_index_retired() is False, (
+        "the explicit rollback retired the index")
 
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     assert projection.vector_index_retired() is True, (
-        "an armed cutover with a DSN IS the replacement — the exemption is "
-        "earned, so the line may be an INFO")
+        "an EXPLICITLY armed cutover with a DSN is the operator saying the record "
+        "serves the dense read — the exemption is earned, so the line may be an INFO")
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN")
     assert projection.vector_index_retired() is False, (

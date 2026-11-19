@@ -653,7 +653,7 @@ measured p50, which the row above puts at 8.9 m; a projection is not a measureme
 not conflate them), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.35 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.36 m`** from the
 committed `durations` map (re-derived from the map, not restated: registering
 `test_10371_nonpoint_lifecycle_guard.py` in `slow_files` moved this projection from the `8.64 m` →
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
@@ -752,7 +752,9 @@ If the pool grows, invariant 2 permits a larger cap — and that move is not fre
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.1767 m ≈ 16.35 m` (the `8.18` above is that per-leg figure rounded), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+slow `2 × 8.18 m ≈ 16.36 m` (the `8.18` above is that per-leg figure rounded; `#13685`'s
+`slow_files` entry moved the job wall `8.1767 × 2 ≈ 16.35 m` → `16.36 m` by adding one 2.0-weight
+file to the pool, and the pin recomputes both halves), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
 ⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**

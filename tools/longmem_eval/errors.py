@@ -43,6 +43,8 @@ from tortoise.model_adapters import classify_llm_error
 from tortoise.retry import (  # noqa: F401  — re-exported for the eval harness
     WriteStageRetriesExhausted,
     call_with_predicate,
+    graph_abort_family,
+    retryable_aborted_write,
     retryable_transient,
 )
 
@@ -82,6 +84,150 @@ def fatal_census(error_census: dict | None) -> dict:
 
 _SITES = ("reader", "judge", "ingest")
 
+# ── #8486 F1: the recoverable-class set — ONE source of truth ──────────────
+#: The bare classes a persisted failure entry may be RE-ATTEMPTED from.
+#:
+#: ``retryable`` in a failure record answers ONE question — *is re-attempting
+#: this question plausible?* — and it is deliberately ONE half of the
+#: eligibility test, not the whole of it. The gate (``run.py``'s
+#: ``_retry_failed_skip_reason``) requires ``error_class ==
+#: "ingest:retries_exhausted"`` as well, so a ``reader:``/``judge:`` entry can
+#: record ``retryable: true`` and still never be re-attempted — the tier, not
+#: the flag, is what scopes ``--retry-failed`` to the write-path surface
+#: (the plan's P2-G). Read the flag as "recoverable in principle".
+#:
+#: It is derived from the entry's ``error_class`` through
+#: :func:`class_is_recoverable`, gated by ONE further condition —
+#: :func:`failure_is_recoverable` also requires that the exception be INFRA
+#: rather than a deterministic bug — and from nothing else. The class alone is
+#: deliberately NOT ``retryable_transient`` (the write-path
+#: predicate in ``tortoise/retry.py``), which answers a DIFFERENT question —
+#: *may THIS write be retried at THIS layer right now* — and returns False for
+#: error families that are recoverable at a higher layer (a replaced-graph /
+#: write-lock ``ResponseError`` is retried by ``retryable_aborted_write`` at the
+#: SDK write seam, so the outer layer must not, per retry.py's own docstring).
+#:
+#: Borrowing that predicate for the record is #8486 finding 1: a
+#: ``server:ResponseError`` graded ``ingest:retries_exhausted`` (recoverable)
+#: was written with ``retryable: false``, so the resume meant to pick it up
+#: skipped it — silently, because a skip is not an error.
+#:
+#: ⚠️ The class ALONE is not enough, and that is why the gate is a second
+#: function rather than this set read directly. ``eval_failure_class`` widens
+#: EVERY ``unknown``-class exception at ingest to ``retries_exhausted``
+#: (#1776), so a deterministic bug in our own extractor and a transient server
+#: refusal wear the SAME class. The plan pinning ``--retry-failed`` states the
+#: complement explicitly — "Deterministic extractor bugs (``retryable=False``)
+#: remain excluded — that is the guard against re-burning ~25 min on
+#: deterministic failures that also widen to ``retries_exhausted``"
+#: (``docs/plans/2026-08-27-1786-infra-resilience.md``, Task 2 Step 2). A
+#: class-only flag would drop that guard as collateral damage from fixing
+#: finding 1, so :func:`failure_is_recoverable` keeps it.
+#:
+#: ``transient`` / ``unknown`` cannot reach a persisted entry today
+#: (``eval_failure_class`` converts both to ``retries_exhausted``); they are
+#: listed so the set is the VOCABULARY's answer, not a restatement of one
+#: branch — a future class that stops converting still grades coherently.
+RECOVERABLE_EVAL_CLASSES = frozenset({"transient", "unknown", "retries_exhausted"})
+
+
+def class_is_recoverable(error_class: str | None) -> bool:
+    """True iff ``<site>:<class>`` names a RECOVERABLE eval error class.
+
+    Reads the class half of the site-prefixed census key (``ingest:retries_
+    exhausted`` → ``retries_exhausted``); a bare class (``ingest``, the
+    structurally-fatal/parse ingest veto) is read as itself and is NOT
+    recoverable. ``None``/empty → False (an entry with no class is never
+    re-attempted — the resume gate rejects it on its own class check first).
+
+    This is the CLASS half of the answer only; the re-attempt decision is
+    :func:`failure_is_recoverable`.
+    """
+    cls = str(error_class or "").rsplit(":", 1)[-1].strip()
+    return cls in RECOVERABLE_EVAL_CLASSES
+
+
+def infra_failure(exc: BaseException) -> bool:
+    """True iff ``exc`` is an INFRA failure rather than a deterministic bug.
+
+    The one signal ``error_class`` cannot carry (see the note on
+    :data:`RECOVERABLE_EVAL_CLASSES`): ``eval_failure_class`` widens both an
+    ``unknown``-class server refusal and an ``unknown``-class ``RuntimeError``
+    in our own extractor to ``<site>:retries_exhausted``. This answers the
+    other half — *would re-running the same question plausibly succeed?*
+
+    Deliberately narrow, because a false True costs two ~25-minute re-burns
+    per question while a false False costs a retained entry an operator can
+    see and hand-recover:
+
+    * ``retryable_transient(exc)`` — the write seam's own transport/provider
+      predicate (``tortoise/retry.py``); an extractor LLM transient
+      (``requests.Timeout``/``URLError``) is in scope by the plan's P2-2 pin.
+    * ``graph_abort_family(exc)`` — the engine ABORTED the statement because the
+      graph was deleted or replaced (``_GRAPH_ABORT_RE``). This is the family
+      the smoke's record is MOST CONSISTENT WITH, and the reason finding 1
+      exists. ⚠️ Consistency, not identification: ``repr(ResponseError)`` is
+      ``'server:ResponseError'`` and drops the server's sentence, which is
+      finding 2's own premise, so the record cannot name which family the
+      smoke hit — a bare query timeout would persist the identical record and
+      is deliberately left excluded below. The mandated rung-10 re-run is what
+      confirms it; nothing here claims it has been confirmed.
+    * ``retryable_aborted_write(exc)`` — the write-slot refusal and the
+      MISCONF/disk-full family (``_WRITE_LOCK_RE`` / ``_MISCONF_RE``), which
+      the plan's P1-7 pin already treats as re-attemptable. ``graph_exists`` is
+      omitted on purpose: that argument gates the graph-abort arm ONLY, which
+      the line above decides from the error text, so the omitted probe is not
+      a silent refusal of anything in scope here.
+
+    ⛔ NOT ``isinstance(exc, redis.exceptions.RedisError)``. That base class is
+    emphatically not infra: it covers the deterministic refusals — ``WRONGTYPE``
+    (the client sent the wrong operation for the key), ``NOPERM`` (an ACL that
+    will refuse again on every attempt), ``ERR unknown command``, and
+    ``redis.exceptions.DataError``, which redis-py's ENCODER raises before a
+    byte reaches the server. Marking those recoverable re-introduces exactly
+    the burn the plan's guard forbids, at 2 × ~25 min per question.
+
+    Everything else — a ``TypeError``/``KeyError``/``RuntimeError`` from our
+    own code, and the deterministic redis refusals above — is excluded.
+
+    ⚠️ The one behavioural delta this narrowing makes, in both directions.
+    These three families match none of the three predicates, so they persist
+    ``retryable: false`` where the ``isinstance(exc, RedisError)`` arm this
+    replaced said ``true``: a bare ``ResponseError('Query timed out')``,
+    ``ReadOnlyError`` (a replica refusing writes) and ``OutOfMemoryError``.
+    ⛔ That arm existed only on this PR's own intermediate head — ``main``
+    derives the flag from ``retryable_transient`` alone, which is False for all
+    three — so against ``main`` this is not a flip; it is the fix returning to
+    main's answer for these families. The direction is the safe one (a
+    persisted ``true`` is what spends ~25 min per attempt; a false ``False``
+    leaves a retained entry an operator can see and hand-recover) and it is NOT
+    free: a server query timeout at ingest is genuinely transient, so a resume
+    skips it until someone admits the family on purpose. ``LOADING`` is NOT in
+    that list — ``redis.exceptions.BusyLoadingError`` subclasses
+    ``ConnectionError``, so ``retryable_transient`` admits it and the flag
+    stays ``true``. Admitting the other three is a separate decision with its
+    own budget question, recorded in the plan (§12) and pinned both ways by
+    ``tests/test_longmem_failure_record_coherence.py::
+    test_the_transient_value_redis_families``.
+    """
+    return (retryable_transient(exc)
+            or graph_abort_family(exc)
+            or retryable_aborted_write(exc))
+
+
+def failure_is_recoverable(exc: BaseException, *,
+                           error_class: str | None) -> bool:
+    """The persisted ``retryable`` flag: recoverable class AND infra failure.
+
+    Both conditions are required and they answer different questions, which is
+    why a failure record must not carry either alone (that is #8486 finding 1,
+    the flag and the class contradicting each other): ``error_class`` says
+    *where in the taxonomy this landed* (and hence whether the tier admits
+    re-attempts at all), ``infra_failure`` says *whether the blame is the
+    environment or our code*.
+    """
+    return class_is_recoverable(error_class) and infra_failure(exc)
+
 # ── #1786/#1806 retry budget constants (results-relevant knobs) ────────────
 #: Write-stage retry count (R1): a transient redis TimeoutError/ConnectionError
 #: on an un-timed graph write is retried up to this many times before the
@@ -94,10 +240,31 @@ INGEST_WRITE_RETRIES = 2
 #: DISARMED during ``--retry-failed`` resume re-attempts, so the worst-case
 #: re-burn budget is 2 x ~25 min (1 in-run R2 + 1 resume).
 INGEST_QUESTION_RETRIES = 1
-#: Resume re-attempt cap (R3): the persisted ``attempts`` field bounds
-#: ``--retry-failed`` re-attempts across processes (the in-run R2 counts as
-#: the first attempt).
-RESUME_ATTEMPTS_CAP = 2
+#: Resume re-attempt cap (R3): the persisted ``attempts`` field bounds the
+#: number of PIPELINE ATTEMPTS a question may consume across processes — the
+#: initial attempt is 1, the in-run R2 makes it 2, each failed
+#: ``--retry-failed`` re-attempt adds one. At this value the documented budget
+#: is preserved EXACTLY: a question that exhausted the write-stage retries and
+#: its in-run R2 (2 attempts) still gets its one resume (attempt 3).
+#:
+#: #8486 finding 1 — why the field and this cap moved together. The field used
+#: to count only RE-BURNS (a provider failure that never entered the
+#: write-stage loop started at ``0``), so a persisted record could say
+#: ``error_class=ingest:retries_exhausted`` — "the retry budget burned" — with
+#: ``attempts: 0``, "nothing was tried", next to ``retryable: false``. Two
+#: numbers, three wrong readings. Counting attempts MADE is the honest reading
+#: of a field named ``attempts``, and it is what an operator needs to tell a
+#: 12-minute ingest that failed once from one that failed three times. The cap
+#: is +1 (2 → 3) so the SAME worst-case recovery surface is preserved —
+#: TWO re-burns either way, ~2 × 25 min: a question that exhausted the
+#: write-stage retries and its in-run R2 (attempts 2) burns them as R2 + one
+#: resume (3), and a plain initial failure (attempts 1) burns two resumes
+#: (2, then 3). ⚠️ Only the PLAIN path gets two resumes; the R2 path gets one
+#: because R2 itself was the first re-burn. A resumed checkpoint
+#: written under the old accounting is refused by the fingerprint (the value
+#: rides ``resume_attempts_cap``), which is the correct outcome — its
+#: ``attempts`` numbers would be read two ways.
+RESUME_ATTEMPTS_CAP = 3
 
 # ══ PRODUCT-PARITY NOTE (WIRED — shipped to product in this PR) ══════════
 # The write-stage retry machinery below (``retryable_transient`` /
@@ -164,7 +331,7 @@ def eval_failure_class(exc: BaseException, *, site: str) -> str:
     # (is_transient(parse-class) is True per P2's unknown-safe rule, so the
     # coarse class is checked, not is_transient.)
     if cls.split(":", 1)[1] in ("transient", "unknown"):
-        return f"{site}:retries_exhausted"
+        return f"{site}:retries_exhausted"  # recoverable — see class_is_recoverable
     if site == "ingest":
         return "ingest"
     return cls

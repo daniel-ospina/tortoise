@@ -2673,6 +2673,55 @@ CONSENT_PREVIEW_PATH = "/oauth/consent/preview"
 CONSENT_TOKEN_HEADER = "X-Consent-Token"
 
 
+# ⛔ ONE WARNING PER DISTINCT unprovisioned FAULT, PER PROCESS (#13721 review P2).
+# `consent_bounce_url` calls `_mint_consent_attempt_key` on EVERY unauthenticated `GET
+# /oauth/authorize` that carries no `attempt_key`, and the state it reports — no usable consent
+# key — is SUPPORTED and non-fatal (see that function's docstring): it repeats byte-identically
+# per request forever, so a WARNING per call is an unbounded, attacker-drivable write to the log
+# sink that carries no more information than its first occurrence. The latch is keyed on the fault
+# STRING, not on "have we warned at all", so a genuinely different fault is still new evidence and
+# still warns. (Today `mint_attempt_key` collapses every provisioning fault — unset, malformed set,
+# padded, reused — into one message, so this is one warning per process; the keying is what keeps a
+# future second fault from being folded silently into the first.)
+_unprovisioned_faults_warned: set[str] = set()
+
+
+def _mint_consent_attempt_key() -> str:
+    """A SIGNED attempt key for this hop (§9 step 4, #10794) — or an unsigned fallback.
+
+    The key must be one the app half can prove the AS minted, or a caller could choose a flow's key
+    by presenting its own (`start.ts` adopts only what verifies). `mint_attempt_key` is the Python
+    half of that value; the app half mints the SAME shape when it is handed none.
+
+    ⛔ THE FALLBACK IS UNSIGNED ON PURPOSE, and it is the pre-#10794 behaviour rather than a
+    half-measure: this hop runs BEFORE the consent arm's own provisioning check (an unauthenticated
+    visitor must still be handed to the app's sign-in leg while this AS has no key — see
+    `hosted_api.oauth_authorize`), so raising here would turn a missing key into a 500 on the
+    bounce. An unsigned value verifies NOWHERE, so the adopter treats it as absent and mints its
+    own: the flow completes within that request and only the cross-leg adoption degrades — which is
+    exactly the state the deployment is in, since it cannot verify anything either.
+
+    ⛔ THE LOG WRITE IS BOUNDED, because this runs on a PUBLIC endpoint. This function is reached
+    from `consent_bounce_url` on every bounce that carries no `attempt_key`, so logging the
+    unprovisioned state once per call would let any anonymous caller append unlimited lines to the
+    sink — for the least actionable state there is. The first occurrence of each distinct fault is
+    a WARNING; repeats degrade to DEBUG (`_unprovisioned_faults_warned`), so the operator keeps the
+    signal and the sink stops growing.
+    """
+    from tortoise.consent_token import mint_attempt_key
+    try:
+        return mint_attempt_key()
+    except ValueError as exc:
+        fault = str(exc)
+        first_of_its_kind = fault not in _unprovisioned_faults_warned
+        _unprovisioned_faults_warned.add(fault)
+        log = logger.warning if first_of_its_kind else logger.debug
+        log(
+            "the bounce cannot SIGN its attempt key (%s) — emitting an unsigned value, which the "
+            "app half will treat as absent and replace; the consent arm is unprovisioned", exc)
+        return secrets.token_urlsafe(32)
+
+
 def presented_consent_attempt_key(query: str) -> str:
     """The attempt key a query string PRESENTS, by the READERS' predicate.
 
@@ -2737,13 +2786,22 @@ def presented_consent_attempt_key(query: str) -> str:
     emission is single-keyed whatever rule chose it — so they never need to
     strip, and the emitter therefore keeps the adopted value's OWN bytes
     (padding included): a stripped emit would put the page's POST and this
-    link's key on different bytes. Neither of them strips ON ITS OWN, though, so a whitespace
-    `attempt_key` presented STRAIGHT to `/api/consent/start`, bypassing the AS,
-    is still adopted verbatim there; that predates this hop and is recorded in
-    #10487 rather than fixed silently here.
-    ⛔ #10487 is RETIRED by the fold that lands this hop, so the live home for
-    that residual is #10884, which is filed OPEN. Point a reader at the open
-    issue, not at a closed thread and not at this docstring.
+    link's key on different bytes.
+
+    ⛔ THE WHITESPACE ARM IS CLOSED by #10794, and this paragraph is its record.
+    A whitespace `attempt_key` presented STRAIGHT to `/api/consent/start`,
+    bypassing the AS, is no longer adopted verbatim: `start.ts` adopts a
+    presented key only when its MAC verifies (`verifyAttemptKey`), so a value
+    nobody minted — whitespace included — verifies nowhere and is replaced by a
+    freshly MINTED one. Stripping was never the protection; the MAC is, because
+    a well-formed CHOSEN key fails it too (RFC 9700's reused-value detection, not
+    a shape test).
+
+    What remains OPEN is the MINT arm, not the adoption arm: the entry leg still
+    invents a key when it is handed none, so a caller can begin a flow with a key
+    only it holds and the first-mover dead end survives. Tracked on #10884 and
+    #10865, both filed OPEN — point a reader there, not at a closed thread and not
+    at this docstring.
     """
     values = parse_qs(query, keep_blank_values=True).get(
         CONSENT_ATTEMPT_KEY_PARAM, [])
@@ -2830,9 +2888,14 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       inventing one on the insert, so the row is bound to the key the visitor's
       browser is actually carrying and the bounce's own return can reclaim it.
       ⚠️ It is PER-BOUNCE, not per-flow, and that is what it is: every call
-      mints a FRESH `secrets.token_urlsafe(32)` (a property this module's tests
-      pin as desirable — a key derived from the client-chosen, PUBLIC `state`
-      would be predictable, and this is the browser's only proof of ownership).
+      mints a FRESH 32-byte random part, now SIGNED with the current consent
+      key (a property this module's tests pin as desirable — a key derived from
+      the client-chosen, PUBLIC `state` would be predictable, and this is the
+      browser's only proof of ownership). The signature is what makes the
+      value MINTED-BY-THE-SERVER rather than merely well-formed (#10794): the
+      app half adopts a presented key only when its MAC verifies, so a caller
+      can no longer choose a flow's key by presenting its own. The fresh
+      random part is what keeps two bounces of one flow from sharing a value.
       So a KEYLESS re-entry AFTER the row exists mints a DIFFERENT key and is
       refused exactly as before — #10487's remaining hole, deliberately not
       closed in this lane (its OPEN home is #10884, filed rather than left in a
@@ -2894,7 +2957,7 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
         presented = decoded
         out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: presented}))
     if not presented:
-        out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)}))
+        out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: _mint_consent_attempt_key()}))
     inner = CONSENT_START_PATH + (("?" + "&".join(out)) if out else "")
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))

@@ -380,6 +380,23 @@ SOURCE_PATTERNS = {
                    "website/apps/dashboard/public/welcome.html",
                    "website/apps/dashboard/public/signup.html",
                    "website/self-hosted.html", "website/product.html",
+                   # #13645: the niche product page (`premiselabs.co/tortoise-
+                   # for-product-teams`) and the ONE pricing source both product
+                   # pages render from. `website/` is in NON_PYTHON_PREFIXES and
+                   # these are CONCRETE names, so without these rows a diff that
+                   # added the page or changed a price selected NOTHING —
+                   # measured: `select(["website/tortoise-for-product-teams.html"])`
+                   # -> `surfaces: []`, so the head/canonical/pricing guards and
+                   # `test_website_static.py`'s `TestPricingSourceIsShared` never
+                   # ran on the only change class that can re-stale them. Same
+                   # #1349/#3332/#3616 silent-drop class as the entries below.
+                   "website/tortoise-for-product-teams.html",
+                   "website/assets/tortoise-pricing.js",
+                   # #13645: this page's own preview card. The card guard resolves
+                   # EVERY page's `og:image` and holds it to its declared type,
+                   # size and a 40 KB content floor, so a replaced card is a
+                   # subject of that guard.
+                   "website/assets/product-teams-og.jpg",
                    # #2409: the public contact form's page. Registered here for the
                    # same reason as the rest of this tuple — a PR touching only
                    # this page must still select the guard that holds it.
@@ -1948,6 +1965,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_13629_entity_vector_retire.py::test_a_tools_only_diff_selects_this_pin.
              "tools/entity_vector_parity_census.py",
              "tools/strip_graph_entity_vectors.py",
+             # #13685: the BACKFILL that unblocks the retirement
+             # (`tools/entity_vector_backfill.py`) owns
+             # tests/test_13685_entity_vector_backfill.py (registered `core`, and a
+             # `slow_files` member because its acceptance leg mints a throwaway
+             # `pgvector/pgvector:pg16`). Same flat `tools/` swallow, and the stakes are
+             # the mirror image of the entry above: this tool is the one that FILLS, so a
+             # diff that dropped the `AND embedding IS NULL` guard, the exact-population
+             # digest, the two token refusals or the unmatched-node count would merge
+             # with every falsifier that catches those asleep — and the failure it would
+             # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
+             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
+             # and by
+             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
+             "tools/entity_vector_backfill.py",
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:

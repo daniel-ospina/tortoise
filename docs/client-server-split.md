@@ -325,10 +325,15 @@ whose biconditional reads this `**What this does NOT do**` paragraph itself. The
 `#10884` half is held by the two pins in `tests/test_oauth_consent_bff_routes.py` —
 `test_the_store_fault_residual_names_a_home_this_fold_does_not_close` (that
 module's docstring) and
-`test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close`
-(`presented_consent_attempt_key`'s own docstring) — because #10884's two residuals
-live in the CODE, not on this page: they red when the arm or the unstripped
-adoption goes away, and they cannot read a markdown paragraph at all.
+`test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so`
+(`presented_consent_attempt_key`'s own `THE WHITESPACE ARM IS CLOSED by #10794`
+marker) — because #10884's two residuals live in the CODE, not on this page, and
+neither pin can read a markdown paragraph at all. The store-fault pin reds when
+the `503 consent_store_unavailable` arm goes away. The adoption arm's subject is
+already **CLOSED by #10794** (`start.ts` adopts a presented key only when its MAC
+verifies), so that pin now reds the other way: if the MAC gate is removed while
+the docstring still declares the arm closed. What #10884 still holds is the MINT
+arm — a caller can begin a flow with a key only it holds.
 
 Both modules are staged into the client-only wheel (`client/build_client.sh`), and
 both have guards registered on the `api` CI surface:

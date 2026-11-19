@@ -142,6 +142,35 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_12855_outdated_rewrite.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
     ],
+    # #12186: the capstone-measurement file is declared HERMETIC (no DB, no graph,
+    # no docker, no network, no model call) in `config/ci-surfaces.yml`, and its
+    # three sites exist to pin the `run()` ARM that answers — not to reach a
+    # database. (1) `delenv` at the door test: `run()` has four `return 3` arms, so
+    # with an ambient URI the URI arm can answer for the door arm and the test
+    # stays green over a deleted door guard (measured in its own docstring); the
+    # environment is therefore pinned EMPTY. (2) `setenv rediss://`: proves
+    # execution reaches `FalkorProjection.from_uri` at all — the assertion is the
+    # raised sentinel, not a message. (3) `setenv postgres://`: pins the RUN()-LEVEL
+    # wiring, not the predicate. `_uri_refusal` is already pinned in both
+    # directions at the unit level (`test_the_uri_guard_accepts_every_scheme_the_
+    # product_itself_supports`), so deleting the PREDICATE would red those. What
+    # nothing else covers is `run()`'s half: it reads `_uri_refusal` and returns 3,
+    # and deleting THAT block leaves the unit pins green while every arm figure is
+    # written against a backend the product cannot use — measured: with the block
+    # deleted, `run()` reached `FalkorProjection.from_uri` and this row was the only
+    # red (`1 failed, 2 passed` over the uri-selected cases).
+    # Every site uses `monkeypatch`, so no lane state leaks, and none of them
+    # constructs anything: the ports are stubbed above the driver.
+    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored, like every row above: `_is_declared`
+    # matches each censused line on its own, so these three spellings are all the row
+    # authorizes and any FUTURE site in the same file reds until it is triaged (#11083 —
+    # a looser, unanchored arm would ride along silently, which is exactly the #942
+    # vacuity vector this census exists to catch).
+    "test_capstone_12186_recall.py": [
+        r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "rediss://:pw@falkordb\.example:6379/g"\)$',
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "postgres://host/db"\)$',
+    ],
     # ── DELIBERATE_EMBEDDED_LANE: SDK-level tests force the embedded lane so
     #    the constructions never ride the URI (the delenv IS the point) ──────
     # #2944: the two embedded allow-path tests force the embedded lane so the
@@ -482,6 +511,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # embedded-green), and neither the probe's `finally` nor the fixture's restore
     # lets the lane leak into a later docker-lane test.
     "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13722: the projection OPEN's round-trip count. `test_13722_projection_open_round_trips.py`
+    # is the same 8933/12360/12184 shape a fourth time — a module-level live probe
+    # (set to `_DB_URI`, restore the previous value in a `finally`, pop when it was
+    # unset: 3 sites) plus a per-test `_live_uri` fixture that re-points the lane at
+    # THIS module's own graph and restores it (3 more). DELIBERATE_URI is the point:
+    # the claims under test are wire-level (`send_command` counts on a REAL
+    # connection: one read is ONE round trip, a steady-state open is bounded) and
+    # round-trip cost, which no pure-function test can observe — an embedded or
+    # URI-less run would measure nothing and prove nothing. An unreachable lane
+    # degrades to `FALKORDB_AVAILABLE = False` (the live arms `skipif`, they never
+    # run embedded-green), and neither the probe's `finally` nor the fixture's
+    # restore lets the lane leak into a later docker-lane test.
+    "test_13722_projection_open_round_trips.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
     # unanchored declaration for this file here, and this branch had already
     # landed a narrowed one at the tail of this dict under the same KEY — an
@@ -603,6 +645,28 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # lane leaks into a later docker-lane test.
     "test_bounded_raw_clients_3065.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8486: the ingest-cost profiler's arm tests, grouped by INTENT and
+    # deliberately without a site count: this comment has carried one before and
+    # gone stale, because every round that adds a site leaves the number behind.
+    # The regexes below are site-CLASS patterns, so a new site of either kind is
+    # already authorised; the prose's job is the WHY, and a count is a snapshot
+    # of the file, not of the intent.
+    #   * DELIBERATE_URI `setenv`: the ambient URI is the test INPUT. It is what
+    #     selects the server arm (`run_main` promotes it), it is the state an
+    #     explicit `--db` must outrank, and an INVALID value is set there to
+    #     pin that the promotion validates what it promotes.
+    #   * DELIBERATE_EMBEDDED_LANE `setenv("")`: an EMPTY ambient URI is the
+    #     repo's documented way to say "embedded", so such a site pins the
+    #     embedded arm and belongs to this group, not the one above.
+    #   * DELIBERATE_EMBEDDED_LANE `delenv`: forces the embedded arm for its
+    #     start-budget floor, its constructor shape and the no-URI report arm.
+    # No server is contacted on any of them (the SDK is a stub) and every site
+    # takes the fixture-param `monkeypatch`, which auto-restores at teardown —
+    # no lane state leaks into a later test.
+    "test_longmem_ingest_profile.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # #3892: the read-path status test points the endpoint at a DECLARED but
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.
