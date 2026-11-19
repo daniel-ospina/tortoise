@@ -1496,6 +1496,17 @@ def _served(markup: str) -> str:
     markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
     markup = re.sub(r"<script\b.*?</script>", " ", markup, flags=re.S | re.I)
     markup = re.sub(r"<style\b.*?</style>", " ", markup, flags=re.S | re.I)
+    # ⛔ An UNTERMINATED `<script>`/`<style>` swallows the rest of the document —
+    # that is what a browser does with it, so anything after the opener is not
+    # markup a reader receives. The paired substitutions above cannot match a
+    # body with no closer, so without these two lines such a body stays
+    # "served" — and every `_served` row can be satisfied from inside it.
+    # Measured (#13696 round 10): deleting the real footer CTA and parking its
+    # tagged `href` in a trailing unterminated `<script>` left the whole static
+    # suite green (168 passed). Both pages are balanced today, so this truncates
+    # nothing now; it exists so the next unbalanced one cannot be a hiding place.
+    markup = re.sub(r"<script\b.*", " ", markup, flags=re.S | re.I)
+    markup = re.sub(r"<style\b.*", " ", markup, flags=re.S | re.I)
     return re.sub(r"<!--.*", " ", markup, flags=re.S)
 
 
@@ -9526,7 +9537,30 @@ class TestProductTeamsIdentity:
         # `<loc>`, i.e. the three surfaces disagreed with nothing red — and THIS
         # doc is what a later lane reads before re-cutting the routing map, so
         # it would then delete the experiment's only traffic channel.
-        assert not re.search(r"\b(?:NOT|NO|NON|UN)[- ]?INDEXED\b", entry, re.I), (
+        #
+        # ⛔ SENTENCE-SCOPED, because an adjacency regex is not enough: measured
+        # (#13696 round 10), `It is **NOT** the case that this page is
+        # **INDEXED** …` has no negation TOUCHING the token, so it passed while
+        # negating the decision. Every sentence that names the decision must
+        # carry the positive token and must not negate or `noindex` it.
+        # NOTE: a bare `\bNO\b` here is WRONG — the baseline sentence contains
+        # "no traffic to measure", which is a reason, not a negation. Only
+        # `NOT` / `NEVER` / `noindex` are refused.
+        naming = [
+            s for s in re.split(r"(?<=[.!?])\s+", " ".join(entry.split()))
+            if "INDEXED" in s
+        ]
+        assert naming and all(re.search(r"\*\*INDEXED\*\*", s) for s in naming), (
+            f"the architecture doc's {route} entry names the INDEXED decision in a "
+            "sentence that does not carry the positive `**INDEXED**` token — so "
+            "the sentence can say `NOT … INDEXED`, or `noindex`, while this row "
+            "still passes. The page serves `content=\"index,follow\"` and the "
+            "sitemap carries its `<loc>`; the entry has to state the SAME decision "
+            "(#13645).")
+        assert not re.search(
+            r"\b(?:NOT|NEVER)\b|noindex|\b(?:NOT|NO|NON|UN)[- ]?INDEXED\b",
+            " ".join(naming), re.I,
+        ), (
             f"the architecture doc's {route} entry NEGATES the decision while "
             "naming it — the entry must say INDEXED, not `NOT INDEXED`: the page "
             "serves `<meta name=\"robots\" content=\"index,follow\">` and the "
