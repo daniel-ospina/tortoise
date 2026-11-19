@@ -6592,7 +6592,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
-        # The three offsets (+29 `nodes_used` -> `:15357`, +39 `max_nodes` -> `:15367`, +77 END)
+        # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
         # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
         # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the

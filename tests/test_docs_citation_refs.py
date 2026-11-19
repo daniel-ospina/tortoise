@@ -953,12 +953,15 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # ⛔ THOSE TWO COUNTS ARE HISTORY, NOT THIS HEAD'S (round 6 review, P3 — MEASURED): the
     # regex has since been widened to the detector's whole VERB class, so `reports exactly
     # two paths`, `lists one path`, `shows`/`names`/`includes`/`contains`/`has`/`=`/`:` and
-    # `outputs`/`→` all match it here. Its ANSWER class is a strict SUBSET of the
-    # detector's — measured, `returns none` is read by the detector and not by this regex,
-    # which is exactly what the `config/ci-surfaces.yml` row for this file states — so the
-    # detector is still asked separately for its direction LOGIC and its wider answer list
-    # (#13802 review, P2: this comment claimed EQUALITY of both classes, which the config
-    # row in the same diff contradicted).
+    # `outputs`/`→` all match it here. ⛔ ITS ANSWER CLASS IS NOT A STRICT SUBSET, and the
+    # earlier cut of this comment said it was: the example it gave is read by THIS regex too
+    # (`none` is one of its alternatives, measured), and the `config/ci-surfaces.yml` row for
+    # this file says the opposite of "subset" — **ZERO** detector-only tokens left. What holds
+    # is that the ban reads every emptiness / count / bare-verb answer the sibling detector
+    # does, `blank` included, so the detector is still asked separately for its DIRECTION
+    # LOGIC and its SUBJECT anchoring, never for a wider answer list
+    # (#13802 review round 10, P2: the correction re-made the very class it was correcting,
+    # against the row it named).
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
     # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
@@ -2239,9 +2242,12 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     NON-VACUITY, MEASURED — and ⛔ the census is NOT typed per line here, because this
     comment is subject to the very rule it describes. An earlier cut of it said "FIVE
     times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
-    this branch's range produces that census (re-measured with the CURRENT pattern at
-    `origin/main`: **SIX matches across FIVE lines**, three of them the `--numstat` form
-    and three the ``docs/00_index.md`` + pair form). Re-run the pattern at the head you
+    this branch's range produces that census, and ⛔ **NO figure is typed here either**:
+    measured with the CURRENT pattern against `origin/main` (`28ca66878d`) it matches
+    **zero** lines, because `main`'s own `#13807` de-typed those clauses — the paragraph's
+    own thesis turned on its own docstring (round 10 review, P2: the cut that stood here
+    typed a six-match / five-line census "at `origin/main`", and re-measuring it is what
+    refutes it; a floating ref is not a head). Re-run the pattern at the head you
     are reviewing and read the map from that, rather than trusting a figure written here
     — which is the arm's whole thesis applied to its own docstring.
     """
