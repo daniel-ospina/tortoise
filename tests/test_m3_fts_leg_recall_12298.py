@@ -1401,12 +1401,21 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so
     # the pin and §1 of the brief name the same lines as the code.
-    ("tortoise/projection/__init__.py", 21004, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21004`"),
-    ("tortoise/projection/__init__.py", 21447, "def _create_fulltext_index(",
-     "`:21447`"),
-    ("tortoise/projection/__init__.py", 21889,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21889`"),
+    #
+    # ⛔ RE-DERIVED AGAIN (main-red, un-red lane): #13808 inserted +14 net lines
+    # into `tortoise/projection/__init__.py` at ~:20387, ABOVE all three rows, so
+    # this pin and §1 of the brief both had to move by +14. Nothing about the
+    # mechanism moved — the SYMBOLS are identical, only the line numbers — which
+    # is exactly the drift this pin exists to make visible, and it is why the
+    # remedy is to re-derive the numbers rather than to relax the equality.
+    # Both sides are updated together: the pin here and the §1 table in
+    # `docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md`.
+    ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21018`"),
+    ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
+     "`:21461`"),
+    ("tortoise/projection/__init__.py", 21903,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21903`"),
 )
 
 

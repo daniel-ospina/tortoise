@@ -63,6 +63,36 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
     for var in (*DB_ENV_VARS, "TORTOISE_API_KEY", "TORTOISE_API_URL"):
         monkeypatch.delenv(var, raising=False)
+    # ⛔ RESTORE THE #4071 CANONICAL-STORE GUARD THIS DELENV JUST REMOVED.
+    # `conftest.py` repoints the URI-less embedded lane away from the canonical
+    # store by setting `TORTOISE_DB_PATH` at IMPORT time (#4071) — its comment
+    # says that ONE choke point "covers every embedded constructor in the lane,
+    # including a test file that forgets an explicit path, which per-file edits
+    # cannot". This fixture clears `TORTOISE_DB_PATH` on purpose (`DB_ENV_VARS`,
+    # because "no env says where the store is" IS the state under test), which
+    # silently drops that guard: `resolve_db_path()` then falls through to
+    # `DEFAULT_DB_PATH` — the OWNER'S or the RUNNER'S REAL `~/.tortoise/tortoise.db`.
+    #
+    # Measured (shard `test (b)` at 79eaae021c, self-hosted runner): `doctor`
+    # probed that real store, FalkorDBLite is single-writer, and a live peer
+    # process held it —
+    #
+    #     ❌ Graph: health: Embedded store busy:
+    #        '/home/cmux/.tortoise/tortoise.db' is held by a live process (pid 3391344)
+    #
+    # — so `doctor` exited 1 and six tests that only assert `.env` DISCLOSURE
+    # went red for a reason none of them is about (#13856).
+    #
+    # ⛔ `HOME` does NOT redirect it: `DEFAULT_DB_PATH` is computed at IMPORT
+    # (`tortoise/config.py:31`), so the `setenv("HOME", …)` above is too late. The
+    # constant itself is what must be pinned — the same pattern this file already
+    # uses at its two relative-path arms (`monkeypatch.setattr(config,
+    # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist: the
+    # #2204 pre-init guard then skips the probe instead of grading a store, which
+    # is what makes these tests hermetic rather than "green on a quiet machine".
+    import tortoise.config as _config
+    monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
+                        str(tmp_path / "canonical" / "tortoise.db"))
     monkeypatch.chdir(tmp_path)
     env_path = tmp_path / "repo" / ".env"
     monkeypatch.setattr(dotenv_file, "dotenv_path", lambda: str(env_path))
