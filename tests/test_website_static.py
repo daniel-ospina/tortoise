@@ -9510,7 +9510,7 @@ class TestProductTeamsIdentity:
                 break
             bullet.append(ln)
         entry = "\n".join(bullet)
-        assert "INDEXED" in entry, (
+        assert re.search(r"\*\*INDEXED\*\*", entry), (
             f"the architecture doc's {route} entry no longer states the page is "
             "INDEXED. `noindex` and `index` differ in whether the experiment can "
             "be measured at all, so the recorded decision must name which one is "
@@ -9519,6 +9519,19 @@ class TestProductTeamsIdentity:
             "ENDS the entry — if the sentence is still in the document but sits "
             "below a blank line inside the bullet, move it back up rather than "
             "adding a second copy.")
+        # ⛔ POLARITY, not a substring. `"INDEXED" in entry` is satisfied by its
+        # own negation — measured (#13696 round 9): `It is **NOT INDEXED** …`
+        # left 246/246 green across both website suites while the page still
+        # served `content="index,follow"` and the sitemap still carried the
+        # `<loc>`, i.e. the three surfaces disagreed with nothing red — and THIS
+        # doc is what a later lane reads before re-cutting the routing map, so
+        # it would then delete the experiment's only traffic channel.
+        assert not re.search(r"\b(?:NOT|NO|NON|UN)[- ]?INDEXED\b", entry, re.I), (
+            f"the architecture doc's {route} entry NEGATES the decision while "
+            "naming it — the entry must say INDEXED, not `NOT INDEXED`: the page "
+            "serves `<meta name=\"robots\" content=\"index,follow\">` and the "
+            "sitemap carries its `<loc>`, so a negation here is the doc "
+            "contradicting both other surfaces with no row red (#13645).")
         assert "PRODUCT_PAGES" in entry, (
             f"the architecture doc's {route} entry no longer says why this page is "
             "NOT a `PRODUCT_PAGES` member. That membership is a 301 to "
@@ -9609,7 +9622,14 @@ class TestProductTeamsIdentity:
 
     def test_the_page_links_to_the_canonical_product_page(self):
         """The owner's rule: this page does not re-tell /tortoise's story."""
-        html = _without_html_comments(_product_teams_html())
+        # ⛔ `_served`, not `_without_html_comments`: the latter deliberately
+        # KEEPS `<script>` bodies, so an `href="/tortoise?utm_…"` string inside
+        # an inline-JS COMMENT satisfied this row on its own (#13696 round 9:
+        # deleting the real footer CTA and leaving that string green-lit all
+        # 167 rows, with the funnel's only tagged entry to the canonical page
+        # gone). The sibling campaign-tag row already reads `_served`; the two
+        # halves of this invariant must agree on what "reads a link" means.
+        html = _served(_product_teams_html())
         raw_hrefs = re.findall(r'href="([^"]+)"', html)
         hrefs = [h.split("?", 1)[0] for h in raw_hrefs]
         assert "/tortoise" in hrefs, (
