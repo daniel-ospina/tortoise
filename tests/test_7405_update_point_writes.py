@@ -5307,10 +5307,19 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
             f"`{symbol}` is no longer named in `tortoise/sdk.py` — the comment "
             "that used to cite it by line now cites nothing, so its claim is "
             "unattributable")
-        assert symbol in source, (
+        # ⛔ DEFINES, not merely NAMES. `symbol in source` is a substring test over
+        # a module that also discusses its own mechanics in prose: a rename of the
+        # DEFINITION alone (`def _upsert_point_props` → `..._v2`) leaves 25 of the
+        # name's 27 occurrences in `entities.py` intact and stayed GREEN, so the
+        # row certified a symbol nothing had checked. Measured: with this row a
+        # definition-only rename REDS at this line; every symbol in the loop above
+        # is a `def` or a `class` (asserted by the row itself, so a symbol that
+        # becomes an assignment reds here for re-derivation, never for a wrong
+        # reason).
+        assert re.search(rf"(?:def|class)\s+{re.escape(symbol)}\b", source), (
             f"`tortoise/sdk.py` attributes a claim to `{symbol}` in `{owner}`, but "
-            f"`{owner}` no longer defines it — re-derive the symbol the mechanic "
-            "moved to")
+            f"`{owner}` no longer DEFINES it (the name may survive in prose) — "
+            "re-derive the symbol the mechanic moved to")
 
     # ⛔ The arm above is FILE-wide, so it is satisfied by the symbol appearing
     # anywhere in a 60k-line module — it says nothing about the sentence this
