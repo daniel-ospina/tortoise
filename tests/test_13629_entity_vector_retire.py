@@ -4950,6 +4950,119 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND A UNION AROUND THAT MERGE IS THE SAME STORE (`#13788` F4, measured at this
+        # head). `_rebuild_stores_the_vector` answered the `**` operand of a `{…}` display
+        # only in its DIRECT form, because the two `_dict_stores_the_vector` calls it makes
+        # omitted `stop_arm=True` — so its own `merges = any(key is None …)` test was
+        # satisfied by `{**{…}}` while the operand behind `**` was never read. One union
+        # (`| {}`) around the merge therefore CERTIFIED a stop arm that stores, and so did
+        # the same union with the merge `.copy()`-wrapped, with a comprehension behind the
+        # `**`, on the ASSIGN arm as well as `|=`, and inside `update(…)` — all six measured
+        # CERTIFIED before the fix and runtime-checked to leave `{"embedding": VEC}` in
+        # `props`. The union's operands are now answered by the OPERAND rule (literal with
+        # the stop-mode recursion, comprehension, both wrappers) rather than by two type
+        # tests, which is the one-rule shape the rest of this family uses.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev)}} | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding": _encode(ev)}} | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding": _encode(ev)}}.copy() | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": _encode(ev)}} | {})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev) for _x in _keys()}} | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding": _encode(ev)}} | {"embedding_model": _m()}
+        return None
+    _write(props)
+""",
+        # ⛔ …AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE ELEMENT ITSELF (`#13788` F4).
+        # The slice arm followed `[pairs][:]` but not `[pairs][0]`, so every `[<mapping>][<n>]`
+        # spelling CERTIFIED a stop arm that stores — seven measured rows here, each
+        # runtime-checked to leave `{"embedding": VEC}` in `props`, including the ASSIGN arm
+        # (`props = [{"embedding": vec}][0]`), the `.copy()`-wrapped element, the pairs-shaped
+        # element, and the NEGATIVE index (`[-1]` is `UnaryOp(USub, Constant(1))`, not
+        # `Constant(-1)` — the "one constant spelling over" shape that had to be read through
+        # `_constant_index` to be caught at all). The index must be CONSTANT and the container
+        # a List/Tuple LITERAL; an index that is a name or an expression stays the stated
+        # data-flow residual, and the control for it is in the accepted block below.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [{"embedding": _encode(ev)}][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([{"embedding": _encode(ev)}][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = [{"embedding": _encode(ev)}][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = [{"embedding": _encode(ev)}.copy()][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([[("embedding", _encode(ev))]][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict([{"embedding": _encode(ev)}][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([{"embedding": _encode(ev)}][-1])
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -5397,6 +5510,51 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= _collections.OrderedDict(_collections.OrderedDict({**{"embedding_model": _m()}}))
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE UNION (`#13788` F4): routing a union's operands
+        # through the operand rule must not swallow a `|` that places nothing. The pre-guard
+        # reset behind a `**` inside a union, and the identity triple in the same position,
+        # both still CERTIFY — the same two narrowings (EXACT property, NON-CONSTANT value)
+        # that keep every other arm from refusing an honest writer.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": None}} | {}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding_model": _m()}} | {}
+        return None
+    _write(props)
+""",
+        # ⛔ THE CONTROLS FOR THE CONSTANT-INDEX ARM (`#13788` F4), so the new recognition is
+        # not an over-broad `return True`: the pre-guard reset and the identity triple behind
+        # the same index still CERTIFY, and so does an index that is a NAME — `_merged[0]` is
+        # the STATED residual (following a name is data flow this module does not do), and a
+        # row for it keeps a future widening from swallowing it silently.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update([{"embedding": None}][0])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = [{"embedding_model": _m()}][0]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_merged[0])
         return None
     _write(props)
 """,

@@ -1497,6 +1497,21 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     if isinstance(node, ast.IfExp):
         return (_mapping_literal_stores_the_vector(node.body)
                 or _mapping_literal_stores_the_vector(node.orelse))
+    # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME MAPPING (`#13788` F4):
+    # `[{"embedding": vec}][0]` is the literal itself, one constant index in, and it CERTIFIED
+    # the ASSIGN arm (`props = [{"embedding": vec}][0]`, runtime-checked to leave the key)
+    # beside `props = {"embedding": vec}` refused. Answered HERE rather than in
+    # `_rebuild_stores_the_vector`'s walk so there is ONE rule for "is this expression a
+    # mapping that stores" — the same reason the `.copy()` arm above lives here. The index
+    # must be a CONSTANT and the container a List/Tuple LITERAL: an index that is a name or
+    # an expression is the stated data-flow residual, not a wrapper.
+    if (isinstance(node, ast.Subscript)
+            and (index := _constant_index(node.slice)) is not None
+            and isinstance(node.value, ast.List | ast.Tuple)):
+        elements = node.value.elts
+        if -len(elements) <= index < len(elements):
+            return _mapping_literal_stores_the_vector(elements[index])
+        return False
     return False
 
 
@@ -1694,6 +1709,28 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         return False                  # `zip(…)`, `map(…)`, a builder: residual, stated above
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
         return _operand_stores_the_vector(node.value)
+    # ⛔ A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME OPERAND (`#13788` F4, measured
+    # at this head). The slice arm above follows `[pairs][:]` but not `[pairs][0]`, so
+    # `props.update([[("embedding", vec)]][0])`, `props |= [{…"embedding"…}][0]` and the
+    # constructor spelling `props |= dict([{…}][0])` CERTIFIED a stop arm that stores — 68
+    # measured spellings in the sweep this was found with, every one runtime-checked to leave
+    # `{"embedding": VEC}` in `props`. The index is a CONSTANT into a LITERAL, so this is
+    # static: no name to follow, no computed key, no call result.
+    # ⛔ NARROW ON PURPOSE, and the narrowing is what keeps it from being a second rule: an
+    # index that is a NAME / an expression / negative-out-of-range is NOT evaluated (that is
+    # the stated data-flow residual), and the container must be a List/Tuple LITERAL, so
+    # `pairs[0]` bound elsewhere still answers False. STOP-ARM REACH ONLY, like every other
+    # arm in this helper: the three stop-arm call sites are the mutator rule, the
+    # `anywhere`-gated `|=` arm and the rebuild rule, and no mirror-arm fixture changes
+    # verdict (measured — `tests/test_13629_entity_vector_retire.py` is green, and that suite
+    # carries the mirror-arm pins that a widening would redden).
+    if (isinstance(node, ast.Subscript)
+            and (index := _constant_index(node.slice)) is not None
+            and isinstance(node.value, ast.List | ast.Tuple)):
+        elements = node.value.elts
+        if -len(elements) <= index < len(elements):
+            return _operand_stores_the_vector(elements[index])
+        return False
     if isinstance(node, ast.IfExp):
         return (_operand_stores_the_vector(node.body)
                 or _operand_stores_the_vector(node.orelse))
@@ -1720,6 +1757,30 @@ def _operand_stores_the_vector(node) -> bool:
     """
     return (_mapping_operand_stores_the_vector(node)
             or _pairs_operand_stores_the_vector(node))
+
+
+def _constant_index(node) -> int | None:
+    """The integer an index expression IS — `0`, `-1`, `+2` — or `None` if it is not constant.
+
+    ⛔ ONE ANSWER FOR BOTH OPERAND RULES (`#13788` F4). A constant index into a container
+    LITERAL is the element itself (`[{"embedding": vec}][0]`), so both rules follow it; the
+    spelling has to be read the same way in both or the fix is half a rule again — and a
+    NEGATIVE index is `UnaryOp(USub, Constant(1))`, not `Constant(-1)`, which is exactly the
+    "one constant spelling over" shape this series keeps meeting (measured: `[{"embedding":
+    vec}][-1]` stayed CERTIFIED while `[…][0]` was refused).
+
+    Deliberately CONSTANT-ONLY: an index that is a name or an expression is not evaluated.
+    """
+    import ast
+
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if (isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)):
+        return (-node.operand.value if isinstance(node.op, ast.USub)
+                else node.operand.value)
+    return None
 
 
 def _pairs_store_the_vector(node) -> bool:
@@ -2000,7 +2061,16 @@ def _rebuild_stores_the_vector(node) -> bool:
     for leaf in _own_walk(node):
         if isinstance(leaf, ast.Dict):
             merges = any(key is None for key in leaf.keys)
-            if merges and _dict_stores_the_vector(leaf):
+            # ⛔ THE STOP-MODE RECURSION IS THE WHOLE POINT (`#13788` F4, measured at this
+            # head): without `stop_arm=True`, `_dict_stores_the_vector` answers the DIRECT
+            # `{"embedding": vec}` and skips the `**` operand — so the merge test above was
+            # satisfied by `{**…}` while the operand behind it was never read. Measured
+            # CERTIFIED, runtime-checked to place the key:
+            #     props |= {**{"embedding": _encode(ev)}} | {}      # union around the merge
+            # beside `props |= {**{"embedding": _encode(ev)}}` refused. This helper is
+            # reached ONLY from stop-arm call sites, so the recursion cannot widen a
+            # mirror-arm acceptance.
+            if merges and _dict_stores_the_vector(leaf, stop_arm=True):
                 return True       # `{**props, "embedding": vec}`
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
@@ -2008,9 +2078,15 @@ def _rebuild_stores_the_vector(node) -> bool:
             # ⛔ AND THE UNION'S COMPREHENSION OPERAND IS THE SAME MERGE (measured at
             # `45b5f88a`): `props = props | {"embedding": vec for …}` places exactly what
             # `props | {"embedding": vec}` places, and this arm accepted only the literal.
-            if any((isinstance(side, ast.Dict) and _dict_stores_the_vector(side))
-                   or (isinstance(side, ast.DictComp)
-                       and _pairs_operand_stores_the_vector(side))
+            # ⛔ AND A UNION OPERAND IS ANSWERED BY THE OPERAND RULE, NOT BY TWO TYPE TESTS:
+            # the `**`-in-a-display spelling one union over (`{**{…}} | {}`) and the mapping
+            # WRAPPERS (`.copy()`, `if…else`) in the same position were certified while
+            # their bare spellings were refused — the same half-a-rule shape this series
+            # keeps closing. `_mapping_operand_stores_the_vector` carries the stop-mode Dict
+            # recursion, the comprehension, the `Starred`/container arms and both wrappers;
+            # a non-mapping operand (`a | b` for sets, a constructor) still answers False
+            # here, so no honest union is swept in.
+            if any(_mapping_operand_stores_the_vector(side)
                    for side in (leaf.left, leaf.right)):
                 return True
         elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
