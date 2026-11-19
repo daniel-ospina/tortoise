@@ -28,10 +28,16 @@ THE THREE THINGS THIS FILE PINS, each a way the fix could be defeated:
    coincidence of the current string.
 3. **The open's round-trip count is bounded** against a real store — #13722's
    own metric. One trivial read is 1 round trip; a steady-state open measured
-   10, of which 2 are the redis handshake. A change that makes the open cost
-   more fails here instead of after a deploy.
+   10, of which 5 are protocol commands and 5 are `GRAPH.QUERY` (enumerated
+   below). A change that makes the open cost more fails here instead of after
+   a deploy.
 
-Run (the first three need no database; the live ones need the docker lane)::
+HOW DISCRIMINATING A REVERT IS (measured, so a later reader inherits the real
+number): reverting the probe to `count(n)` reddens **3 of these 6 arms** on a
+lane with a store — "one query, no aggregate", the open's wire-count filter,
+and the scaling/control arm — and **1 of 6** where those two live arms skip.
+
+Run (the first four need no database; the live ones need the docker lane)::
 
     TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \\
         tests/test_13722_projection_open_round_trips.py -q
@@ -61,6 +67,22 @@ def _aggregates(cypher: str) -> list[str]:
     named `count` (``n.count``) is not a false hit."""
     low = " ".join(cypher.lower().split())
     return [a for a in _AGGREGATES if a in low]
+
+
+def _aggregating_graph_sends(sends) -> list[str]:
+    """The aggregating STATEMENTS carried by a list of ``(command, cypher)`` sends.
+
+    Filtered on the whole `GRAPH.` namespace, not on `GRAPH.QUERY` alone. The
+    graph handle this pin watches (``_GuardedGraph``) exposes `ro_query` as well
+    as `query`, and `ro_query` goes out as `GRAPH.RO_QUERY` — FalkorDB runs the
+    SAME Cypher under it, rejecting only write clauses, so
+    ``MATCH (n) RETURN count(n) LIMIT 1`` is a perfectly legal read-only
+    statement. A filter pinned to the read-write verb therefore leaves half the
+    handle unwatched while this file's claim is "no aggregating graph query
+    issued inside an open".
+    """
+    return [c for (name, c) in sends
+            if name.upper().startswith("GRAPH.") and c and _aggregates(c)]
 
 
 class _SpyGraph:
@@ -128,6 +150,30 @@ def test_the_pre_fix_statement_fails_that_detector():
         "removed — the assertion above has stopped discriminating")
 
 
+def test_the_open_filter_watches_every_graph_verb_not_just_graph_query():
+    """MUTANT: an aggregate issued through ANY `GRAPH.*` verb must be caught.
+
+    The defect this closes is a pin narrower than its own claim: filtering on
+    `GRAPH.QUERY` alone stays GREEN when the same aggregate is sent through
+    `ro_query` (`GRAPH.RO_QUERY`), which is the verb a read-only path uses.
+    """
+    pre_fix = "MATCH (n) RETURN count(n) LIMIT 1"
+    for verb in ("GRAPH.QUERY", "GRAPH.RO_QUERY", "graph.ro_query"):
+        assert _aggregating_graph_sends([(verb, pre_fix)]) == [pre_fix], (
+            f"an aggregate sent through {verb} was not seen by the open's "
+            "filter — the pin is narrower than its own claim")
+
+    # Not "any query at all": the statement the fix installs passes, so the
+    # filter cannot be satisfied by flagging traffic generically.
+    probe = "MATCH (n) RETURN 1 LIMIT 1"
+    assert _aggregating_graph_sends([("GRAPH.QUERY", probe)]) == []
+    assert _aggregating_graph_sends([("GRAPH.RO_QUERY", probe)]) == []
+
+    # And it is scoped to the graph namespace: a non-graph command whose
+    # argument happens to carry that text is not this pin's business.
+    assert _aggregating_graph_sends([("CLIENT", pre_fix)]) == []
+
+
 def test_a_failing_probe_still_keeps_the_reason():
     """The probe's OTHER half: a raise is recorded, never swallowed (#2981).
 
@@ -187,12 +233,21 @@ def _live_uri():
             os.environ.pop("TORTOISE_DB_URI", None)
 
 
-#: A steady-state (schema already current) projection open, measured on docker
-#: FalkorDB 4.20.6 at #13722: 2 redis-handshake commands (`CLIENT SETINFO` ×2)
-#: + 5 `GRAPH.QUERY` (`_probe_ok`, `CALL db.indexes()`, the `:Point` FTS
-#: flatten check, and the vector-index API resolution ×2) = 10. The bound is 12
-#: so an engine that answers the vector procedure differently is not a red,
-#: while a whole new graph-wide statement per open still is.
+#: A steady-state (schema already current) projection open, MEASURED on docker
+#: FalkorDB 4.20.6 at #13722 by enumerating every `Connection.send_command`:
+#:
+#:     1 CLIENT LIB-NAME     2 CLIENT LIB-VER   3 INFO
+#:     4 INFO               5 MODULE
+#:     6 GRAPH.QUERY  MATCH (n) RETURN 1 LIMIT 1                    (_probe_ok)
+#:     7 GRAPH.QUERY  CALL db.indexes()
+#:     8 GRAPH.QUERY  MATCH (n:Point) WHERE … search_keys …        (:Point FTS flatten)
+#:     9 GRAPH.QUERY  CALL db.idx.vector.createNodeIndex(…)
+#:    10 GRAPH.QUERY  CREATE VECTOR INDEX FOR (p:Point) …
+#:
+#: i.e. 5 protocol commands + 5 `GRAPH.QUERY` = 10, and a second open of the
+#: same graph costs the same 10 (measured, same enumeration). The bound is 12 so
+#: an engine that answers the vector procedure differently is not a red, while a
+#: whole new graph-wide statement per open still is.
 _OPEN_ROUND_TRIPS_MAX = 12
 
 
@@ -245,19 +300,20 @@ def test_a_steady_state_open_is_bounded_and_a_read_is_one_round_trip(
         "hosted request pays this — URI mode builds a fresh SDK per request — "
         "so growth here is a per-request latency multiplier (#13722).")
 
-    offending = [c for (n, c) in open_sends
-                 if n.upper() == "GRAPH.QUERY" and c and _aggregates(c)]
+    offending = _aggregating_graph_sends(open_sends)
     assert offending == [], (
         "a projection open issued an aggregating graph query, which scans the "
         f"tenant's whole graph on every request: {offending!r}")
 
 
-#: The two node counts of the SCALING differential. Both samples run in ONE
-#: process against ONE graph over ONE connection, so they pay the same round
-#: trip, the same client and the same host load — what differs between them is
-#: only the scan the statement does.
+#: The two node counts of the SCALING differential, and the two graphs they
+#: live in. Each size gets its OWN graph so the two probes can be sampled
+#: ALTERNATELY over one run (see `_interleaved_medians`) — a shared FalkorDB
+#: under xdist has a load that drifts over tens of seconds, and two medians
+#: taken in sequence measure that drift as much as the statement.
 _SMALL_NODES = 2_000
 _LARGE_NODES = 50_000
+_SMALL_GRAPH = f"{_GRAPH}_2k"
 
 #: The statement #13722 REMOVED, kept here as the same-run CONTROL. It is the
 #: O(n) work the fix deletes, so timing it on the same graph calibrates the box
@@ -268,14 +324,24 @@ _PRE_FIX = "MATCH (n) RETURN count(n) LIMIT 1"
 #: (lane, this change): probe 0.70 ms @2k -> 0.85 ms @50k = **1.2x**, while the
 #: pre-fix statement went 0.76 -> 4.41 ms = **5.8x** over the same range. 2.5x
 #: sits between them with ~2x headroom on BOTH sides, so a loaded lane cannot
-#: false-red it and a re-introduced scan cannot pass it.
+#: false-red it and a re-introduced scan cannot pass it. RE-MEASURED by the
+#: interleaved sampling in this file (docker 4.20.6, same box): 0.75 -> 0.83 ms
+#: = **1.1x**, control `count(n)` at 5.82 ms = **7.0x** separation.
+#:
+#: ⛔ KEPT ABSOLUTE ON PURPOSE (review observation, #13722). A load-relative
+#: form (`growth <= 2.5 x control_growth`) would also pass a probe that scales
+#: WITH the graph but costs less than `count(n)` — a false PASS bought to avoid
+#: a false RED, and a false pass is the expensive error. The load sensitivity is
+#: answered at the SAMPLING instead: the two sizes are interleaved, so a load
+#: step lands on both halves of this ratio.
 _SCALING_BOUND = 2.5
 
 #: The control must be measurably slower than the probe. MEASURED at 50k:
 #: count(n) 4.41 ms vs the probe's 0.85 ms = **5.2x**, vs a bare `RETURN 1` at
 #: 0.68 ms (so the probe's cost IS the round trip, not a scan). This is the arm
 #: a REVERT reddens: reverting the fix makes the probe and the control the same
-#: statement, and the ratio collapses to ~1.0. 2x leaves 2.6x of headroom.
+#: statement, and the ratio collapses to ~1.0. 2x leaves 2.6x of headroom
+#: (RE-MEASURED at 7.0x on the same box as the note above).
 _CONTROL_RATIO = 2.0
 
 
@@ -298,6 +364,31 @@ def _median_ms(fn, samples: int = 11) -> float:
     return statistics.median(timings)
 
 
+def _interleaved_medians(fa, fb, samples: int = 11) -> tuple[float, float]:
+    """Medians of *fa* and *fb*, sampled ALTERNATELY — one pair per round.
+
+    Why not two `_median_ms` calls in sequence: this lane shares its FalkorDB
+    host with the rest of the fleet, and a load step that arrives between the
+    two *sequential* passes inflates the ratio without anything in the product
+    changing (measured baseline 1.2x against a 2.5x bound, so a sustained ~2x
+    step was enough to red a correct probe). Interleaving makes a drifting load
+    land on both sides of the ratio it is used in.
+    """
+    import statistics
+    import time
+
+    a: list[float] = []
+    b: list[float] = []
+    for _ in range(samples):
+        t0 = time.perf_counter()
+        fa()
+        a.append((time.perf_counter() - t0) * 1000.0)
+        t0 = time.perf_counter()
+        fb()
+        b.append((time.perf_counter() - t0) * 1000.0)
+    return statistics.median(a), statistics.median(b)
+
+
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,
                     reason="Live FalkorDB (Docker) not available")
 def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
@@ -314,23 +405,29 @@ def test_the_open_probe_is_flat_in_a_large_graph(_live_uri):
     the SAME graph, over the SAME connection:
 
     1. SCALING — the probe at 50k vs the same probe at 2k (O(1) work is a flat
-       line; the pre-fix scan grows 5.8x across this range).
+       line; the pre-fix scan grows 5.8x across this range). The two sizes are
+       sampled ALTERNATELY, so a load drift lands on both halves of the ratio.
     2. THE CONTROL — the probe vs the pre-fix statement itself on the 50k
        graph. This is the arm a revert reddens directly: the two samples become
        the same statement and the ratio collapses to ~1.
     """
     from tortoise.projection import FalkorProjection
 
+    small = FalkorProjection.from_uri(_live_uri, graph_name=_SMALL_GRAPH)
+    small.g.query("MATCH (n) RETURN 1 LIMIT 1")  # warm the connection
+    small.g.query(f"UNWIND range(1, {_SMALL_NODES}) AS i "
+                  "MERGE (:Point {id: 'rt13722_' + toString(i)})")
+
     proj = FalkorProjection.from_uri(_live_uri, graph_name=_GRAPH)
     proj.g.query("MATCH (n) RETURN 1 LIMIT 1")  # warm the connection
-
-    proj.g.query(f"UNWIND range(1, {_SMALL_NODES}) AS i "
+    proj.g.query(f"UNWIND range(1, {_LARGE_NODES}) AS i "
                  "MERGE (:Point {id: 'rt13722_' + toString(i)})")
-    small_ms = _median_ms(proj._probe_ok)
 
-    proj.g.query(f"UNWIND range({_SMALL_NODES + 1}, {_LARGE_NODES}) AS i "
-                 "MERGE (:Point {id: 'rt13722_' + toString(i)})")
-    large_ms = _median_ms(proj._probe_ok)
+    # Interleaved, so the host's load is the same on both halves of `growth`.
+    small_ms, large_ms = _interleaved_medians(small._probe_ok, proj._probe_ok)
+
+    # The control is read on the LARGE graph only, adjacent to `large_ms`: it is
+    # the statement the fix deletes, timed on the tree being measured.
     control_ms = _median_ms(lambda: proj.g.query(_PRE_FIX))
 
     growth = large_ms / max(small_ms, 1e-6)
