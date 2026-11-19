@@ -106,7 +106,49 @@ confirmed clean between them:
 
 Neither mutation was a crash or an exception: both returned a well-formed payload
 of the correct type. That is the point. A suite that only catches crashes cannot
-see the failure class this row owns.
+see the failure class this row owns. Mutation 1 was re-run after the review
+round below and still reddened exactly one test.
+
+WHAT A REVIEW ROUND CHANGED (and why it is recorded here)
+=======================================================
+
+A fresh-context review found that the first draft contained assertions a broken
+implementation could satisfy. They are fixed, and the fixes are the reason several
+tests assert COUNTS and IDS rather than "no error":
+
+* ``mine_knowledge_from_session`` sent ``items`` as a list of STRINGS. The item
+  contract is ``{wing, room, content}`` dicts, so the call was REFUSED (-32008) and
+  the only assertion ("not the stdio-only error") passed on that refusal — a tool
+  counted as covered while its write arm was never exercised. It now sends a dict,
+  asserts ``filed == 1``, and asserts the re-send is a DUPLICATE.
+* ``calibrate_summary``, five of six ``search_knowledge`` ``mode=`` arms, and the
+  ``session``/``topic``/``recompute`` confidence arms asserted ``out is not None``
+  or ``isinstance(out, (list, dict))`` — satisfied by every branch the payload
+  helper can return. Each now asserts its own shape and seeded content.
+* ``source_reliability`` used ``out.get("url", <seed>)``, whose default made a
+  payload MISSING the field pass. It now has no default.
+* ``create_edge``, ``write_question``, ``record_decision`` and ``ingest`` asserted
+  only "no error". ``ingest({})`` in particular returns a CONSTANT batch id with
+  all-zero counts, so an empty bundle proved nothing. All four now assert counts
+  and ids, and read the write back.
+* The ``graph_overview`` section table used ``isinstance(out, dict)``, which
+  ``{"error": …}`` also satisfies — for ``taxonomy``, ``tags``, ``stale``,
+  ``graphs`` and ``namespaces`` that was the ONLY assertion. Error envelopes are
+  now excluded explicitly and those arms assert content.
+* ``create_entity``'s 6th arm (``type='diary'``) was undriven — diary points were
+  seeded through the SDK, bypassing the transport. It now round-trips through
+  ``list_knowledge(kind='diary')``.
+
+Two things the review surfaced that are NOT fixed here, because they are not this
+row's to decide, and are recorded instead of absorbed:
+
+* ``tortoise_expand_relationships`` declares ``http_policy=False`` yet answers over
+  the tenant HTTP surface — see ``HTTP_POLICY_DISAGREEMENTS``. A new
+  ``test_every_http_excluded_tool_is_accounted_for`` binds the file to
+  ``http_policy`` so the registry is the authority and this cannot drift silently.
+* ``approve_merge``'s success arm, ``manage_sources(enable)`` and
+  ``check_confidence(topic=)`` cannot be driven on this lane — see ``ARM_GAPS``.
+  They are recorded as gaps, never as passes.
 """
 
 from __future__ import annotations
@@ -145,6 +187,39 @@ UNDRIVEN: dict[str, str] = {
     "tortoise_refresh_confidence":
         "UNDRIVEN — excluded from tenant HTTP by design: the 4-tool refresh family "
         "is served by the hosted REST API / stdio lane, not the tenant MCP door.",
+}
+
+#: Per-ARM gaps inside a tool that is otherwise driven. A tool can be DRIVEN and
+#: still have an arm this lane cannot reach; saying so is the difference between
+#: a measured gap and a silent claim. These are NOT passes either.
+ARM_GAPS: dict[str, str] = {
+    "tortoise_approve_merge(data)":
+        "ARM GAP — the merge SUCCESS arm is unreachable here: `create_object` "
+        "deduplicates on `canonical_name`, so seeding two identical names returns "
+        "the SAME id and no ambiguity pair exists (measured: 'has no ambiguity "
+        "pair on the current graph'). The refusal arm IS driven.",
+    "tortoise_manage_sources(enable)":
+        "ARM GAP — the `enable` arm requires a connected GitHub account and refuses "
+        "by naming that (`GitHub not connected`). The `list` and `disable` arms are "
+        "driven, and `disable` is read back through `list`.",
+    "tortoise_check_confidence(topic)":
+        "ARM GAP — MEASURED: `topic='capstone-topic'` returns an EMPTY list even "
+        "for a claim seeded with that topic verbatim, so the arm is asserted as the "
+        "collection it returns rather than as content it does not return.",
+}
+
+#: Live tools whose DECLARED `http_policy` and OBSERVED tenant-HTTP behaviour
+#: disagree on this head. Recorded so the disagreement is visible at the row that
+#: would otherwise absorb it as a pass (#13886 review, finding 11). The registry
+#: row is the product's declaration and this file does not edit it.
+HTTP_POLICY_DISAGREEMENTS: dict[str, str] = {
+    "tortoise_expand_relationships":
+        "Declared `http_policy=False` (not on the tenant HTTP surface) yet its "
+        "handler carries NO transport check, so it ANSWERS over HTTP with a real "
+        "payload. Either the registry row or the handler is wrong; untracked at "
+        "the time of writing (filed from this lane). The case below drives it and "
+        "asserts the payload, because the behaviour is real whichever way the "
+        "row is settled.",
 }
 
 
@@ -237,6 +312,7 @@ def seeded(tmp_path, monkeypatch):
 
     sdk = TortoiseSDK(db_path=db, namespace=org)
     s: dict[str, str] = {}
+    s["org"] = org
 
     # ── the seed ────────────────────────────────────────────────────────────
     s["claim"] = sdk.create_point(
@@ -249,6 +325,10 @@ def seeded(tmp_path, monkeypatch):
         credibility="high")["id"]
     s["claim2"] = sdk.create_point(
         "statement", "A second seeded claim, the operator's target.")["id"]
+    # A TOPIC-TAGGED claim, for the `check_confidence(topic=…)` arm.
+    s["topical"] = sdk.create_point(
+        "statement", "A topic-tagged claim about capstone retrieval.",
+        topic="capstone-topic")["id"]
     s["object"] = sdk.create_object("Widget", objectKind="core:thing")["id"]
     s["subject"] = sdk.create_subject("Alice")["id"]
     s["source"] = sdk.register_source("https://example.test/a", "web")["id"]
@@ -319,6 +399,36 @@ def test_undriven_entries_name_a_mechanism():
     for name, reason in UNDRIVEN.items():
         assert reason.startswith("UNDRIVEN — "), name
         assert len(reason) > 60, f"{name}: reason must name the mechanism"
+
+
+def test_every_http_excluded_tool_is_accounted_for():
+    """A tool declared OFF the tenant HTTP surface must be either UNDRIVEN or a
+    recorded disagreement — so a new `http_policy=False` row cannot appear and be
+    silently exercised (or silently skipped) here.
+
+    This is the registry-to-file binding: the reviewer's finding was that
+    `_DRIVEN_BY_TEST` is hand-typed prose. Binding it to `http_policy` makes the
+    registry itself the authority for which tools the transport may serve.
+    """
+    declared_excluded = {t.name for t in TOOL_REGISTRY if not t.http_policy}
+    unrecorded = declared_excluded - set(UNDRIVEN) - set(HTTP_POLICY_DISAGREEMENTS)
+    assert not unrecorded, (
+        "http_policy=False tool(s) with neither an UNDRIVEN entry nor a recorded "
+        f"HTTP_POLICY_DISAGREEMENT: {sorted(unrecorded)}")
+    # an exclusion we DID drive must be declared as a disagreement, not left
+    # looking like an ordinary drivable tool
+    driven_excluded = declared_excluded & set(_DRIVEN_BY_TEST)
+    assert driven_excluded <= set(HTTP_POLICY_DISAGREEMENTS), (
+        "tool(s) driven over HTTP while the registry declares http_policy=False, "
+        f"with no recorded disagreement: {sorted(driven_excluded)}")
+
+
+def test_recorded_disagreements_explain_themselves():
+    for name, reason in HTTP_POLICY_DISAGREEMENTS.items():
+        assert len(reason) > 80, f"{name}: disagreement must name the mechanism"
+    for name, reason in ARM_GAPS.items():
+        assert reason.startswith("ARM GAP — "), name
+        assert len(reason) > 80, f"{name}: arm gap must name the mechanism"
 
 
 def _driven_tool_names():
@@ -430,7 +540,11 @@ class TestListKnowledgeKinds:
         assert s["source"] in urls, out
 
     def test_source_reliability_kind_reads_the_seeded_source(self, seeded):
-        """`kind='source_reliability'` is a PER-SOURCE read: it requires `url=`."""
+        """`kind='source_reliability'` is a PER-SOURCE read: it requires `url=`.
+
+        The URL assertion has no default — a payload MISSING the field must
+        fail, which is what `out.get("url", <seed>)` got wrong.
+        """
         door, s, _ = seeded
         door.call("tortoise_manage_source_trust",
                   {"url": s["source"], "tier": "high"})
@@ -439,7 +553,11 @@ class TestListKnowledgeKinds:
                                  "url": s["source"]})
         assert status == 200
         assert isinstance(out, dict), out
-        assert out.get("url", s["source"]) == s["source"], out
+        assert out.get("url") == s["source"], out
+        # the tier write must have moved it off "untiered"/None
+        assert isinstance(out.get("reliability"), (int, float)), out
+        assert 0.0 <= float(out["reliability"]) <= 1.0, out
+        assert out.get("cache") in {"fresh", "recomputed", "miss"}, out
 
     def test_batch_kind_answers_a_collection(self, seeded):
         """No batch was seeded, so the CORRECT payload is an empty collection —
@@ -456,9 +574,9 @@ class TestListKnowledgeKinds:
                                 {"kind": "namespace"})
         assert status == 200
         assert isinstance(out, list) and out, out
-        names = {row.get("namespace") for row in out if isinstance(row, dict)}
-        assert names, out
-        assert all(isinstance(n, str) and n for n in names), out
+        assert all(isinstance(r, dict) for r in out), out
+        names = {row.get("namespace") for row in out}
+        assert names and all(isinstance(n, str) and n for n in names), out
 
     def test_topic_kind_answers_the_seeded_entitys_profile(self, seeded):
         """`kind='topic'` is a PER-ENTITY read: it must echo the entity it was
@@ -499,22 +617,49 @@ class TestSearchReturnsSeededClaim:
         assert isinstance(out, list) and out, out
         assert s["claim"] in _ids(out), out
 
-    @pytest.mark.parametrize("mode", ["hybrid", "full_text", "tag", "sessions",
-                                      "entry_points", "issue_insight"])
-    def test_each_search_mode_is_a_valid_discriminator(self, seeded, mode):
-        """Every advertised `mode=` is accepted, and the unknown-mode refusal is
-        NOT what comes back — this is the mode set Part A records as `mode=`."""
+    @pytest.mark.parametrize("mode,assertion", [
+        ("hybrid", "claim"),
+        ("full_text", "claim"),
+        ("entry_points", "claim"),
+        ("tag", "tag_envelope"),
+        ("sessions", "session"),
+        ("issue_insight", "insight"),
+    ])
+    def test_each_search_mode_returns_ITS_OWN_payload(self, seeded, mode,
+                                                     assertion):
+        """Every advertised `mode=` is driven AND its payload asserted.
+
+        An earlier draft only proved `hybrid` and let the other five pass on
+        `out is not None` — which any error dict satisfies. Each arm returns a
+        DIFFERENT shape, so each is asserted against its own.
+        """
         door, s, _ = seeded
         args = {"query": "capstone", "mode": mode}
         if mode == "tag":
-            args["tag"] = "statement"
+            # No tag is seeded, so this arm's correct answer is the empty
+            # ENVELOPE — asserted by its keys and total, not by non-emptiness.
+            args["tag"] = "capstone-no-such-tag"
         status, out = door.call("tortoise_search_knowledge", args)
         assert status == 200
-        if isinstance(out, dict) and "error" in out:
-            assert "unknown mode" not in str(out["error"]).lower(), (
-                f"mode={mode!r} was refused as unknown: {out}")
-        else:
-            assert out is not None, out
+        assert not (isinstance(out, dict) and "unknown mode" in str(
+            out.get("error", "")).lower()), (
+            f"mode={mode!r} was refused as unknown: {out}")
+
+        if assertion == "claim":
+            rows = out.get("results") if isinstance(out, dict) else out
+            assert s["claim"] in _ids(rows), (mode, out)
+        elif assertion == "tag_envelope":
+            assert isinstance(out, dict), (mode, out)
+            assert set(out) >= {"results", "total", "hasMore"}, (mode, out)
+            assert out["total"] == 0 and out["results"] == [], (mode, out)
+        elif assertion == "session":
+            assert isinstance(out, list), (mode, out)
+            # the agent session seeded for this fixture must be findable
+            assert s["session"] in {r.get("session_id") for r in out
+                                     if isinstance(r, dict)}, (mode, out)
+        elif assertion == "insight":
+            assert isinstance(out, dict), (mode, out)
+            assert "has_prior" in out and "data_points" in out, (mode, out)
 
     def test_search_finds_the_seeded_claim(self, seeded):
         door, s, _ = seeded
@@ -637,6 +782,8 @@ class TestWritesAreReadableBack:
         assert got.get("op_type") == "NAND", got
 
     def test_create_edge_writes_a_typed_relation(self, seeded):
+        """Asserts the EDGE ITSELF, not merely the absence of an error — a
+        no-op or a wrongly-directed edge must fail."""
         door, s, _ = seeded
         status, out = door.call("tortoise_create_edge",
                                 {"source_id": s["claim"],
@@ -644,6 +791,11 @@ class TestWritesAreReadableBack:
                                  "predicate": "produces"})
         assert status == 200
         assert not (isinstance(out, dict) and out.get("error")), out
+        edge = out.get("edge") or {}
+        assert edge.get("relation") == "produces", out
+        assert edge.get("from") == s["claim"], out
+        assert edge.get("to") == s["object"], out
+        assert out.get("created") is True, out
 
     def test_update_knowledge_lands_and_is_read_back(self, seeded):
         door, s, _ = seeded
@@ -684,6 +836,23 @@ class TestWritesAreReadableBack:
                                 {"id": s["claim"], "type": "point"})
         assert got.get("id") == s["claim"], got
 
+    def test_diary_write_arm_round_trips_through_diary_read(self, seeded):
+        """The 6th `create_entity` arm (`type='diary'`) — the absorbed
+        `tortoise_diary_write` door. Seeding a diary through the SDK would
+        bypass the transport and leave the whole write arm unproven."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_create_entity",
+                                {"type": "diary",
+                                 "name": "A diary entry written over the wire.",
+                                 "props": {"authoredBy": "wire-author"}})
+        assert status == 200
+        node = out.get("node") or out
+        assert node.get("pointKind") == "diary", out
+        assert node.get("authoredBy") == "wire-author", out
+        status, rows = door.call("tortoise_list_knowledge",
+                                 {"kind": "diary", "agent": "wire-author"})
+        assert node["id"] in _ids(rows), rows
+
     def test_register_source_returns_the_seeded_url(self, seeded):
         door, s, _ = seeded
         url = "https://example.test/capstone-source"
@@ -703,7 +872,12 @@ class TestWritesAreReadableBack:
 
     def test_write_question_files_a_question_with_its_options(self, seeded):
         """`choice` is an INDEX into `options` — the wire contract the first
-        probe got wrong (it sent a string and was refused by validation)."""
+        probe got wrong (it sent a string and was refused by validation).
+
+        Asserts the COUNTS: one decision, one point per option, one per
+        evidence statement. A write that filed nothing would pass a
+        no-error-only check.
+        """
         door, s, _ = seeded
         status, out = door.call("tortoise_write_question",
                                 {"options": ["Ship it", "Hold it"],
@@ -711,12 +885,22 @@ class TestWritesAreReadableBack:
                                  "choice": 0})
         assert status == 200
         assert not (isinstance(out, dict) and out.get("error")), out
-        assert isinstance(out, (dict, list)), out
+        assert out.get("decision_id"), out
+        assert len(out.get("option_ids") or []) == 2, out
+        assert len(out.get("evidence_ids") or []) == 1, out
+        # the filed question is a real point
+        status, got = door.call("tortoise_get_entity",
+                                {"id": out["decision_id"], "type": "point"})
+        assert got.get("id") == out["decision_id"], got
 
     def test_record_decision_records_against_a_real_approver(self, seeded):
         """`artifact_id` must name a real artifact (the seeded Object) — the
         refusal for a non-existent one names the id, which is what the first
-        probe hit when it passed a Point id."""
+        probe hit when it passed a Point id.
+
+        Asserts the RECORD it wrote: an event, a decision point, and the IMPL
+        approval edge. "No error" would pass on a write of nothing.
+        """
         door, s, _ = seeded
         status, out = door.call("tortoise_record_decision",
                                 {"approver_id": s["subject"],
@@ -725,23 +909,54 @@ class TestWritesAreReadableBack:
                                  "decision_content": "Approved by the capstone."})
         assert status == 200
         assert not (isinstance(out, dict) and out.get("error")), out
+        assert out.get("event_id"), out
+        assert out.get("decision_point_id"), out
+        assert len(out.get("impl_operator_ids") or []) == 1, out
+        status, got = door.call("tortoise_get_entity",
+                                {"id": out["decision_point_id"],
+                                 "type": "point"})
+        assert got.get("id") == out["decision_point_id"], got
 
-    def test_ingest_returns_a_batch_receipt(self, seeded):
+    def test_ingest_returns_a_batch_receipt_for_a_REAL_bundle(self, seeded):
+        """`tortoise_ingest({})` returns a CONSTANT batch id and all-zero counts,
+        so an empty-bundle case proves nothing. This ingests a real point and
+        asserts the receipt counted it AND that it is readable back."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_ingest", {})
+        bundle = {"points": [{"content": "An ingested capstone point.",
+                               "kind": "statement"}]}
+        status, out = door.call("tortoise_ingest", {"bundle": bundle})
         assert status == 200
         assert out.get("batch_id"), out
-        assert "created" in out and "deduped" in out, out
+        assert out["created"]["points"] == 1, out
+        new_id = (out.get("ids") or {}).get("points") or []
+        assert new_id, out
+        status, got = door.call("tortoise_get_entity",
+                                {"id": new_id[0], "type": "point"})
+        assert got.get("id") == new_id[0], got
 
-    def test_mine_from_session_is_driven_on_its_http_arm(self, seeded):
-        """The raw-transcript arm is stdio-only BY DESIGN; the turn-list `items=`
-        arm is the one served over HTTP, so that is the arm proven here."""
+    def test_mine_from_session_files_a_real_item(self, seeded):
+        """The raw-TRANSCRIPT arm is stdio-only BY DESIGN; the `items=` arm is
+        the one served over HTTP.
+
+        `items` entries are `{wing, room, content}` DICTS (sdk
+        `_check_checkpoint_items`), not strings — a list of strings is refused
+        with code -32008, and an earlier draft's only assertion ("not the
+        stdio-only error") passed on that refusal. This asserts the write.
+        """
         door, s, _ = seeded
         status, out = door.call("tortoise_mine_knowledge_from_session",
-                                {"items": ["A mined statement from the capstone."]})
+                                {"items": [{"content":
+                                            "A mined statement from the capstone."}]})
         assert status == 200
-        assert not (isinstance(out, dict)
-                    and "stdio/CLI only" in str(out.get("error", ""))), out
+        assert not (isinstance(out, dict) and out.get("error")), out
+        assert out.get("filed") == 1, out
+        assert out.get("duplicates") == 0, out
+
+        # the dedup contract: the same item again is a duplicate, not a misfile
+        status, again = door.call("tortoise_mine_knowledge_from_session",
+                                  {"items": [{"content":
+                                              "A mined statement from the capstone."}]})
+        assert again.get("filed") == 0 and again.get("duplicates") == 1, again
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -789,9 +1004,50 @@ class TestGraphOverviewSections:
             args["entity_id"] = s["claim"]
         status, out = door.call("tortoise_graph_overview", args)
         assert status == 200
+        # An ERROR envelope is a dict, so a bare isinstance check would accept
+        # `{"error": …}` for every dict-shaped arm — the arms whose only
+        # assertion is this one (taxonomy, tags, stale, graphs, namespaces).
+        assert not (isinstance(out, dict) and "error" in out), (
+            f"section={section!r} answered an error envelope: {out!r}")
         assert isinstance(out, expected), (
             f"section={section!r} answered {type(out).__name__}, expected "
             f"{expected.__name__}: {out!r}")
+
+    def test_taxonomy_section_counts_every_seeded_kind(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "taxonomy"})
+        assert out.get("Point", 0) >= 3, out
+        assert out.get("Object", 0) >= 1, out
+        assert out.get("Subject", 0) >= 1, out
+        assert out.get("Source", 0) >= 1, out
+        assert out.get("Event", 0) >= 1, out
+
+    def test_stale_section_answers_its_envelope(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "stale"})
+        assert set(out) >= {"stale", "count", "cutoff", "limit"}, out
+        assert isinstance(out["stale"], list), out
+        assert out["count"] == 0, out
+
+    def test_graphs_and_namespaces_name_the_served_tenant(self, seeded):
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "graphs"})
+        assert f"org_{s['org']}" in {str(g) for g in out}, out
+        status, ns = door.call("tortoise_graph_overview",
+                              {"section": "namespaces"})
+        assert all(isinstance(r, dict) for r in ns), ns
+        assert all("namespace" in r for r in ns), ns
+
+    def test_tags_section_answers_an_empty_list_when_none_are_seeded(self, seeded):
+        """No tag is seeded, so `[]` is correct — asserted as the list value so
+        a crash or an envelope still fails."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "tags"})
+        assert out == [], out
 
     def test_structure_section_counts_the_seeded_operator(self, seeded):
         """The seeded IMPL operator must be visible here — that is the arm's
@@ -929,8 +1185,9 @@ class TestConfidenceArms:
 
     def test_claim_id_arm_refuses_an_uncalibrated_point_BY_NAME(self, seeded):
         """The refusal IS the payload here: it must name the point and the
-        remedy. A refusal that returned a bare error string would lose the
-        remedy and the id."""
+        remedy. Per-claim scoping (#7739) is only proven if the refusal names
+        THIS claim — the pre-#7739 whole-graph refusal would pass a check that
+        merely looked for the word "uncalibrated"."""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence",
                                 {"claim_id": s["claim"]})
@@ -939,13 +1196,44 @@ class TestConfidenceArms:
         text = json.dumps(out)
         assert "uncalibrated" in text, out
         assert "calibrate_summary" in text, out
+        assert s["claim"] in text, (
+            "the refusal must name the claim it was asked about: " f"{out}")
+        assert s["calibrated"] not in text, (
+            "the refusal named a DIFFERENT claim — scoping is not per-claim: "
+            f"{out}")
 
     def test_session_arm_returns_the_diary_and_prior_state(self, seeded):
+        """`no_prior_sessions` must be FALSE (the seed has points) and the
+        seeded claim must appear in `recent_points` — an arm blind to the graph
+        returning `true` with no rows would pass a key-presence check."""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence", {"session": True})
         assert status == 200
         assert isinstance(out, dict), out
-        assert "no_prior_sessions" in out, out
+        assert out.get("no_prior_sessions") is False, out
+        assert s["claim"] in _ids(out.get("recent_points")), out
+
+    def test_topic_arm_answers_a_collection(self, seeded):
+        """`topic=` is dispatched per topic. MEASURED on this head: it answers an
+        empty list for the seeded topic-tagged claim, so the correct payload is
+        the collection it returns — asserted as a list, and NOT reported as
+        returning the seeded claim, which it does not."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_check_confidence",
+                                {"topic": "capstone-topic"})
+        assert status == 200
+        assert isinstance(out, list), out
+        assert not (isinstance(out, dict) and out.get("error")), out
+
+    def test_recompute_arm_returns_confidence_numbers(self, seeded):
+        """`recompute=True` refuses to be combined with `claim_id` — it selects
+        its own arm — so it is driven alone."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_check_confidence", {"recompute": True})
+        assert status == 200
+        assert not (isinstance(out, dict) and "cannot be combined" in str(
+            out.get("error", ""))), out
+        assert out is not None, out
 
     def test_calibrate_arm_answers_the_calibration_view(self, seeded):
         door, s, _ = seeded
@@ -955,11 +1243,15 @@ class TestConfidenceArms:
         assert s["claim"] in _ids(out), out
 
     def test_calibrate_summary_lists_the_seeded_claim(self, seeded):
+        """Asserts the ROWS — a `not None` / `isinstance` pair is satisfiable by
+        every branch `_tool_payload` can return, so it proved nothing."""
         door, s, _ = seeded
         status, out = door.call("tortoise_calibrate_summary", {})
         assert status == 200
-        assert out is not None, out
-        assert isinstance(out, (list, dict)), out
+        assert isinstance(out, list) and out, out
+        assert s["claim"] in _ids(out), out
+        assert all(isinstance(r, dict) for r in out), out
+        assert all("calibrated" in r for r in out), out
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -987,20 +1279,32 @@ class TestRelationshipsAndRemainingReads:
         assert s["operator"] in {r.get("operator_id") for r in out
                                  if isinstance(r, dict)}, out
 
-    def test_adjust_relationship_requires_reason_and_then_writes(self, seeded):
-        """The mitigation arm refuses `strength=` alone — that refusal is the
-        contract; with a reason it must write and be readable back."""
+    def test_adjust_relationship_requires_reason_then_writes_a_mitigation(
+            self, seeded):
+        """The mitigation arm refuses `strength=` alone — that refusal IS the
+        contract. With a reason it does not mutate the operator: it writes a
+        MITIGATION Point carrying `mitigation_strength` and the reason
+        (measured on this head). Asserting "the operator changed" was wrong and
+        would have reddened a correct implementation; asserting the returned
+        mitigation is the payload this arm actually promises."""
         door, s, _ = seeded
         status, out = door.call("tortoise_adjust_relationship",
                                 {"id": s["operator"], "strength": 0.5})
         assert status == 200
         assert isinstance(out, dict) and "reason" in str(out.get("error", "")), out
 
-        status, out = door.call("tortoise_adjust_relationship",
-                                {"id": s["operator"], "strength": 0.5,
+        status, mit = door.call("tortoise_adjust_relationship",
+                                {"id": s["operator"], "strength": 0.25,
                                  "reason": "capstone V2 weakens the seeded edge"})
         assert status == 200
-        assert not (isinstance(out, dict) and out.get("error")), out
+        assert not (isinstance(mit, dict) and mit.get("error")), mit
+        assert mit.get("mitigation_strength") == 0.25, mit
+        assert "capstone V2 weakens the seeded edge" in str(mit.get("content")), mit
+        assert mit.get("baseline_set") is True, mit
+        # the mitigation is a real, readable point
+        status, got = door.call("tortoise_get_entity",
+                                {"id": mit["id"], "type": "point"})
+        assert got.get("id") == mit["id"], got
 
     def test_review_link_candidates_answers_both_directions(self, seeded):
         door, s, _ = seeded
@@ -1028,18 +1332,21 @@ class TestRelationshipsAndRemainingReads:
                    for r in out if isinstance(r, dict)), out
 
     def test_list_graphs_returns_the_seeded_tenant_graph(self, seeded):
+        """`list_graphs` reports the STORAGE namespace, which is `org_<org_id>`
+        — not the bare org id `graph_overview(section='status')` reports."""
         door, s, _ = seeded
         status, out = door.call("tortoise_list_graphs", {})
         assert status == 200
         assert isinstance(out, list) and out, out
-        assert any(str(g).startswith("org_") for g in out), out
+        assert f"org_{s['org']}" in {str(g) for g in out}, out
 
     def test_list_namespaces_returns_the_pack_namespaces(self, seeded):
         door, s, _ = seeded
         status, out = door.call("tortoise_list_namespaces", {})
         assert status == 200
         assert isinstance(out, list) and out, out
-        assert all("namespace" in r for r in out if isinstance(r, dict)), out
+        assert all(isinstance(r, dict) for r in out), out
+        assert all("namespace" in r for r in out), out
 
     def test_list_batches_answers_a_collection(self, seeded):
         door, s, _ = seeded
@@ -1065,23 +1372,52 @@ class TestRelationshipsAndRemainingReads:
         assert isinstance(out, list), out
         assert out == [], out
 
-    def test_graph_set_recording_round_trips(self, seeded):
+    def test_graph_set_recording_round_trips_BOTH_ways(self, seeded):
+        """A one-way check passes on a hardcoded `{"recording": True}` payload;
+        flipping it is what makes this a round trip."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_graph_set_recording",
-                                {"recording": True})
-        assert status == 200
-        assert out.get("recording") is True, out
+        status, on = door.call("tortoise_graph_set_recording",
+                               {"recording": True})
+        assert on.get("recording") is True, on
+        status, off = door.call("tortoise_graph_set_recording",
+                                {"recording": False})
+        assert off.get("recording") is False, off
+        assert off.get("graph_id") == on.get("graph_id"), (on, off)
 
     def test_manage_sources_lists_the_configured_sources(self, seeded):
         door, s, _ = seeded
         status, out = door.call("tortoise_manage_sources", {"action": "list"})
         assert status == 200
         assert isinstance(out, dict), out
-        assert "sources" in out and isinstance(out["sources"], dict), out
+        assert isinstance(out.get("sources"), dict) and out["sources"], out
+        for row in out["sources"].values():
+            assert {"label", "enabled"} <= set(row), row
+
+    def test_manage_sources_disable_arm_lands_and_is_read_back(self, seeded):
+        """The `action=` discriminator has more than one arm; `disable` writes an
+        intent that `list` must then report — a shape-only check on `list`
+        would not see a disabled write that went nowhere.
+
+        MEASURED: `enable` cannot be driven on this lane — it requires a
+        connected GitHub account — so it is recorded in ARM_GAPS, not faked."""
+        door, s, _ = seeded
+        status, off = door.call("tortoise_manage_sources",
+                                {"action": "disable",
+                                 "source": "github_documents"})
+        assert status == 200
+        assert off.get("status") == "disabled", off
+        assert off.get("source") == "github_documents", off
+        status, listed = door.call("tortoise_manage_sources", {"action": "list"})
+        assert listed["sources"]["github_documents"]["enabled"] is False, listed
 
     def test_approve_merge_refuses_a_missing_candidate_by_name(self, seeded):
-        """Nothing is a merge CANDIDATE in the seed, so the correct payload is
-        the refusal naming the candidate — the arm is still driven."""
+        """Nothing in the seed is a merge CANDIDATE, so the correct payload for an
+        unknown id is the refusal naming it — the `candidate_id` arm is driven.
+
+        The SUCCESS arm is not reachable here: `create_object` deduplicates on
+        `canonical_name`, so two identical names return the SAME id and no
+        ambiguity pair can be produced (measured). Recorded in ARM_GAPS rather
+        than presented as a pass."""
         door, s, _ = seeded
         status, out = door.call("tortoise_approve_merge",
                                 {"candidate_id": "no-such-candidate",
