@@ -121,7 +121,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (at this head `:57090` is a docstring line; `scored.append({` is `:57284`), nor on
+    # head (at this head `:57090` is a BLANK line inside `_no_source_advisory`'s docstring, which
+    # opens at `:57089`; `scored.append({` is `:57284`), nor on
     # `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
     # integration inserted 186 lines above it, later merges 147 more — 333 in all at the PRE-`#13833`
     # tip (`:57423`) — and `main`'s `#13833` a further 194, so 527 at `origin/main`). ⛔ AND EACH
