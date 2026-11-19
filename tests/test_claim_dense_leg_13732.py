@@ -605,24 +605,132 @@ class TestRefusals:
         assert ei.value.exit_code == 2
 
     def test_seeded_guard_refuses_the_zero_zero_coverage_trap(self, tool_mod):
-        """`0 >= 0` is VERIFIED — so seeding is guarded, not inferred."""
+        """`0 >= 0` is VERIFIED — so seeding is guarded, not inferred.
+
+        ⛔ AND IT IS GUARDED FROM BOTH SIDES, BY TWO FUNCTIONS. One function that
+        asserted both counts was called inside the record block's `try/except`,
+        so a zero-vector GRAPH raised `graph_unseeded` there and blocked the
+        RECORD arm — a graph fact wearing a record cause, with the headline
+        `record_dense_vs_lexical` comparison going UNMEASURED (`#13745` review
+        round 2, finding 1). Each side now refuses where its fact lives.
+        """
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(0, 0)
-        assert ei.value.code == "graph_unseeded"
+            tool_mod.require_graph_population(0, 786)
+        assert ei.value.code == "graph_population_absent"
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_record_measured(0)
+        assert ei.value.code == "record_unseeded"
+
+    def test_the_record_guard_never_names_the_graph(self, tool_mod):
+        """⚠️ THE MESSAGE IS THE DIAGNOSIS: a record refusal must not blame the graph.
+
+        `require_seeded`'s graph clause said *"every arm would measure the lexical
+        leg"* — false for `record_dense`, which reads Postgres — and it raised
+        from inside the record block, so that sentence shipped as the record
+        arm's explanation.
+        """
+        source = TOOL.read_text()
+        tree = ast.parse(source)
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "require_record_measured"
+        )
+        # ⛔ THE CODE, NOT THE DOCSTRING: the docstring must be free to EXPLAIN the
+        # old coupling, and a pin that forbade the word there would forbid the
+        # explanation of the bug it guards.
+        code_nodes = (
+            fn.body[1:]
+            if (
+                fn.body
+                and isinstance(fn.body[0], ast.Expr)
+                and isinstance(fn.body[0].value, ast.Constant)
+                and isinstance(fn.body[0].value.value, str)
+            )
+            else fn.body
+        )
+        code = "\n".join(ast.unparse(n) for n in code_nodes)
+        assert "graph" not in code.lower(), (
+            "the record guard must never name the graph in CODE — that coupling is "
+            "what blocked the record arm on a graph fact"
+        )
+        # and the run must call the RECORD half here, not a both-sides guard
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        called = {
+            c.func.id
+            for c in ast.walk(run)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        }
+        assert "require_record_measured" in called, called
+        assert "require_seeded" not in called, (
+            "`require_seeded` asserts BOTH counts; called inside the record block it "
+            "re-introduces the graph-blocks-the-record-arm bug"
+        )
+
+    def test_no_GRAPH_fact_can_decide_the_RECORD_block(self):
+        """⛔ Structural, because the shipped bug was structural.
+
+        `require_seeded(graph_vectors, record_vectors)` raised `graph_unseeded`
+        from INSIDE the record block's `try/except`, which caught it as
+        `record_blocked`: a zero-vector graph then blocked the `record_dense` arm
+        under a message about "every arm", and the headline comparison went
+        UNMEASURED (`#13745` review round 2, finding 1). The pure-function pin
+        above cannot see that shape, so this one reads the RUN: inside the record
+        block, `graph_vectors` may be handed to `coverage(...)` as the DENOMINATOR
+        and nothing else, and no refusal there may be spelled `graph_*`.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        block = next(
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.If)
+            and isinstance(n.test, ast.Compare)
+            and "record_blocked" in ast.unparse(n.test)
+        )
+        # every COMPARISON touched inside the block is a decision; none may be about the graph
+        decisions = [
+            ast.unparse(node)
+            for node in ast.walk(block)
+            if isinstance(node, ast.Compare) and "graph" in ast.unparse(node).lower()
+        ]
+        assert not decisions, (
+            "a graph comparison decides the record block: "
+            f"{decisions} — that is the shape that let a graph fact block the record arm"
+        )
+        # and no `graph_*` refusal code may be raised there
+        codes = [
+            node.args[0].value
+            for node in ast.walk(block)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Refused"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ]
+        assert not [c for c in codes if isinstance(c, str) and c.startswith("graph")], codes
 
     def test_seeded_guard_refuses_an_empty_record(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(786, 0)
+            tool_mod.require_record_measured(0)
         assert ei.value.code == "record_unseeded"
         assert "13210" in ei.value.message  # the backfill is named, not implied
 
     def test_seeded_guard_refuses_an_unmeasurable_record(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
-            tool_mod.require_seeded(786, None)
+            tool_mod.require_record_measured(None)
         assert ei.value.code == "record_unmeasurable"
 
-    def test_seeded_guard_passes_a_seeded_pair(self, tool_mod):
-        tool_mod.require_seeded(786, 800)  # no raise
+    def test_seeded_guard_passes_a_seeded_record(self, tool_mod):
+        tool_mod.require_record_measured(800)  # no raise
 
     def test_a_required_embedder_that_cannot_load_is_a_NAMED_refusal(self, tool_mod, monkeypatch):
         """`EmbeddingModel.get()` RAISES when REQUIRED is armed — catch it by name.
@@ -1271,13 +1379,52 @@ class TestTheWiringTheReviewFixed:
 
 
 class _FakeGraph:
+    # The texts this run "seeded", set by `_drive`. Class-level because
+    # `run_measurement` constructs the SDK (and therefore this graph) itself.
+    # ⛔ IT ANSWERS THE ID-AND-TEXT QUERY HONESTLY RATHER THAN THE RUN STUBBING
+    # `graph_population_vectors`: stubbing it made the guard's enforcement
+    # unobservable — a run that swallowed the refusal kept the whole suite green
+    # (`#13745` review round 1, finding 1).
+    contents: ClassVar[dict[str, str]] = {}
+    # ⛔ AN UNREADABLE GRAPH, driven through `run_measurement`. The unit-level
+    # `_GraphStub(boom=…)` test proves the FUNCTION answers None, but nothing
+    # drove the RUN with a graph it could not read — so `graph_population or 0`
+    # in the artifact published `0` ("the graph holds no vectors") for a graph
+    # that could not be read, with 99 tests green (`#13745` review round 11).
+    unreadable: ClassVar[bool] = False
+    # A graph that is DOWN answers NEITHER shape — the realistic case. `unreadable`
+    # alone models only a failing id-scoped read, which is what the round-11 test
+    # drove; a dead store also fails the PREFIX count, the coverage denominator.
+    down: ClassVar[bool] = False
+    # Only the PREFIX scan fails (a label-wide scan can time out on a store that
+    # answers id lookups) — the shape the round-12 `graph_unreadable` guard
+    # exists for, and the one `unreadable`/`down` do not model
+    # (`#13745` review round 14, finding 1: repointing the down-graph test at the
+    # WRITE left that guard asserted nowhere, so deleting it stayed green).
+    prefix_unreadable: ClassVar[bool] = False
+    # ⛔ AND AN UNOPENABLE GRAPH IS ITS OWN CASE (`#13745` review round 16). A
+    # store that is DOWN fails the OPEN-TIME health probe inside `_get_proj()`,
+    # before `_seed_graph` is ever called — so the write guard cannot see it and
+    # the run still reached `main()` as a traceback. `unreadable`/`down`/
+    # `prefix_unreadable` all require a store that answered the open, so without
+    # a knob of its own the guard that actually covers "the store is down" is
+    # asserted nowhere. The knob lives on `_FakeSDK`, which owns `_get_proj`.
+
     def __init__(self, rows: int):
         self._rows = rows
 
-    def query(self, _cypher):
-        # The run-level `graph_unseeded` guard reads this: a zero count refuses the
-        # RUN (the population was written without embeddings), so a fake that
-        # reports zero would never reach the arms this class is about.
+    def query(self, _cypher, params=None):
+        if self.down:
+            raise RuntimeError("no route to the graph")
+        if params is not None and "ids" in params:
+            if self.unreadable:
+                raise RuntimeError("no route to the graph")
+            return types.SimpleNamespace(
+                result_set=[[i, self.contents.get(i)] for i in params["ids"]]
+            )
+        # The run's PREFIX-wide count: `graph_vectors`, the coverage DENOMINATOR.
+        if self.prefix_unreadable:
+            raise RuntimeError("prefix scan timed out")
         return types.SimpleNamespace(result_set=[[f"pt-12186{i:06d}"] for i in range(self._rows)])
 
 
@@ -1287,10 +1434,29 @@ class _FakeProj:
 
 
 class _FakeSDK:
+    # ⛔ THE PREFIX-WIDE COUNT IS ITS OWN KNOB, DELIBERATELY NOT `len(population)`.
+    # Fixed at the population's own 3 it made the artifact's two counts equal by
+    # construction, so emitting one count under BOTH names — the collapse the pair
+    # exists to prevent — stayed green across the suite (`#13745` review round 2,
+    # finding 1: `"graph_vectors": graph_population` survived 95 tests). The
+    # population is always 3 rows here; a test that sets this to anything else
+    # makes the two artifact fields DISAGREE.
+    prefix_rows: ClassVar[int] = 3
+    # a graph that fails the OPEN-TIME health probe — declared HERE, on the class
+    # that reads it, so a test that builds `_FakeSDK` directly still gets a default
+    unopenable: ClassVar[bool] = False
+
     def __init__(self, **_kw):
-        self._proj = _FakeProj(3)
+        self._proj = _FakeProj(self.prefix_rows)
 
     def _get_proj(self):
+        if self.unopenable:
+            # the real shape: `FalkorProjection.from_uri` runs the open-time
+            # health probe and raises a plain RuntimeError when it cannot answer
+            raise RuntimeError(
+                "DB health check failed on open (server/production mode). "
+                "Run with an embedded store or fix the connection."
+            )
         return self._proj
 
 
@@ -1310,12 +1476,30 @@ class TestTheDocumentedRunPath:
     population build to the exit code is `run_measurement` as it ships.
     """
 
+    SCOPE = types.SimpleNamespace(org_id="org-1", graph_id="graph-1")
+
     BLOCK_MESSAGE = (
         "TORTOISE_RECORD_DSN is not set — the record's dense leg cannot be read, "
         "and the graph's leg under the record's name is not this measurement"
     )
 
-    def _drive(self, tool_mod, monkeypatch, tmp_path, *, out: str, preregistered_n: int):
+    def _drive(
+        self,
+        tool_mod,
+        monkeypatch,
+        tmp_path,
+        *,
+        out: str,
+        preregistered_n: int,
+        seeded: int | None = None,
+        record_ok: bool = False,
+        graph_unreadable: bool = False,
+        graph_down: bool = False,
+        prefix_unreadable: bool = False,
+        seed_refused: str | None = None,
+        graph_unopenable: bool = False,
+    ):
+        self.coverage_kwargs = {}
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
         rows = [
@@ -1330,8 +1514,67 @@ class TestTheDocumentedRunPath:
             raise tool_mod.Refused("no_record_dsn", self.BLOCK_MESSAGE)
 
         monkeypatch.setattr(tool_mod, "require_record", _no_record)
+        if record_ok:
+            # ⛔ A HEALTHY RECORD, so the property this change exists for — that a
+            # partial graph seed does NOT cost the headline
+            # `record_dense_vs_lexical` — is observable. Without it the run-path
+            # harness blocks `record_dense` for an unrelated reason and the claim
+            # is asserted nowhere (`#13745` review round 2, finding 2).
+            monkeypatch.setattr(tool_mod, "require_record", lambda _dsn: "postgresql://u@h/db")
+            # `run_measurement` imports `record_vector` INSIDE the function, so the
+            # seam is the module on `tortoise`, not an attribute of the tool.
+            monkeypatch.setattr("tortoise.record_vector._resolve_scope", lambda: self.SCOPE)
+
+            # ⛔ AND WHAT IT WAS ASKED WITH IS CAPTURED: `graph_vectors` is the
+            # coverage DENOMINATOR, so `graph_vectors=0` silently turns the gate
+            # into `record_vectors >= 0` — always verified — while the artifact
+            # still publishes `verified: true` (`#13745` review round 12).
+            def _coverage(*_a, **_k):
+                self.coverage_kwargs.update(_k)
+                return types.SimpleNamespace(
+                    verified=True, reason="ok", record_vectors=3, graph_vectors=3
+                )
+
+            monkeypatch.setattr("tortoise.record_vector.coverage", _coverage)
+            monkeypatch.setattr("tortoise.record_vector.reset_coverage_cache", lambda: None)
+            monkeypatch.setattr(tool_mod, "record_population_vectors", lambda _ids, _scope, _dsn: 3)
         monkeypatch.setattr(tool_mod, "_git_head", lambda: "deadbeef")
-        monkeypatch.setattr(tool_mod, "_seed_graph", lambda _proj, pop: len(pop))
+        # ⛔ WHAT THE GRAPH "HOLDS" IS WRITTEN BY THE SEED STUB, NOT PRE-SET HERE.
+        # Pre-setting it made the graph independent of whether the seed ran, so a
+        # count taken BEFORE `_seed_graph` — which on a first run blocks
+        # `graph_dense` on every box — stayed green across the whole suite
+        # (`#13745` review round 4, finding 1: the `stub the outcome` shape round 1
+        # fixed for `graph_population_vectors`, reintroduced one level up).
+        # `seeded` is how many of this run's rows the seed lands; the rest keep no
+        # vector (or an earlier text's).
+        _FakeGraph.contents = {}  # nothing is in the graph until the seed writes it
+        # …and whether the id-scoped read can be TAKEN at all. `unreadable` makes
+        # `query` raise for that shape, which is the only way to drive the
+        # None-vs-0 contract through the RUN instead of the pure function.
+        _FakeGraph.unreadable = graph_unreadable
+        _FakeGraph.down = graph_down
+        _FakeGraph.prefix_unreadable = prefix_unreadable
+        _FakeSDK.unopenable = graph_unopenable
+
+        def _seed(_proj, pop):
+            if seed_refused is not None:
+                # ⛔ A `Refused` FROM INSIDE THE SEED MUST SURVIVE THE WRITE
+                # GUARD. It is a `RuntimeError`, so the guard's broad
+                # `except Exception` would swallow it and re-label a row the
+                # EMBEDDER could not embed as `graph_unwritable` — sending the
+                # operator to FalkorDB for a refusal that fires BEFORE any write
+                # (`#13745` review round 15). `except Refused: raise` looks
+                # redundant next to the clause below it, and is not.
+                raise tool_mod.Refused(seed_refused, "the embedder answered no vector")
+            if graph_down:
+                # a store that will not accept the write either: the realistic
+                # dead-graph case, and the one the READ guard cannot see
+                raise RuntimeError("no route to the graph")
+            keep = len(pop) if seeded is None else seeded
+            _FakeGraph.contents = {r["id"]: r["content"] for r in pop[:keep]}
+            return len(pop)
+
+        monkeypatch.setattr(tool_mod, "_seed_graph", _seed)
         monkeypatch.setattr(
             tool_mod,
             "_read_arm",
@@ -1384,6 +1627,441 @@ class TestTheDocumentedRunPath:
         assert rc == 3
         assert json.loads(got.out)["arms"]["record_dense"]["blocked"] == "no_record_dsn"
         assert f"REFUSED[no_record_dsn]: {self.BLOCK_MESSAGE}" in got.err, got.err
+
+    def test_the_artifact_carries_BOTH_graph_counts(self, tool_mod, monkeypatch, tmp_path):
+        """Both counts, because the prefix-wide one cannot tell a full seed from a partial one.
+
+        ⛔ The README tells the reader the artifact "carries both counts", so the
+        claim needs a pin: a mutant that deletes these two fields, or that emits
+        the prefix count under both names, left the suite green.
+        """
+        target = tmp_path / "a.json"
+        # ⛔ THE PREFIX COUNT IS DRIVEN TO A VALUE THE POPULATION IS NOT. With both
+        # fixed at 3 the fields agree by construction and the collapse mutant
+        # (`"graph_vectors": graph_population`) survives every assertion below.
+        # 5 vs 3 makes it visible (`#13745` review round 2, finding 1).
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 5)
+        # a HEALTHY record, so the coverage gate is actually CONSULTED (it is the
+        # consumer of the denominator this test pins)
+        self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, record_ok=True
+        )
+        artifact = json.loads(target.read_text())
+        pop = artifact["population"]
+        assert pop["graph_vectors"] == 5, pop  # the PREFIX-wide count (_FakeGraph)
+        assert pop["graph_population_vectors"] == 3, pop  # the id-and-text count (guard)
+        # ⛔ and each field must carry ITS OWN measurement, not one count under two
+        # names — `"graph_population_vectors": graph_vectors` satisfies every
+        # assertion above while telling the reader nothing.
+        # ⛔ THE DENOMINATOR ITSELF, not just its presence: `graph_vectors=0`
+        # makes `record_vectors >= graph_vectors` always true.
+        # ⛔ AND THE HEALTHY CASE MUST STILL READ AS VERIFIED. Without this, the
+        # `denominator_zero` branch firing ALWAYS stayed green while every artifact
+        # declared the gate unverifiable (`#13745` review round 14, finding 2).
+        assert artifact["coverage"]["verified"] is True, artifact["coverage"]
+        assert self.coverage_kwargs.get("graph_vectors") == 5, (
+            "the coverage gate must be asked with the PREFIX count as its "
+            f"denominator, got {self.coverage_kwargs!r}"
+        )
+        src = TOOL.read_text()
+        assert '"graph_population_vectors": graph_population' in src, (
+            "the artifact's id-and-text count must be `graph_population`, the value "
+            "the guard refused on — not `graph_vectors` under a second name"
+        )
+        assert '"graph_vectors": graph_vectors' in src, (
+            "the artifact's prefix-wide count must be `graph_vectors` — bound to "
+            "`graph_population` instead, the coverage denominator is not reported "
+            "and both fields say the same thing"
+        )
+
+    def test_a_partly_seeded_graph_costs_the_graph_arm_and_NOTHING_ELSE(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """THE BEHAVIOUR, through the shipped guard, with a HEALTHY record.
+
+        ⛔ `#13745` review round 1, finding 1: stubbing `graph_population_vectors`
+        in the run-path harness left the guard's enforcement unobservable — a run
+        that swallowed its refusal kept the suite green.
+        ⛔ AND ROUND 2, FINDING 2: the harness blocked `record_dense` too (a
+        deliberate `no_record_dsn`), so the property this whole change exists for
+        — that a partial graph seed does NOT cost the headline
+        `record_dense_vs_lexical` — was asserted nowhere, and a mutant that
+        suppressed the headline whenever the graph arm was blocked stayed green.
+        So `record_ok=True`: only the graph arm may be missing from the result.
+        """
+        target = tmp_path / "partial.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            seeded=1,
+            record_ok=True,
+        )
+        artifact = json.loads(target.read_text())
+        # the graph arm is blocked BY NAME and carries no measurement
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        assert "summary" not in artifact["arms"]["graph_dense"]
+        assert artifact["population"]["graph_population_vectors"] == 1
+        # ⛔ THE OTHER TWO ARMS ARE REAL MEASUREMENTS — this is the discriminator
+        # against run-level scoping (which raises before the first arm, exits 2
+        # and publishes NO artifact) and against a graph block that leaks into the
+        # record arm (round 2, finding 1: `graph_unseeded` blocking `record_dense`).
+        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
+        # ⛔ AND THE HEADLINE SURVIVES. Only comparisons that involve the blocked
+        # arm are UNMEASURED; `record_dense_vs_lexical` is a real verdict.
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
+        assert "primary" in artifact["comparisons"]["record_dense_vs_lexical"]
+        assert artifact["comparisons"]["graph_dense_vs_lexical"]["label"] == "UNMEASURED"
+        assert artifact["comparisons"]["record_dense_vs_graph_dense"]["label"] == "UNMEASURED"
+        # INCOMPLETE, named, exit 3 — and exactly ONE cause, since the record is healthy
+        assert rc == 3
+        notes = [n for n in artifact["not_measured"] if "BLOCKED[" in n]
+        assert len(notes) == 1, notes
+        assert "BLOCKED[graph_population_absent]" in notes[0], notes[0]
+        assert [line for line in capsys.readouterr().err.splitlines() if "REFUSED[" in line] == [
+            "REFUSED[graph_population_absent]: " + artifact["arms"]["graph_dense"]["message"]
+        ]
+
+    def test_a_graph_with_NO_vector_at_all_still_measures_the_other_arms(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """The run-level `graph_vectors <= 0` refusal is GONE — and pinned gone.
+
+        ⛔ `#13745` review round 3, finding 3: every run-path test drove the
+        prefix count at 3, so `graph_vectors == 0` was never executed and
+        re-inserting `if graph_vectors <= 0: raise Refused("graph_unseeded", …)`
+        ahead of the arms stayed green (95 passed) — the deletion this change is
+        named for had no behavioural pin. The zero-vector graph is the EXTREME of
+        a partly seeded one: the graph arm is blocked BY NAME, the other two
+        measure, and the run exits 3.
+        """
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 0)
+        target = tmp_path / "zero.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            seeded=0,
+            record_ok=True,
+        )
+        artifact = json.loads(target.read_text())
+        assert artifact["population"]["graph_vectors"] == 0
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        # ⛔ THE DISCRIMINATOR: a run-level refusal raises before the first arm, so
+        # it exits 2 with NO artifact and nothing published. Both surviving arms
+        # are therefore asserted to be REAL measurements, not just present keys.
+        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
+        assert rc == 3, rc
+
+    def test_the_seed_writes_a_row_for_EVERY_entry(self, tool_mod):
+        """BEHAVIOURAL — and complete where an AST pin provably cannot be.
+
+        Three rounds tried to pin "the seed leaves no row unwritten" by inspecting
+        `_seed_graph`'s syntax, and every attempt was BOTH false-blocking (a
+        conditional `raise`, a re-raising `try`, a validation pre-pass all reddened)
+        AND blind (a `contextlib.suppress`, a ternary write, a truncated iterable
+        all passed) — `#13745` reviews rounds 7-9. Count the WRITES instead: every
+        syntactic way of skipping a row shows up at the fold call, so one assertion
+        covers the shapes and forbids nothing legitimate.
+
+        ⛔ BUT COUNTING WRITES IS ONLY AS COMPLETE AS THE POPULATION IT COUNTS
+        (`#13745` review round 10, P1). With three identical-shape rows the coverage
+        was DATA-dependent, not syntax-dependent: a skip keyed on a property the
+        fixture never varies stays green — measured, `if not row["content"]:
+        continue` → the whole suite PASSED. That is not a hypothetical edit: the
+        production write path this seed mirrors computes no vector for falsy content
+        (`projection/entities.py` — "computes neither for an operator, falsy content,
+        an unavailable embedder, …"), so "preserve the existing vector when the text
+        is empty" is the plausible defensive change — and its consequence is a
+        silently short population behind a green guard. The fixture therefore VARIES
+        every property a skip could key on, and the empty-content row is load-bearing
+        rather than decorative: this seed writes a vector for every row regardless of
+        the text.
+        """
+        written: list[str] = []
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                written.append(props["id"])
+                return (True, True, frozenset())
+
+        # falsy content · production-shaped id · varying text length — one row each
+        population = [
+            {"id": "pt-000000", "content": "claim 0"},
+            {"id": "pt-12186-7f3a9c2e", "content": ""},
+            {"id": "pt-000002", "content": "a production-shaped claim row, longer than the rest"},
+        ]
+        try:
+            count = tool_mod._seed_graph(
+                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
+            )
+        except tool_mod.Refused as exc:
+            # ⛔ A REFUSAL IS NOT A CORRECT OUTCOME FOR THIS POPULATION (`#13745`
+            # review round 10, P2). Returning here asserted nothing, and it hid the
+            # one fault it can actually observe: a seed that writes every row and
+            # THEN refuses makes every run unmeasurable — the outcome this test
+            # exists to catch, not to excuse. No legitimate refusal is reachable
+            # from here either: `_seed_graph`'s only refusals are
+            # `seed_vectors_missing` (a length mismatch, or a `None` vector), and the
+            # stub above answers a vector for every row. Those two genuine paths are
+            # pinned by `test_seed_graph_refuses_a_row_it_could_not_embed`.
+            pytest.fail(f"a well-formed population must be seeded, not refused: {exc}")
+        # ⛔ SORTED, because a graph upsert has no order dependency (`#13745` review
+        # round 10, P2): comparing to the population's own order banned a legitimate
+        # batching/reordering seed (`reversed(list(zip(…)))` → RED) while catching no
+        # hole that the sorted form misses.
+        assert sorted(written) == sorted(row["id"] for row in population), (
+            "the seed must write one row per population entry — a skipped or "
+            f"conditional write leaves a hole: {written}"
+        )
+        # ⛔ NOT `count == len(population)` ALONE (`#13745` review round 10, P2):
+        # `_seed_graph` ends `return len(population)`, so that comparison is
+        # tautological with respect to the writes — a seed that wrote 1 of 3 rows
+        # still returns 3 — and it reads as a third independent check without being
+        # one. Tying it to `written` is what makes the returned count a claim about
+        # the rows rather than about the return statement.
+        assert count == len(written) == len(population), (count, written)
+
+    def test_a_failed_seed_write_PROPAGATES(self, tool_mod):
+        """The other half: a failed upsert must end the run, not be swallowed.
+
+        `graph_population_absent` names only the VECTOR-side causes because a row
+        this run failed to write cannot survive to the guard — the failure leaves
+        `_seed_graph` as an exception. Wrapping the write in
+        `contextlib.suppress(Exception)` (this module's cleanup idiom) would make it
+        a nameable cause again, which is why this is asserted as behaviour rather
+        than as "no `Try` node exists" (`#13745` reviews rounds 7-9).
+        """
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                if props["id"].endswith("000001"):
+                    raise RuntimeError("the fold refused this row")
+                return (True, True, frozenset())
+
+        population = [{"id": f"pt-{i:06d}", "content": f"claim {i}"} for i in range(3)]
+        with pytest.raises(RuntimeError):
+            tool_mod._seed_graph(
+                _Proj(), population, encode_many=lambda texts: [[0.1, 0.2] for _ in texts]
+            )
+
+    def test_a_DOWN_graph_is_a_named_refusal_not_a_traceback(self, tool_mod, monkeypatch, tmp_path):
+        """⛔ THE SEED WRITE IS A STORE OPERATION TOO (`#13745` review round 13).
+
+        The prefix READ was made a named refusal in round 12; the seed WRITE that
+        runs before it was not, and `main()` catches only `Refused` — so a store
+        that accepts the open and then refuses the write gave the operator exit 1,
+        a traceback and NO artifact. (The round-12 PREFIX-scan pin lives in
+        `test_a_failing_PREFIX_SCAN_is_a_named_refusal_not_a_traceback`; this test
+        used to carry that name, which sent a reader looking for `graph_unreadable`
+        to a test that never exercises it.)
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "down.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                graph_down=True,
+            )
+        assert ei.value.code == "graph_unwritable"
+        assert not (tmp_path / "down.json").exists(), "a refused run publishes nothing"
+
+    def test_a_graph_that_cannot_be_OPENED_is_a_named_refusal(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE OPEN IS WHAT A DEAD STORE ACTUALLY FAILS ON (`#13745` round 16).
+
+        `_get_proj()` runs the OPEN-TIME health probe
+        (`FalkorProjection.from_uri(..., skip_health_check=False)`), so a graph
+        that is simply down raises there — BEFORE `_seed_graph`, and therefore
+        outside the round-13 write guard, whose comment claimed to cover exactly
+        this case while the probe eight lines above it stayed unguarded. `main()`
+        catches only `Refused`, so the realistic dead-store run still produced
+        exit 1, a traceback and no artifact. Measured: without the open guard this
+        test fails with the raw `RuntimeError`, not a `Refused`.
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "unopenable.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                graph_unopenable=True,
+            )
+        assert ei.value.code == "graph_unopenable", ei.value.code
+        # ⛔ 2, not 3: 3 means "published, but not the complete paired answer" and
+        # this path publishes NOTHING (the arm codes are pinned elsewhere).
+        assert ei.value.exit_code == 2, ei.value.exit_code
+        assert not (tmp_path / "unopenable.json").exists(), "a refused run publishes nothing"
+
+    def test_a_ZERO_denominator_does_not_publish_a_verified_gate(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ `record_vectors >= 0` is a TAUTOLOGY, not a verification.
+
+        Dropping the run-level `graph_vectors <= 0` refusal made a zero
+        denominator reachable, and `record_vector.coverage` then answers VERIFIED
+        for any record at all — so the artifact would publish a verified gate off
+        the exact state this file calls "a gate that can be satisfied by two
+        zeros" (`#13745` review round 13). The RECORD arm is blocked by name; the
+        graph arm has its own block; `lexical` still measures.
+        """
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 0)
+        target = tmp_path / "zero.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            record_ok=True,
+            seeded=0,  # the graph holds none of this run's vectors either
+        )
+        artifact = json.loads(target.read_text())
+        # the gate is recorded as UNVERIFIABLE, never as a pass
+        assert artifact["coverage"]["verified"] is None, artifact["coverage"]
+        assert artifact["coverage"]["reason"] == "denominator_zero"
+        assert "tautology" in artifact["coverage"]["note"]
+        # …and the arms still do what they can: the graph arm is blocked (its own
+        # cohort is empty), the RECORD arm measures off its id-scoped guard, and
+        # the headline comparison survives
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        assert "summary" in artifact["arms"]["record_dense"]
+        assert "summary" in artifact["arms"]["lexical"]
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["label"] != "UNMEASURED"
+        assert rc == 3
+
+    def test_a_Refused_from_the_SEED_keeps_its_own_name(self, tool_mod, monkeypatch, tmp_path):
+        """⛔ THE PASSTHROUGH IS LOAD-BEARING: `Refused` ⊂ `RuntimeError`.
+
+        Delete `except Refused: raise` and the broad handler below it swallows a
+        seed refusal and re-labels `seed_vectors_missing` as `graph_unwritable` —
+        under prose about a store that "will not hold the cohort", when both
+        `seed_vectors_missing` refusals fire BEFORE any write at all, so the store
+        was never asked (`#13745` review round 15).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "seed.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                seed_refused="seed_vectors_missing",
+            )
+        assert ei.value.code == "seed_vectors_missing", ei.value.code
+
+    def test_a_failing_PREFIX_SCAN_is_a_named_refusal_not_a_traceback(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ THE ROUND-12 GUARD, ASSERTED WHERE IT LIVES.
+
+        A store that answers id lookups but fails the LABEL-WIDE scan (a plausible
+        timeout — the seed's writes are point-level, that query is a scan) used to
+        give exit 1 + a traceback + no artifact. Repointing the down-graph test at
+        the seed WRITE left this handler asserted NOWHERE, so narrowing or
+        deleting it stayed green (`#13745` review round 14, finding 1).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            self._drive(
+                tool_mod,
+                monkeypatch,
+                tmp_path,
+                out=str(tmp_path / "scan.json"),
+                preregistered_n=M2_N,
+                record_ok=True,
+                prefix_unreadable=True,
+            )
+        assert ei.value.code == "graph_unreadable"
+        assert not (tmp_path / "scan.json").exists(), "a refused run publishes nothing"
+
+    def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
+        """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
+
+        A graph block and a record block are different facts about different
+        stores, and a report that names only one of them points the next lane at
+        the wrong repair. The mutant — reporting `blockages` as a one-element
+        slice — is green on every other test in this file.
+        """
+        target = tmp_path / "two.json"
+        rc = self._drive(
+            tool_mod, monkeypatch, tmp_path, out=str(target), preregistered_n=M2_N, seeded=1
+        )
+        artifact = json.loads(target.read_text())
+        notes = [n for n in artifact["not_measured"] if "BLOCKED[" in n]
+        codes = sorted(n.split("BLOCKED[")[1].split("]")[0] for n in notes)
+        assert codes == ["graph_population_absent", "no_record_dsn"], codes
+        lines = [line for line in capsys.readouterr().err.splitlines() if "REFUSED[" in line]
+        assert len(lines) == 2, lines
+        assert {line.split("REFUSED[")[1].split("]")[0] for line in lines} == set(codes)
+        # ⛔ EACH COMPARISON MUST NAME ITS OWN BLOCKED ARM'S CAUSE. Pinning only the
+        # SET of codes let `next(iter(blockages.values()))` — every comparison
+        # reporting the first cause — stay green, so both graph comparisons could
+        # carry the RECORD's cause (`#13745` review round 3, finding 2).
+        assert artifact["comparisons"]["record_dense_vs_lexical"]["blocked"] == "no_record_dsn"
+        assert (
+            artifact["comparisons"]["graph_dense_vs_lexical"]["blocked"]
+            == "graph_population_absent"
+        )
+        assert (
+            artifact["comparisons"]["record_dense_vs_graph_dense"]["blocked"]
+            == "graph_population_absent"
+        )
+        # ⛔ AND EACH NOTE MUST NAME THE ARM IT BELONGS TO. Pinning only the codes
+        # let the note hardcode `record_dense` while carrying a graph cause — the
+        # exact "message is the diagnosis" defect this file pins for the record
+        # guard (`#13745` review round 3, finding 3).
+        by_code = {n.split("BLOCKED[")[1].split("]")[0]: n for n in notes}
+        assert by_code["graph_population_absent"].startswith("the `graph_dense` arm"), by_code
+        assert by_code["no_record_dsn"].startswith("the `record_dense` arm"), by_code
+        assert rc == 3
+
+    def test_an_UNREADABLE_graph_publishes_None_not_zero(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """⛔ "UNMEASURED IS NEVER ZERO", ASSERTED THROUGH THE ARTIFACT.
+
+        A graph that cannot be read must publish `None` and block the arm by name.
+        Publishing `0` says "this graph holds no vectors" — a measurement — when
+        the truth is "we could not look", which is the false-PASS class the
+        function's own `None`-vs-`0` contract exists to prevent. Nothing drove the
+        RUN with an unreadable graph, so `graph_population or 0` survived the whole
+        suite (`#13745` review round 11).
+        """
+        target = tmp_path / "unreadable.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            record_ok=True,
+            graph_unreadable=True,
+        )
+        artifact = json.loads(target.read_text())
+        assert artifact["population"]["graph_population_vectors"] is None, (
+            "an unreadable graph must publish None — `or 0` states a measurement "
+            "('no vectors') about a graph nobody could read"
+        )
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_unmeasurable"
+        assert "summary" not in artifact["arms"]["graph_dense"]
+        # the arms that do not read graph vectors still measure, and the run is INCOMPLETE
+        assert "summary" in artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"]
+        assert rc == 3
+        assert any("BLOCKED[graph_population_unmeasurable]" in n for n in artifact["not_measured"])
 
     def test_the_artifact_names_the_arms_OWN_reason_not_a_cohort_story(
         self, tool_mod, monkeypatch, tmp_path
@@ -1592,3 +2270,291 @@ class TestContradictionTest:
     def test_it_reuses_the_m3_statistic_rather_than_copying_it(self):
         source = TOOL.read_text()
         assert "from tools.m3_fts_leg_recall import _binom_two_sided" in source
+
+
+# ── 5b. the GRAPH's membership of the population (id+text scoped, arm-gated) ──
+
+
+class _GraphResult:
+    def __init__(self, result_set):
+        self.result_set = result_set
+
+
+class _GraphStub:
+    def __init__(self, result_set=None, boom=None):
+        self.result_set = result_set
+        self.boom = boom
+        self.queries: list[tuple[str, object]] = []
+
+    def query(self, cypher, params=None):
+        self.queries.append((cypher, params))
+        if self.boom is not None:
+            raise self.boom
+        return _GraphResult(self.result_set)
+
+
+class _ProjStub:
+    def __init__(self, graph):
+        self.g = graph
+
+
+class TestGraphMembership:
+    """The population's OWN ids must carry THIS run's vector in the GRAPH.
+
+    ⛔ The gate beside the seed is PREFIX-wide:
+    ``n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL``. That count is
+    above zero while the population is only PARTLY seeded, and the causes that
+    count can actually meet on THIS write path are TWO, not five: the seed
+    payload always carries an explicit ``embedding``, so the fold takes its
+    ``owns_embedding`` branch and never reaches the ``encode_for_row`` derive —
+    an operator point, an EMBED-gate refusal (``#5008``) and a swallowed encode
+    failure are UNREACHABLE here (``None`` from ``compute_embeddings`` is refused
+    by name as ``seed_vectors_missing`` before any write). What is reachable: a
+    width mismatch (``#5004``), and a vector the fold refuses as unusable
+    (``_writable_journalled_vector`` → ``None``). A row this run never wrote is
+    NOT a cause — ``_seed_graph`` upserts every row and raises on failure — it is
+    the DEFENSIVE case the text pairing would catch, which is why the pairing is
+    kept. These cases red the mutants that make the graph guard prefix-wide,
+    id-only, or blind to a row this run did not write — and the wiring pin reds
+    moving it off the ``graph_dense`` arm.
+    """
+
+    def _pop(self, n: int) -> list[dict]:
+        return [{"id": f"pt-12186{i:06d}", "content": f"claim {i}"} for i in range(n)]
+
+    def test_the_query_is_id_scoped_and_not_a_prefix_count(self, tool_mod):
+        pop = self._pop(3)
+        graph = _GraphStub(result_set=[[r["id"], r["content"]] for r in pop])
+        got = tool_mod.graph_population_vectors(_ProjStub(graph), pop)
+        assert got == 3
+        cypher, params = graph.queries[-1]
+        assert "n.id IN $ids" in cypher, cypher  # the ID SET is the predicate
+        assert "STARTS WITH" not in cypher, cypher  # ⛔ the prefix-wide mutant
+        assert "n.embedding IS NOT NULL" in cypher, cypher  # what the dense leg needs
+        assert "RETURN n.id, n.content" in cypher, cypher  # the PAIR, for the pairing below
+        assert params == {"ids": [r["id"] for r in pop]}
+
+    def test_a_row_this_run_did_NOT_write_is_not_counted(self, tool_mod):
+        """The pairing proves the WRITE REACHED the row — nothing more.
+
+        A node still holding an earlier population's text at this id is a row
+        this run did not write (the fold's `n.content=$content` is
+        unconditional, so a written row carries THIS run's text). Counting it
+        would let `graph_dense` score a population that is partly not there.
+
+        ⛔ AND THE DISTINCTION MATTERS (`#13745` review round 3, finding 1): this
+        does NOT make the count a check that the stored VECTOR is this run's. On
+        a reused `--graph`, a refused (width-gate) vector leaves this run's text
+        beside the OLD vector, and this count passes — the residual is documented
+        on `graph_population_vectors`, not asserted away here.
+        """
+        pop = self._pop(2)
+        graph = _GraphStub(
+            result_set=[
+                [pop[0]["id"], pop[0]["content"]],  # this run's text — counted
+                [pop[1]["id"], "an earlier text"],  # stale vector — NOT counted
+            ]
+        )
+        assert tool_mod.graph_population_vectors(_ProjStub(graph), pop) == 1
+
+    def test_an_unreadable_graph_is_unmeasurable_not_empty(self, tool_mod):
+        graph = _GraphStub(boom=RuntimeError("no route to the graph"))
+        assert tool_mod.graph_population_vectors(_ProjStub(graph), self._pop(3)) is None
+
+    def test_a_malformed_row_is_unmeasurable_not_a_traceback(self, tool_mod):
+        """The row shape is the client's; an unexpected one must answer `None`.
+
+        ⛔ Outside the guard, `int(rows[0][0])` (or a 1-column row) raises out of
+        `graph_population_vectors` and then out of `run_measurement`, and `main()`
+        catches only `Refused` — the operator gets a traceback and exit 1 where
+        the artifact promises `REFUSED[...]`. Same shape as the `record_dsn`
+        finding. `[[0]]`-style scalar rows are refused as unmeasurable too: this
+        query RETURNS a pair, so a bare count is not an answer to it.
+
+        ⛔ AND THE SHORT-ROW CASE IS THE ONE THAT NEEDS THE EXPLICIT CHECK: most
+        malformed rows raise on their own (`row[1]` of a 1-element list is an
+        `IndexError`), which the `except` would catch anyway — `["not-a-row"]` is
+        the case that does NOT, because a long-enough STRING is indexable and
+        silently pairs two characters against nothing, returning `0`: an empty
+        graph. That is a wrong ANSWER, not a wrong shape, so it must be a refusal
+        and this row is the mutant that proves the check earns its line.
+        """
+        for bad in ([[None]], [["pt-1"]], [[0]], [None], ["not-a-row"], "not-a-row-list"):
+            assert (
+                tool_mod.graph_population_vectors(_ProjStub(_GraphStub(bad)), self._pop(1)) is None
+            ), bad
+
+    def test_an_empty_graph_is_a_measurement_of_zero_not_unmeasurable(self, tool_mod):
+        got = tool_mod.graph_population_vectors(_ProjStub(_GraphStub([])), self._pop(3))
+        assert got == 0, "an empty result is an empty graph; only a failure is unmeasurable"
+
+    def test_no_population_is_not_a_verdict(self, tool_mod):
+        assert tool_mod.graph_population_vectors(_ProjStub(_GraphStub([[0]])), []) is None
+
+    def test_guard_refuses_a_partly_seeded_population(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(785, 786)
+        assert ei.value.code == "graph_population_absent"
+        # the REACHABLE mechanisms are named, not just the arithmetic
+        assert "WIDTH" in ei.value.message
+        assert "_writable_journalled_vector" in ei.value.message
+        # ⛔ THE NUMBERS ARE THE OPERATOR'S DIAGNOSIS — pin them. `{matched}` →
+        # `{population_n}` makes the message say "holds an embedding for 786 of the
+        # 786" while refusing, and stayed green (`#13745` review round 5, finding 2).
+        assert "785 of the 786" in ei.value.message, ei.value.message
+        # ⛔ AND THE UNREACHABLE ONES ARE NOT NAMED. The seed payload always carries
+        # an explicit `embedding` (so the fold never reaches its `encode_for_row`
+        # derive), `_seed_graph` upserts EVERY row before this guard and raises on
+        # failure (so a missing row is not a cause either), and naming them sends
+        # the operator to a dead end (`#13745` review rounds 5-6).
+        assert "operator point" not in ei.value.message, ei.value.message
+        assert "EMBED gate" not in ei.value.message, ei.value.message
+        assert "swallowed" not in ei.value.message, ei.value.message
+        assert "never reached the row" not in ei.value.message, ei.value.message
+        # ⛔ THE COMPLETENESS OF THAT LIST IS PINNED AS A CODE FACT, NOT AS PROSE.
+        # Two attempts to pin the MESSAGE structurally failed the same way: one
+        # matched literals (a synonym passed), the next counted the word "row" (a
+        # synonym without it passed, and an accurate edit that mentioned a row
+        # false-REDDENED). Prose cannot be pinned this way (`#13745` reviews
+        # rounds 6-7), and a pin that refuses a correct edit is a trap for the next
+        # fixer, so the claim it was reaching for is asserted where it lives — on
+        # the SEED (see `test_the_seed_writes_a_row_for_EVERY_entry` above): the
+        # list is complete BECAUSE the seed writes every row and raises on failure.
+        # This negative assertion stays only for the exact regressions we have
+        # already shipped.
+        # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
+        # text pairing refuses a node that kept "an EARLIER text's vector" — which
+        # the pairing cannot detect, because this run's text is written
+        # unconditionally beside the preserved vector (`#13745` round 3, finding 1).
+        assert "EARLIER text" not in ei.value.message, ei.value.message
+        assert "which the text pairing" not in ei.value.message, ei.value.message
+
+    def test_the_guard_does_not_CLAIM_vector_provenance(self, tool_mod):
+        """The SUMMARY line is the contract a reader quotes; it must not overclaim.
+
+        ⛔ `#13745` review round 4, finding 2: both docstrings opened with "THIS
+        run's vector" while their own bodies said the count does NOT prove the
+        stored vector is this run's (the fold preserves an old vector when the
+        payload's is refused). Only the body was corrected in round 3, so `help()`
+        and an IDE kept advertising the contract the guard does not enforce.
+        """
+        for fn in (tool_mod.graph_population_vectors, tool_mod.require_graph_population):
+            summary = (fn.__doc__ or "").strip().splitlines()[0].lower()
+            assert "this run's vector" not in summary, summary
+            assert "this run's text" in summary, summary
+
+    def test_the_message_reports_the_two_numbers_it_was_given(self, tool_mod):
+        """⛔ THE ARITHMETIC IS PINNED, AND THE COUNT IS DESCRIBED AS WHAT IT IS.
+
+        `matched` is the id-AND-text count, but the message used to report it as
+        "the graph holds an EMBEDDING for N of M rows" — so in the one case where
+        the halves disagree (the graph holds a vector for a row whose text is not
+        this run's) the message named a cause that is not true and sent the
+        operator to the embedder (`#13745` review round 10).
+        """
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(785, 786)
+        msg = ei.value.message
+        # the numbers the caller passed, not a recomputation
+        assert "785" in msg and "786" in msg, msg
+        # and the count is the PAIR, said so in the message itself
+        assert "NOT A VECTOR COUNT" in msg, msg
+        assert "THIS RUN'S TEXT" in msg, msg
+
+    def test_guard_refuses_an_unmeasurable_graph(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(None, 786)
+        assert ei.value.code == "graph_population_unmeasurable"
+
+    def test_guard_refuses_an_empty_graph(self, tool_mod):
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.require_graph_population(0, 786)
+        assert ei.value.code == "graph_population_absent"
+
+    def test_guard_passes_a_fully_seeded_population(self, tool_mod):
+        tool_mod.require_graph_population(786, 786)  # no raise
+
+    def test_the_run_asks_the_graph_question_INSIDE_the_arm_loop(self):
+        """Wired over the population's own rows, and gating `graph_dense` alone.
+
+        ⛔ A guard nothing calls is the shape this finding started as. ⛔ AND THE
+        SCOPE IS THE RECORD GUARD'S, NOT THE RUN'S (`#13745` review round 1,
+        finding 2): a partly seeded graph degrades `graph_dense` ONLY — `lexical`
+        forces `EmbeddingModel.get()` to None and reads a full-text index built
+        from `n.content`, which the fold writes unconditionally, and
+        `record_dense` reads Postgres. Refusing the run over it therefore throws
+        away `record_dense_vs_lexical`, the lane's headline question, which is the
+        failure the record gate 40 lines up was already moved out of.
+        """
+        tree = ast.parse(TOOL.read_text())
+        run = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        calls = [n for n in ast.walk(run) if isinstance(n, ast.Call)]
+        named = [c for c in calls if isinstance(c.func, ast.Name)]
+        guard = [c for c in named if c.func.id == "require_graph_population"]
+        assert guard, "run_measurement never requires the graph's own cohort"
+        # ⛔ ARG 2 MUST BE THE POPULATION'S OWN LENGTH — a constant makes the
+        # guard a no-op.
+        n_arg = guard[0].args[1]
+        assert isinstance(n_arg, ast.Call), ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.func, ast.Name) and n_arg.func.id == "len", ast.dump(n_arg)[:120]
+        assert isinstance(n_arg.args[0], ast.Name), ast.dump(n_arg)[:120]
+        assert n_arg.args[0].id == "population_ids", ast.dump(n_arg)[:120]
+        # ⛔ ARG 1 MUST BE THE ID-AND-TEXT MEASUREMENT, not the prefix-wide count
+        # the run already holds — `require_graph_population(graph_vectors, …)` is
+        # the exact bug this pin exists for.
+        matched = guard[0].args[0]
+        assert isinstance(matched, ast.Name), ast.dump(matched)[:120]
+        assert matched.id == "graph_population", ast.dump(matched)[:120]
+        bound = [
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "graph_population" for t in n.targets)
+        ]
+        assert bound, "graph_population is never bound in run_measurement"
+        value = bound[0].value
+        assert isinstance(value, ast.Call) and isinstance(value.func, ast.Name), ast.dump(value)[
+            :120
+        ]
+        assert value.func.id == "graph_population_vectors", ast.dump(value)[:120]
+        asked = value.args[1]
+        assert isinstance(asked, ast.Name) and asked.id == "population", ast.dump(asked)[:120]
+        # ⛔ AND IT MUST SIT INSIDE THE ARMS LOOP, UNDER `arm == ARM_GRAPH_DENSE`.
+        # At run level it refuses the two arms that need no graph vector at all;
+        # under any other arm it either blocks the wrong one or runs the dense
+        # arm on a cohort it never verified.
+        arms_loop = next(
+            n
+            for n in ast.walk(run)
+            if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "ARMS"
+        )
+        in_loop = [
+            c
+            for c in ast.walk(arms_loop)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
+            and c.func.id == "require_graph_population"
+        ]
+        assert in_loop, (
+            "the graph guard must gate the `graph_dense` arm INSIDE the arms loop "
+            "— at run level it blocks `lexical` and `record_dense` too, which need "
+            "no graph vector, and discards the headline `record_dense_vs_lexical`"
+        )
+        parents = {}
+        for node in ast.walk(run):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        node = in_loop[0]
+        enclosures = []
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If):
+                enclosures.append(node)
+        assert any("ARM_GRAPH_DENSE" in ast.unparse(if_node.test) for if_node in enclosures), (
+            "the guard must be enclosed in `if arm == ARM_GRAPH_DENSE` — inside the "
+            "loop but ungated it blocks whichever arm is scored first"
+        )
