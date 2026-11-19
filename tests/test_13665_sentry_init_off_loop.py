@@ -7,6 +7,18 @@ callback (``WaitBoundMiddleware``'s deadline) and the ``send`` of a response —
 are BOTH loop work. A loop held for seconds is therefore not a slow answer, it
 is no answer.
 
+⛔ THAT IS A BLOCK *IN SERVICE*, AND THIS MODULE DOES NOT CLAIM IT FOR STARTUP
+(#13665 review round 1, issue 3). uvicorn awaits ``lifespan.startup()`` BEFORE
+it creates the listener (``uvicorn/server.py::Server.startup``, pinned 0.52.1),
+so a request arriving during the lifespan startup half is not read, dispatched
+or answered — with or without this fix. Moving the init off the loop does NOT
+move process-start→first-answer and does NOT by itself close #13665's
+``HTTP 000`` shape. What it removes is a real defect that is not about that
+caller: the loop being HELD for the whole init, which stalls every other piece
+of loop-scheduled work in the boot window and is what makes the loop-block
+instrument record a startup episode (the ``max_age_s: 5.212`` capture #13665 is
+built on).
+
 ⛔ MEASURED ON THE DEPLOYED BOX, NOT HYPOTHESISED. ``/health`` on head
 ``18d406258f7b`` (the exact head #13665 measured) carries the loop-block
 sampler's capture — ``loop_blocks`` → ``max_age_s: 5.212``, also appended to
@@ -30,11 +42,11 @@ because ``auto_enabling_integrations`` defaults to True, and ``_lifespan``
 called that init SYNCHRONOUSLY on the loop.
 
 What is pinned here is the OUTPUT, not a doc pin: **while the startup init runs,
-the loop keeps running.** That is exactly the property a caller needs — a request
-arriving during startup gets an answer inside its bound instead of ``HTTP 000``.
-The SDK init is stubbed to sleep, so this module does not depend on how many
-distributions the runner's image happens to carry; the real cost is measured in
-the tracker and recorded in ``tortoise/sentry.py``'s own docstrings.
+the loop keeps running** — its callbacks are served throughout instead of being
+held for the whole of it. The SDK init is stubbed to sleep, so this module does
+not depend on how many distributions the runner's image happens to carry; the
+real cost is measured in the tracker and recorded in ``tortoise/sentry.py``'s
+own docstrings.
 
 ⛔ THE ON-LOOP CONTROL IS PART OF THE TEST, not commentary. A ticker test that
 passes for every implementation measures nothing: the control below drives the
@@ -55,8 +67,13 @@ import tortoise.sentry as tsentry
 
 #: Long enough that an ON-LOOP sleep covers many ticker wake-ups (the ticker
 #: waits 5 ms per iteration, so a starved loop shows 0-1 ticks and a served loop
-#: ~60). Small enough that the whole module stays around a second.
-STUB_SECONDS = 0.30
+#: ~120). Small enough that the whole module stays around a second.
+#:
+#: 0.60 s rather than 0.30 s on purpose (#13665 review round 1, non-blocking 3):
+#: the bound below is ``ticks >= 20``, so 0.30 s asked a loaded fast-band shard
+#: for one tick per 15 ms — ~3x headroom against scheduler jitter, which is the
+#: false-RED shape. 0.60 s keeps the same absolute bound at ~6x headroom.
+STUB_SECONDS = 0.60
 
 
 @pytest.fixture(autouse=True)
@@ -134,8 +151,10 @@ async def _loop_wake_ups_during(awaitable_factory) -> int:
 def test_init_off_loop_keeps_the_event_loop_serving(slow_init: dict) -> None:
     """THE FIX: a slow startup init does not stop the loop.
 
-    A caller arriving during startup keeps its timer callbacks and its ``send``,
-    so it ends in an answer or a legible refusal — never in ``HTTP 000``.
+    Not "a caller gets its answer sooner" — no request is being read yet (see
+    the module docstring). What is pinned is the LOOP: it keeps serving its
+    callbacks while the init is in flight, instead of being held for the whole
+    of it.
     """
     ticks = asyncio.run(_loop_wake_ups_during(tsentry.init_off_loop))
 
@@ -237,6 +256,33 @@ def test_no_dsn_short_circuits_without_a_thread(
         "back inside init(), i.e. onto the worker"
     )
     assert tsentry.enabled() is False
+
+
+def test_concurrent_init_off_loop_calls_initialise_once(slow_init: dict) -> None:
+    """Two overlapping startup calls must not build TWO Sentry clients.
+
+    ``init_off_loop`` SUSPENDS at the thread hand-off *before* ``_enabled`` is
+    set, so its loop-side fast path cannot make the pair atomic — the
+    synchronous form could not overlap at all. The guard that matters is inside
+    the worker (``_init_once``), and this is the arm that pins it: delete the
+    lock and both callers reach ``sentry_sdk.init`` (two clients, one leaked
+    transport).
+
+    ``submits`` is deliberately NOT asserted to 1 here: the second hand-off is
+    harmless once the worker serialises, and pinning it to 1 would demand
+    loop-side state this function does not have.
+    """
+
+    async def _both() -> list[bool]:
+        return await asyncio.gather(
+            tsentry.init_off_loop(), tsentry.init_off_loop()
+        )
+
+    assert asyncio.run(_both()) == [True, True]
+    assert slow_init["n"] == 1, (
+        "two overlapping calls each ran the SDK init — that is two clients and "
+        "a leaked transport; the pair must serialise on `_init_once`'s lock"
+    )
 
 
 def test_the_lifespan_uses_the_off_loop_entry_point(

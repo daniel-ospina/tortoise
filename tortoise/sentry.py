@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from typing import Any
 
 _log = logging.getLogger("tortoise.sentry")
@@ -136,6 +137,21 @@ async def init_off_loop() -> bool:
     exactly the false-zero ``WaitBoundMiddleware``'s ``on_starved`` arm was
     added to expose.
 
+    ⛔ WHAT A *STARTUP* BLOCK DOES NOT DO, STATED SO THE MECHANISM IS NOT
+    OVERCLAIMED (#13665 review round 1, issue 3). The ``HTTP 000`` above is
+    what a block does to a caller that ALREADY holds a connection. A block
+    during the LIFESPAN is not that caller: uvicorn awaits
+    ``lifespan.startup()`` BEFORE it creates the listener
+    (``uvicorn/server.py::Server.startup``, pinned 0.52.1 — the same fact
+    ``_lifespan`` states at "uvicorn binds only after this half returns",
+    #2953), so no request is read, dispatched or answered in this window with
+    OR without the fix. Moving this init off the loop therefore does NOT move
+    process-start→first-answer, and it is NOT what closes #13665's ``HTTP 000``
+    shape on its own. What it does do is real: the loop is not held, so
+    loop-scheduled work in that window is not delayed, and the loop-block
+    instrument stops recording a STARTUP episode — which is precisely the
+    ``max_age_s: 5.212`` capture #13665 is built on.
+
     ⛔ WHY THE DEFAULT EXECUTOR IS ACCEPTABLE HERE, WHEN #10602 SPENT A WHOLE
     READ LANE REFUSING IT. ``asyncio.to_thread`` submits to the loop's shared
     pool, and #10602 moved the READ path off it because a 40–80 ms store behind
@@ -159,12 +175,38 @@ async def init_off_loop() -> bool:
     is checked HERE and again inside :func:`init`. Both calls read the SAME
     helper (:func:`_dsn`), so the two cannot drift into disagreeing about what
     "configured" means.
+
+    ⛔ THE PAIR IS NOT ATOMIC ON THE LOOP, SO THE GUARD IS IN THE WORKER. This
+    function SUSPENDS at the thread hand-off *before* ``_enabled`` is set, so
+    the fast path above cannot stop two overlapping callers from both getting
+    through; the synchronous form could not overlap at all. The serialisation
+    that matters is therefore inside the worker (:func:`_init_once`), not here.
+    Without it, two concurrent calls build TWO clients and leak one transport
+    (#13665 review round 1, non-blocking 2).
     """
     if _enabled:
         return True
     if not _dsn():
         return False
-    return await asyncio.to_thread(init)
+    return await asyncio.to_thread(_init_once)
+
+
+#: Serialises the ACTUAL :func:`init` call. A ``threading`` lock, deliberately
+#: NOT an ``asyncio`` one: the guard must hold ACROSS the thread hand-off, and a
+#: module-level ``asyncio.Lock`` binds to whichever loop first contends for it,
+#: which this module's own suite (repeated ``asyncio.run``) would trip.
+_init_lock = threading.Lock()
+
+
+def _init_once() -> bool:
+    """Run :func:`init` under :data:`_init_lock`, so concurrent callers serialise.
+
+    The second holder finds ``_enabled`` set by the first and returns ``True``
+    from ``init``'s own guard without re-initialising — the same contract the
+    synchronous form had, now reachable from the off-loop entry point.
+    """
+    with _init_lock:
+        return init()
 
 
 def _dsn() -> str:
