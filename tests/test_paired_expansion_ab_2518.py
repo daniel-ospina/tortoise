@@ -2515,11 +2515,17 @@ def test_the_touched_path_cell_names_every_top_level_path_the_diff_carries():
     # files this lane may legitimately edit, so an overlap test would re-arm the false
     # block for any PR that touches one of them (and this fix edits
     # `tests/test_paired_expansion_ab_2518.py` itself).
+    # ⛔ BOTH owner paths, not one (#13572 review, P2): the record's change is the brief
+    # AND the probe it reports (`tools/paired_expansion_ab_2518.py`), so arming on the
+    # brief alone let a probe-only PR reach the `tortoise/` claim below unarmed — a gap,
+    # not vacuity, since the owning PR carries both. A PR that merely edits a test file
+    # the cell names still skips; that is what the narrow trigger is FOR.
     brief_dir = _DOCS.relative_to(repo).as_posix() + "/"
-    if not [p for p in diff if p.startswith(brief_dir)]:
-        pytest.skip("this branch's diff does not carry the research brief this cell "
-                    "records (the cell describes one PR's change) — the set is "
-                    "re-read by a reviewer at each head")
+    probe_path = "tools/paired_expansion_ab_2518.py"
+    if not [p for p in diff if p.startswith(brief_dir) or p == probe_path]:
+        pytest.skip("this branch's diff carries neither the research brief this cell "
+                    "records nor the probe it reports (the cell describes one PR's "
+                    "change) — the set is re-read by a reviewer at each head")
 
     assert not [p for p in diff if p.startswith("tortoise/")], (
         "the R3 claim is 'no retrieval behaviour changed', and the diff reaches "
