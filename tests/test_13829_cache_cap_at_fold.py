@@ -178,7 +178,7 @@ class _Projection:
     def __init__(self) -> None:
         self.applied: list[dict] = []
 
-    def apply(self, event: dict) -> None:  # noqa: D401 - the Protocol's method
+    def apply(self, event: dict) -> None:
         self.applied.append(dict(event))
 
 
