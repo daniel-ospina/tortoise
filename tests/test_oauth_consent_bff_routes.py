@@ -2341,20 +2341,21 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 # table's job is the opposite one: it pins that no PHRASING gets a sentence with the false noun past
 # the guard — including the historical forms the deleted exemptions were written to allow.
 #
-# ⛔ FOUR EXEMPTIONS WERE TRIED, AND THE ROWS BELOW ARE THE SHAPES WHOSE VERDICT THEY CHANGED —
-# because each exemption is the argument for deleting the mechanism rather than tuning it: a bare
-# word list (`bf5202ce79`), a retro marker accepted anywhere in the sentence (`4ab3033e32`), a `used
-# to` read from an unbounded tail, a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and
-# an anchored historical shape that did not fail open but made the guard VACUOUS against `origin/main`.
+# ⛔ FIVE EXEMPTION SHAPES WERE TRIED — four failed OPEN and the fifth made the guard VACUOUS — and
+# each one is the argument for deleting the mechanism rather than tuning it: a bare word list
+# (`bf5202ce79`), a retro marker accepted anywhere in the sentence (`4ab3033e32`), a `used to` read
+# from an unbounded tail, a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and an
+# anchored historical shape that did not fail open but matched `origin/main`'s own pre-fix sentence,
+# so reverting the copy hunk redded nothing.
 #
-# ⛔ NOT EVERY ROW BELOW IS ONE OF THOSE, and saying it was would be the class of over-claim this PR
-# exists to remove (review of #13712, F15 — measured: the bare denial "Every hard failure is a page,
-# not a JSON blob." carries no survivor, no retro marker, no `-ed` and no anchor, so it was RED under
-# ALL FIVE schemes and GREEN under none of them). The rows that pin the phrase and its SPELLING
-# tolerance — the bare denial, the wrap, the `**hard**`, the `hard-failure`, the tab — are here for a
-# different reason: they hold the PATTERN, not an exemption. Where a row's own comment names an old
-# revision, that row is one of the exemptions' casualties; where it names none, it is not, and this
-# comment must not be read as claiming otherwise.
+# ⛔ THE TABLE IS NOT "EVERY ROW BELOW WAS GREEN UNDER ONE OF THOSE", and two earlier wordings of this
+# comment said exactly that and were falsified by the table itself (review of #13712, F15/F16 —
+# measured: 8 of the 35 rows are RED under ALL FIVE schemes, GREEN under none). A row whose own
+# comment names a revision is a casualty of that scheme; the rest are here for their own reason — the
+# bare denial, and the spelling rows (wrap, `**hard**`, `hard-failure`, tab) that hold the PATTERN
+# rather than an exemption. Both kinds belong in the table; what must never be written is that a row
+# demonstrates a discrimination it does not perform — which is the class of over-claim this PR
+# exists to remove.
 _SUMMARY_ABSOLUTE_ROWS: list[str] = [
     # the denial itself, however it is dressed
     ("Every hard failure is a page, not a JSON blob."),
@@ -2375,7 +2376,7 @@ _SUMMARY_ABSOLUTE_ROWS: list[str] = [
     ("Every hard-failure is a page, not a JSON blob."),
     ("Every\thard\tfailure is a page, not a JSON blob."),
     ("EVERY HARD FAILURE IS A PAGE, not a JSON blob."),
-    # ordinary-English clauses: a word list (`still` / `remains` / `survives`) exempted all three
+    # ordinary-English clauses: a word list (`still` / `remains`) exempted ALL FOUR under `bf5202ce79`
     ("Every hard failure is a page; the consent cookie is still set before the flow starts."),
     ("Every hard failure of the route is a page, and the store remains the source of truth."),
     ("Every hard failure is a page, which still leaves the graph as the source of truth."),
@@ -2413,10 +2414,16 @@ _SUMMARY_ABSOLUTE_ROWS: list[str] = [
      "every hard failure is a page."),
     ("Every hard failure is a page, and before #13671 every hard failure was JSON; two arms "
      "still do."),
-    # ⛔ F6, the other half: an `-ed` word is not a tense. `documented` and `were` both exempted the
-    # bare denial under the clause-scoped `\w+ed` rule; nothing but the phrase is read now.
+    # ⛔ F6, the other half: an `-ed` word is not a tense. ⛔ THE NEXT TWO ROWS ARE NOT ITS CASUALTIES,
+    # and an earlier comment credited them with a discrimination they do not perform (review of
+    # #13712, F17 — measured at `ceb8ab564f`, the only revision that shipped the clause-scoped `\w+ed`
+    # rule: both rows were RED there, because that rule ALSO required a retro frame and neither
+    # carries one; they are casualties of the bare word list at `bf5202ce79`). The row BELOW them is
+    # the one that rule actually flipped — it carries the retro frame AND `documented`, and it was
+    # GREEN at `ceb8ab564f`.
     ("Two arms remain, and every hard failure is a page as documented."),
     ("Two arms were converted and every hard failure is a page now."),
+    ("Before #13671, every hard failure is a page as documented; two arms still do."),
     # a true past prefix does not excuse the SAME sentence asserting the present
     ("Every hard failure answered raw JSON, and is a page now."),
     # ⛔ AND SO IS THE HISTORICAL FORM — this is the row that decides whether the guard pins the fix.
