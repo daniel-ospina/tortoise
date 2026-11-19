@@ -209,6 +209,20 @@ whenever a write came back unprojected. One command would not be runnable: `appl
 requires ``--org-id``/``--graph-id`` on every verb and refuses a writing run without
 the count `plan` prints.
 
+⛔ AND THE DSN IS DECLARED TOO, BECAUSE ``--dsn`` ALONE DOES NOT ARM THE WRITE
+(#13839 review, finding 1). ``--dsn`` resolved the value every READ used, while
+``live_write.write`` asked ``record_writer.record_dsn()`` — the ENVIRONMENT — and
+answered "unarmed": nothing was written, no fold was emitted, the artifact
+published ``record_armed: false`` for a store the same run could query, and the
+refusal that blocked the arm named only FOLD causes. ``run_measurement`` therefore
+declares the resolved value into ``TORTOISE_RECORD_DSN`` for the length of the run
+(``main()`` restores the caller's, exactly as it does for the journal), and
+:func:`_arm_blockage` blocks the ``record_dense`` arm by name
+(``record_arm_undeclared``) if a run holding a DSN ever sees its seam answer
+unarmed again — so that mismatch can neither recur silently nor be mistaken for a
+fold. ⚠️ A caller that invokes :func:`_seed_population` directly must declare the
+same variable itself; the seam reads nothing else.
+
 ⛔ THE JOURNAL IS A PRECONDITION, DECLARED, NOT DERIVED. The record is
 ``replay(journal)``, so a seed that appends nowhere is not a seed; ``--journal``
 (or ``TORTOISE_RECORD_JOURNAL``, which also tells ``record_vector.journal_ready``
@@ -1470,21 +1484,29 @@ class SeedReport:
             payload["fold"] = {
                 "plan": (
                     f"uv run python tools/record_runner.py plan --from-checkpoint "
-                    f"--journal {journal} {ident}"
+                    f"--journal {journal} {ident} --dsn \"$TORTOISE_RECORD_DSN\""
                 ),
                 "apply": (
                     f"uv run python tools/record_runner.py apply --journal {journal} "
-                    f"{ident} --acknowledge-plan <N: the count `plan` reports>"
+                    f"{ident} --dsn \"$TORTOISE_RECORD_DSN\" "
+                    f"--acknowledge-plan <N: the count `plan` reports>"
                 ),
                 "why": (
                     "`apply` writes NOTHING without --acknowledge-plan (a number only "
                     "`plan` prints), and `--from-checkpoint` makes the plan report "
                     "what REMAINS rather than the whole journal — the number `apply` "
                     "then wants. Both verbs require --org-id/--graph-id, filled in "
-                    "above from this run's tenant. ⚠️ A CUT-OVER graph (one holding a "
-                    "`record_cursor` row) refuses an ENUMERATED replay whatever the "
-                    "acknowledgement; there the repair is the allocator's operator "
-                    "path, not this fold"
+                    "above from this run's tenant. ⛔ `--dsn \"$TORTOISE_RECORD_DSN\"` "
+                    "names the store THIS RUN measured, as a shell VARIABLE so no "
+                    "secret enters this artifact: `record_runner` otherwise falls back "
+                    "to the same environment variable, and with it unset the paste is "
+                    "an obvious `no record DSN` refusal — but with it naming a "
+                    "DIFFERENT record the fold would write this population into a "
+                    "store nobody measured, silently. Export the DSN this run used "
+                    "(or pass it on `--dsn`) before pasting. ⚠️ A "
+                    "CUT-OVER graph (one holding a `record_cursor` row) refuses an "
+                    "ENUMERATED replay whatever the acknowledgement; there the repair "
+                    "is the allocator's operator path, not this fold"
                 ),
             }
             payload["note"] = (
@@ -1500,6 +1522,47 @@ class SeedReport:
                 f"record's own door, not a second writer (#13345)"
             )
         return payload
+
+
+def _arm_blockage(dsn: str | None, seed: SeedReport) -> Refused | None:
+    """Does the WRITE seam disagree with this run's own arming?
+
+    ⛔ THE MISMATCH THAT MADE THE SEED A SILENT NO-OP, AS A STANDING GUARD
+    (`#13839` review, finding 1). A run that holds a DSN has armed the record for
+    every READ it makes (`record_vector.coverage`, `record_population_vectors`)
+    and every repair it can emit — so a write seam answering *unarmed* is not a
+    deployment without a record, it is THIS RUN's two doors reading different
+    arming surfaces (`--dsn` resolved a value; `record_writer._live_write_verdict`
+    asks the environment). Left unreported, the artifact publishes
+    ``record_armed: false`` for a store the same run queries, no fold is emitted,
+    and the refusal that eventually blocks the arm names only FOLD causes.
+
+    ⛔ ``armed is None`` IS NOT THIS FAULT. Unmeasured (a projection that raised on
+    every row) is a different fact and one this function must not collapse into
+    False — it carries `positions_unproven`/`record_unprojected` and its own
+    repair. And a run holding NO DSN is legitimately unarmed: the arm is blocked
+    by `no_record_dsn` and the other two arms still publish.
+
+    ⛔ A BLOCKED ARM, NOT A REFUSED RUN. The record's preconditions belong to the
+    ``record_dense`` arm (see `run_measurement`'s note), so this becomes the arm's
+    named blockage and the lexical/graph arms still measure — while the cause the
+    operator reads is the real one, not the fold.
+    """
+    if dsn is not None and seed.record_armed is False:
+        return Refused(
+            "record_arm_undeclared",
+            f"this run holds a record DSN but the write seam answered UNARMED for "
+            f"all {seed.written} seeded row(s) — the token this run resolved and "
+            f"the token the seam reads are not the same one, so nothing reached "
+            f"the record and there is no fold to run. The seam asks the "
+            f"ENVIRONMENT (`record_writer.record_dsn()`), so a DSN supplied only "
+            f"by flag must be declared into `TORTOISE_RECORD_DSN` for the write "
+            f"path (`run_measurement` does this; a caller invoking the seed "
+            f"directly must too). ⛔ This is NOT the fold: re-running the fold "
+            f"cannot repair a store that was never written, which is why it is "
+            f"named here instead of in `require_population_in_record`'s causes",
+        )
+    return None
 
 
 def _seed_population(
@@ -1660,6 +1723,23 @@ def run_measurement(args: argparse.Namespace) -> int:
     scope = None
     try:
         dsn = require_record(_resolve_dsn(args.dsn))
+        # ⛔ AND THE RESOLVED DSN IS DECLARED FOR THE RUN, because "--dsn arms the
+        # reads" is only HALF of arming (#13839 review, finding 1). The write
+        # seam's predicate asks the DSN question with NO ARGUMENT —
+        # `record_writer._live_write_verdict` reads `record_dsn()`, i.e. the
+        # ENVIRONMENT (tortoise/record_writer.py:2754-2759) — so a `--dsn`-only run
+        # armed every READ (`record_vector.coverage(record_dsn=dsn)`,
+        # `record_population_vectors(..., dsn)`) while `live_write.write` answered
+        # "unarmed": nothing written, no fold emitted, `record_armed: false` in the
+        # artifact for a store this same run can read, and every named cause in the
+        # refusal pointing at the FOLD. The seam cannot be handed a DSN — it asks
+        # the environment, by design — so the run declares it, exactly as it already
+        # declares the journal below for the same class of reason. The value is the
+        # one `--dsn`/`TORTOISE_RECORD_DSN` already resolved (flag wins), never a
+        # second reading of the flags; `main()` restores the caller's value.
+        from tortoise.record_writer import RECORD_DSN_ENV
+
+        os.environ[RECORD_DSN_ENV] = dsn
         scope = record_vector._resolve_scope()
         if scope is None:
             raise Refused(
@@ -1769,6 +1849,15 @@ def run_measurement(args: argparse.Namespace) -> int:
             f"so this run publishes no artifact rather than a result about a "
             f"graph that was never seeded",
         ) from exc
+    # ⛔ THE WRITE SEAM AND THIS RUN MUST AGREE ABOUT ARMING (#13839 review,
+    # finding 1). A run holding a DSN whose seam answered "unarmed" wrote NOTHING
+    # to the record, so the `record_dense` arm is blocked by name HERE — at the
+    # cause — rather than by `record_population_absent`, whose message would send
+    # the operator to a fold that cannot repair a store nobody wrote to. The FIRST
+    # blockage wins, so an already-named cause (`no_tenant`, an unreachable
+    # record) is not overwritten by this one.
+    if record_blocked is None:
+        record_blocked = _arm_blockage(dsn, seed)
     if seed.record_unprojected or seed.positions_unproven:
         # ⛔ NOT FATAL, AND NOT SILENT. `live_write.write` never raises after its
         # append (the append is the commit point), so these are lines the RECORD did
@@ -2202,8 +2291,16 @@ def main(argv: list[str] | None = None) -> int:
     # `run_measurement` directly — from inheriting a path for a journal this process
     # happened to seed. The import is LOCAL so `--preregister` stays store-free.
     from tortoise import record_vector
+    from tortoise.record_writer import RECORD_DSN_ENV
 
     saved = os.environ.get(record_vector.RECORD_JOURNAL_ENV)
+    # ⛔ THE DSN DECLARATION IS RESTORED FOR THE SAME REASON, AND WITH THE SAME
+    # RULE (#13839 review, finding 1): `run_measurement` publishes the run's DSN to
+    # the write seam, and a caller that gets its environment back unchanged must
+    # not inherit a record this process happened to measure against. A prior
+    # declaration is put back VERBATIM — popped when there was none, restored when
+    # there was — so a library caller's own arming survives a run.
+    saved_dsn = os.environ.get(RECORD_DSN_ENV)
     try:
         return run_measurement(args)
     except Refused as exc:
@@ -2214,6 +2311,10 @@ def main(argv: list[str] | None = None) -> int:
             os.environ.pop(record_vector.RECORD_JOURNAL_ENV, None)
         else:
             os.environ[record_vector.RECORD_JOURNAL_ENV] = saved
+        if saved_dsn is None:
+            os.environ.pop(RECORD_DSN_ENV, None)
+        else:
+            os.environ[RECORD_DSN_ENV] = saved_dsn
 
 
 if __name__ == "__main__":

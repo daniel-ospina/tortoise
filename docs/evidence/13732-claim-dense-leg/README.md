@@ -284,6 +284,19 @@ record's readiness gate measures. Point it at a **measurement tenant**: a run ap
 records and writes `n` record rows, and the ids are deterministic, so a re-run upserts the rows and
 only grows the journal.
 
+⛔ **`--dsn` ARMS THE WRITE, NOT ONLY THE READS (#13839).** The write path's arming predicate reads
+`TORTOISE_RECORD_DSN` from the **environment** (`record_writer._live_write_verdict`, no argument), so
+a run whose DSN came only from the `--dsn` flag used to arm every read and leave `live_write.write`
+unarmed: the seed wrote **nothing**, no fold was emitted, and the artifact published
+`record_armed: false` for a record the same run could query. `run_measurement` now declares the
+resolved value into `TORTOISE_RECORD_DSN` for the length of the run (`main()` restores the caller's),
+and if a run holding a DSN ever sees the seam answer *unarmed* again the `record_dense` arm is
+blocked by name — `record_arm_undeclared` — instead of being reported as a fold shortfall. **Export
+`TORTOISE_RECORD_DSN` (or pass `--dsn`) before pasting the fold commands**: they carry
+`--dsn "$TORTOISE_RECORD_DSN"` so the fold writes into the store this run measured; with the
+variable unset that is a named refusal, and with it naming a *different* record it used to be a
+silent fold into a store nobody measured.
+
 ⛔ **If a write comes back unprojected, the artifact says so and names the repair.** `seed` in the
 artifact carries `record_armed` (three-state: `true`/`false`/`null`, so `record_applied: 0` on an
 unarmed deployment is not read as a refusal), `record_applied`, `record_unprojected` and
@@ -293,11 +306,12 @@ the journal this run wrote, as the TWO commands `record_runner` actually require
 ```bash
 # 1. plan: read the number, writes nothing
 uv run python tools/record_runner.py plan --from-checkpoint \
-    --journal "$TORTOISE_RECORD_JOURNAL" --org-id "$TORTOISE_RECORD_ORG_ID" --graph-id "$TORTOISE_RECORD_GRAPH_ID"
+    --journal "$TORTOISE_RECORD_JOURNAL" --org-id "$TORTOISE_RECORD_ORG_ID" --graph-id "$TORTOISE_RECORD_GRAPH_ID" \
+    --dsn "$TORTOISE_RECORD_DSN"
 # 2. apply that number (N = what the plan reported)
 uv run python tools/record_runner.py apply \
     --journal "$TORTOISE_RECORD_JOURNAL" --org-id "$TORTOISE_RECORD_ORG_ID" --graph-id "$TORTOISE_RECORD_GRAPH_ID" \
-    --acknowledge-plan <N>
+    --dsn "$TORTOISE_RECORD_DSN" --acknowledge-plan <N>
 ```
 
 (The artifact fills the tenant in from the run itself — the block above is the same two commands with

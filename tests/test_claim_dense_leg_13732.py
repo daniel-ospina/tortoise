@@ -1414,6 +1414,123 @@ class TestTheJournalDeclaration:
         assert os.environ[record_vector.RECORD_JOURNAL_ENV] == "/tmp/original.jsonl"
 
 
+class TestTheDSNDeclaration:
+    """#13839 review finding 1 — `--dsn` must arm the WRITE, not only the reads.
+
+    ⛔ THE FAILURE THIS CLASS PINS. `live_write.write` asks the record seam's own
+    arming predicate, and that predicate reads ``TORTOISE_RECORD_DSN`` from the
+    ENVIRONMENT with NO argument (``record_writer._live_write_verdict`` ->
+    ``record_dsn()``, tortoise/record_writer.py:2754-2759). A run that resolved its
+    DSN from the ``--dsn`` FLAG therefore armed every read it made
+    (``record_vector.coverage(record_dsn=dsn)``, ``record_population_vectors(...,
+    dsn)``) and left the write seam UNARMED: the seed wrote nothing, ``_fold_needed``
+    was false so no repair was emitted, and the artifact published
+    ``record_armed: false`` for a store the same process could query.
+
+    ⛔ THE ASSERTION IS AT THE MOMENT BEFORE THE SEED, not on the artifact: the
+    declaration has to be in place when ``_seed_population`` runs, and a test that
+    read the artifact could not tell "declared" from "declared too late".
+    """
+
+    DSN = "postgresql://user@record.invalid:5432/tortoise"
+
+    def _reach_the_declaration(self, tool_mod, monkeypatch, tmp_path, *, prior=None):
+        """Run `main()` up to the first corpus read, capturing the declarations."""
+        from tortoise import record_vector
+        from tortoise.record_writer import RECORD_DSN_ENV
+
+        import tools.window_quality_m2 as wqm
+
+        if prior is None:
+            monkeypatch.delenv(RECORD_DSN_ENV, raising=False)
+        else:
+            monkeypatch.setenv(RECORD_DSN_ENV, prior)
+        monkeypatch.delenv(record_vector.RECORD_JOURNAL_ENV, raising=False)
+
+        captured: dict[str, str | None] = {}
+
+        def _stop(_sessions, _want):
+            # ⛔ THE FIRST LINE PAST BOTH DECLARATIONS — the moment the seed would
+            # have read the environment the write seam reads.
+            captured["dsn"] = os.environ.get(RECORD_DSN_ENV)
+            captured["journal"] = os.environ.get(record_vector.RECORD_JOURNAL_ENV)
+            raise tool_mod.Refused("test_stop_here", "the run reached the point under test")
+
+        monkeypatch.setattr(wqm, "harvest_turn_texts", _stop)
+        monkeypatch.setattr(tool_mod, "require_corpus", lambda _sessions: [])
+        monkeypatch.setattr(tool_mod, "require_embedder", lambda: None)
+        # the real `require_record` opens a store; this test is about the flag's
+        # RESOLVED VALUE reaching the write seam, not about reachability.
+        monkeypatch.setattr(tool_mod, "require_record", lambda dsn: dsn)
+        monkeypatch.setattr(
+            record_vector,
+            "_resolve_scope",
+            lambda: types.SimpleNamespace(org_id="org-1", graph_id="graph-1"),
+        )
+        rc = tool_mod.main(
+            [
+                "--population",
+                str(M2_N),
+                "--dsn",
+                self.DSN,
+                "--journal",
+                str(tmp_path / "events.jsonl"),
+            ]
+        )
+        return rc, captured, RECORD_DSN_ENV
+
+    def test_a_flag_DSN_is_declared_for_the_write_seam(self, tool_mod, monkeypatch, tmp_path):
+        rc, captured, dsn_env = self._reach_the_declaration(tool_mod, monkeypatch, tmp_path)
+        assert rc == 2, f"the stop refusal became exit {rc} — the run did not reach the seed"
+        assert captured["dsn"] == self.DSN, (
+            "the resolved --dsn was NOT declared into "
+            f"{dsn_env} before the seed — the write seam's `armed` predicate reads "
+            "only the environment, so `live_write.write` would answer 'unarmed' "
+            "while every read in this run uses the flag's store: the seed becomes "
+            "a silent no-op, no fold is emitted, and the artifact publishes "
+            "record_armed=false for a record it can read"
+        )
+        assert captured["journal"] == str(tmp_path / "events.jsonl"), captured
+
+    def test_a_prior_DSN_declaration_is_put_BACK_unchanged(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        """⛔ The declaration is the RUN's, not the process's.
+
+        `main()` restores the caller's value — a library caller whose own record is
+        armed must get that arming back after a run, exactly as it does for the
+        journal path.
+        """
+        prior = "postgresql://someone-else@other.invalid:5432/tortoise"
+        rc, captured, dsn_env = self._reach_the_declaration(
+            tool_mod, monkeypatch, tmp_path, prior=prior
+        )
+        assert rc == 2, rc
+        assert captured["dsn"] == self.DSN, (
+            "the flag must WIN inside the run (an explicit --dsn beats the env)"
+        )
+        assert os.environ.get(dsn_env) == prior, (
+            f"{dsn_env} was left as this run's value — a later caller would measure "
+            "against a record it never named"
+        )
+
+    def test_the_seam_that_answers_arming_reads_the_environment(self, tool_mod, monkeypatch):
+        """The premise of the two tests above, asserted rather than assumed.
+
+        If `write_live_record` ever grew a DSN argument, declaring the environment
+        would stop being the fix and this class would be pinning a no-op.
+        """
+        from tortoise import record_writer
+
+        monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
+        assert record_writer.record_dsn() is None
+        verdict = record_writer._live_write_verdict(durable=True)
+        assert verdict[0] == "unarmed", verdict
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV, self.DSN)
+        assert record_writer.record_dsn() == self.DSN
+        assert record_writer._live_write_verdict(durable=True)[0] != "unarmed"
+
+
 class TestTheSeedReport:
     """What the seeding pass reports, and the repair it names when it must."""
 
@@ -1460,6 +1577,13 @@ class TestTheSeedReport:
         assert "--org-id org-1 --graph-id graph-1" in fold["plan"], fold["plan"]
         assert "--acknowledge-plan" in fold["apply"], fold["apply"]
         assert "--org-id org-1 --graph-id graph-1" in fold["apply"], fold["apply"]
+        # ⛔ AND BOTH NAME THE STORE (#13839 finding 1, corollary): `record_runner`
+        # resolves the DSN from the ENVIRONMENT, so a paste from a run whose DSN came
+        # from `--dsn` folds into whatever `TORTOISE_RECORD_DSN` happens to name —
+        # silently, when it names a different record. A shell variable, never the
+        # value, so no secret enters the artifact.
+        for verb in ("plan", "apply"):
+            assert '--dsn "$TORTOISE_RECORD_DSN"' in fold[verb], fold[verb]
         assert "plan" in fold["why"] and "acknowledge" in fold["why"], fold["why"]
         assert "unprojected" in payload["note"], payload["note"]
 
@@ -1500,6 +1624,11 @@ class TestTheSeedReport:
         plan = parser.parse_args(_argv(payload["fold"]["plan"]))
         assert plan.verb == "plan", plan
         assert (plan.org_id, plan.graph_id) == ("org-1", "graph-1"), plan
+        # ⛔ THE REPAIR MUST NAME THE STORE THIS RUN MEASURED (#13839 finding 1).
+        # Absent, `record_runner` falls back to the environment: an obvious refusal
+        # when it is unset, a SILENT fold into the wrong record when it names a
+        # different one — 786 population rows under a tenant nobody measured.
+        assert plan.dsn == "$TORTOISE_RECORD_DSN", plan.dsn
         assert plan.from_checkpoint is True, (
             "without --from-checkpoint the plan reports the WHOLE journal, which is a "
             "different number from the one `apply` then wants"
@@ -1510,6 +1639,7 @@ class TestTheSeedReport:
         assert applied.verb == "apply", applied
         assert applied.acknowledge_plan == 3, applied
         assert (applied.org_id, applied.graph_id) == ("org-1", "graph-1"), applied
+        assert applied.dsn == "$TORTOISE_RECORD_DSN", applied.dsn
 
     def test_no_tenant_is_a_VISIBLE_placeholder_never_a_guessed_id(self, tool_mod):
         """⛔ The `--org-id`/`--graph-id` branch WITH no tenant is REACHABLE.
@@ -1572,6 +1702,125 @@ class TestTheSeedReport:
     def test_the_report_states_the_door_it_used(self, tool_mod):
         payload = self._report(tool_mod).as_dict()
         assert "live_write.write" in payload["door"], payload["door"]
+
+
+class TestTheArmBlockage:
+    """⛔ THE WRITE SEAM MUST AGREE WITH THE RUN ABOUT ARMING (#13839 finding 1).
+
+    `_arm_blockage` is the standing guard behind the declaration fix. A run that
+    holds a DSN and whose seam answers *unarmed* wrote NOTHING to the record — so
+    the `record_dense` arm has to be blocked AT THAT CAUSE, not by
+    `record_population_absent`, whose message would send the operator to a fold
+    that cannot repair a store nobody wrote to.
+    """
+
+    DSN = "postgresql://user@record.invalid:5432/tortoise"
+
+    def _seed(self, tool_mod, **over):
+        base = dict(
+            journal="/tmp/j.jsonl",
+            org_id="org-1",
+            graph_id="graph-1",
+            written=3,
+            record_armed=True,
+            record_applied=3,
+            record_unprojected=0,
+            positions_unproven=0,
+            folded=3,
+            first_seq=1,
+            last_seq=3,
+        )
+        base.update(over)
+        return tool_mod.SeedReport(**base)
+
+    def test_a_run_holding_a_DSN_whose_seam_says_UNARMED_is_blocked_at_the_cause(
+        self, tool_mod
+    ):
+        blocked = tool_mod._arm_blockage(
+            self.DSN,
+            self._seed(tool_mod, record_armed=False, record_applied=0, folded=0),
+        )
+        assert blocked is not None, (
+            "a run holding a DSN whose write seam answered 'unarmed' is the mismatch "
+            "itself — it must not be reported as a fold shortfall"
+        )
+        assert blocked.code == "record_arm_undeclared", blocked.code
+        assert "TORTOISE_RECORD_DSN" in blocked.message, blocked.message
+        assert "not the fold" in blocked.message.lower(), (
+            "the refusal must say the fold cannot repair it — naming a reachable "
+            "cause that does not apply is the failure #13745 round 6 closed"
+        )
+
+    def test_a_run_with_NO_DSN_is_legitimately_unarmed(self, tool_mod):
+        """An unarmed deployment is a supported state, not this fault."""
+        assert (
+            tool_mod._arm_blockage(
+                None, self._seed(tool_mod, record_armed=False, record_applied=0, folded=0)
+            )
+            is None
+        )
+
+    def test_an_UNMEASURED_arming_is_not_collapsed_into_this_fault(self, tool_mod):
+        """`armed is None` is a different fact: the projections RAISED.
+
+        That arm carries `record_unprojected` and its own fold repair, so a guard
+        that read `not armed` would replace a real cause with a wrong one.
+        """
+        assert (
+            tool_mod._arm_blockage(
+                self.DSN,
+                self._seed(
+                    tool_mod,
+                    record_armed=None,
+                    record_applied=0,
+                    record_unprojected=3,
+                    folded=0,
+                ),
+            )
+            is None
+        )
+
+    def test_an_armed_run_is_not_blocked(self, tool_mod):
+        assert tool_mod._arm_blockage(self.DSN, self._seed(tool_mod)) is None
+
+    def test_run_measurement_consults_it(self, tool_mod):
+        """⛔ The guard is inert unless the run asks it.
+
+        Measured class of revert: deleting the call site leaves every unit above
+        green and restores the silent no-op this PR exists to remove.
+        """
+        tree = ast.parse(TOOL.read_text())
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "run_measurement"
+        )
+        calls = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_arm_blockage"
+        ]
+        assert calls, (
+            "run_measurement no longer consults `_arm_blockage` — a write seam that "
+            "answers 'unarmed' on a run holding a DSN would read as a fold shortfall "
+            "again (#13839)"
+        )
+        assigned = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "record_blocked" for t in n.targets)
+            and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Name)
+            and n.value.func.id == "_arm_blockage"
+        ]
+        assert assigned, (
+            "the guard's answer must land in `record_blocked`, the arm's named "
+            "blockage — a discarded return silently disables it"
+        )
+
 
 
 # ── 5c. the call sites the review rounds fixed (wiring, not logic) ─────────
