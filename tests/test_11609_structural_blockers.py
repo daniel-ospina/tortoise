@@ -28,7 +28,7 @@ WHAT IS PINNED, AND WHAT IS DELIBERATELY NOT
     instantiates the only thing that would derive one (`FastAPIRouterAdapter`), and the
     served routes are hand-written decorators that call the SDK. `PROTECTED`'s `rest_spec`
     reason is therefore STALE, and THAT is what is pinned below;
-  · the nine `NO_CONTAINER_YET` destinations are still not MCP doors.
+  · the seven `NO_CONTAINER_YET` destinations are still not MCP doors.
 
 ⛔ NOT pinned here: the retired-forward population, the pointer one-hop rule, and the
 `PROTECTED`/`NO_CONTAINER_YET` table sizes — `tests/test_11609_door_retirement.py` owns
@@ -987,7 +987,7 @@ def _mounted_router_names(source: str) -> set[str]:
     return visitor.names
 
 
-#: All nine `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
+#: All seven `NO_CONTAINER_YET` destinations. A `tenancy:`/`sdk:` prefix is not an MCP door.
 NO_CONTAINER_DESTINATIONS = {
     # ⛔ `tortoise_delete_point` / `tortoise_delete_entity` left this map in #11609 lane P6:
     # the owner's #9660 ruling executes the `delete_knowledge` row by KEEPING
@@ -1283,7 +1283,7 @@ def test_a_dict_annotation_cannot_be_the_answer():
         _probe(dict)
 
 
-# ── the REST route dies with its registry row ────────────────────────────────
+# ── the REST route SURVIVES its registry row — the recorded coupling is FALSE ──
 
 class _RecordingRouter:
     """The one method `FastAPIRouterAdapter` calls."""
@@ -1327,7 +1327,10 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     entry = _any_entry(door)
     assert entry is not None, f"{door} is not advertised — re-derive this pin"
     assert entry.rest_spec is not None, (
-        f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
+        f"{door} lost its `rest_spec` CELL. That cell is a record of a route that exists "
+        "independently — it is NOT what retains the door and not what `PROTECTED` cites "
+        "(§1.5: the coupling is measured false). Re-derive why the cell moved before "
+        "retiring anything")
     assert (entry.rest_spec.method, entry.rest_spec.path) == (method, path), (
         f"{door}'s `rest_spec` moved to {entry.rest_spec.method} {entry.rest_spec.path}, "
         f"not {method} {path}")
@@ -2814,7 +2817,7 @@ def test_the_search_door_is_held_by_the_envelope_not_the_route():
     assert inspect.signature(ms.tortoise_search, eval_str=True).return_annotation == list[dict]
 
 
-# ── the nine are still not doors ─────────────────────────────────────────────
+# ── the seven are still not doors ─────────────────────────────────────────────
 
 def _doors_missing_the_prefix(live) -> list[str]:
     """Live door names that do NOT carry the `tortoise_` prefix.
@@ -2834,7 +2837,7 @@ def test_every_live_door_carries_the_prefix_the_destination_pins_compare_against
     door carries the prefix: a door landed under the bare destination name
     (`delete_knowledge`) would be invisible to the comparison, which then stays green
     while `NO_CONTAINER_YET` keeps a door that became retirable — the container's landing
-    goes unnoticed, which is the drift the nine-door pin exists to catch. A review round
+    goes unnoticed, which is the drift the seven-door pin exists to catch. A review round
     measured exactly that mutant green, so the convention is part of the pin.
     """
     missing = _doors_missing_the_prefix(_live())
@@ -2887,3 +2890,92 @@ def test_the_recorded_destination_is_still_not_an_mcp_door(door, destination):
     assert f"tortoise_{destination}" not in live, (
         f"{destination} IS now a live MCP door (tortoise_{destination}) — {door} became "
         "retirable in the batch that landed it, and `NO_CONTAINER_YET` should lose the name")
+
+
+#: The plan document whose §1.4 DEFINES the `NO_CONTAINER_YET` population, and the two section
+#: headings that bound it. Named as offsets rather than line numbers because the section moves
+#: with every prose edit — a line-pinned reader would grade a paragraph instead of the table.
+_BLOCKERS_DOC = Path("docs") / "architecture" / "11609-STRUCTURAL-BLOCKERS.md"
+_SECTION_START = "### 1.4 "
+_SECTION_END = "### 1.5 "
+_NUMBER_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+}
+
+
+def _no_container_section(text: str) -> str:
+    """The plan's §1.4, from its heading to the next section's."""
+    return text[text.index(_SECTION_START):text.index(_SECTION_END)]
+
+
+def _table_doors(section: str) -> set[str]:
+    """The doors the §1.4 TABLE names — first column only, so the prose is not read as a row.
+
+    ⛔ Scoped to the table ON PURPOSE. §1.4 also NAMES doors it is explaining away (the
+    retired `delete_point`/`delete_entity` pair), and a whole-section grep would count them
+    as members — which is exactly how the table came to list nine after the population fell
+    to seven.
+    """
+    doors: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 2:
+            continue
+        doors.update(re.findall(r"`(tortoise_[a-z0-9_]+)`", cells[1]))
+    return doors
+
+
+def test_this_table_names_exactly_the_no_container_yet_population():
+    """The plan's §1.4 table and this file's map are ONE population, not two copies of it.
+
+    §1.4 is the definition every later reader is sent to (`NO_CONTAINER_YET`'s members, and
+    the `#9660` note that explains the one row whose claim is about a NAME). It is prose, so
+    nothing reds when it drifts — and it did: after #11609 lane P6 retired
+    `delete_point`/`delete_entity` forward, the table still listed them and still opened
+    "the nine destinations", while `NO_CONTAINER_YET` held seven. That is not cosmetic: a
+    lane reading the table concludes those two doors are still held, "restores" them, and
+    reds `tests/test_11609_door_retirement.py` in the file it is editing.
+
+    Mutation attribution (#3442): restoring the retired pair to the table's first column reds
+    the population comparison; writing the count in the heading as "seventeen" (a substring
+    match) reds the heading arm, which is why that arm is word-anchored. ⛔ The LAST arm is
+    deliberately prose-sensitive and NOT table-scoped: it requires §1.4 to still MENTION the
+    retired `delete_point` while NOT counting it, so deleting that sentence reds it. That is
+    the point — a section that stops naming the doors it is explaining away is a section this
+    row's premise no longer describes — but it means a prose rewrite of §1.4 can red this test
+    on purpose.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    section = _no_container_section(
+        (repo / _BLOCKERS_DOC).read_text(encoding="utf-8"))
+    named = _table_doors(section)
+    population = set(NO_CONTAINER_DESTINATIONS)
+    assert named == population, (
+        f"§1.4 of {_BLOCKERS_DOC} names {sorted(named)} as `NO_CONTAINER_YET`, but this "
+        f"file's map holds {sorted(population)}; extra={sorted(named - population)}, "
+        f"missing={sorted(population - named)}. The table IS the population's definition — "
+        "move a door here in the same change that retires it, not later")
+
+    heading = section.splitlines()[0]
+    # ⛔ A WORD BOUNDARY, not a substring: `"seven" in heading` is satisfied by "seventeen",
+    # and "seventeen destinations" is exactly the transcription slip a count re-stamp lane
+    # makes when the population it just read is 17. Same class for "six"/"sixteen" and
+    # "one"/"none" — a substring arm would pass over the very error it exists to red.
+    assert re.search(
+        rf"\b{_NUMBER_WORDS.get(len(population), str(len(population)))}\b", heading), (
+        f"§1.4's heading reads {heading!r}, which does not state the population's size "
+        f"as the WORD {_NUMBER_WORDS.get(len(population), len(population))!r}; "
+        "a heading count outlives the "
+        "rows it counts. Substring matching is not enough — 'seven' is inside 'seventeen'")
+
+    # …and the reader is table-scoped, so it cannot pass by grepping the section: §1.4
+    # necessarily MENTIONS the retired pair while explaining them away.
+    assert "tortoise_delete_point" in section, (
+        "§1.4 no longer mentions the retired `delete_point`, so this row's premise (a "
+        "section that names doors it does not count) would be untested")
+    assert "tortoise_delete_point" not in _table_doors(section), (
+        "the table-scoped reader counted `tortoise_delete_point`, so it is reading prose "
+        "and would report a superset of the population")

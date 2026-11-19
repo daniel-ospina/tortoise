@@ -42,6 +42,16 @@ Host routing lives in `website/functions/_middleware.ts`:
   not the product (#11762 settled that fork)
 - `tortoise.premiselabs.co/*` → a **PERMANENT 301** onto the paths above. The host, its DNS and its
   Pages binding are a fixture, never a leftover
+- `/tortoise-for-product-teams` → the **niche product page** (`website/tortoise-for-product-teams.html`,
+  #13645), served at the company ROOT by Pages' pretty-URL resolution — **added alongside** `/tortoise`,
+  never replacing it, and NOT a `PRODUCT_PAGES` member: that set 301s its members UNDER the prefix, so
+  membership would send this very URL to `/tortoise/tortoise-for-product-teams`, a 404. Its `.html` and
+  trailing-slash twins 301 here via `website/_redirects`, and `tortoise.premiselabs.co`'s copy 301s here
+  in one hop via the middleware's `ROOT_PAGE` set — one address per document, like every other page
+  (#11762). It is **INDEXED** (an experiment nobody can find has no traffic to measure), so its
+  `<title>`/`<h1>` name the audience and it links to `/tortoise` for the full story rather than
+  duplicating it; `sitemap-product.xml` carries the `<loc>`. Its prices render from the ONE shared
+  source `/assets/tortoise-pricing.js`, which `/tortoise` loads too
 - `/product`, `/product.html` → 301 to `/tortoise` on BOTH marketing hosts (one canonical product URL)
 - **a stray authorization response is refused, not rendered or forwarded** (`?code=…`, #10088 ask 3):
   a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
@@ -67,7 +77,7 @@ Host routing lives in `website/functions/_middleware.ts`:
     differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
     the middleware 301s them to the app origin with the code in its `Location` (the recorded
     residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
-    through to the **backstop** at `_middleware.ts:538` and is refused with the same 400
+    through to the **backstop** at `_middleware.ts:555` and is refused with the same 400
     (`/signup?code=…` on the tortoise host — pinned by the suite).
   - `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*` (302) are
     **host-independent**: those branches run on every host, so an exempt-shaped request carrying a
@@ -79,7 +89,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:440-445`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:457-462`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
@@ -89,7 +99,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
-    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:538`
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:555`
     returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
     refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
     own comment forbids reversing the exemption that way
@@ -146,7 +156,8 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Page | File | Purpose |
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
-| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section |
+| Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section. **The canonical product page** — the story for every audience |
+| Product (niche) | `website/tortoise-for-product-teams.html` | GTM experiment at `/tortoise-for-product-teams` (#13645): the same product told for founders and product teams. Added alongside `/tortoise`, not instead of it. Prices come from the shared `/assets/tortoise-pricing.js`, pinned to product.html's by `tests/test_website_static.py::TestPricingSourceIsShared`; indexed, and its three funnel events are named in its own source and consent-gated through `/consent.js` |
 | Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
 | Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (blog.js, the byline avatar) · the shared link-preview card is `website/assets/og-tortoise.jpg`, the same one the static pages use (#11318) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |

@@ -5334,8 +5334,16 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
     # `create_point`'s note left the four-symbol arm GREEN. The cite must have
     # its symbol IN FRONT of it, or the reference is a module holding hundreds
     # of functions — the same unattributable claim the numeric ban replaces.
+    #
+    # ⛔ ADJACENCY, NOT WORD ORDER — the pin accepts `MERGE` before or after the
+    # cite, and the siblings' `::symbol` spelling of it. The claim is that the
+    # symbol sits beside the module cite in the same sentence; pinning this
+    # branch's exact word order instead red an identical repair that landed on
+    # `main` independently (word order is the one thing two correct spellings of
+    # the same cite do not share).
     assert re.search(
-        r"`_upsert_point_props` MERGE \(`projection/entities\.py`\)",
+        r"`_upsert_point_props`(?:\s+MERGE)?\s+\(`projection/entities\.py"
+        r"(?:::_upsert_point_props)?`\)",
         _decommented(sdk_path)), (
         "`create_point`'s note no longer names `_upsert_point_props` beside its "
         "`projection/entities.py` cite — re-derive the symbol, do not drop it: a "
