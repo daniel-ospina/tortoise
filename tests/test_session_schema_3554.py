@@ -3517,8 +3517,16 @@ _APPROVAL_RECORD_IN_A_TABLE_ROW = (
 # block kinds this paragraph model does not name, and the label after either DOES open a
 # paragraph — measured against `markdown_it(commonmark)`: `> ---` renders
 # `hr, paragraph_open`, a fence renders `fence, paragraph_open`, and the row renders
-# `paragraph_open`. So both are the SAME fail-OPEN as the row above, and the completeness
-# word sent a fixer at the row's remedy, which does not reach them.
+# `paragraph_open`. The completeness word sent a fixer at the row's remedy, which does not
+# reach them. ⛔ BUT ALL THREE ARE NOT THE SAME FAIL-OPEN READING (review P2 at
+# `0e9f920d7f6`, measured): `paragraph_open` is present in every one of them, and that is
+# the only property they share — the break and the fence make the label OPEN its own
+# paragraph (the shape this arm reads everywhere else), while the ROW renders ONE
+# paragraph whose text OPENS with the table's `|` and carries the label MID-paragraph, so
+# `_opening_approval_label` returns None for it. Stated as "the label after either DOES
+# open a paragraph … the same fail-OPEN as the row", the sentence was true of the break
+# and the fence and FALSE of the row, and it is the row's own half of it that sends a
+# reader at a property the row does not have.
 # ⛔ AND THE REMEDY IS NOT THE ROW'S, MEASURED: the row closes through the STRIPPER
 # (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED), while these two close only through
 # the SPLITTER — an END-of-paragraph boundary in `_quoted_paragraphs` (the
@@ -4458,10 +4466,13 @@ def test_the_block_kind_residuals_are_fail_open_by_a_commonmark_reading() -> Non
 
     Review P3 at ``3b62664120``: this file called the table row "the one block kind
     ``_PARAGRAPH_START_RE`` does not know", which is false — a thematic break and a fenced
-    block are two more, and the label after either DOES open a paragraph to a reader (the
-    same fail-OPEN as the row). The completeness word mattered because it points the next
-    fix at the wrong half: the row closes through the STRIPPER, while these two close only
-    through an END-of-paragraph boundary in ``_quoted_paragraphs``.
+    block are two more, and the label after either DOES open a paragraph to a reader — the
+    same fail-OPEN DIRECTION as the row, by a DIFFERENT mechanism: the row's label sits
+    mid-paragraph behind the table's ``|`` and opens nothing, which the assertions below
+    state as its own shape rather than folding it into the break's. The completeness word
+    mattered because it points the next fix at the wrong half: the row closes through the
+    STRIPPER, while these two close only through an END-of-paragraph boundary in
+    ``_quoted_paragraphs``.
 
     Two facts are derived here, and neither is asserted in prose alone:
 
