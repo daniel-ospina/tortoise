@@ -1025,15 +1025,69 @@ _OVERVIEW_SECTIONS: dict[str, type] = {
     "audit": dict,
 }
 
+#: Sections the container SERVES that this row cannot drive through the tenant
+#: HTTP transport, with the MEASURED mechanism. Recorded rather than asserted as
+#: "something came back": over HTTP the refusal IS the correct payload, and its
+#: code is what distinguishes it from a break.
+_OVERVIEW_SECTION_GAPS: dict[str, str] = {
+    "dream_health":
+        "ARM GAP — MEASURED: `section='dream_health'` is REFUSED at the tenant "
+        "HTTP transport with JSON-RPC -32004 (`This tool is not available over "
+        "HTTP. Use the hosted REST API or stdio MCP.`), the same transport "
+        "boundary that makes `tortoise_refresh_confidence` UNDRIVEN above. "
+        "Nothing about the section is broken; this lane cannot reach it.",
+}
+
 
 class TestGraphOverviewSections:
-    """Part A records `section=` as this target's discriminator — 14 absorbed
+    """Part A records `section=` as this target's discriminator — 15 absorbed
     sources, so a single-arm proof would be a token gesture.
 
     Each arm is asserted against the SHAPE ITS OWN DOOR returns, read off the
     live surface — not against a shared "something came back". An arm that
     drifted to another door's shape (a dict where a list belongs) fails.
+
+    The table answers to the PRODUCT's own section set, not to itself:
+    ``test_the_section_table_covers_every_source_the_container_serves`` binds it,
+    so a section source added to the SDK reds this file until it gets a case or a
+    recorded gap — the same anti-silence shape as ``_DRIVEN_BY_TEST``. Without
+    that bind the table is 14 of the 15 sections the container serves, and the
+    missing one is invisible.
     """
+
+    def test_the_section_table_covers_every_source_the_container_serves(self):
+        """`driven ∪ gaps == served`, exactly — and the served set is not
+        hand-typed here: it is `TortoiseSDK.GRAPH_OVERVIEW_SECTIONS` PLUS
+        `mcp_server._OVERVIEW_TRANSPORT_ONLY_SECTIONS`, the pair
+        `tests/test_11609_read_containers.py` already pins in both directions.
+
+        A section source added to the product with no case and no gap fails this,
+        which is what stops the table from being a 14-of-15 hand-typed list.
+        """
+        from tortoise import mcp_server as ms
+        served = set(TortoiseSDK.GRAPH_OVERVIEW_SECTIONS) | set(
+            ms._OVERVIEW_TRANSPORT_ONLY_SECTIONS)
+        driven = set(_OVERVIEW_SECTIONS)
+        assert driven | set(_OVERVIEW_SECTION_GAPS) == served, (
+            "section source(s) served by the container with no case and no "
+            f"recorded gap: {sorted(served - driven - set(_OVERVIEW_SECTION_GAPS))}"
+            "; recorded gap(s) the container no longer serves: "
+            f"{sorted(set(_OVERVIEW_SECTION_GAPS) - served)}")
+        assert not (driven & set(_OVERVIEW_SECTION_GAPS)), (
+            "a section is both driven and recorded as a gap: "
+            f"{sorted(driven & set(_OVERVIEW_SECTION_GAPS))}")
+
+    def test_the_dream_health_gap_is_the_measured_refusal(self, seeded):
+        """The recorded gap must be the OBSERVED answer, not a note: -32004 over
+        the tenant transport. If the section ever starts answering here the gap is
+        stale, and this arm is what notices."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                               {"section": "dream_health"})
+        text = json.dumps(out)
+        assert "-32004" in text or "not available over HTTP" in text, (
+            f"the recorded gap is stale — `dream_health` answered: {out!r}")
+
 
     @pytest.mark.parametrize("section,expected", sorted(_OVERVIEW_SECTIONS.items()))
     def test_each_section_answers_its_own_type(self, seeded, section, expected):
