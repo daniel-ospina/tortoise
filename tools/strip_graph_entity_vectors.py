@@ -1943,11 +1943,25 @@ def _rebuild_stores_the_vector(node) -> bool:
     for leaf in _own_walk(node):
         if isinstance(leaf, ast.Dict):
             merges = any(key is None for key in leaf.keys)
-            if merges and _dict_stores_the_vector(leaf):
+            # ⛔ AND THE `{**{…}}` MERGE IS READ IN STOP MODE (`#13788` F4, measured at
+            # `45b5f88a`). `_dict_stores_the_vector`'s `**` recursion is gated on
+            # `stop_arm`, and this route — the writer being HANDED a rebuilt mapping — asked
+            # it with the default OFF while being reached only under `anywhere`. So the
+            # recursion was inert here and four spellings CERTIFIED beside their
+            # non-merge siblings refused: `_write({**{"embedding": vec}})`, its `.copy()`,
+            # `_write({**props, **{"embedding": vec}})` and `= props | {**{"embedding": vec}}`
+            # (the last two through the union arm below). Refusal-only: both call sites of
+            # this helper are `anywhere`-gated.
+            if merges and _dict_stores_the_vector(leaf, stop_arm=True):
                 return True       # `{**props, "embedding": vec}`
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
             # construction, so the `merges` requirement above is met by the operator.
+            # ⛔ THE `{**{…}}` MERGE ONE OPERATOR OVER IS ALREADY ANSWERED BY THE DICT BRANCH
+            # ABOVE (`_own_walk` yields the display inside the union, and its `merges` test
+            # accepts it), which is MEASURED: asking this line in stop mode instead changes no
+            # verdict on any fixture — so it is not changed. A guard with nothing that can
+            # redden it is the defect this series exists to remove, not defence in depth.
             if any(isinstance(side, ast.Dict) and _dict_stores_the_vector(side)
                    for side in (leaf.left, leaf.right)):
                 return True
