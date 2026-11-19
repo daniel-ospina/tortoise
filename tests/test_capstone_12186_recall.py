@@ -1625,7 +1625,7 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
 
 
 def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
-    """Every SUMMARY figure must be re-derivable from the raw evidence beside it.
+    """Every SUMMARY figure DERIVED FROM `per_query` is re-derived from it here.
 
     ⛔ MEASURED GAP (round 27). `per_query` is the only place the underlying data
     lives (1 500 rank entries), and the suite read it solely for its KEY SET — so
@@ -1635,18 +1635,32 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
     listed gain id's rank to 999 — a "gain" that is not a hit at k=3 — was likewise
     0 reds.
 
-    ⛔ AND THE CLAIM IS NOW NO WIDER THAN THE GUARD (round 29). The sentence above
-    said "EVERY SUMMARY figure", but `arms[*].mean_rank` — the same arm object,
-    computed by the tool from the same `per_query` ranks
-    (`tools/capstone_12186_recall.py`, `round(rank_sum / in_window, 3)`) — was read
-    by NO assertion (`grep -c mean_rank tests/` was 0), so it could be set to 99.9
-    on every arm and every k with the suite GREEN. The loop below reconciles it too,
-    AND `arms[*].by_class` — which carries a `cls` and a `rank` per `per_query` row and
-    was likewise reconciled by nothing (round 30, F1: `by_class.path["3"]` 0.9333 ->
-    0.9667 with the matching README cell stayed GREEN at 58 passed, refuting the epic's
-    own `ident`/`path` mechanism figure against the committed ranks). With both in the
-    loop the universal sentence is true; the rank-entry count is corrected
-    to the artifact's own total (5 arms x 300; `mint_rate` is a write-path block and
+    ⛔ AND THE CLAIM IS NOW NO WIDER THAN THE GUARD (rounds 29-31). An earlier version
+    of the sentence above said "EVERY SUMMARY figure", which was false in BOTH
+    directions it was checked:
+      * `arms[*].mean_rank` — computed by the tool from the same `per_query` ranks
+        (`round(rank_sum / in_window, 3)`) — was read by NO assertion
+        (`grep -c mean_rank tests/` was 0), so it could be set to 99.9 on every arm
+        and every k with the suite GREEN (measured);
+      * `arms[*].by_class` — the summarisation OF the per-`per_query` `cls`/`rank`
+        rows — was reconciled by nothing, so `by_class.path["3"]` 0.9333 -> 0.9667
+        TOGETHER WITH the matching README cell stayed GREEN at 58 passed, refuting
+        the epic's own `ident`/`path` mechanism figure against the committed ranks
+        (measured).
+    Both are now in the loop, so every summary DERIVED FROM `per_query` is reconciled.
+
+    ⛔ THE BOUNDARY, stated rather than inferred (round 31). Two summaries beside
+    `per_query` are NOT re-derivable from it, because the rows carry only
+    `cls`/`degraded`/`rank` and no window contents:
+      * `duplicate_rate_in_window` — bounded per arm
+        (`test_the_duplicate_rate_never_exceeds_the_window`: `duplicate_rows <= rows`,
+        `rate` in [0, 1]) and cell-pinned where the README quotes it (`user_search`'s
+        dup table), but its own ARITHMETIC (`rate == duplicate_rows / rows`) is checked
+        nowhere, and the other arms' cells are pinned to no document;
+      * `rows_zero` — pinned where §2a's leg-degradation rows quote it, not re-derived.
+    Neither is claimed by this test, and the sentence at the top of this docstring says
+    so ("DERIVED FROM `per_query`") rather than claiming a universal it cannot meet. The rank-entry count is
+    the artifact's own total (5 arms x 300; `mint_rate` is a write-path block and
     carries NO `per_query` key at all, so 1 800 was one arm too many).
 
     The `neardup_rule` pair below is the same family and is ALSO owned by its own
@@ -1677,9 +1691,10 @@ def test_the_artifact_reconciles_its_own_raw_evidence(artifact):
         if per_query is None:  # `mint_rate` is a write-path block, not an arm
             continue
         assert arm["n"] == len(per_query), (name, arm["n"], len(per_query))
-        #: ⛔ `by_class` IS THE SAME SUMMARISATION (round 30, F1). Each `per_query` row
-        #: carries a `cls` and a `rank`, so `by_class[cls][k]` is exactly
-        #: `hits(cls) / count(cls)` and was reconciled by NOTHING — which made the
+        #: ⛔ `by_class` IS THE SAME SUMMARISATION (round 30, F1). It is summarised FROM
+        #: the `per_query` rows — whose `cls` and `rank` are what make it derivable — so
+        #: `by_class[cls][k]` is exactly `hits(cls) / count(cls)` and was reconciled by
+        #: NOTHING — which made the
         #: docstring's universal sentence FALSE even after `mean_rank` was added.
         #: MEASURED: `by_class.path["3"]` 0.9333 -> 0.9667 TOGETHER WITH the matching
         #: README cell stayed GREEN at 58 passed, while the committed ranks still said
