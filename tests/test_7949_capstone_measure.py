@@ -5733,12 +5733,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("192", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        # The number is asserted, never remembered: `:745` -> `:751` above the
-        # accounting block, where this row kept the old value while the DOCUMENT was
-        # already right (#11837); #13800's `_CONDITIONAL_MEMO` moved it again,
-        # `:762` -> `:798`.
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:798`) refuses a GREEN row whose", (
-            ("798", "def _step_accounting("),
+        # The number is asserted, never remembered: this PR's own `+6` above the
+        # accounting block moved the def from `:745` to `:751`, and its last commit
+        # re-derived the DOCUMENT's cite while leaving this row on the old number —
+        # so the pin reddened against a document that was already right (#11837).
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:779`) refuses a GREEN row whose", (
+            ("779", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved

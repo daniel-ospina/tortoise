@@ -395,7 +395,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers**, **plus `E6`** — 13 total (`#11673` added the `E6` criteria entry; 12 when this section was first written) while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:1080-1086`), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers**, **plus `E6`** — 13 total (`#11673` added the `E6` criteria entry; 12 when this section was first written) while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:1155-1161`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -424,8 +424,8 @@ commit**. §4.1 did not say that.
 
 **Cardinality is a decision, and it moves the verdict tool's hardcoded five.** If the A-rows become verdict rows (and §1 J1's
 "ten rows" says they do), then the table is **10**, and these move **in the same change**: the `V2` "the table is 5 rows"
-refusal (`capstone_verdict_check.py:1106`), the `--require-green: {len(red)}/5` message (`:1683`), and the `5/5`
-prose and strings at `:160`, `:178`, `:630`, `:1271`, `:1286`, `:1677`, `:1871`. **And
+refusal (`capstone_verdict_check.py:1132`), the `--require-green: {len(red)}/5` message (`:1710`), and the `5/5`
+prose and strings at `:160`, `:178`, `:630`, `:1298`, `:1313`, `:1704`, `:1898`. **And
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
 

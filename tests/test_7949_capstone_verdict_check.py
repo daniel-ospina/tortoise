@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,23 @@ if str(_REPO) not in sys.path:
 
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
 from tools import capstone_verdict_check as cvc  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_git_memos():
+    """No test may inherit another's memoised git answer (#13800).
+
+    The gate's memos are PROCESS-lifetime by design (`main()` is one shot), and
+    a pytest session is exactly the long-lived process that design excludes: a
+    test that wedges `_git` (or checks a throwaway repo) would otherwise answer
+    for the next test's — measured, a wedge arm cached a failed
+    `_record_conditional` for `HEAD` and red
+    `tests/test_7949_capstone_measure.py`'s split-V5 arm in the same session.
+    """
+    cvc._clear_git_memos()
+    yield
+    cvc._clear_git_memos()
+
 
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
@@ -714,8 +732,16 @@ def test_an_unreachable_prereg_sha_does_not_accuse_the_evidence_of_predating():
     findings = cvc.check(rec, repo=_REPO, require_green=False)
     codes = [c for c, _w, _m in findings.items]
     assert "V5" not in codes, findings.render()
-    assert ("prereg", "d" * 40, "not in this object DB") in findings.unresolved, \
-        findings.unresolved
+    # ⚠️ The REASON is environment-dependent since #13800: a full clone answers
+    # "not in this object DB" in ms, while a `blob:none` clone cannot prove
+    # absence inside the bound and reports the clock instead. Both are correct
+    # for a squashed/absent prereg sha, and NEITHER may become a V5 finding —
+    # which is the property this arm exists for.
+    reasons = [why for kind, sha, why in findings.unresolved
+               if kind == "prereg" and sha == "d" * 40]
+    assert reasons, findings.unresolved
+    assert ("not in this object DB" in reasons[0]
+            or "could not answer" in reasons[0]), reasons
     assert "V11" in _codes(rec, require_resolvable=True)
 
 
@@ -4685,7 +4711,7 @@ def test_an_expired_object_probe_reads_as_ABSENT(monkeypatch):
         raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
     monkeypatch.setattr(cvc.subprocess, "run", _expire)
-    cvc._OBJECT_DB_MEMO.clear()
+    cvc._clear_git_memos()
     assert cvc._resolves(_REPO, "2" * 40) is False
 
 
@@ -4704,8 +4730,7 @@ def test_every_git_call_carries_a_bound_and_the_blob_read_gets_the_wider_one(
         return subprocess.CompletedProcess(argv, 1, "", "")
 
     monkeypatch.setattr(cvc.subprocess, "run", _capture)
-    cvc._OBJECT_DB_MEMO.clear()
-    cvc._CONDITIONAL_MEMO.clear()
+    cvc._clear_git_memos()
     cvc._is_git_repo(_REPO)
     cvc._resolves(_REPO, "1" * 40)
     cvc._is_ancestor(_REPO, "1" * 40, "2" * 40)
@@ -4732,7 +4757,7 @@ def test_the_object_existence_answer_is_asked_ONCE_per_checkout_and_sha(
         return subprocess.CompletedProcess(argv, 1, "", "")
 
     monkeypatch.setattr(cvc.subprocess, "run", _count)
-    cvc._OBJECT_DB_MEMO.clear()
+    cvc._clear_git_memos()
     assert cvc._resolves(_REPO, "e" * 40) is False
     assert cvc._resolves(_REPO, "e" * 40) is False
     assert len(calls) == 1, calls
@@ -4769,7 +4794,7 @@ def test_an_expired_ancestry_probe_is_UNKNOWN_not_a_PREDATES_finding(
         return real_git(repo_path, *args, timeout=timeout)
 
     monkeypatch.setattr(cvc, "_git", _expire_merge_base)
-    cvc._OBJECT_DB_MEMO.clear()
+    cvc._clear_git_memos()
     findings = cvc.check(rec, repo=repo, require_green=False)
     codes = [code for code, _w, _m in findings.items]
     assert "V5" not in codes, findings.render()
@@ -4799,7 +4824,6 @@ def test_an_expiry_never_names_a_cause_it_cannot_establish(monkeypatch):
         raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
     monkeypatch.setattr(cvc.subprocess, "run", _expire)
-    cvc._CONDITIONAL_MEMO.clear()
     probe = cvc._git(_REPO, "rev-parse", "--is-inside-work-tree")
     assert probe.returncode == 124, probe
     why = cvc._repo_refusal(probe)
@@ -4814,105 +4838,136 @@ def test_an_expiry_never_names_a_cause_it_cannot_establish(monkeypatch):
     # "slow fetch, not a missing object" would be a claim the clock cannot make.
     assert "is NOT evidence the object is missing" in reason, reason
     assert "does not resolve" not in reason, reason
+    # …and the THIRD site: the reason V3 reports for a row whose probe expired.
+    # Reading the expiry as plain absence made `main()` advice the reader that a
+    # squash merge explains it — a cause, and a remediation, that a wedged git
+    # did not establish (#13800 review round 3).
+    for sha in ("5" * 40,):
+        state = cvc._resolve_state(_REPO, sha)
+        assert state == cvc.EXPIRED, state
+        why = cvc._resolve_reason(state, sha)
+        assert "could not answer" in why and "NOT a finding of absence" in why, why
+        assert why != "not in this object DB", why
+    assert cvc._resolve_reason(cvc.ABSENT, "5" * 40) == "not in this object DB"
 
 
-def test_the_bounds_fit_inside_the_configured_pytest_budget():
-    """A bound at or above the per-test budget restores the bug it removed.
+def _pytest_budget() -> int:
+    """The configured per-test budget, parsed as TOML (not matched as text).
 
-    The whole point of #13800 is that a probe must return BEFORE the harness
-    kills the test; a later bump (15 -> 400) would re-create
-    `Failed: Timeout (>300s)` with every other pin in this section green, so the
-    relationship is pinned rather than left to a comment.
+    #13800 review round 2, P2: a regex could not cross a `[`, so a stanza that
+    gained a `filterwarnings` list above `timeout` made the pin report "no
+    longer configured" about a config it had simply not read.
     """
-    # Parsed as TOML, not matched as text (#13800 review, P2): a stanza that
-    # gains a `[` above `timeout` (a `filterwarnings` list, say) made the first
-    # regex fail closed and report "no longer configured" about a config it had
-    # simply not read.
     ini = tomllib.loads((_REPO / "pyproject.toml").read_text())
     ini = ini.get("tool", {}).get("pytest", {}).get("ini_options", {})
     assert "timeout" in ini, "the pytest per-test budget is no longer configured"
     budget = ini["timeout"]
     assert isinstance(budget, int), budget
+    return budget
+
+
+def _bounded_probes(monkeypatch, *, object_db_answers: bool) -> Counter:
+    """Every bound ONE `check()` asks for, on the recorded 5/5-GREEN shape.
+
+    The shape is the worst one this gate can be handed: five GREEN rows with
+    DISTINCT shas (the memos are per sha) and a run that declares a conditional
+    step (so `_step_accounting` reads the frozen record, the ONE blob read).
+    """
+    bounds: list[float] = []
+
+    def _probe(repo_path, *args, timeout=cvc.GIT_TIMEOUT):
+        # `rev-parse` is the WORK-TREE probe: it answers in both shapes, because
+        # a wedged work-tree probe short-circuits the row loop and would measure
+        # one probe instead of the sum this pin is about.
+        if object_db_answers or args[:1] == ("rev-parse",):
+            bounds.append(timeout)
+            return subprocess.CompletedProcess(["git", *args], 0,
+                                               "true\n" if args[:1] == ("rev-parse",) else "",
+                                               "")
+        bounds.append(timeout)
+        return subprocess.CompletedProcess(["git", *args], 124, "", "exceeded")
+
+    monkeypatch.setattr(cvc, "_git", _probe)
+    cvc._clear_git_memos()
+    rec = _idle_green(_record())
+    lead = rec["rows"][0]
+    for i, row in enumerate(rec["rows"]):
+        # ⛔ `_green()` greens rows[0] ONLY. Copying that row onto the other four
+        # is what makes this a 5/5 table — without it the fixture is 1 green + 4
+        # refused, the ancestry arm runs once, and the measured sum proves
+        # nothing about the shape the epic actually ships.
+        row.update({k: lead[k] for k in ("verdict", "evidence_kind", "evidence",
+                                         "numerator", "denominator", "blocked_by",
+                                         "corpus_sha256")})
+        row["sha"] = f"{i + 1:040x}"
+    assert [r["verdict"] for r in rec["rows"]] == ["GREEN"] * 5, rec["rows"]
+    cvc.check(rec, repo=_REPO, require_green=False)
+    assert bounds, "no probe reached the runner — the sum below would be vacuous"
+    return Counter(bounds)
+
+
+def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
+    """The SUM of every bound one `check()` can spend must fit the budget.
+
+    ⛔ Comparing ONE bound to the budget is what the first version of this pin
+    did, and it passed with `BLOB_TIMEOUT=250` while five blob reads would have
+    cost 1250 s (#13800 review round 3). pytest-timeout kills the TEST, so the
+    quantity that has to fit is the sum of the probes one `check()` makes, and
+    the ceiling is the 5/5-GREEN shape, where EVERY call site is reached.
+
+    MEASURED, both shapes, same fixture and runner (this test asserts them):
+
+    | shape | before the memos (`4bd26f535f`) | this head |
+    |---|---|---|
+    | 5/5 GREEN, every probe answers (the CEILING) | 26 probes / **615 s** | 13 / **240 s** |
+    | object DB wedged (the #13800 shape) | 20 / 525 s | 7 / 150 s |
+
+    So the sum assertion is RED on the reviewed head — this is a real guard, not
+    a restatement. The `Counter` equality per shape is deliberate: it makes the
+    ENUMERATION a pinned fact, so a new probe call site (or an un-memoised one)
+    reds here with its own count instead of being recounted in a comment.
+    """
+    budget = _pytest_budget()
+    ceiling = _bounded_probes(monkeypatch, object_db_answers=True)
+    # 1 work-tree probe (memoised) + 5 distinct row shas + 1 prereg sha (a
+    # distinct key) + 5 `merge-base` (one per GREEN row) and the ONE blob read.
+    assert ceiling == Counter({cvc.GIT_TIMEOUT: 12, cvc.BLOB_TIMEOUT: 1}), (
+        "the enumerated call sites changed — re-derive the count in "
+        "`GIT_TIMEOUT`'s comment, then this row", dict(ceiling))
+    assert sum(b * n for b, n in ceiling.items()) < budget, (
+        sum(b * n for b, n in ceiling.items()), dict(ceiling), budget)
+
+    wedged = _bounded_probes(monkeypatch, object_db_answers=False)
+    # A row sha that does not resolve SKIPS that row's ancestry probe, so the
+    # wedged shape is strictly cheaper — stated as an assertion so a change that
+    # makes the cheaper shape the expensive one is visible.
+    assert wedged == Counter({cvc.GIT_TIMEOUT: 6, cvc.BLOB_TIMEOUT: 1}), dict(wedged)
+    assert sum(b * n for b, n in wedged.items()) < budget, (
+        sum(b * n for b, n in wedged.items()), dict(wedged), budget)
     assert budget > cvc.GIT_TIMEOUT, (cvc.GIT_TIMEOUT, budget)
     assert budget > cvc.BLOB_TIMEOUT, (cvc.BLOB_TIMEOUT, budget)
 
 
-def _wedged_green_record() -> dict:
-    """Five GREEN rows whose S2.3 is conditional — the shape the epic ships.
+def test_the_epic_scopes_verdict_gate_cites_resolve_where_they_say():
+    """`02-scope.md`'s F1 row cites this gate twice — the site round 2 MISSED.
 
-    This is the record that makes the AGGREGATE the interesting number: every
-    row goes through V3, V5's work-tree probe and V5's step accounting, so the
-    probe count is a multiple of the row count rather than one per row.
+    Inserting the bounded-`_git` block moved `_step_accounting` and
+    `RECOGNISED_CRITERIA`'s refusal loop; the re-derivation re-pointed
+    `E1-E5-PROOFS.md`, `04-plan.md` and `03-test-design.md`, and skipped this
+    document because it is not in `_BUNDLE_DOCS`, so no sweep reads its numbers
+    (#13800 review round 3, P1). Pinned here so the next insertion cannot
+    re-stale it silently: the paragraph must carry the numbers, and each number
+    must land on the statement it names.
     """
-    rec = _record()
-    for row in rec["rows"]:
-        row.update(verdict="GREEN", evidence_kind="measurement",
-                   evidence="docs/evidence/7949-capstone/capstone.log",
-                   numerator=31, denominator=50, blocked_by=None,
-                   corpus_sha256="a" * 64, sha="6" * 40)
-    rec["corpus"] = {"path": "corpus.json", "sha256": "a" * 64, "turns": 50}
-    rec["prereg"] = {"sha": "5" * 40, "status": "OK",
-                     "artifact": cvc.RECORD_ARTIFACT}
-    required = [s for s in cvc.STEPS if s != "S2.3"]
-    rec["run"] = {"status": "COMPLETED", "reason": "eight steps",
-                  "steps_observed": list(required),
-                  "steps_required": list(required),
-                  "steps_conditional": [{"step": "S2.3", "state": "idle",
-                                         "basis": "flag ON, no activity, no "
-                                                  "failure marker"}]}
-    return rec
-
-
-def test_the_cost_one_wedged_check_pays_is_BOUNDED_as_an_AGGREGATE(monkeypatch):
-    """The number that decides the timeout is the SUM over one `check()`.
-
-    `test_the_bounds_fit_inside_the_configured_pytest_budget` compares each
-    constant with the budget ALONE, and that is not the shape that reds the
-    harness: `check()` makes several probes per row and the row loop multiplies
-    them, so a bound "well inside 300 s" on its own can still sum past it —
-    which is how a later bump silently restores `Failed: Timeout (>300.0s)`,
-    the exact failure #13800 removed. So this arm measures the aggregate the
-    comment above `GIT_TIMEOUT` claims: every `_git` call ONE `check()` makes on
-    a five-GREEN-row record, with the clock expiring on all of them, summed over
-    the bound each probe carried.
-
-    Non-vacuity, both halves: on the pre-fix code the blob read is NOT memoised,
-    so five rows pay five `BLOB_TIMEOUT`s and the sum is 450 s against a 300 s
-    budget — `total < budget` and the single-blob assertion both red there, and
-    only the memo turns them green.
-    """
-    calls: list[tuple[list[str], float | None]] = []
-
-    def _expire(argv, **kwargs):
-        calls.append((list(argv), kwargs.get("timeout")))
-        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
-
-    rec = _wedged_green_record()
-    monkeypatch.setattr(cvc.subprocess, "run", _expire)
-    cvc._OBJECT_DB_MEMO.clear()
-    cvc._CONDITIONAL_MEMO.clear()
-    try:
-        cvc.check(rec, repo=_REPO, require_green=False)
-        total = sum(bound for _argv, bound in calls)
-    finally:
-        cvc._CONDITIONAL_MEMO.clear()
-        cvc._OBJECT_DB_MEMO.clear()
-
-    ini = tomllib.loads((_REPO / "pyproject.toml").read_text())
-    budget = ini["tool"]["pytest"]["ini_options"]["timeout"]
-    assert calls, "no probe reached the runner — the sum below would be vacuous"
-    assert total < budget, (
-        f"one wedged check() spends {total}s of a {budget}s budget across "
-        f"{len(calls)} probes")
-
-    # The MULTIPLICITY, pinned directly so the amount of headroom is legible:
-    # the work-tree probe is asked twice per row (V3, then V5) and the one
-    # NETWORK read is paid once however many rows ask for it.
-    work_tree = [c for c in calls
-                 if c[0][1:3] == ["rev-parse", "--is-inside-work-tree"]]
-    blobs = [c for c in calls if c[0][1:2] == ["show"]]
-    assert len(work_tree) == 2 * len(rec["rows"]), calls
-    assert len(blobs) == 1, calls
-    assert blobs[0][1] == cvc.BLOB_TIMEOUT, blobs
-    assert all(bound == cvc.GIT_TIMEOUT for argv, bound in calls
-               if argv[1:2] != ["show"]), calls
+    text = (_REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone"
+            "/02-scope.md").read_text()
+    m = re.search(r"`capstone_verdict_check\.py`'s `RECOGNISED_CRITERIA`.*?"
+                  r"at `:(\d+)`, refused at the V2 loop `:(\d+)-(\d+)`",
+                  text, re.DOTALL)
+    assert m is not None, ("the F1 row no longer cites this gate the way this "
+                           "pin reads it — re-point the pin, not the document")
+    enum_line, lo, hi = (int(g) for g in m.groups())
+    lines = (_REPO / "tools/capstone_verdict_check.py").read_text().splitlines()
+    assert lines[enum_line - 1].startswith("RECOGNISED_CRITERIA = ("), lines[enum_line - 1]
+    assert "for criterion in RECOGNISED_CRITERIA:" in lines[lo - 1], lines[lo - 1]
+    assert "if criterion not in RECOGNISED_CRITERIA" in lines[hi - 1], lines[hi - 1]
