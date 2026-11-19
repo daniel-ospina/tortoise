@@ -193,6 +193,7 @@ STATED LIMITS — deliberate, and measured rather than guessed:
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -588,13 +589,39 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # document names. The `is NOT empty` spelling is no longer forbidden for the same reason —
     # it is what the command prints here, so refusing it refused the truth.
     #
-    # NON-VACUITY, MEASURED: on the pre-fix document every one of these spellings was present
-    # (`grep -c 'and neither is'` -> 1) and this leg reds on it; it is green only once the empty
-    # claims are gone. The last member refuses a different claim in the other spelling the cell
-    # used to carry — `… tortoise/` "returns exactly those two" — and the QUOTES are what tell
-    # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
-    # form, so the retraction that still records the false spelling stays legal).
+    # NON-VACUITY, MEASURED — per member, because the collective claim was FALSE
+    # (#13728 delta review, P2). On the pre-fix document (`16ace39823`) THREE of the five
+    # spellings below fire (`neither is` -> 1, `is empty` -> 2, `-> empty` -> 1, counted with
+    # `grep -c -F --`). The other two are REFUSALS WITHOUT A MEASURED PRE-FIX CASE and are
+    # labelled so rather than counted as exercised: `is EMPTY` matched only a DIFFERENT
+    # subject in that document ("the same command with `-- tortoise/` is EMPTY"), and
+    # `returns exactly those two` occurs there only inside the quoted retraction the
+    # pattern deliberately excludes. An earlier wording said "every one of these
+    # spellings was present" and cited one member as evidence for five.
+    #
+    # ⛔ AND THE DIRECTION IS MEASURED AT TEST TIME, not typed (#13728 delta review, P2).
+    # On a tree whose three-dot diff against `origin/main` IS empty — the merged tree, where
+    # HEAD is `origin/main` — those spellings are TRUE, and refusing them unconditionally
+    # would false-block the one sentence a merger most needs. So the arm runs the command:
+    # non-empty output => the empty claims are false here and are refused; empty output =>
+    # this leg has nothing to refuse and says so (a skip, never a silent pass).
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    _measured = subprocess.run(
+        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
+        cwd=REPO, capture_output=True, text=True)
+    if _measured.returncode != 0:
+        pytest.skip(
+            "`origin/main` is not resolvable in this clone, so the measured set this leg "
+            f"compares against cannot be read (git said: {_measured.stderr.strip()[:200]}). "
+            "A FAILED READ IS NOT AN EMPTY SET — the same rule as #784/#3690.")
+    _measured_paths = [ln for ln in _measured.stdout.splitlines() if ln.strip()]
+    assert not (_measured_paths and _measured.returncode), "unreachable"
+    if not _measured_paths:
+        pytest.skip(
+            "`git diff --name-only origin/main...HEAD -- tortoise/` is EMPTY at this head "
+            "(HEAD is `origin/main` or identical to it), so the empty spelling is TRUE here "
+            "and this leg has no claim to refuse. It is not a pass: the command's output is "
+            "what makes the empty claim right or wrong, and it is read at the head under test.")
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is empty",
@@ -604,10 +631,10 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     ):
         assert _negation not in doc, (
             f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the PR's OWN "
-            "`tortoise/` paths (measured: three of them, `projection/__init__.py` among "
-            "them), so the empty claim is refuted by the very command it quotes — and it "
-            "satisfied the presence-only leg above while contradicting the empty claims "
-            "beside it (#13489 review, P1)")
+            f"`tortoise/` paths — measured at this head: {len(_measured_paths)} "
+            f"({', '.join(_measured_paths)}) — so the empty claim is refuted by the very "
+            "command it quotes, and it satisfied the presence-only leg above while "
+            "contradicting the empty claims beside it (#13489 review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
