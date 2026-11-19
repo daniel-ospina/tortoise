@@ -12113,13 +12113,19 @@ class FalkorProjection(
         proportional to the tenant's graph is the amplifier that turns one slow
         round trip into a breached request.
 
-        ``MATCH (n) RETURN 1 LIMIT 1`` keeps what the probe is FOR — a real
-        traversal of the store's node iterator, so every failure this probe
-        classified (unresponsive graph, ``Timeout argument``, a decode/type
-        error on a corrupt node) still fails here — while costing O(1):
-        measured 0.4-0.6 ms **flat** from 1k to 300k nodes. The empty-graph
-        case is unchanged in both directions (0 rows, no error), which is what
-        keeps this a reachability probe rather than a data check.
+        ``MATCH (n) RETURN 1 LIMIT 1`` keeps what this probe is FOR — a
+        REACHABILITY test over the store's node iterator — at O(1): ``LIMIT 1``
+        stops that iterator after the first row and ``RETURN 1`` decodes no
+        node payload, so measured 0.4-0.6 ms **flat** from 1k to 300k nodes.
+        ⛔ Say what that buys and no more: what still fails here is a graph the
+        store cannot walk at all (unresponsive graph, ``Timeout argument``, a
+        store-level error raised before the first row). A CORRUPT NODE PAST THE
+        FIRST ROW IS NO LONGER REACHED by this statement — that is the price of
+        O(1), not a claim this docstring can make — and a property-decode error
+        was never what ``RETURN <constant>`` surfaced. Graph-wide corruption
+        detection is ``recover_from_log``'s node count, not this probe's. The
+        empty-graph case is unchanged in both directions (0 rows, no error),
+        which is what keeps this a reachability probe rather than a data check.
         """
         self._probe_error = None
         try:
