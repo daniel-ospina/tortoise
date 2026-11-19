@@ -138,7 +138,7 @@ pin's `:3732` — and that pair reads `:3837` / `:3834` at `main`, where the `ca
 pin's `:3633`); the pin's `:2715` is `if k not in tail_denied})` — the `tail_denied = forbidden | {` this
 document quotes is the pin's `:2710` — and `main` holds those two at `:2720` / `:2715`; and
 `projection/entities.py` `:5722` is the `s.summary=coalesce($summary, s.summary, '')` write on this
-tree (it was a COMMENT at the pin AND at `main`, where that write sits at `:5598` and `:5646`) — ⛔ every number in this clause was taken with `grep -n` on the tree that names
+tree (it was a COMMENT at the pin AND at `main`: the write sits at `:5598` at the pin and `:5646` at `main`) — ⛔ every number in this clause was taken with `grep -n` on the tree that names
 it, never by applying a delta: the two states are DIFFERENT files at DIFFERENT offsets, so a single shift
 cannot describe the pair, and one applied here is what turns a pin-side description into a false one).
 Five of the eight are already asserted at `main` by `_PINS` in `tests/test_12184_shifted_cites.py`, and the
