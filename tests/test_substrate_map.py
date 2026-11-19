@@ -279,6 +279,7 @@ def _label_hits_reads(
     *,
     during=None,
     everything: list | None = None,
+    run=None,
 ) -> list[Path]:
     """Every path `_label_hits()` read via `Path.read_text`, in read order.
 
@@ -321,6 +322,13 @@ def _label_hits_reads(
     `during` runs after the patch is installed and before `_label_hits()`, so a
     caller can stage an unrelated read deterministically instead of hoping for
     one.
+
+    `run` replaces the `_label_hits()` pass itself, defaulting to it. It exists so
+    an arm can put the SAME pass on a worker thread and observe what the rule
+    attributes there: the rule is a FRAME rule, and a frame has no thread, so a
+    narrowing that added `threading.current_thread() is threading.main_thread()`
+    would attribute nothing and must red an arm rather than leave the file green
+    (the residual declared open by #13699's round-5 review).
     """
     read: list[Path] = []
 
@@ -340,7 +348,7 @@ def _label_hits_reads(
     monkeypatch.setattr(Path, "read_text", _spy)
     if during is not None:
         during()
-    _label_hits()
+    (run or _label_hits)()
     return read
 
 
@@ -1424,11 +1432,12 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
     #: assertion GREEN. What catches a rewrite is the exclusion and drift arms,
     #: and they catch a REPLACEMENT only (measured): replacing the rule with a
     #: path filter reds the drift arm alone; deleting it reds only the two
-    #: exclusion assertions. ⛔ AND A STRENGTHENING IS CAUGHT BY NOTHING —
+    #: exclusion assertions. ⛔ A STRENGTHENING of the rule is caught by the
+    #: WORKER-THREAD window at the end of this test, not by this assertion:
     #: `caller is _LABEL_HITS_CODE and threading.current_thread() is
-    #: threading.main_thread()` leaves this whole file green (measured), which is
-    #: the narrowing #13699 is about; that residual is OPEN and this arm does not
-    #: close it. `_probe` is hoisted out of the thread closure so the expected
+    #: threading.main_thread()` left this whole file green before that window
+    #: existed (measured), which is the narrowing #13699 is about. `_probe` is
+    #: hoisted out of the thread closure so the expected
     #: name comes from its own code object rather than a string literal, which a
     #: rename or an inline would red with a message blaming the recorder.
     assert ({name for p, name in everything if p == foreign}
@@ -1452,6 +1461,43 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "the recorded population drifted off the tracked set under tortoise/ — "
         "the population §5's `git grep` sentence is stated in: "
         + ", ".join(str(p) for p in _population_drift(scoped)[:5])
+    )
+
+    #: ⛔ The rule must not care WHICH THREAD the frame runs on either. This is the
+    #: residual #13699's round-5 review declared OPEN — a STRENGTHENING of the rule
+    #: to `caller is _LABEL_HITS_CODE and threading.current_thread() is
+    #: threading.main_thread()` left this whole file green (measured), because every
+    #: arm above runs `_label_hits` on the MAIN thread. That narrowing is #13699 one
+    #: refactor out, in the direction that fails loudest: a worker-thread
+    #: `_label_hits` pass would record nothing, the population control would compare
+    #: a set holding only foreign reads against the tracked one, and the required
+    #: `test` job would red with no defect behind it. So the SAME pass is run on a
+    #: worker thread here, and what it recorded must be the tracked population.
+    def _label_hits_in_another_thread() -> None:
+        thread = threading.Thread(target=_label_hits, daemon=True)
+        thread.start()
+        thread.join(timeout=_INDEX_TIMEOUT_S)
+        assert not thread.is_alive(), (
+            "the `_label_hits` thread did not finish inside the patched window, "
+            "so this arm would prove nothing about what a worker-thread pass is "
+            "attributed to"
+        )
+
+    #: `run=lambda: None` keeps a MAIN-thread `_label_hits()` out of this window, so
+    #: `worker_read` holds only what the worker-thread pass recorded — otherwise the
+    #: main-thread half would satisfy the assertion below and the thread narrowing
+    #: would stay green.
+    worker_read = _label_hits_reads(
+        monkeypatch, during=_label_hits_in_another_thread, run=lambda: None
+    )
+    tracked = set(_tracked_files_under(_TRACKED_DIR))
+    assert set(worker_read) == tracked, (
+        "a `_label_hits` pass on a WORKER THREAD attributed "
+        f"{len(set(worker_read))} of {len(tracked)} tracked file(s) — the "
+        "recorder's rule consults the CALLING THREAD in addition to the frame, so "
+        "a pass that does not run on the main thread is invisible to it; that is "
+        "the narrowing #13699 is about, and the population control would then red "
+        "the required `test` job with no defect behind it"
     )
 
 
