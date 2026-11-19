@@ -7268,14 +7268,34 @@ class TestPricingSourceIsShared:
         `PRICING.display.annual_discount_pct` and the local alias declaration
         `const PRICING = window.TORTOISE_PRICING;` all have no assignment after a
         property chain, and all three are used legitimately on both pages.
+
+        ⛔ THE GUARD BINDS THE PROPERTY PATH, NOT THE ROOT IDENTIFIER. Binding on
+        `PRICING` / `window.TORTOISE_PRICING` was the first version and it is one
+        alias away from useless: `const PRICING = window.TORTOISE_PRICING;` is
+        already both pages' established pattern, so `const _P = …; _P.tiers.pro
+        .price = 25;` — or `const {tiers} = …; tiers.pro.price = 25;` — reached the
+        same object and left all **137 rows GREEN** while the campaign page
+        rendered a different price than `/tortoise` (measured at `b9d6bcdf4c`,
+        #13696 review 4 finding 2). The key list is DERIVED from the shared source
+        (`_extract_pricing_object`) rather than retyped, so a new schema field is
+        covered the day it lands; a write has to end at one of those keys however
+        the object was named, and a READ (`fmtPrice(t.price)`,
+        `PRICING.tiers[name].price`, `PRICING.tiers.free.price === 0`) still has
+        no `=` after the path.
         """
+        pricing = _extract_pricing_object()
+        keys = set(pricing) | {"tiers", "display"} | set(pricing["display"])
+        for tier in pricing["tiers"].values():
+            keys |= set(tier)
+        key_alt = "|".join(sorted(map(re.escape, keys)))
+        ident = r"[A-Za-z_$][\w$]*"
+        rest = rf"(?:\s*\.\s*{ident}|\s*\[[^\]]*\])*"
         write = re.compile(
-            r"\b(?:window\.TORTOISE_PRICING|PRICING)"
-            r"(?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]]*\])+"
-            r"\s*(?:[-+*/%]|&&|\|\||\?\?)?=(?!=)")
+            rf"\.\s*(?:{key_alt})\b{rest}\s*"
+            rf"(?:[-+*/%|&^]|\*\*|<<|>>|&&|\|\||\?\?)?=(?!=)")
         other = re.compile(
-            r"\bObject\.assign\(\s*(?:window\.TORTOISE_PRICING|PRICING)\b"
-            r"|\bdelete\s+(?:window\.TORTOISE_PRICING|PRICING)\b")
+            rf"\bdelete\s+{ident}(?:\s*\.\s*{ident})*\s*\.\s*(?:{key_alt})\b"
+            rf"|\bObject\.assign\(\s*(?:{ident}\s*\.\s*)*(?:{key_alt})\b")
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             hits = [ln.strip()
                     for ln in path.read_text(encoding="utf-8").splitlines()
@@ -7283,12 +7303,50 @@ class TestPricingSourceIsShared:
             assert not hits, (
                 f"{name} MUTATES the shared pricing table:\n  " + "\n  ".join(hits)
                 + "\nThe table is ONE object shared by both product pages, so a "
-                "write here changes the price every page renders — the campaign "
-                "page would quote a different number than `/tortoise` with no "
-                "other red (#13645). Change the price in "
+                "write here changes the price BOTH pages render — whichever page "
+                "it lands on, the other one is now quoting a different number "
+                "with no red anywhere (#13645). A rename of the local alias does "
+                "not make the write legitimate. Change the price in "
                 "`product/pricing.json` (the source of truth) instead, so both "
                 "pages move together — or, if this page genuinely needs its own "
                 "figure, that is a decision, not an edit.")
+
+    def test_no_page_quotes_a_price_outside_the_pricing_section(self):
+        """The invariant's last unread scope: prices OUTSIDE `#pricing-section`.
+
+        Every row above is scoped to the pricing section — the whole-section
+        compare included — so a price figure anywhere ELSE in either document was
+        read by nothing. Measured at `b9d6bcdf4c`: adding
+        `<p class="hero-price">Pro from $25/mo</p>` to the campaign page's hero
+        left all **137 rows GREEN** while that page quoted $25/mo for Builder
+        against `/tortoise`'s $20 monthly / $15 annual (#13696 review 4 finding
+        1). Both pages carry ZERO price figures outside the section today, so
+        this row is green as written — it refuses the next one rather than fixing
+        a live divergence.
+
+        A page that genuinely needs a price elsewhere is making a decision, not
+        an edit: put the figure inside the section, or change this row together
+        with what the section serves.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            served = _served(html)
+            section = _pricing_section(html)
+            assert section in served, (
+                f"the `#pricing-section` slice is not part of {name}'s served "
+                "markup, so this row cannot tell inside from outside — the "
+                "section compare above is the thing that finds the boundary")
+            outside = served.replace(section, "", 1)
+            hits = [outside[max(0, m.start() - 50):m.end() + 20].strip()
+                    for m in re.finditer(r"\$\s?\d", outside)]
+            assert not hits, (
+                f"{name} quotes a price OUTSIDE the pricing section:\n  "
+                + "\n  ".join(hits)
+                + "\nEvery price on both product pages must come from the ONE "
+                "shared table, and the section is where it is rendered — a "
+                "figure above the fold is a second copy that no row compares "
+                "against `/tortoise`, so the two pages can quote different "
+                "numbers with nothing red (#13645).")
 
     # The five functions that turn the shared table into the prices a JS
     # visitor actually sees. See `test_the_two_pages_render_from_the_same_code`.
@@ -7779,12 +7837,17 @@ class TestProductTeamsIdentity:
             "INDEXED. `noindex` and `index` differ in whether the experiment can "
             "be measured at all, so the recorded decision must name which one is "
             "in force — the same reason the page's `<meta>` and the sitemap `<loc>` "
-            "are pinned above.")
+            "are pinned above. NOTE: this row reads the ENTRY, and a blank line "
+            "ENDS the entry — if the sentence is still in the document but sits "
+            "below a blank line inside the bullet, move it back up rather than "
+            "adding a second copy.")
         assert "PRODUCT_PAGES" in entry, (
             f"the architecture doc's {route} entry no longer says why this page is "
             "NOT a `PRODUCT_PAGES` member. That membership is a 301 to "
             "`/tortoise/tortoise-for-product-teams`, which does not exist; the "
-            "reason has to live beside the route or the next reader removes it.")
+            "reason has to live beside the route or the next reader removes it. "
+            "(Same caveat as the row above: a blank line ends the entry, so a "
+            "sentence moved below one is not read here.)")
 
     def test_the_page_loads_the_consent_module(self):
         """Every named event must be gated, so the gate must be loaded."""
