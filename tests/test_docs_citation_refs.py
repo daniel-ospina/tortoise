@@ -558,6 +558,17 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
     # closure claim above is read as "closed under formatting ON ONE LINE".
+    # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
+    # (#13845): a claim that names the command by PRONOUN — "the command this clause
+    # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
+    # reach it; and a command SHORTENED to a fragment is reachable only if the caller passes
+    # that fragment as `cmd`. Both are handled by the callers (the two literal tripwires in
+    # the claim list, and the second `_typed_answers_to_tortoise_cmd` call over
+    # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
+    # rather than implying the class is closed over every way a document can point at the
+    # command. The residual is a sentence that refers to the measurement without naming it
+    # at all, which is why the live document carries a HEAD LABEL on each such sentence and
+    # that is checked by reading, not by an assertion.
     for match in re.finditer(
             r"`?" + re.escape(cmd)
             + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
@@ -1062,6 +1073,13 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                 # Mutation-pinned: restoring that spelling in a doc whose set is non-empty
                 # reds HERE and nowhere else.
                 "the `tortoise/` set above is EMPTY",
+                # …and the two the SECOND review cycle measured, both abbreviations of
+                # the same command: one names it by pronoun ("the command this clause
+                # prescribes"), the other shortens it to `` `-- tortoise/` ``. Pinned as
+                # literals because no shape rule can reach a pronoun — see the declared
+                # limit in the module docstring.
+                "returns NOTHING AT ALL (the diff carries no `tortoise/` path)",
+                "`-- tortoise/` returns NOTHING",
             )),
             *((_c, False) for _c in (
                 f"{_tortoise_cmd}` is NOT empty",
@@ -1079,7 +1097,14 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"direction the tree refutes at this head, where that command prints "
             f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
             "(#13489 review, P1; #13750 review, cycle 1; #13728 review, P1)")
-    for _answer, _claims_empty in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd):
+    # ⛔ AND THE ABBREVIATED SPELLING (#13845 review, cycle 2): the document shortens the
+    # command to `` `-- tortoise/` `` in several places, so an answer typed against the
+    # SHORT form was invisible to the arm above — the same half-closure one layer down.
+    # Both spellings are read; a claim naming the command by pronoun is not, and that
+    # residual is declared in the module docstring rather than left implied.
+    for _answer, _claims_empty in (
+            *_typed_answers_to_tortoise_cmd(doc, _tortoise_cmd),
+            *_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")):
         assert _claims_empty != bool(_tortoise_set), (
             f"05-verify.md types {_answer!r} as the answer to `{_tortoise_cmd}`, which "
             f"prints {_measured} at this head — a typed present-tense ANSWER to a head-bound "
