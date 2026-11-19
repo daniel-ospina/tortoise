@@ -7356,13 +7356,15 @@ def _figures(text: str) -> list[str]:
 
 
 def _inline_scripts(html: str) -> list[str]:
-    """The body of every INLINE `<script>`, comment lines dropped.
+    """The body of every INLINE `<script>`, comment spans cut out.
 
     `src=`-carrying tags are skipped: their bodies are empty in these documents
     and the code they load (`/assets/tortoise-pricing.js`, `/consent.js`) is
-    graded by its own rows. Comment lines go through the same line-based rule
-    `_render_code` uses, so a `//`-strip cannot cut the `https://` inside the
-    self-host anchor and hide every literal after it.
+    graded by its own rows. Comments go through the same span-cutting rule
+    `_render_code` uses — a `/* … */` block is removed but the code after its
+    closing `*/` on that line is KEPT — so a `//`-strip cannot cut the
+    `https://` inside the self-host anchor and hide every literal after it,
+    while `/* note */ labels.pro = 'Growth';` still reads as code.
     """
     return [
         _strip_comment_lines(body)
@@ -7378,9 +7380,10 @@ def _style_bodies(html: str) -> list[str]:
     `_served` deletes style bodies (a `content:` rule is not served markup), so
     a price there is visible to the reader and invisible to every static row
     (#13696 round 6: `#beat-hero .cta::after { content: " — from $25/mo"; }`
-    left every row green). Comment lines are dropped by the SAME
-    line-based rule the script channel uses, so a `/* … */` line of prose may
-    name a figure without reding this row.
+    left every row green). Comments go through the SAME span-cutting rule the
+    script channel uses: a full-line `/* … */` or `//` comment of prose may name
+    a figure without reding this row, but a block comment that closes on a line
+    and is followed by a declaration does NOT hide that declaration.
     """
     return [_strip_comment_lines(body)
             for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html,
@@ -8254,7 +8257,12 @@ class TestProductTeamsIdentity:
             "website/product.html carries the niche page's identity attribute")
 
     def test_the_canonical_names_the_url_that_serves_it(self):
-        html = _product_teams_html()
+        # `_served`, not the raw document: a canonical inside `<!-- … -->` is
+        # one no browser parses, so the page would serve NO canonical while
+        # this row stayed green — and variant URLs of a link-tagged campaign
+        # page (`?utm_source=…`) would each index separately, which is the one
+        # thing a canonical exists to prevent here (#13696 round 7).
+        html = _served(_product_teams_html())
         canon = re.search(r'<link[^>]*rel="canonical"[^>]*href="([^"]+)"', html)
         assert canon, "the page declares no canonical"
         assert canon.group(1) == PRODUCT_TEAMS_URL, (
@@ -8387,7 +8395,13 @@ class TestProductTeamsIdentity:
             "be gated on it, not merely deferred")
 
     def test_the_campaign_tags_point_at_the_canonical_url(self):
-        html = _product_teams_html()
+        # `_served`, not the raw document, and that is load-bearing: the page's
+        # own inline JS states the convention in a COMMENT
+        # (`utm_campaign=tortoise-for-product-teams + utm_source + utm_medium`),
+        # so a raw read is satisfied by prose while all four tagged links lose
+        # their tag — leaving the experiment with no denominator, which is the
+        # owner's recorded reason for the tag (#13696 round 7).
+        html = _served(_product_teams_html())
         assert "utm_campaign=tortoise-for-product-teams" in html, (
             "the links this page controls carry no utm_campaign, so its traffic "
             "is not separable from /tortoise's in the same PostHog project — "
