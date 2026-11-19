@@ -644,9 +644,12 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 #     be satisfied.
 #
 # Both are the SAME open question — which node kinds must carry a prior? —
-# which #9063 reserves to the owner (belief model). WIDENING EITHER TUPLE IS
-# THAT DECISION; they are single constants because the query is already
-# id-anchored and EP-predicated.
+# which #9063 raised and reserved to the owner (belief model), then closed
+# COMPLETED on 2026-10-20 WITHOUT deciding it. No open issue tracked it at the
+# time of writing (that is a tracker state, not a fact this comment can keep
+# true — filing one is a legitimate future), so silence here must not be read
+# as a decision. WIDENING EITHER TUPLE IS THAT DECISION; they are single
+# constants because the query is already id-anchored and EP-predicated.
 _CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
 _CALIBRATION_GATED_LABELS = ("Point",)
 
@@ -41522,10 +41525,9 @@ class TortoiseSDK:
                 # ⛔ This refusal used to tell the caller that non-Point priors "are the open
                 # belief-model decision in #9063". That pointer does not resolve: #9063 RAISED the
                 # question — which node kinds must carry a prior? — reserved it to the owner, and
-                # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the correction is recorded in
-                # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 entry, appended by #13641; the question itself is
-                # stated as open and owner-reserved at `_CALIBRATION_EVIDENCE_KINDS`, which records no
-                # closure — do not read it as one). So a caller who followed it found a closed issue and
+                # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the same reading is recorded in
+                # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction, #13641, and stated in the code at
+                # `_CALIBRATION_EVIDENCE_KINDS`). So a caller who followed it found a closed issue and
                 # no answer, and the question is tracked by NO open issue.
                 # ⛔ The correction is recorded HERE and deliberately NOT in the message: a tracker
                 # state is not something a shipped string can keep true (the issue may be filed
