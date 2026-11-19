@@ -4520,6 +4520,7 @@ def _upsert_object(ev):
     return _write(ev)
 """,
     )
+    assert refused, "the refused fixture tuple is EMPTY — the loop below asserts nothing"
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))

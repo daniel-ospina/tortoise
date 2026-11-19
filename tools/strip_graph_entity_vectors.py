@@ -1883,9 +1883,16 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
     ⛔ WHAT THIS DELIBERATELY DOES NOT DO — the two halves that are a DIFFERENT rule:
     a container of MAPPINGS (`[{…}]`) is NOT an iterable of pairs (`dict.__ior__` rejects it
     with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
-    (`zip(NAMES, VALUES)`, `map(...)`, a generator expression) is the stated residual —
-    extracting a pair out of a call result is data flow this module does not do, and it is
-    disclosed here rather than left to be rediscovered. ⛔ THE SAME RESIDUAL COVERS A MAPPING
+    WHOSE ARGUMENTS THIS MODULE CANNOT READ (`zip(NAMES, VALUES)`, `map(...)`, `sorted(...)`,
+    `iter(...)`) is the stated residual — extracting a pair out of a call result is data flow
+    this module does not do, and it is disclosed here rather than left to be rediscovered.
+    ⛔ "A CALL" DOES NOT INCLUDE A COMPREHENSION, and this list used to say "a generator
+    expression" (`#13788`, corrected by the review of `e5ee00efb`, measured there): the
+    `GeneratorExp`/`ListComp`/`SetComp` arm below scans `elt` and the generators, so an
+    identity comprehension over a LITERAL pair list is REFUSED — `props |= (x for x in
+    [("embedding", vec)])` is refused at this head while `map(tuple, [("embedding", vec)])`
+    is CERTIFIED. The residual is the CALL-RESULT family, which this list now names.
+    ⛔ THE SAME RESIDUAL COVERS A MAPPING
     BUILT BY A CALL THAT IS NOT A RECOGNISED BUILDER: `dict(zip(keys, values))` places the
     vector and is CERTIFIED (measured at `716991951e`), because answering it needs the call's
     RESULT — a zip of names — which is the data flow stated above, not a wrapper or an
