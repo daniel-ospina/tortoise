@@ -1564,10 +1564,16 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # capture-prior mirror of `extractor_v2._fts_rows` and forwards the same
         # one method, so it runs the same leg.
         # `run` is the WARM-UP read (`sdk.tortoise_fts_query("warm", …)`,
-        # result discarded) that warms the leg before the index waits: the
-        # `user_search_rerank` arm runs the lever, so warming it disarmed
-        # would leave that arm paying the cross-encoder cold start inside the
-        # timing it reports.
+        # result discarded) issued before the index waits. Registered rather
+        # than disarmed because it must perform the SAME read the arms perform:
+        # disarming it would make the warm read a different call from the arms it
+        # precedes, and an ambient `TORTOISE_FUSED_RERANK` would then be warmed on
+        # a path no arm takes.
+        # ⛔ MEASURED LIMIT (review of #13778): this call runs BEFORE the per-arm
+        # env loop, so the lever is OFF there (`rerank_pool_enabled()` is
+        # fail-safe) and it does NOT warm the cross-encoder — no per-arm
+        # `elapsed_s` figure may be read as a warm start. The registration is
+        # about the CALL SHAPE, not about a warmed model.
         "tools/capstone_12186_recall.py": frozenset({
             "tortoise_fts_query", "_query_rows", "run"}),
     }
