@@ -44,6 +44,7 @@ import threading
 import time
 import weakref
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -157,24 +158,72 @@ def clean_embedder(monkeypatch):
     EmbeddingModel._load_attempt_thread = None
 
 
+def _shipped_load_bound_s() -> float:
+    """`EmbeddingModel._LOAD_TIMEOUT_S` as the SHIPPED SOURCE declares it.
+
+    ⛔ Not `EmbeddingModel._LOAD_TIMEOUT_S`: `tests/conftest.py:288` assigns
+    ``270.0`` to that attribute session-wide for the test lane (#6960), so the
+    runtime attribute is the LANE's override whatever the source says. Grading
+    it pins nothing — a "tidy" back to 90.0 leaves it at 270.0 (review F2). The
+    derivation #13674 asks for lives in the class body, so that is what is read;
+    parsing the AST (not a regex) means a comment or a docstring quoting the
+    number cannot satisfy the guard.
+    """
+    import ast
+
+    source_path = Path(__file__).resolve().parent.parent / "tortoise" / "embeddings.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != "EmbeddingModel":
+            continue
+        for stmt in node.body:
+            targets = (stmt.targets if isinstance(stmt, ast.Assign) else [])
+            if not any(isinstance(t, ast.Name) and t.id == "_LOAD_TIMEOUT_S"
+                       for t in targets):
+                continue
+            value = stmt.value
+            if (isinstance(value, ast.Constant)
+                    and isinstance(value.value, (int, float))
+                    and not isinstance(value.value, bool)):
+                return float(value.value)
+            raise AssertionError(
+                "`_LOAD_TIMEOUT_S` is no longer a literal in the shipped class "
+                f"body ({ast.dump(value)[:120]}) — re-state how this pin reads it")
+    raise AssertionError(
+        "`EmbeddingModel._LOAD_TIMEOUT_S` was not found in "
+        f"{source_path} — the bound moved or was renamed")
+
+
 class TestTheBoundIsDerivedFromTheMeasurement:
     """(B) — the bound must clear the measured COLD cost, with stated margin."""
 
     def test_the_bound_clears_the_measured_cold_cost_with_stated_margin(self):
-        bound = EmbeddingModel._LOAD_TIMEOUT_S
-        assert _MEASURED_COLD_LOAD_S == pytest.approx(195.8, abs=0.05), (
+        """Pins the DERIVATION IN THE SOURCE, not this lane's runtime override.
+
+        Reverting `tortoise/embeddings.py` to `_LOAD_TIMEOUT_S = 90.0` must red
+        THIS row: it reads the shipped literal, which the conftest override
+        cannot mask. The product default is independently covered from a fresh
+        interpreter by
+        `tests/test_read_status.py::test_the_test_lane_never_out_budgets_the_hosted_prewarm`.
+        """
+        bound = _shipped_load_bound_s()
+        assert pytest.approx(195.8, abs=0.05) == _MEASURED_COLD_LOAD_S, (
             "the measured cold cost is 24.1 + 132.4 + 39.3 — if a component is "
             "re-measured, restate it at the top of this file"
         )
         assert bound >= _MEASURED_COLD_LOAD_S * 1.25, (
-            f"a {bound}s bound cannot carry a {_MEASURED_COLD_LOAD_S:.1f}s "
-            "measured COLD load with margin (#13674)"
+            f"the shipped {bound}s bound cannot carry a "
+            f"{_MEASURED_COLD_LOAD_S:.1f}s measured COLD load with margin (#13674)"
         )
         assert bound > _PREFIX_BOUND_S * 2, (
-            f"{_PREFIX_BOUND_S}s is the pre-fix value that made every cold load "
-            "time out (#13674) — the bound must be a different number, derived "
-            "from the measurement"
+            f"the shipped bound is {bound}s — {_PREFIX_BOUND_S}s is the pre-fix "
+            "value that made every cold load time out (#13674): the bound must "
+            "be a different number, derived from the measurement"
         )
+        # `EmbeddingModel._LOAD_TIMEOUT_S` is deliberately NOT what is graded
+        # above: the conftest override makes it 270.0 in-lane, so it is not
+        # evidence about the shipped derivation (mutation-proved by reverting the
+        # source literal to 90.0 — this row reds, the attribute does not move).
 
     def test_the_bound_is_the_one_the_hosted_prewarm_uses(self):
         """ONE declared bound — the pre-warm must not pass a second number.
@@ -183,9 +232,9 @@ class TestTheBoundIsDerivedFromTheMeasurement:
         a product default of 90.0, so two numbers described one load and the
         timeout log named the wrong one.
         """
-        source = open(
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "tortoise", "hosted_api.py"), encoding="utf-8").read()
+        source = (
+            Path(__file__).resolve().parent.parent / "tortoise" / "hosted_api.py"
+        ).read_text(encoding="utf-8")
         assert "EmbeddingModel.get(load_timeout=300.0)" not in source, (
             "the hosted pre-warm re-introduced a second declared bound; it must "
             "take the product default so there is ONE number (#13674)"
@@ -366,14 +415,14 @@ class TestTheQueryDeclaresItsLeg:
     """
 
     #: The shape the read path emits for a healthy dense read (#2952's HEALTHY).
-    HEALTHY_TRACE = [
+    HEALTHY_TRACE: ClassVar[list[dict]] = [
         {"leg": "fts", "ran": True, "degraded": False, "reason": "ok", "count": 3},
         {"leg": "vector", "ran": True, "degraded": False, "reason": "ok",
          "count": 2},
         {"leg": "structural", "ran": False, "degraded": True,
          "reason": "breaker_open", "count": 0},
     ]
-    NO_EMBEDDER_TRACE = [
+    NO_EMBEDDER_TRACE: ClassVar[list[dict]] = [
         {"leg": "vector", "ran": False, "degraded": True,
          "reason": "no_embedder", "count": 0},
         {"leg": "fts", "ran": True, "degraded": False, "reason": "ok", "count": 3},
@@ -732,6 +781,60 @@ class TestTheBootPrewarm:
         combined = proc.stdout + proc.stderr
         assert needle in combined, (
             f"the rc={py_rc} arm did not report {needle!r}: {combined!r}"
+        )
+
+    def test_the_skip_message_does_not_claim_the_request_path_stops_loading(
+            self, tmp_path):
+        """#13674 review F3 — the switch gates WARM-UP; `get()` is NOT gated.
+
+        `TORTOISE_EMBEDDER_WARMUP` gates exactly `start_warm_up`, `warm_up`, the
+        write-path warm-up and the hosted lifespan pre-warm. `EmbeddingModel.get()`
+        — the request path — is not gated, and `tortoise/mcp_auth.py` says so
+        verbatim: "``TORTOISE_EMBEDDER_WARMUP`` does NOT gate this path, and that
+        is the point". The pre-fix skip message claimed "the in-process load is
+        disabled too, so there is nothing this would make cheap" — false on both
+        halves, and it steered the operator at the very switch this PR hands
+        back (`TORTOISE_EMBEDDER_WARMUP=0` on the deployed app is the parent's to
+        flip): with the flag off the first request that needs an embedding still
+        pays the cold load, which is exactly the cost the boot pre-warm removes.
+        """
+        proc, _bound = _run_prewarm(
+            tmp_path, {"TORTOISE_EMBEDDER_WARMUP": "0"})
+        assert proc.returncode == 0, proc.stderr
+        msg = proc.stdout + proc.stderr
+        assert "in-process load is disabled" not in msg, (
+            "the skip arm claims the in-process LOAD is disabled — the switch "
+            "gates warm-up only, `get()` still loads the model (#13674 review "
+            f"F3): {msg!r}"
+        )
+        assert "request path" in msg and "cold" in msg, (
+            "the skip arm must say the request path still loads the model, COLD, "
+            "on first use — otherwise an operator reads a free trade where the "
+            f"cost is only moved (#13674 review F3): {msg!r}"
+        )
+
+    def test_the_timeout_message_does_not_advertise_the_prewarm_bound_as_the_apps(
+            self, tmp_path):
+        """#13674 review F3 — `$_bound` bounds the PRE-WARM, not the app's load.
+
+        The app applies `EmbeddingModel._LOAD_TIMEOUT_S`; the two numbers
+        coincide only at the default. With `TORTOISE_BOOT_EMBEDDER_WARMUP_
+        TIMEOUT_S=45` the pre-fix message advertised a 45 s APP bound that the
+        app never applies.
+        """
+        proc, bound = _run_prewarm(
+            tmp_path, {"TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S": "45"},
+            py_rc="124")
+        assert bound == "45", "the pre-warm never ran with the operator's bound"
+        combined = proc.stdout + proc.stderr
+        app_lines = [line for line in combined.splitlines() if "lazily" in line]
+        assert app_lines, (
+            "the timeout arm no longer tells the operator what the app does "
+            f"next: {combined!r}"
+        )
+        assert all("45" not in line for line in app_lines), (
+            "the timeout arm names the PRE-WARM's bound as the app's bound — the "
+            f"app applies its own (#13674 review F3): {app_lines!r}"
         )
 
     def test_the_call_sits_before_the_topology_sentinel(self):
