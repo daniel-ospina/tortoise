@@ -576,17 +576,18 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # the sentence true by shipping code. MEASURED at this head:
     #
     #     $ git diff --name-only origin/main -- tortoise/
-    #     tortoise/activation_scorecard.py
-    #     tortoise/hosted_api.py
     #     tortoise/indexer/github_indexer.py
     #     tortoise/projection/__init__.py
     #
-    # — THIS PR's own `tortoise/` paths, one of them (`projection/__init__.py`) its runtime
-    # change and two of them comment-text figure restatements. ⛔ the block that stood here said
+    # — THIS PR's own `tortoise/` paths at THIS head, one of them (`projection/__init__.py`) its
+    # runtime change and one its citation docstring. ⛔ the block that stood here said
     # "three paths, one of them `projection/__init__.py`" and omitted
     # `indexer/github_indexer.py` — the same head-bound figure this file condemns, one paragraph
-    # after it condemns it (#13728 delta review, P1). No count is typed now: the membership is
-    # the record, and `git diff --name-only origin/main -- tortoise/` re-takes it.
+    # after it condemns it (#13728 delta review, P1). The two `activation_scorecard.py` /
+    # `hosted_api.py` rows a later cut recorded here left the set at the merge of `origin/main`
+    # `e679d22286`, which landed its own re-cut of both census notes — the merged outcome is what
+    # the census verb prints at this tree. No count is typed now: the membership is the record,
+    # and `git diff --name-only origin/main -- tortoise/` re-takes it.
     #
     # The leg therefore demanded that the document assert a falsehood, and the lane that
     # corrected the document to the measured set (and to the command, which is this document's
