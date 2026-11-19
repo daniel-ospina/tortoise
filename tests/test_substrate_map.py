@@ -266,7 +266,6 @@ _LABEL_HITS_FRAME = "_label_hits"
 def _label_hits_reads(
     monkeypatch,
     *,
-    attribute_to: str | None = _LABEL_HITS_FRAME,
     during=None,
     everything: list | None = None,
 ) -> list[Path]:
@@ -300,21 +299,17 @@ def _label_hits_reads(
     `test_a_same_thread_ambient_read_is_not_attributed_to_label_hits` and
     `test_a_read_from_another_thread_is_not_attributed_to_label_hits`).
 
-    `attribute_to=None` records EVERY read in the window, which is what the
-    non-vacuity arms need: a scoping rule is only safe if the recorder it scopes
-    demonstrably saw the read it is excluding. Prefer `everything`, which yields
-    the SAME evidence from ONE patch — a non-vacuity arm that patched twice in a
-    row added a second variable (what the previous patch left installed) to a
-    test whose whole point is to be deterministic.
+    `everything` receives `(path, caller frame name)` for EVERY read in the
+    window, attributed or not — so a test can prove that the read it means to
+    exclude was really made, which is what stops the exclusion assertions from
+    being vacuously true. Prefer it to a second patch: a non-vacuity arm that
+    patched `Path.read_text` twice in a row added a second variable (what the
+    previous patch left installed) to a test whose whole point is to be
+    deterministic.
 
     `during` runs after the patch is installed and before `_label_hits()`, so a
     caller can stage an unrelated read deterministically instead of hoping for
     one.
-
-    `everything` receives `(path, caller frame name)` for EVERY read in the
-    window, attributed or not — so a test can assert that the read it means to
-    exclude was really made (`… and was seen`), which is what stops the
-    exclusion assertions from being vacuously true.
     """
     read: list[Path] = []
 
@@ -325,7 +320,7 @@ def _label_hits_reads(
             caller = "<no frame>"
         if everything is not None:
             everything.append((self, caller))
-        if attribute_to is None or caller == attribute_to:
+        if caller == _LABEL_HITS_FRAME:
             read.append(self)
         return _REAL_READ_TEXT(self, *args, **kwargs)
 
@@ -1336,6 +1331,23 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
         "population drifted off the one §5's `git grep` sentence is stated in: "
         + ", ".join(str(p) for p in drifted[:5])
     )
+    #: ⛔ The IDENTITY, not only the containment. `_label_hits` walks the whole
+    #: indexed population, so the recorded set must EQUAL it — and since
+    #: `_label_hits_reads` now attributes by caller frame, it can under-record in
+    #: a way thread scoping never could (a future read routed through a helper
+    #: would drop out). Containment, a non-empty list and a non-`.py` member are
+    #: all still true of a recorder that lost one subtree, so without this the
+    #: control would keep its name and lose the property the name states.
+    tracked = _tracked_files_under(_TRACKED_DIR)
+    assert set(read) == set(tracked), (
+        "the recorder did not see every file `_label_hits` walks — "
+        f"{len(set(tracked) - set(read))} tracked file(s) missing, "
+        f"{len(set(read) - set(tracked))} unexpected: "
+        + ", ".join(
+            str(p)
+            for p in sorted(set(tracked) - set(read))[:5] + sorted(set(read) - set(tracked))[:5]
+        )
+    )
 
 
 def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch) -> None:
@@ -1422,8 +1434,8 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     happens on the thread the recorder was scoped to — a synchronous reaper path,
     a fixture, a `gc`-driven finalizer — thread scoping excludes nothing, the
     path is recorded as `_label_hits`'s own, and the required `test` job reds with
-    no defect behind it. The file is registered in `tier1` and on the `core`
-    surface (`config/ci-surfaces.yml:8810`, `:10968`) and is in NEITHER
+    no defect behind it. The file is `core`-registered
+    (`config/ci-surfaces.yml:8810`) and in `tier1` (`:10968`), and is in NEITHER
     `slow_files` nor `carve_out`, so it belongs to the FAST pool: it is packed
     into ONE of the `test (x)` shards (11 bins, `config/ci-surfaces.yml:63`) —
     `test (e)` in the run above — never the `slow`/`carve-out` legs. That red
@@ -2214,10 +2226,10 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
 
 
 #: §5 introduces some of its evidence with the SYMBOL the line declares:
-#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:2260`) ``. Those pointers rot the
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:2288`) ``. Those pointers rot the
 #: same way the `:Document` ones did — and one already had: §5 cited
 #: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
-#: map was cut at `438a8924d1` and is at **2260** at this head, so the citation
+#: map was cut at `438a8924d1` and is at **2288** at this head, so the citation
 #: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
 #: the guard above reads only `cache_eviction.py` citations.
 _SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
@@ -2228,7 +2240,7 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
     `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration sat at
-    1974 when this pin was written and 2260 at this head (it was 1584 when the map
+    1974 when this pin was written and 2288 at this head (it was 1584 when the map
     was cut; that module has grown since). The citation therefore sent a reader
     re-examining the retirement mechanism to a comment about `_ingestedAtStored` —
     the exact class of stale evidence pointer the `:Document` pin next door closes
