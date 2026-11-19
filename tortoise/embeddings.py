@@ -1110,6 +1110,15 @@ class EmbeddingModel:
         ``load_in_progress_s: null``: a pair no state of the machine produces, on
         the very instrument #13674 exists to make readable. This snapshot is the
         ONLY reader, so the published fields are one reading, not two.
+
+        ⛔ It reads THREE class attributes and takes no lock (it must not:
+        ``get()`` holds ``cls._lock`` for the whole load, so a locked read here
+        would park ``/health`` up to the bound). The reads are therefore
+        consistent only because the PUBLISHER writes them in the reverse order —
+        ``_load_started_at`` before ``_load_attempt_thread`` (see
+        ``__init__``), so a thread this function can see always already has its
+        own start time. Reading the fields in the other order, or reordering
+        either side, restores the torn pair.
         """
         thread = cls._load_attempt_thread
         started = cls._load_started_at
@@ -1917,9 +1926,23 @@ class EmbeddingModel:
         # and ``status()`` publishes it as ``load_in_progress``. Set on the
         # class BEFORE ``t.start()`` so the guard can never see a window where a
         # running thread is not yet recorded.
+        #
+        # ⛔ THE CLOCK GOES FIRST, AND THAT ORDER IS LOAD-BEARING (#13841
+        # review). ``load_attempt_snapshot()`` is a LOCK-FREE reader — it may
+        # not take ``cls._lock``, because ``get()`` holds that lock for the whole
+        # load and ``/health`` would then block up to the bound — and it reads
+        # ``_load_attempt_thread`` BEFORE ``_load_started_at``. So the writer
+        # must publish in the REVERSE order: once a reader can see this attempt's
+        # thread, its start time is already visible too. Written the other way
+        # round, a reader preempted between its two reads could pair a LIVE
+        # thread with the PREVIOUS attempt's start (a huge elapsed) or with
+        # ``None`` — publishing ``load_in_progress: true`` beside
+        # ``load_in_progress_s: null``, the pair the snapshot exists to make
+        # impossible. Do not reorder these two lines without also reordering the
+        # reader; `test_the_attempts_clock_is_published_before_its_thread` reds.
+        type(self)._load_started_at = _attempt_started_at
         type(self)._load_attempt_thread = t
         type(self)._load_attempt_abandoned = abandoned
-        type(self)._load_started_at = _attempt_started_at
         # #13819 review F3: record the bound THIS attempt runs under, so the
         # reclaim warning quotes it rather than the class default.
         type(self)._load_attempt_timeout_s = timeout

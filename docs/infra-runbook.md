@@ -1195,9 +1195,10 @@ publishes. An attempt a caller started with `get(load_timeout=…)` runs under I
 reading 10 s is abandoned while still reading *below* the published 300 s. The reading resolves by
 itself when the thread exits (the guard clears, and the next `get()` retries once the cooldown has
 passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is wall-clock since the
-attempt started, so a starved loader may legitimately run past its bound (this PR's own bound exists
-because the same import measured 156.5 s under load). Before restarting a machine on this reading,
-get independent evidence that the import is not advancing — a stack from OUTSIDE the process
+attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
+because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
+headroom above it is what covers the contention the box shows while serving traffic). Before
+restarting a machine on this reading, get independent evidence that the import is not advancing — a stack from OUTSIDE the process
 (`py-spy dump --pid <pid>`, which this runbook already uses elsewhere), showing where the import
 sits.
 
@@ -1217,6 +1218,21 @@ silence is the expected state for BOTH progress and a wedge.
 A restart on this reading throws away an import that may be about to finish and re-pays the whole
 cold cost, so get the stack FIRST — the block alone cannot justify it.
 
+attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
+because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
+headroom above it is what covers the contention the box shows while serving traffic). Before restarting a machine on this reading,
+get independent evidence — a stack (`py-spy dump --pid`, faulthandler) showing where the import sits;
+an ABSENCE of further `embedder:` lines is NOT that evidence, because the loader logs nothing between
+the timeout line and the load finishing or its overrun ending. A restart throws away an import that
+may be about to finish and re-pays the whole cold cost.
+attempt started, so a starved loader may legitimately run past its bound (`#13674`'s bound exists
+because the same cold import measured 156.5 s of imports ALONE on the production box; the 53 %
+headroom above it is what covers the contention the box shows while serving traffic). Before
+restarting a machine on this reading,
+get independent evidence — a stack (`py-spy dump --pid`, faulthandler) showing where the import sits;
+an ABSENCE of further `embedder:` lines is NOT that evidence, because the loader logs nothing between
+the timeout line and the load finishing or its overrun ending. A restart throws away an import that
+may be about to finish and re-pays the whole cold cost.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),

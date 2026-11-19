@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import inspect
 import logging
 import os
 import subprocess
@@ -793,6 +794,73 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "race the publisher (`get()` holds it across `__init__`'s write) and "
             "leave a live loader unreferenced, disarming the reclaim guard "
             f"(held={seen.get('held')!r})"
+        )
+
+    def test_a_live_attempt_keeps_its_own_bound_across_a_reset(
+            self, monkeypatch, clean_embedder):
+        """The LIVE mirror of the dead-attempt row below (#13841 review).
+
+        Clearing the bound is conditional on the attempt being DEAD: a live
+        overrunning loader must keep the bound IT ran under, because
+        `_describe_load_attempt()` quotes it in the reclaim refusal. Hoisting the
+        `_load_attempt_timeout_s = None` line out of the `if attempt is None or
+        not attempt.is_alive():` block left every row green (measured), and it
+        resurrects #13819 F3 — the warning would name the class default instead
+        of the bound that actually fired.
+        """
+        release = threading.Event()
+        live = threading.Thread(target=release.wait, daemon=True)
+        live.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while not live.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert live.is_alive(), "the stub thread never started"
+
+            EmbeddingModel._reset()
+            EmbeddingModel._load_attempt_thread = live
+            EmbeddingModel._load_attempt_timeout_s = 7.0
+            EmbeddingModel._reset()
+
+            _in_flight, _elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+            assert bound == 7.0, (
+                f"a LIVE attempt's bound was reset away ({bound!r}s) — the "
+                f"reclaim refusal would then quote the class default instead of "
+                f"the bound this attempt ran under (#13819 F3)"
+            )
+        finally:
+            release.set()
+            live.join(30)
+            EmbeddingModel._load_attempt_thread = None
+            EmbeddingModel._reset()
+
+    def test_the_attempts_clock_is_published_before_its_thread(self):
+        """The WRITER's order is what makes the lock-free reader consistent.
+
+        `load_attempt_snapshot()` takes no lock (it must not: `get()` holds
+        `cls._lock` for the whole load) and reads `_load_attempt_thread` BEFORE
+        `_load_started_at`. Published the other way round, a reader preempted
+        between those two reads pairs the new thread with the PREVIOUS attempt's
+        start — a huge elapsed — or with `None`, publishing
+        `load_in_progress: true` beside `load_in_progress_s: null`: the pair the
+        snapshot exists to make impossible, and the reading an operator uses to
+        decide whether to restart a machine mid-import.
+
+        Pinned as an ORDER IN THE WRITER, the same way
+        `test_the_call_sits_before_the_topology_sentinel` pins `entrypoint.sh`: a
+        class-attribute write cannot be intercepted by a descriptor (``type(self)
+        ._load_started_at = …`` goes through the metaclass, not the class dict),
+        so the pin is the order of the two statements in `__init__`'s source.
+        """
+        source = inspect.getsource(EmbeddingModel.__init__)
+        clock = source.index("_load_started_at = _attempt_started_at")
+        thread = source.index("_load_attempt_thread = t")
+        assert clock < thread, (
+            "the attempt's THREAD is published before its CLOCK — "
+            "`load_attempt_snapshot()` takes no lock and reads the thread "
+            "FIRST, so it can pair a live thread with the PREVIOUS attempt's "
+            "start time (a huge elapsed) or with None: `load_in_progress: "
+            "true` beside `load_in_progress_s: null` (#13841 review)"
         )
 
     def test_a_reset_drops_the_dead_attempts_bound_too(
