@@ -8362,6 +8362,14 @@
    "path": 30
   }
  },
+ "post_run_edits": [
+  {
+   "declared": "2026-11-19",
+   "field": "cleanup",
+   "run_head": "31bce52ddbb3b3f0bc93093e2988b42c0e5536ba",
+   "why": "the `cleanup` block was inserted by hand after this run: the tool AT `code_head` has no `cleanup` builder at all (`git show 31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup` = 0), so reproducing at the head this record names yields every number below and no `cleanup` block. The block is a DECLARATION of the graph residue, not a figure; every figure in this record is run output. Any later run writes the block itself and records `post_run_edits: []`."
+  }
+ ],
  "timings": {
   "arms_s": 675.5,
   "embedder_warm_s": 44.2,
