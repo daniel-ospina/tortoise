@@ -1671,8 +1671,10 @@ def test_the_numerator_applies_the_labels_kind_predicate():
     taken over the whole table compares a KIND's served rows against the PARENT
     table's total: a record holding only plain points would verify `operator` on a
     surplus of plain points, and the operator-scoped read would then be answered
-    from the record with zero rows of that kind, reported `mechanism=pgvector,
-    reason=ok`. `record ≥ graph` is the expected steady state once the record (truth)
+    from the record with zero rows of that kind — an empty answer from the RECORD,
+    which cannot carry `reason=ok` (`search_engine.py:4229` needs non-empty rows), so
+    nothing on the record leg reports the shortfall. `record ≥ graph` is the expected
+    steady state once the record (truth)
     is ahead of the graph (cache), so the surplus is not exotic.
     """
     sql: list[str] = []

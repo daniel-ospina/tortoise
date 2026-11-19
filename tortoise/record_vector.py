@@ -892,8 +892,8 @@ def _record_vector_count(label: str, scope: _Scope, *,
     points verify `operator` on a SURPLUS of plain points, and the kind-filtered
     read would then answer with zero rows of that kind while the COUNT called the
     label covered — and an empty answer from the RECORD cannot carry `reason=ok`
-    (`:4229` needs non-empty rows), so nothing on the record leg reports the
-    shortfall. One-sided on purpose: the graph
+    (`search_engine.py:4229` needs non-empty rows), so nothing on the record leg
+    reports the shortfall. One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
     count), so the comparison for those two labels is not merely HARDER to pass —
     for `document`/`source` it is UNREACHABLE whenever the other kind carries an
