@@ -6464,6 +6464,39 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND A TUPLE-UNPACK TARGET TAKES THE VALUE AT ITS OWN INDEX (`#13788` F23, measured
+        # by the review of `9ddcaa4f`): `x, _z = key, 1` binds the property to `x`, and it bound
+        # NOTHING while the closure filtered a tuple target out — 8/8 channels CERTIFIED a stop
+        # arm that stores `props["embedding"]`. ⚠️ AND THE MIRROR IMAGE IS NOT AN ALIAS:
+        # `x = (key, 1)` binds the TUPLE, places the key `("embedding", 1)` and stores no
+        # `props["embedding"]`, so it must keep certifying (see the accepted rows).
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, _z = key, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, _z = key, 1
+    if not _derived_mirror_required("object"):
+        props.update({x: _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    key = "embedding"
+    x, _z = key, 1
+    if not _derived_mirror_required("object"):
+        props |= {x: _encode(ev)}
+        return None
+    _write(props)
+""",
         # ⚠️ A KEY EXPRESSION THAT FOLDS TO THE PROPERTY (`("embedding" if _f() else "y")`,
         # `("embedding" or "y")`, `(w := "embedding")`) is a MEASURED, DISCLOSED false PASS —
         # residual #5 of `_mutator_stores_the_vector` — not a row here. Resolving it in the key
