@@ -28,7 +28,9 @@ WHAT IT DOES *NOT* DO
 - **It does not decide what is current.** The currency predicate is
   ``live._terminal_excluded`` — the SAME expression every reader filters on, in
   the keep direction, taken with ITS OWN defaults so it is the exact dual of the
-  ``live._terminal_expression`` the ended read selects by. A word or a slot those
+  ``live._terminal_expression`` the ended read selects by — and the draft half is
+  ``live._live_only``, the canonical "current and not a draft" predicate (see the
+  DRAFTS section below). A word or a slot those
   predicates stop treating as an ending stops dividing these two reads, and
   nothing in this module needs editing. ⛔ The position axis is part of it
   (#13034): a plan sitting in a ``terminal`` slot, or carrying ``isClosed``, has
@@ -60,16 +62,22 @@ DRAFTS ARE CURRENT BUT NOT COMMITMENTS (§4)
 -------------------------------------------
 ``draft`` is in ``live.CURRENT_POINT_STATUS_VALUES`` — a draft is not dead — but
 design §4 defines it as *"created, not yet a commitment … not counted as in
-force"*. So the draft literal is excluded HERE, from
-``live.DRAFT_STATUS`` (the declared constant, not a new one): this read is the
-one place where the two facts ("current" and "a commitment") differ, and the
-exclusion is the design's sentence rather than a deny-list invented here. An
-ABSENT status stays in — it is live by the vocabulary's own rule (legacy rows
-and the ordinary birth state), and a legacy commitment is still a commitment.
+force"*. So a draft is excluded HERE — and ⛔ **through
+``live._live_only``, not by re-spelling the literal**: that function IS "current
+and not a draft" (``include_draft=False``, its default), it is the predicate every
+other product reader calls, and its draft half comes from ``live.DRAFT_STATUS``.
+A first cut hand-spelled ``_terminal_excluded(...) + " AND coalesce(status, '') <>
+'" + DRAFT_STATUS + "'"`` — the same statement in a second place, which is the
+defect this module's own thesis refuses for the ending vocabulary
+(*"a word or a slot those predicates stop treating as an ending stops dividing
+these two reads, and nothing in this module needs editing"*): the guarantee held
+for the ending words and not for the draft one (round-5 review, P2). An ABSENT
+status stays in — ``_live_only``'s NULL arm keeps a legacy row live, and a legacy
+commitment is still a commitment.
 """
 from __future__ import annotations
 
-from .live import DRAFT_STATUS, _terminal_excluded
+from .live import _live_only
 
 #: The commitment-state family of ONTOLOGY §5 — the Object kinds a commitment
 #: is. ONE declaration: the read narrows on these, and the kind EXPANSION of
@@ -119,14 +127,22 @@ def _keep_expression(alias: str) -> str:
     and ENDED to the ended read, i.e. the same record in both populations. The
     two reads are one determinant read from both sides, or they are two lists.
 
-    The DRAFT exclusion is the ONE thing added on top, and it is not part of the
-    duality: §4 says a draft is *"created, not yet a commitment … not counted as
-    in force"*, so a draft is in NEITHER population (it is current, so not ended;
-    not in force, so not a commitment). Its literal comes from
-    ``live.DRAFT_STATUS``, the declared constant, not from a list minted here.
+    ⛔ AND THE DRAFT HALF COMES FROM ``live._live_only`` (round-5 review, P2),
+    which IS that predicate — "current and not a draft", ``include_draft=False``
+    being its default: ``((status IS NULL OR status <> 'draft') AND
+    _terminal_excluded(status))``. A first cut composed the terminal half from
+    ``_terminal_excluded`` and hand-spelled the draft conjunct beside it, so the
+    module's "one home for the determinant" guarantee covered the ending
+    vocabulary and NOT the draft one — the same duplication the repo already names
+    for the neighbouring case (``tests/test_3815_mitigation_moves_weight.py``:
+    *"the arm that distinguishes the canonical ``_live_only`` predicate from a
+    hand-rolled ``status <> 'retracted'``"*). One call, one home.
+
+    The DRAFT exclusion is not part of the duality: §4 says a draft is *"created,
+    not yet a commitment … not counted as in force"*, so a draft is in NEITHER
+    population (it is current, so not ended; not in force, so not a commitment).
     """
-    return (_terminal_excluded(f"{alias}.status")
-            + f" AND coalesce({alias}.status, '') <> '{DRAFT_STATUS}'")
+    return _live_only(f"{alias}.status")
 
 
 def build_cypher(*, narrow_kinds: bool) -> str:

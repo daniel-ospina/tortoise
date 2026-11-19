@@ -158,6 +158,12 @@ SELECTED = [
      "commitments", "committed_to"),
     ("what are our commitments", "commitments", "determined_noun"),
     ("our commitments", "commitments", "determined_noun"),
+    # …and the wh-word's own copula, which is the shape the noun anchor admits:
+    # the noun phrase is still the WHOLE request, only introduced by "what are".
+    # Pinned because the start anchor (round-5 review, P2) is what refuses
+    # `what did the vendor say about our commitments` — a start anchor that also
+    # refused the bare set question would be a recall loss with no finding.
+    ("what are the current commitments", "commitments", "scoped_noun"),
     # #13558 — Q6, and the other shapes a customer uses for it.
     ("has anything we relied on been withdrawn", "ended", "existence"),
     ("has anything been retired", "ended", "existence"),
@@ -171,6 +177,12 @@ SELECTED = [
     ("what was retracted", "ended", "wh_whole_question"),
     ("which commitments were withdrawn", "ended", "which_predicate"),
     ("which claims were archived", "ended", "which_predicate"),
+    # A set question whose predicate IS the ending — the `which` shape with a
+    # plural-head noun that is one of ASKED-ABOUT records (`endpoints`), which is
+    # the same sentence as `which claims were archived`. Named in the round-5
+    # review's gap list as a row that should exist; it is a SELECTED row rather
+    # than a refusal because the question really does ask for the ended set.
+    ("which of our endpoints is deprecated", "ended", "which_predicate"),
     ("what did we archive last quarter", "ended", "do_support"),
     ("did we retire the onboarding flow", "ended", "do_support"),
 ]
@@ -294,6 +306,39 @@ NOT_SELECTED = [
     "what commitments do we have",
     "",
     "   ",
+    # ── the PRESENT-HABITUAL class (round-5 review, P1) ──────────────────────
+    # `do|does` + we + a base ending verb is the affirmative present-habitual
+    # frame — a question about what we DO, answered with the whole ended
+    # population on the default SDK / MCP / hosted `/search` surfaces, with no
+    # way to switch the route off. `did` is the anti-signal; these four are the
+    # class, not two instances.
+    "do we archive customer emails",
+    "do we cancel subscriptions automatically",
+    "do we archive old reports",
+    "do we retract statements when challenged",
+    "does legal archive the register",
+    # ── the APPENDED-CONSTRAINT class on `existence` (round-5 review, P1) ────
+    # `existence` was the one ending shape with no tail anchor, so the caller's
+    # narrowing was silently dropped and the WHOLE ended population was served
+    # as if it had been applied. Both orders of the constraint are pinned.
+    "have any claims been retracted in Q3",
+    "have any of our bookings been cancelled by the venue",
+    "has anything we promised been withdrawn by legal",
+    # ── the THIRD-PARTY-CLAUSE and STATEMENT class on the NOUN shapes ───────
+    # (round-5 review, P2) Ending at the noun was only half the rule: with no
+    # subject guard the noun phrase matched inside somebody else's clause and
+    # the caller's actual subject was thrown away, so a question this population
+    # CANNOT answer came back as OUR commitments. The last row is a statement.
+    "what did the vendor say about our commitments",
+    "what did legal advise about our commitments",
+    "what are the risks to our commitments",
+    "the board discussed current commitments",
+    # …and the recall the start anchor gives up, stated rather than discovered:
+    # an IMPERATIVE set request keeps the relevance read, because the measured
+    # hijack `show me the retired onboarding flow` is the same imperative frame
+    # asking for ONE record.
+    "list our commitments",
+    "show me all the commitments",
 ]
 
 
@@ -408,8 +453,16 @@ def _commitment_world(sdk):
 
     A live plan (a ``core:plan`` on a non-terminal stage), a live goal and a live
     target (the commitment-state family of §5), an unrelated live Object, a
-    retired Object (``deprecated``, nothing replacing it) and a plan that reached a
-    terminal stage. Returns the handles by role.
+    retired commitment (``core:goal``, ``deprecated``, nothing replacing it) and a
+    plan that reached a terminal stage. Returns the handles by role.
+
+    ⛔ THE RETIRED RECORD CARRIES A COMMITMENT KIND ON PURPOSE, and that is a
+    review finding rather than a detail (round-5 review, P2, rule 3 of the
+    attribution contract). It used to be a ``process`` — which the KIND narrowing
+    alone excludes — so the assertion watching it stayed green when the currency
+    predicate was reverted to ``"true"`` and when the draft conjunct was deleted:
+    it read as a status pin while proving nothing about status. With a commitment
+    kind, the only thing keeping it out is the predicate the test claims to pin.
     """
     from tortoise import pipeline
 
@@ -423,7 +476,7 @@ def _commitment_world(sdk):
                                objectKind="core:target",
                                props={"comparator": ">=", "threshold": 99.9})
     other = sdk.create_object("Office lease", objectKind="process")
-    retired = sdk.create_object("Old onboarding flow", objectKind="process")
+    retired = sdk.create_object("Old onboarding goal", objectKind="core:goal")
     sdk.update_knowledge(retired["id"], status="deprecated")
     cancelled = sdk.create_object("Thursday partner call — 6 November",
                                   objectKind="core:plan")
@@ -468,12 +521,17 @@ def test_a_commitment_question_returns_every_live_commitment_by_kind(sdk):
 
 @_docker_only
 def test_a_retired_or_ended_commitment_is_not_in_the_commitment_question(sdk):
-    """The other half of Q1: the retired flow and the cancelled plan stay out.
+    """The other half of Q1: the retired goal and the cancelled plan stay out.
 
-    A ``deprecated`` process is not a commitment kind *and* has ended; a plan on a
-    terminal stage has ended on the POSITION axis with no status word at all. Both
-    are the currency rule (#13034), read in the keep direction — so this is the
-    same determinant every other reader filters on, not a list written here.
+    A ``deprecated`` COMMITMENT-KIND goal has ended on the status axis, and a plan
+    on a terminal stage has ended on the POSITION axis with no status word at all.
+    Both are the currency rule (#13034), read in the keep direction — so this is
+    the same determinant every other reader filters on, not a list written here.
+
+    ⛔ THE FIRST ASSERTION IS ONLY A PIN BECAUSE THE RECORD IS A COMMITMENT KIND
+    (round-5 review, P2, rule 3). While it was a ``process``, the kind narrowing
+    excluded it on its own, so replacing ``_keep_expression`` with ``"true"`` —
+    the revert this assertion exists to catch — left it green.
     """
     world = _commitment_world(sdk)
 
@@ -579,6 +637,40 @@ def test_the_commitment_read_reads_no_relationship_edge():
         f"a commitment row carries {sorted(served)} — `linkedEvents` is the ended "
         "read's field (its links ARE how it ended) and here it would put the read "
         "back on §13's census for an answer nobody asked for")
+
+
+def test_the_keep_predicate_is_the_canonical_live_only_predicate():
+    """The keep predicate is ``live._live_only`` — ONE home, not a re-spelling.
+
+    ⛔ ROUND-5 REVIEW, P2: the module's own thesis is that the determinant lives in
+    one place (``tortoise/commitments.py``: *"A word or a slot those predicates
+    stop treating as an ending stops dividing these two reads, and nothing in this
+    module needs editing"*). The first cut honoured that for the ENDING half
+    (``_terminal_excluded``) and then hand-spelled the DRAFT half beside it
+    (``AND coalesce(status, '') <> 'draft'``), so the guarantee silently covered
+    only half the predicate. ``live._live_only`` IS "current and not a draft"
+    (``include_draft=False`` is its default) and is what every other product
+    reader calls.
+
+    ⛔ Hermetic (no ``sdk``, no docker): both sides are pure string functions, and
+    the assertion is identity, so it REDS on the pre-fix code — the revert this
+    watches (re-spelling the draft conjunct) changes the string.
+    """
+    from tortoise import commitments
+    from tortoise.live import _live_only
+
+    assert commitments._keep_expression("n") == _live_only("n.status"), (
+        "the commitment read no longer composes its keep predicate from "
+        "`live._live_only` — a re-spelt draft or terminal conjunct is a second "
+        "home for the determinant, so a change to what 'current and not a "
+        "draft' means stops reaching this read in silence")
+
+    statement = commitments.build_cypher(narrow_kinds=True)
+    assert _live_only("n.status") in statement, (
+        f"the statement does not carry the canonical predicate:\n  {statement}")
+    # …and the specific re-spelling the finding was about cannot come back.
+    assert "coalesce(n.status, '') <> " not in statement, (
+        f"the hand-spelled draft conjunct is back:\n  {statement}")
 
 
 @_docker_only

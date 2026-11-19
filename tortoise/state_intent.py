@@ -174,6 +174,14 @@ _ENDING_BASE = (
 #:   `been|already|ever` immediately before the participle is the predicative
 #:   test: the participle is then the head of the verb phrase, not a modifier of
 #:   the noun that follows the quantifier.
+#:   ⛔ AND THE PARTICIPLE MUST END THE QUESTION (round-5 review, P1). This was
+#:   the one ending shape with no tail anchor, so a caller's appended CONSTRAINT
+#:   was silently dropped: `have any claims been retracted in Q3`, `have any of
+#:   our bookings been cancelled by the venue` and `has anything we promised been
+#:   withdrawn by legal` all selected the WHOLE ended population and served it as
+#:   if the narrowing had been applied. Every other shape is anchored at the tail
+#:   for exactly this reason, and the same fix is a window-preserving one — the
+#:   middle window is the relative clause and stays.
 #: * ``wh_whole_question`` — the WHOLE question is "what (has been) <participle>":
 #:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
 #:   constraint (`what is the archived pricing document`) cannot reach it.
@@ -189,6 +197,19 @@ _ENDING_BASE = (
 #: * ``do_support`` — "what did WE <base verb>", "did we retire …". Anchored, and
 #:   the base verb must follow the pronoun IMMEDIATELY — a window let
 #:   `what do we do when we cancel a subscription` (a how-to question) through.
+#:   ⛔ THE AUXILIARY MUST BE the PAST ``did`` (round-5 review, P1), and that is
+#:   the same anti-signal the round-4 note above applies to the participle: the
+#:   base verb sitting immediately after the pronoun is not enough, because
+#:   `do|does` + we + a base ending verb is also the affirmative PRESENT-HABITUAL
+#:   form. `do we archive customer emails`, `do we cancel subscriptions
+#:   automatically`, `do we archive old reports` and `do we retract statements
+#:   when challenged` are policy questions about what we do, and all four were
+#:   answered with the whole ended population — on the default SDK, MCP and
+#:   hosted `/search` surfaces, none of which can switch the route off. The PAST
+#:   auxiliary is what makes the sentence a question about records that ended,
+#:   so the shape requires it. The recall this gives up is stated below rather
+#:   than discovered: a present-tense set question (`do we ever archive plans`) —
+#:   which `ever` makes a FREQUENCY question — keeps the relevance read.
 #:
 #: ⛔ NOTHING IS SPLIT OFF THE QUERY, and a first cut that did is recorded here
 #: because it is the shape a reader would otherwise re-add. It matched each shape
@@ -224,15 +245,25 @@ _ENDING_BASE = (
 #:   route.
 #: * "list what we retired" / "show me the retired onboarding flow" — an
 #:   imperative, which was measured as a hijack: `show me the retired onboarding
-#:   flow` is a lookup for ONE record.
+#:   flow` is a lookup for ONE record. ⛔ The same frame with a SET noun (`list
+#:   our commitments`, `show me all the commitments`) is the recall the start
+#:   anchor gives up, and it is named here so it is a decision and not a gap.
+#: * "do we ever archive plans" / "do we archive customer emails" — the
+#:   PRESENT-habitual frame, which `do_support` refuses on purpose (round-5
+#:   review, P1): it asks what we do, not which records ended.
+#: * "have any claims been retracted in Q3" / "has anything been withdrawn by
+#:   legal" — an appended CONSTRAINT, refused by every shape's tail anchor so the
+#:   caller keeps the relevance read instead of having the narrowing dropped.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "have any claims been retired?"
     # An EXISTENCE question about an ending: the auxiliary + quantifier is the
     # subject of the question, and the relative clause in between is the thing
-    # asked about.
+    # asked about. ⛔ The PARTICIPLE must then END the question, so an appended
+    # constraint is refused instead of dropped (round-5 review, P1).
     ("existence", re.compile(
         rf"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)"
-        rf"\b[^?]{{0,60}}?\b(?:been|already|ever)\s+(?:{_ENDING_WORDS})\b")),
+        rf"\b[^?]{{0,60}}?\b(?:been|already|ever)\s+(?:{_ENDING_WORDS})\b"
+        rf"(?=\s*(?:[?.!]|$))")),
     # "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
     # question, anchored at both ends, so a trailing constraint ("what is the
     # archived pricing document") and a wh-word in a subordinate clause cannot
@@ -249,8 +280,12 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # ⛔ THE BASE VERB MUST FOLLOW THE PRONOUN IMMEDIATELY. A window let a
     # subordinate clause through: `what do we do when we cancel a subscription`
     # is a how-to question, and the earlier cut served it the ended population.
+    # ⛔ AND THE AUXILIARY IS `did` — the PAST form (round-5 review, P1). `do`
+    # and `does` turn the same words into the present-habitual POLICY frame
+    # (`do we archive customer emails`), which is a content question about what
+    # we do, and every one of those was answered with the whole ended population.
     ("do_support", re.compile(
-        rf"^(?:what\s+)?(?:did|do|does)\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
+        rf"^(?:what\s+)?did\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
@@ -271,6 +306,22 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: a wrong answer that looks right). The verb phrase is anchored to "what
 #: are/have we|our …" for the same reason — `how much have we committed to the
 #: SOC2 audit` is a scalar question, not a request for the population.
+#:
+#: ⛔ AND THE NOUN SHAPES ARE ANCHORED AT THE START OF THE QUESTION (round-5
+#: review, P2). Ending at the noun was only half the rule: with no subject guard,
+#: a noun phrase inside somebody else's clause matched and the caller's actual
+#: subject was thrown away — `what did the vendor say about our commitments`,
+#: `what did legal advise about our commitments` and `what are the risks to our
+#: commitments` were answered with OUR commitments (none of those is a question
+#: this population can answer), and `the board discussed current commitments` is
+#: a STATEMENT, not a request for a set. The shapes therefore admit the noun
+#: phrase only as the WHOLE request — optionally introduced by the wh-word's own
+#: copula ("what are our commitments") — which is the same start anchor
+#: `which_predicate` and `do_support` already use. The recall given up is stated
+#: below rather than discovered: an imperative (`list our commitments`, `show me
+#: all the commitments`) keeps the relevance read, because the measured hijack
+#: `show me the retired onboarding flow` is the same imperative frame asking for
+#: ONE record.
 #:
 #: ⛔ TWO MORE RULES ON THE SET-QUESTION, both round-4 review (P1), and both are
 #: the SAME class the paragraph above records — one word different:
@@ -299,12 +350,13 @@ _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"\bcommitt(?:ed|ing)\b"
         r"\s*(?:to\b)?"
         r"(?=\s*(?:[—–\-,.;:!?]|and\b|or\b|but\b|so\b|yet\b|nor\b|$))")),
-    # "current commitments" / "live commitments" / "outstanding commitments"
+    # "current commitments" / "live commitments" / "what are the live commitments"
     ("scoped_noun", re.compile(
-        r"\b(?:current|live|active|open|outstanding)\s+commitments\s*[?.!]*$")),
+        r"^(?:what\s+(?:are|is)\s+)?(?:the\s+)?"
+        r"(?:current|live|active|open|outstanding)\s+commitments\s*[?.!]*$")),
     # "our commitments" / "all the commitments" / "what are our commitments"
     ("determined_noun", re.compile(
-        r"\b(?:our|all)\b(?:\s+the)?\s+commitments\s*[?.!]*$")),
+        r"^(?:what\s+(?:are|is)\s+)?(?:our|all)\b(?:\s+the)?\s+commitments\s*[?.!]*$")),
 )
 
 
