@@ -42,8 +42,10 @@ those are what this file measures:
          delete) — measuring the entry alone would read green for a routing that deletes
          the wrong kind.
 
-     THREE + SIX + FOUR = THIRTEEN, and each group is a different seam: the counts above
-     are the table's, not a second tally kept in prose.
+     THREE + SIX + FOUR = THIRTEEN, and each group is a different seam:
+     `test_the_table_holds_the_thirteen_doors_the_prose_names` reads BOTH the count and the
+     per-CONTAINER histogram off the table, so this paragraph is a claim the table is
+     checked against, not a second tally kept in prose.
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
@@ -103,6 +105,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections import Counter
 from typing import ClassVar
 
 import pytest
@@ -153,6 +156,27 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     # selector — a bare `tortoise_delete(id)` is a PREVIEW, not a delete.
     "tortoise_delete_point": ("delete", 'dry_run=True'),
     "tortoise_delete_entity": ("delete", 'dry_run=True'),
+}
+
+#: The `3 + 6 + 4` the module docstring states, in the table's OWN vocabulary: each key is a
+#: `container` value and each value is how many doors retire through it.
+#: ⛔ A HISTOGRAM, NOT ONLY A TOTAL (#13651 review F2). The size pin alone left the
+#: `container` field with no reader for ten of the thirteen rows — the only other reader is
+#: `RETIRED_CREATE_TYPES`, which filters `create_entity` — so a mutant that reassigns one
+#: non-`create_entity` container (e.g. `tortoise_session_context` → `get_session`) kept the
+#: total at 13, kept that door's pointer and discriminator intact, and left EVERY row in this
+#: file green while the docstring's "THREE + SIX + FOUR" became 4 + 6 + 3. The container IS
+#: the seam each group is defined by: the READ trio (one container each), the SIX doors that
+#: share `create_entity`'s single method, and the lane-P6 quartet (the `rest_spec` pair and
+#: the DELETE pair).
+RETIRED_THIS_WAVE_BY_CONTAINER: dict[str, int] = {
+    "get_session": 1,
+    "get_cross_lens_candidates": 1,
+    "list_batch": 1,
+    "create_entity": 6,
+    "search_knowledge": 1,
+    "check_confidence": 1,
+    "delete": 2,
 }
 
 
@@ -321,7 +345,7 @@ _POINTER_TARGET = re.compile(r"^([A-Za-z0-9_]+)")
 
 class TestTheWaveIsRetiredForward:
     def test_the_table_holds_the_thirteen_doors_the_prose_names(self):
-        """The count this file's own prose states is PINNED, so it cannot rot silently.
+        """The count AND its decomposition are PINNED, so neither can rot silently.
 
         ⛔ WHY A COUNT PIN AND NOT JUST THE PROSE (#13651 review F2). Every other
         assertion in this file is parametrized OVER the table, so the table's SIZE was
@@ -331,12 +355,27 @@ class TestTheWaveIsRetiredForward:
         defect class as a count chain naming the wrong set — the prose reads verified
         while nothing checks it. The shapes in the docstring are 3 + 6 + 4, so a door
         joining or leaving the wave moves this pin in the change that does it.
+
+        ⛔ AND WHY THE HISTOGRAM, NOT ONLY THE TOTAL (same review, one level down): the size
+        pin closes "thirteen doors" but says nothing about WHICH seam each one retires
+        through, so the decomposition in the sentence above was a tally kept in prose and
+        checked by nothing. The container is that seam, and pinning its histogram is what
+        makes the claim true — see `RETIRED_THIS_WAVE_BY_CONTAINER`.
         """
         assert len(RETIRED_THIS_WAVE) == 13, (
             f"RETIRED_THIS_WAVE holds {len(RETIRED_THIS_WAVE)} doors, not the THIRTEEN "
             "this wave's prose enumerates (3 read + 6 on `create_entity` + 4 in lane "
             "P6) — a door added or dropped moves the count AND its shapes paragraph in "
             "the same change, not silently")
+        histogram = Counter(
+            container for container, _ in RETIRED_THIS_WAVE.values())
+        assert dict(histogram) == RETIRED_THIS_WAVE_BY_CONTAINER, (
+            f"the wave's per-container histogram is "
+            f"{dict(sorted(histogram.items()))}, not "
+            f"{dict(sorted(RETIRED_THIS_WAVE_BY_CONTAINER.items()))}: the docstring's "
+            "THREE + SIX + FOUR is read off these containers (one READ container each, "
+            "SIX doors on `create_entity`, the lane-P6 quartet), so a row whose container "
+            "is reassigned moves the group counts even while the total stays at THIRTEEN")
 
     @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
     def test_the_door_left_the_advertised_surface(self, name):
