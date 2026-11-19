@@ -4228,6 +4228,39 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE `**` OPERAND OF A DICT DISPLAY IS AN OPERAND TOO (`#13788` F3, measured at
+        # `45b5f88a`). `_dict_stores_the_vector`'s merge recursion narrowed the `**` value to
+        # `ast.Dict | ast.DictComp`, so the same one-line wrapper this branch follows in every
+        # other position re-opened it one display over: all four rows below CERTIFIED while
+        # their unwrapped spellings were refused.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": _encode(ev)}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev)}.copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding": _encode(ev)}.copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({**{"embedding": _encode(ev)}.copy()})
+        return None
+    _write(props)
+""",
         # ⛔ …and the two halves the constructor arm did not reach: its operand may be a
         # MAPPING LITERAL rather than a pairs sequence, and the constructor family is not
         # "suffix `Dict`" — `defaultdict`/`ChainMap`/`Counter` are mappings whose names say
@@ -5176,6 +5209,23 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(**{"embedding": None}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE `**`-IN-A-DISPLAY WRAPPER ARM (`#13788` F3): the
+        # operand rule keeps the two narrowings (EXACT property, NON-CONSTANT value) behind the
+        # wrapper, so the pre-guard reset and the identity triple must still CERTIFY.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding": None}.copy()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {**{"embedding_model": _m()}.copy()}
         return None
     _write(props)
 """,

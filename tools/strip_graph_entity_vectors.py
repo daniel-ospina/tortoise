@@ -2055,10 +2055,14 @@ def _dict_stores_the_vector(node, *, stop_arm: bool = False) -> bool:
         # while the literal behind the same `**` was refused (measured, and runtime-checked
         # to place the key). One wrapper, one hole — the shape this helper's `.copy()` /
         # `list(…)` / `+ []` history is made of.
-        if stop_arm and key is None and isinstance(value, ast.Dict | ast.DictComp) \
-                and (_dict_stores_the_vector(value, stop_arm=stop_arm)
-                     if isinstance(value, ast.Dict)
-                     else _pairs_operand_stores_the_vector(value)):
+        # ⛔ AND THAT INCLUDES THE WRAPPERS (`#13788` F3, measured at `45b5f88a`): the
+        # narrowing to `ast.Dict | ast.DictComp` still certified `{**{"embedding": vec}.copy()}`
+        # — `props.update({**{…}.copy()})`, `props |= {**{…}.copy()}` and
+        # `props = {**{…}.copy()}` all CERTIFIED beside their unwrapped spellings refused.
+        # The operand rule is the one rule that answers a literal, a comprehension AND the
+        # transparent wrappers, so the `**` value asks IT rather than a type test; the pairs
+        # tail it carries is what already answered the `DictComp` spelling.
+        if stop_arm and key is None and _mapping_operand_stores_the_vector(value):
             return True
         if (isinstance(key, ast.Constant) and key.value == EMBEDDING_PROPERTY
                 and not isinstance(value, ast.Constant)):
