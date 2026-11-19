@@ -65,8 +65,10 @@ payload was the production one, and it was right.
 
 ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
-population does not fail the coverage gate, it *passes* it and then serves an
-empty record cohort as ``mechanism=pgvector, reason=ok``. That is why the
+population does not fail the coverage gate, it *passes* it and is then served by a
+leg whose trace does not say the cohort was empty: ``empty_results`` from the record
+where the contract owns the label, ``no_embeddings``/``degraded=True`` from the graph
+everywhere else, and never a token that names the two zeroes. That is why the
 zero-zero state is refused from BOTH sides before an arm runs — by
 :func:`require_record_measured` for the record and by
 :func:`require_graph_population` for the graph. One function asserting both was
@@ -819,8 +821,10 @@ def require_record_measured(record_vectors: int | None) -> None:
     """The RECORD's count must be a measurement, and a non-zero one.
 
     ⛔ ``record_vector.coverage`` compares ``record_vectors >= graph_vectors`` and
-    **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and
-    then serves an empty cohort as ``mechanism=pgvector, reason=ok`` — the
+    **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and is
+    then served with a trace that does not name the two zeroes (``empty_results``
+    from the record where the contract owns the label, ``no_embeddings`` /
+    ``degraded=True`` from the graph everywhere else) — the
     failure mode that would have made M2's population look like a dense leg with
     no recall rather than a population with no vectors.
 

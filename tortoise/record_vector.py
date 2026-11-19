@@ -588,9 +588,13 @@ class Coverage:
     reported the SAME ``verified`` as a fully backfilled one — and *"the record
     caught up"* became a finding the count never established
     (`tools/claim_dense_leg_13732.py` hit it first: an unseeded population PASSES
-    the gate and is then served as ``mechanism=pgvector, reason=empty_results``,
-    which is the SAME token a backfilled label answering the same empty read
-    records — so nothing said WHICH). So the
+    the gate, and WHICH leg then serves it depends on the label — for the two the
+    contract retired (``MIRROR_RETIRED_LABELS``: ``object``/``subject``) the
+    record's sealed-empty arm answers ``mechanism=pgvector, reason=empty_results,
+    degraded=False``, the SAME token a backfilled label's empty read records, so
+    nothing said WHICH; for every other gated label the empty record answer FALLS
+    THROUGH to the graph, which records ``mechanism=scan_fallback,
+    reason=no_embeddings, degraded=True``). So the
     two-zero case is reported **``verified=True, trivial=True``** — the RELATION
     holds, the EVIDENCE does not — while every other satisfied count is
     ``verified=True, trivial=False``. A gate that compares two things needs a
@@ -886,8 +890,11 @@ def _record_vector_count(label: str, scope: _Scope, *,
     (`if kind_filter: where.append(kind_filter)` in :func:`vector_search`) — so a
     numerator taken over the whole table would let a record holding only plain
     points verify `operator` on a SURPLUS of plain points, and the kind-filtered
-    read would then be served from the record with zero rows of that kind while
-    reporting `mechanism=pgvector, reason=ok`. One-sided on purpose: the graph
+    read would then answer with zero rows of that kind while the COUNT called the
+    label covered — an empty answer that cannot carry `reason=ok` (`:4229` needs
+    non-empty rows): it is `empty_results` where the contract owns the label and a
+    fall-through to the graph (`no_embeddings`, `degraded=True`) everywhere else, so
+    the shortfall would be silent in every trace. One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
     count), so the comparison for those two labels is not merely HARDER to pass —
     for `document`/`source` it is UNREACHABLE whenever the other kind carries an
@@ -2266,10 +2273,13 @@ def searcher(
                 # ⛔ THE VACUOUS PASS IS REPORTED ON THE PATH THAT SERVES IT (#13798).
                 # The branch above logs its `reason` only when it DECLINES, which a
                 # verified verdict never reaches — so a label holding nothing in
-                # either store served an EMPTY cohort as `mechanism=pgvector,
-                # reason=empty_results`, the SAME token a backfilled label answering
-                # the same empty read records: no line said WHICH of the two states
-                # produced it. This line is the difference, and it
+                # either store was served by a leg whose trace never said WHICH state
+                # it was in: where the contract owns the label (`object`/`subject`)
+                # the record answers `mechanism=pgvector, reason=empty_results`, the
+                # SAME token a backfilled label's empty read records, and everywhere
+                # else the empty answer FALLS THROUGH and the GRAPH records
+                # `mechanism=scan_fallback, reason=no_embeddings, degraded=True`.
+                # This line is the difference, and it
                 # DECIDES NOTHING: the read proceeds exactly as before, because with
                 # both sides empty the two stores answer identically (which is why
                 # the two-zero case is marked rather than refused).
