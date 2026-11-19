@@ -271,6 +271,17 @@ _REAL_READ_TEXT = Path.read_text
 #: and red the population control on a file `_label_hits` never reads — the very
 #: false-RED class #13699 is. The name is still what `everything` reports, because a
 #: failure message a reader can follow matters more there than the identity does.
+#:
+#: ⛔ THE DECLARED RESIDUAL, named rather than left for a reader to assume away: this
+#: pins the `co_name` spelling (`test_a_same_thread_ambient_read_is_not_attributed_
+#: to_label_hits`) and the `co_filename` one (both exclusion arms red on it). Two
+#: SUPERSETS of the code-object rule are still green, measured, and are NOT pinned
+#: here: `caller.co_qualname == _LABEL_HITS_CODE.co_qualname` (a qualname carries no
+#: module, so a same-named function in another module shares it) and
+#: `caller is _LABEL_HITS_CODE or self.suffix == ".py"` (a widening that re-admits
+#: every `.py` ambient read). Neither is the shipped rule; pinning them needs an arm
+#: whose staged read is a `.py` file OUTSIDE the population, which is a different
+#: fixture — named here so the next reader does not read this pin as total.
 _LABEL_HITS_CODE = _label_hits.__code__
 
 
@@ -1568,9 +1579,11 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "the imposter does not share `_label_hits`'s code name, so a name-based rule "
         "would not take its read and this arm would pin nothing"
     )
-    assert imposter.__code__ is not _LABEL_HITS_CODE, (
-        "the imposter IS `_label_hits`'s code object, so it is not an imposter"
-    )
+    #: No `is not _LABEL_HITS_CODE` premise assert beside that one: `CodeType.replace`
+    #: always constructs a NEW object (`f.__code__.replace() is f.__code__` -> False),
+    #: so the assert could not fail and would be the vacuous assertion this file bars.
+    #: That the imposter really is a different code object is what mutation (b) measures
+    #: — reverting the rule to `co_name` reds HERE, and on nothing else.
 
     def _an_ambient_read() -> None:
         ambient.read_text(encoding="utf-8")
