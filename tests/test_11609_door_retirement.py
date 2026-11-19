@@ -282,13 +282,15 @@ PROTECTED = {
     "tortoise_expand_relationships": "list envelope (#8482)",
     "tortoise_check_structure": "list envelope (#8482, #10914)",
     "tortoise_calibrate_summary": "list envelope (#8482, #12951)",
-    # `rest_spec`: retiring the registry entry deletes the REST route with it.
-    # ⛔ `tortoise_issue_insight` / `tortoise_session_context` USED to sit here on that
-    # basis and left in #11609 lane P6 — lane P4 measured the coupling FALSE (§1.5 of
+    # `rest_spec`: the CELL is still recorded, but the coupling it used to stand for —
+    # "retiring the registry entry deletes the REST route with it" — is MEASURED FALSE for
+    # every door that ever claimed it, `search` included (§1.5 of
     # `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`): no product module derives a route
-    # from a registry row, and both routes are hand-written decorators that reach the SDK
-    # directly, so the row going deletes nothing. The reason stays REAL for `search`,
-    # which is held by the envelope as well.
+    # from a registry row, and the routes are hand-written decorators that reach the SDK
+    # directly, so the row going deletes nothing on the wire. ⛔ So `search` is held by its
+    # `list[dict]` ENVELOPE, not by the route; its `rest_spec` cell is a recorded fact about
+    # a route that exists independently, never a retention reason. `issue_insight` /
+    # `tortoise_session_context` sat here on the false reason and left in #11609 lane P6.
     "tortoise_search": "list envelope + rest_spec GET /v1/search",
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
@@ -900,11 +902,21 @@ class TestProtectedDoorsStayLive:
     @pytest.mark.parametrize("name", [
         "tortoise_search",
     ])
-    def test_the_rest_route_is_still_what_keeps_it_live(self, name):
+    def test_the_rest_spec_cell_is_still_recorded_though_the_route_holds_nothing(self, name):
+        """The CELL persists; the ROUTE is not what retains the door (§1.5).
+
+        The assertion is unchanged — `search` still carries `rest_spec` — but the name and
+        the message must not teach the measured-false mechanism. ⛔ The coupling is FALSE
+        (the route is a hand-written decorator; no product module derives one from a row),
+        so removing this cell is NOT a retirement gate: what keeps `search` live is its
+        `list[dict]` envelope, pinned by the arm above and by
+        `tests/test_11609_structural_blockers.py::test_the_search_door_is_held_by_the_envelope_not_the_route`.
+        """
         entry = _live()[name]
         assert getattr(entry, "rest_spec", None) is not None, (
-            f"{name} no longer carries a `rest_spec`, so retiring the entry no longer "
-            "deletes a REST route — it may be retirable in that batch")
+            f"{name} no longer carries a `rest_spec` cell. That is a RECORD change, not a "
+            "retirement gate — the route does not hold the door; its `list[dict]` envelope "
+            "does (see §1.5). Re-derive why the cell moved before retiring anything")
 
     # ⛔ THE `no arm` CATEGORY IS EMPTY, AND BOTH HALVES OF ITS DEPARTURE ARE ASSERTED
     # FROM THE CODE ABOVE, not from this table's silence:

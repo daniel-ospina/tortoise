@@ -2930,7 +2930,10 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     `tests/test_11609_door_retirement.py` rows. Their `rest_spec` cell stays ON the
     #     retired row — it is the recorded evidence the route exists independently, and
     #     `tests/test_11609_structural_blockers.py` reads a retired entry too.
-    #   · `search` — both reasons at once (`list[dict]` AND `GET /v1/search`).
+    #   · `search` — held by its `list[dict]` ENVELOPE, and by nothing else: its
+    #     `rest_spec` (`GET /v1/search`) is a recorded CELL for a route that exists
+    #     independently, and lane P4 measured the coupling FALSE (§1.5) — so "it has a
+    #     REST route" is NOT a second reason, and removing that cell would not gate it.
     #   · `query` — the paged destination two ALREADY-retired pointers name
     #     (`paginated_query`, `query_points_by_tag`), and the UNION envelope the
     #     #8482 sweep's shrinkage floor measures alone at this head (the second,

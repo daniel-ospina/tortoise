@@ -98,8 +98,10 @@
 # the 7 `NO_CONTAINER_YET` names COVER it (10 + 7 = 17), so a live door dropped from either
 # table reds there instead of surviving as a comment. `PROTECTED` holds a retaining property:
 # six READ doors plus `check_structure` and `calibrate_summary` keep their `-> list[dict]`
-# envelope (the #8482 repair), `search` keeps BOTH that envelope and a `rest_spec`
-# (`GET /v1/search`), and `query` is the paged destination of two already-retired pointers.
+# envelope (the #8482 repair), `search` is held by that envelope and no longer by its
+# `rest_spec` (`GET /v1/search` is a hand-written route the row does not create — §1.5
+# measured the coupling false; the CELL is recorded, the ROUTE is not a retention reason),
+# and `query` is the paged destination of two already-retired pointers.
 # `NO_CONTAINER_YET` holds a destination that is not live on `main` yet: `delete`,
 # `create_edge`/`create_operator`, `events_poll`, `org_create`, `ingest`, `list_graphs`.
 # ⛔ `issue_insight`/`session_context`, `create_point`/`diary_write` and
