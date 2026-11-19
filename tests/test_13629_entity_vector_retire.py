@@ -4303,6 +4303,46 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE HELPER'S `key`/`value` PAIR IS THE SAME PAIR THROUGH A WRAPPER (`#13788` F5,
+        # measured at `45b5f88a`). The `**` operand's VALUE scan read only a top-level
+        # `ast.Dict` literal, so `_set(props, **{"key": "embedding", "value": vec})` (refused
+        # above) certified in every one-wrapper spelling of itself — the same wrapper
+        # vocabulary the store test already follows. All five rows below CERTIFIED.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding", "value": _encode(ev)}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding", "value": _encode(ev)} if _flag(ev) else {})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{**{"key": "embedding", "value": _encode(ev)}})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **dict(key="embedding", value=_encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **({"key": "embedding", "value": _encode(ev)} | {}))
+        return None
+    _write(props)
+""",
         # ⛔ …and the two halves the constructor arm did not reach: its operand may be a
         # MAPPING LITERAL rather than a pairs sequence, and the constructor family is not
         # "suffix `Dict`" — `defaultdict`/`ChainMap`/`Counter` are mappings whose names say
@@ -5286,6 +5326,23 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         _write({**props, "embedding_model": _m()})
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE `**` VALUE WALK (`#13788` F5): a READ whose
+        # default is a literal must still CERTIFY, and the identity triple / the pre-guard
+        # reset must stay certified behind the same wrapper.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _read(props, **{"key": "embedding", "default": None}.copy())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _set(props, **{"key": "embedding_model", "value": _m()}.copy())
         return None
     _write(props)
 """,

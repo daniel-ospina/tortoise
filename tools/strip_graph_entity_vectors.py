@@ -1745,18 +1745,23 @@ def _third_argument_stores_the_vector(call) -> bool:
     # two rules below cannot see a `key`/`value` pair it carries — and
     # `_set(props, **{"key": "embedding", "value": vec})` certified the stop arm while its
     # keyword spelling was refused. Same two narrowings, applied to the mapping's values.
-    starred = [keyword.value for keyword in call.keywords
-               if keyword.arg is None and isinstance(keyword.value, ast.Dict)]
+    # ⛔ AND THE PAIRS COME FROM THE WALK, NOT FROM A TOP-LEVEL LITERAL (`#13788` F5, measured
+    # at `45b5f88a`): reading `keyword.value` only when it IS an `ast.Dict` meant every
+    # one-wrapper spelling of the SAME `key`/`value` pair certified — `…}.copy()`, `… if f
+    # else {}`, `{**{…}}`, `dict(key=…, value=…)` and `… | {}` — while the bare row was
+    # refused. `_mapping_pairs` follows exactly the wrappers the store rule follows, so the
+    # two halves of one vocabulary cannot drift apart again.
+    starred = [value for keyword in call.keywords if keyword.arg is None
+               for value in _mapping_values(keyword.value)]
     live_keyword = (
         any(keyword.arg is not None and not isinstance(keyword.value, ast.Constant)
             for keyword in call.keywords)
-        or any(not isinstance(value, ast.Constant)
-               for mapping in starred for value in mapping.values))
+        or any(not isinstance(value, ast.Constant) for value in starred))
     named_as_value = (
         any(keyword.arg is not None and isinstance(keyword.value, ast.Constant)
             and keyword.value.value == EMBEDDING_PROPERTY for keyword in call.keywords)
         or any(isinstance(value, ast.Constant) and value.value == EMBEDDING_PROPERTY
-               for mapping in starred for value in mapping.values))
+               for value in starred))
     # `record.set("embedding", value=vec)` / `_set(props, "embedding", value=vec)` — the
     # property as a POSITIONAL constant anywhere before the value, which then arrives as a
     # keyword (so the three-positional-argument test above never sees it).
@@ -1782,6 +1787,64 @@ def _third_argument_stores_the_vector(call) -> bool:
     # the bare ``**`` refused, i.e. the identical wrapper the pairs rule already follows.
     return any(keyword.arg is None and _mapping_operand_stores_the_vector(keyword.value)
                for keyword in call.keywords)
+
+
+def _mapping_values(node):
+    """The VALUES a ``**`` operand carries — through a wrapper, a merge or a constructor.
+
+    ⛔ THE ``**`` OPERAND'S *VALUE* SCAN IS THE SAME VOCABULARY AS ITS *STORE* TEST
+    (`#13788` F5, measured at `45b5f88a`). `_set(props, **{"key": "embedding", "value":
+    vec})` is a store (the property is the CONSTANT VALUE beside a live one) and was refused,
+    while every one-wrapper spelling of that same pair CERTIFIED: `…}.copy()`, `… if f else
+    {}`, `{**{…}}`, `dict(key=…, value=…)`, `… | {}`. The store test already follows all of
+    those (`_mapping_operand_stores_the_vector`); this scan read only a TOP-LEVEL literal's
+    values, so the two halves of one vocabulary answered differently — the recurring shape
+    of this whole series.
+
+    ⛔ NOTHING HERE DECIDES A STORE: the caller applies the same two narrowings to what this
+    yields (the property must be the EXACT constant `embedding`, beside a non-constant
+    value), and a ``**`` operand is already refused by default for an unknown callee. So a
+    wider walk can only complete that refusal, never accept more.
+
+    ⛔ STATED RESIDUALS — a ``**`` operand reached through a CALL or an INDEX
+    (`dict(*[{…}])`, `(tuple([{…}])[0])`) is not followed: selecting a mapping out of a
+    sequence is data flow this module does not do, the same limit
+    `_mutator_stores_the_vector` states for a mapping reached through a name. The
+    `List`/`Tuple`/slice arms a first draft carried were REMOVED rather than left looking
+    load-bearing: `**` requires a mapping, so Python rejects `**list(…)`, `**tuple(…)` and
+    `**<slice>` outright, and the revert of each changed no verdict on any fixture — an
+    unreachable guard is the defect this series exists to remove. `Starred` is gone for the
+    same reason: outside a `dict(…)` its operand is a sequence, which `**` rejects.
+    """
+    import ast
+
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values, strict=False):
+            if key is None:
+                yield from _mapping_values(value)     # `{**{…}}` — the merge one level in
+            else:
+                yield value
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        yield from _mapping_values(node.left)
+        yield from _mapping_values(node.right)
+    elif isinstance(node, ast.IfExp):
+        yield from _mapping_values(node.body)
+        yield from _mapping_values(node.orelse)
+    elif isinstance(node, ast.Call):
+        name = _callee_name(node)
+        if name == "copy" and isinstance(node.func, ast.Attribute) \
+                and not node.args and not node.keywords:
+            yield from _mapping_values(node.func.value)
+        elif _is_mapping_constructor(name):
+            # `dict(key="embedding", value=vec)` and its `**` inside: a constructor's named
+            # keywords are the SAME facts as a literal's entries.
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    yield from _mapping_values(keyword.value)
+                else:
+                    yield keyword.value
+            for argument in node.args:
+                yield from _mapping_values(argument)
 
 
 def _mutator_stores_the_vector(call) -> bool:
