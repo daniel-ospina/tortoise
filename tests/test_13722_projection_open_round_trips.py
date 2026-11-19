@@ -33,11 +33,14 @@ THE THREE THINGS THIS FILE PINS, each a way the fix could be defeated:
    a deploy.
 
 HOW DISCRIMINATING A REVERT IS (measured, so a later reader inherits the real
-number): reverting the probe to `count(n)` reddens **3 of these 6 arms** on a
+number): reverting the probe to `count(n)` reddens **3 of these 7 arms** on a
 lane with a store — "one query, no aggregate", the open's wire-count filter,
-and the scaling/control arm — and **1 of 6** where those two live arms skip.
+and the scaling/control arm — and **1 of 7** where those two live arms skip.
+(Measured at this head: `3 failed, 4 passed` with the probe reverted, and
+`1 failed, 6 passed` with the aggregate filter narrowed back to
+`GRAPH.QUERY`.)
 
-Run (the first four need no database; the live ones need the docker lane)::
+Run (the first five need no database; the live ones need the docker lane)::
 
     TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \\
         tests/test_13722_projection_open_round_trips.py -q
