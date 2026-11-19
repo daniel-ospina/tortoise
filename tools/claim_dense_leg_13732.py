@@ -889,17 +889,27 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     the record, and it exists because the run-level gate beside the seed asks a
     PREFIX-wide question: ``MATCH (n:Point) WHERE n.id STARTS WITH … AND
     n.embedding IS NOT NULL`` counts whatever the prefix happens to hold, not
-    what this run wrote. Two ways that count is above zero while the population
-    is only partly seeded, both of them real:
+    what this run wrote. Ways that count is above zero while the population is
+    only partly seeded — and ⛔ ONLY THE THREE THIS WRITE PATH CAN REACH, because
+    a message that names an unreachable cause sends the operator to a dead end
+    (``#13745`` review round 6, finding 3). ``_seed_graph`` calls
+    ``_upsert_point_props`` with ``{"id", "content", "embedding"}``, so
+    ``owns_embedding`` is ALWAYS true and the fold never reaches its
+    ``encode_for_row`` derive branch: an operator point, an EMBED-gate refusal
+    (``#5008``) and a swallowed encode failure are all UNREACHABLE here (and a
+    ``None`` from ``compute_embeddings`` is refused by name as
+    ``seed_vectors_missing`` before a single write). What IS reachable:
 
-    * the apply-fold leaves ``n.embedding`` UNSET for a row it cannot vectorise —
-      an operator point (every embed branch in ``projection/entities.py`` is
-      gated on ``not op``), an identifier-only text refused by the EMBED gate
-      (``#5008``), an ``encode_for_row`` failure swallowed by ``except
-      Exception: pass``, or an embedding-WIDTH mismatch, where the fold warns
-      and leaves the node's vector alone rather than write a vector the index
-      cannot hold (``#5004``);
-    * ``--graph`` names an EXISTING graph.
+    * an embedding-WIDTH mismatch — the fold warns and leaves the node's vector
+      alone rather than write a vector the index cannot hold (``#5004``);
+    * a vector the fold REFUSES as unusable — ``_writable_journalled_vector``
+      answers ``None`` for an empty list, an implausibly long one, or one
+      carrying a non-finite/non-numeric entry, and the payload then owns a
+      field with no usable value, so nothing is written;
+    * the write never reached the row at all — the node is absent, so the
+      ``MATCH`` does not return it (this is the ``--graph`` case as well: the
+      ids are deterministic, so a reused graph answers with nodes this run's
+      write may never have touched).
 
     ⛔ WHAT THE PAIRING PROVES, AND WHAT IT DOES NOT. It proves the write
     REACHED the node: the returned row's text must be the text this run asked
@@ -917,10 +927,13 @@ def graph_population_vectors(proj, population: list[dict]) -> int | None:
     passes.
 
     Residual, named rather than papered over: same id + THIS run's text + a
-    preserved vector is indistinguishable here. Closing it needs the vector's
-    provenance ON THE NODE (``_record_embedding_identity``, ``#5004``), which the
-    seed payload does not carry. This guard is an assertion that the population
-    WAS WRITTEN, not that every vector was REPLACED.
+    preserved vector is indistinguishable HERE, because this is a RE-READ. It is
+    closable without touching the store: ``_upsert_point_props`` already returns
+    whether the row's vector was written (``(embedding is not None, …)``,
+    ``projection/entities.py:3339``) and ``_seed_graph`` DISCARDS that value —
+    capturing it per row would make the count exact, where a re-read cannot. Until
+    then this guard is an assertion that the population WAS WRITTEN, not that
+    every vector was REPLACED.
 
     A ``graph_dense`` arm over a partially seeded population ranks only the
     seeded part, so its delta against ``record_dense`` is a figure about the
@@ -993,12 +1006,13 @@ def require_graph_population(matched: int | None, population_n: int) -> None:
         raise Refused(
             "graph_population_absent",
             f"the graph holds an embedding for {matched} of the {population_n} "
-            f"population row(s) this run would score — the apply-fold leaves "
-            f"`n.embedding` unset for a row it cannot vectorise (an operator "
-            f"point, a text refused by the EMBED gate, an embedding-WIDTH "
-            f"mismatch left unset rather than written, or a swallowed encode "
-            f"failure), or the write never reached the row at all (the count "
-            f"pairs each id with THIS run's text). A `graph_dense` arm over that "
+            f"population row(s) this run would score — reachable causes, and only "
+            f"these: an embedding-WIDTH mismatch (the fold leaves the node's "
+            f"vector alone rather than write one the index cannot hold, #5004), a "
+            f"vector the fold refuses as unusable (`_writable_journalled_vector` "
+            f"answers None for empty, over-long, or non-finite values, so nothing "
+            f"is written), or a write that never reached the row at all. A "
+            f"`graph_dense` arm over that "
             f"population ranks only the seeded part, so its delta against "
             f"`record_dense` is a figure about the seed step and not about the leg",
         )
@@ -1308,10 +1322,10 @@ def run_measurement(args: argparse.Namespace) -> int:
     # `graph_dense` ARM (not the run — see `require_graph_population`). The count
     # above is PREFIX-wide, so it asks *"does this graph hold any embedded
     # claim?"* — not *"did THIS run seed THIS population?"*. It passes over a
-    # partly seeded population (an operator point, an EMBED-gate refusal, a
-    # swallowed encode failure, a width mismatch) and over a `--graph` served
-    # from a previous run. `graph_population_vectors` asks the id-and-text scoped
-    # question; it is computed HERE because it needs the graph, and consumed
+    # partly seeded population (a width mismatch, a vector the fold refuses, a
+    # write that never landed) and over a `--graph` served from a previous run.
+    # `graph_population_vectors` asks the id-and-text scoped question; it is
+    # computed HERE because it needs the graph, and consumed
     # INSIDE the arms loop, where only `graph_dense` reads graph vectors.
     #
     # ⛔ AND IT REPLACES THE `graph_vectors <= 0` BRANCH THAT USED TO SIT HERE.

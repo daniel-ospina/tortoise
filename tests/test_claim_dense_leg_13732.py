@@ -1631,6 +1631,40 @@ class TestTheDocumentedRunPath:
             "REFUSED[graph_population_absent]: " + artifact["arms"]["graph_dense"]["message"]
         ]
 
+    def test_a_graph_with_NO_vector_at_all_still_measures_the_other_arms(
+        self, tool_mod, monkeypatch, tmp_path, capsys
+    ):
+        """The run-level `graph_vectors <= 0` refusal is GONE — and pinned gone.
+
+        ⛔ `#13745` review round 3, finding 3: every run-path test drove the
+        prefix count at 3, so `graph_vectors == 0` was never executed and
+        re-inserting `if graph_vectors <= 0: raise Refused("graph_unseeded", …)`
+        ahead of the arms stayed green (95 passed) — the deletion this change is
+        named for had no behavioural pin. The zero-vector graph is the EXTREME of
+        a partly seeded one: the graph arm is blocked BY NAME, the other two
+        measure, and the run exits 3.
+        """
+        monkeypatch.setattr(_FakeSDK, "prefix_rows", 0)
+        target = tmp_path / "zero.json"
+        rc = self._drive(
+            tool_mod,
+            monkeypatch,
+            tmp_path,
+            out=str(target),
+            preregistered_n=M2_N,
+            seeded=0,
+            record_ok=True,
+        )
+        artifact = json.loads(target.read_text())
+        assert artifact["population"]["graph_vectors"] == 0
+        assert artifact["arms"]["graph_dense"]["blocked"] == "graph_population_absent"
+        # ⛔ THE DISCRIMINATOR: a run-level refusal raises before the first arm, so
+        # it exits 2 with NO artifact and nothing published. Both surviving arms
+        # are therefore asserted to be REAL measurements, not just present keys.
+        assert "summary" in artifact["arms"]["lexical"], artifact["arms"]["lexical"]
+        assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
+        assert rc == 3, rc
+
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
 
@@ -1912,16 +1946,18 @@ class TestGraphMembership:
 
     ⛔ The gate beside the seed is PREFIX-wide:
     ``n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL``. That count is
-    above zero while the population is only PARTLY seeded — the apply-fold leaves
-    ``n.embedding`` unset for an operator point (every embed branch is gated on
-    ``not op``), for an identifier-only text the EMBED gate refuses (#5008), for a
-    width mismatch (``#5004``: it warns rather than write a vector the index
-    cannot hold), or after an ``encode_for_row`` failure swallowed by ``except
-    Exception: pass``. And ``n.embedding IS NOT NULL`` alone cannot tell THIS
-    run's vector from an EARLIER text's under the same deterministic id, which is
-    what a reused ``--graph`` produces. These cases red the mutants that make the
-    graph guard prefix-wide, id-only, or blind to an earlier text under the same
-    id — and the wiring pin reds moving it off the ``graph_dense`` arm.
+    above zero while the population is only PARTLY seeded, and the causes that
+    count can actually meet on THIS write path are three, not five: the seed
+    payload always carries an explicit ``embedding``, so the fold takes its
+    ``owns_embedding`` branch and never reaches the ``encode_for_row`` derive —
+    an operator point, an EMBED-gate refusal (``#5008``) and a swallowed encode
+    failure are UNREACHABLE here (``None`` from ``compute_embeddings`` is refused
+    by name as ``seed_vectors_missing`` before any write). What is reachable: a
+    width mismatch (``#5004``), a vector the fold refuses as unusable
+    (``_writable_journalled_vector`` → ``None``), and a write that never reached
+    the row. These cases red the mutants that make the graph guard prefix-wide,
+    id-only, or blind to a row this run did not write — and the wiring pin reds
+    moving it off the ``graph_dense`` arm.
     """
 
     def _pop(self, n: int) -> list[dict]:
@@ -2000,10 +2036,18 @@ class TestGraphMembership:
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.require_graph_population(785, 786)
         assert ei.value.code == "graph_population_absent"
-        # the MECHANISMS are named, not just the arithmetic
-        assert "operator point" in ei.value.message
+        # the REACHABLE mechanisms are named, not just the arithmetic
         assert "WIDTH" in ei.value.message
         assert "never reached the row" in ei.value.message
+        assert "_writable_journalled_vector" in ei.value.message
+        # ⛔ AND THE UNREACHABLE ONES ARE NOT. The seed payload always carries an
+        # explicit `embedding`, so the fold never reaches its `encode_for_row`
+        # derive: naming an operator point, the EMBED gate or a swallowed encode
+        # failure sends the operator to a dead end (`#13745` review round 6,
+        # finding 3).
+        assert "operator point" not in ei.value.message, ei.value.message
+        assert "EMBED gate" not in ei.value.message, ei.value.message
+        assert "swallowed" not in ei.value.message, ei.value.message
         # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
         # text pairing refuses a node that kept "an EARLIER text's vector" — which
         # the pairing cannot detect, because this run's text is written

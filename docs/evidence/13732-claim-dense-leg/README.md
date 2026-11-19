@@ -143,35 +143,49 @@ is the only place the population is known.
 (`#13734` review, round 5). The gate beside the seed is **prefix-wide** —
 `MATCH (n:Point) WHERE n.id STARTS WITH '<prefix>' AND n.embedding IS NOT NULL` — so it answers
 *"does this graph hold ANY embedded claim?"*, which stays above zero while the population is only
-**partly** seeded. Two mechanisms, both real: the apply-fold leaves `n.embedding` unset for a row it
-cannot vectorise (an operator point — every embed branch in `projection/entities.py` is gated on
-`not op`; an identifier-only text the EMBED gate refuses, `#5008`; an `encode_for_row` failure
-swallowed by `except Exception: pass`; or an embedding-**width mismatch**, which the fold warns about
-and leaves unset rather than write a vector the index cannot hold, `#5004`), and `--graph` names a
-graph a previous run already seeded.
+**partly** seeded. ⛔ **The reachable mechanisms, and only these** (`#13745` round 6, finding 3): the
+instrument's seed payload ALWAYS carries an explicit `embedding`, so the fold takes its
+`owns_embedding` branch and never reaches the `encode_for_row` derive — an operator point, an
+EMBED-gate refusal (`#5008`) and a swallowed encode failure are **unreachable on this write path**
+(and a `None` from `compute_embeddings` is refused by name as `seed_vectors_missing` before a single
+write). What IS reachable: an embedding-**width mismatch** (the fold warns and leaves the node's
+vector alone rather than write one the index cannot hold, `#5004`); a vector the fold **refuses as
+unusable** (`_writable_journalled_vector` answers `None` for an empty, over-long, or
+non-finite/non-numeric value, so nothing is written); and a **write that never reached the row** —
+including the `--graph` case, where the deterministic ids collide with nodes a previous run seeded.
 
 `graph_population_vectors` therefore asks the **id-and-text** question — one `IN $ids` round trip
 returning `(id, content)`, paired in Python against the text this run asked for — and
 `require_graph_population` refuses `graph_population_absent` (or `graph_population_unmeasurable`,
-because unmeasured is never zero). ⛔ **The text pairing is not decoration:** the fold rewrites
-`n.content` unconditionally but **keeps** `n.embedding` when the payload's vector was refused, and
-the population's ids are deterministic (`f"{ID_PREFIX['point']}{index:06d}"`), so on a reused
-`--graph` every id collides — an id-only `IS NOT NULL` count passes over the OLD text's vector and
-`graph_dense` ranks by a vector this run did not write. Residual, stated rather than papered over:
-the pairing compares TEXT only, so on a re-run whose population text is unchanged a preserved
-vector is indistinguishable **whatever its width or embedder** — the text test catches only a node
-whose text CHANGED, and this guard reads no vector. Closing it needs the vector's provenance on the
-node (`_record_embedding_identity`, `#5004`).
+because unmeasured is never zero). ⛔ **What the text half buys is narrow, and stated exactly:** it
+catches a row this run did NOT write — a node absent, or one still holding an earlier population's
+text at this id (the population's ids are deterministic, `f"{ID_PREFIX['point']}{index:06d}"`, so on
+a reused `--graph` every id collides). It does **not** catch a preserved VECTOR: the fold rewrites
+`n.content` unconditionally, so on a reused graph the node carries THIS run's text beside the OLD
+vector and the pair matches anyway — an id-only `IS NOT NULL` count would agree with it.
+Residual, stated rather than papered over: the pairing compares TEXT only, so on a re-run whose
+population text is unchanged a preserved vector is indistinguishable **whatever its width or
+embedder** — the text test catches only a node whose text CHANGED, and this guard reads no vector.
+That residual is closable without touching the store, which is worth saying because the earlier
+text of this paragraph implied it was not: `_upsert_point_props` already RETURNS whether the row's
+vector was written (`(embedding is not None, …)`, `projection/entities.py:3339`) and `_seed_graph`
+discards that value — capturing it per row makes the count exact, where a re-read cannot. Until
+then this guard asserts the population **was written**, not that every vector was replaced.
 
 The guard gates the **`graph_dense` arm, not the run** — the same scope, for the same reason, as the
 record gate above (`#13745` review round 1, finding 2). A partly seeded graph does **not** degrade
 `lexical`: that arm forces `EmbeddingModel.get()` to `None` and the full-text index it reads is built
 from `n.content`, which the fold writes **unconditionally** — only the vector is held back. Nor does
-it degrade `record_dense`, which reads Postgres. So the graph cohort is a precondition of exactly one
-arm, and refusing the run over it would throw away `record_dense_vs_lexical` — the lane's own
-headline question — while looking like a strict gate. When the graph cannot hold the cohort, the arm
-is recorded `BLOCKED[graph_population_absent]` by name, the other two arms measure, the graph
-comparisons are `UNMEASURED`, and the run exits **3**.
+it degrade `record_dense`, which reads Postgres. ⚠️ That sentence rides on the content write having
+REACHED the rows: a row the seed's write never landed for is the one case the text pairing does
+catch (it would count it short), and a text shortfall would hurt `lexical` too — so the assumption is
+stated rather than assumed away, and a `graph_population_absent` whose shortfall is textual is worth
+reading as `lexical`'s problem as well. Within the seed, every row is upserted and an exception
+propagates, so this is the defensive case, not the ordinary one. So the graph cohort is a
+precondition of exactly one arm, and refusing the run over it would throw away
+`record_dense_vs_lexical` — the lane's own headline question — while looking like a strict gate. When
+the graph cannot hold the cohort, the arm is recorded `BLOCKED[graph_population_absent]` by name, the
+other two arms measure, the graph comparisons are `UNMEASURED`, and the run exits **3**.
 
 That replaces the `graph_vectors <= 0` branch that used to refuse the whole run when the graph held
 no vector at all: on a box that could still publish the lexical baseline and the record comparison,
