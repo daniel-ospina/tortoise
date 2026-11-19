@@ -3212,6 +3212,25 @@ _APPROVAL_RECORD_AS_A_PARENTHESISED_ITEM = (
     "> 1) **Owner approval of the exact changes** — given in-session, no comment cited.")
 _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX = (
     "> - [x] **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ THE ITEM THAT IS NOT FIRST (review round 5, measured FAIL-OPEN and a REGRESSION from
+# `main`): a compact list carries no `>` separator between its items, so joining the block
+# by line fused every item into ONE paragraph and the marker strip could only reach the
+# FIRST one. A record written as a later bullet was therefore never read, while `main`'s
+# phrase detector refused it — the arm did not reduce the vacuity here, it widened it.
+# The corpus cannot see this (nothing landed records an approval inside a list), so the
+# direction is pinned by fixture; `docs/ONTOLOGY-CHANGELOG.md` has 104 bullet lines and
+# its lists are compact, so this is the shape the NEXT release reaches.
+_APPROVAL_RECORD_AS_A_LATER_BULLET = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> - **Owner approval of the exact changes:** given in-session, no comment cited.")
+_APPROVAL_RECORD_AS_A_LATER_ORDERED_ITEM = (
+    "> 1. Retired the legacy predicate in §4.5.\n"
+    "> 2. **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ ITS MIRROR DIRECTION, so the split cannot be satisfied by refusing every list: a
+# later item that records NO approval owes no citation and stays GREEN.
+_A_LATER_BULLET_WITH_NO_APPROVAL_RECORD = (
+    "> - Retired the legacy predicate in §4.5.\n"
+    "> - **Corrected the §4.5 wording**, which named a form the owner rejected.")
 _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS = (
     "> *Owner approval of the exact changes* — given in-session, no comment cited.")
 _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS = (
@@ -3302,12 +3321,30 @@ _POINTER_NAMING_A_CONTAINER = (
     "> Each extractor keeps its own issue tracker.")
 
 
+# ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
+# `_LEADING_LIST_MARKER_RE` below strips ONE such marker off a paragraph's first bytes;
+# this one decides where a paragraph BEGINS, which is the half that was missing — its
+# absence is why an approval in a list's SECOND item was unread. A task-list checkbox and
+# a heading are the same case, per CommonMark §5.2 (a list item's text is its own block).
+_PARAGRAPH_START_RE = re.compile(
+    r"^(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+)")
+
+
 def _quoted_paragraphs(block: str) -> list[str]:
     """The block's quote PARAGRAPHS, quote prefixes stripped and wrapping joined.
 
     A PARAGRAPH, not a line: the approval record WRAPS (its citation sits on a later
     physical line than the bold label), so a line-scoped read would refuse a record
     that does name its home — a false block on a true sentence.
+
+    ⛔ AND A LIST ITEM IS ITS OWN PARAGRAPH (review round 5, measured FAIL-OPEN and a
+    regression from `main`): a blank line separates blocks, but a COMPACT list separates
+    nothing — consecutive bullets sit on consecutive lines — so joining by line fused
+    `- did A` / `- **Owner approval …**` into one paragraph, and only the FIRST item's
+    opening run could ever be read. CommonMark §5.2/§4.8 settle what a paragraph is: each
+    list item is a container block whose text is its OWN paragraph, so each item's first
+    inline run does open one — the exact contract this arm is built on. A heading splits
+    the same way, for the same reason.
     """
     paragraphs: list[str] = []
     current: list[str] = []
@@ -3317,7 +3354,11 @@ def _quoted_paragraphs(block: str) -> list[str]:
                 paragraphs.append(" ".join(current))
                 current = []
             continue
-        current.append(re.sub(r"^[\s>]+", "", line))
+        text = re.sub(r"^[\s>]+", "", line)
+        if current and _PARAGRAPH_START_RE.match(text):
+            paragraphs.append(" ".join(current))
+            current = []
+        current.append(text)
     if current:
         paragraphs.append(" ".join(current))
     return paragraphs
@@ -3457,7 +3498,11 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         **Owner approval …**``, are not read as records — emphasis is the corpus's only
         structural signal for a label, the phrase detector is what #13669 measured
         vacuous, and reading a mid-paragraph bold run is what makes the bolded-denial
-        control above a false block;
+        control above a false block. ⛔ A SECOND (or later) LIST ITEM is NOT this
+        residual: each item is its own paragraph (CommonMark §5.2), so its opening run is
+        read like any other — ``_quoted_paragraphs`` splits at the item boundary, and
+        ``_APPROVAL_RECORD_AS_A_LATER_*`` pin it because the fused-paragraph read PASSED
+        a later-item record while `main` refused it;
       - a BOLDED DENIAL that OPENS a paragraph (``**Owner approval was not required.**``)
         is read as a record and refused, and so is a bolded TOPICAL mention
         (``**Approval of spend** requires two owners``) — the cost of excluding negations
@@ -3514,8 +3559,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         # and `1) ` never had the problem; only the `\d+[.)]` family did.
         label = _sentences(_LEADING_LIST_MARKER_RE.sub("", record.strip()))[0]
         assert _CITATION_RE.search(label), (
-            "the changelog block records an owner approval but names no comment "
-            "id in the SENTENCE that records it, so the approval has no home a reader "
+            f"the changelog block {NO_RESOLVABLE_HOME_DIAGNOSIS} "
+            "in the SENTENCE that records it, so the approval has no home a reader "
             "can resolve — cite the comment that records it in that same sentence "
             "(``comment <id>`` or the permalink), as the v3.37 entry does. An id in a "
             "later sentence is that sentence's, not the approval's. *\"The artifact is "
@@ -3525,11 +3570,23 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
 
 _LEADING_LIST_MARKER_RE = re.compile(
     r"^(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+)")
+# ⛔ THE REFUSAL'S DIAGNOSIS IS ONE LITERAL, SHARED BY THE ARM AND THE PIN (review P3):
+# the arm's message and the fixture assertion that checks it is "a diagnosis a lane can
+# act on" were two copies of the same phrase, so a legitimate reword red the fixture while
+# `_assert_refused_by` promises (in the same file) that "no arm's message WORDING is
+# involved" in attribution. Hoisting it keeps the property under test — the refusal
+# carries a DIAGNOSIS — without pinning the prose that states it: a reword now moves both
+# sides together, and deleting the diagnosis still reds the fixture.
+NO_RESOLVABLE_HOME_DIAGNOSIS = "records an owner approval but names no comment id"
 # ⛔ THE RUN MAY BE SINGLE-MARKER EMPHASIS TOO, AND MAY SIT BEHIND A LIST MARKER OR A
-# HEADING (review rounds 2 and 3, all measured FAIL-OPEN): `- **Owner approval …**`,
+# HEADING (review rounds 2, 3 and 5, all measured FAIL-OPEN): `- **Owner approval …**`,
 # `1. **Owner approval …**`, `- [ ] **Owner approval …**`, `### **Owner approval …**`,
 # `*Owner approval …*` and `_Owner approval …_` all render as a labelled paragraph, and
 # a detector anchored on `**`/`__` at the paragraph's first byte slept through every one.
+# ⛔ AND THE STRIP BELOW ONLY EVER REACHED THE FIRST ITEM (review round 5): the marker is
+# what remains at a paragraph's start, so `_PARAGRAPH_START_RE` (above, where the paragraph
+# BEGINS) is what makes a LATER item's run readable at all; this pattern then strips the
+# marker that split placed at the front.
 _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
 # ⛔ THE PLURAL POSSESSIVE IS IN THE CLASS (review round 3): `Owners' approval` renders as
 # the same label, and `owner'?s?` covered `owner` / `owner's` / `owners` but not `owners'`.
@@ -3711,9 +3768,19 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
         version_match = _BLOCK_VERSION_RE.match(landed_block)
         assert version_match, "a labelled block must carry a readable version header"
         labelled_versions.append(version_match.group(1))
-        for paragraph in labelled:
-            if not _CITATION_RE.search(_sentences(paragraph)[0]):
-                refused_versions.append(version_match.group(1))
+        # ⛔ THE REFUSAL IS READ FROM THE ARM ITSELF, NOT RE-IMPLEMENTED (review P3):
+        # this loop used to re-decide with its own ``_CITATION_RE.search(_sentences(...))``
+        # copy, so the message could claim "the landed entries this arm refuses changed"
+        # while being blind to every change in the ARM — a second refusal condition, a
+        # ``records[:1]`` narrowing, even dropping the arm's assert — because none of them
+        # touches ``_CITATION_RE``. A second copy of a decision is the defect this file
+        # refuses at ``:1395-1399`` ("Re-spelling one in the test would create a SECOND
+        # literal copy, which the scan itself refuses"). Calling the arm makes the pin
+        # measure the thing its message names.
+        try:
+            _refuse_an_approval_record_with_no_resolvable_home(landed_block)
+        except AssertionError:
+            refused_versions.append(version_match.group(1))
     assert labelled_versions == ["3.38", "3.37", "3.36", "3.35", "3.34",
                                  "3.33", "3.33", "3.32"], (
         "the set of landed blocks that OPEN with a bold approval label changed — the "
@@ -3771,7 +3838,7 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
             _APPROVAL_LABEL_SENTENCE_ENDS_AT_A_FULL_STOP)
     _assert_refused_by(
         full_stop, "_refuse_an_approval_record_with_no_resolvable_home")
-    assert "no comment id" in str(full_stop.value), (
+    assert NO_RESOLVABLE_HOME_DIAGNOSIS in str(full_stop.value), (
         "the refusal must carry a diagnosis a lane can act on, not a bare traceback")
     # ⛔ AND THE MARKDOWN SHAPES A CHANGELOG ACTUALLY USES (review round 2): a bullet, an
     # ordered item, `*…*` and `_…_` all render as a labelled paragraph, and each was
@@ -3782,6 +3849,8 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                             _APPROVAL_RECORD_AS_A_PLUS_BULLET,
                             _APPROVAL_RECORD_AS_A_PARENTHESISED_ITEM,
                             _APPROVAL_RECORD_BEHIND_A_CHECKED_TASK_LIST_BOX,
+                            _APPROVAL_RECORD_AS_A_LATER_BULLET,
+                            _APPROVAL_RECORD_AS_A_LATER_ORDERED_ITEM,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
                             _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
                             _APPROVAL_RECORD_BEHIND_A_HEADING,
@@ -3795,6 +3864,11 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
             _refuse_an_approval_record_with_no_resolvable_home(marked_up_label)
         _assert_refused_by(
             marked_up, "_refuse_an_approval_record_with_no_resolvable_home")
+    # ⛔ THE LIST SPLIT'S MIRROR DIRECTION (review round 5): the later item is READ, so a
+    # later item that records no approval must still pass — otherwise "refuse every list"
+    # would satisfy the two rows above.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _A_LATER_BULLET_WITH_NO_APPROVAL_RECORD)
     # ⛔ EVERY RECORD IS CHECKED (review round 2): a cited first record does not discharge
     # a second, uncited one in the SAME block — measured, checking `records[:1]` left this
     # GREEN — and two cited records stay green, so the loop is not a blanket refusal.
