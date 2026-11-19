@@ -7172,6 +7172,12 @@ def _pricing_source_includes(html: str) -> list[str]:
 #: of it outside the shared table.
 PRICE_FIGURE_RE = re.compile(r"\$\s?\d")
 
+#: A whole figure, for the row that asks whether the SHARED SOURCE can produce
+#: it. Kept separate from `PRICE_FIGURE_RE` on purpose: the detector must stay
+#: `$`+digit so it cannot be narrowed out of a channel, while an extracted value
+#: needs its digits to be compared.
+PRICE_ONLY_RE = re.compile(r"\$\s?\d[\d,]*")
+
 
 def _inline_scripts(html: str) -> list[str]:
     """The body of every INLINE `<script>`, comment lines dropped.
@@ -7188,6 +7194,50 @@ def _inline_scripts(html: str) -> list[str]:
             r"<script\b([^>]*)>(.*?)</script>", html, re.S | re.I)
         if not re.search(r"\bsrc\s*=", attrs, re.I)
     ]
+
+
+def _style_bodies(html: str) -> list[str]:
+    """The body of every `<style>` block — CSS `content:` renders text too.
+
+    `_served` deletes style bodies (a `content:` rule is not served markup), so
+    a price there is visible to the reader and invisible to every static row
+    (#13696 round 6: `#beat-hero .cta::after { content: " — from $25/mo"; }`
+    left every row green). Comment lines are dropped by the SAME
+    line-based rule the script channel uses, so a `/* … */` line of prose may
+    name a figure without reding this row.
+    """
+    return [_strip_comment_lines(body)
+            for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html,
+                                  re.S | re.I)]
+
+
+def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
+    """`(src, text)` for every SAME-ORIGIN script a page loads, except the source.
+
+    A `<script src>` tag has an EMPTY body, so `_inline_scripts` skips it and
+    `_served` never sees the FILE — a price in a second asset is in no channel
+    any row read (measured, #13696 round 6: adding
+    `website/assets/teams-extra.js` holding
+    `document.title = 'Builder from $25/mo';` plus its tag left 139 rows green).
+    `/assets/tortoise-pricing.js` is EXCLUDED because it IS the source: it
+    legitimately holds the figures the other rows derive from.
+    """
+    out: list[tuple[str, str]] = []
+    for src in _pricing_source_includes(html):
+        if src.startswith(("http://", "https://", "//")):
+            continue
+        path = REPO_ROOT / "website" / src.lstrip("/")
+        if path.resolve() == PRICING_SOURCE.resolve():
+            continue
+        assert path.is_file(), (
+            f"{name} loads `{src}` but no such file exists under `website/`, so "
+            "this gate cannot read the code the page actually runs — the file "
+            "moved and the row must move with it")
+        # Comment lines dropped for the same reason the inline channel drops
+        # them: a `// …` note may name a figure without being a second copy.
+        out.append((src, _strip_comment_lines(
+            path.read_text(encoding="utf-8"))))
+    return out
 
 
 class TestPricingSourceIsShared:
@@ -7358,8 +7408,12 @@ class TestPricingSourceIsShared:
         """
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             html = path.read_text(encoding="utf-8")
-            served = _served(html)
-            section = _pricing_section(html)
+            # `unescape` FIRST: `&#36;` renders as `$` to a reader, but
+            # `_served` does not decode entities, so a figure written that way
+            # was in no served text this row scanned while the reader saw
+            # `$89/mo` (measured, #13696 round 6).
+            served = unescape(_served(html))
+            section = unescape(_pricing_section(html))
             assert section in served, (
                 f"the `#pricing-section` slice is not part of {name}'s served "
                 "markup, so this row cannot tell inside from outside — the "
@@ -7396,34 +7450,52 @@ class TestPricingSourceIsShared:
         this row is green as written — it refuses the next one rather than
         fixing a live divergence.
 
+        ⛔ Round 6 measured THREE channels this row still did not read, each
+        leaving every suite green: a same-origin `<script src>` FILE (the tag's
+        body is empty and `_served` never sees the file), a `<style>` body (a
+        CSS `content:` rule is rendered text), and an entity-encoded figure
+        (`&#36;89` reads as `$89/mo`). A list of remembered channels is what
+        produced those gaps, so the row now reads every channel a reader can
+        RECEIVE that is not served text — see the helpers below.
+
         A price a script needs must come from the shared table through
         `window.tortoiseFmtPrice` (or `PRICING`); a literal is a second copy of
         the number that no row compares against `/tortoise`.
 
-        A line that is WHOLLY a comment is dropped before the scan, so prose may
-        still mention a figure. A TRAILING comment on a code line is not — the
-        line is scanned as written — which fails closed and deliberately: the fix
-        is to move the sentence onto its own line, never to widen this row.
+        A line that is WHOLLY a comment is dropped before the scan, in EVERY
+        channel below — the inline `<script>` bodies, the `<style>` bodies and
+        the same-origin asset files — so prose may still mention a figure. A
+        TRAILING comment on a code line is not — the line is scanned as written
+        — which fails closed and deliberately: the fix is to move the sentence
+        onto its own line, never to widen this row.
         """
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
-            scripts = _inline_scripts(path.read_text(encoding="utf-8"))
+            markup = path.read_text(encoding="utf-8")
+            scripts = _inline_scripts(markup)
             assert scripts, (
                 f"{name} carries no inline `<script>` body, so this row would "
                 "pass without reading anything — the channel it exists to read "
                 "has moved and the row must move with it")
+            channels: list[tuple[str, str]] = [
+                ("inline `<script>`", body) for body in scripts]
+            channels += [("`<style>`", body) for body in _style_bodies(markup)]
+            channels += [(f"`{src}`", body)
+                         for src, body in _same_origin_script_bodies(name, markup)]
             hits = [
-                line.strip()
-                for body in scripts
+                f"{where}: {line.strip()}"
+                for where, body in channels
                 for line in body.splitlines()
                 if PRICE_FIGURE_RE.search(line)
             ]
             assert not hits, (
-                f"{name} quotes a price INSIDE its own script:\n  "
+                f"{name} quotes a price in a channel that is not served text:\n  "
                 + "\n  ".join(hits)
-                + "\nA price a script renders must come from the ONE shared "
+                + "\nA price a script or style renders must come from the ONE "
+                "shared "
                 "table via `window.tortoiseFmtPrice` / `PRICING` — a literal is "
                 "a second copy that no static row can see (`_served` deletes "
-                "script bodies) and no render row compares, so this page can "
+                "script and style bodies, and never sees a separate asset "
+                "file) and no render row compares, so this page can "
                 "quote a different number than `/tortoise` with every suite "
                 "green (#13645).\n"
                 "(A line that is wholly a comment is skipped, so prose may name "
@@ -7531,6 +7603,49 @@ class TestPricingSourceIsShared:
                     f"{name} / {tier_name}: exclusions {card['excluded']!r} != the "
                     f"shared source's {tier['excluded']!r}")
 
+    def test_every_figure_inside_the_section_is_one_the_source_has(self):
+        """…and a figure the source does NOT have is refused on BOTH pages.
+
+        The whole-section compare above asserts the two pages AGREE, and
+        `test_the_static_cards_on_both_pages_carry_the_shared_numbers` derives
+        the three slices it knows how to parse. Everything ELSE inside
+        `#pricing-section` — `.pricing-sub`, the `<h2>`, the toggle label, the
+        ToS sentence, any paragraph added later — was compared to the other page
+        and to nothing else, so a price added to BOTH sections could ship on both
+        pages quoting a number the source does not contain (measured, #13696
+        round 6: `<p class="pricing-sub">Team from $89/mo, billed annually.</p>`
+        in both sections left 139 rows green, while the source says Team is $149
+        monthly / $119 annual — and the block's own comment tells the next
+        editor to change both together).
+
+        So this row takes the COMPLEMENT of the parsed slices: every `$` figure a
+        reader can receive from the section must be a figure the shared source
+        can produce in SOME mode. A figure that is not is a price nobody
+        approved, and no other row would say so.
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        allowed: set[str] = set()
+        for tier in pricing["tiers"].values():
+            for mode in ("monthly", "annual"):
+                for rendered in _fmt_price(tier["price"], mode, disc):
+                    allowed.update(PRICE_ONLY_RE.findall(rendered))
+        for key in ("overage_line", "license_self_hosted"):
+            allowed.update(PRICE_ONLY_RE.findall(pricing["display"][key]))
+        assert allowed, "the shared source yields no figure at all — this row is vacuous"
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            section = unescape(_served(_pricing_section(
+                path.read_text(encoding="utf-8"))))
+            stray = sorted(set(PRICE_ONLY_RE.findall(section)) - allowed)
+            assert not stray, (
+                f"{name} quotes {stray!r} inside `#pricing-section`, and the "
+                f"shared source can produce only {sorted(allowed)!r}. Both "
+                "pages match each other and neither matches the table, so every "
+                "row that compares the pages is satisfied while both quote a "
+                "price nobody approved (#13645). Change the price in "
+                "`product/pricing.json` and `website/assets/tortoise-pricing.js` "
+                "— together — instead of typing it into the section.")
+
     def test_the_pages_format_prices_through_the_shared_function(self):
         """The rounding contract is ONE implementation, too.
 
@@ -7610,7 +7725,18 @@ class TestConsentSeam:
             if m.group(1) != name:
                 continue
             end = starts[i + 1].start() if i + 1 < len(starts) else len(src)
-            return src[m.start():end]
+            # ⛔ CODE ONLY. Every caller decides presence with `str.find`, and
+            # `find` matches a MENTION inside a comment as readily as the call
+            # itself: `opt_in_capturing()` deleted from `onAccept` while a
+            # `// opt_in_capturing() is now handled inside
+            # loadConsentedAnalytics()` sentence remained passed all three
+            # `TestConsentSeam` rows (measured, #13696 round 6). That deletion
+            # is not cosmetic — consent.js loads PostHog OPTED OUT and
+            # `loadConsentedAnalytics()` only loads GTM/Meta, so every accepting
+            # visitor's page view was dropped by an instrument that stayed green.
+            # The file's own `_strip_comment_lines` is the exact instrument and
+            # is already used by `_render_code`/`_inline_scripts` for this hazard.
+            return _strip_comment_lines(src[m.start():end])
         raise AssertionError(
             f"no `function {name}(` at the module's own indent in consent.js — "
             "this gate's subject moved, so it is no longer asserting order")
