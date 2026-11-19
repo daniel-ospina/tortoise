@@ -1223,8 +1223,11 @@ class CheckpointStaleError(RuntimeError):
 # ── #1786 (R3): failure-entry lifecycle + resume-claim helpers ────────────
 # The failure-entry schema (Task 1 Step 4, additive to the existing
 # ``error``/``error_class``/``failed_at_utc`` shape — no format bump):
-# ``{question_id, question_type, error, error_class, retryable, attempts,
-#  failed_at_utc, in_progress: {in_progress_utc, pid} | null}``.
+# ``{question_id, question_type, error, error_detail, error_class, retryable,
+#  attempts, failed_at_utc, in_progress: {in_progress_utc, pid} | null}``.
+# ``error_detail`` is #8486 F2 (additive, omitted when the exception carries no
+# message); a field list that claims to enumerate the record but omits it is the
+# same "record disagrees with the code" defect class this PR exists to close.
 
 
 def _utc_now() -> datetime:
@@ -1461,9 +1464,10 @@ def _scrub_exc_repr(exc: BaseException) -> str:
     ``_legacy_repr_match`` substring, and every on-disk record's shape).
 
     ⚠️ Residual, stated rather than implied: the blind spot is a property of any
-    ESCAPED text, so a credential carried by a non-string ``args`` object — whose
-    ``str`` is itself a repr — is still only reachable by the repr pass. Covering
-    that needs the redactor to anchor after an escape sequence, which is a
+    ESCAPED text, and it is NOT confined to this pass — ``_error_detail`` scrubs
+    ``str(exc)``, which for a container argument is escaped text too, so the
+    same nested-``args`` credential survives there (measured). Covering it needs
+    the redactor to anchor after an escape sequence, which is a
     product-redactor change (the capture path feeds it REAL newlines, where the
     anchor is correct) and is deliberately not made here.
     """
@@ -1491,8 +1495,16 @@ def _error_detail(exc: BaseException) -> str:
       scrubbed through the PRODUCT's credential redactor —
       ``tortoise.security.redact_secrets`` — which replaces credential-shaped
       spans (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
-      ``[REDACTED:<kind>]`` and leaves everything else byte-identical. A
-      failure record must never be the thing that leaks a key.
+      ``[REDACTED:<kind>]`` and leaves everything else byte-identical. ⚠️ NOT
+      an absolute guarantee, and the residual here is NOT the one
+      ``_scrub_exc_repr`` discloses: ``str(exc)`` on a container argument IS
+      escaped text (``ValueError(["a\nredis://u:pw@h/0"])``), so the
+      connection-URL anchor sees ``\n``'s trailing ``n`` and misses it —
+      measured, that password survives in BOTH fields. Every realistic shape is
+      covered (inline URL, URL at a line start in a real message, dict/tuple/
+      bytes args, PEM past the cap); the nested-``args`` shape is the known
+      hole, and closing it is a product-redactor change (anchor after an escape
+      sequence), not a local one.
     * Whitespace is collapsed (a FalkorDB parse error echoes the query with
       newlines) and the result is capped at ``ERROR_DETAIL_CAP``.
 

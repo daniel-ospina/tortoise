@@ -359,3 +359,50 @@ def test_the_embedded_arm_raises_the_redislite_start_budget(monkeypatch):
     _, cleanup = prof._sdk(db_uri=None, namespace="profile-test")
     assert rc.Redis.start_timeout == 120
     cleanup()
+
+# ── the promotion must validate what it promotes (review round 9) ──────────
+# `main()`'s arm reporting and its `--db ""` refusal are pinned by
+# `test_the_reported_arm_is_the_one_actually_selected`,
+# `test_the_reported_arm_is_embedded_with_no_uri_at_all` and
+# `test_an_empty_db_is_refused_instead_of_silently_embedded` (a peer commit on
+# this branch landed equivalents while this round was in flight — the three
+# duplicates written here were dropped rather than kept as parallel pins that
+# would drift). What is NOT pinned there is the ambient-URI validation below.
+def _stub_measurements(monkeypatch):
+    """Stub everything ``main()`` would spend minutes on."""
+    import tortoise.embeddings as emb
+    from tools.longmem_eval import ingest_profile as prof_mod
+
+    calls: dict[str, object] = {}
+
+    class _NoModel:
+        @staticmethod
+        def get(**_kw):
+            return None
+
+    def _fake_measure_shape(**kw):
+        calls.setdefault("shapes", []).append(kw.get("db_uri"))
+        return {"db_uri": kw.get("db_uri")}
+
+    monkeypatch.setattr(emb, "EmbeddingModel", _NoModel)
+    monkeypatch.setattr(prof_mod, "measure_shape", _fake_measure_shape)
+    return calls
+
+
+def test_sdk_refuses_an_ambient_uri_that_is_not_a_uri(monkeypatch):
+    """The promotion must validate what it promotes, like ``run_main``.
+
+    ``run_main`` runs the URI-shape check on the PROMOTED value; promoting
+    without it hands ``TortoiseSDK`` garbage and the error names the SDK, not
+    the mistake.
+    """
+    import pytest as _pytest
+
+    class _StubSDK:
+        def __init__(self, *_a, **_kw):
+            raise AssertionError("must not construct on an invalid URI")
+
+    monkeypatch.setattr(prof, "TortoiseSDK", _StubSDK)
+    monkeypatch.setenv("TORTOISE_DB_URI", "notauri")
+    with _pytest.raises(ValueError, match="must be a FalkorDB URI"):
+        prof._sdk(db_uri=None, namespace="profile-test")

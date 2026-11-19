@@ -140,6 +140,15 @@ def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
     """
     if db_uri is None:
         db_uri = os.environ.get("TORTOISE_DB_URI")
+    # Validate what was promoted, not just what was passed: ``run_main`` runs
+    # this check on the PROMOTED value, so an ambient ``TORTOISE_DB_URI=notauri``
+    # is a usage error there and would otherwise surface as a ``TortoiseSDK``
+    # failure here — naming the SDK, not the mistake.
+    if db_uri is not None and "://" not in db_uri:
+        raise ValueError(
+            f"--db (or TORTOISE_DB_URI) must be a FalkorDB URI "
+            f"(docker://|redis://|rediss://|bolt://), got {db_uri!r} — the "
+            f"per-question isolated graphs derive from the URI's server")
     if db_uri:
         prev = os.environ.get("TORTOISE_DB_URI")
         # ASSIGN, not setdefault: an already-exported TORTOISE_DB_URI would
