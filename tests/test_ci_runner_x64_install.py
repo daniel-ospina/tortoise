@@ -2949,12 +2949,12 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     `MODE = …` block ref must land on that block's own `if [ "$MODE" = … ]` line, and "the refusal
     dies at `:NNN`" must land on a `die`, not on the comment that explains it.
 
-    Non-vacuity (measured, each mechanism in isolation): the pre-fix pair `:545`/`:550` reds on the
-    unknown-number check — "cites installer line(s) this pin does not know: [529, 534]". Supply table
-    entries that ACCEPT those lines and the two sentence checks still catch it on their own: the
-    `MODE = install` claim reds on `:545` (the `--print-labels` prelude comment) and the refusal
-    claim reds on `:550` (`# every install.`). The same holds for a number this pin already knows:
-    `:578` swapped for `:551` (the `--print-labels` block) reds only the sentence check.
+    Non-vacuity (measured, each mechanism in isolation): citing a number the supply table does not
+    know reds on the unknown-number check — "cites installer line(s) this pin does not know: [...]".
+    Supply table entries that ACCEPT those lines and the two sentence checks still catch it on their
+    own: the `MODE = install` claim reds when its ref lands on a comment instead of the
+    `if [ "$MODE" = … ]` line, and the refusal claim reds when its ref lands on the comment instead of
+    the `die`. A number this pin already knows, swapped for another known one, reds only the sentence check.
 
     ⛔ THE RANGE HALF IS PINNED BY CONTENT TOO, AND BY A RELATION, BECAUSE A NUMBER KEY CANNOT BE
     TRUSTED ALONE (review round 5). `range_ends` pins each span's TRAILING line(s) against a token
@@ -3432,6 +3432,57 @@ def test_every_installer_citation_outside_the_runbook_lands_on_the_symbol_it_nam
     repair = re.search(r"the repair \(`(?:tools/)?install-ci-runner-x64\.sh:(\d+)-\d+`\)", memory)
     assert repair, "MEMORY.md no longer cites the repair's line range — re-anchor this pin"
     land("MEMORY.md", int(repair.group(1)), r'^if \[ "\$MODE" = repair \]')
+
+
+# ── 8b-ter. the runbook's refs OUTSIDE its pinned map section ────────────────────────────────
+def test_the_memory_bound_bullet_names_installer_symbols_instead_of_line_numbers():
+    """⛔ A REF OUTSIDE THE PINNED SECTION IS A REF NOBODY RE-DERIVES.
+
+    The `MemoryMax` bullet cited the knob's two consumers as `:1510` and `:342`. Both were CORRECT at
+    the head that wrote them, and nothing watched them: the installer-ref pin above spans the
+    runbook's line-map section only (its `start` is the first `tools/install-ci-runner-x64.sh:NNN`,
+    its `end` the next `## `), so a number written anywhere else in this 1.2k-line doc is unpinned —
+    the drift class #13781 exists to close, reopened by its own follow-up. Measured at the pre-fix
+    head: rewriting `:1510` to `:1526` (a stale-by-shift ref) leaves this whole suite GREEN, because
+    no assertion reads the bullet. The readers here are operators tuning a LIVE `MemoryMax=` on
+    serving units, where the bullet's own sentence says the mistake kills in-flight jobs.
+
+    So the bullet names the SYMBOLS the installer writes — `mem_need_gb=` (the box headroom
+    arithmetic) and `MEM_MAX_GB=` (the live per-unit cap the knob multiplies into) — and this arm
+    reds if a line number is reintroduced. Non-vacuity, measured on the pre-fix text: it reds on
+    `[":1510", ":342"]` and on both symbol assertions.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+    start = next(
+        (i for i, line in enumerate(doc) if line.startswith("- **`MemoryMax` bounds ONE unit")), None
+    )
+    assert start is not None, (
+        "the runbook no longer carries the `MemoryMax` bullet — re-anchor this pin rather than "
+        "deleting it"
+    )
+    bullet: list[str] = [doc[start]]
+    for line in doc[start + 1:]:
+        if not line.strip() or line.startswith("- "):
+            break
+        bullet.append(line)
+    text = "\n".join(bullet)
+
+    # ⛔ BOTH SYMBOLS, and each is the thing an operator greps the installer for — an edit that keeps
+    # the prose but drops a symbol sends them back to a number nobody re-derives.
+    assert "mem_need_gb=" in text, (
+        "the bullet no longer names `mem_need_gb=`, the headroom arithmetic that reads the knob: "
+        f"{text!r}"
+    )
+    assert "MEM_MAX_GB=" in text, (
+        "the bullet no longer names `MEM_MAX_GB=`, the live per-unit cap the knob multiplies into: "
+        f"{text!r}"
+    )
+    refs = re.findall(r"(?<![A-Za-z0-9_.\-]):\d+\b", text)
+    assert not refs, (
+        "the `MemoryMax` bullet cites installer line(s) this doc's pin does not cover — the pin's "
+        "region is the line-map section, so a number here is re-derived by nobody. Name the symbol "
+        f"instead: {refs}"
+    )
 
 
 # ── 8b-bis. the PLAN's positional refs ───────────────────────────────────────────────────────
@@ -4830,9 +4881,9 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
     `exit 4`, or the `STATIC label set` refusal; deleting the `fromJSON` block (or making it static)
     reds the last arm, which is the signal to delete the paragraph in the same change.
     """
-    # Local import: a module-level one shifts this file's line numbers, and five other files cite
-    # `tests/test_ci_runner_x64_install.py:230` by number (pinned by
-    # `test_the_label_assertion_other_files_cite_lands_on_it`).
+    # Local import: a module-level one shifts this file's line numbers, and four other files cite
+    # `tests/test_ci_runner_x64_install.py:236` by number (pinned by
+    # `test_the_label_assertion_other_files_cite_lands_on_it`; the fifth cites the test by symbol).
     import yaml
 
     wf_dir = REPO_ROOT / ".github" / "workflows"
@@ -6239,13 +6290,13 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
     """rc=0 on a target that never had a `.d` directory — and the teardown is not even INVOKED.
 
     ⛔ THE rc=0 IS NOT THE GUARD'S DOING, and this arm used to assert NOTHING ELSE: `sudo rm -f` on an
-    absent path exits 0 and the `rmdir` ENOENT is swallowed by the `2>/dev/null || true` already on
-    that line, so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old assertion GREEN — a
-    proven-green mutant. It pinned "uninstall exits 0", which was equally true before this PR, when
-    no drop-in code existed at all. What the guard actually buys is that a box with nothing of ours to
-    remove runs no `sudo` and no `rmdir`, so THAT is what is asserted here, and it is the thing that
-    reddens when the guard is deleted (mutant: drop the `[ -d ]` line ⇒ `sudo rm -f` and `sudo rmdir`
-    both run, `rmdir.log` appears, the arm reds while rc stays 0).
+    absent path exits 0 and NOTHING in the function lets the `rmdir` ENOENT become the status — the
+    terminal `return 0` decides it — so deleting `[ -d "$UNIT_DIR/$unit.d" ] || return 0` left the old
+    assertion GREEN, a proven-green mutant; and it stays GREEN with the `2>/dev/null || true` deleted
+    too (measured: `set -uo pipefail` carries no `-e`, so the `|| true` is not what decides it). It
+    pinned "uninstall exits 0", equally true before this PR when no drop-in code existed. What the
+    guard buys is that a box with nothing of ours to remove runs no `sudo` and no `rmdir`, so THAT is
+    asserted here (mutant: drop `[ -d ]` ⇒ both run, `rmdir.log` appears, the arm reds while rc is 0).
     """
     env = _uninstall_env(tmp_path)
     # `rmdir` stub: logs its argv and exits 1, exactly as the REAL one does on a missing directory.
@@ -6272,6 +6323,102 @@ def test_uninstall_on_a_target_with_no_dropin_directory_is_not_a_failure(tmp_pat
     ]
     assert not tried, (
         f"the teardown tried to remove a drop-in that cannot exist on this target: {tried}"
+    )
+
+
+def test_a_dropin_that_cannot_be_removed_is_an_operation_failure_not_a_clean_uninstall(
+    tmp_path: Path,
+):
+    """⛔ `remove_unit_dropin`'s FIRST `return 3` ARM IS LIVE CODE, AND NOTHING PINNED IT.
+
+    The comment above that function used to claim that nothing there makes rc=3 reachable. That is
+    true of the MISSING-`.d` path only — the function has four exit points, two of them `return 3` —
+    and both callers turn those into rc=3 (`remove_unit_dropin "$unit" || rc=3`). No arm asserted
+    either one, so a later fixer reading the blanket sentence could delete them as dead code, and a
+    drop-in that cannot be removed would report a CLEAN uninstall (rc=0) while
+    `10-restart-and-memory.conf` kept governing a future unit of the same name: fail-open on the
+    destructive path, against this file's own EXIT contract (`3 OPERATION failed — … a failed
+    systemd unit removal`).
+
+    Non-vacuity (measured, one mutant at a time, guard present throughout): delete the WHOLE
+    `|| { say "could not remove …"; return 3; }` clause on the `rm -f` line and this run still exits 3
+    — the survival re-check below catches the file — but only the survival warning prints, so the
+    `"could not remove"` assertion is the one that reds. Delete BOTH `return 3`s (the `say`s kept) and
+    it falls through to `return 0` with the drop-in still on disk, so the `rc == 3` assertion reds.
+    Deleting only the first `return 3` reds NOTHING — the survival re-check returns 3 anyway — which is
+    exactly why the assertion is on the warning TEXT and not only on the exit code.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+    # `sudo rm -f` on OUR drop-in fails the way a permission problem does; every other `sudo` argv
+    # (svc.sh, `rm -rf` of the runner dir) passes through to the real command.
+    _stub_tool(
+        tmp_path / "bin",
+        "sudo",
+        f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\n'
+        'case "$*" in *"rm -f"*10-restart-and-memory.conf*) exit 1 ;; esac\nexec "$@"',
+    )
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, (
+        "a drop-in that cannot be removed is an OPERATION failure (rc=3) — reporting 0 here tells "
+        f"the operator the box is clean while the drop-in still governs the unit: {r.returncode}: "
+        f"{r.stderr}"
+    )
+    assert ours.exists(), "the failing arm still left its file on disk, so it must survive and be reported"
+    out = r.stdout + r.stderr
+    assert "could not remove" in out and "10-restart-and-memory.conf" in out, (
+        f"the failure must say which file it could not remove: {out}"
+    )
+
+
+def test_a_dropin_that_survives_removal_is_an_operation_failure_not_a_clean_uninstall(
+    tmp_path: Path,
+):
+    """⛔ `remove_unit_dropin`'s SECOND `return 3` ARM — THE ONE THAT CATCHES A `rm` THAT LIED.
+
+    `sudo rm -f` can exit 0 and still leave the file (a stub-shaped `sudo`, a wrapper that swallows
+    the call, a read-only mount reported as success by a helper). The re-check `[ -e "$dropin" ]` is
+    the only thing that turns that into a report instead of a clean uninstall, and — like its sibling
+    above — no arm asserted it, so the blanket "nothing here makes rc=3 reachable" comment made it
+    look deletable.
+
+    Non-vacuity (measured): delete the `[ -e ] … return 3` line and this run exits 0 with the drop-in
+    still on disk.
+    """
+    env = _uninstall_env(tmp_path)
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    unit = _unit_for()
+    runner = _deregisterable(Path(env["CI_RUNNER_BASE"]))
+    _stub_tool(runner, "svc.sh", "exit 0")
+    (unit_dir / unit).write_text("[Unit]\nDescription=x\n")
+    ours = unit_dir / f"{unit}.d" / "10-restart-and-memory.conf"
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("[Service]\nRestart=on-failure\n")
+    # a `rm -f` that reports success and removes NOTHING — the exact shape the re-check exists for.
+    _stub_tool(
+        tmp_path / "bin",
+        "sudo",
+        f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\n'
+        'case "$*" in *"rm -f"*10-restart-and-memory.conf*) exit 0 ;; esac\nexec "$@"',
+    )
+
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, (
+        "a drop-in that SURVIVED its removal must be reported as an OPERATION failure (rc=3), not "
+        f"as a clean uninstall: {r.returncode}: {r.stderr}"
+    )
+    assert ours.exists(), "the fixture must leave the file in place — that is what the re-check sees"
+    out = r.stdout + r.stderr
+    assert "survived removal" in out and "10-restart-and-memory.conf" in out, (
+        f"the surviving drop-in must be named so the operator can remove it by hand: {out}"
     )
 
 
