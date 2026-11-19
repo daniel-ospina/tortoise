@@ -1382,7 +1382,7 @@ def _phrase_re(phrase: str) -> str:
     correct sentence (measured): `too small to  call a win` — one extra space,
     identical rendering — redded as though the verdict had vanished, and so would a
     reflow that left a DOUBLED SPACE at the line break (the abstract is pre-joined with
-    single spaces, `:1747`, so a PLAIN mid-line wrap was never a red — measured at
+    single spaces, `:1793`, so a PLAIN mid-line wrap was never a red — measured at
     `dc8b08bd^`. This sentence first claimed the plain wrap too, which the guard never
     covered; corrected here because an unmeasured claim inside a pin is exactly what
     this file exists to catch). A false red is as bad as a false
@@ -1402,7 +1402,8 @@ def _phrase_re(phrase: str) -> str:
 #: `n't` for `isn’t too small to call a win`, on the one clause with no adjacency second
 #: net. This is not a new rule: `tortoise/extractor_v2.py:7665` states the same shape
 #: (`_CLITIC_RE = r"n[^\w\s]{1,2}t$"`) with the same rationale, and
-#: `tests/test_never_across_fold_5080.py:410-428` pins 26 apostrophe codepoints for it.
+#: `tests/test_never_across_fold_5080.py:410-428` pins 25 apostrophe codepoints for it
+#: (26 parametrized cases — U+02BC is listed twice).
 #: ⛔ The separator class is `[^\sa-z0-9]` — not `[^\w\s]` — and the difference is
 #: measured, not stylistic: Unicode classifies 12 of the apostrophe codepoints this repo
 #: enumerates (U+02B9, U+02BB, U+02BD–U+02C1, U+02C8, U+02CA–U+02CC, U+02D0) as
