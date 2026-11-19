@@ -4868,7 +4868,7 @@ def _pytest_budget() -> int:
 
 def _bounded_probes(monkeypatch, *, object_db_answers: bool,
                     criteria: tuple[str, ...] = cvc.CRITERIA) -> Counter:
-    """Every bound ONE `check()` asks for, on the recorded 5/5-GREEN shape.
+    """Every bound ONE `check()` asks for, on an N-GREEN `criteria`-row shape.
 
     The shape is the worst one this gate can be handed at that cardinality: N
     GREEN rows with DISTINCT shas (the memos are per sha) and a run that
@@ -4914,8 +4914,7 @@ def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
     ⛔ Comparing ONE bound to the budget is what the first version of this pin
     did, and it passed with `BLOB_TIMEOUT=250` while five blob reads would have
     cost 1250 s (#13800 review round 3). pytest-timeout kills the TEST, so the
-    quantity that has to fit is the sum of the probes one `check()` makes, and
-    the ceiling is the 5/5-GREEN shape, where EVERY call site is reached.
+    quantity that has to fit is the sum of the probes one `check()` makes.
 
     ⛔ AND THE ROW COUNT IS NOT FIVE EITHER (#13800 review round 4): five is
     the required MINIMUM, not the ceiling — `RECOGNISED_CRITERIA` (11 ids) is
@@ -4938,14 +4937,14 @@ def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
     reds here with its own count instead of being recounted in a comment.
     """
     budget = _pytest_budget()
-    ceiling = _bounded_probes(monkeypatch, object_db_answers=True)
+    five_rows = _bounded_probes(monkeypatch, object_db_answers=True)
     # 1 work-tree probe (memoised) + 5 distinct row shas + 1 prereg sha (a
     # distinct key) + 5 `merge-base` (one per GREEN row) and the ONE blob read.
-    assert ceiling == Counter({cvc.GIT_TIMEOUT: 12, cvc.BLOB_TIMEOUT: 1}), (
+    assert five_rows == Counter({cvc.GIT_TIMEOUT: 12, cvc.BLOB_TIMEOUT: 1}), (
         "the enumerated call sites or their bounds changed — re-derive the "
-        "count in `GIT_TIMEOUT`'s comment, then this row", dict(ceiling))
-    assert sum(b * n for b, n in ceiling.items()) < budget, (
-        sum(b * n for b, n in ceiling.items()), dict(ceiling), budget)
+        "count in `GIT_TIMEOUT`'s comment, then this row", dict(five_rows))
+    assert sum(b * n for b, n in five_rows.items()) < budget, (
+        sum(b * n for b, n in five_rows.items()), dict(five_rows), budget)
 
     wedged = _bounded_probes(monkeypatch, object_db_answers=False)
     # A row sha that does not resolve SKIPS that row's ancestry probe, so the
