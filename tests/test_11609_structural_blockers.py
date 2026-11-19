@@ -245,8 +245,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     a site here and WAS one there, because `A` is `object`. That is a false BLOCK the
     PRE-`#13585` reader (`888eda1368^`) emits and this head does not — measured, and pinned so
     the element-wise reading cannot decay back into "ignore the target". It is NOT `origin/main`
-    that emits it: measured on this branch's base (`66ddcf305a`), `main` answers `[]` for the
-    same source too, because `#13585` had already replaced the target-skipping reader.
+    that emits it: measured on `66ddcf305a` (the base `#13628` was written against), `main`
+    answered `[]` for the same source too, because `#13585` had already replaced the
+    target-skipping reader there.
 
     ⛔ EVERY BINDING IS REPLAYED INTO THE BLOCK THAT OWNS IT, AND A CALL IS RESOLVED THROUGH THE
     WHOLE CHAIN (`#13585 review` P3). A FLAT replay cannot say which block a binding belongs to,
@@ -515,8 +516,10 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         and every name in the target was recorded `SHADOWED`. That lost the alias, so
         `A, b = A, object` … `A(app)` reported `[]` at the head while the PRE-`#13585` reader —
         which skipped every non-`Name` target and therefore never dropped the import binding —
-        reported the site. (Measured: `origin/main` at this branch's base answers `[]` too, so
-        naming `main` here would be FALSE — `#13585` had already removed that reader.) Same
+        reported the site. (Measured: `origin/main` answers `[3]` here — it reports the site by
+        PAIRING the value, not by ignoring the target, so `main` carries neither direction for
+        this row. The `[]` reading belongs to `66ddcf305a`, the base `#13628` was written
+        against, and naming `main` for it would be FALSE.) Same
         false PASS as the store arm, one level down: the pin's headline claim goes green over a
         module that really wires the adapter.
 
@@ -526,10 +529,14 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         right, `a, *b, c = (1, 2, 3, 4)` → `c` is `4`). That parenthesised arm is the only
         starred arm that PAIRS. A bare starred target also parses (`*a = [1]` is a `Starred`
         target on 3.12, not the `SyntaxError` an earlier cut of this docstring claimed —
-        measured FALSE) and it reaches the `return []` arm below, so it makes NO CLAIM: `*A, =
-        [object]` … `A(app)` therefore reports a site it should not. That is the DECLARED
-        over-read direction (a false BLOCK, never a false PASS) and it is recorded here so the
-        shape is a decision a reader can see rather than an untested accident.
+        measured FALSE); it is not a `Tuple`, so it falls past both branches here to the
+        `return []` arm below and makes NO CLAIM. The example below is a DIFFERENT AST shape that
+        lands in the same place: `*A, = [object]` parses as a ONE-ELEMENT `Tuple` holding a
+        `Starred`, so it takes the tuple arm, passes the arity guard (`1 >= 1 - 1`) and returns
+        an EMPTY pair list from `return pairs` without ever reaching the final arm. Neither shape
+        claims anything, so `*A, = [object]` … `A(app)` reports a site it should not. That is the
+        DECLARED over-read direction (a false BLOCK, never a false PASS) and it is recorded here
+        so the shape is a decision a reader can see rather than an untested accident.
 
         ⛔ AN UNPAIRABLE DESTRUCTURING MAKES NO CLAIM AT ALL (`return []`), rather than binding
         every name `SHADOWED`. The value is determinate at run time but unreadable here, so
@@ -551,8 +558,11 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
 
         The function row is the FALSE-PASS direction and it is a KNOWN residual, recorded here
         rather than claimed away: a `SHADOWED` there is also defensible (Python really does
-        rebind the name to an unreadable value), and settling it is not this PR's change. The
-        module row is what keeps the shape this PR closes reachable.
+        rebind the name to an unreadable value), and settling it is not this PR's change. It is
+        filed as `#13657` — `_resolve`'s bound-but-unvalued `SHADOWED` default, the two rows
+        above, and the latitude (`1330` destructuring assignments in `tortoise/`, `0` targeting
+        an adapter/module alias today). The module row is what keeps the shape this PR closes
+        reachable.
         """
         if isinstance(target, ast.Name):
             return [(target.id, value)]
@@ -1722,8 +1732,9 @@ def test_the_adapter_reading_is_not_spelling_blind():
     # and the mirror row below is the polar control: there too it reported a site, and that
     # report was wrong — `A` is `object`. Element-wise pairing answers both directions; ignoring
     # the target, which is what the pre-`#13585` reader did, answers neither. MEASURED, so the
-    # name is not a guess: on this branch's base (`origin/main` `66ddcf305a`) BOTH rows answer
-    # `[]`, i.e. `main` today carries the false PASS, not the false BLOCK.
+    # name is not a guess: at `66ddcf305a` (the base `#13628` was written against) BOTH rows
+    # answered `[]` — that tree carried the false PASS. `origin/main` today answers `[3]` for the
+    # first row and `[]` for the mirror, so `main` carries NEITHER direction for these shapes.
     assert _adapter_instantiation_sites(
         "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
         "A, b = A, object\n"
