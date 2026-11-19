@@ -72,16 +72,29 @@ def _restore_sentry_state():
 
 @pytest.fixture()
 def slow_init(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Replace ``sentry_sdk.init`` with a slow stub; return its call log."""
-    calls: dict = {"n": 0}
+    """Replace ``sentry_sdk.init`` with a slow stub; return its call log.
+
+    The log also counts SUBMISSIONS to the executor (``submits``), by wrapping
+    ``asyncio.to_thread`` with a delegating counter. That counter is what makes
+    the "does this arm pay a thread hand-off?" claims OBSERVABLE rather than
+    asserted in prose — #13665 review round 1, findings 3 and 4.
+    """
+    calls: dict = {"n": 0, "submits": 0}
 
     def _slow_init(*args, **kwargs):
         calls["n"] += 1
         time.sleep(STUB_SECONDS)
 
+    real_to_thread = asyncio.to_thread
+
+    def _counting_to_thread(fn, /, *args, **kwargs):
+        calls["submits"] += 1
+        return real_to_thread(fn, *args, **kwargs)
+
     import sentry_sdk
 
     monkeypatch.setattr(sentry_sdk, "init", _slow_init)
+    monkeypatch.setattr(asyncio, "to_thread", _counting_to_thread)
     monkeypatch.setenv("SENTRY_DSN", "https://public@example.invalid/1")
     return calls
 
@@ -157,11 +170,19 @@ def test_the_on_loop_control_is_starved(slow_init: dict) -> None:
     )
 
 
-def test_init_off_loop_is_idempotent(slow_init: dict) -> None:
-    """The async entry point is a THREADING change, not a second initialiser.
+def test_init_off_loop_is_idempotent_and_skips_the_hand_off(slow_init: dict) -> None:
+    """The async entry point's OWN fast path is load-bearing, and pinned here.
 
-    ``init()``'s contract — a second call while enabled is a no-op returning
-    ``True`` — must survive, or the lifespan's retry would re-run the slow init.
+    ⛔ THE FIRST VERSION OF THIS ARM WAS VACUOUS (#13665 review round 1, finding
+    4): it only asserted ``slow_init["n"] == 1`` across two calls, and that
+    number is delivered entirely by ``init()``'s PRE-EXISTING ``if _enabled:``
+    guard — so deleting ``init_off_loop``'s own guard left it green. Asserting
+    the SUBMISSION COUNT is what makes the new line reachable: the second call
+    must return without a second executor hand-off.
+
+    (The earlier docstring also credited the guard to "the lifespan's retry".
+    There is no retry — ``_lifespan`` is one ``try``/``await``. The real subject
+    is the fast path itself.)
     """
 
     async def _twice() -> tuple[bool, bool]:
@@ -169,29 +190,52 @@ def test_init_off_loop_is_idempotent(slow_init: dict) -> None:
 
     assert asyncio.run(_twice()) == (True, True)
     assert slow_init["n"] == 1, "the second call re-ran the SDK init"
+    assert slow_init["submits"] == 1, (
+        "the second call costs a second executor hand-off — delete "
+        "`init_off_loop`'s own `if _enabled:` fast path and this is the arm "
+        "that reds"
+    )
 
 
-def test_no_dsn_still_short_circuits_without_a_thread(
+def test_no_dsn_short_circuits_without_a_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No DSN → no SDK init and no worker thread, on either entry point.
+    """No DSN → no SDK init AND no executor submission.
 
-    This is the arm that keeps local SDK use, self-host and the test suite
-    entirely off the slow path: discovering "there is no DSN" must not cost a
-    thread hand-off.
+    ⛔ THE FIRST VERSION OF THIS ARM ASSERTED A PROPERTY THE CODE VIOLATED
+    (#13665 review round 1, finding 3). It claimed "no worker thread" while
+    ``init_off_loop`` submitted UNCONDITIONALLY and only discovered the missing
+    DSN *inside* ``init`` — on the worker. The assertion could not see a thread,
+    so it passed while its own name was false. The DSN gate now runs BEFORE the
+    hand-off, and ``submits`` is what pins that: it would catch the gate sliding
+    back inside ``init``.
+
+    This is the arm that keeps local SDK use, self-host and the test suite off
+    the slow path — by not paying for a thread they do not need.
     """
     monkeypatch.delenv("SENTRY_DSN", raising=False)
-    calls: dict = {"n": 0}
+    calls: dict = {"n": 0, "submits": 0}
 
     def _slow_init(*args, **kwargs):
         calls["n"] += 1
 
+    real_to_thread = asyncio.to_thread
+
+    def _counting_to_thread(fn, /, *args, **kwargs):
+        calls["submits"] += 1
+        return real_to_thread(fn, *args, **kwargs)
+
     import sentry_sdk
 
     monkeypatch.setattr(sentry_sdk, "init", _slow_init)
+    monkeypatch.setattr(asyncio, "to_thread", _counting_to_thread)
 
     assert asyncio.run(tsentry.init_off_loop()) is False
-    assert calls["n"] == 0
+    assert calls["n"] == 0, "the SDK init ran without a DSN"
+    assert calls["submits"] == 0, (
+        "discovering 'there is no DSN' cost a thread hand-off — the gate slid "
+        "back inside init(), i.e. onto the worker"
+    )
     assert tsentry.enabled() is False
 
 

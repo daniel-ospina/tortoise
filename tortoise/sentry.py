@@ -152,10 +152,30 @@ async def init_off_loop() -> bool:
     the cost itself small is a separate change (``auto_enabling_integrations``
     is a deliberate SDK default, and turning it off would silently drop
     integration coverage), and it is NOT taken here.
+
+    ⛔ THE DSN GATE IS ANSWERED BEFORE THE HAND-OFF (#13665 review round 1, P3).
+    A deployment with no ``SENTRY_DSN`` — local SDK use, self-host, every test
+    run — must not pay a thread submission to discover it is inert, so the gate
+    is checked HERE and again inside :func:`init`. Both calls read the SAME
+    helper (:func:`_dsn`), so the two cannot drift into disagreeing about what
+    "configured" means.
     """
     if _enabled:
         return True
+    if not _dsn():
+        return False
     return await asyncio.to_thread(init)
+
+
+def _dsn() -> str:
+    """The configured DSN, stripped, or ``""``. ONE resolution site.
+
+    Read by :func:`init_off_loop` (to decide whether a thread hand-off is worth
+    paying for) and by :func:`init` (to decide whether to arm the SDK). Two
+    inline ``os.environ.get(...).strip()`` calls would let the two answer
+    differently — the seam exists so "no DSN" has exactly one meaning.
+    """
+    return os.environ.get("SENTRY_DSN", "").strip()
 
 
 def init() -> bool:
@@ -173,7 +193,7 @@ def init() -> bool:
     global _enabled
     if _enabled:
         return True
-    dsn = os.environ.get("SENTRY_DSN", "").strip()
+    dsn = _dsn()
     if not dsn:
         _enabled = False
         return False
