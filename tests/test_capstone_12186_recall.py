@@ -237,13 +237,35 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
     #: has repaired twice (§5's DOOR paragraph, §4's second quotation of the mint
     #: rate). A heading that renamed the rule while the sentence kept it would also
     #: leave the table's own title contradicting its body.
-    text = README.read_text()
-    headings = [ln for ln in text.splitlines() if ln.startswith("### 3a.")]
+    #:
+    #: ⛔ ALNUM-BOUNDED, not `in` (round 29 F1). The first cut of this pin used a bare
+    #: substring and a fresh reviewer falsified it: `neardup-v1` is a PREFIX of
+    #: `neardup-v11`, so BOTH copies could be renamed to a version that exists nowhere
+    #: (`NEARDUP_RULE` and the artifact both stay `neardup-v1`) with the suite GREEN at
+    #: 56 passed — and the version this rule would drift to next is a multi-digit one,
+    #: which is exactly the blind spot. `_mentions` does not close it either: it is
+    #: digit-bounded and operates on `_flat`, which glues the next word onto the token
+    #: (`neardup-v1frozeninthetool`), so a letter boundary cannot be expressed there.
+    #: The names are therefore read from the RAW document, where backticks and
+    #: whitespace give the token real edges.
+    raw = README.read_text()
+    rule_shape = re.compile(
+        rf"(?<![0-9A-Za-z]){re.escape(cap.NEARDUP_RULE)}(?![0-9A-Za-z])")
+    #: …and EVERY spelling of the shape in the document is the rule, so a third copy
+    #: added elsewhere cannot carry a different version either.
+    spelled = set(re.findall(r"(?<![0-9A-Za-z])neardup-v[0-9A-Za-z]+", raw))
+    assert spelled == {cap.NEARDUP_RULE}, (
+        f"the record spells the near-duplicate rule {sorted(spelled)}, but the tool's "
+        f"rule is {cap.NEARDUP_RULE!r} — a name the tool does not carry is a rule "
+        f"nobody can re-derive §3a under")
+    headings = [ln for ln in raw.splitlines() if ln.startswith("### 3a.")]
     assert len(headings) == 1, headings
-    assert cap.NEARDUP_RULE in headings[0], (
+    assert rule_shape.search(headings[0]), (
         f"§3a's heading no longer names {cap.NEARDUP_RULE!r}: {headings[0]!r}")
-    assert cap.NEARDUP_RULE in paragraph, (
-        f"§3a's rule sentence no longer names {cap.NEARDUP_RULE!r}: {paragraph!r}")
+    blocks = [b for b in re.split(r"\n\s*\n", raw) if "frozen in the tool" in b]
+    assert len(blocks) == 1, f"expected one §3a rule block, got {len(blocks)}"
+    assert rule_shape.search(blocks[0]), (
+        f"§3a's rule sentence no longer names {cap.NEARDUP_RULE!r}: {blocks[0]!r}")
 
 
 
