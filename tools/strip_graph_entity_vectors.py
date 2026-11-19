@@ -1706,8 +1706,11 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     operand. ⛔ `dict.fromkeys(["embedding"], vec)` USED TO BE IN THIS RESIDUAL AND IS NOT
     ANY MORE (`#13788` F6, measured at `78cbe4da`): its operands are a KEY SEQUENCE and one
     value, both statically readable, so `_constructor_stores_the_vector` recognises it when
-    the key list is a literal containing the EXACT property name; a COMPUTED key sequence
-    (`dict.fromkeys(_keys(), vec)`) remains a residual, and the fixture pins it.
+    the key sequence is a LITERAL (list, tuple or set) containing the EXACT property name. A
+    COMPUTED key sequence remains a residual — `props |= dict.fromkeys(_keys(ev), vec)` is
+    the fixture that pins BOTH terms of that boundary: dropping the literal-container test,
+    or the exact-name test, makes that honest-stop row (and the identity-triple row beside
+    it) refuse, so neither narrowing is dead weight.
 
     ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
     helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
