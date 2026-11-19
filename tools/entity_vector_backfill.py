@@ -91,7 +91,10 @@ from the census's OWN graph leg (`entity_vector_parity_census.read_graph_vector_
 `RESULTSET_SIZE` truncation guard included) and the same `graph_only = keyed
 graph-only + unkeyed` definition, and a live measurement that disagrees with the
 plan's recorded numbers refuses with the delta. A backfill whose justification moved
-is not the backfill that was approved.
+is not the backfill that was approved. ⚠️ That definition is the census's as of
+`#13647`'s PREDECESSOR — `#13647` moved the census to a RENDERED-identity join plus a
+`render_collision` term, and this tool still joins on the RAW key; :func:`_measure_label`
+carries the exact boundary and what it costs.
 
 ⚠️ WHY IT IS THE CENSUS'S LEGS AND NOT `parity.census()` ITSELF. `:Point` is not in
 that function's population (see :data:`BACKFILLED`), so calling it with the five
@@ -893,6 +896,21 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     keys with a readable vector| + unkeyed`, and `record_vectors` is the count of rows
     whose GENERATED `embedding_vec` is present — `embedding IS NOT NULL` is NOT the
     parity test, because a payload the converter refuses answers no dense query.
+
+    ⚠️ THAT DEFINITION IS NOT CURRENTLY THE CENSUS'S, AND THE DIFFERENCE IS MEASURED
+    (`#13647` moved it under this tool). The census now joins on the RENDERED identity
+    (`graph["text"]`) plus a `render_collision` term, because the record's identity
+    column is TEXT; this tool joins on the RAW key, because the raw value is what the
+    `UPDATE … WHERE node_key = %s` it issues must match. On a NON-STRING graph identity
+    the two therefore disagree, and the tool is the side that over-reports: a node keyed
+    `id=123` against a record row holding `"123"` measures `graph_only=1` here and `0`
+    in the census, so the node is never `fillable` and its residual never clears. This is
+    STATED rather than silently half-fixed: adopting the census's rendered join alone
+    would not reconcile them either (it would double-count the collision excess against
+    the raw-key mismatch), and choosing which identity the WRITE path matches on is a
+    design decision, not a merge repair. Tracked as its own finding; the pin that
+    compares the two instruments is bounded to populations where the rendered and raw
+    forms coincide, and says so.
 
     The RECORD leg is :meth:`RecordDoor.targets`, the same read the write addresses
     (it is the only read that can tell this tool which rows are NULL). One pass per

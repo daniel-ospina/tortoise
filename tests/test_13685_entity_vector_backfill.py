@@ -1144,27 +1144,19 @@ def test_a_rotated_password_is_the_same_target_and_the_digest_is_not_an_oracle(s
     assert drifted.value.token == backfill.REFUSE_TARGET_DRIFT
 
 
-def test_the_unreachable_head_pin_names_the_ref_that_re_arms_it():
-    """⛔ A SKIP MUST NAME THE WAY BACK (review cycle 2, finding 4).
-
-    The `f07b73b1de` quartet is only carried by `fix/13494-rederive-search-cites` (an
-    UNMERGED sibling lane, no `refs/pull/*`), so the arm SKIPS on a fresh clone and in
-    CI's `fetch-depth: 1` checkout — and a skip whose message names no ref leaves the
-    four numbers with no reader anywhere, editable to anything. The skip message and
-    the document clause both name the re-arm route; this pin is what keeps them naming
-    it.
-    """
-    import pathlib
-    root = pathlib.Path(__file__).resolve().parent.parent
-    test_src = (root / "tests" / "test_7949_capstone_measure.py").read_text(encoding="utf-8")
-    doc = (root / "docs/epics/2026-11-04-7949-extractor-v4-capstone" / "05-verify.md"
-           ).read_text(encoding="utf-8")
-    assert "git fetch origin fix/13494-rederive-search-cites" in test_src, (
-        "the skip message no longer names the ref that carries f07b73b1de — the four "
-        "numbers it checks then have no reader on a fresh clone or in CI")
-    assert "fix/13494-rederive-search-cites" in doc, (
-        "05-verify.md's promote/dedup clause labels the quartet with a head no ref in "
-        "the default refspec carries, and no longer names the sibling ref that does")
+# ⛔ `test_the_unreachable_head_pin_names_the_ref_that_re_arms_it` STOOD HERE AND IS
+# DELETED, not weakened. It pinned ANOTHER epic's file — it asserted that
+# `tests/test_7949_capstone_measure.py`'s skip named `fix/13494-rederive-search-cites`
+# as the way back to the `f07b73b1de` quartet. It existed only because this branch
+# carried its own re-derivation of the `#7949` cites, and the merge with `origin/main`
+# resolved that duplication in main's favour (#13755 re-derived the same cites at main's
+# head and REMOVED that skip, because the numbers now resolve at a reachable head — so
+# there is no unreachable head left for a ref to re-arm). This branch no longer differs
+# from main on that file (`git diff --name-only origin/main --
+# tests/test_7949_capstone_measure.py` -> empty), so the pin had no subject left: keeping
+# it would have meant asserting a mechanism main deliberately retired, and re-anchoring
+# it to main's current way-back would duplicate an invariant `#7949`'s own suite owns
+# into `#13685`'s. Main's re-arm route is still named by main's own skips.
 
 
 def test_a_non_finite_element_is_counted_and_never_wedges_the_batch(stores):
@@ -1512,6 +1504,14 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     run's graph cost), so the equivalence is PINNED rather than assumed — the census's
     own record leg is monkeypatched to read the same fake door, and the two tables are
     compared field by field.
+
+    ⚠️ BOUNDED TO STRING IDENTITIES, on purpose and stated rather than left to the
+    fixture to imply: since `#13647` the census joins on the RENDERED identity and adds
+    a `render_collision` term, while this tool joins on the RAW key (see the ⚠️ in
+    `_measure_label`). On a string identity the two coincide, which is the population
+    this pin certifies. A NON-STRING key (`id=123` against a record row `"123"`) makes
+    the tool over-report `graph_only` by one — measured, tracked as its own finding — so
+    feeding one here would make this pin assert a reconciliation the code does not make.
     """
     graph, door = stores
     graph.add("Object", "obj-1")
@@ -1525,16 +1525,34 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     door.seed("event", "evt-1")
     door.seed("source", "https://example.test/a")
     door.seed("event", "evt-unreadable", vector=_vec(0.3), readable=False)
+    # ⛔ `evt-unreadable` is a GRAPH node as well as a record row, and that is load-
+    # bearing rather than decorative: the census's record leg is NARROWED to the graph's
+    # rendered identities (`#13647`), so a record row outside that population is
+    # invisible to it and would make this pin compare two DIFFERENT populations — the
+    # row-only shape it used to seed here would red on `record_unreadable_vector` (this
+    # tool 1, the census 0) for a reason that is a modelling error in the fixture, not a
+    # disagreement between the instruments. The unreadable population is seeded on both
+    # sides so the equality is a real one.
+    graph.add("Event", "evt-unreadable", _vec(0.3))
 
-    monkeypatch.setattr(
-        parity, "read_record_vector_keys",
-        lambda _dsn, _org, _graph, table: {
-            "keys": door.targets(table)["readable"],
-            "unreadable": len(door.targets(table)["rows"]
-                              - door.targets(table)["missing"]
-                              - door.targets(table)["readable"]),
-            "rows": len(door.targets(table)["rows"]),
-        })
+    # The census's record leg at ITS contract (#13647): the graph's RENDERED identities
+    # in, and the two AGGREGATE totals out — `record_only` is derived from
+    # `record_readable_total`, so a fake that omitted them would compare the four
+    # interesting fields against a `KeyError` rather than against a number.
+    def fake_record_leg(_dsn, _org, _graph, table, keys):
+        targets = door.targets(table)
+        wanted = {str(k) for k in keys}
+        readable = set(targets["readable"]) & wanted
+        with_payload = set(targets["rows"]) - set(targets["missing"])
+        return {
+            "readable": readable,
+            "unreadable": len((with_payload & wanted) - readable),
+            "record_readable_total": len(targets["readable"]),
+            "record_unreadable_total": len(with_payload),
+            "rows": len(set(targets["rows"]) & wanted),
+        }
+
+    monkeypatch.setattr(parity, "read_record_vector_keys", fake_record_leg)
 
     census = parity.census(g=graph, record_dsn="postgresql://x", org_id="org",
                            graph_id="graph")
@@ -1554,7 +1572,7 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     # `obj-1` and `obj-orphan` are BOTH graph-only (`graph_only` counts a graph node whose
     # record row answers no dense query — an unfilled row and an absent row alike).
     assert ours["Object"]["graph_only"] == 2
-    assert ours["Event"]["graph_only"] == 2  # evt-1 + the unkeyed node
+    assert ours["Event"]["graph_only"] == 3  # evt-1 + evt-unreadable + the unkeyed node
     assert ours["Event"]["record_unreadable_vector"] == 1
     assert ours["Subject"]["graph_only"] == 0
 
