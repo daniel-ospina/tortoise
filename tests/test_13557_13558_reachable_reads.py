@@ -178,22 +178,51 @@ SELECTED = [
     ("which commitments were withdrawn", "ended", "which_predicate"),
     ("which claims were archived", "ended", "which_predicate"),
     # A set question whose predicate IS the ending — the `which` shape with a
-    # plural-head noun that is one of ASKED-ABOUT records (`endpoints`), which is
-    # the same sentence as `which claims were archived`. Named in the round-5
-    # review's gap list as a row that should exist; it is a SELECTED row rather
-    # than a refusal because the question really does ask for the ended set.
-    # ⛔ THE ROUND-5 REVIEW LEFT THIS AS AN OPEN JUDGEMENT CALL FOR THE NEXT
-    # REVIEWER, AND THIS IS THE RULING (see `test_the_partitive_is_not_the_
-    # discriminator`). It stays SELECTED. The reviewer's objection was that
-    # `of our endpoints` is the only narrowing in the question and the population
-    # read cannot apply it — but that is true of `which claims were archived`
-    # too, where the wh-noun `claims` is equally unapplied, and that row is the
-    # capability's canonical Q6 spelling. Refusing the partitive would refuse
-    # both. What was actually wrong with this shape was the FREE WINDOW, not the
-    # partitive: the same window admitted `which vendor said our commitments
-    # were archived`. Bounding the window fixes the hijack and leaves every
-    # genuine set question working, which is the narrower change and the one the
-    # precision contract asks for.
+    # A set question whose predicate IS the ending — the `which` shape with a
+    # plural-head noun that is one of ASKED-ABOUT records (`endpoints`). ⛔ THE
+    # ROUND-5 REVIEW CLASSIFIED THIS STRING AS A `NOT_SELECTED` ROW AND THIS FILE
+    # DELIBERATELY DOES NOT, so the disagreement is recorded here rather than
+    # left for the next reader to rediscover (the review named it in its
+    # mutation-attribution gap: *"`which of our endpoints is deprecated` … a
+    # `NOT_SELECTED` entry waiting to be written"*, and left it as an open
+    # judgement call for the next reviewer). It stays SELECTED. Two reasons, and
+    # the second is the one that decides it:
+    #
+    #   1. The population read is not a state FILTER, it is the ended SET with
+    #      each row's own how-it-ended. `which claims were archived` is pinned
+    #      SELECTED above for exactly that reason, so `… are deprecated` cannot be
+    #      split off from it on the tense: `which <noun> ARE <participle>` and
+    #      `which <noun> WERE <participle>` are the same request — the present
+    #      form is the one a caller uses for a CURRENT terminal state, and the
+    #      relevance read HIDES terminal records, so refusing it would answer a
+    #      question about archived/deprecated rows with `0 rows`, i.e. restore
+    #      #13558's silent-empty defect for the present-tense spelling.
+    #   2. The discriminator that would separate this string from
+    #      `which claims were archived` is the NOUN's record-class status
+    #      (`endpoints` is not a graph kind, `claims` is), and a noun allow-list
+    #      is a noun→route assignment — the same sin as the noun→state assignment
+    #      #13128 refuses (*"a phrase is not a kind"*) and that this table's own
+    #      header refuses (*"the cue is a QUESTION SHAPE, never a noun-to-state
+    #      assignment"*). The review's suggested remedy therefore contradicts a
+    #      recorded decision of this change, so it is arguable only as a reopen,
+    #      not adoptable as a fix.
+    #
+    # ⛔ AND THE PARTITIVE IS NOT THE DISCRIMINATOR EITHER — the WINDOW was. The
+    # reviewer's remaining objection was that `of our endpoints` is the only
+    # narrowing in the question and the population read cannot apply it; that is
+    # equally true of the wh-noun `claims` in the row above. What was actually
+    # wrong with this shape was its bounded-FREE 30-character window, which on the
+    # pre-fix module admitted a whole subordinate clause (`which vendor said our
+    # commitments were archived`). Bounding the window to head-noun adjacency
+    # fixes the hijack and leaves every genuine set question working — the
+    # narrower change, and the one the precision contract asks for. See
+    # `test_the_partitive_is_not_the_discriminator`.
+    #
+    # The residual is stated rather than hidden: `which endpoints are deprecated`
+    # routes and returns the ended set, whose rows carry their own status word, so
+    # a caller reading it can tell a `deprecated` row from an `archived` one. What
+    # it does NOT do is apply `deprecated` as a filter — the same recall-as-
+    # population trade the other SELECTED rows make.
     ("which of our endpoints is deprecated", "ended", "which_predicate"),
     ("what did we archive last quarter", "ended", "do_support"),
     ("did we retire the onboarding flow", "ended", "do_support"),
@@ -336,6 +365,14 @@ NOT_SELECTED = [
     "have any claims been retracted in Q3",
     "have any of our bookings been cancelled by the venue",
     "has anything we promised been withdrawn by legal",
+    # …the same class on the `which` shape, which is the row the pre-fix detector
+    # also served (round-3 review, P1: *"`which claims were retracted by legal`
+    # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
+    # description now names this exact string as a relevance read
+    # (`mcp_server.py::tortoise_search`), and a promise in a tool description that
+    # no row reds on is a claim, not a contract.
+    "which claims were retracted by legal",
+    "which reports were superseded by the new one",
     # ── the THIRD-PARTY-CLAUSE and STATEMENT class on the NOUN shapes ───────
     # (round-5 review, P2) Ending at the noun was only half the rule: with no
     # subject guard the noun phrase matched inside somebody else's clause and

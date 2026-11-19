@@ -45789,6 +45789,26 @@ class TortoiseSDK:
         # naming the population themselves, and `include_terminal=True` is the
         # caller asking for the complete view — neither is overridden by a guess
         # about their words.
+        #
+        # OVERRIDES (#1745, recorded 2026-10-18 on #8487): this read-path lever
+        # ships DEFAULT ON, where #1745's fail-safe convention keeps a new lever
+        # OFF until a measured delta adopts it (`entity_key_expansion` and
+        # `time_aware` above follow that default). The measured delta is why a
+        # flag is the wrong shape HERE: #13557 and #13558 are defects of REACH on
+        # the DEFAULT call — `search('current commitments', object)` returned 0
+        # rows while the live plan sat in the graph, and the withdrawal sentence
+        # reached nothing — so a route that ships OFF leaves both issues
+        # unimplemented for the caller who filed them. The delta is on the record
+        # rather than assumed: the capstone scoreboard moved 3 right / 3 wrong at
+        # 9e9fc232 to 6 right / 0 wrong, Q1 and Q6 flipped and Q2–Q5 held. And
+        # the escape hatch needs no flag, which is the narrower departure rather
+        # than a wider one: the route fires only for a plain question, so any
+        # retrieval knob, `include_terminal=True` or an explicit `ended_scope=`
+        # keeps exactly the read that caller asked for — a caller who has never
+        # heard of a flag still gets their relevance read. Its correctness rests
+        # on the module's own PRECISION contract (`state_intent.py`: where a
+        # shape could go either way it does not fire), whose falsifier is the
+        # pinned `NOT_SELECTED` table rather than this comment.
         _scope_from_question: str | None = None
         _commitment_scope = False
         if (query is not None and not ended_scope and not include_terminal
