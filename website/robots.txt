@@ -4,9 +4,10 @@
 # `/blog`. `tortoise.premiselabs.co` is a permanent 301 onto those paths for the surfaces
 # this project owns (the product and legal pages, `/blog`, and the crawler surface it
 # serves below), so there is no second host to cross-submit to any more — this file
-# names the sitemaps of the host it is served from, and nothing else. The one company page
-# it does not own, `/contact`, still answers there as a 200; it carries its canonical on
-# THIS host, and `website_architecture.md` §6.5 records the residual (#11766).
+# names the sitemaps of the host it is served from, and nothing else. Every marketing page
+# on the retired host is a one-hop 301 onto this one, `/contact` included since #13636 — what
+# that host still answers itself is the `/404` document and the static assets both hosts
+# share, and `website_architecture.md` §6.5 records that residual (#11766).
 #
 # Each advertised sitemap is a document on THIS host and declares only URLs on it,
 # which is the Sitemaps protocol's same-site rule (a subdomain is the spec's own

@@ -1592,24 +1592,34 @@ _ALLOWED_ORIGINS = [
     "https://api.premiselabs.co",
     # #11767: KEEP, do not sweep. `tortoise.premiselabs.co` outlives the pages this
     # entry was added for: a tab opened against it before the cutover still
-    # preflights against it, and the host still ANSWERS for some paths — re-measured
-    # 2026-11-12 after #11763's map and #12031's host inversion shipped:
+    # preflights against it, and the host still ANSWERS for every path — re-measured
+    # 2026-11-12 after #11763's map and #12031's host inversion shipped, and again
+    # after #13636 moved the last page that was still served twice:
     #   `/`          -> 301 to https://premiselabs.co/tortoise
-    #   `/contact`   -> 200, serving `website/contact.html`, which carries a <script>
-    #   `/404`       -> 200 (no script); `/404.html` -> 308 to `/404`
-    # so the host is NOT "a scriptless 404 and nothing else". ⛔ An earlier revision
-    # of this comment claimed `website/404.html` was ALL this host still served, and
-    # made THAT the safety argument. It was false: `_middleware.ts`'s product-host
-    # block does not intercept `/contact`, and `website/_redirects` maps
-    # `/contact.html` host-agnostically, so `/contact` falls through and is served.
-    # A sweep reading the false version could satisfy its own condition (c) from a
-    # premise that was never true. The entry is safe to keep for a DIFFERENT and
-    # durable reason: this host serves only THIS repository's own static pages (no
-    # third-party content is hosted there), so the entry grants nothing to anyone
-    # else — it exists so a legacy tab's preflight is not refused.
+    #   `/contact`   -> 301 to https://premiselabs.co/contact (#13636)
+    #   `/404`       -> 200 text/html (scriptless); `/404.html` -> 308 to `/404`
+    # so the host is NOT "a scriptless 404 and nothing else": every marketing URL
+    # terminates on the company host, and what this host still answers itself is the
+    # 404 document plus the static assets BOTH hosts share. ⛔ An earlier revision of
+    # this comment claimed `website/404.html` was ALL this host still served, and
+    # made THAT the safety argument. It was FALSE — `_middleware.ts`'s product-host
+    # block did not intercept `/contact`, so that path fell straight through to
+    # `context.next()` and Pages served `website/contact.html`, a `<script>`-bearing
+    # page, from this host as well as from the company one. A sweep reading the false
+    # version could satisfy its own condition (c) from a premise that was never true.
+    # #13636 closed the ROUTING (that path is a one-hop 301 now, pinned
+    # behaviourally by `tests/test_middleware_host_consolidation.mjs`); what stays
+    # recorded here is the false ARGUMENT, because a sweep that re-derives it lands in
+    # the same trap.
+    # The entry is safe to keep for a DIFFERENT and durable reason: this host serves
+    # only THIS repository's own static pages (no third-party content is hosted
+    # there), so the entry grants nothing to anyone else — it exists so a legacy
+    # tab's preflight is not refused.
     # Removal trigger (all four MEASURED, not judgement): (a) #11763's redirect map
-    # covers every path that still answers 200 here (`/contact` is NOT covered
-    # today — reported on #11762); (b) >=30 days after children 1-3 are live;
+    # covers every marketing page that used to be served from this host, and
+    # `/contact` joined it in #13636 (pinned behaviourally, not by this comment);
+    # what a 200 still serves there is the 404 document and the assets the two hosts
+    # share, never a second copy of a page; (b) >=30 days after children 1-3 are live;
     # (c) a probe shows the host answers 200 `text/html` for NO path — not merely
     # that `website/404.html` is scriptless, which is why the old wording had to go;
     # (d) a production probe shows no request FROM that origin. Also note
