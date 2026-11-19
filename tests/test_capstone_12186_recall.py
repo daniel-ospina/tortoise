@@ -394,6 +394,42 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
             f"the committed artifact's `{arm}.door_note` is not the tool's current "
             f"note — the record would keep publishing the corrected-away sentence")
 
+    # ⛔ …and the README's OWN restatement of the same boundary, which was left
+    # unpinned by that fix and is the same defect one document over. §5 opens with a
+    # *frontier* claim of its own ("the measured call is the user door's VERB, not its
+    # ARGUMENTS") and prints both diverging defaults as checked facts; `limit=10` →
+    # `limit=20` in that paragraph stayed GREEN with every pin above unchanged
+    # (measured at this head). A corrected constant beside an unpinned restatement is
+    # exactly the claim/evidence split this file exists to close, so the paragraph is
+    # pinned clause-scoped, in the same DERIVED terms rather than hard-coded digits.
+    readme = README.read_text()
+    for marker in ("**First, the boundary on the door itself",
+                   "**Not a production census.**"):
+        assert marker in readme, (
+            f"README §5 must carry {marker!r} — it is the bound this paragraph is "
+            f"pinned against; if the section was reworded, re-point this check")
+    door_para = " ".join(readme[
+        readme.index("**First, the boundary on the door itself"):
+        readme.index("**Not a production census.**")].split())
+    assert f"entity_type='object'" in door_para, (
+        f"README §5 must state the `entity_type` the arms pass: {door_para!r}")
+    assert f"limit={cap.KMAX}" in door_para, (
+        f"README §5 must state the `limit` the arms pass ({cap.KMAX}): {door_para!r}")
+    assert f"default to `entity_type='{door_entity}'`" in door_para, (
+        f"README §5 must name the doors' real `entity_type` default "
+        f"({door_entity!r}) so the divergence is visible: {door_para!r}")
+    assert f"limit={door_limit}" in door_para, (
+        f"README §5 must name the doors' real `limit` default ({door_limit!r}) — "
+        f"the shipped window is that value, and a wrong one here re-publishes the "
+        f"falsehood as a checked fact: {door_para!r}")
+    assert f"shipped-window figure only for `k <= {door_limit}`" in door_para, (
+        f"README §5 must scope `recall@k` to the doors' own window "
+        f"(`k <= {door_limit}`), not to this instrument's `@{cap.KMAX}`: "
+        f"{door_para!r}")
+    assert "own defaults" not in door_para, (
+        "README §5 calls this fixture's arguments the tool's \"own defaults\" "
+        f"while diverging from {door_entity!r}/{door_limit!r}: {door_para!r}")
+
 
 def test_the_artifact_names_a_reachable_head_to_run_its_commands_against(artifact):
     """`code_head` is truthful but UNREACHABLE, so the record must name a stand-in.
@@ -525,6 +561,11 @@ def test_the_artifact_declares_the_edits_made_after_its_run(artifact):
     run output), which is why this is provenance and not a measurement defect; but a
     record that cannot say which of its blocks its own head emits is not re-derivable.
 
+    ⛔ `31bce52ddb` is the RUN head, and the rebase onto `origin/main` rewrote it, so
+    the `git show` above resolves on no ref of this branch. Run the identical command
+    against `318950c6e0` (this branch, byte-identical tool + `queries.json` blobs) —
+    the mapping is `artifact["code_head_note"]` and README §6 states it too.
+
     Declaring it is the fix that needs no re-run: the run's own builder writes
     `post_run_edits: []`, so a later run states "none" instead of omitting the
     question, and an edit is bound to the head it edits rather than to a free-text
@@ -537,7 +578,8 @@ def test_the_artifact_declares_the_edits_made_after_its_run(artifact):
     assert edits, (
         "no post-run edits are declared, but this record carries a `cleanup` block "
         "its `code_head` cannot emit (`git show "
-        "31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup` = 0). If you "
+        "318950c6e0:tools/capstone_12186_recall.py | grep -c cleanup` = 0 — use "
+        "318950c6e0, not the rebased-away run head; see `code_head_note`). If you "
         "re-ran the measurement and YOUR run emitted the block, then — like every "
         "other pin in this file — this is a claim about the committed record: re-cut "
         "it against the new artifact")
@@ -1052,6 +1094,28 @@ def _mentions(text: str, token: str) -> bool:
     return False
 
 
+def _negates(text: str, phrase: str) -> bool:
+    """`phrase` occurs in `text` behind a PRIVATIVE, i.e. the claim is inverted.
+
+    ⛔ A flattened token cannot see polarity, and that is not a hypothetical: `_flat`
+    deletes the spaces, so `is no longer visible on the write path` still CONTAINS
+    `visibleonthewritepath`, and `no longer too small to call a win` still CONTAINS
+    `toosmalltocallawin` — both measured GREEN through `_mentions` before this
+    helper existed. `not a decisive win` likewise contains the `else`-branch token.
+    So the SURFACE words are `_mentions`' business and the POLARITY is this
+    function's, matched on `_clause_raw`'s unflattened sentence where `\\b` survives.
+
+    The window is deliberately TIGHT (at most three words between the privative and
+    the phrase). A wider one false-reds: in the rerank clause the unrelated
+    `not visible to a user` sits ~24 words before `too small to call a win`, and a
+    loose `not .. phrase` match would red a correct sentence — a false red is as bad
+    as a false pass (see `_clause`'s docstring).
+    """
+    return re.search(
+        rf"\b(?:not|never|no\s+longer|no\s+more)\s+(?:\w+\s+){{0,3}}{phrase.replace(' ', r'\s+')}",
+        text) is not None
+
+
 def _assert_mentions(text: str, tokens, where: str) -> None:
     for token in tokens:
         assert _mentions(text, token), f"{where} omits {token!r}: {text!r}"
@@ -1470,6 +1534,22 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
          "toosmalltocallawin" if rerank["p"] >= 0.05 else "adecisivewin"),
         "the abstract's rerank clause")
 
+    #: ⛔ AND THE POLARITY (round 12), for the same reason as the `#12304` clause: the
+    #: significance JUDGEMENT is the claim here, and `no longer too small to call a
+    #: win` / `not a decisive win` both stay GREEN through a flattened token (measured).
+    #: The phrase is chosen by the artifact's own `p`, so the guard follows the
+    #: measurement instead of freezing today's verdict.
+    rerank_raw = _clause_raw(paragraph, "#12343").replace("*", "")
+    rerank_phrase = (r"too small to call a win" if rerank["p"] >= 0.05
+                     else r"a decisive win")
+    assert re.search(rf"\b{rerank_phrase}\b", rerank_raw), (
+        f"the abstract's rerank clause no longer states the significance verdict the "
+        f"artifact's p = {rerank['p']} implies ({rerank_phrase!r}): {rerank_raw!r}")
+    assert not _negates(rerank_raw, rerank_phrase), (
+        f"the abstract's rerank clause now NEGATES its significance verdict, which is "
+        f"the one claim the record makes about a p = {rerank['p']} result: "
+        f"{rerank_raw!r}")
+
     #: The three-lever summary sentence. Its counts are DECLARED here and tied to the
     #: §4 verdicts immediately below, so `one … is visible` -> `two … are visible`
     #: cannot pass while §4 still says one YES-user, one NO and one write-path.
@@ -1511,6 +1591,26 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
          #: `offbydefault`); its absence here was the gap, not its form.
          "visibleonthewritepath"),
         "the abstract's `#12304` clause")
+
+    #: ⛔ AND THE POLARITY (round 12). The flattened token above proves the words are
+    #: present; it cannot prove they are not NEGATED, because `_flat` deletes the
+    #: spaces that separate a privative from them. Measured GREEN before this:
+    #: `is visible on the **write path**` -> `is no longer visible on the **write
+    #: path**` (and `is not visible …`), which makes the record say the shipped
+    #: `#12304` fold does NOTHING while §4's `YES on the write path` row and the same
+    #: paragraph's `one is only visible on the write path` stay pinned — so the
+    #: contradiction is invisible. The RAW sentence is where `\b` survives, so the
+    #: verb phrase must be ADJACENT (`is\s+visible`, nothing between) and no privative
+    #: may LEAD it (`no longer is visible on the write path` is valid English and
+    #: would pass the adjacency check alone).
+    write_path_raw = _clause_raw(paragraph, "#12304").replace("*", "")
+    assert re.search(r"\bis visible\s+on the write path\b", write_path_raw), (
+        f"the abstract's `#12304` clause no longer states, ADJACENTLY, that the fold "
+        f"is visible on the write path — a privative or qualifier inserted between "
+        f"those words leaves the flattened token satisfied: {write_path_raw!r}")
+    assert not _negates(write_path_raw, r"is visible on the write path"), (
+        f"the abstract's `#12304` clause now NEGATES the write-path visibility, so the "
+        f"record claims the shipped fold does nothing: {write_path_raw!r}")
 
 
 def test_the_readme_refuses_the_cross_corpus_comparison_too(artifact):
