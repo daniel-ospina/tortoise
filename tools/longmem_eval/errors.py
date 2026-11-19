@@ -39,6 +39,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import logging
 from collections import Counter
 
+import redis.exceptions
+
 from tortoise.model_adapters import classify_llm_error
 from tortoise.retry import (  # noqa: F401  — re-exported for the eval harness
     WriteStageRetriesExhausted,
@@ -87,8 +89,10 @@ _SITES = ("reader", "judge", "ingest")
 #:
 #: ``retryable`` in a failure record answers exactly one question: *may a
 #: ``--retry-failed`` resume re-attempt this question?* It is derived from the
-#: entry's ``error_class`` through :func:`class_is_recoverable`, and from
-#: nothing else. It is deliberately NOT ``retryable_transient`` (the write-path
+#: entry's ``error_class`` through :func:`class_is_recoverable`, gated by ONE
+#: further condition — :func:`failure_is_recoverable` also requires that the
+#: exception be INFRA rather than a deterministic bug — and from nothing else.
+#: The class alone is deliberately NOT ``retryable_transient`` (the write-path
 #: predicate in ``tortoise/retry.py``), which answers a DIFFERENT question —
 #: *may THIS write be retried at THIS layer right now* — and returns False for
 #: error families that are recoverable at a higher layer (a replaced-graph /
@@ -99,6 +103,18 @@ _SITES = ("reader", "judge", "ingest")
 #: ``server:ResponseError`` graded ``ingest:retries_exhausted`` (recoverable)
 #: was written with ``retryable: false``, so the resume meant to pick it up
 #: skipped it — silently, because a skip is not an error.
+#:
+#: ⚠️ The class ALONE is not enough, and that is why the gate is a second
+#: function rather than this set read directly. ``eval_failure_class`` widens
+#: EVERY ``unknown``-class exception at ingest to ``retries_exhausted``
+#: (#1776), so a deterministic bug in our own extractor and a transient server
+#: refusal wear the SAME class. The plan pinning ``--retry-failed`` states the
+#: complement explicitly — "Deterministic extractor bugs (``retryable=False``)
+#: remain excluded — that is the guard against re-burning ~25 min on
+#: deterministic failures that also widen to ``retries_exhausted``"
+#: (``docs/plans/2026-08-27-1786-infra-resilience.md``, Task 2 Step 2). A
+#: class-only flag would drop that guard as collateral damage from fixing
+#: finding 1, so :func:`failure_is_recoverable` keeps it.
 #:
 #: ``transient`` / ``unknown`` cannot reach a persisted entry today
 #: (``eval_failure_class`` converts both to ``retries_exhausted``); they are
@@ -115,9 +131,56 @@ def class_is_recoverable(error_class: str | None) -> bool:
     structurally-fatal/parse ingest veto) is read as itself and is NOT
     recoverable. ``None``/empty → False (an entry with no class is never
     re-attempted — the resume gate rejects it on its own class check first).
+
+    This is the CLASS half of the answer only; the re-attempt decision is
+    :func:`failure_is_recoverable`.
     """
     cls = str(error_class or "").rsplit(":", 1)[-1].strip()
     return cls in RECOVERABLE_EVAL_CLASSES
+
+
+def infra_failure(exc: BaseException) -> bool:
+    """True iff ``exc`` is an INFRA failure rather than a deterministic bug.
+
+    The one signal ``error_class`` cannot carry (see the note on
+    :data:`RECOVERABLE_EVAL_CLASSES`): ``eval_failure_class`` widens both an
+    ``unknown``-class server refusal and an ``unknown``-class ``RuntimeError``
+    in our own extractor to ``<site>:retries_exhausted``. This answers the
+    other half — *would re-running the same question plausibly succeed?*
+
+    Deliberately narrow, because a false True costs two ~25-minute re-burns
+    per question while a false False costs a retained entry an operator can
+    see and hand-recover:
+
+    * ``retryable_transient(exc)`` — the write seam's own transport/provider
+      predicate (``tortoise/retry.py``); an extractor LLM transient
+      (``requests.Timeout``/``URLError``) is in scope by the plan's P2-2 pin.
+    * a ``redis.exceptions.RedisError`` — the server REFUSED, timed out, or
+      dropped the graph. That family is infra by construction (its ``repr``
+      drops ``args``, which is #8486 finding 2) and it is exactly the shape
+      finding 1 was about, so it may not be re-graded as a deterministic bug
+      just because both predicates said False.
+
+    Everything else — a ``TypeError``/``KeyError``/``RuntimeError`` from our
+    own code — is deterministic and stays excluded.
+    """
+    if retryable_transient(exc):
+        return True
+    return isinstance(exc, redis.exceptions.RedisError)
+
+
+def failure_is_recoverable(exc: BaseException, *,
+                           error_class: str | None) -> bool:
+    """The persisted ``retryable`` flag: recoverable class AND infra failure.
+
+    Both conditions are required and they answer different questions, which is
+    why a failure record must not carry either alone (that is #8486 finding 1,
+    the flag and the class contradicting each other): ``error_class`` says
+    *where in the taxonomy this landed* (and hence whether the tier admits
+    re-attempts at all), ``infra_failure`` says *whether the blame is the
+    environment or our code*.
+    """
+    return class_is_recoverable(error_class) and infra_failure(exc)
 
 # ── #1786/#1806 retry budget constants (results-relevant knobs) ────────────
 #: Write-stage retry count (R1): a transient redis TimeoutError/ConnectionError
@@ -146,8 +209,12 @@ INGEST_QUESTION_RETRIES = 1
 #: numbers, three wrong readings. Counting attempts MADE is the honest reading
 #: of a field named ``attempts``, and it is what an operator needs to tell a
 #: 12-minute ingest that failed once from one that failed three times. The cap
-#: is +1 (2 → 3) so the SAME recovery surface is preserved: initial + R2 + ONE
-#: resume, and one resume after a plain initial failure. A resumed checkpoint
+#: is +1 (2 → 3) so the SAME worst-case recovery surface is preserved —
+#: TWO resumes either way, ~2 × ~25 min: a question that exhausted the
+#: write-stage retries and its in-run R2 (attempts 2) gets one resume (3),
+#: and a plain initial failure (attempts 1) gets two (2, then 3). ⚠️ Say TWO
+#: for the plain path, not one: the gate admits while ``attempts < 3``.
+#: A resumed checkpoint
 #: written under the old accounting is refused by the fingerprint (the value
 #: rides ``resume_attempts_cap``), which is the correct outcome — its
 #: ``attempts`` numbers would be read two ways.

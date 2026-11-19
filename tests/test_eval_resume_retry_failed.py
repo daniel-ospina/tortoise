@@ -552,7 +552,12 @@ def test_resume_fails_at_judge_class_preserved_at_cap(tmp_path, monkeypatch):
     entry = saved["failures"][0]
     assert entry["attempts"] == 3
     assert entry["error_class"] == "ingest:retries_exhausted"  # preserved
-    assert entry["retryable"] is True  # reflects the live judge transient
+    assert entry["retryable"] is True  # follows the PRESERVED class + an infra exception
+    # `retryable` is derived from the entry's STORED `error_class` (preserved
+    # as ingest:retries_exhausted above) gated by `infra_failure` — NOT from
+    # this live judge exception. The live `requests.Timeout` happens to be
+    # infra too, so the assertion would still pass if the class regressed;
+    # #8486 F1.
     # live inner repr (requests.Timeout reprs as Timeout(...) — the class
     # name, not TimeoutError; P1-5 documents this is why the structured
     # retryable field is authoritative for new entries)

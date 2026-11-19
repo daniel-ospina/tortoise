@@ -21,14 +21,16 @@ needs to be able to ask this question): the haystack is SYNTHETIC. Its size is
 calibrated to the real split by the one number the repo has measured —
 ``haystack_overlap``'s census that the 500-Q S split emits **371,095 encode
 units** (turn leg 246,750 + chunk leg 124,345), i.e. **742 points per
-question**, which is what the default 500-turn × 2-turn-chunk shape here
-produces (500 turns + 250 chunks).
+question** — 371,095 / 500 = 742.19. The synthetic shape below is built to
+that TARGET; the headline ladder's last rung (500 turns + 250 chunks) builds
+**750** points, 1.1 % over it, and the module reports the shape it actually
+built so the two are never conflated.
 
 Usage::
 
-    uv run python -m tools.longmem_eval.ingest_profile            # docker lane
-    uv run python -m tools.longmem_eval.ingest_profile --db-of-lane
+    uv run python -m tools.longmem_eval.ingest_profile            # embedded tempdir graph
     uv run python -m tools.longmem_eval.ingest_profile --json
+    uv run python -m tools.longmem_eval.ingest_profile --db docker://:falkordb@localhost:6379/tortoise
 
 The embed term needs the pinned embedder (``uv sync --extra embeddings`` and
 the cached bge-small weights). Without it the profile still runs and says so:
@@ -67,8 +69,11 @@ from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 
 #: Points per question on the real 500-Q S split (``haystack_overlap``'s
 #: census: 371,095 encode units / 500 questions) — the calibration target the
-#: synthetic shape below is built to hit.
-DATASET_POINTS_PER_QUESTION = 741
+#: synthetic shape below is built to hit. 371,095 encode units / 500 questions
+#: = 742.19; the headline rung builds 750 (500 turns + 250 chunks), which is
+#: the shape actually profiled — the module reports it rather than asserting
+#: the target.
+DATASET_POINTS_PER_QUESTION = 742
 
 #: Turn length (chars) for the synthetic haystack. LongMemEval-S is ~115k
 #: tokens over ~500 turns, i.e. ~230 tokens/turn ≈ 900 chars — the value the
@@ -79,7 +84,8 @@ HEADLINE_TURN_CHARS = 900
 SHORT_TURN_CHARS = 200
 
 #: The scaling ladder: (sessions, turns-per-session). The last is the real
-#: per-question shape (25 × 20 = 500 turns → 742 points at chunk_turns=2).
+#: per-question shape (25 × 20 = 500 turns → 750 points at chunk_turns=2,
+#: against the 742 the dataset averages — see DATASET_POINTS_PER_QUESTION).
 SCALING_SHAPES = ((1, 4), (5, 20), (10, 20), (25, 20))
 
 
@@ -119,7 +125,13 @@ def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
     embedded tempdir)."""
     if db_uri:
         prev = os.environ.get("TORTOISE_DB_URI")
-        os.environ.setdefault("TORTOISE_DB_URI", db_uri)
+        # ASSIGN, not setdefault: an already-exported TORTOISE_DB_URI would
+        # otherwise win over the --db the operator named, so the measurement
+        # (and the five throwaway graphs it leaves) would land on a DIFFERENT
+        # server than the one asked for while report["db"] still said True.
+        # That is the likeliest state on a smoke lane — tools/test_lane.py
+        # exports exactly this variable.
+        os.environ["TORTOISE_DB_URI"] = db_uri
 
         def _cleanup():
             if prev is None:

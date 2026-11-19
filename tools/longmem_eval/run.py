@@ -123,8 +123,8 @@ from .errors import (
     INGEST_WRITE_RETRIES,
     RESUME_ATTEMPTS_CAP,
     WriteStageRetriesExhausted,
-    class_is_recoverable,
     eval_failure_class,
+    failure_is_recoverable,
     fatal_census,
     retryable_transient,
 )
@@ -1452,16 +1452,25 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     #8486 F1 — the record must not contradict itself. ``retryable`` answers
     one question: "may a ``--retry-failed`` resume re-attempt this question?"
     It is therefore derived from the entry's OWN ``error_class`` via
-    :func:`errors.class_is_recoverable` — never from ``retryable_transient``.
-    That predicate answers a DIFFERENT question ("may this WRITE be retried at
-    THIS layer now") and returns False for families that are recoverable at a
-    higher layer: a ``ResponseError('graph was deleted or replaced…')`` is
-    retried by ``retryable_aborted_write`` at the SDK write seam and must not
-    be retried again out here (``tortoise/retry.py``'s docstring), yet the
-    question it failed on IS recoverable. Borrowing it here wrote
-    ``error_class=ingest:retries_exhausted`` (recoverable) with
+    :func:`errors.failure_is_recoverable` — never from ``retryable_transient``
+    ALONE. That predicate answers a DIFFERENT question ("may this WRITE be
+    retried at THIS layer now") and returns False for families that are
+    recoverable at a higher layer: a ``ResponseError('graph was deleted or
+    replaced…')`` is retried by ``retryable_aborted_write`` at the SDK write
+    seam and must not be retried again out here (``tortoise/retry.py``'s
+    docstring), yet the question it failed on IS recoverable. Borrowing it
+    here wrote ``error_class=ingest:retries_exhausted`` (recoverable) with
     ``retryable: false`` in the 10-question smoke, and the resume silently
     skipped the failure it exists to pick up.
+
+    ⚠️ The class is necessary but not sufficient. ``eval_failure_class``
+    widens every ``unknown``-class exception at ingest to
+    ``ingest:retries_exhausted``, so a deterministic bug in our own extractor
+    wears the same class as a refused query; ``failure_is_recoverable`` takes
+    the second condition (``errors.infra_failure``) so fixing this finding does
+    not quietly drop the plan's pinned exclusion of deterministic bugs
+    (``docs/plans/2026-08-27-1786-infra-resilience.md``, Task 2 Step 2) and
+    re-burn ~25 min twice over on them.
 
     #8486 F2 — ``error`` is ``repr(exc)``, and ``redis.exceptions.RedisError``
     overrides ``__repr__`` to ``f"{self.error_type.value}:{type(self).__name__}"``
@@ -1474,7 +1483,7 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     error_class = eval_failure_class(exc, site=stage)
     if prior and prior.get("error_class") == "ingest:retries_exhausted":
         error_class = "ingest:retries_exhausted"
-    retryable = class_is_recoverable(error_class)
+    retryable = failure_is_recoverable(exc, error_class=error_class)
     err = repr(exc)
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
@@ -7718,8 +7727,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "ingest:retries_exhausted failure entries with "
                         "retryable=true (or a legacy transport repr) and "
                         f"attempts < {RESUME_ATTEMPTS_CAP}; attempts are "
-                        "bounded across resumes (the in-run whole-question "
-                        "retry counts as the first); on success the failure "
+                        "bounded across resumes (the initial attempt is 1, "
+                        "the in-run whole-question retry makes it 2); on "
+                        "success the failure "
                         "entry is removed in one flocked write and the report "
                         "grades the qid clean. NOT fingerprinted (a recorded "
                         "resume-mode — the revalidation protocol sets it); "

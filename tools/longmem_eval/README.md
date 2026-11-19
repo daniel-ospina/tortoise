@@ -834,7 +834,9 @@ escalation ladder is affordable. `tools/longmem_eval/ingest_profile.py` answers
 where it goes, without downloading the dataset (it builds a LongMemEval-SHAPED
 synthetic haystack calibrated to the one measured scale constant — the
 `haystack_overlap` census of **371,095 encode units / 500 questions ≈ 742
-points per question**, i.e. ~500 turns + ~250 two-turn raw chunks):
+points per question** = 742.19, built here as ~500 turns + ~250 two-turn raw
+chunks, which is **750** points — 1.1 % over the target, and the table below
+reports the shape actually built rather than the target):
 
 ```bash
 uv run python -m tools.longmem_eval.ingest_profile --db docker://:falkordb@localhost:6379/tortoise
@@ -851,8 +853,15 @@ Measured (private lane, idle box, CPU embedder = the pinned bge-small):
 
 + **It is per-question work, not a fixed setup cost.** The fixed per-question
   setup (SDK construct + fresh graph + first touch) is **0.04–0.11 s**, i.e.
-  ~0.03 % of the question's ingest; the marginal cost is a flat **0.211 s per
-  point** at every size, so the cost is proportional to (turns + chunks).
+  ~0.03 % of the question's ingest at the real size; the marginal cost is a
+  flat **0.211–0.214 s per point** from 150 points up, so the cost is
+  proportional to (turns + chunks). ⚠️ Not flat at EVERY size: the 6-point
+  rung measures **0.374 s/point**, 77 % above the plateau — at that size the
+  fixed setup is still a third of the run, which is the point of the row
+  (extrapolating from the smallest rung would over-state the real cost).
+  The calibration target is **742** points/question (371,095 encode units /
+  500 questions = 742.19); the headline rung builds **750** (500 turns + 250
+  chunks), 1.1 % over it, and the table reports the shape actually built.
 + **The dominant term is the write-time embed: 141.7 s of a 182.8 s run
   (77.5 %)**, from **776 single-text `encode_for_store` calls** (one per point,
   plus events) in `cProfile` (`tools/longmem_eval/ingest_profile.py`). The

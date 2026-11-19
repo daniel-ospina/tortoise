@@ -79,15 +79,56 @@ def test_retryable_agrees_with_the_graded_class(label, exc, site,
     """⛔ THE FALSIFIER for finding 1: a recoverable class recorded with
     ``retryable: false`` — or a non-recoverable class recorded ``true`` —
     fails this test. Both halves matter: the flag must be a FUNCTION of the
-    class, so neither direction may drift."""
+    class (and of the one infra/determinism gate that the class cannot carry),
+    so neither direction may drift.
+
+    The expectation is computed by ``failure_is_recoverable``, NOT by
+    ``class_is_recoverable`` alone: ``eval_failure_class`` widens every
+    ``unknown``-class exception at ingest to ``ingest:retries_exhausted``, so
+    a deterministic ``RuntimeError`` and a refused query wear the same class.
+    ``test_a_deterministic_bug_stays_excluded`` is the row that pins which way
+    that must fall.
+    """
     entry = _entry(exc, stage=site)
     assert entry["error_class"] == expected_class
-    assert entry["retryable"] is lme_errors.class_is_recoverable(
-        expected_class), (
+    assert entry["retryable"] is lme_errors.failure_is_recoverable(
+        exc, error_class=expected_class), (
         f"{label}: error_class={entry['error_class']!r} recorded "
         f"retryable={entry['retryable']!r} — class and flag must agree, or a "
         f"--retry-failed resume skips (or over-retries) the failure"
     )
+
+
+def test_a_deterministic_bug_stays_excluded():
+    """The plan's pinned guard, kept alive by the fix rather than dropped as
+    collateral damage.
+
+    ``docs/plans/2026-08-27-1786-infra-resilience.md`` (Task 2 Step 2):
+    "Deterministic extractor bugs (``retryable=False``) remain excluded — that
+    is the guard against re-burning ~25 min on deterministic failures that
+    also widen to ``retries_exhausted``".
+
+    The class cannot express that distinction (both widen to the same key), so
+    the flag carries it: a ``RuntimeError`` from our own extractor is NOT
+    infra, and must not be re-attempted — while the redis refusal that finding
+    1 was about must be. Without this pin, deriving ``retryable`` from the
+    class alone would silently re-admit deterministic bugs at 2 × ~25 min
+    each.
+    """
+    deterministic = RuntimeError("extractor bug: unparseable turn")
+    assert lme_errors.eval_failure_class(deterministic, site="ingest") == (
+        "ingest:retries_exhausted")  # ...the SAME class as SMOKE_EXC
+    assert lme_errors.class_is_recoverable("ingest:retries_exhausted") is True
+
+    entry = _entry(deterministic)
+    assert entry["retryable"] is False, (
+        "a deterministic extractor bug must not be re-attempted — re-running "
+        "the same code reproduces it and costs ~25 min per attempt")
+    assert runner._retry_failed_skip_reason(entry) is not None, (
+        "the resume gate must EXCLUDE it, visibly, not skip it silently")
+
+    # ...and the smoke's own failure is the contrast: same class, admitted.
+    assert _entry(SMOKE_EXC)["retryable"] is True
 
 
 def test_the_smoke_record_is_now_coherent():
