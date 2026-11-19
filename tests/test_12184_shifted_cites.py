@@ -121,12 +121,15 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (it is `scored.append({`), nor on `origin/main` as it stood when this pin was written,
+    # head (it is a BLANK line here; `scored.append({` is at `:57284` — itself `57090 + 194`,
+    # `#13833`'s insert — and at `8bdd34c631` line `57090` did hold `scored.append({`), nor on
+    # `origin/main` as it stood when this pin was written,
     # where the statement was `:57423` (the `#13550` / `#13584`
     # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
     # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
-    # NOT that head's), `57276 + 147 = 57423` is the head this pin was written at, and
+    # NOT that head's), `57276 + 147 = 57423` is `8bdd34c631` (the head this pin ROW was written
+    # at), and
     # `57423 + 194 = 57617` is THIS head — `#13833` (`1231060fd2`) adds 198 and removes 4 lines of
     # `tortoise/sdk.py` above the statement, so the rebase onto it RE-DERIVES this cite rather than
     # carrying it. Measured per
@@ -142,8 +145,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
     # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
-    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
-    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved `+341` since
+    # `f07b73b1de`'s `57276` (`+194` since `8bdd34c631`'s `57423`, the head the pin row was written
+    # at), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
     (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
