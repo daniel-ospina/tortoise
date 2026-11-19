@@ -1416,6 +1416,16 @@ def test_a_read_from_another_thread_is_not_attributed_to_label_hits(monkeypatch)
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
     )
+    #: `everything` carries the frame NAME as well as the path, and that half is
+    #: asserted here rather than merely collected: the attribution is only right
+    #: if the foreign read is attributed to the frame that MADE it, not to
+    #: `_label_hits` by a rule that merely happens to exclude it.
+    assert {name for p, name in everything if p == foreign} == {"_probe"}, (
+        "the recorder attributed the other thread's read to "
+        f"{[name for p, name in everything if p == foreign]} instead of the frame "
+        "that made it — the `everything` payload is what makes that visible, and "
+        "nothing else reads it"
+    )
 
     assert scoped, (
         "`_label_hits` read no file from its own frame, so the recorder is "
@@ -1488,6 +1498,15 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
     )
+    #: The frame NAME half of `everything` is asserted, not just collected: the
+    #: read must be attributed to `_an_ambient_read`, the frame that made it. A
+    #: rule that excluded it for any other reason (a path filter, a thread check)
+    #: would satisfy the exclusion below while mis-naming what made the read.
+    assert {name for p, name in everything if p == ambient} == {"_an_ambient_read"}, (
+        "the recorder attributed the same-thread read to "
+        f"{[name for p, name in everything if p == ambient]} instead of the frame "
+        "that made it"
+    )
     assert read, (
         "`_label_hits` read no file from its own frame, so the recorder is "
         "blind and the exclusion below proves nothing"
@@ -1504,7 +1523,7 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     )
 
 
-def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> None:
+def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_path: Path) -> None:
     """Non-vacuity for the frame attribution, which the population control cannot see.
 
     Attributing reads to one frame is a way to make the population control
@@ -1517,17 +1536,38 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
     for a `_label_hits` that had wandered off it.
 
     This is the missing direction: a file outside the index that `_label_hits`
-    READS ITSELF is still recorded and still reported as drift. The read is
+    READS ITSELF is still recorded and still reported as drift. The reads are
     driven through `_label_hits`'s own frame (the population it walks is widened
     for the duration of the recording) rather than staged beside it, because a
     staged read is now — correctly — not `_label_hits`'s and would pin nothing
     about the guard against a `_label_hits` that wandered off its population.
+
+    ⛔ TWO stales, one INSIDE the checkout and one OUTSIDE it, because a filter is
+    only innocent if you know what it drops. An in-checkout stray alone is
+    defeated by the most natural wrong reading of the CI red this whole change
+    answers — "the reaper reads `/proc`, so bound the read to the checkout" —
+    which is `self.is_relative_to(REPO)`: it keeps the in-checkout stray and
+    drops every `/proc/<pid>/stat` read, i.e. exactly the class #13699 is. That
+    mutant passed 48/48 before the out-of-checkout stale existed. Frame
+    attribution keeps both; a containment filter keeps one and REDS here.
     """
-    stray = REPO / "tests" / "test_substrate_map.py"
+    inside_checkout = REPO / "tests" / "test_substrate_map.py"
+    #: A REAL file outside the checkout, so the read succeeds and the read the arm
+    #: stages is the read `_label_hits` performs — a nonexistent path would be
+    #: recorded by the spy but `_label_hits` would raise its `OSError` state error
+    #: on the way out, and the assertion this arm exists to make would never run.
+    outside_checkout = tmp_path / "an-untracked-out-of-checkout-read.txt"
+    outside_checkout.write_text(
+        "read by `_label_hits` through the widened population\n", encoding="utf-8"
+    )
     real_population = _tracked_files_under
-    assert stray not in real_population(_TRACKED_DIR), (
+    assert inside_checkout not in real_population(_TRACKED_DIR), (
         "the fixture file is already in the tracked population, so it cannot "
         "stand in for a read that has wandered off it"
+    )
+    assert not outside_checkout.is_relative_to(REPO), (
+        "the out-of-checkout stale is inside the checkout, so it cannot pin the "
+        "containment-filter direction this arm exists for"
     )
 
     def _widened(rel: str) -> list[Path]:
@@ -1535,15 +1575,15 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
         #: widening were unconditional, it would also be visible to the RECORDER —
         #: so a recorder that derived its own view of the population
         #: (`if self in set(_tracked_files_under(_TRACKED_DIR)): read.append(self)`,
-        #: or the same set precomputed beside the spy) would count `stray` as
-        #: tracked, record it, and pass this arm while silently dropping exactly
+        #: or the same set precomputed beside the spy) would count the stales as
+        #: tracked, record them, and pass this arm while silently dropping exactly
         #: the reads the arm exists to make visible. Measured before this scoping:
-        #: that mutant passed 48/48. Scoped by FRAME, `_label_hits` sees `stray`
-        #: (so it really reads it) and a population-filtering recorder does not
-        #: (so it drops it and this arm REDS).
+        #: that mutant passed 48/48. Scoped by FRAME, `_label_hits` sees both
+        #: stales (so it really reads them) and a population-filtering recorder
+        #: does not (so it drops them and this arm REDS).
         if sys._getframe(1).f_code is not _LABEL_HITS_CODE:
             return real_population(rel)
-        return [*real_population(rel), stray]
+        return [*real_population(rel), inside_checkout, outside_checkout]
 
     #: Patch the NAME `_label_hits` resolves, for the recording only: the read of
     #: `stray` must come from `_label_hits`'s own frame, or the attribution rule
@@ -1553,7 +1593,7 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch) -> Non
         read = _label_hits_reads(monkeypatch)
 
     drifted = _population_drift(read)
-    assert drifted == [stray], drifted
+    assert drifted == sorted({inside_checkout, outside_checkout}), drifted
 
 
 def test_an_index_git_that_cannot_answer_is_a_state_error_not_an_empty_population(
