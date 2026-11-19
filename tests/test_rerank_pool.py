@@ -1528,6 +1528,23 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # measures the rerank itself
         "tools/candidate_recall_11901.py": frozenset({"run", "window"}),
         "tools/rerank_calibration_12297.py": frozenset({"run"}),
+        # ⛔ A MIRROR of the shipped USER door, which keeps the lever ON: the arms pass the
+        # door's OWN arguments (no `_rerank_candidates` kwarg at all, because the MCP tool and
+        # `GET /v1/search` pass none either) and the shipped/armed split is decided by the
+        # `TORTOISE_FUSED_RERANK` env gate ONE FLAG apart (`user_search` vs
+        # `user_search_rerank`). Its whole subject is what the lever does to recall@k, so
+        # opting it out would measure a reader neither door runs — the same reason
+        # `tools/window_quality_m2.py` is on this list rather than opted out. The comment at
+        # its `_query_rows` states the argument as the SHIPPED CALL SHAPE, not as a value.
+        # `tortoise_fts_query` is the TRACING WRAPPER the capture prior goes through: it
+        # forwards its caller's kwargs and adds only `leg_trace`, so injecting an opt-out
+        # there would make the wrapper measure a different read than `_fts_rows` performs.
+        # ⛔ ITS ENTRY IS 47 LINES DOWN, not here: the merge of `origin/main` brought this
+        # registration and this branch carried its own for the same key, so a bare union
+        # would have been two dict keys with the same literal (ruff F601, and the second
+        # silently wins). The surviving entry is the branch's — it is main's pair PLUS `run`,
+        # whose warm-up argument is recorded there — and these lines keep main's rationale
+        # for registering the file at all.
         # ⛔ A MIRROR of `extractor_v2._fts_rows`, which keeps the rerank ON
         # DELIBERATELY: `sdk.py`'s `_rerank_candidates` docstring records the
         # departure verbatim — "the capture path (`extractor_v2._fts_rows`)

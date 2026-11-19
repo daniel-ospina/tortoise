@@ -469,6 +469,62 @@ def test_both_spellings_reach_the_same_classifier_on_a_real_scan(tmp_path: Path)
     )
 
 
+def test_a_pointer_at_a_whole_FILE_is_not_scanned_as_a_symbol(tmp_path: Path) -> None:
+    """A file pointer whose extension the static list has not been taught yet.
+
+    NON-VACUITY: on the pre-fix guard `_NOT_A_SYMBOL` held seven extensions and no
+    `.mjs`, so `tests/test_middleware_host_consolidation.mjs` — a real pointer in
+    `tortoise/hosted_api.py`, unchanged from `main` — was returned as
+    `(…, 'tests.test_middleware_host_consolidation', 'mjs')` and the guard failed
+    trying to IMPORT it. The suite was red on a tree where nothing had moved, and
+    the fix is structural (the target IS a file), not a longer list: a list only
+    ever names the extensions someone remembered. `zzz` below is an extension no
+    list in this repo names, which is the point.
+    """
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_widget.zzz").write_text("noop\n", encoding="utf-8")
+    (tests_dir / "test_widget.py").write_text("X = 1\n", encoding="utf-8")
+    production_dir = tmp_path / "tortoise"
+    production_dir.mkdir()
+    (production_dir / "mod.py").write_text(
+        "# behaviourally by `tests/test_widget.zzz`); what stays\n"
+        "# and the seam `tests/test_widget.py` — a whole file too\n",
+        encoding="utf-8",
+    )
+
+    # ⛔ `_production_pointers` returns `(symbols, files)` since `main`'s
+    # evidence-positive split: a whole-FILE pointer is LISTED on the files side,
+    # never dropped. The assertion is therefore on the SYMBOL list — that is the
+    # one an import would try to resolve, and the one this test is about.
+    symbols, files = _production_pointers(production_dir, tests_dir)
+    assert symbols == [], (
+        "a pointer naming a whole FILE was scanned as a symbol — the required "
+        "`test` job reds on prose that moved nothing"
+    )
+    # ⛔ NAME THE TARGET, do not merely assert the list is non-empty (#13728 review,
+    # P2). The tree above also carries `tests/test_widget.py`, which `_classify`
+    # routes to FILE unconditionally through `_NOT_A_SYMBOL`, so `assert files` passed
+    # even for an implementation that DROPPED the unknown-extension pointer — the one
+    # case this arm exists to cover. Measured: an impl that drops only
+    # `test_widget.zzz` still leaves `files == ['tests/test_widget.py']`.
+    assert any(named.endswith("test_widget.zzz") for _, _, named in files), (
+        "the unknown-extension whole-FILE pointer was DROPPED instead of LISTED "
+        f"— files={[named for _, _, named in files]}"
+    )
+
+    # …and the scan still finds a REAL symbol pointer in the same tree, so the
+    # assertion above cannot pass by the walk breaking.
+    (production_dir / "mod.py").write_text(
+        "# `tests.test_widget.X` is the only symbol pointer here\n",
+        encoding="utf-8",
+    )
+    symbols, _ = _production_pointers(production_dir, tests_dir)
+    assert symbols == [
+        (production_dir / "mod.py", "`tests.test_widget.X`", "tests.test_widget", "X")
+    ]
+
+
 def test_no_source_still_names_the_pre_move_symbols():
     # This guard must SPELL the names it forbids, so it is the one file
     # exempt from its own scan; every other module — and the production tree —
