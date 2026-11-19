@@ -3218,6 +3218,24 @@ _NOT_A_POINTER_WITH_ITS_OWN_SECTION = (
     "> The issue has its own section above.")
 _NOT_A_POINTER_WITH_ITS_OWN_SCOPE = (
     "> This is a separate issue with its own scope.")
+# ⛔ AND THE IDIOM FAMILY (review round 3, all five measured REFUSED by the ``of…own``
+# binding): these carry the reversed shape and name no home, so the stop-list above exists.
+_NOT_A_POINTER_OF_OUR_OWN_MAKING = (
+    "> That was an issue of our own making.")
+_NOT_A_POINTER_OF_THEIR_OWN_DESIGN = (
+    "> That problem was an issue of their own design.")
+_NOT_A_POINTER_OF_ITS_OWN_ACCORD = (
+    "> The issue of its own accord resolved.")
+# ⛔ THE CONTAINERS A READER DOES NOT SEE (review round 3, both measured FAIL-OPEN): a
+# heading, or a task-list checkbox, before a bold label is still a labelled paragraph.
+_APPROVAL_RECORD_BEHIND_A_HEADING = (
+    "> ### **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_BEHIND_A_TASK_LIST_CHECKBOX = (
+    "> - [ ] **Owner approval of the exact changes** — given in-session, no comment cited.")
+# ⛔ THE PLURAL POSSESSIVE (review round 3): `Owners' approval` renders as the same label
+# and was ACCEPTED by a start pattern that covered `owners` but not `owners'`.
+_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE = (
+    "> **Owners' approval of the exact changes** — given in-session, no comment cited.")
 
 
 def _quoted_paragraphs(block: str) -> list[str]:
@@ -3333,7 +3351,8 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     refuses the borrow.
     ⛔ WHAT A RECORD *IS* WAS RE-DECIDED IN #13669, because the phrase detector this arm
     shipped with was measurably vacuous. The shipped detector keyed on ``owner approval``
-    followed by a COLON inside one sentence. Measured at the merged head ``9d34e510``:
+    followed by a COLON inside one sentence. Measured at the merged head ``6d761643``
+    (the squash of #13643, re-measured at ``4531e7e2``):
     ``**Owner approval of the exact changes** — given in-session … The artifact is the
     text itself.`` was **ACCEPTED** (the bold label carries no colon), and so was the
     landed v3.32 record with its comment id deleted — the arm slept through the exact
@@ -3414,25 +3433,35 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
             f"{record!r}")
 
 
-_LEADING_LIST_MARKER_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
-# ⛔ THE RUN MAY BE SINGLE-MARKER EMPHASIS TOO, AND MAY SIT BEHIND A LIST MARKER (review
-# round 2, both measured FAIL-OPEN): `- **Owner approval …**`, `1. **Owner approval …**`,
-# `*Owner approval …*` and `_Owner approval …_` all render as a labelled paragraph, and a
-# detector anchored on `**`/`__` at the paragraph's first byte slept through all four.
+_LEADING_LIST_MARKER_RE = re.compile(
+    r"^(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+)")
+# ⛔ THE RUN MAY BE SINGLE-MARKER EMPHASIS TOO, AND MAY SIT BEHIND A LIST MARKER OR A
+# HEADING (review rounds 2 and 3, all measured FAIL-OPEN): `- **Owner approval …**`,
+# `1. **Owner approval …**`, `- [ ] **Owner approval …**`, `### **Owner approval …**`,
+# `*Owner approval …*` and `_Owner approval …_` all render as a labelled paragraph, and
+# a detector anchored on `**`/`__` at the paragraph's first byte slept through every one.
 _OPENING_EMPHASIS_RE = re.compile(r"^(\*\*\*|\*\*|__|\*|_)(.+?)\1", re.S)
-_APPROVAL_LABEL_START_RE = re.compile(r"^(?:owner'?s?\s+)?approval\b", re.IGNORECASE)
+# ⛔ THE PLURAL POSSESSIVE IS IN THE CLASS (review round 3): `Owners' approval` renders as
+# the same label, and `owner'?s?` covered `owner` / `owner's` / `owners` but not `owners'`.
+_APPROVAL_LABEL_START_RE = re.compile(r"^(?:owners?'?s?\s+)?approval\b", re.IGNORECASE)
 # ⛔ THE POINTER PHRASE IS READ IN EITHER WORD ORDER (#13669 finding 2): ``an issue of
 # its own`` / ``a tracking issue of its own`` is the same pointer as ``its own issue``,
 # and the shipped adjacency-exact pattern (`own` then up to three words then `issue`)
 # missed both, so a defect naming a home it cannot give passed unread.
-# ⛔ THE REVERSED FORM IS BOUND TO THE IDIOM, measured (review round 2): an unbounded
-# ``issue … own`` window refused TRUE prose that is not a pointer — ``Each issue is
-# judged on its own merits.``, ``The issue has its own section above.``, ``a separate
-# issue with its own scope.`` — so the reversed alternative demands ``of``/``all of``
-# between the words, which is the only shape that names a home.
+# ⛔ THE REVERSED FORM IS BOUND TO THE IDIOM, AND THE BINDING IS NOT A GUARANTEE — measured
+# (review rounds 2 and 3): an unbounded ``issue … own`` window refused TRUE prose (``Each
+# issue is judged on its own merits.``, ``The issue has its own section above.``), and
+# ``of … own`` alone still caught the idiom family (``an issue of our own making``,
+# ``of their own design``, ``of its own accord``). So the reversed form demands ``of…own``
+# AND refuses the listed idiom heads. ⛔ THE RESIDUAL IS STATED: an UNLISTED idiom of the
+# same shape (``an issue of its own wording``) is still refused — fail-CLOSED, remedy is
+# to extend this list, which is the safer direction even though a list of English idioms
+# cannot be completed.
 _OWN_ISSUE_RE = re.compile(
     r"\bown\b(?:\s+\S+){0,3}\s+issues?\b"
-    r"|\bissues?\b\s+(?:of|all\s+of)\s+(?:\w+\s+){0,2}own\b", re.IGNORECASE)
+    r"|\bissues?\b\s+(?:of|all\s+of)\s+(?:\w+\s+){0,2}own\b"
+    r"(?!\s+(?:accord|behalf|design|devising|making|merits|right|sake|terms|volition)\b)",
+    re.IGNORECASE)
 _ISSUE_NUMBER_RE = re.compile(r"#\d{2,}")
 
 
@@ -3510,8 +3539,11 @@ def _assert_refused_by(raised: pytest.ExceptionInfo[AssertionError], arm: str) -
     carrying the shape it names moves the catch and the pin goes on reporting green.
     The frame name is read from the traceback, so no arm's message WORDING is involved
     and a legitimate reword cannot red this test; the directions stay distinguishable
-    because each fixture is shaped so that only its own assert can fire (exactly one
-    approval paragraph, so the per-record loop below has a single subject).
+    because each fixture is shaped so that only its own assert can fire — one approval
+    paragraph per fixture, so the per-record loop below has a single subject, with the
+    two ``_TWO_RECORDS_*`` fixtures as the DELIBERATE exception (every-record checking is
+    exactly what they pin) — and the arm has one raise site, so the frame stays
+    unambiguous.
     """
     frames = {frame.name for frame in traceback.extract_tb(raised.tb)}
     assert arm in frames, (
@@ -3641,7 +3673,10 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     for marked_up_label in (_APPROVAL_RECORD_AS_A_BULLET,
                             _APPROVAL_RECORD_AS_AN_ORDERED_ITEM,
                             _APPROVAL_RECORD_IN_SINGLE_ASTERISK_EMPHASIS,
-                            _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS):
+                            _APPROVAL_RECORD_IN_SINGLE_UNDERSCORE_EMPHASIS,
+                            _APPROVAL_RECORD_BEHIND_A_HEADING,
+                            _APPROVAL_RECORD_BEHIND_A_TASK_LIST_CHECKBOX,
+                            _APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE):
         with pytest.raises(AssertionError) as marked_up:
             _refuse_an_approval_record_with_no_resolvable_home(marked_up_label)
         _assert_refused_by(
@@ -3735,7 +3770,10 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # measured, an unbounded reversal refused all three of these TRUE sentences.
     for not_a_pointer in (_NOT_A_POINTER_ON_ITS_OWN_MERITS,
                           _NOT_A_POINTER_WITH_ITS_OWN_SECTION,
-                          _NOT_A_POINTER_WITH_ITS_OWN_SCOPE):
+                          _NOT_A_POINTER_WITH_ITS_OWN_SCOPE,
+                          _NOT_A_POINTER_OF_OUR_OWN_MAKING,
+                          _NOT_A_POINTER_OF_THEIR_OWN_DESIGN,
+                          _NOT_A_POINTER_OF_ITS_OWN_ACCORD):
         _refuse_an_unresolvable_pointer(not_a_pointer)
 
 
