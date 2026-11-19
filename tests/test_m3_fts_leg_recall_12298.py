@@ -1401,12 +1401,20 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # brief and this pin still named the pre-#13290 lines), and this branch's own
     # seam work moves them a further +23. Re-derived against the live file, so
     # the pin and §1 of the brief name the same lines as the code.
-    ("tortoise/projection/__init__.py", 20974, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:20974`"),
-    ("tortoise/projection/__init__.py", 21417, "def _create_fulltext_index(",
-     "`:21417`"),
-    ("tortoise/projection/__init__.py", 21867,
-     "self._create_fulltext_index(label, fields)", "`:21867`"),
+    #
+    # ⛔ RE-DERIVED AGAIN at `main` `d956b3b619` (#13728/#13722): that commit grew
+    # `_probe`'s docstring by 31 lines and deleted 1 (a net **+30**) at ~12096,
+    # which is ABOVE all three anchors — so all three moved together, uniformly,
+    # and the +30 is the CAUSE rather than an offset applied to them. Each anchor
+    # was re-located by its own text at this tree (one hit each), never nudged:
+    # the declared FULLTEXT row, the `def _create_fulltext_index(`, and the
+    # `_FULLTEXT_INDEX_LABEL_FIELDS` loop's call site.
+    ("tortoise/projection/__init__.py", 21004, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21004`"),
+    ("tortoise/projection/__init__.py", 21447, "def _create_fulltext_index(",
+     "`:21447`"),
+    ("tortoise/projection/__init__.py", 21897,
+     "self._create_fulltext_index(label, fields)", "`:21897`"),
 )
 
 
