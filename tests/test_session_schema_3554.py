@@ -1969,7 +1969,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     cite a comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none"* as the evidence for narrowing a gate's scope. Measured with
     this module's own tools the count is **7 of 43**, and that block DOES cite — the permalink
-    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:397``):
+    ``#issuecomment-5619843002`` (v3.33's issue-#11824 block, ``docs/ONTOLOGY-CHANGELOG.md:406``):
     the citing versions are listed below, one entry per block, and the sentences that
     quote them are checked by this pin. Both halves
     of the sentence were wrong, in a file whose subject is removing unverified
@@ -2928,7 +2928,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     patterned sentences are held to one copy each.) An earlier cut of this
     sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
-    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:397` (issue
+    BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:406` (issue
     #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` — an
     accepted form, enumerated below, in the sentence the old text contradicted.
     So v3.33 is not evidence for the narrow scope; the 36 blocks that
