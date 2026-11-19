@@ -3034,44 +3034,44 @@ def test_every_runbook_installer_ref_lands_on_the_line_it_names():
     anchors: dict[int, str] = {
         111: r"^# EXIT — the one distinction",  # "Exit codes (`:107-134`)"
         256: r"VALIDATED ONCE, BEFORE THE MODE DISPATCH",  # the flag/--count validation
-        423: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
-        427: r"the fallback label: follow the gate's own state",  # "label resolution at"
-        431: r"^fallback_engaged\(\) \{",
-        454: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
-        459: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
-        491: r"^resolve_labels\(\) \{",
-        530: r"label algebra: the UNION",  # "the union's label algebra at"
-        554: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
-        582: r"── status ──",  # the `--status` block
-        605: r"label-coverage — labels the workflows name",  # "the label-coverage block"
-        945: r"label-coverage read NOTHING",  # no workflows -> exit 4
-        953: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
-        962: r"found NO runs-on label to check",  # zero labels -> exit 4
+        431: r"^is_runner_install\(\) \{",  # "the proof is `is_runner_install` at"
+        435: r"the fallback label: follow the gate's own state",  # "label resolution at"
+        439: r"^fallback_engaged\(\) \{",
+        462: r'^case "\$\{CI_RUNNER_OS_LABEL:-off\}" in',  # the flag, validated once
+        467: r"^resolve_os_label\(\) \{",  # "resolve_os_label"
+        499: r"^resolve_labels\(\) \{",
+        538: r"label algebra: the UNION",  # "the union's label algebra at"
+        562: r"^is_foreign_arch_label\(\) \{",  # "TWO NAMED CARVE-OUTS"
+        590: r"── status ──",  # the `--status` block
+        613: r"label-coverage — labels the workflows name",  # "the label-coverage block"
+        953: r"label-coverage read NOTHING",  # no workflows -> exit 4
+        961: r"could not read \$runs_on_unreadable",  # a partial read -> exit 4
+        970: r"found NO runs-on label to check",  # zero labels -> exit 4
         # ⛔ A BARE `}` CANNOT ANCHOR A CLAIM ABOUT A SPECIFIC CONSTRUCT: it matches any of the file's
         # function ends, which is how `:386` (the DROP-IN writer's brace) stayed green for one review
         # round while the sentence promised `resolve_labels`. The number is kept here so the two-way
         # table stays complete, and the claim is re-checked against the CONSTRUCT below.
-        528: r"^\}$",  # "whose body ends at its `}` on"
-        1180: r"exit 5",  # the uncovered verdict
-        1202: r'MODE" = repair',  # "--repair-labels UNIONS" / the repair block
-        1209: r'^  if \[ "\$FALLBACK" = off \]; then',  # "--fallback off is REFUSED"
-        1227: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
-        1374: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
-        1406: r'MODE" = labels',  # "`--print-labels`"
-        1433: r'MODE" = install',  # "the two mode blocks" / "only an install"
-        1438: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
-        1441: r"FORK HEADROOM FIRST",  # "forks"
-        1461: r"DISK NEXT",  # "disk"
-        1468: r"CPU LAST",  # "cpu/memory"
-        1491: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
-        1492: r'MODE" = uninstall',  # "`uninstall`"
-        1621: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
-        1624: r"dry-run: would download",  # "the run at … is the dry-run echo"
-        1632: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
-        1635: r"registration-token",  # "token"
-        1640: r"^    set -- --unattended",  # "one argv"
-        1642: r'\./config\.sh "\$@"',  # "`config.sh`"
-        1652: r'svc\.sh install "\$actor"',  # "systemd install/start"
+        536: r"^\}$",  # "whose body ends at its `}` on"
+        1188: r"exit 5",  # the uncovered verdict
+        1210: r'MODE" = repair',  # "--repair-labels UNIONS" / the repair block
+        1217: r'^  if \[ "\$FALLBACK" = off \]; then',  # "--fallback off is REFUSED"
+        1235: r"UNREADABLE LABEL SET IS A REFUSAL",  # "An unreadable current label set is a REFUSAL"
+        1382: r"`relabelled` IS A CLAIM ABOUT THE SERVER",  # "relabelled … is a claim about the server"
+        1414: r'MODE" = labels',  # "`--print-labels`"
+        1441: r'MODE" = install',  # "the two mode blocks" / "only an install"
+        1446: r'\|\| die "this installer is for x86_64',  # "the refusal itself dies at"
+        1449: r"FORK HEADROOM FIRST",  # "forks"
+        1469: r"DISK NEXT",  # "disk"
+        1476: r"CPU LAST",  # "cpu/memory"
+        1499: r"^# ── uninstall",  # the span's first line ("`--uninstall` deletes only what it can PROVE")
+        1500: r'MODE" = uninstall',  # "`uninstall`"
+        1629: r'^for i in \$\(seq 1 "\$COUNT"\); do',  # "the scale loop"
+        1632: r"dry-run: would download",  # "the run at … is the dry-run echo"
+        1640: r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',  # "sha256 pin" / "verify"
+        1643: r"registration-token",  # "token"
+        1648: r"^    set -- --unattended",  # "one argv"
+        1650: r'\./config\.sh "\$@"',  # "`config.sh`"
+        1660: r'svc\.sh install "\$actor"',  # "systemd install/start"
     }
 
     unknown = sorted(cited - anchors.keys())
@@ -6007,10 +6007,15 @@ def test_a_timespan_magnitude_systemd_cannot_parse_is_refused(tmp_path: Path):
     produced. A suffix check alone therefore still admits a value systemd ignores.
     """
     env = _dropin_env(tmp_path, unit_present=False)
-    for bad in ("999999999999999999999s", "9223372036854776s", "12345678901234h"):
+    # ⛔ ONE CEILING PER SUFFIX, because systemd's limit is on the RESULT: `999999999d` is nine digits
+    # and is DROPPED, while `999999999h` parses. A flat digit bound let days, hours and minutes through.
+    for bad in (
+        "999999999999999999999s", "9223372036854776s", "12345678901234h",
+        "999999999d", "9999999999h", "999999999999min", "99999999999999999ms",
+    ):
         r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": bad})
         assert r.returncode == 1, f"{bad!r} is beyond what systemd can parse and must be refused, got {r.returncode}"
-    for good in ("9223372036855s", "30s", "1h"):
+    for good in ("9223372036855s", "99999999d", "999999999h", "99999999999min", "30s", "1h"):
         r = _run("--count", "1", "--dry-run", env={**env, "CI_RUNNER_RESTART_SEC": good})
         assert r.returncode == 0, f"{good!r} parses in systemd and must be accepted, got {r.returncode}: {r.stderr}"
 
