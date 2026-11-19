@@ -1118,7 +1118,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
     and turned any code PR's head into a false red (#13807 review, F1, and the false-red
     direction recorded in `_census_membership_verdicts`).
     """
-    assert _TORTOISE_MEMBERSHIP_SPELLINGS == (
+    assert (
         "THREE are in this head",
         "two comment-only `tortoise/` modules",
         "prints exactly `tortoise/activation_scorecard.py`",
@@ -1130,18 +1130,18 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_TORTOISE_CENSUS_CMD}` prints the two COMMENT-ONLY modules",
         f"{_TORTOISE_CENSUS_CMD}` prints exactly `tortoise/activation_scorecard.py`",
         "the `tortoise/` set above is the two COMMENT-ONLY modules",
-    ), (
+    ) == _TORTOISE_MEMBERSHIP_SPELLINGS, (
         "the affirmative (MEMBERSHIP) ledger changed. These are the exact phrasings that were "
         "FALSE at a head and survived anyway, so a row that is edited, however slightly, is a "
         "ban the document can be re-inserted past (#13746 review, finding 7; #13807 review, "
         "finding 5). Retiring a NEW spelling means adding it; it never means re-wording one.")
-    assert _TORTOISE_EMPTY_SPELLINGS == (
+    assert (
         f"neither is `{_TORTOISE_CENSUS_CMD}`",
         f"{_TORTOISE_CENSUS_CMD}` -> empty",
         f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
         "prints NO path at all",
         "the `tortoise/` set above is EMPTY",
-    ), (
+    ) == _TORTOISE_EMPTY_SPELLINGS, (
         "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
         "retired for the same reason — head-bound in both directions (#13807 review, F1). "
         "The last two rows sit beside NO command because the live document stated the verdict "
