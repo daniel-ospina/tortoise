@@ -2414,6 +2414,9 @@ _SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
     ("Every hard failure is a page; the consent cookie is still set before the flow starts.", "RED"),
     ("Every hard failure of the route is a page, and the store remains the source of truth.", "RED"),
     ("Every hard failure is a page, which still leaves the graph as the source of truth.", "RED"),
+    ("Before #13671, every hard failure answered raw JSON. Two arms still do.", "RED"),
+    ("The store was previously unreachable. Every hard failure is a page; two arms still return JSON.", "RED"),
+    ("Previously every hard failure of that route answered raw JSON.", "RED"),
     # the sentence window is bounded, so a survivor in the NEXT sentence exempts nothing
     ("Every hard failure is a page. Two arms still answer JSON.", "RED"),
     # counted survivors alone are not enough: without retro framing it is still the absolute
