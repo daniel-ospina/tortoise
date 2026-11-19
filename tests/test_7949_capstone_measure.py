@@ -16307,6 +16307,38 @@ def _table_cells(line: str) -> list[str]:
     return cells
 
 
+def _unpaired_backtick_run(line: str) -> int | None:
+    """Offset of the first backtick run with no partner OF ITS OWN LENGTH, else None.
+
+    CommonMark delimits a code span with a run of N backticks and CLOSES it on the
+    next run of exactly N — so a run with no such partner (a stray or a missing
+    delimiter) does not merely leave one span open, it delimits every span AFTER it
+    with the wrong backticks. That is the docs-check failure mode below, and it is
+    why the assertion is about PAIRING rather than about a backtick count: an even
+    count with a mis-paired pair is the same defect. `` (double) delimiters are
+    matched against other doubles only, which is what keeps the two spans whose
+    content legitimately begins with a space honest.
+
+    A line-scoped reader ONLY: a code span may legally span a soft line break
+    (measured in this document at :181-:182), so pairing is not a property of an
+    arbitrary line. Fenced-code delimiter lines also read as unpaired here — which
+    is why this is applied to the ONE row for which the document itself pins
+    single-line-ness, never to the whole file.
+    """
+    runs = [(match.start(), len(match.group())) for match in re.finditer(r"`+", line)]
+    index = 0
+    while index < len(runs):
+        offset, length = runs[index]
+        partner = next(
+            (later for later in range(index + 1, len(runs)) if runs[later][1] == length),
+            None,
+        )
+        if partner is None:
+            return offset
+        index = partner + 1
+    return None
+
+
 def test_every_bundle_table_row_carries_its_headers_cell_count():
     """A raw `|` in a cell is 178 docs-check findings, not one typo (#13489).
 
@@ -16379,6 +16411,21 @@ def test_the_D5_row_is_still_one_table_row():
         "characters of citations (its length is not typed — it moves with every commit "
         "that edits the row); one unescaped `|` splits it and reds the REQUIRED `docs` check "
         "with ~178 findings (#13489). Escape a pipe in a cell as `\\|`")
+    # ⛔ The SECOND one-character defect with this shape, and it was measured, not
+    # predicted: a stray backtick after `moved the span once more)` left this row's
+    # last cell with an odd backtick count, so every span after it was delimited by
+    # the wrong backticks and the REQUIRED `docs` check reddened with **234**
+    # MD038/MD037 findings — all on this one line — while every line-scoped pin in
+    # this file stayed GREEN (PR #13746, introduced by a review round of that same
+    # PR). Same argument as the `|` above: the failure is one character, the report
+    # is hundreds, and nothing local named it.
+    unpaired = _unpaired_backtick_run(d5[0])
+    assert unpaired is None, (
+        f"the D5 row carries a backtick run with no partner of its own length at "
+        f"offset {unpaired} — every code span AFTER it is delimited by the wrong "
+        f"backticks, and the REQUIRED `docs` check reports one MD038 per mis-paired "
+        "span (measured: 234 findings from ONE stray backtick). Delete or add the "
+        "delimiter; do not re-word around it")
 
 
 
