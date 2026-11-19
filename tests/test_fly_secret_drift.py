@@ -2157,7 +2157,7 @@ _READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s
 #: says `"three read sites" omits the bound pair` while discussing the wrong unit), so
 #: the lookbehind refuses a word inside quotes.
 _READER_STATED_COUNT_RE = re.compile(
-    "(?<![\"\u201c'`])\\b(one|two|three|four|five|six|seven|eight|nine|ten|\\d{1,2})\\b[\\s*]*read[ -]sites?",
+    "(?<![\"\u201c'`])\\b(one|two|three|four|five|six|seven|eight|nine|ten|\\d{1,2})\\b[\\s*]*read[\\s-]+sites?",
     re.IGNORECASE,
 )
 _NUMBER_WORDS = {
@@ -2187,11 +2187,19 @@ _READER_ORDINAL_LIST_RE = re.compile(r"\(\s*(\d+(?:\s*,\s*\d+)+)\s*\)")
 
 
 def _stated_count_text(lines: list[str], start: int, end: int) -> str:
-    """The region's prose with fenced code blocks removed.
+    """The region's prose, UNWRAPPED, with fenced code blocks removed.
 
-    A count inside a fence is an EXAMPLE, not a claim about this list — and the runbook
-    is full of fences. Removing them (plus the backtick exclusion in the count regex)
-    keeps a documented `two read sites` from reddening the artifact that documents it.
+    Two normalizations, both earned by a measured false pass:
+
+    * a count inside a fence is an EXAMPLE, not a claim about this list, so fences
+      go; the count regex additionally refuses a backticked or quoted mention.
+    * the runbook is a WRAPPED blockquote, so `read` and `sites` routinely land on
+      different lines — and the count regex used to require them adjacent. Measured,
+      round 9: `gates **six** read` / `> sites:` beside the intact `= five read
+      sites` stayed green (the contradicting count was simply not matched), and the
+      same wrap on a CORRECT artifact reddened as "states no count". Joining the
+      lines (dropping the `> ` continuation marker) makes the phrase findable
+      wherever the wrap falls.
     """
     kept: list[str] = []
     fenced = False
@@ -2201,7 +2209,36 @@ def _stated_count_text(lines: list[str], start: int, end: int) -> str:
             continue
         if not fenced:
             kept.append(line)
-    return "\n".join(kept)
+    return re.sub(r"\s*\n\s*(?:>\s*)?", " ", "\n".join(kept))
+
+
+#: The two claims the runbook's prose makes about a NUMBERED entry in words rather
+#: than by number — `Number 4 is the one an operator is most likely to miss: it is the
+#: production pre-warm, not the SDK path`, and `three warm-up surfaces (1, 4, 5) + two
+#: readiness bounds (2, 3)`. Bound to the FILE the referenced entry actually cites,
+#: because existence is not identity: swapping entries 4 and 5 whole (labels travel
+#: with their readers) left every other arm green while `Number 4` pointed at the SHELL
+#: pre-warm (measured, round 9). The vocabulary is the artifact's own, mapped to the
+#: file it names — deliberately explicit, so a reworded sentence reds instead of
+#: silently unbinding.
+_READER_ORDINAL_CLAIM_FILE = {
+    "production": "hosted_api.py",
+    "hosted": "hosted_api.py",
+    "readiness": "embeddings.py",
+    "bound": "embeddings.py",
+    "bounds": "embeddings.py",
+}
+_READER_ORDINAL_CLAIM_RE = re.compile(
+    r"\bNumbers?\s+(\d+)\b([^.\n]{0,120})", re.IGNORECASE
+)
+#: The GROUP form states the class BEFORE the numbers — `two readiness bounds (2, 3)`
+#: — so the words are read from in front of the parentheses, never from behind them
+#: (behind is where the NEXT group's class sits, which mis-bound entries 4 and 5 to
+#: `embeddings.py` the first time this was written).
+_READER_ORDINAL_GROUP_CLAIM_RE = re.compile(
+    r"([A-Za-z][\w-]*(?:\s+[A-Za-z][\w-]*){0,4})\s*\(\s*(\d+(?:\s*,\s*\d+)+)\s*\)",
+    re.IGNORECASE,
+)
 
 
 def _resolver_definition_span() -> tuple[int, int]:
@@ -2230,6 +2267,7 @@ def _resolver_definition_span() -> tuple[int, int]:
 
 def _reader_citations(
     lines: list[str], start: int, end: int, artifact: str,
+    identity_claims_required: bool = False,
 ) -> list[tuple[str, int, int, str | None]]:
     """(file, start, end, symbol) for every cite in `lines[start:end]`.
 
@@ -2285,7 +2323,15 @@ def _reader_citations(
     #: sentence wraps across lines in BOTH artifacts, so this outlives one line.
     pending: list[str] = []
     ordinal_bound = 0
-    for ln in lines[start:end]:
+    #: numbered ENTRY -> the files its own cites land in. Identity, not existence: see
+    #: the ordinal-claim checks below.
+    entry_files: dict[int, set[str]] = {}
+    #: region-relative line index of every cite, parallel to `cites`.
+    cite_offsets: list[int] = []
+    #: where the numbered list STARTS, so the definition it is built on can be told
+    #: apart from a reader entry that merely re-cites it.
+    first_entry_offset: int | None = None
+    for offset, ln in enumerate(lines[start:end]):
         # A numbered reader entry starts a new claim: its symbol is its own. The
         # invariant sentence below the list ends them, so nothing after it may
         # inherit reader 5's symbol. The entry regex accepts BOTH artifacts'
@@ -2297,6 +2343,8 @@ def _reader_citations(
             ordinal = int(entry.group(1))
             entry_ordinals.add(ordinal)
             entry_order.append(ordinal)
+            if first_entry_offset is None:
+                first_entry_offset = offset
         if _READER_SYMBOL_RESET_RE.search(ln.replace("*", "")):
             symbol = None
             ordinal = None
@@ -2332,7 +2380,9 @@ def _reader_citations(
                 # LINE, not its `::name` (see the docstring: keying on the name let
                 # an entry drop both and leave this check vacuously satisfied).
                 entry_cites[ordinal] = entry_cites.get(ordinal, 0) + 1
+                entry_files.setdefault(ordinal, set()).add(current)
             cites.append((current, lo, hi, bound))
+            cite_offsets.append(offset)
     # DELETION: every numbered entry must still carry at least one cite of its own.
     # Editing a reader's cite out leaves the artifact telling a reviewer that N
     # readers are pinned while the list pins N-1 — the shape a count floor cannot
@@ -2405,6 +2455,50 @@ def _reader_citations(
         f"has no such entr(y/ies) ({sorted(entry_ordinals)}) — an entry was deleted or "
         f"renumbered and the sentences that describe what each one is were not updated"
     )
+    # ⛔ EXISTENCE IS NOT IDENTITY. A `Number 4 is … the production pre-warm` sentence,
+    # and a `(1, 4, 5) warm-up surfaces + (2, 3) readiness bounds` list, are claims about
+    # WHICH reader sits at that number. Number reuse is invisible to everything above:
+    # swapping entries 4 and 5 WHOLE (each label travelling with its own reader) keeps
+    # ordinals 1..N, the count, distinctness and file coverage all green — measured,
+    # round 9 — while `Number 4` then points at the SHELL pre-warm. So the sentence's own
+    # vocabulary is mapped to the file it names, and the entry's cites must be in it.
+    def _cited_files(entry_number: int) -> set[str]:
+        return entry_files.get(entry_number, set())
+
+    claims: list[tuple[int, str, str]] = []
+    for number, tail in _READER_ORDINAL_CLAIM_RE.findall(region_text):
+        for word, expected_file in _READER_ORDINAL_CLAIM_FILE.items():
+            if re.search(rf"\b{word}\b", tail, re.IGNORECASE):
+                claims.append((int(number), word, expected_file))
+                break
+    for phrase, group in _READER_ORDINAL_GROUP_CLAIM_RE.findall(region_text):
+        for number in group.split(","):
+            for word, expected_file in _READER_ORDINAL_CLAIM_FILE.items():
+                if re.search(rf"\b{word}\b", phrase, re.IGNORECASE):
+                    claims.append((int(number), word, expected_file))
+                    break
+    misdirected = sorted(
+        (number, word, expected, sorted(_cited_files(number)))
+        for number, word, expected in claims
+        if expected not in _cited_files(number)
+    )
+    assert not misdirected, (
+        f"{artifact}: the prose describes reader(s) by NUMBER and by what they ARE, and "
+        f"these no longer agree — (entry, word, file the word names, files the entry "
+        f"actually cites): {misdirected}. The entries were reordered or renumbered under "
+        f"sentences that still describe the old reader"
+    )
+    # Non-vacuity, PER ARTIFACT: the two artifacts bind identity differently, so the
+    # requirement is passed in by the caller that knows which sentences its copy carries
+    # (the runbook states `Number 4 … the production pre-warm`; the manifest names each
+    # entry's file inline and binds 2/3 with `Readers 2 and 3`). Without this, deleting
+    # the binding sentence silently removes the only check on number reuse.
+    assert claims or not identity_claims_required, (
+        f"{artifact}: the section no longer says which reader sits at which NUMBER (the "
+        f"'Number N is …' sentence, or a '<class> (N, M)' group), so nothing binds entry "
+        f"identity to its number and a reorder would read green — restore it, or this "
+        f"guard is reading a section it no longer recognises"
+    )
     stated = [
         (m.group(1).lower(), _count_value(m.group(1)))
         for m in _READER_STATED_COUNT_RE.finditer(_stated_count_text(lines, start, end))
@@ -2475,6 +2569,29 @@ def _reader_citations(
         f"`def` at check time, not from a literal in this test). These do not: {outside} — "
         f"either an entry's cite lost its reader (reflowed above its `::name`, or edited "
         f"out), or the resolver span was pointed at another reader's gate line"
+    )
+    # ⛔ AND THE DEFINITION IS NOT ONE OF THE READERS. A numbered entry may legally cite
+    # the resolver's span — its `def` line contains the flag's name, so the needle passes
+    # and the `sym is None` arm above never sees it (the entry names the symbol inline).
+    # That let an entry be REPLACED by the definition itself: entry 1 retuned to
+    # `::_embedder_warmup_enabled` at the `def` line left every check green while the SDK
+    # engine-init warm-up reader was gone and the block still claimed five read sites
+    # (measured, round 9). The definition belongs ABOVE the list, which is where both
+    # artifacts put it.
+    resolver_as_reader = sorted(
+        (fname, lo, hi)
+        for (fname, lo, hi, _sym), offset in zip(cites, cite_offsets, strict=True)
+        if first_entry_offset is not None
+        and offset >= first_entry_offset
+        and fname == "embeddings.py"
+        and lo >= resolver_lo
+        and hi <= resolver_hi
+    )
+    assert not resolver_as_reader, (
+        f"{artifact}: a NUMBERED reader entry cites the resolver's own definition "
+        f"(`tortoise/embeddings.py:{resolver_lo}-{resolver_hi}`) — the definition is what "
+        f"the list is built ON, not one of the sites that reads it, so this entry no "
+        f"longer pins a reader: {resolver_as_reader}"
     )
     return cites
 
@@ -2553,7 +2670,9 @@ def _embedder_warmup_runbook_citations() -> list[tuple[str, int, int, str | None
         "the end of the operator section (the '**When to flip it.**' paragraph)",
         after=start,
     )
-    return _reader_citations(lines, start, end, "docs/infra-runbook.md")
+    return _reader_citations(
+        lines, start, end, "docs/infra-runbook.md", identity_claims_required=True
+    )
 
 
 def _assert_every_citation_reads_the_flag(
