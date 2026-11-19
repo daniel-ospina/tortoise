@@ -16,18 +16,36 @@ those are what this file measures:
      reach it — not by reading a docstring. A container that answers with something else
      is the failure mode this wave exists to avoid: it would delete the door and keep the
      name, with no capability behind either.
-     ⛔ ALL ELEVEN, and the shapes differ on purpose:
+     ⛔ ALL THIRTEEN, and the shapes differ on purpose:
        · the three READ doors (`get_session`, `list_batch`, `get_cross_lens_candidates`)
          are substituted at their container's own METHOD — the pointer's `type=`/`kind=`
          is what selects the arm, so the read is measured through `tortoise_get_entity` /
          `tortoise_list_knowledge` / `tortoise_review_link_candidates`;
-       · the four `create_*` doors share ONE container method (`create_entity`) whose
+       · the six doors on `create_entity` (five `create_*` — subject, object, event,
+         document, point — plus `diary_write`) share ONE container method whose
          `type=` selects a per-label WRITE, so substitution goes one level deeper: the
          test drives `create_entity(type=..., props={"<kind>": ...})` and records the
          `_create_entity` call it lands on. That is the only seam that can catch an arm
          routing `type="subject"` to an OBJECT write, or one that drops the
          `props`-carried kind the pointer advertises — a check against the
-         `_ENTITY_ITEM_LABELS` constant alone leaves both green (#13052 review F3).
+         `_ENTITY_ITEM_LABELS` constant alone leaves both green (#13052 review F3);
+       · the four doors lane P6 retired are TWO shapes, and neither is either of those.
+         The `rest_spec` pair (`issue_insight`, `session_context`) is substituted at
+         their container's own METHOD (`issue_insight` / `session_context`), reached
+         through the kept door's keyword discriminator —
+         `tortoise_search_knowledge(mode="issue_insight")` /
+         `tortoise_check_confidence(session=True)`; the DELETE pair is a different seam
+         again — `tortoise_delete` is ONE kept entry whose LABEL dispatch must route a
+         Point to `delete_point` and anything else to `delete_entity`, so the recorder
+         sits on the per-label METHOD, and the pointer's `dry_run=True` is the
+         preview-then-confirm SELECTOR (a bare `tortoise_delete(id)` is a PREVIEW, not a
+         delete) — measuring the entry alone would read green for a routing that deletes
+         the wrong kind.
+
+     THREE + SIX + FOUR = THIRTEEN, and each group is a different seam:
+     `test_the_table_holds_the_thirteen_doors_the_prose_names` reads BOTH the count and the
+     per-CONTAINER histogram off the table, so this paragraph is a claim the table is
+     checked against, not a second tally kept in prose.
 
 ⛔ AND THE HALF THAT IS A RECORDED DECISION, NOT A CHOICE THIS FILE MAKES
 -----------------------------------------------------------------------
@@ -40,12 +58,12 @@ THAT UNBLOCKS IT, not silently:
   · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `search` carries a `rest_spec`, so retiring the registry entry deletes a
-    public REST route with it. `issue_insight` and `session_context` carried one too and
-    left on the same terms in lane P6 — lane P4 MEASURED that coupling FALSE (no product
-    module derives a route from a registry row; both routes are hand-written decorators in
-    `hosted_api.py`), so the reason stopped holding and the doors retired in the batch that
-    acted on the measurement;
+  · `search` carries a `rest_spec` (and a list envelope as well), so retiring the registry
+    entry deletes a public REST route with it. `issue_insight` and `session_context` carried
+    one too and left on the same terms in lane P6 — lane P4 MEASURED that coupling FALSE (no
+    product module derives a route from a registry row; both routes are hand-written
+    decorators in `hosted_api.py`), so the reason stopped holding and the doors retired in
+    the batch that acted on the measurement;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -64,8 +82,9 @@ THAT UNBLOCKS IT, not silently:
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
-⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, AND 17 AFTER IT
-(P6 retired TWO pairs: the `rest_spec` pair, then the DELETE pair). `create_point` and
+⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, 19 AFTER THAT
+LANE'S `rest_spec` PAIR, AND 17 AFTER ITS DELETE PAIR — the count at this head (P6 retired TWO
+pairs: the `rest_spec` pair, then the DELETE pair). `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -81,11 +100,11 @@ in the same lane, on the owner's #9660 ruling: the canonical row is executed by 
 single `tortoise_delete` entry and widening what it deletes, so `delete_knowledge` — the
 destination both were held against — was never going to arrive as its own row. The
 arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the population 25 became
-23 became 21 became 17 — a count left at 19 would have been a table claiming two names that
-are no longer live, which is the rot the population check exists to red. ⛔ THIS PROSE SAID
-19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the assertions
-were right and the prose was pre-DELETE-pair, which is the shape a lane "restores" to a red
-(#13626 review ISSUE 4).
+23 became 21 became 19 became 17 — a count left at 19 would have been a table claiming two
+names that are no longer live, which is the rot the population check exists to red. ⛔ THIS
+PROSE SAID 19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the
+assertions were right and the prose was pre-DELETE-pair, which is the shape a lane
+"restores" to a red (#13626 review ISSUE 4).
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -95,6 +114,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections import Counter
 from typing import ClassVar
 
 import pytest
@@ -110,10 +130,11 @@ from tortoise.tool_registry import (
 #: This wave's doors. name -> the container whose method must be REACHED, and the
 #: discriminator the pointer names. The discriminator is the container's OWN dispatch
 #: value (`docs/product/bridge-table.md` Part A), never invented here.
-#: ⛔ TWO WAVES SHARE THIS TABLE. `tests/test_11609_door_retirement.py` was written for
+#: ⛔ THREE WAVES SHARE THIS TABLE. `tests/test_11609_door_retirement.py` was written for
 #: lane E's seven; #11609 lane P1 added `tortoise_create_point` and
 #: `tortoise_diary_write` to it in the change that BUILT the arms they were waiting for
-#: (`create_entity`'s `type="point"`/`type="diary"`). Every assertion here is
+#: (`create_entity`'s `type="point"`/`type="diary"`), and lane P6 added four more in two
+#: units (the `rest_spec` pair, then the DELETE pair). Every assertion here is
 #: parametrized over this table, so a door added here is covered without a second edit.
 RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     "tortoise_get_session": ("get_session", 'type="session"'),
@@ -144,6 +165,27 @@ RETIRED_THIS_WAVE: dict[str, tuple[str, str]] = {
     # selector — a bare `tortoise_delete(id)` is a PREVIEW, not a delete.
     "tortoise_delete_point": ("delete", 'dry_run=True'),
     "tortoise_delete_entity": ("delete", 'dry_run=True'),
+}
+
+#: The `3 + 6 + 4` the module docstring states, in the table's OWN vocabulary: each key is a
+#: `container` value and each value is how many doors retire through it.
+#: ⛔ A HISTOGRAM, NOT ONLY A TOTAL (#13651 review F2). The size pin alone left the
+#: `container` field with no reader for ten of the thirteen rows — the only other reader is
+#: `RETIRED_CREATE_TYPES`, which filters `create_entity` — so a mutant that reassigns one
+#: non-`create_entity` container (e.g. `tortoise_session_context` → `get_session`) kept the
+#: total at 13, kept that door's pointer and discriminator intact, and left EVERY row in this
+#: file green while the docstring's "THREE + SIX + FOUR" became 4 + 6 + 3. The container IS
+#: the seam each group is defined by: the READ trio (one container each), the SIX doors that
+#: share `create_entity`'s single method, and the lane-P6 quartet (the `rest_spec` pair and
+#: the DELETE pair).
+RETIRED_THIS_WAVE_BY_CONTAINER: dict[str, int] = {
+    "get_session": 1,
+    "get_cross_lens_candidates": 1,
+    "list_batch": 1,
+    "create_entity": 6,
+    "search_knowledge": 1,
+    "check_confidence": 1,
+    "delete": 2,
 }
 
 
@@ -311,6 +353,39 @@ _POINTER_TARGET = re.compile(r"^([A-Za-z0-9_]+)")
 
 
 class TestTheWaveIsRetiredForward:
+    def test_the_table_holds_the_thirteen_doors_the_prose_names(self):
+        """The count AND its decomposition are PINNED, so neither can rot silently.
+
+        ⛔ WHY A COUNT PIN AND NOT JUST THE PROSE (#13651 review F2). Every other
+        assertion in this file is parametrized OVER the table, so the table's SIZE was
+        read by nothing: the module docstring says "ALL THIRTEEN" and
+        `TestProtectedDoorsStayLive` subtracts four pairs from 25, and either sentence
+        would have stayed green through a door being added or dropped. That is the same
+        defect class as a count chain naming the wrong set — the prose reads verified
+        while nothing checks it. The shapes in the docstring are 3 + 6 + 4, so a door
+        joining or leaving the wave moves this pin in the change that does it.
+
+        ⛔ AND WHY THE HISTOGRAM, NOT ONLY THE TOTAL (same review, one level down): the size
+        pin closes "thirteen doors" but says nothing about WHICH seam each one retires
+        through, so the decomposition in the sentence above was a tally kept in prose and
+        checked by nothing. The container is that seam, and pinning its histogram is what
+        makes the claim true — see `RETIRED_THIS_WAVE_BY_CONTAINER`.
+        """
+        assert len(RETIRED_THIS_WAVE) == 13, (
+            f"RETIRED_THIS_WAVE holds {len(RETIRED_THIS_WAVE)} doors, not the THIRTEEN "
+            "this wave's prose enumerates (3 read + 6 on `create_entity` + 4 in lane "
+            "P6) — a door added or dropped moves the count AND its shapes paragraph in "
+            "the same change, not silently")
+        histogram = Counter(
+            container for container, _ in RETIRED_THIS_WAVE.values())
+        assert dict(histogram) == RETIRED_THIS_WAVE_BY_CONTAINER, (
+            f"the wave's per-container histogram is "
+            f"{dict(sorted(histogram.items()))}, not "
+            f"{dict(sorted(RETIRED_THIS_WAVE_BY_CONTAINER.items()))}: the docstring's "
+            "THREE + SIX + FOUR is read off these containers (one READ container each, "
+            "SIX doors on `create_entity`, the lane-P6 quartet), so a row whose container "
+            "is reassigned moves the group counts even while the total stays at THIRTEEN")
+
     @pytest.mark.parametrize("name", sorted(RETIRED_THIS_WAVE))
     def test_the_door_left_the_advertised_surface(self, name):
         live = _live()
@@ -356,7 +431,7 @@ class TestThePointerIsCallableAtTheContainer:
     and refuses the write without one). `tortoise_create_subject`/`_object` named the
     kind NOWHERE, which is quieter and worse: `entities.py` defaults it to `'other'`.
 
-    ⛔ Scoped to THIS WAVE's seven — and NOT because a global scan finds a defect, because it
+    ⛔ Scoped to THIS FILE's thirteen — and NOT because a global scan finds a defect, because it
     does not. The reason is mechanical: this assertion attributes every `name=` kwarg to ONE
     target (`_POINTER_TARGET.match`), and a pointer may be COMPOUND. There is exactly one such
     pointer — `tortoise_mine_conversations` names BOTH arms (*"…from_directory(directory=…,
@@ -364,8 +439,8 @@ class TestThePointerIsCallableAtTheContainer:
     <transcript>, source_id=…)"*) — and every named argument is accepted by ITS OWN target
     (`from_directory(directory, extract_entities=True)`, `from_session(conversation=None, …,
     source_id=None, …)`), so the pointer is correct and was adjudicated so at #12984's P2-1.
-    Scoping to the seven keeps this assertion's reading of the pointer unambiguous instead of
-    teaching it to parse prose; a one-target scan over all 60 pointers is a different change.
+    Scoping to the thirteen keeps this assertion's reading of the pointer unambiguous instead of
+    teaching it to parse prose; a one-target scan over all 68 pointers is a different change.
     """
 
     #: The kind each retired `create_*` door REQUIRED, and the container takes inside
@@ -417,7 +492,7 @@ class TestThePointerIsCallableAtTheContainer:
 
 class TestEveryPointerResolvesInOneHop:
     def test_every_retired_name_points_at_a_live_tool(self):
-        """The property, over the WHOLE population — not only this wave's seven."""
+        """The property, over the WHOLE population — not only this file's thirteen."""
         live = set(_live())
         strays = []
         for name, pointer in RETIRED_USE_INSTEAD.items():
@@ -434,10 +509,12 @@ class TestEveryPointerResolvesInOneHop:
         Each retiring wave removes doors into arms its container had to grow for them
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
         `recompute=True` / `recall=True`), so the count can only fall and no container is
-        added. The waves are independent subtractions on the same base surface — 48 minus
-        2 minus 2, then 44 minus 4 — because each merged on its own; the pin is the SUM,
-        which is
-        what the merged registry actually advertises.
+        added. The chain is the sequence of pins the merged trees actually carried, one
+        step per wave that landed on its own — 48 minus 2 = 46 (P1, #13556), 46 minus 2 = 44
+        (P2, #13550) — and then 44 minus 4 = 40, because P6's two pairs (`rest_spec`,
+        then DELETE) merged TOGETHER in one commit (`73c26022db`). No
+        `len(TOOL_REGISTRY) == 42` pin ever existed, so 42 is not a surface this chain may
+        claim as advertised.
         """
         assert len(TOOL_REGISTRY) == 40, (
             f"live surface is {len(TOOL_REGISTRY)}, not 40 — these waves remove doors only "
@@ -736,13 +813,14 @@ class TestProtectedDoorsStayLive:
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
     named 25 live doors off the 27-target and four PAIRS have left it since — the chain
-    `25 -> 23 -> 21 -> 17` the block itself states. TWO (`create_point`, `diary_write`) were
-    retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO
-    (`compute_confidence`, `recall`) by lane P2 in the change that gave `check_confidence` its
-    recompute/recall arms, and TWO more (`issue_insight`, `session_context`) plus the LAST TWO
-    (`delete_point`, `delete_entity`) by lane P6 — the first pair on lane P4's measurement that
-    the `rest_spec` reason was false, the second on the #9660 ruling that keeps
-    `tortoise_delete` and widens it — so the population is 17 and TEN
+    `25 -> 23 -> 21 -> 19 -> 17` the block itself states. TWO (`create_point`, `diary_write`)
+    were retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO
+    (`compute_confidence`, `recall`) by lane P2 (#13550) in the change that gave
+    `check_confidence` its `recompute=True` / `recall=True` arms, and TWO more
+    (`issue_insight`, `session_context`) plus the LAST TWO (`delete_point`, `delete_entity`)
+    by lane P6 — the first pair on lane P4's measurement that the `rest_spec` reason was
+    false, the second on the #9660 ruling that keeps `tortoise_delete` and widens it — so
+    25 − 2 − 2 − 2 − 2 = 17, and the population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052

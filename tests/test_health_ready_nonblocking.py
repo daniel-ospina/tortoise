@@ -1356,6 +1356,41 @@ def test_both_probes_are_dispatched_through_their_coordinators():
 READY_WORST_CASE_BUDGET_S = 15.0
 
 
+def _boot_prewarm_default_bound_s() -> float:
+    """The boot pre-warm's own default bound, read from the shipped script.
+
+    #13674 added `_prewarm_embedder` to `entrypoint.sh`: it pays the embedder's
+    cold import BEFORE `exec`, bounded by
+    ``TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S`` (default 300 s). That bound is
+    the quantity a fly health check's ``grace_period`` has to clear — a check
+    whose grace expires while the boot is still legitimately working reports a
+    healthy boot as failing, and a boot that fails its checks is a restart
+    loop.
+
+    Read from the script rather than restated here so the fly.toml assertion
+    below cannot drift from the bound it derives from.
+    """
+    src = (REPO / "entrypoint.sh").read_text()
+    match = re.search(
+        r'TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S:-([0-9]+)', src)
+    assert match, (
+        "entrypoint.sh no longer declares a default "
+        "TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S — the fly.toml grace "
+        "derivation has nothing to compare against (#13674)"
+    )
+    return float(match.group(1))
+
+
+def _grace_period_s(block: dict, label: str) -> float:
+    """A check block's ``grace_period`` as seconds, failing loudly on a typo."""
+    raw = block.get("grace_period")
+    assert isinstance(raw, str) and re.fullmatch(r"[0-9]+s", raw), (
+        f"{label} has no usable `grace_period` ({raw!r}) — its boot-window "
+        "coverage cannot be evaluated"
+    )
+    return float(raw[:-1])
+
+
 def _fly_check_budget_proxy_s() -> float | None:
     """fly.toml's configured ``[[services.http_checks]] timeout``, in seconds.
 
@@ -1725,6 +1760,30 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
             "tcp_checks that replaced it (#2850) — the services checks block "
             "was removed or altered without the documented migration"
         )
+        # ── #13674: this block's grace must ALSO clear the boot pre-warm ────
+        # `[[services.tcp_checks]]` and `[checks.loop_liveness]` carry SEPARATE
+        # `grace_period` keys. The PR under review raised the top-level one and
+        # left this one behind, which is the drift this half exists to catch:
+        # whichever check fires first inside the boot window still restarts the
+        # machine. Both are graded against the SAME derived quantity — the
+        # pre-warm's own bound — not against a literal, so a future retune of
+        # the pre-warm moves this assertion with it.
+        tcp_checks = _cfg["services"][0]["tcp_checks"]
+        assert isinstance(tcp_checks, list) and len(tcp_checks) == 1, (
+            "fly.toml must define exactly ONE [[services.tcp_checks]] entry "
+            f"for its boot-window coverage to be evaluable; found {tcp_checks!r}"
+        )
+        boot_bound_s = _boot_prewarm_default_bound_s()
+        tcp_grace_s = _grace_period_s(tcp_checks[0], "[[services.tcp_checks]]")
+        assert tcp_grace_s > boot_bound_s, (
+            "[[services.tcp_checks]].grace_period "
+            f"({tcp_grace_s:.0f}s) does not clear the boot pre-warm's own bound "
+            f"({boot_bound_s:.0f}s, entrypoint.sh `_prewarm_embedder`) — the "
+            "TCP check would start failing while the boot was still legitimately "
+            "paying the cold import, and a boot that fails its checks is a "
+            "restart loop (#13674). `[checks.loop_liveness]` is a SEPARATE "
+            "key; fixing one does not cover the other."
+        )
         checks = _cfg.get("checks")
         if checks is not None:
             assert isinstance(checks, dict) and set(checks) == {"loop_liveness"}, (
@@ -1759,13 +1818,37 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
             )
             # Its OWN documented bounds (fly.toml §6.4): pin them so a silent
             # edit to the interval/timeout/grace cannot pass through the model.
-            interval, timeout, grace = "15s", "5s", "180s"
+            #
+            # ⛔ #13674 raised the GRACE from 180s to 420s, and this pin is the
+            # thing that made the unpropagated half of that change visible: the
+            # boot pre-warm pays a measured 195.8 s cold import BEFORE uvicorn
+            # binds (entrypoint.sh `_prewarm_embedder`), so a 180 s grace started
+            # failing checks while the boot was still legitimately working — a
+            # restart loop, the same outage wearing a different hat. 420 s leaves
+            # ~220 s of headroom over the measurement.
+            #
+            # ⛔ BOTH VALUES ARE SEPARATE CONFIG KEYS. `[[services.tcp_checks]]`
+            # and `[checks.loop_liveness]` each carry their own `grace_period`;
+            # raising one and not the other leaves a check that still fires
+            # inside the boot window. This assertion grades the top-level
+            # `[checks]` block (the branch reached when
+            # `_fly_check_budget_proxy_s()` returns None — there is no
+            # `[[services.http_checks]]` on this head); the
+            # `[[services.tcp_checks]]` half is graded a few lines above, in
+            # this same branch, because a model that only pinned one of the two
+            # is exactly how the pair drifts apart.
+            interval, timeout, grace = "15s", "5s", "420s"
             assert (ll.get("interval"), ll.get("timeout"), ll.get("grace_period")) \
                 == (interval, timeout, grace), (
                     "[checks.loop_liveness] bounds drifted from the documented "
                     f"{interval}/{timeout}/{grace}: got interval={ll.get('interval')!r} "
                     f"timeout={ll.get('timeout')!r} grace_period={ll.get('grace_period')!r}"
                 )
+            assert _grace_period_s(ll, "[checks.loop_liveness]") > boot_bound_s, (
+                "[checks.loop_liveness].grace_period does not clear the boot "
+                f"pre-warm's own bound ({boot_bound_s:.0f}s) — see the "
+                "[[services.tcp_checks]] assertion above (#13674)"
+            )
             # NOT a readiness budget. Its 5s timeout sits BELOW /health/ready's
             # sequential worst case, so borrowing it as a ceiling would be a
             # silent DISARM; and _fly_check_budget_proxy_s — the only reader —

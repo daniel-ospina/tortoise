@@ -70,13 +70,24 @@ from tortoise.search_engine import (
 
 #: The canonical Subject terminal vocabulary, HARD-CODED (an expectation
 #: imported from the code under test is not an expectation). ``retracted`` is
-#: a member even though ONTOLOGY §4.2 does not declare it — the Object
-#: family's own precedent (#2977): a READ vocabulary names every stored state
-#: that is dead, including one a legacy/pre-fix SDK or a raw producer can have
-#: written, regardless of whether the (now guarded) generic write surface may
-#: mint it. The write guard is asserted separately below.
+#: a member even though ONTOLOGY §4.2 does not declare it as a lifecycle VERB
+#: — the Object family's own precedent (#2977): a READ vocabulary names every
+#: stored state that is dead, including one a legacy/pre-fix SDK or a raw
+#: producer can have written, regardless of whether the write surface mints it
+#: AS ITSELF. Since #11824 it does not: ``retracted`` is a declared synonym
+#: stored as ``deprecated``, so a stored ``retracted`` row predates the door
+#: and the net has to keep covering it. The write guard is asserted below.
 CANONICAL_SUBJECT_TERMINAL = frozenset(
     {"superseded", "deprecated", "archived", "retracted"})
+
+#: The canonical WRITABLE Subject vocabulary: the closed four-word lifecycle
+#: base every knowledge kind shares (#11824 S0, ONTOLOGY §4.2), HARD-CODED for
+#: the same reason as the terminal set above. ``archived`` / ``retracted`` are
+#: deliberately NOT members — they are declared SYNONYMS stored as
+#: ``deprecated`` (``lifecycle_vocabulary.LIFECYCLE_STATUS_SYNONYMS``), which
+#: is a different claim from "undeclared" and is pinned separately below.
+CANONICAL_SUBJECT_WRITABLE = frozenset(
+    {"draft", "live", "deprecated", "superseded"})
 _VEC = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
 _SB_PREFIX = "sub-"
 
@@ -379,48 +390,107 @@ class TestKeepFirstAndNeverGuess:
 
 # ── 1b. the write guard: an undeclared Subject status must not be STORABLE ─
 
+def _assert_refusal_names_the_repair(message: str) -> None:
+    """AX §5: a refusal is admissible only if the third part is PERFORMABLE.
+
+    The lifecycle door's refusal names every writable word, so a caller recovers
+    by resubmitting one — the reason the message, not a fixed phrase, is what a
+    pin should assert about it.
+    """
+    assert "was refused" in message, message
+    assert "not a lifecycle word" in message, message
+    for word in ("draft", "live", "deprecated", "superseded",
+                 "archived", "retracted"):
+        assert f"`{word}`" in message, (word, message)
+
+
 class TestSubjectStatusWriteIsValidated:
-    """#1423 review P1 — the ROOT hole, not just the word ``retracted``.
+    """#1423 review P1 — the ROOT hole, not just one word.
 
     The `status` guard in `_update_entity` was Point-PREDICATED, so any value
     reached a `:Subject` and the read vocabulary (a denylist) then read an
     unknown one as CURRENT. MUTATION: reverting the two guards reds every case
-    here — the write succeeds where a `ValueError` is required — for
-    ``retracted`` (the instance the review found) and ``dead`` (the general
-    class). The declared lifecycle still writes.
+    here — the write succeeds where a `ValueError` is required — for ``dead``
+    and ``garbage``.
+
+    ⛔ ``retracted`` was this class's original instance and is NOT one any more:
+    #11824 S0 made the write vocabulary the closed four-word base every
+    knowledge kind shares (``lifecycle_vocabulary``), and ``retracted`` /
+    ``archived`` are DECLARED SYNONYMS of ``deprecated`` — accepted, stored as
+    ``deprecated``, reported to nobody (ONTOLOGY §4.2; the design's §3.1 verb
+    table lands retract/retire/withdraw on that one word). The synonym ruling
+    is pinned on its own immediately below, so the claim the old case made is
+    RESTATED rather than dropped. The declared lifecycle still writes.
     """
 
-    @pytest.mark.parametrize("bad", ["retracted", "dead"])
+    @pytest.mark.parametrize("bad", ["dead", "garbage"])
     def test_update_entity_refuses_an_undeclared_subject_status(
             self, env, bad):
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
-        with pytest.raises(ValueError, match="Invalid status"):
+        with pytest.raises(ValueError) as exc:
             sdk.update_knowledge(sid, status=bad)
+        _assert_refusal_names_the_repair(str(exc.value))
         # refused BEFORE any write: the stored value is untouched — a status-less
         # birth leaves it ABSENT since #9974 R1 (absent reads LIVE).
         (status,), = _subject_row(proj, "Team Alpha", "status")
         assert status is None, status
 
-    @pytest.mark.parametrize("bad", ["retracted", "dead"])
+    @pytest.mark.parametrize("bad", ["dead", "garbage"])
     def test_create_entity_refuses_an_undeclared_subject_status(
             self, env, bad):
         """The SECOND door: `status` reaches `_upsert_subject` through
         `**props`, so a guard on `_update_entity` alone leaves this writable."""
         sdk, _proj, _events, _journal_path = env
-        with pytest.raises(ValueError, match="Invalid status"):
+        with pytest.raises(ValueError) as exc:
             sdk.create_entity("subject", "Team New", subjectKind="core:team",
                               status=bad)
+        _assert_refusal_names_the_repair(str(exc.value))
 
-    def test_the_declared_subject_lifecycle_still_writes(self, env):
-        """Anti-vacuity: the guard refuses only UNDECLARED values, so the
-        §4.2 lifecycle (including the terminal members) still writes."""
+    @pytest.mark.parametrize("synonym", ["archived", "retracted"])
+    def test_a_declared_synonym_is_accepted_and_stored_as_deprecated(
+            self, env, synonym):
+        """#11824 — the OTHER half of the vocabulary ruling, and the reason
+        neither word is an "undeclared" case any more: a declared synonym
+        supplies no meaning the model did not already have, so the store gets
+        the canonical word and the caller gets no receipt (AX §1). ONTOLOGY
+        §4.2 says it for ``archived`` verbatim; the design's §3.1 verb table
+        lands retract/retire/withdraw on the same word.
+
+        MUTATION: dropping the pair from
+        ``lifecycle_vocabulary.LIFECYCLE_STATUS_SYNONYMS`` makes both cases
+        raise where a value must be STORED.
+        """
         sdk, proj, _events, _journal_path = env
         sid = node_id(sdk, "Subject", "Team Alpha")
-        for st in ("draft", "live", "superseded", "deprecated", "archived"):
+        sdk.update_knowledge(sid, status=synonym)
+        (got,), = _subject_row(proj, "Team Alpha", "status")
+        assert got == "deprecated", (synonym, got)
+        # the SECOND door answers the same way — both share the one vocabulary
+        # function, so a word cannot be legal on one door and refused on the
+        # other
+        sdk.create_entity("subject", "Team New", subjectKind="core:team",
+                          status=synonym)
+        (created,), = _subject_row(proj, "Team New", "status")
+        assert created == "deprecated", (synonym, created)
+        # …and the canonical word is what the WRITE SET names, so nothing a
+        # later READ can see was minted (the net stores no new spelling)
+        from tortoise import commit_ops
+
+        assert synonym not in commit_ops.SUBJECT_STATUS_VALUES
+
+    def test_the_declared_subject_lifecycle_still_writes(self, env):
+        """Anti-vacuity: the guard refuses only UNDECLARED values, so the whole
+        declared lifecycle — the four-word base, its terminal members included
+        — still writes. ``archived`` is NOT a fifth member: it is a synonym
+        stored as ``deprecated`` (pinned above), so listing it here would
+        assert a round-trip the model deliberately does not make."""
+        sdk, proj, _events, _journal_path = env
+        sid = node_id(sdk, "Subject", "Team Alpha")
+        for st in ("draft", "live", "superseded", "deprecated"):
             # ⛔ #12592 ADDS A PARTNER REQUIREMENT to one member of this list and
             # leaves the anti-vacuity claim untouched: `superseded` names its
-            # successor (ONTOLOGY §4.2), the other four need none.
+            # successor (ONTOLOGY §4.2), the other three need none.
             extra = ({"supersededBy": "Team Alpha II"} if st == "superseded"
                      else {})
             sdk.update_knowledge(sid, status=st, **extra)
@@ -590,25 +660,36 @@ def test_provenance_chain_surfaces_the_subject_status(env):
 
 def test_subject_family_has_its_own_declared_terminal_vocabulary():
     from tortoise import commit_ops
+    from tortoise.lifecycle_vocabulary import LIFECYCLE_STATUS_SYNONYMS
     from tortoise.search_engine import (
         _STATUS_FILTERED_LABELS,
         _status_vocab_for,
     )
 
     assert commit_ops.SUBJECT_TERMINAL_STATUSES == CANONICAL_SUBJECT_TERMINAL
+    # the WRITABLE set is the closed four-word base every knowledge kind shares
+    # (#11824 S0) — asserted against a HARD-CODED expectation, not against the
+    # module it comes from.
+    assert commit_ops.SUBJECT_STATUS_VALUES == CANONICAL_SUBJECT_WRITABLE
     vocab, include_outdated_flag = _status_vocab_for("Subject")
     assert vocab is commit_ops.SUBJECT_TERMINAL_STATUSES
     assert include_outdated_flag is False
     # the vocabulary is the TERMINAL set for the Subject read surface. `draft`
     # is retrievable (not terminal); `retracted` IS terminal by the Object
     # family's precedent (#2977) — a READ vocabulary must hold a dead state the
-    # graph can contain even when the write guard refuses to mint it.
+    # graph can contain even though the door now mints that state only as
+    # `deprecated`.
     assert "draft" not in vocab and "retracted" in vocab
-    # ONE declaration wide, not two drifting copies: the writable lifecycle
-    # (ONTOLOGY §4.2) plus the read-only legacy member IS the terminal set plus
-    # the current members. `retracted` is read-terminal but NOT writable.
-    assert commit_ops.SUBJECT_STATUS_VALUES | {"retracted"} == (
+    # ONE declaration wide, not two drifting copies: what a caller may WRITE —
+    # the four canonical words PLUS the declared synonyms stored as `deprecated`
+    # — IS the read net plus the current members. That is why the door's set is
+    # four words while the net is six: `archived`/`retracted` sit on the read
+    # side as STORED states and on the write side only as spellings of
+    # `deprecated` (ONTOLOGY §4.2, #11824).
+    assert commit_ops.SUBJECT_STATUS_VALUES | set(LIFECYCLE_STATUS_SYNONYMS) == (
         commit_ops.SUBJECT_TERMINAL_STATUSES | {"draft", "live"})
+    assert set(LIFECYCLE_STATUS_SYNONYMS) == {"archived", "retracted"}
+    assert set(LIFECYCLE_STATUS_SYNONYMS.values()) == {"deprecated"}
     assert "retracted" not in commit_ops.SUBJECT_STATUS_VALUES
     # the gate that was the actual defect: every retrieval leg read a per-site
     # `("Point", "Object")` literal, so :Subject was never filtered at all.

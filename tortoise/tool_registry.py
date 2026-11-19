@@ -2932,9 +2932,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     `tests/test_11609_structural_blockers.py` reads a retired entry too.
     #   · `search` — both reasons at once (`list[dict]` AND `GET /v1/search`).
     #   · `query` — the paged destination two ALREADY-retired pointers name
-    #     (`paginated_query`, `query_points_by_tag`), and one of the two UNION
-    #     envelopes the #8482 sweep's shrinkage floor measures. Retiring it is a
-    #     re-pointing decision, not a door removal, so it is not this wave's.
+    #     (`paginated_query`, `query_points_by_tag`), and the UNION envelope the
+    #     #8482 sweep's shrinkage floor measures alone at this head (the second,
+    #     `delete_entity`, retired in #11609 lane P6 and survives as a shim, which
+    #     the sweep does not read). Retiring `query` is a re-pointing decision,
+    #     not a door removal, so it is not this wave's.
     #   · `create_point`, `diary_write` — RETIRED in #11609 lane P1, which BUILT
     #     the arms that made their recorded reason false (`create_entity` now
     #     dispatches `type="point"` and `type="diary"`, see the residue block
@@ -2962,11 +2964,12 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #     every other entity -> `delete_entity`), so the kept entry carries both doors'
     #     whole capability, and both retire FORWARD into it above.
     #   · `delete`, `create_edge`/`create_operator`, `events_poll`, `org_create`,
-    #     `ingest`, `list_graphs` — their destinations (`link_entities`, `poll_events`,
-    #     the tenancy pair and the builder-only `write_knowledge_batch`) are NOT live on
-    #     `main` yet, so there is no container to answer through. `delete` itself is not a
-    #     door to retire but the KEPT entry the #9660 ruling keeps: it is the container the
-    #     two names above retire INTO, which is why it stays on this side of the line.
+    #     `ingest`, `list_graphs` — their destinations (`delete_knowledge`,
+    #     `link_entities`, `poll_events`, the tenancy pair and the builder-only
+    #     `write_knowledge_batch`) are NOT live on `main` yet, so there is no container to
+    #     answer through. `delete` itself is not a door to retire but the KEPT entry the
+    #     #9660 ruling keeps: it is the container the two names above retire INTO, which is
+    #     why it stays on this side of the line.
     #
     # The seven below are the residue: `-> dict`, no `rest_spec`, no envelope
     # repair, and a destination arm that exists and delegates to the very method
@@ -2979,10 +2982,10 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # the summands totalled 24, a review of #13687 measured it, and the clause was dropped.)
     # (It was 25 before the #11609 P1, P2 and P6 waves left it there, with their arms:
     # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2, the
-    # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 17. ⛔ THIS BLOCK
-    # STILL SAID 21 AND STILL LISTED BOTH P6 PAIRS AS HELD after #13626 merged, which is
-    # why `tests/test_11609_door_retirement.py`'s population check (17/10/7) and this
-    # prose disagreed on `main` — #13626 review ISSUE 2.)
+    # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 19 -> 17, one pair per
+    # unit. ⛔ THIS BLOCK STILL SAID 21 AND STILL LISTED BOTH P6 PAIRS AS HELD after #13626
+    # merged, which is why `tests/test_11609_door_retirement.py`'s population check (17/10/7)
+    # and this prose disagreed on `main` — #13626 review ISSUE 2.)
     # ⛔ ONE HOP to a live name in every pointer (GitHub's own
     # `DeprecatedToolAliases` states the limit: aliases are not transitive).
     # Arguments are named where dropping one changes the operation — `type=` and
