@@ -71,9 +71,14 @@ PRODUCTION_DIR = ROOT / "tortoise"
 #: `tests.<module>.<symbol>` or `tests/<module>[.py].<symbol>`, inside
 #: backticks. Deliberately narrow: a bare file pointer
 #: (`tests/test_x.py` — the `.py` lands in the symbol group, filtered by
-#: `_NOT_A_SYMBOL`), a data file (`tests/x.json`), an ellipsis
-#: (`tests/...boundary.py`) and a node id (`tests/test_x.py::node`) are out of
-#: scope, so this guard needs no per-token escape hatch.
+#: `_NOT_A_SYMBOL`), a data file **whose target is there** (`tests/x.json`), an
+#: ellipsis (`tests/...boundary.py`) and a node id (`tests/test_x.py::node`) are
+#: out of scope, so this guard needs no per-token escape hatch. ⚠️ Read that
+#: data-file clause with `_classify` in front of you: a data file is suppressed
+#: by the EVIDENCE conjunct (the file exists), not by an extension list, so the
+#: silence it promises holds only while the target is on disk — a pointer to a
+#: generated-or-absent fixture is asserted, and reds. That is the same residual
+#: `_NOT_A_SYMBOL`'s note states for the `.py` shape.
 _POINTER = re.compile(
     r"`(?:tests\.(?P<dotted>[A-Za-z0-9_]+)\.(?P<dsym>[A-Za-z0-9_]+)"
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
@@ -81,11 +86,12 @@ _POINTER = re.compile(
 
 #: A trailing token that is an EXTENSION, not a symbol. It covers ONLY the bare
 #: file pointer (`tests/test_x.py`, where `.py` lands in the symbol group), in
-#: BOTH spellings; every other file pointer is recognised by EVIDENCE —
-#: `tests/<written>.<symbol>` naming a file that IS THERE (`tests/x.mjs`,
-#: `tests/x.jsonl`, `tests/x.c`, or an extension nobody has invented yet) — never
-#: by an enumeration of extensions, which is only ever as complete as today's
-#: citations.
+#: BOTH spellings; every other pointer — either spelling — is recognised by
+#: EVIDENCE: `tests/<written>.<symbol>` naming a file that IS THERE
+#: (`tests/x.mjs`, `tests/x.jsonl`, `tests/x.c`, or an extension nobody has
+#: invented yet), never by an enumeration of extensions, which is only ever as
+#: complete as today's citations. Both spellings go through the ONE classifier
+#: (`_classify`); the dotted branch is not a second rule.
 #:
 #: ⛔ MEASURED (#13760 review): `tests/test_middleware_host_consolidation.mjs`,
 #: named by `tortoise/hosted_api.py`'s `#13636` note, was being IMPORTED as a
@@ -222,9 +228,10 @@ def _production_pointers() -> tuple[
 
     The slash form's split is `_classify`'s verdict, which is EVIDENCE-POSITIVE
     on the target (`tests/<written>.<symbol>` exists ⇒ FILE), so a renamed
-    module stays a SYMBOL pointer and reds. The dotted form is a module by
-    construction; only its bare-file tail (`tests.x.py`) is filtered, by
-    `_NOT_A_SYMBOL` — the same conjunct, not a second classifier.
+    module stays a SYMBOL pointer and reds. **The dotted form goes through the
+    SAME `_classify`**, so the two spellings cannot drift: a dotted file pointer
+    (`tests.x.json`, `tests.x.py`) is LISTED, and a dotted module pointer is
+    imported and looked up — one rule, not two.
     """
     symbols: list[tuple[Path, str, str, str]] = []
     files: list[tuple[Path, str, str]] = []
@@ -234,10 +241,11 @@ def _production_pointers() -> tuple[
             dotted = match.group("dotted")
             if dotted:
                 dsym = match.group("dsym")
-                if dsym in _NOT_A_SYMBOL:
-                    files.append((path, match.group(0), f"tests/{dotted}.{dsym}"))
+                kind, target = _classify(dotted, dsym)
+                if kind == "file":
+                    files.append((path, match.group(0), target))
                 else:
-                    symbols.append((path, match.group(0), f"tests.{dotted}", dsym))
+                    symbols.append((path, match.group(0), target, dsym))
                 continue
             written = match.group("path")
             symbol = match.group("psym")
@@ -334,6 +342,11 @@ def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
         "tests/test_present.py",
     )
     assert _classify("x", "py", tests_dir=tmp_path) == ("file", "tests/x.py")
+    # a dotted file pointer goes through the SAME rule, and is listed not asserted
+    assert _classify("harness", "mjs", tests_dir=tmp_path) == (
+        "file",
+        "tests/harness.mjs",
+    )
 
 
 def test_no_source_still_names_the_pre_move_symbols():
