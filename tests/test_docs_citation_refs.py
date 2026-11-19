@@ -634,6 +634,44 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "That count is the MERGE head's; name it beside the claim (`2584a86ec1`, with "
             "the merge-base command that prints its set) or the two module statements stay "
             "uncheckable (#13489 review, P1)")
+
+
+def _base_ref_absent_detail() -> str | None:
+    """Why THIS checkout cannot see `origin/main`, or ``None`` when it can.
+
+    A reading that cannot be taken is UNPROVABLE, never FALSE. The `test` job checks
+    out with `actions/checkout@v4` at its DEFAULT `fetch-depth: 1`
+    (`.github/workflows/python-ci.yml:968` has no `with:`; the file states the depth
+    itself at `:489`), which fetches ONLY the PR ref
+    (`refs/remotes/pull/<N>/merge`) — nothing maps `origin/main`. Measured in that
+    exact topology: `git show origin/main:docs/00_index.md` exits 128 with
+    `fatal: invalid object name 'origin/main'`, and
+    `git rev-parse --is-shallow-repository` prints `true`.
+
+    Failing there would red the REQUIRED `test` job on a CORRECT artifact in every
+    pull request in the repo — this file is `core`+`tier1`, so `select()` runs it in
+    every PR. That ruling is already recorded for this exact shape, and the shape below
+    is copied from it rather than invented: `tests/test_11739_quote_population_probe.py`
+    — *"a full clone of `main` (and CI, which checks out `fetch-depth: 1`) can resolve
+    neither. **Failing there would red the required `test` job permanently on a correct
+    artifact** (review F1) ... So the skip is keyed off what THIS checkout can see, read
+    from git rather than from the artifact."*
+    """
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "origin/main^{commit}"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+    except FileNotFoundError:  # no `git` on this host at all
+        return "`git` is not installed here, so no ref can be read"
+    if resolved.returncode == 0:
+        return None
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=REPO, capture_output=True, text=True, check=False).stdout.strip()
+    return (f"`origin/main` does not resolve in this checkout "
+            f"(shallow={shallow or 'UNKNOWN'})")
+
+
 def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed():
     """The doc attributed a `docs/00_index.md` cite re-point to THIS diff; it re-points none.
 
@@ -664,7 +702,10 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     measured cite sets are EQUAL — no cite moves, so no re-point can be this diff's.
     The prohibition is applied only where the measurement supports it: on a head whose
     diff really does move a cite the attribution is legitimate and this leg stands
-    down, while the resolution leg below still has to hold.
+    down, while the resolution leg — now ordered ABOVE this arm so that it runs in the
+    depth-1 checkout too (`#13802` review, finding 3) — still has to hold. Where neither
+    ref can be read at all, this leg reports UNPROVABLE (a `pytest.skip`) instead of
+    failing: a fail-closed read here redded the required `test` job in every PR.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
@@ -681,24 +722,13 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
         "for exactly ONE cite",
     )
 
-    probe = subprocess.run(
-        ["git", "show", "origin/main:docs/00_index.md"],
-        cwd=REPO, capture_output=True, text=True, check=False)
-    assert probe.returncode == 0, (
-        "cannot read `origin/main:docs/00_index.md`, so this arm cannot tell whether "
-        "this diff moves a cite — run `git show origin/main:docs/00_index.md` here "
-        "before trusting a green (#13746 review, round 3, P2)")
-    _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
-    _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
-    if _main == _head:
-        for phrase in _attributions:
-            assert phrase not in doc, (
-                f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
-                f"({phrase!r}), but that file's cite set is IDENTICAL on `origin/main` "
-                f"and at this head ({_head}) — no cite moves here, so no re-point is "
-                "this diff's. State the command (`git diff -U0 --word-diff=plain "
-                "origin/main...HEAD -- docs/00_index.md`) and let the reader re-derive "
-                "it (#13746 review, round 3, finding 4)")
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ARMS THAT NEED NO BASE REF, ORDERED FIRST ON PURPOSE (#13802 review, finding 3).
+    # Both read THIS tree and THIS document, so they are answerable in EVERY checkout.
+    # Ordering them above the `pytest.skip` below is what keeps the skip from carrying
+    # them away with it: pytest skips only if execution REACHES the skip, so a failure
+    # in either arm still reds the row in the depth-1 checkout that cannot compare sets.
+    # ─────────────────────────────────────────────────────────────────────────────
 
     # ⛔ HOISTED OUT OF THE SET-EQUALITY GUARD (#13802 review, finding 2 — FAIL-OPEN).
     # Standing the prohibition down when the measurement supports the attribution is
@@ -731,6 +761,58 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
             f"`tortoise/sdk.py:{_n}` is {_sdk[_n - 1].strip()!r} — the cite does not "
             "name the content the sentence says it names "
             "(#13746 review, round 3, P2)")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ARMS THAT NEED THE BASE REF (#13802 review, finding 3 — P1, blocking).
+    #
+    # ⛔ THIS READ USED TO FAIL CLOSED, AND THAT REDED THE REQUIRED `test` JOB IN
+    # EVERY PR IN THE REPO. `assert probe.returncode == 0` on
+    # `git show origin/main:docs/00_index.md` is unfailable-and-green on a full clone
+    # and unpassable on the depth-1 PR checkout `python-ci.yml` uses, so the fix for a
+    # documentation-claim defect broke the merge rail repo-wide — this file is
+    # `core`+`tier1`, and `select()` unions `tier1` into EVERY PR selection. Dropping
+    # the arm is NOT the repair (it is the only thing that measures the cite sets);
+    # raising the shared `test` job's checkout depth is not either (a full-history
+    # fetch on all 11 shards). Key it off what THIS checkout can see, per
+    # `_base_ref_absent_detail` and the `#11739` precedent it names.
+    # ─────────────────────────────────────────────────────────────────────────────
+    _absent = _base_ref_absent_detail()
+    if _absent is not None:
+        pytest.skip(
+            f"the `docs/00_index.md` cite-set comparison is UNPROVABLE here — "
+            f"{_absent}, which `actions/checkout@v4`'s default `fetch-depth: 1` on a "
+            f"`pull_request` always produces (only the PR ref is fetched, so nothing "
+            f"maps `origin/main`). UNPROVABLE is never FALSE: this is not a defect in "
+            f"the document, and the arms that need no base ref have already run above. "
+            f"Re-derive the comparison in a full clone:\n"
+            f"  git fetch origin main && git show origin/main:docs/00_index.md "
+            f"| grep -o 'sdk[.]py:[0-9]*'\n"
+            f"  grep -o 'sdk[.]py:[0-9]*' docs/00_index.md\n"
+            f"(#13802 review, finding 3; the shape is `#11739` review F1's)")
+
+    probe = subprocess.run(
+        ["git", "show", "origin/main:docs/00_index.md"],
+        cwd=REPO, capture_output=True, text=True, check=False)
+    # `origin/main` RESOLVES here (the skip above is the only way past this point), so a
+    # failed read is no longer an environment fact — it is an artifact fault, and it
+    # still fails closed. Do not widen this to `pytest.skip`: an unresolvable PATH at a
+    # resolvable ref is a real defect and the reader must see it as one.
+    assert probe.returncode == 0, (
+        "`origin/main` resolves in this checkout, but `docs/00_index.md` cannot be read "
+        "at it — `git show origin/main:docs/00_index.md` exits "
+        f"{probe.returncode} ({probe.stderr.strip()!r}). That is an artifact fault, not "
+        "a shallow clone, so this arm fails closed (#13802 review, finding 3)")
+    _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
+    _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
+    if _main == _head:
+        for phrase in _attributions:
+            assert phrase not in doc, (
+                f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
+                f"({phrase!r}), but that file's cite set is IDENTICAL on `origin/main` "
+                f"and at this head ({_head}) — no cite moves here, so no re-point is "
+                "this diff's. State the command (`git diff -U0 --word-diff=plain "
+                "origin/main...HEAD -- docs/00_index.md`) and let the reader re-derive "
+                "it (#13746 review, round 3, finding 4)")
 
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
@@ -841,7 +923,26 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
         ["git", "diff", "-U0", "--word-diff=plain", "origin/main...HEAD", "--",
          "docs/00_index.md"],
         cwd=REPO, capture_output=True, text=True, check=False)
-    moved = _added_cite_tokens(proc.stdout) if proc.returncode == 0 else set()
+    # ⛔ `else set()` WAS THE SAME P1 AS THE ARM ABOVE (#13802 review, finding 3 — the
+    # root, in the sibling leg). A three-dot diff against a ref this checkout cannot
+    # resolve exits non-zero, and folding that to an EMPTY set makes an UNPROVABLE
+    # reading indistinguishable from a MEASURED one — so the moment a claim phrase is
+    # present, a depth-1 checkout reds on a CORRECT artifact with the wrong accusation
+    # ("the live three-dot diff adds no such token"). rc == 0 with NO added token is a
+    # real measurement and still reds; only an UNREADABLE base skips, and it says so.
+    if proc.returncode != 0:
+        pytest.skip(
+            f"the live three-dot diff of `docs/00_index.md` is UNPROVABLE here — "
+            f"`git diff -U0 --word-diff=plain origin/main...HEAD` exits "
+            f"{proc.returncode} ({proc.stderr.strip()!r}); "
+            f"{_base_ref_absent_detail() or 'the base ref does not resolve'}. An empty "
+            f"reading would be read as MEASURED and would red this row on a correct "
+            f"artifact, so it is reported as unchecked instead. Re-derive it in a full "
+            f"clone:\n"
+            f"  git fetch origin main && git diff -U0 --word-diff=plain "
+            f"origin/main...HEAD -- docs/00_index.md\n"
+            f"(#13802 review, finding 3)")
+    moved = _added_cite_tokens(proc.stdout)
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
