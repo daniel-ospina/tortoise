@@ -28,8 +28,11 @@ for them:
 * a healthy wrap tool's envelope is byte-identical (the schema is NOT relaxed);
 * an object-annotated tool's `_safe` error dict is UNCHANGED (the established
   contract, which works);
-* an `anyOf` envelope (`tortoise_query`, `tortoise_delete_entity`) is untouched
-  — a dict `result` is VALID there;
+* an `anyOf` envelope is untouched — a dict `result` is VALID there. The only
+  ADVERTISED union door left is `tortoise_query`; `tortoise_delete_entity` was the
+  second one until #11609 lane P6 retired it (#11609), and its retired name keeps the
+  union schema on the #3883 shim, which the advertised registry the sweep walks does
+  not carry;
 * the second trigger of the same class — the wait-bound refusal, whose payload
   has no `result` key at all — is repaired too;
 * the raw tool FUNCTION still returns the `_safe` error dict: the repair lives
@@ -243,8 +246,10 @@ async def test_an_object_tool_keeps_its_structured_error(quiet):
 
 @pytest.mark.asyncio
 async def test_an_anyof_envelope_is_left_alone(quiet):
-    """`tortoise_query` / `tortoise_delete_entity` advertise `anyOf`, where a
-    dict `result` is VALID — repairing them would break a working surface."""
+    """`tortoise_query` advertises `anyOf`, where a dict `result` is VALID — repairing
+    it would break a working surface. It is the only advertised union door at this head:
+    `tortoise_delete_entity`, the other one when this probe was written, retired in
+    #11609 lane P6 and now lives on the #3883 shim, outside the swept population."""
     def _union() -> list[dict] | dict:
         return {"error": "page must be >= 1 (1-based), got 0"}
 

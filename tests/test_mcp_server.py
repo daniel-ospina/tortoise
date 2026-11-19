@@ -1236,9 +1236,9 @@ class TestStdioEntrypointToolRegistration:
             #   42 -  2 + 0 = 40   (#11609 P6's DELETE pair — `delete_point` /
             #                       `delete_entity` retire into the `tortoise_delete`
             #                       entry the #9660 ruling KEEPS)
-            # ⛔ Not the HTTP-filtered view: that one is 39 at this head
-            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 39
-            # and 36 respectively), and
+            # ⛔ Not the HTTP-filtered view: that one is 35 at this head
+            # (`test_ask_eval_only` / `test_10084_graph_argument_omit_first` pin it — 35
+            # and 32 respectively), and
             # the two differ by the five `http_policy=False` rows. Writing one view's
             # base with the other's head lands on a number no population has.
             assert len(names) >= 40, f"expected >=40 tools, got {len(names)}"
