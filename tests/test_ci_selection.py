@@ -10316,6 +10316,15 @@ ROWED_BY_THIS_FOLD = (
     # row states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
     # listed has no `durations:` row and nothing reds.
     "test_13665_sentry_init_off_loop.py",
+    # #12186 capstone (PR #13680) — the measurement record's pins. A file this fold ADDED,
+    # registered on `core` AND on `tier1` because every subject it guards
+    # (`tools/capstone_12186_recall.py`, `docs/evidence/12186-capstone/{README.md,
+    # measurement.json,queries.json}`) is under `NON_PYTHON_PREFIXES` and measures
+    # `surfaces: []` — a tools-or-docs-only diff takes the tier-1 early return, so without the
+    # rows these pins ran ZERO times on the one change class that can re-stale the record.
+    # The row is here for the same reason as the one above: the ENTRY-RULE pin iterates this
+    # EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
+    "test_capstone_12186_recall.py",
 )
 
 

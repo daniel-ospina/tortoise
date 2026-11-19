@@ -28,6 +28,21 @@
     <priority>0.8</priority>
   </url>
   <url>
+    <!-- The niche product page (#13645) — a GTM experiment, ADDED alongside
+         `/tortoise` rather than replacing it. It lives at the COMPANY ROOT, not
+         under the `/tortoise` prefix used by every other product URL in this
+         file: the middleware's prefix rewrite serves only `PRODUCT_PAGES`
+         there, and this page is deliberately not a member. It is INDEXED on
+         purpose (the page's own `<meta name="robots">` says so): an experiment
+         nobody can find has no traffic to measure. If it is ever retired or
+         flipped to noindex, this <loc> goes with it —
+         `tests/test_website_docs_consistency.py::test_no_sitemap_advertises_a_
+         page_that_is_deleted_or_noindex` reds otherwise. -->
+    <loc>https://premiselabs.co/tortoise-for-product-teams</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://premiselabs.co/tortoise/faq</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>

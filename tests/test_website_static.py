@@ -68,6 +68,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
 import re
 import struct
@@ -90,6 +91,50 @@ if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packag
 
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
+# The ONE pricing source (#13645). Both product pages load this file; the tier
+# table used to be inlined in product.html, and `/tortoise-for-product-teams`
+# renders the same prices, so a second copy would be two prices that can drift
+# with nothing red. See `TestPricingSourceIsShared`.
+PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
+
+#: The hosts this site serves itself from. An asset referenced through one of
+#: these is SAME-ORIGIN — the browser loads the same file a relative path would —
+#: so the absolute spelling must not be read as a foreign asset and skipped
+#: (#13696 round 9, P3). `tortoise.premiselabs.co` is the PRODUCT host and serves
+#: this same `website/` tree (`TestOgImages.SITE_ORIGINS` pins the same pair), so
+#: leaving it out read `https://tortoise.premiselabs.co/assets/x.js` as foreign
+#: and left a `$25/mo` in it green — measured, #13696 round 10.
+SITE_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+# The shared consent module (#658/#736). It GAINED a behaviour for #13645 — the
+# `tortoise:consent` event — and the niche page's whole funnel reads it, so the
+# seam is pinned here: see `TestConsentSeam`.
+CONSENT_JS = REPO_ROOT / "website" / "consent.js"
+
+#: The consent seam's calls, each anchored as a STATEMENT in the file's own code.
+#: ⛔ Every one of these replaced a `str.find`/`in` substring test, which three
+#: successive spellings defeated: a whole-line comment, a trailing comment, a
+#: `//` glued to a colon, and a STRING LITERAL
+#: (`throw new Error("opt_in_capturing() is handled by the caller")`). All four
+#: left a deleted call green (#13696 rounds 6, 8, 9). A pattern anchored to the
+#: line's own code cannot be satisfied by prose, a string, or a fragment of a
+#: larger expression.
+OPT_IN_STMT = re.compile(
+    r"^[ \t]*window\.posthog\.opt_in_capturing\(\)[ \t]*;?", re.M)
+LOADERS_STMT = re.compile(r"^[ \t]*loadConsentedAnalytics\(\)[ \t]*;?", re.M)
+GRANTED_STMT = re.compile(
+    r"""^[ \t]*announceConsent\((["'])granted\1\)[ \t]*;?""", re.M)
+#: `;?` — the terminator is OPTIONAL on purpose. A statement's identity here is
+#: the `^[ \t]*` anchor plus the full call text; requiring `;` red a call that is
+#: present and ASI-terminated with "no longer calls `opt_in_capturing()`", which
+#: is false and misleads the next reader (#13696 round 10, measured: dropping
+#: only the semicolon failed this row while every other row was green).
+#: The page's consent gate, as the statement it is: `if (!consented()) return;`.
+NOT_CONSENTED_STMT = re.compile(
+    r"^[ \t]*if \(!consented\(\)\)[ \t]*return\b", re.M)
+# The niche product page (#13645) — a GTM experiment added ALONGSIDE
+# `/tortoise`, served at the company root (`premiselabs.co/tortoise-for-product-
+# teams`), not under the `/tortoise` prefix.
+PRODUCT_TEAMS_HTML = REPO_ROOT / "website" / "tortoise-for-product-teams.html"
 # The investor one-pager (PR #9283): its Progress section carries owner copy and
 # a left/right cell order that is pure DOM order — see TestInvestorsProgressCopy.
 INVESTORS_HTML = REPO_ROOT / "website" / "investors.html"
@@ -109,21 +154,28 @@ PUBLIC_TIERS = frozenset({"free", "solo", "pro", "team"})
 
 
 def _extract_pricing_object() -> dict:
-    """Parse the `const PRICING = {...}` object from product.html.
+    """Parse the `window.TORTOISE_PRICING = {...}` object from the ONE source.
+
+    ⛔ It is NOT in product.html any more (#13645). The tier table moved to
+    `website/assets/tortoise-pricing.js` because `/tortoise-for-product-teams`
+    renders the same prices, and the owner's decision named a second copy as
+    the defect: two prices that can drift with nothing red.
+    `TestPricingSourceIsShared` holds both pages to this one file; everything
+    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`,
+    `tests/test_tier_naming.py`) now reads the shared source, so the mirror
+    parity it asserts is a property of the ONE table every page renders.
 
     Raises AssertionError (with the source context) when the block cannot be
     located — a renamed/moved constant must fail loudly, not skip.
     """
-    src = PRODUCT_HTML.read_text(encoding="utf-8")
-    start = src.index("const PRICING = {")
+    src = PRICING_SOURCE.read_text(encoding="utf-8")
+    start = src.index("window.TORTOISE_PRICING = {")
     obj_start = src.index("{", start)
-    end_marker = "let currentBilling"
-    obj_end = src.index(end_marker, obj_start)
-    block = src[obj_start:obj_end].rstrip()
-    # Strip the trailing `};` (block ends with the object's closing brace)
-    if block.endswith("};"):
-        block = block[:-1]
-    return json.loads(_normalize_js_object(block))
+    # The object closes on a line of its own (`};` at column 0); every nested
+    # object is indented, so the first unindented `\n};` marks the end and the
+    # object's own `}` is the character before it.
+    end = src.index("\n};", obj_start)
+    return json.loads(_normalize_js_object(src[obj_start:end + 2]))
 
 
 def _normalize_js_object(src: str) -> str:
@@ -195,6 +247,403 @@ def _fmt_price(price, mode: str, discount_pct: int) -> tuple[str, str]:
     return f"${price}", "Billed monthly"
 
 
+# ── the SAME contract, executed from the JS both pages load ─────────────────
+
+#: `window.tortoiseFmtPrice = function (…) {` in the shared source.
+FMT_PRICE_HEAD_RE = re.compile(
+    r"window\.tortoiseFmtPrice\s*=\s*function\s*\([^)]*\)\s*\{")
+
+
+def _fmt_price_js_body() -> str:
+    """The body of the shared formatter — the code BOTH pages actually execute.
+
+    `_code_only`, so a COMMENT edit cannot red a row whose subject is the math.
+    """
+    code = _code_only(PRICING_SOURCE.read_text(encoding="utf-8"))
+    m = FMT_PRICE_HEAD_RE.search(code)
+    assert m, (
+        "the shared source no longer defines `window.tortoiseFmtPrice` — the "
+        "rounding contract has no home, so each page would re-implement it")
+    return _balanced_block(code, m.start())
+
+
+def _js_round(value: float) -> int:
+    """`Math.round`: JS sends halves UP, where Python's `round` is half-to-EVEN
+    (`round(20.5)` is 20 here and 21 in a browser)."""
+    return math.floor(value + 0.5)
+
+
+# ── a reader for the ONE formatter: statements and expressions EXECUTED ─────
+#
+# ⛔ The reason this exists at all (#13696 round 16, P1, measured): the previous
+# reader took `mode` as its OWN Python argument and returned HARDCODED strings.
+# It evaluated only the three `var` bindings and compared two return templates
+# as TEXT — so the source's own `if (mode === 'annual')` guard and its two
+# `return { big: …, total: … }` templates were never read. Both mutants left
+# all 167 rows GREEN:
+#
+#   * `if (mode === 'annual') {` → `if (true) {` — a MONTHLY visitor then sees
+#     `$20` / `$240 billed annually` on both pages, identically, so the
+#     page-vs-page compare and the static-card compare (annual default) agree;
+#   * `total: '$' + total + ' billed annually'` → `… ' billed yearly'`.
+#
+# Restating the dispatch or the output strings in Python cannot disagree with
+# itself, which is why a row built that way verifies its re-implementation. So
+# the guard, the statements and both templates are now READ OUT of
+# `website/assets/tortoise-pricing.js` and EXECUTED. Anything this reader does
+# not model is REFUSED with the construct named — never skimmed past — so a
+# rewrite reds with a message a human can act on instead of passing blind.
+
+#: The only CALLS the formatter may contain. `Math` is the only JS-ism its
+#: arithmetic needs; a call this table does not name is refused.
+JS_FMT_CALLS = {"Math.round": _js_round, "Math.max": max}
+
+#: JS tokens the formatter's own statements are written in.
+JS_FMT_TOKEN_RE = re.compile(
+    r"\s*(?:"
+    r"(?P<str>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
+    r"|(?P<num>\d+(?:\.\d+)?)"
+    r"|(?P<op>===|!==|==|!=|\+|\*|/|\(|\)|,|\{|\}|:|-)"
+    r"|(?P<ident>[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+    r")")
+
+#: `text`'s bracket group starting at `text[i]` — the opener included, the
+#: closer matched by depth — and the index just past it. Quote-aware.
+_JS_OPENERS = {"(": ")", "[": "]", "{": "}"}
+
+
+def _js_unmodelled(construct: str) -> str:
+    return (
+        "the shared formatter contains "
+        f"`{construct.strip()[:80]}`, which this reader does not model — teach "
+        "it here rather than letting the agreement row pass blind over code it "
+        "cannot execute (#13696 round 16)")
+
+
+def _js_bracket_group(text: str, i: int) -> tuple[str, int]:
+    """`(inner, index_after)` for the bracket group opening at `text[i]`."""
+    if i >= len(text) or text[i] not in _JS_OPENERS:
+        raise AssertionError(_js_unmodelled(text[i:i + 40]))
+    close = _JS_OPENERS[text[i]]
+    depth = 0
+    quote = ""
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if quote:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in _JS_OPENERS:
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                if ch != close:
+                    raise AssertionError(_js_unmodelled(text[i:j + 1]))
+                return text[i + 1:j], j + 1
+        j += 1
+    raise AssertionError(
+        f"unbalanced `{text[i]}` in the shared formatter: {text[i:i + 80]!r}")
+
+
+def _js_statement_end(text: str, i: int) -> int:
+    """Index of the `;` that terminates the statement starting at `text[i]`
+    (bracket- and quote-aware, so a `;` inside `(…)` or a string is not it)."""
+    depth = 0
+    quote = ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in _JS_OPENERS:
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return i
+        i += 1
+    raise AssertionError(
+        "the shared formatter has an unterminated statement: "
+        f"{text.strip()[:120]!r}")
+
+
+def _js_statements(inner: str) -> list[tuple]:
+    """Parse the formatter's statement block into `if` / `var` / `return` nodes.
+
+    Only the three shapes the formatter is written in are modelled: a
+    `var NAME = EXPR;`, a `return EXPR;`, and an `if (COND)` whose body is a
+    `{ … }` block or a single statement. Anything else is refused by name.
+    """
+    statements: list[tuple] = []
+    i, n = 0, len(inner)
+    while True:
+        while i < n and (inner[i].isspace() or inner[i] == ";"):
+            i += 1
+        if i >= n:
+            return statements
+        rest = inner[i:]
+        if re.match(r"if\s*\(", rest):
+            cond, j = _js_bracket_group(inner, i + rest.index("("))
+            while j < n and inner[j].isspace():
+                j += 1
+            if j < n and inner[j] == "{":
+                block, j = _js_bracket_group(inner, j)
+                statements.append(("if", cond, _js_statements(block)))
+            else:
+                end = _js_statement_end(inner, j)
+                statements.append(("if", cond, _js_statements(inner[j:end + 1])))
+                j = end + 1
+            i = j
+            continue
+        m = re.match(r"var\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=", rest)
+        if m:
+            j = i + m.end()
+            end = _js_statement_end(inner, j)
+            statements.append(("var", m.group(1), inner[j:end]))
+            i = end + 1
+            continue
+        if re.match(r"return\b", rest):
+            j = i + len("return")
+            end = _js_statement_end(inner, j)
+            statements.append(("return", inner[j:end]))
+            i = end + 1
+            continue
+        raise AssertionError(_js_unmodelled(rest[:60]))
+
+
+def _js_str(value: object) -> str:
+    """How JS renders a value inside `'…' + value` (`20`, not `20.0`)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else repr(value)
+    raise AssertionError(
+        f"the shared formatter concatenates {value!r} into a price string — "
+        "this reader does not model that value")
+
+
+def _js_add(left: object, right: object) -> object:
+    """JS `+`: concatenation when EITHER side is a string, numeric otherwise."""
+    if isinstance(left, str) or isinstance(right, str):
+        return _js_str(left) + _js_str(right)
+    if isinstance(left, bool) or isinstance(right, bool):  # pragma: no cover
+        raise AssertionError(_js_unmodelled(f"{left!r} + {right!r}"))
+    return left + right  # type: ignore[operator]
+
+
+class _JsExpression:
+    """A recursive-descent evaluator for the formatter's own expressions.
+
+    It EVALUATES the source text — `'$' + perMonth` becomes the string a browser
+    would print — so a changed literal or a changed operator is measured, not
+    pattern-matched. Precedence and semantics are the JS ones this contract
+    uses: `+` concatenates when a side is a string, `/` is float division,
+    `===`/`!==` compare values.
+    """
+
+    def __init__(self, expr: str, scope: dict[str, object]) -> None:
+        self.text = expr
+        self.scope = scope
+        self.tokens: list[tuple[str, str]] = []
+        i = 0
+        while expr[i:].strip():
+            m = JS_FMT_TOKEN_RE.match(expr, i)
+            if m is None:
+                raise AssertionError(_js_unmodelled(expr[i:i + 40]))
+            kind = m.lastgroup
+            assert kind is not None
+            self.tokens.append((kind, m.group(kind)))
+            i = m.end()
+        self.i = 0
+
+    def _peek(self, ahead: int = 0) -> tuple[str | None, str | None]:
+        j = self.i + ahead
+        return self.tokens[j] if j < len(self.tokens) else (None, None)
+
+    def _take(self, kind: str, value: str | None = None) -> str:
+        got_kind, got = self._peek()
+        if got_kind != kind or (value is not None and got != value):
+            raise AssertionError(_js_unmodelled(self.text))
+        self.i += 1
+        assert got is not None
+        return got
+
+    def parse(self) -> object:
+        value = self._comparison()
+        if self.i != len(self.tokens):
+            raise AssertionError(_js_unmodelled(self.text))
+        return value
+
+    def _comparison(self) -> object:
+        left = self._additive()
+        while self._peek()[0] == "op" and self._peek()[1] in (
+                "===", "!==", "==", "!="):
+            op = self._take("op")
+            right = self._additive()
+            left = (left == right) if op in ("===", "==") else (left != right)
+        return left
+
+    def _additive(self) -> object:
+        left = self._multiplicative()
+        while self._peek()[0] == "op" and self._peek()[1] in ("+", "-"):
+            op = self._take("op")
+            right = self._multiplicative()
+            if op == "+":
+                left = _js_add(left, right)
+                continue
+            if isinstance(left, bool) or isinstance(right, bool) or not isinstance(
+                    left, (int, float)) or not isinstance(right, (int, float)):
+                raise AssertionError(_js_unmodelled(self.text))
+            left = left - right
+        return left
+
+    def _multiplicative(self) -> object:
+        left = self._primary()
+        while self._peek()[0] == "op" and self._peek()[1] in ("*", "/"):
+            op = self._take("op")
+            right = self._primary()
+            if not isinstance(left, (int, float)) or isinstance(left, bool) \
+                    or not isinstance(right, (int, float)) \
+                    or isinstance(right, bool):
+                raise AssertionError(_js_unmodelled(self.text))
+            left = left * right if op == "*" else left / right
+        return left
+
+    def _primary(self) -> object:
+        kind, value = self._peek()
+        if kind == "num":
+            self._take("num")
+            assert value is not None
+            return int(value) if "." not in value else float(value)
+        if kind == "str":
+            self._take("str")
+            assert value is not None
+            if "\\" in value:
+                raise AssertionError(_js_unmodelled(value))
+            return value[1:-1]
+        if (kind, value) == ("op", "("):
+            self._take("op", "(")
+            inner = self._comparison()
+            self._take("op", ")")
+            return inner
+        if (kind, value) == ("op", "{"):
+            return self._object_literal()
+        if kind == "ident":
+            self._take("ident")
+            assert value is not None
+            if value in ("true", "false"):
+                return value == "true"
+            if self._peek() == ("op", "("):
+                return self._call(value)
+            if value not in self.scope:
+                raise AssertionError(_js_unmodelled(value))
+            return self.scope[value]
+        raise AssertionError(_js_unmodelled(self.text))
+
+    def _call(self, name: str) -> object:
+        fn = JS_FMT_CALLS.get(name)
+        if fn is None:
+            raise AssertionError(_js_unmodelled(f"{name}(…)"))
+        self._take("op", "(")
+        args: list[object] = []
+        if self._peek() != ("op", ")"):
+            args.append(self._comparison())
+            while self._peek() == ("op", ","):
+                self._take("op", ",")
+                args.append(self._comparison())
+        self._take("op", ")")
+        assert callable(fn)
+        return fn(*args)
+
+    def _object_literal(self) -> dict[str, object]:
+        self._take("op", "{")
+        obj: dict[str, object] = {}
+        while self._peek() != ("op", "}"):
+            key = self._take("ident")
+            self._take("op", ":")
+            obj[key] = self._comparison()
+            if self._peek() == ("op", ","):
+                self._take("op", ",")
+        self._take("op", "}")
+        return obj
+
+
+#: The value `_js_run` returns when a branch reaches no `return`.
+JS_FMT_FELL_THROUGH = object()
+
+
+def _js_run(statements: list[tuple], scope: dict[str, object]) -> object:
+    """Run the parsed formatter; the value of the FIRST `return` reached."""
+    for stmt in statements:
+        kind = stmt[0]
+        if kind == "if":
+            _, cond_src, block = stmt
+            if _JsExpression(cond_src, scope).parse():
+                value = _js_run(block, scope)
+                if value is not JS_FMT_FELL_THROUGH:
+                    return value
+        elif kind == "var":
+            _, name, expr_src = stmt
+            scope[name] = _JsExpression(expr_src, scope).parse()
+        elif kind == "return":
+            return _JsExpression(stmt[1], scope).parse()
+        else:  # pragma: no cover — `_js_statements` only produces those three
+            raise AssertionError(f"unexpected statement {kind!r}")
+    return JS_FMT_FELL_THROUGH
+
+
+def _js_fmt_price(price: int, mode: str, discount_pct: int) -> tuple[str, str]:
+    """EXECUTE the shared formatter — the code BOTH pages run — and return the
+    `(big, total)` pair it produces for a visitor in `mode`.
+
+    The dispatch is the SOURCE's: `if (mode === 'annual') { … }` is evaluated
+    against `mode`, and the pair comes from the source's own `return { big: …,
+    total: … }` templates. Nothing here restates the guard, the branch chosen,
+    or either output string — so a mutated guard, a swapped branch or an edited
+    template all disagree with the Python mirror and red the rows that use this.
+
+    Measured at `3e381c6194` (#13696 round 16, P1): with the previous reader
+    (which took `mode` as its own argument and returned hardcoded strings)
+    `if (mode === 'annual')` → `if (true)` and `' billed annually'` →
+    `' billed yearly'` each left **all 167 rows GREEN**.
+    """
+    body = _fmt_price_js_body()
+    inner, _ = _js_bracket_group(body, body.index("{"))
+    program = _js_statements(inner)
+    assert program, (
+        "the shared formatter's body is empty — the display contract has no "
+        f"implementation (#13645):\n{body}")
+    out = _js_run(program, {"price": price, "mode": mode,
+                            "discountPct": discount_pct})
+    assert out is not JS_FMT_FELL_THROUGH, (
+        f"the shared formatter returned nothing for mode={mode!r}, ${price} — "
+        "a visitor in that mode would render `undefined` (#13645). Its own "
+        f"statements decide this, so the guard must branch on `mode`:\n{body}")
+    assert isinstance(out, dict), (
+        f"the shared formatter returns {out!r} instead of a `{{ big, total }}` "
+        f"pair (#13645):\n{body}")
+    missing = {"big", "total"} - set(out)
+    assert not missing, (
+        f"the shared formatter's return object lost {sorted(missing)!r}, so a "
+        f"page would render `undefined` (#13645):\n{body}")
+    return _js_str(out["big"]), _js_str(out["total"])
+
+
 def _render_pricing_fn(html: str) -> str:
     """Extract the renderPricing() function body from product.html."""
     m = re.search(r"function renderPricing\(\) \{.*?\n    \}", html, re.S)
@@ -202,10 +651,263 @@ def _render_pricing_fn(html: str) -> str:
     return m.group(0)
 
 
-def _function_refs(html: str, fn_name: str) -> str:
+def _function_refs(html: str, fn_name: str, page: str = "product.html") -> str:
+    """`page` labels the failure. A message that hard-codes one file name sends
+    the next reader to a page that is fine, now that the extractor serves both
+    product pages (#13696 review 2, finding 3)."""
     m = re.search(rf"function {fn_name}\(.*?\n    \}}", html, re.S)
-    assert m, f"{fn_name}() not found in product.html"
+    assert m, f"{fn_name}() not found in {page}"
     return m.group(0)
+
+
+def _balanced_block(text: str, start: int) -> str:
+    """`text[start:]` up to and including the `}` that closes its first `{`.
+
+    QUOTE-AWARE, because every body this is used on holds strings: a quoted `}`
+    (or `{`) must not move the depth. A `${…}` interpolation inside a template
+    literal is balanced by construction, so treating a backtick literal as an
+    opaque string is enough — none of these consumers needs a JS parser.
+    """
+    open_at = text.find("{", start)
+    assert open_at != -1, (
+        f"no `{{` at or after offset {start}: {text[start:start + 80]!r}")
+    depth = 0
+    quote = ""
+    i = open_at
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+        i += 1
+    raise AssertionError(
+        f"unbalanced `{{` at offset {open_at}: {text[open_at:open_at + 80]!r}")
+
+
+#: The block that CHOOSES the initial billing mode, at the page's top level.
+_PRICING_INIT_RE = re.compile(
+    r"^[ \t]*if[ \t]*\([ \t]*PRICING[ \t]*\)[ \t]*\{", re.M)
+
+#: A `function` head, whose body the stray-call scan must not read as top level.
+_FUNCTION_HEAD_RE = re.compile(r"\bfunction\b[^\n{]*\{")
+
+
+def _without_function_bodies(code: str) -> str:
+    """`code` with every `function …(…) { … }`, head included, removed.
+
+    What survives is the page's TOP-LEVEL code — the statements a browser runs
+    at parse time. A `function` whose signature spans lines is not matched, so
+    its body stays in the result: that direction is fail-CLOSED (a call inside
+    it would red the row below with a message naming the rule), never a silent
+    pass.
+    """
+    out: list[str] = []
+    i = 0
+    while True:
+        m = _FUNCTION_HEAD_RE.search(code, i)
+        if m is None:
+            out.append(code[i:])
+            return "".join(out)
+        out.append(code[i:m.start()])
+        block = _balanced_block(code, m.start())
+        i = m.start() + len(block)
+
+
+def _pricing_init_code(html: str, page: str = "product.html") -> str:
+    """The `if (PRICING) { … }` BLOCK that decides which prices a visitor sees FIRST.
+
+    `setBilling` is itself compared by `test_the_two_pages_render_from_the_same_code`,
+    but the call that CHOOSES its argument sits at the page's top level, outside
+    every captured function — so a page could keep the function identical and
+    still open on the other billing mode. Measured before this helper existed
+    (#13696 review 2, finding 4): flipping the campaign page's init to
+    `setBilling('monthly')` left all 135 rows GREEN while that page opened on
+    $19/$25/$149 against `/tortoise`'s $15/$20/$119 annual.
+
+    ⛔ Round 11 (#13696, P1): this used to return the ONE LINE carrying both
+    `PRICING.display.annual_default` and `setBilling` and compare that stripped
+    line. Keeping that line BYTE-IDENTICAL and appending
+    `if (PRICING) setBilling('monthly');` after the block left all **158 rows
+    GREEN** at `59bc263091` while the campaign page opened on $19/$25/$149
+    against `/tortoise`'s $15/$20/$119 — the same divergence, one statement
+    later. So the WHOLE block is compared, and a second top-level `setBilling(…)`
+    call is refused: the block is the only statement allowed to choose the
+    initial mode.
+    """
+    blocks: list[str] = []
+    stray: list[str] = []
+    for script in _inline_scripts(html):
+        found = [_balanced_block(script, m.start())
+                 for m in _PRICING_INIT_RE.finditer(script)]
+        blocks.extend(found)
+        rest = script
+        for block in found:
+            rest = rest.replace(block, "", 1)
+        # `_code_only`, not the comment-stripped script: this consumer asks
+        # "is the call there at all", where a mention in prose or in a trailing
+        # comment is indistinguishable from the call (see `_code_only`).
+        stray.extend(ln.strip()
+                     for ln in _code_only(_without_function_bodies(rest)).splitlines()
+                     if re.search(r"\bsetBilling\s*\(", ln))
+    assert blocks, (
+        f"{page} no longer wires its billing default from the shared table "
+        "(`if (PRICING) { … setBilling(…) … }`). Without it the "
+        "page opens on whatever `setBilling` was left at, not the mode "
+        "`pricing.json` names, so every price on it is quoted in the wrong "
+        "billing period (#13645).")
+    assert len(blocks) == 1, (
+        f"{page} wires the billing default {len(blocks)} time(s): {blocks!r}. "
+        "Two wiring blocks can disagree, and only the last one runs.")
+    # Indentation is not code, so the comparison is over stripped lines.
+    block = "\n".join(ln.strip() for ln in blocks[0].splitlines() if ln.strip())
+    assert "PRICING.display.annual_default" in block and "setBilling(" in block, (
+        f"{page}'s `if (PRICING) {{ … }}` block no longer chooses the mode from "
+        "`PRICING.display.annual_default`, so the page opens on the wrong "
+        f"billing period with every row green (#13645):\n{block}")
+    assert not stray, (
+        f"{page} calls `setBilling(…)` at TOP LEVEL, outside the init block:\n  "
+        + "\n  ".join(stray)
+        + "\nThe init block is the only statement allowed to choose the "
+        "initial billing mode: a later top-level call WINS, so the page opens "
+        "on the other mode than `/tortoise` while the compared block is "
+        "byte-identical (#13696 round 11, measured green). Move the call inside "
+        "the block, or leave the mode to the monthly/annual buttons' `onclick`.")
+    return block
+
+
+def _code_only(code: str) -> str:
+    """`code` with every JS comment removed — block AND line, whole-line
+    or trailing.
+
+    Whole-line stripping alone is not enough where the result feeds a PRESENCE
+    check: a trailing `// opt_in_capturing() is now handled inside …` satisfied
+    `str.find` while the real call was gone (#13696 round 7). `_strip_comment_lines`
+    stays the tool for the price channels, where a trailing comment is meant to
+    be scanned WITH the code (it fails closed there — the line is read as
+    written); this helper is for the rows that ask "is the call there at all",
+    where a mention is indistinguishable from the call and so must not count.
+
+    `(?<!:)` keeps a `//` that is part of a URL scheme (`https://…`) intact.
+    """
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
+    return re.sub(r"(?<!:)//[^\n]*", "", code)
+
+
+def _strip_comment_lines(code: str) -> str:
+    """`code` with every WHOLLY-comment line removed and every comment SPAN cut.
+
+    ⛔ SPANS, not lines. Dropping a line because its stripped form merely
+    STARTS with `/*` also drops the code that follows the closing `*/` on that
+    same line, and continuing past `*/` when a block closes mid-line drops the
+    remainder with it — so `/* note */ labels.pro = 'Growth';` and a block whose
+    last line closes and then runs code were both invisible to every consumer
+    of this helper. Measured (`#13696` review, round 6): with the line-based
+    rule, a `$25/mo` literal behind a leading `/* x */` left BOTH
+    `test_no_page_quotes_a_price_inside_its_own_script` and
+    `test_the_two_pages_render_the_same_code` green while the page quoted a
+    price `/tortoise` does not. The tail after `*/` is now KEPT as code.
+
+    Line-based for the trailing `//` case only, on purpose. A regex `//`-strip
+    would cut the `https://` inside the self-host anchor and hide every
+    mutation past it; a `//` at the START of a stripped line really is wholly a
+    comment, so that branch stays a per-line drop.
+    """
+    out: list[str] = []
+    in_block = False
+    for line in code.splitlines():
+        stripped = line.strip()
+        if in_block:
+            end = stripped.find("*/")
+            if end == -1:
+                continue
+            in_block = False
+            # The block closes here; anything after it is CODE on this line.
+            # NO indent is inherited: the leading whitespace on this line
+            # belongs to the comment's own continuation, not to the code.
+            line, stripped = _keep_code_indent(
+                line, stripped, end + 2, keep_indent=False)
+            if not stripped:
+                continue
+        if stripped.startswith("/*"):
+            end = stripped.find("*/")
+            if end == -1:
+                in_block = True
+                continue
+            # A one-line block comment leading a line of code: keep the code.
+            line, stripped = _keep_code_indent(line, stripped, end + 2)
+            if not stripped:
+                continue
+        if stripped.startswith("//"):
+            continue
+        out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def _keep_code_indent(line: str, stripped: str, cut: int,
+                      keep_indent: bool = True) -> tuple[str, str]:
+    """`(line_with_comment_cut, code)`, keeping the line's own INDENT.
+
+    `_render_code` compares two pages' function bodies as STRINGS and its
+    contract says the pages may explain themselves differently — so cutting a
+    comment must not move the code. For a comment that OPENS on this line the
+    indent is the original line's leading whitespace, unchanged by inserting the
+    comment after it:
+
+        `        /* c */ code` → `        code`
+        `/* why */ run(x)` → `run(x)`
+
+    Taking it from the text after the comment instead would ADD an indent to a
+    line that had none; taking it from nowhere would drop the indent of an
+    indented line and red the render-equality row against a page whose code is
+    identical (#13696 round 8, P3 — measured both ways).
+
+    `keep_indent=False` is for a block comment that CLOSED on this line: its
+    leading whitespace indents the comment's continuation (` */ run(x)`), not
+    the code, so the code takes no indent from it.
+    """
+    code = stripped[cut:].strip()
+    indent = '' if not keep_indent else line[:len(line) - len(line.lstrip())]
+    return indent + code, code
+
+
+def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
+    """One page's render function with its COMMENTS removed.
+
+    The two product pages explain the same code with different comments — and
+    legitimately so: `product.html` cites `#4815` for the labels resolver, the
+    campaign page cites the funnel. What must not differ is the CODE, so the
+    comparison is taken over it.
+
+    `_code_only`, not `_strip_comment_lines`: this consumer compares two pages
+    as STRINGS, so a TRAILING `// note` on one page is a difference that is not
+    a difference in code. `_strip_comment_lines` deliberately keeps a trailing
+    `//` (the price channels scan it — fail-closed there), which made a
+    comment-only edit red this row (#13696 round 9, P2). The two consumers want
+    opposite things, so they use opposite strippers.
+    """
+    return "\n".join(
+        # Each line STRIPPED, blanks dropped. Both normalise something that is
+        # not a difference in code: a cut comment leaves a blank line behind,
+        # and cutting a LEADING `/* … */` leaves its indent behind
+        # (`      /* c */ run();` → `       run();`) — which made a comment-only
+        # edit to ONE page red this row while the render was byte-identical
+        # (#13696 round 10, measured: the two bodies differed by one space).
+        # Indentation is not code; the comparison is over the statements.
+        ln.strip()
+        for ln in _code_only(_function_refs(html, fn_name, page)).splitlines()
+        if ln.strip()
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -518,6 +1220,133 @@ class TestFmtPriceMath:
         assert max(1, round(1 * 12 * 0.01 / 12)) == 1
 
 
+class TestSharedFormatterMathIsExecuted:
+    """The JS the pages RUN is executed, not merely found.
+
+    ⛔ #13696 round 11, P2. `TestFmtPriceMath` above exercises `_fmt_price` —
+    the Python MIRROR — and the shared-source row asserted only that
+    `website/assets/tortoise-pricing.js` DEFINES `window.tortoiseFmtPrice`. So
+    nothing tied either to the arithmetic both pages actually execute, and the
+    PR makes that one file the place EVERY product page formats through: one
+    silent edit there quotes wrong money on both, which is the invariant this
+    PR declares. Measured mutants, both left all **158 rows GREEN** at
+    `59bc263091`:
+
+      * `var disc = discountPct / 100;` → `var disc = 0 / 100;` — both pages
+        then rendered annual $9/$25/$149 (totals $108/$300/$1788) beside the
+        static no-JS cards' $7/$20/$119;
+      * `var total = perMonth * 12;` → `Math.round(price * 12 * (1 - disc))` —
+        `$15/mo` printed beside `$182 billed annually`.
+
+    The rows below EXECUTE the source — its `if (mode === 'annual')` guard, its
+    `var` statements and its two `return { big: …, total: … }` templates — so
+    the two implementations are held to EACH OTHER. A formula rewrite, a
+    swapped branch or an edited template reds even where the text still looks
+    right.
+
+    ⛔ #13696 round 16, P1 (measured at `3e381c6194`): the previous reader took
+    `mode` as its OWN Python argument and returned HARDCODED strings, so the
+    guard and the return templates were never read and three mutants left all
+    **167 rows GREEN** — a monthly visitor was mis-priced with the suite green:
+
+      * `if (mode === 'annual')` → `if (true)` — Monthly then rendered
+        `$20` / `$240 billed annually` on both pages, identically;
+      * `total: '$' + total + ' billed annually'` → `'… billed yearly'`;
+      * `big: '$' + perMonth` → `big: '~$' + perMonth`.
+
+    Restating the dispatch or an output string in Python cannot disagree with
+    itself, so those rows verified their own re-implementation. Everything the
+    rows now measure comes out of the source, and a construct the reader does
+    not model is REFUSED by name (`test_the_reader_refuses_code_it_cannot
+    _execute`) rather than skimmed past.
+    """
+
+    def test_the_shared_math_agrees_with_the_python_mirror(self):
+        disc = _mirror_data()[0]["display"]["annual_discount_pct"]
+        cases = {
+            0: ("$0", "Free forever"),
+            1: ("$1", "$12 billed annually"),      # the max(1, …) floor
+            9: ("$7", "$84 billed annually"),      # 7.2 → 7
+            25: ("$20", "$240 billed annually"),   # 25 × 0.8 exactly
+            149: ("$119", "$1428 billed annually"),  # 119.2 → 119
+        }
+        for price, expected in cases.items():
+            from_source = _js_fmt_price(price, "annual", disc)
+            from_mirror = _fmt_price(price, "annual", disc)
+            assert from_source == from_mirror == expected, (
+                f"the formatter both pages LOAD and the Python mirror that "
+                f"pins its cases disagree at ${price}: source={from_source!r} "
+                f"mirror={from_mirror!r} expected={expected!r}. One of them "
+                "now quotes a different number than the other, and the page "
+                "runs the first (#13645, #13696 round 11).")
+
+    def test_the_two_implementations_agree_across_the_price_range(self):
+        """The five pinned cases are also the five the mirror was written from.
+
+        A formula can agree on those and diverge elsewhere — so the agreement
+        is measured over a range, which is what makes the row a comparison of
+        two implementations rather than of two literals.
+        """
+        disc = _mirror_data()[0]["display"]["annual_discount_pct"]
+        offenders = [
+            (price, _js_fmt_price(price, "annual", disc),
+             _fmt_price(price, "annual", disc))
+            for price in range(0, 500)
+            if _js_fmt_price(price, "annual", disc)
+            != _fmt_price(price, "annual", disc)]
+        assert not offenders, (
+            "the shared formatter's math and the Python mirror disagree "
+            f"({len(offenders)} of 0..499): {offenders[:5]}")
+
+    def test_monthly_comes_from_the_sources_own_final_return(self):
+        """The MONTHLY pair is the source's last statement, executed.
+
+        This is the row that would have caught the round-16 P1 on its own: when
+        the reader took `mode` as its own argument, `if (mode === 'annual')` →
+        `if (true)` left this row GREEN while every monthly visitor was quoted
+        the annual price. It now reds because the SOURCE picks the branch and
+        the source's own template prints the pair.
+        """
+        assert _js_fmt_price(25, "monthly", 20) == ("$25", "Billed monthly")
+        for price in (0, 9, 25, 149):
+            assert _js_fmt_price(price, "monthly", 20) == \
+                _fmt_price(price, "monthly", 20)
+
+    def test_the_reader_refuses_code_it_cannot_execute(self):
+        """Fail CLOSED: a construct the reader does not model is named, not
+        skimmed past.
+
+        `_js_fmt_price` is only honest while an unreadable statement is an
+        ERROR. If the reader ever guessed instead, a rewritten formatter would
+        be graded by whatever residue happened to parse — the exact shape that
+        let three mutants through at `3e381c6194`.
+        """
+        for construct in (
+                "'$' + String(perMonth)",     # a call outside JS_FMT_CALLS
+                "perMonth ?? 0",              # an operator not modelled
+                "tier[0]",                    # a member expression
+        ):
+            try:
+                _JsExpression(construct, {"price": 25}).parse()
+            except AssertionError as exc:
+                assert "does not model" in str(exc), (construct, str(exc))
+            else:  # pragma: no cover - this is the failure
+                raise AssertionError(
+                    f"the reader accepted `{construct}`, which it does not "
+                    "execute — an unreadable formatter would then be graded "
+                    "by whatever residue parses (#13696 round 16)")
+        for statement in ("for (var i = 0; i < 2; i++) {}",
+                          "while (true) {}"):
+            try:
+                _js_statements(statement)
+            except AssertionError as exc:
+                assert "does not model" in str(exc), (statement, str(exc))
+            else:  # pragma: no cover - this is the failure
+                raise AssertionError(
+                    f"the reader accepted the statement `{statement}` — an "
+                    "unmodelled statement must red, not be skipped")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4. renderPricing / setBilling / renderSelfHost element inventory (anti-#728)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -667,6 +1496,17 @@ def _served(markup: str) -> str:
     markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
     markup = re.sub(r"<script\b.*?</script>", " ", markup, flags=re.S | re.I)
     markup = re.sub(r"<style\b.*?</style>", " ", markup, flags=re.S | re.I)
+    # ⛔ An UNTERMINATED `<script>`/`<style>` swallows the rest of the document —
+    # that is what a browser does with it, so anything after the opener is not
+    # markup a reader receives. The paired substitutions above cannot match a
+    # body with no closer, so without these two lines such a body stays
+    # "served" — and every `_served` row can be satisfied from inside it.
+    # Measured (#13696 round 10): deleting the real footer CTA and parking its
+    # tagged `href` in a trailing unterminated `<script>` left the whole static
+    # suite green (168 passed). Both pages are balanced today, so this truncates
+    # nothing now; it exists so the next unbalanced one cannot be a hiding place.
+    markup = re.sub(r"<script\b.*", " ", markup, flags=re.S | re.I)
+    markup = re.sub(r"<style\b.*", " ", markup, flags=re.S | re.I)
     return re.sub(r"<!--.*", " ", markup, flags=re.S)
 
 
@@ -708,18 +1548,22 @@ def _served_without_comments(markup: str) -> str:
     return re.sub(r"<!--.*", "", markup, flags=re.S)
 
 
-def _pricing_section() -> str:
+def _pricing_section(html: str | None = None) -> str:
     """The `#pricing-section` region as a reader receives it.
 
     Sliced on the STRIPPED document (not on a sentinel comment), so a comment
     that disables part of the section removes it from this gate too. Stops at
     the first `</section>`, so the nested-section guard below keeps a claim in a
     nested section from being invisible here.
+
+    `html` defaults to product.html — the page this gate was written for. It is
+    parameterized because #13645's second product page renders the SAME pricing
+    section, and `TestPricingSourceIsShared` holds the two to each other.
     """
-    src = _served(PRODUCT_HTML.read_text(encoding="utf-8"))
+    src = _served(html if html is not None else PRODUCT_HTML.read_text(encoding="utf-8"))
     marker = 'id="pricing-section"'
     assert marker in src, (
-        "website/product.html lost #pricing-section — this gate's subject moved")
+        "the page lost #pricing-section — this gate's subject moved")
     start = src.index(marker)
     section = src[start:src.index("</section>", start)]
     assert "<section" not in section[section.index(">") + 1:], (
@@ -729,9 +1573,9 @@ def _pricing_section() -> str:
     return section
 
 
-def _static_pricing_grid() -> str:
+def _static_pricing_grid(html: str | None = None) -> str:
     """The static cards: between `#pricing-grid` and the usage line."""
-    section = _pricing_section()
+    section = _pricing_section(html)
     start = section.index('id="pricing-grid"')
     end = section.index('id="pricing-usage-line"')
     assert end > start, "#pricing-usage-line no longer follows #pricing-grid"
@@ -779,7 +1623,7 @@ def _render_facts(fn: str) -> dict:
     }
 
 
-def _static_cards() -> list[dict]:
+def _static_cards(html: str | None = None) -> list[dict]:
     """One dict per static `.pricing-card`, in DOM order.
 
     Every field the JS render writes is captured, including the CTA, the
@@ -788,7 +1632,7 @@ def _static_cards() -> list[dict]:
     drifted to `href="/signup"`, or while "Overage" was re-rendered with a green
     check on the one tier that does not include it (both measured).
     """
-    grid = _static_pricing_grid()
+    grid = _static_pricing_grid(html)
     cards = []
     for chunk in grid.split('<div class="pricing-card')[1:]:
         features_block = re.search(r'<div class="features">(.*?)</div>\s*<a ', chunk, re.S)
@@ -824,21 +1668,21 @@ def _static_cards() -> list[dict]:
     return cards
 
 
-def _static_usage_line() -> str:
+def _static_usage_line(html: str | None = None) -> str:
     m = re.search(r'<p class="pricing-usage" id="pricing-usage-line">(.*?)</p>',
-                  _pricing_section(), re.S)
+                  _pricing_section(html), re.S)
     assert m, "#pricing-usage-line lost its static content"
     return _beat_text(m.group(1))
 
 
-def _static_selfhost_block() -> str:
+def _static_selfhost_block(html: str | None = None) -> str:
     """The `#selfhost-section` element, closed by its OWN `</div>`.
 
     Sliced by depth rather than "to the end of the section": a link added later
     inside `#pricing-section` (a "Talk to sales" line, say) would otherwise fail
     this gate although the block it tests did not change.
     """
-    section = _pricing_section()
+    section = _pricing_section(html)
     marker = section.index('id="selfhost-section"')
     # Start at the `<div` that OPENS the element, not at the id inside its
     # tag — otherwise the first balanced child (`.actions`) closes the slice.
@@ -2960,6 +3804,24 @@ class TestPageHeadingOutline:
                 f"website/product.html skips a heading level: h{prev} -> h{cur} "
                 f"(levels: {levels})")
 
+    def test_the_niche_product_page_does_not_skip_a_heading_level(self):
+        """#13645: same outline contract, one page over.
+
+        The owner's PDF has ONE h1 (the hero) and an h2 per step, plus the
+        heading-less intro and compute beats — so the expected shape is
+        h1, h2, h2, h2, h2, h2, h2 and no level skips. A step rendered as an h3
+        (an easy slip when a beat is pasted in) is an accessibility regression
+        here exactly as it is on the product page.
+        """
+        levels = _heading_levels(PRODUCT_TEAMS_HTML.read_text(encoding="utf-8"))
+        assert levels and levels[0] == 1, (
+            "website/tortoise-for-product-teams.html's first heading is not h1 "
+            f"(levels: {levels})")
+        for prev, cur in pairwise(levels):
+            assert cur <= prev + 1, (
+                "website/tortoise-for-product-teams.html skips a heading level: "
+                f"h{prev} -> h{cur} (levels: {levels})")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 10. Short-viewport beats must scroll, not clip (PR #9813 review, P2)
@@ -2980,6 +3842,12 @@ SHORT_VIEWPORT_BEATS = (
     (INDEX_HTML, "#beat-cta", "the company waitlist form + its legal line"),
     (INDEX_HTML, "#beat-tortoise", "the company closing pitch + its CTA"),
     (PRODUCT_HTML, "#beat-hero", "the product hero + its CTA"),
+    # #13645: the niche page's hero is a SPLIT — copy beside an owned 9/16 video
+    # (398 px tall on its own), so it is taller than any text-only hero here.
+    (PRODUCT_TEAMS_HTML, "#beat-hero", "the split hero: copy + the 9/16 video"),
+    # …and its compute beat carries a paragraph PLUS the six-row ↑/↓ grid, which
+    # is the other beat that overruns a landscape phone.
+    (PRODUCT_TEAMS_HTML, "#beat-compute", "the compute claim + the ↑/↓ outcomes grid"),
 )
 
 #: A landscape phone is ~390-430 px tall, so a hatch that only fires below this
@@ -4123,10 +4991,11 @@ class TestSiteIconAndSocialPreviewContract:
     # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
     # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
     # best`), so the first cut's 20 KB floor passed the very image it was written to
-    # reject. The floor is enforced on EVERY page's declared card, and the three cards
-    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg) and
-    # 50,393 B (design-partners-intro-og.jpg) — i.e. 2.35x, 1.24x and 1.26x the floor,
-    # not 2.35x each. Re-encoding the SAME pixels is what eats the margin: with
+    # reject. The floor is enforced on EVERY page's declared card, and the four cards
+    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg),
+    # 50,393 B (design-partners-intro-og.jpg) and 61,103 B (product-teams-og.jpg) —
+    # i.e. 2.35x, 1.24x, 1.26x and 1.53x the floor, not 2.35x each. Re-encoding the
+    # SAME pixels is what eats the margin: with
     # `ffmpeg -q:v 4` the two smaller cards measure 37,024 B and 39,818 B, both under
     # the floor. That is the one false red this bound can produce, which is why
     # `_card_floor_violation`'s message tells the reader to LOOK at the card first.
@@ -4694,13 +5563,17 @@ class TestSiteIconAndSocialPreviewContract:
 
     # The population every assertion from here down iterates. Pinned, because a
     # MOVE narrows it silently: `glob("*.html")` is non-recursive, so filing six
-    # pages into a subdirectory left these guards covering 8 of 14 pages and green
-    # (epic #11762 rejected that shape for exactly this reason). Adding or removing
-    # a page is a deliberate act; a page that leaves coverage by moving is not.
+    # pages into a subdirectory left these guards covering 8 of the 14 pages then
+    # served and green (epic #11762 rejected that shape for exactly this reason).
+    # Adding or removing a page is a deliberate act; a page that leaves coverage by
+    # moving is not.
     PAGES_AT_11762 = (
         "404.html", "contact.html", "design-partners-intro.html", "docs.html",
         "dpa.html", "faq.html", "index.html", "investors.html", "license.html",
         "privacy.html", "product.html", "security.html", "self-hosted.html",
+        # #13645: the niche product page. ADDED, not moved — a top-level served
+        # document at the company root, so every head/card guard below covers it.
+        "tortoise-for-product-teams.html",
         "tos.html",
     )
 
@@ -4796,7 +5669,7 @@ class TestSiteIconAndSocialPreviewContract:
         The `sizes` attribute is held to the BYTES rather than to a literal, because a
         declared size is a promise a renderer reserves space for: a 512px re-export of
         a 256px file is square, is >= 180, passes every size assertion — and makes all
-        14 pages lie about it. So the tag is checked against the IHDR (PNG) and against
+        15 pages lie about it. So the tag is checked against the IHDR (PNG) and against
         the directory (ICO), which is what the tab will actually draw.
         """
         png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
@@ -6852,7 +7725,14 @@ class TestProductSetIsServedUnderTheOneHost:
     # product) and their links must use the prefix. A reviewer measured that they were in
     # NEITHER link population, so a future `href="/"` labelled "Back to product" on
     # `privacy.html` would have shipped green — the same miss measured on `contact.html`.
-    ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html")
+    # `tortoise-for-product-teams.html` (#13645) is served at the COMPANY ROOT
+    # (`premiselabs.co/tortoise-for-product-teams`), so it belongs here on the
+    # docstring's own test: its `/` is the company homepage, not the product, and
+    # a link from it must carry the `/tortoise` prefix. Measured before adding it:
+    # its links are already correct (no `href="/"`, no `OLD_PRODUCT_PATHS` member),
+    # so this closes a #11764-shaped hole rather than fixing a live defect.
+    ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html",
+                   "tortoise-for-product-teams.html")
     # The app origin's page population, pinned for the same reason `_pages` is: the guard
     # below walks a non-recursive glob, so a page added to a subdirectory (or served from
     # `apps/dashboard/index.html`, which lives OUTSIDE `public/`) would leave coverage with
@@ -7008,11 +7888,2030 @@ class TestProductSetIsServedUnderTheOneHost:
         """The decision this child took: a Function rewrites the prefix, the files stay.
 
         Pinned because the other shape is a silent coverage loss: filing the six pages
-        into `website/tortoise/` would leave `glob("*.html")` guarding 8 of 14 pages with
-        no red anywhere (see `_pages`'s pin).
+        into `website/tortoise/` would leave `glob("*.html")` guarding 8 of the 14
+        pages then served, with no red anywhere (see `_pages`'s pin).
         """
         for name in self.MOVED:
             assert (self.WEB / name).is_file(), (
                 f"{name} is no longer at website/{name} — the prefix is served by the "
                 "middleware rewrite, so moving the file changes which pages the marketing "
                 "guards can see")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 11. ONE pricing source for every page that quotes a price (#13645)
+# ═══════════════════════════════════════════════════════════════════════════════
+# The owner's decision on #13645 recorded the defect this section exists to
+# stop, in its own words: a new page that carries its own copy of the `PRICING`
+# object is "two prices that can drift with nothing red". A niche campaign page
+# quoting a stale price is worse than no campaign page, so the two pages are
+# held to ONE source and to each other — not merely each held to a copy.
+#
+# The division of labour, so a later reader knows which gate answers what:
+#   * `PRICING_SOURCE` (`website/assets/tortoise-pricing.js`) is the ONE table;
+#   * `TestPricingSourceIsShared` (below) proves BOTH pages load it, neither
+#     re-declares it, and the pricing markup a reader receives is IDENTICAL on
+#     the two pages;
+#   * `TestStaticPricingFallback` proves that markup equals the numbers in the
+#     shared source (so the identical copy is also the correct one);
+#   * `TestMirrorNumericParity` + `tests/test_tier_naming.py` prove the shared
+#     source still mirrors `product/pricing.json` and the dashboard's labels.
+
+PRODUCT_PAGES_SHARING_PRICING = (
+    ("website/product.html", PRODUCT_HTML),
+    ("website/tortoise-for-product-teams.html", PRODUCT_TEAMS_HTML),
+)
+
+
+def _without_html_comments(markup: str) -> str:
+    """`markup` minus every HTML comment, including an UNTERMINATED opener.
+
+    `_served` is the right tool when the subject is markup a READER receives,
+    but it also deletes `<script>`/`<style>` bodies — and a `<script src=…>`
+    tag is exactly the subject of the rows below, so `_served` would empty them.
+    This variant keeps tags and script bodies and removes only what a browser
+    never parses. Same lesson as `_served`'s own docstring (#13696 review,
+    round 6): commenting a tag out is the natural way to disable it, and it
+    must not leave the row that pins it green.
+    """
+    markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
+    return re.sub(r"<!--.*", " ", markup, flags=re.S)
+
+
+def _pricing_source_includes(html: str) -> list[str]:
+    """The `src` of every `<script>` the browser PARSES, in source order.
+
+    TWO independent properties, kept together because either one alone leaves a
+    channel unread:
+
+    - COMMENTED-OUT tags are excluded (`_without_html_comments`): they are not
+      in the page, so a row that pins them must not see them.
+    - The attribute is parsed TOLERANTLY — `src="…"`, `src='…'`,
+      `src = "…"` and an UNQUOTED `src=/assets/x.js` all count (unquoted
+      attribute values are legal HTML5). A stricter spelling does not merely
+      misread the attribute: the tag is then skipped by `_inline_scripts` (its
+      `\\bsrc\\s*=` test still excludes it) and deleted by `_served`, so the
+      file it loads is in NO channel at all (measured, #13696 rounds 7 and 8:
+      the same price-bearing asset was read red under `src="…"` and left 219
+      rows green under `src='…'` and under `src=/assets/…`).
+    """
+    found = re.findall(
+        r"""<script\b[^>]*?\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""",
+        _without_html_comments(html), re.I)
+    # `findall` yields one tuple per tag with exactly one group populated; the
+    # QUOTING cannot select whether the channel is read.
+    return [next(g for g in groups if g) for groups in found]
+
+
+#: ONE spelling of a price figure, shared by the rows that refuse a second copy
+#: of it outside the shared table.
+#:
+#: ⛔ The tag group is load-bearing: the section slice is MARKUP, not text, and
+#: both pages already style a price in parts (`<div class="price">$119<span>
+#: /mo</span></div>`), so `$<b>89</b>/mo` — which a reader sees as `$89/mo` — is
+#: the natural way to write a figure. Without this it matched nothing and left
+#: 219 rows green (#13696 round 7). It does NOT let tags join two figures:
+#: digits must follow the tag run, so `$1</div>…428` still yields only `$1`.
+PRICE_FIGURE_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d")
+
+#: A DOLLAR FRAGMENT: a `$` that is neither a `${…}` template interpolation nor
+#: the head of a figure (a `$` followed by a digit is `PRICE_FIGURE_RE`'s job).
+#:
+#: ⛔ It is how JS ASSEMBLES a price — `'<div class="price">$' + t.price` — and
+#: the figure then lives in the TABLE, not in the page's source text, so no
+#: `$<digit>` detector can see it: the most common way to build a price in JS
+#: was in no channel at all. Measured at `59bc263091` (#13696 round 11, P2):
+#: appending that one line to the campaign page's inline script left all **158
+#: rows GREEN** while its grid showed Builder at $25/mo beside its own $20
+#: annual cards, and `/tortoise` showed $20/$15.
+#:
+#: Both product pages carry ZERO `$` outside a `${…}` in any channel today, so
+#: this is green as written — it refuses the next one. A price a script needs
+#: must still come from the shared table through `window.tortoiseFmtPrice`,
+#: whose own `'$' + perMonth` is legitimate because THAT file is the source (it
+#: is excluded from `_price_channels`, and its math is executed by
+#: `TestSharedFormatterMathIsExecuted`).
+PRICE_FRAGMENT_RE = re.compile(r"\$(?![{\d])")
+
+#: A figure carried in a DATA ATTRIBUTE (`data-price="20"`), which no `$`
+#: detector reads and which exists only to be turned into one by a script. Zero
+#: on both product pages today; refused rather than gated on a spelling.
+PRICE_DATA_ATTR_RE = re.compile(r"\bdata-price\s*=\s*[\"']?\d")
+
+#: A whole figure, for the row that asks whether the SHARED SOURCE can produce
+#: it. Same tag tolerance as the detector, so a figure cannot be read as
+#: present-but-different; `_figures` normalises the match back to `$89` before
+#: any comparison.
+PRICE_ONLY_RE = re.compile(r"\$\s?(?:<[^>]+>\s*)*\d[\d,]*")
+
+#: The tags that can sit INSIDE a figure without ending its line box. Any
+#: other tag is a block boundary, where a reader sees two separate texts — so a
+#: tag run spanning one must never be read as a split figure (measured, #13696
+#: round 9, P2: `<div class="price">$0</div>` followed by a `<p>` was reported
+#: as "splits a price figure", sending the editor to rewrite correct markup).
+INLINE_TAGS = "span|b|i|em|strong|sup|sub|small|code|abbr|mark"
+
+#: A figure whose DIGIT RUN is interrupted by markup — `$15<b>9</b>`, which a
+#: reader sees as `$159` while every detector above can only read `$15`. The
+#: tag group in `PRICE_ONLY_RE` sits before the digits, so it cannot span one.
+#: Fail closed on the ambiguous spelling rather than guess which is meant.
+PRICE_SPLIT_RE = re.compile(
+    r"\$\s?(?:<(?:" + INLINE_TAGS + r")\b[^>]*>\s*)*\d[\d,]*"
+    r"(?:<(?:" + INLINE_TAGS + r")\b[^>]*>\s*)+\d")
+
+
+def _figures(text: str) -> list[str]:
+    """Every `$` figure in `text`, inline markup removed from INSIDE the match.
+
+    Normalised per MATCH, never over the whole document: stripping tags
+    document-wide would splice `$1</div><div>428` into a figure (`$1428`) that
+    neither the page nor the source states.
+    """
+    return [re.sub(r"<[^>]+>", "", m) for m in PRICE_ONLY_RE.findall(text)]
+
+
+def _inline_scripts(html: str) -> list[str]:
+    """The body of every INLINE `<script>`, comment spans cut out.
+
+    `src=`-carrying tags are skipped: their bodies are empty in these documents
+    and the code they load (`/assets/tortoise-pricing.js`, `/consent.js`) is
+    graded by its own rows. Comments go through the same span-cutting rule
+    `_render_code` uses — a `/* … */` block is removed but the code after its
+    closing `*/` on that line is KEPT — so a `//`-strip cannot cut the
+    `https://` inside the self-host anchor and hide every literal after it,
+    while `/* note */ labels.pro = 'Growth';` still reads as code.
+    """
+    return [
+        _strip_comment_lines(body)
+        for attrs, body in re.findall(
+            r"<script\b([^>]*)>(.*?)</script>", html, re.S | re.I)
+        if not re.search(r"\bsrc\s*=", attrs, re.I)
+    ]
+
+
+def _style_bodies(html: str) -> list[str]:
+    """The body of every `<style>` block — CSS `content:` renders text too.
+
+    `_served` deletes style bodies (a `content:` rule is not served markup), so
+    a price there is visible to the reader and invisible to every static row
+    (#13696 round 6: `#beat-hero .cta::after { content: " — from $25/mo"; }`
+    left every row green). Comments go through the SAME span-cutting rule the
+    script channel uses: a full-line `/* … */` or `//` comment of prose may name
+    a figure without reding this row, but a block comment that closes on a line
+    and is followed by a declaration does NOT hide that declaration.
+    """
+    return [_strip_comment_lines(body)
+            for body in re.findall(r"<style\b[^>]*>(.*?)</style>", html,
+                                  re.S | re.I)]
+
+
+def _same_origin_asset(
+    name: str, ref: str, base: Path | None = None, site: Path | None = None,
+) -> tuple[Path | None, str]:
+    """`(path, label)` for a same-origin asset reference, or `(None, label)`.
+
+    SAME-ORIGIN means the site's own host as well as a path: the page may write
+    `https://premiselabs.co/assets/x.js`, which loads exactly the file a
+    relative `src` would, so the absolute spelling must not select a channel
+    (measured, #13696 round 9, P3: the absolute spelling left both price rows
+    green). A cache-busting `?v=…` is stripped before the file is resolved — the
+    site already serves `/favicon.ico?v=…`, so refusing a query would false-red
+    a legitimate tag.
+
+    `base` is the directory a BARE relative reference resolves against; it
+    defaults to the site root (`website/`), which is right for a tag on a page.
+    A CSS `@import` resolves against the SHEET THAT CARRIES IT instead, so the
+    style helper passes the importing file's directory — without that,
+    `@import "more.css"` inside `/assets/x.css` was looked for at
+    `website/more.css`, missed, and SKIPPED, which is a fail-OPEN, not a gap
+    (measured, #13696 round 10).
+
+    `data:`/`blob:` are REFUSED rather than skipped: the bytes are inline, so
+    the reader does receive them and no static channel here can read what they
+    say. Both pages carry none, so the assertion is a closed door, not a
+    restriction on real markup.
+    """
+    url = urlsplit(ref)
+    if url.scheme in ("data", "blob"):
+        raise AssertionError(
+            f"{name} delivers bytes inline through a `{url.scheme}:` URI "
+            f"(`{ref[:60]}…`), which no channel here can read — vendor it under "
+            "`website/` or extend the channel deliberately")
+    site = site or (REPO_ROOT / "website")
+    if url.scheme or url.netloc or ref.startswith("//"):
+        if url.netloc.lower().removeprefix("www.") not in SITE_HOSTS:
+            return None, ref  # a genuinely foreign asset: not this site's code
+        base = site
+    if url.path.startswith("/"):
+        # Root-relative is a PAGE url: it resolves against the site root even
+        # when the reference came from a sheet in a subdirectory.
+        path = site / url.path.lstrip("/")
+    else:
+        path = (site if base is None else base) / url.path
+    return path, url.path
+
+
+def _same_origin_script_bodies(
+    name: str, html: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """`(src, text)` for every SAME-ORIGIN script a page loads, except the source.
+
+    A `<script src>` tag has an EMPTY body, so `_inline_scripts` skips it and
+    `_served` never sees the FILE — a price in a second asset is in no channel
+    any row read (measured, #13696 round 6: adding
+    `website/assets/teams-extra.js` holding
+    `document.title = 'Builder from $25/mo';` plus its tag left 139 rows green).
+    `/assets/tortoise-pricing.js` is EXCLUDED because it IS the source: it
+    legitimately holds the figures the other rows derive from.
+
+    `root` defaults to `website/` and exists so the channel can be exercised
+    against a fixture tree (see `TestStylesheetChannelIsRead`); every caller in
+    this file leaves it at the default.
+    """
+    out: list[tuple[str, str]] = []
+    site = root or (REPO_ROOT / "website")
+    for src in _pricing_source_includes(html):
+        path, _label = _same_origin_asset(name, src, None, site)
+        if path is None:      # a genuinely foreign asset (GSAP on cdnjs)
+            continue
+        if path.resolve() == PRICING_SOURCE.resolve():
+            continue
+        assert path.is_file(), (
+            f"{name} loads `{src}` but no such file exists under `website/`, so "
+            "this gate cannot read the code the page actually runs — the file "
+            "moved and the row must move with it")
+        # Comment lines dropped for the same reason the inline channel drops
+        # them: a `// …` note may name a figure without being a second copy.
+        out.append((src, _strip_comment_lines(
+            path.read_text(encoding="utf-8"))))
+    return out
+
+
+def _stylesheet_imports(css: str) -> list[str]:
+    """Every `@import` target in a stylesheet body, in source order.
+
+    `@import` is the fourth documented way CSS reaches a document (`<link>`,
+    `<style>`, `@import`, the `style` attribute — W3C CSS1 §"Linking Style
+    Sheets to HTML"), so a `<style>` block or a linked FILE can pull in a second
+    file that no tag in the page names. Every legal spelling is read:
+    `@import "x.css"`, `@import url("x.css")`, `@import url(x.css)`.
+
+    The text is comment-stripped FIRST, so a commented-out `@import` is not a
+    channel and a `/* … */` note may name a sheet without being one.
+    """
+    found = re.findall(
+        r"""@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^\s"')]+))""",
+        _strip_comment_lines(css), re.I)
+    return [next(g for groups in found for g in groups if g) for groups in found]
+
+
+def _pricing_stylesheet_hrefs(html: str) -> list[str]:
+    """The `href` of every `<link>` whose `rel` is a STYLESHEET, in source order.
+
+    Tolerant for the reason `_pricing_source_includes` is: the QUOTING of an
+    attribute must never select whether a channel is read. `rel` is a TOKEN
+    LIST, so `rel="alternate stylesheet"` counts (a reader can activate it);
+    `rel="preload" as="style"` does not (a preload applies no rule alone).
+    Commented-out tags are excluded — a disabled tag is not in the page.
+    """
+    href_re = re.compile(
+        r"""\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""", re.I)
+    refs: list[str] = []
+    for tag in re.findall(r"<link\b[^>]*>", _without_html_comments(html), re.I):
+        rel = re.search(
+            r"""\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""", tag, re.I)
+        if not rel or "stylesheet" not in next(g for g in rel.groups() if g is not None).lower().split():
+            continue
+        m = href_re.search(tag)
+        if m:
+            refs.append(next(g for g in m.groups() if g))
+    return refs
+
+
+def _same_origin_style_bodies(
+    name: str, html: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """`(href, text)` for every SAME-ORIGIN stylesheet a page loads — transitively.
+
+    `<style>` is not the only channel that renders CSS text: a
+    `<link rel="stylesheet">` file (or an `@import` inside one) carries a
+    `content:` rule just as effectively, and `_served` never sees it — so a
+    price there was in no channel at all (measured, #13696 round 9, P1: 145 rows
+    green with `$25/mo` in a linked stylesheet, while the same rule inside the
+    page's own `<style>` red).
+
+    ⛔ Round 9 read ONE level of `@import`, only from a LINKED sheet, and
+    resolved every reference against the site root. All three of those bounds
+    were measured leaving the sheet unread at this head (#13696 round 10):
+
+    - an `@import` inside a `<style>` BODY (`<style>@import url("/assets/x.css")`)
+      — a second door into the same file, and no row looked;
+    - a RELATIVE `@import "more.css"` inside `/assets/x.css` — resolved against
+      the site root, so it looked for `website/more.css`, was not a file, and was
+      silently SKIPPED: a fail-OPEN, not a gap;
+    - a TWO-hop chain (`a.css → b.css → c.css`) — the price one hop past the
+      first import;
+
+    so the walk starts at both doors and runs to a FIXPOINT over a visited set
+    (an import CYCLE terminates), with each reference resolved against the sheet
+    that carries it, and a reference that names no file ASSERTS instead of being
+    skipped: a stylesheet the page loads but this gate cannot read is exactly
+    the state the row exists to refuse.
+
+    Only a genuinely FOREIGN host (`cdnjs.cloudflare.com`) is skipped — a static
+    reader has no bytes there — and that skip is itself pinned closed below.
+    """
+    site = root or (REPO_ROOT / "website")
+    # `(ref, base)` — `@import` resolves against the IMPORTING SHEET's own
+    # directory; a tag or a `<style>` body resolves against the site root,
+    # exactly as the page URL does.
+    queue: list[tuple[str, Path | None]] = [
+        (href, None) for href in _pricing_stylesheet_hrefs(html)]
+    for body in _style_bodies(html):
+        queue += [(ref, None) for ref in _stylesheet_imports(body)]
+    seen: set[Path] = set()
+    out: list[tuple[str, str]] = []
+    while queue:
+        ref, base = queue.pop(0)
+        path, _label = _same_origin_asset(name, ref, base, site)
+        if path is None:            # foreign host: no bytes a static reader can read
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        assert path.is_file(), (
+            f"{name} loads the stylesheet `{ref}` but no such file exists under "
+            "`website/`, so this gate cannot read the CSS the page actually "
+            "renders — the file moved and the row must move with it")
+        text = _strip_comment_lines(path.read_text(encoding="utf-8"))
+        try:
+            label = "/" + str(resolved.relative_to(site.resolve()))
+        except ValueError:          # a sheet outside `website/`: name it as written
+            label = ref
+        out.append((label, text))
+        queue += [(ref2, path.parent) for ref2 in _stylesheet_imports(text)]
+    return out
+
+
+def _price_channels(
+    name: str, markup: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Every delivery that can put a PRICE in front of a reader, labelled.
+
+    ONE definition, because the list of deliveries IS the invariant: five review
+    rounds each closed one remembered member of an open-ended set, so the list
+    now lives here and the row plus the pin class both read it — a helper that
+    stops reading a spelling reds the pin instead of quietly widening a gap.
+
+    CLOSED against the documented ways style and script reach a document:
+
+    1. inline `<script>` bodies
+    2. `<style>` bodies
+    3. same-origin `<script src>` FILES
+    4. same-origin `<link rel="stylesheet">` FILES and their `@import`s
+
+    The `style` ATTRIBUTE is deliberately NOT a channel, and not by omission: it
+    is served MARKUP, so the no-price-outside-the-section row already scans it,
+    and `content:` has no effect in a `style` attribute — a figure there can
+    reach a reader only through a rule held in one of the channels above.
+    """
+    channels: list[tuple[str, str]] = [
+        ("inline `<script>`", body) for body in _inline_scripts(markup)]
+    channels += [("`<style>`", body) for body in _style_bodies(markup)]
+    channels += [(f"`{src}`", body)
+                 for src, body in _same_origin_script_bodies(name, markup, root)]
+    channels += [(f"`{href}` (stylesheet)", body)
+                 for href, body in _same_origin_style_bodies(name, markup, root)]
+    return channels
+
+
+
+class TestCommentStrippingKeepsCode:
+    """The strip may lose a COMMENT, never a byte of the code beneath it.
+
+    This helper is the scanning instrument behind every channel row below
+    (inline `<script>`, `<style>`, same-origin asset) and behind the two-page
+    render compare, so anything it drops without reding a row is a channel with
+    no gate — which is how a `$25/mo` literal survived a leading `/* note */`
+    and left BOTH rows green (#13696 round 6, the fail-OPEN the span-cutting fix
+    closed). The rows below reproduce that channel through the real pages; this
+    class pins the instrument itself, so the fail-open cannot come back by a
+    quiet rewrite of the helper.
+    """
+
+    def test_a_wholly_commented_line_is_dropped(self):
+        assert _strip_comment_lines("// Pro is $25/mo\nrun();") == "run();"
+        assert _strip_comment_lines("/* Pro is $25/mo */\nrun();") == "run();"
+
+    def test_a_multiline_block_comment_is_dropped(self):
+        assert _strip_comment_lines(
+            "/* first\n still prose $25\n third */\nrun();") == "run();"
+
+    def test_code_after_a_one_line_block_comment_is_kept(self):
+        # The fail-open: dropping the line wholesale left `run('$25')` in no
+        # channel, so no row could refuse it.
+        assert _strip_comment_lines("/* why */ run('$25');") == "run('$25');"
+        assert PRICE_FIGURE_RE.search(_strip_comment_lines(
+            "/* why */ run('$25');"))
+
+    def test_code_after_a_multiline_block_comment_closes_on_its_own_line(self):
+        assert _strip_comment_lines(
+            "/* why\n * prose $25\n */ run('$25');") == "run('$25');"
+
+    def test_a_trailing_line_comment_is_kept_and_fails_closed(self):
+        # Deliberate asymmetry, documented on the channel row: a trailing `//`
+        # note is SCANNED, so a figure there reds and the fix is to move the
+        # sentence onto its own line, never to widen the row.
+        assert PRICE_FIGURE_RE.search(_strip_comment_lines(
+            "run(); // pinned at $25"))
+
+
+class TestStylesheetChannelIsRead:
+    """The CSS delivery list, pinned independently of the two live pages.
+
+    ⛔ A CLASS, not a row inside
+    `test_no_page_quotes_a_price_inside_its_own_script`, because both product
+    pages carry **zero** linked stylesheets and `website/assets/` holds **no**
+    `.css` file: that row is green as written, so nothing inside it can tell
+    whether this channel is read or invisible. Round 9 added the channel and
+    left FOUR ways through it open, each measured green on its head (#13696
+    round 10): an `@import` inside a `<style>` body, a RELATIVE `@import`
+    (resolved against the site root, missed, silently skipped), a two-hop import
+    chain, and a `<link>` to a stylesheet that does not exist.
+
+    These rows drive the SAME helpers the real row uses — `_pricing_stylesheet_hrefs`,
+    `_stylesheet_imports`, `_same_origin_style_bodies` and the `_price_channels`
+    assembly — against a fixture tree, so a helper that stops reading a spelling
+    reds here instead of quietly widening the gap on the live pages.
+
+    The `style` ATTRIBUTE is not covered on purpose (see `_price_channels`): it
+    is served markup, and `content:` cannot be declared there.
+    """
+
+    @staticmethod
+    def _site(tmp_path):
+        site = tmp_path / "website"
+        (site / "assets").mkdir(parents=True)
+        return site
+
+    def test_every_href_and_rel_spelling_is_read(self):
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="stylesheet" href="/a.css">') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            "<link rel='stylesheet' href='/a.css'>") == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="stylesheet" href=/a.css>') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<link href="/a.css" rel="stylesheet">') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<LINK REL="STYLESHEET" HREF="/a.css">') == ["/a.css"]
+
+    def test_rel_is_a_token_list_so_alternate_counts(self):
+        # A reader can ACTIVATE an alternate sheet, so it renders text too.
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="alternate stylesheet" href="/a.css">') == ["/a.css"]
+        # …but a preload applies no rule by itself: not a delivery.
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="preload" as="style" href="/a.css">') == []
+
+    def test_a_commented_out_link_is_not_read(self):
+        assert _pricing_stylesheet_hrefs(
+            '<!-- <link rel="stylesheet" href="/a.css"> -->') == []
+
+    def test_every_import_spelling_is_read(self):
+        assert _stylesheet_imports('@import "a.css";') == ["a.css"]
+        assert _stylesheet_imports('@import url("a.css");') == ["a.css"]
+        assert _stylesheet_imports("@import url(a.css);") == ["a.css"]
+        assert _stylesheet_imports("@import url( 'a.css' ) screen;") == ["a.css"]
+
+    def test_a_commented_out_import_is_not_read(self):
+        assert _stylesheet_imports('/* @import "a.css"; */') == []
+
+    def test_a_linked_sheet_its_relative_import_and_a_chain_are_channels(
+            self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "a.css").write_text(
+            '@import "b.css";\n.a::after { content: " \u2014 from $25/mo"; }\n',
+            encoding="utf-8")
+        # RELATIVE, and one hop past the first import — the two bounds round 9
+        # had, each measured leaving the figure unread.
+        (site / "assets" / "b.css").write_text(
+            '@import "/assets/c.css";\n.b::after { content: "$999"; }\n',
+            encoding="utf-8")
+        (site / "assets" / "c.css").write_text('.c::after { content: "$42"; }\n',
+                                            encoding="utf-8")
+        markup = ('<html><head><link rel="stylesheet" href="/assets/a.css">'
+                  '</head><body></body></html>')
+        channels = _price_channels("synthetic.html", markup, root=site)
+        bodies = {where: body for where, body in channels}
+        for expected in ("`/assets/a.css` (stylesheet)",
+                         "`/assets/b.css` (stylesheet)",
+                         "`/assets/c.css` (stylesheet)"):
+            assert expected in bodies, (
+                f"{expected} is in NO channel, so a figure one import away is "
+                f"unread: {sorted(bodies)}")
+        hits = [line for _, body in channels for line in body.splitlines()
+                if PRICE_FIGURE_RE.search(line)]
+        assert len(hits) == 3, (
+            "the channel is read but does not reach the detector — the row "
+            f"above would be vacuous over a linked sheet: {hits!r}")
+
+    def test_an_import_inside_a_style_block_is_a_channel(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "from-style.css").write_text(
+            '.x::after { content: "$42"; }\n', encoding="utf-8")
+        markup = ('<html><head><style>@import url("/assets/from-style.css");'
+                  '</style></head><body></body></html>')
+        bodies = dict(_price_channels("synthetic.html", markup, root=site))
+        assert "`/assets/from-style.css` (stylesheet)" in bodies, (
+            "an `@import` inside a `<style>` body is a fourth door to a "
+            f"stylesheet and it is unread: {sorted(bodies)}")
+
+    def test_an_import_cycle_terminates(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "a.css").write_text(
+            '@import "b.css";\n.a::after { content: "$1"; }\n', encoding="utf-8")
+        (site / "assets" / "b.css").write_text(
+            '@import "a.css";\n.b::after { content: "$2"; }\n', encoding="utf-8")
+        markup = ('<html><head><link rel="stylesheet" href="/assets/a.css">'
+                  '</head><body></body></html>')
+        bodies = [w for w, _ in _price_channels(
+            "synthetic.html", markup, root=site)]
+        assert bodies == ["`/assets/a.css` (stylesheet)",
+                          "`/assets/b.css` (stylesheet)"], (
+            "a cycle must terminate and still read every file once, not "
+            f"loop or silently stop: {bodies}")
+
+    def test_a_missing_stylesheet_fails_closed(self, tmp_path):
+        # Round 9 SKIPPED it, so a `<link>` whose file had moved read nothing
+        # and said nothing — the fail-OPEN this row exists to refuse.
+        site = self._site(tmp_path)
+        markup = ('<html><head><link rel="stylesheet" href="/assets/gone.css">'
+                  '</head><body></body></html>')
+        try:
+            _price_channels("synthetic.html", markup, root=site)
+        except AssertionError as exc:
+            assert "gone.css" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a `<link>` to a stylesheet that does not exist was skipped "
+                "silently — the page renders CSS this gate never read, and "
+                "every row stays green")
+
+    def test_an_absolute_url_on_either_site_host_is_read(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "abs.css").write_text('.x { content: "$7"; }\n')
+        for spelling in ("https://premiselabs.co/assets/abs.css",
+                         "https://tortoise.premiselabs.co/assets/abs.css",
+                         "//www.premiselabs.co/assets/abs.css",
+                         "/assets/abs.css"):
+            markup = (f'<html><head><link rel="stylesheet" href="{spelling}">'
+                      '</head><body></body></html>')
+            assert "`/assets/abs.css` (stylesheet)" in dict(
+                _price_channels("synthetic.html", markup, root=site)), (
+                f"{spelling} was not resolved to the file it names")
+
+    def test_a_cache_busted_reference_still_resolves(self, tmp_path):
+        # `/favicon.ico?v=…` is this site's own convention; keeping the query in
+        # the path made `is_file()` false and the row RED with a message that
+        # was not true ("the file moved").
+        site = self._site(tmp_path)
+        (site / "assets" / "busted.css").write_text('.x { content: "$7"; }\n')
+        (site / "assets" / "busted.js").write_text("run();\n")
+        markup = ('<html><head>'
+                  '<link rel="stylesheet" href="/assets/busted.css?v=abc">'
+                  '<script src="/assets/busted.js?v=abc"></script>'
+                  '</head><body></body></html>')
+        bodies = dict(_price_channels("synthetic.html", markup, root=site))
+        assert "`/assets/busted.css` (stylesheet)" in bodies
+        assert "`/assets/busted.js?v=abc`" in bodies
+
+    def test_a_data_uri_delivery_is_refused_not_skipped(self, tmp_path):
+        site = self._site(tmp_path)
+        markup = ('<html><head><link rel="stylesheet" '
+                  'href="data:text/css,.x{content:\'$7\'}"></head>'
+                  '<body></body></html>')
+        try:
+            _price_channels("synthetic.html", markup, root=site)
+        except AssertionError as exc:
+            assert "data:" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a `data:` URI delivers bytes inline and was skipped as if it "
+                "were a foreign host — the figure in it is unread")
+
+    def test_the_only_off_host_delivery_is_the_known_cdn(self):
+        # `_same_origin_asset` returns `None` for a foreign host and the row
+        # then reads NOTHING from it — legitimate only because that set is the
+        # CDN both pages load GSAP from. A new external delivery is a channel
+        # no row reads, so it must red HERE rather than slip past.
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            markup = path.read_text(encoding="utf-8")
+            refs = (_pricing_source_includes(markup)
+                    + _pricing_stylesheet_hrefs(markup)
+                    + [ref for body in _style_bodies(markup)
+                       for ref in _stylesheet_imports(body)])
+            foreign = [ref for ref in refs
+                       if _same_origin_asset(name, ref)[0] is None]
+            assert foreign == [r for r in foreign
+                              if urlsplit(r).netloc.lower()
+                              == "cdnjs.cloudflare.com"], (
+                f"{name} loads script/style from a host this gate cannot read "
+                f"and does not know about: {foreign!r}. A price there is "
+                "ungraded — vendor the file under `website/` or extend the "
+                "channel deliberately")
+
+
+class TestPricingSourceIsShared:
+    """#13645: `/tortoise` and `/tortoise-for-product-teams` cannot disagree.
+
+    The assertion is deliberately structural rather than "each page contains
+    the right numbers": a test of the second kind passes on two copies that
+    happen to match today, which is exactly the state the defect looks like
+    until someone edits one of them.
+    """
+
+    def test_both_product_pages_load_the_same_pricing_source(self):
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            srcs = _pricing_source_includes(path.read_text(encoding="utf-8"))
+            hits = [s for s in srcs if s == "/assets/tortoise-pricing.js"]
+            assert len(hits) == 1, (
+                f"{name} loads the shared pricing source {len(hits)} time(s) "
+                f"(script srcs: {srcs!r}). Both product pages must render "
+                "prices from /assets/tortoise-pricing.js — ONE source — which "
+                "is what makes the two pages' prices agree by construction "
+                "instead of by a copy that can rot.")
+        assert PRICING_SOURCE.is_file(), (
+            "the shared pricing source is gone; both product pages would "
+            "render no prices at all")
+
+    def test_neither_page_declares_its_own_tier_table(self):
+        """The defect itself: a second `PRICING` object inside a page.
+
+        Three shapes are refused, because any one of them is a price table a
+        page could drift on: re-assigning `window.TORTOISE_PRICING`, a
+        `tiers: {` map, and a `price: <number>` entry. The render code that
+        READS the table (`t.price`, `fmtPrice(t.price)`) is untouched by all
+        three, so a legitimate refactor of either page's render is not redded
+        here.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            assert "TORTOISE_PRICING = {" not in html, (
+                f"{name} assigns `window.TORTOISE_PRICING` itself. The ONE "
+                "source is /assets/tortoise-pricing.js; a page that re-declares "
+                "the table is the drift this gate exists to stop (#13645).")
+            for pattern, what in (
+                (r"\btiers\s*:\s*\{", "a `tiers: {...}` table"),
+                (r"\bprice\s*:\s*\d", "a `price: <number>` entry"),
+                (r"\bfeatures\s*:\s*\[", "a `features: [...]` list"),
+            ):
+                assert re.search(pattern, html) is None, (
+                    f"{name} carries {what}, so it has its own copy of the "
+                    "price table. Both product pages must render from "
+                    "/assets/tortoise-pricing.js only (#13645).")
+
+    def test_the_two_pages_render_the_same_pricing_markup(self):
+        """The prices a READER gets are identical — that is 'the pages agree'.
+
+        The static cards are what a no-JS reader, a crawler and a link-preview
+        scraper see, and they are the copy most likely to rot; the usage line
+        and the self-host block are the two other facts the section states.
+        Compared as SERVED markup (`_served`), so a comment or a `<script>` that
+        no reader receives cannot satisfy it.
+        """
+        by_name = {name: _served(path.read_text(encoding="utf-8"))
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        left, right = by_name[left_name], by_name[right_name]
+        for slice_fn, what in (
+            (_static_pricing_grid, "the static pricing cards"),
+            (_static_usage_line, "the overage line"),
+            (_static_selfhost_block, "the self-hosted block"),
+        ):
+            assert slice_fn(left).strip() == slice_fn(right).strip(), (
+                f"{what} differs between {left_name} and {right_name}. The "
+                "pricing section is forked, not rewritten: both pages must show "
+                "one set of prices from the shared source (#13645).\n"
+                f"--- {left_name} ---\n{slice_fn(left)}\n"
+                f"--- {right_name} ---\n{slice_fn(right)}")
+        # ⛔ AND THE WHOLE SECTION, not just the three slices. Named slices leave
+        # everything else in `#pricing-section` unread: a price claim in the
+        # `.pricing-sub` paragraph ABOVE `#pricing-grid` — outside all three —
+        # stayed green while quoting "Team from $12/mo, billed annually" on the
+        # campaign page (measured at `4886f8d097`). The slices above are kept for
+        # a precise failure message; this row is what makes the section as a whole
+        # covered by construction, so a later addition is compared without anyone
+        # remembering to add it to a list.
+        assert _pricing_section(left).strip() == _pricing_section(right).strip(), (
+            f"the `#pricing-section` markup differs between {left_name} and "
+            f"{right_name} — somewhere OUTSIDE the cards, the overage line and "
+            "the self-host block (those are compared separately above, and each "
+            "passes). The whole section is one copied block: a price, a badge or "
+            "a sub-head that lives only on one page is the fork #13645 exists to "
+            "prevent.\n"
+            f"--- {left_name} ---\n{_pricing_section(left)}\n"
+            f"--- {right_name} ---\n{_pricing_section(right)}")
+
+    def test_neither_page_mutates_the_shared_table(self):
+        """The fourth shape of "a price table this page could drift on": a WRITE.
+
+        `test_neither_page_declares_its_own_tier_table` refuses a page that
+        RE-DECLARES the table; it says nothing about a page that MUTATES the
+        shared one at runtime, which produces the same divergent price with one
+        fewer line. Measured at `4886f8d097`: prepending
+        `PRICING.tiers.pro.price = 25; /* experiment drift */` to the campaign
+        page's inline script left all **136 rows GREEN** while that page rendered
+        a different price for the same tier than `/tortoise` (#13696 review 3).
+
+        A READ is untouched: `PRICING.tiers[name].price`,
+        `PRICING.display.annual_discount_pct` and the local alias declaration
+        `const PRICING = window.TORTOISE_PRICING;` all have no assignment after a
+        property chain, and all three are used legitimately on both pages.
+
+        ⛔ THE GUARD BINDS THE PROPERTY PATH, NOT THE ROOT IDENTIFIER. Binding on
+        `PRICING` / `window.TORTOISE_PRICING` was the first version and it is one
+        alias away from useless: `const PRICING = window.TORTOISE_PRICING;` is
+        already both pages' established pattern, so `const _P = …; _P.tiers.pro
+        .price = 25;` — or `const {tiers} = …; tiers.pro.price = 25;` — reached the
+        same object and left all **137 rows GREEN** while the campaign page
+        rendered a different price than `/tortoise` (measured at `b9d6bcdf4c`,
+        #13696 review 4 finding 2). The key list is DERIVED from the shared source
+        (`_extract_pricing_object`) rather than retyped, so a new schema field is
+        covered the day it lands; a write has to end at one of those keys however
+        the object was named, and a READ (`fmtPrice(t.price)`,
+        `PRICING.tiers[name].price`, `PRICING.tiers.free.price === 0`) still has
+        no `=` after the path.
+        """
+        pricing = _extract_pricing_object()
+        keys = set(pricing) | {"tiers", "display"} | set(pricing["display"])
+        for tier in pricing["tiers"].values():
+            keys |= set(tier)
+        key_alt = "|".join(sorted(map(re.escape, keys)))
+        ident = r"[A-Za-z_$][\w$]*"
+        rest = rf"(?:\s*\.\s*{ident}|\s*\[[^\]]*\])*"
+        write = re.compile(
+            rf"\.\s*(?:{key_alt})\b{rest}\s*"
+            rf"(?:[-+*/%|&^]|\*\*|<<|>>|&&|\|\||\?\?)?=(?!=)")
+        other = re.compile(
+            rf"\bdelete\s+{ident}(?:\s*\.\s*{ident})*\s*\.\s*(?:{key_alt})\b"
+            rf"|\bObject\.assign\(\s*(?:{ident}\s*\.\s*)*(?:{key_alt})\b")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            hits = [ln.strip()
+                    for ln in path.read_text(encoding="utf-8").splitlines()
+                    if write.search(ln) or other.search(ln)]
+            assert not hits, (
+                f"{name} MUTATES the shared pricing table:\n  " + "\n  ".join(hits)
+                + "\nThe table is ONE object shared by both product pages, so a "
+                "write here changes the price BOTH pages render — whichever page "
+                "it lands on, the other one is now quoting a different number "
+                "with no red anywhere (#13645). A rename of the local alias does "
+                "not make the write legitimate. Change the price in "
+                "`product/pricing.json` (the source of truth) instead, so both "
+                "pages move together — or, if this page genuinely needs its own "
+                "figure, that is a decision, not an edit.")
+
+    def test_no_page_quotes_a_price_outside_the_pricing_section(self):
+        """The invariant's last unread scope: prices OUTSIDE `#pricing-section`.
+
+        Every row above is scoped to the pricing section — the whole-section
+        compare included — so a price figure anywhere ELSE in either document was
+        read by nothing. Measured at `b9d6bcdf4c`: adding
+        `<p class="hero-price">Pro from $25/mo</p>` to the campaign page's hero
+        left all **137 rows GREEN** while that page quoted $25/mo for Builder
+        against `/tortoise`'s $20 monthly / $15 annual (#13696 review 4 finding
+        1). Both pages carry ZERO price figures outside the section today, so
+        this row is green as written — it refuses the next one rather than fixing
+        a live divergence.
+
+        A page that genuinely needs a price elsewhere is making a decision, not
+        an edit: put the figure inside the section, or change this row together
+        with what the section serves.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            # `unescape` FIRST: `&#36;` renders as `$` to a reader, but
+            # `_served` does not decode entities, so a figure written that way
+            # was in no served text this row scanned while the reader saw
+            # `$89/mo` (measured, #13696 round 6).
+            served = unescape(_served(html))
+            section = unescape(_pricing_section(html))
+            assert section in served, (
+                f"the `#pricing-section` slice is not part of {name}'s served "
+                "markup, so this row cannot tell inside from outside — the "
+                "section compare above is the thing that finds the boundary")
+            outside = served.replace(section, "", 1)
+            hits = [outside[max(0, m.start() - 50):m.end() + 20].strip()
+                    for m in re.finditer(PRICE_FIGURE_RE, outside)]
+            assert not hits, (
+                f"{name} quotes a price OUTSIDE the pricing section:\n  "
+                + "\n  ".join(hits)
+                + "\nEvery price on both product pages must come from the ONE "
+                "shared table, and the section is where it is rendered — a "
+                "figure above the fold is a second copy that no row compares "
+                "against `/tortoise`, so the two pages can quote different "
+                "numbers with nothing red (#13645).")
+
+    def test_no_page_quotes_a_price_inside_its_own_script(self):
+        """The channel `_served` cannot see: a price literal in the page's JS.
+
+        `test_no_page_quotes_a_price_outside_the_pricing_section` reads the
+        SERVED markup, and `_served` deletes `<script>` bodies — deliberately,
+        because injected copy is not what a no-JS reader receives. The render
+        rows close the other end (`test_the_two_pages_render_from_the_same_code`
+        compares the five functions, `test_both_pages_init_to_the_same_billing_mode`
+        the init statement), but a literal ANYWHERE ELSE in the inline script is
+        read by nothing: `_served` has removed it and no render comparison
+        covers it.
+
+        Measured at `fb6b1afc68`: prepending
+        `document.title = 'Pro from $25/mo';` to the campaign page's inline
+        script left all **138 rows GREEN** while that page quoted $25/mo for
+        Builder against `/tortoise`'s $20 monthly / $15 annual (#13696 round 5).
+        Both pages carry ZERO price literals in their inline scripts today, so
+        this row is green as written — it refuses the next one rather than
+        fixing a live divergence.
+
+        ⛔ Round 6 measured THREE channels this row still did not read, each
+        leaving every suite green: a same-origin `<script src>` FILE (the tag's
+        body is empty and `_served` never sees the file), a `<style>` body (a
+        CSS `content:` rule is rendered text), and an entity-encoded figure
+        (`&#36;89` reads as `$89/mo`). A list of remembered channels is what
+        produced those gaps, so the row now reads every channel a reader can
+        RECEIVE that is not served text — see the helpers below.
+
+        A price a script needs must come from the shared table through
+        `window.tortoiseFmtPrice` (or `PRICING`); a literal is a second copy of
+        the number that no row compares against `/tortoise`.
+
+        A line that is WHOLLY a comment is dropped before the scan, in EVERY
+        channel below — the inline `<script>` bodies, the `<style>` bodies and
+        the same-origin asset files — so prose may still mention a figure. A
+        TRAILING comment on a code line is not — the line is scanned as written
+        — which fails closed and deliberately: the fix is to move the sentence
+        onto its own line, never to widen this row.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            markup = path.read_text(encoding="utf-8")
+            scripts = _inline_scripts(markup)
+            assert scripts, (
+                f"{name} carries no inline `<script>` body, so this row would "
+                "pass without reading anything — the channel it exists to read "
+                "has moved and the row must move with it")
+            channels = _price_channels(name, markup)
+            hits = [
+                f"{where}: {line.strip()}"
+                for where, body in channels
+                for line in body.splitlines()
+                if PRICE_FIGURE_RE.search(line)
+            ]
+            assert not hits, (
+                f"{name} quotes a price in a channel that is not served text:\n  "
+                + "\n  ".join(hits)
+                + "\nA price a script or style renders must come from the ONE "
+                "shared "
+                "table via `window.tortoiseFmtPrice` / `PRICING` — a literal is "
+                "a second copy that no static row can see (`_served` deletes "
+                "script and style bodies, and never sees a separate asset "
+                "file) and no render row compares, so this page can "
+                "quote a different number than `/tortoise` with every suite "
+                "green (#13645).\n"
+                "(A line that is wholly a comment is skipped, so prose may name "
+                "a figure; a TRAILING comment on a code line is scanned with "
+                "the code — move the sentence onto its own line.)")
+
+    # The five functions that turn the shared table into the prices a JS
+    # visitor actually sees. See `test_the_two_pages_render_from_the_same_code`.
+    RENDER_FUNCTIONS = (
+        "fmtPrice", "checkSvg", "renderPricing", "renderSelfHost", "setBilling",
+    )
+
+    def test_the_two_pages_render_from_the_same_code(self):
+        """…and the JS RENDER agrees too, not just the static fallback.
+
+        #13696 review finding 1. Both pages carry their own `fmtPrice` /
+        `renderPricing` / `renderSelfHost` / `setBilling`. Every row above
+        reads the STATIC cards, and
+        `test_the_pages_format_prices_through_the_shared_function` only asserts
+        that the string `window.tortoiseFmtPrice(` OCCURS — so no row read the
+        CAMPAIGN page's render at all (product.html's bodies are read elsewhere,
+        the niche page's were read by nothing). Measured at
+        `1608357fc7`, before this row: changing the campaign page's call to
+        `window.tortoiseFmtPrice(price, currentBilling, 0)` left all 133 rows
+        GREEN while that page quoted $19/$25/$149 "annually" against
+        `/tortoise`'s $15/$20/$119 — the exact divergence this PR exists to
+        make impossible, one token away, with nothing red. A label or tier-order
+        edit drifts the same way.
+
+        Held as equality rather than derived per page because the invariant is
+        that there is ONE render: a second copy that is merely *also* correct
+        today is the state the defect looks like until someone edits one of
+        them. `_render_code` drops comment lines only, so the two pages may keep
+        explaining themselves differently.
+        """
+        by_name = {name: {fn: _render_code(path.read_text(encoding="utf-8"), fn, name)
+                          for fn in self.RENDER_FUNCTIONS}
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        for fn in self.RENDER_FUNCTIONS:
+            left, right = by_name[left_name][fn], by_name[right_name][fn]
+            assert left == right, (
+                f"{fn}() differs between {left_name} and {right_name}. The "
+                "pricing RENDER is a second copy that no other row reads, so a "
+                "divergence here is invisible: a different formatter argument "
+                "prints another page's prices, and a different `labels` map "
+                "prints another page's tier names (#13645, #13696 review 1).\n"
+                f"--- {left_name} ---\n{left}\n"
+                f"--- {right_name} ---\n{right}")
+
+    def test_both_pages_init_to_the_same_billing_mode(self):
+        """The render is compared; the statement that SEEDS it was not.
+
+        #13696 review 2, finding 4. `setBilling` is held identical above, but the
+        top-level `if (PRICING.display.annual_default) setBilling(...)` that
+        chooses its argument sits OUTSIDE every captured function, and the only
+        row that read it (`test_init_wiring_honors_annual_default`) reads
+        `product.html` alone. Measured before this row: flipping the campaign
+        page's init to `setBilling('monthly')` left all 135 rows GREEN while
+        that page opened on $19/$25/$149 against `/tortoise`'s $15/$20/$119
+        annual — the same divergence one statement earlier in the same file.
+        """
+        by_name = {name: _pricing_init_code(path.read_text(encoding="utf-8"), name)
+                   for name, path in PRODUCT_PAGES_SHARING_PRICING}
+        left_name, right_name = (name for name, _ in PRODUCT_PAGES_SHARING_PRICING)
+        left, right = by_name[left_name], by_name[right_name]
+        assert left == right, (
+            f"the billing default is wired differently in {left_name} and "
+            f"{right_name}, so a visitor lands on different prices depending "
+            "on which product page they arrived at (#13645):\n"
+            f"--- {left_name} ---\n{left}\n"
+            f"--- {right_name} ---\n{right}")
+
+    def test_the_static_cards_on_both_pages_carry_the_shared_numbers(self):
+        """…and the identical copy is also the CORRECT one.
+
+        `TestStaticPricingFallback` derives product.html's cards from the
+        shared source; this holds the other page's cards to the same source
+        directly, so a drift where BOTH pages are edited together (and so stay
+        identical) still reds here rather than needing the mirror test to
+        notice a page it does not read.
+
+        ⛔ #13696 round 16, P1: the pair is derived from `_js_fmt_price`, which
+        EXECUTES `website/assets/tortoise-pricing.js` — the code both pages
+        load — rather than from the Python mirror. That makes this row the
+        "page's rendered pair vs. the formatter's own templates" binding: an
+        edited `return { big: …, total: … }` in the source now reds HERE, on the
+        numbers a visitor reads, and not only in the mirror-agreement rows.
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        mode = "annual" if pricing["display"]["annual_default"] else "monthly"
+        order = ("free", "solo", "pro", "team")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            cards = _static_cards(html)
+            assert len(cards) == len(order), (
+                f"{name} renders {len(cards)} static cards for {len(order)} tiers")
+            for tier_name, card in zip(order, cards, strict=True):
+                tier = pricing["tiers"][tier_name]
+                big, total = _js_fmt_price(tier["price"], mode, disc)
+                assert (big, total) == _fmt_price(tier["price"], mode, disc), (
+                    f"the formatter the pages LOAD and the Python mirror disagree "
+                    f"for {tier_name} at ${tier['price']} ({mode}): "
+                    f"source={ (big, total)!r} mirror="
+                    f"{_fmt_price(tier['price'], mode, disc)!r} — one of them now "
+                    "quotes a different number than the other (#13645)")
+                assert card["big"] == big, (
+                    f"{name} / {tier_name}: static price {card['big']!r} != "
+                    f"{big!r} from the shared source ({mode})")
+                assert card["billing"] == total, (
+                    f"{name} / {tier_name}: billing line {card['billing']!r} != "
+                    f"{total!r} from the shared source")
+                assert card["included"] == tier["features"], (
+                    f"{name} / {tier_name}: features {card['included']!r} != the "
+                    f"shared source's {tier['features']!r}")
+                assert card["excluded"] == tier["excluded"], (
+                    f"{name} / {tier_name}: exclusions {card['excluded']!r} != the "
+                    f"shared source's {tier['excluded']!r}")
+
+    def test_every_figure_inside_the_section_is_one_the_source_has(self):
+        """…and a figure the source does NOT have is refused on BOTH pages.
+
+        The whole-section compare above asserts the two pages AGREE, and
+        `test_the_static_cards_on_both_pages_carry_the_shared_numbers` derives
+        the three slices it knows how to parse. Everything ELSE inside
+        `#pricing-section` — `.pricing-sub`, the `<h2>`, the toggle label, the
+        ToS sentence, any paragraph added later — was compared to the other page
+        and to nothing else, so a price added to BOTH sections could ship on both
+        pages quoting a number the source does not contain (measured, #13696
+        round 6: `<p class="pricing-sub">Team from $89/mo, billed annually.</p>`
+        in both sections left 139 rows green, while the source says Team is $149
+        monthly / $119 annual — and the block's own comment tells the next
+        editor to change both together).
+
+        So this row takes the COMPLEMENT of the parsed slices: every `$` figure a
+        reader can receive from the section must be a figure the shared source
+        can produce in SOME mode. A figure that is not is a price nobody
+        approved, and no other row would say so.
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        allowed: set[str] = set()
+        for tier in pricing["tiers"].values():
+            for mode in ("monthly", "annual"):
+                for rendered in _fmt_price(tier["price"], mode, disc):
+                    allowed.update(_figures(rendered))
+        for key in ("overage_line", "license_self_hosted"):
+            allowed.update(_figures(pricing["display"][key]))
+        assert allowed, "the shared source yields no figure at all — this row is vacuous"
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            section = unescape(_served(_pricing_section(
+                path.read_text(encoding="utf-8"))))
+            # …and the OTHER half of the same vacuity (#13696 round 7, P2 #7):
+            # `allowed` being non-empty says nothing about what the page
+            # RENDERS. A section that stopped carrying `$` figures at all left
+            # this row GREEN while it read nothing — `stray` is then empty by
+            # construction, so the row cannot disagree with the source. The
+            # neighbour rows spell this guard out; this one did not.
+            rendered_figures = _figures(section)
+            assert rendered_figures, (
+                f"{name} renders NO `$` figure inside `#pricing-section`, so "
+                "this row reads nothing and cannot disagree with the shared "
+                "source — it would pass over a section that renders no price "
+                "at all. Either the section stopped carrying its figures (a "
+                "render regression no other row names) or the extractor is "
+                "reading the wrong slice (#13696 round 7, P2 #7).")
+            # A figure SPLIT by markup is refused rather than read as its
+            # prefix: `$15<b>9</b>` renders as `$159` to a reader but matched
+            # only `$15`, which IS an allowed figure — so an unapproved $159
+            # was invisible while both pages agreed on it (#13696 round 8).
+            # Fail closed: the ambiguous spelling must be written as one run.
+            split = PRICE_SPLIT_RE.search(section)
+            assert split is None, (
+                f"{name} splits a price figure across inline markup "
+                f"({split.group(0)!r}): a reader sees the digits joined, while "
+                "every row here can only read the prefix — so a figure the "
+                "shared source does not contain can ship. Write the number as "
+                "one run and wrap the WHOLE figure if it needs styling.")
+            stray = sorted(set(rendered_figures) - allowed)
+            assert not stray, (
+                f"{name} quotes {stray!r} inside `#pricing-section`, and the "
+                f"shared source can produce only {sorted(allowed)!r}. Both "
+                "pages match each other and neither matches the table, so every "
+                "row that compares the pages is satisfied while both quote a "
+                "price nobody approved (#13645). Change the price in "
+                "`product/pricing.json` and `website/assets/tortoise-pricing.js` "
+                "— together — instead of typing it into the section.")
+
+    def test_the_pages_format_prices_through_the_shared_function(self):
+        """The rounding contract is ONE implementation, too.
+
+        Two pages can share a table and still disagree if each formats it: the
+        annual per-month figure is `round(price * 12 * (1 - disc) / 12)` with
+        the total DERIVED from it, and a page that re-derives it differently
+        prints `$15 / $180` beside `$15 / $186`. So both pages call
+        `window.tortoiseFmtPrice`, and the source defines it.
+        """
+        assert "window.tortoiseFmtPrice = function" in PRICING_SOURCE.read_text(
+            encoding="utf-8"), (
+            "the shared source no longer defines `window.tortoiseFmtPrice` — "
+            "the rounding contract has no home, so each page would re-implement it")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            html = path.read_text(encoding="utf-8")
+            assert "window.tortoiseFmtPrice(" in html, (
+                f"{name} does not call `window.tortoiseFmtPrice` — it formats "
+                "the shared numbers itself, which is the drift one step past "
+                "the table (#13645)")
+            # Whitespace-insensitive on purpose: the literal refused above is
+            # only ONE spelling of the same re-derivation, so `price*12` (or
+            # `price *12`) would slip past a plain substring check — and the
+            # re-derivation, not its spacing, is the defect.
+            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", html), (
+                f"{name} re-derives the annual per-month price instead of "
+                "delegating to `window.tortoiseFmtPrice`")
+
+    def test_a_price_is_not_assembled_from_a_dollar_fragment(self):
+        """A figure built by CONCATENATION is in no `$<digit>` channel.
+
+        ⛔ #13696 round 11, P2. `PRICE_FIGURE_RE` needs a digit right after the
+        `$`, which is the one shape a concatenated price never has: the figure
+        lives in the table and the source text carries only `'$' + t.price`.
+        Measured at `59bc263091`: appending
+        `document…insertAdjacentHTML('beforeend', '<div class="price">$' + t.price + '<span>/mo</span></div>')`
+        to the campaign page's inline script left all **158 rows GREEN** while
+        its grid showed Builder at $25/mo beside its own $20 annual cards and
+        `/tortoise` showed $20/$15. `String.fromCharCode(36)` reaches the same
+        markup, but it reaches NO detector either — that is a decision about
+        what a static gate can see, not a spelling to chase.
+
+        Read over EVERY channel `_price_channels` lists (inline script, `<style>`,
+        same-origin files, stylesheets), because a fragment is exactly as
+        invisible there as a figure. The shared source is excluded from that
+        list BY DESIGN — it is where a price is legitimately built.
+        """
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            markup = path.read_text(encoding="utf-8")
+            hits = [f"{where}: {line.strip()}"
+                    for where, body in _price_channels(name, markup)
+                    for line in body.splitlines()
+                    if PRICE_FRAGMENT_RE.search(line)]
+            assert not hits, (
+                f"{name} assembles a price from a bare `$` fragment:\n  "
+                + "\n  ".join(hits)
+                + "\nA figure concatenated onto `'$'` carries no digit in the "
+                "source, so no price row can read the number it renders and "
+                "this page can quote a price no other page does with every "
+                "suite green (#13645, #13696 round 11). Get the WHOLE figure "
+                "from `window.tortoiseFmtPrice(…)` — it returns `big` already "
+                "carrying the `$` — or from `PRICING`.")
+            attrs = [m.group(0) for m in PRICE_DATA_ATTR_RE.finditer(markup)]
+            assert not attrs, (
+                f"{name} carries a price in a DATA ATTRIBUTE ({attrs!r}). A "
+                "figure stored as `data-price` is turned into a visible price "
+                "by a script, so it is a second copy of the number that no "
+                "static row reads and that the shared table does not own "
+                "(#13645). Render it from `window.tortoiseFmtPrice` instead.")
+
+    def test_the_shared_table_is_FROZEN_against_a_reflective_write(self):
+        """…and the runtime half of the mutation gate.
+
+        ⛔ #13696 round 11, P2. `test_neither_page_mutates_the_shared_table`
+        refuses the STATIC spellings of a write (`x = …`, `delete x.y`,
+        `Object.assign`), and a list of spellings is what the reflective forms
+        defeat: `Object.defineProperty(window.TORTOISE_PRICING.tiers.pro,
+        'price', { value: 26 })` and `Reflect.set(…)` both left all **158 rows
+        GREEN** at `59bc263091`, re-pricing the tier for BOTH pages at runtime.
+        The fix is not more regex — it is that the table cannot be written at
+        all: the shared source deep-freezes it, so the write is REFUSED. What
+        that means in a page's classic (sloppy-mode) script, measured with node
+        against the frozen file: `Object.defineProperty(…)` and
+        `features.push(…)` throw, while `x.price = 26` and
+        `Reflect.set(…, 'price', 26)` are silently refused (`Reflect.set`
+        returns false) — the tier still prices at 25 and the formatter still
+        returns `$20` / `$240 billed annually`. The write does not take effect
+        either way, which is the invariant; a throw is not required.
+
+        The freeze IS the mechanism, so what this row can do is keep the freeze
+        in place and DEEP (`Object.keys(table.tiers).forEach`, so a new tier is
+        covered the day it lands, plus each tier's `features`/`excluded` arrays
+        and `display`).
+        """
+        code = _code_only(PRICING_SOURCE.read_text(encoding="utf-8"))
+        assert re.search(r"Object\.keys\(\s*table\.tiers\s*\)\.forEach\(", code), (
+            "the shared source no longer freezes every tier by ITERATION, so a "
+            "tier added to the table is writable while the ones named in a "
+            "list are not (#13696 round 11)")
+        for target in ("tier.features", "tier.excluded", "tier",
+                       "table.display", "table.tiers", "table"):
+            assert re.search(
+                rf"Object\.freeze\(\s*{re.escape(target)}\s*\)", code), (
+                f"the shared source no longer `Object.freeze({target})`, so "
+                "that part of the ONE table both pages render is writable at "
+                "runtime — `Object.defineProperty` / `Reflect.set` then change "
+                "the price `other` pages quote with nothing red (#13696 "
+                "round 11).")
+
+    #: What makes a served page a RENDERER of the shared table.
+    TABLE_RENDER_MARKERS = (
+        "TORTOISE_PRICING", "tortoise-pricing.js",
+        'id="pricing-grid"', 'class="price"',
+    )
+
+    def test_the_population_is_every_page_that_renders_the_table(self):
+        """The set is hand-maintained on purpose — and VERIFIED, not trusted.
+
+        ⛔ #13696 round 11, P3. `PRODUCT_PAGES_SHARING_PRICING` is a two-page
+        tuple, while `website/assets/tortoise-pricing.js` told an editor that "a
+        page that inlines its own tier table reds the shared-source test". It
+        did not: giving `website/index.html` its own
+        `window.TORTOISE_PRICING = {…}` left all **158 rows GREEN**, because
+        every row in this class iterates the tuple. The list stays explicit — a
+        page joins the shared table by DECISION — but the population is now
+        derived from the pages themselves, so a page that starts rendering the
+        table without joining reds here instead of shipping a second copy.
+
+        The marker list is deliberately about RENDERING the table, not about
+        mentioning a number: `license.html`/`faq.html` quote legitimate fees, and
+        a `$<digit>` marker would draft them into a set that requires loading
+        the shared source.
+        """
+        members = {(name, path.resolve()) for name, path in
+                   PRODUCT_PAGES_SHARING_PRICING}
+        population = TestSiteIconAndSocialPreviewContract.PAGES_AT_11762
+        for page in sorted((REPO_ROOT / "website").glob("*.html")):
+            text = page.read_text(encoding="utf-8")
+            if not any(marker in text for marker in self.TABLE_RENDER_MARKERS):
+                continue
+            rel = f"website/{page.name}"
+            assert (rel, page.resolve()) in members, (
+                f"{rel} renders the shared pricing table "
+                f"({[m for m in self.TABLE_RENDER_MARKERS if m in text]!r}) but is "
+                "not in `PRODUCT_PAGES_SHARING_PRICING`, so NONE of the rows "
+                "that hold a page to the ONE source and to the other pages' "
+                "render covers it — it can quote a different price with every "
+                "suite green (#13645, #13696 round 11). Either load "
+                "`/assets/tortoise-pricing.js` and join the tuple, or stop "
+                "rendering a price table on this page.")
+            assert page.name in population, (
+                f"{rel} renders the shared pricing table but is missing from "
+                "`PAGES_AT_11762` (the pinned served-page population), so the "
+                "head/card guards do not cover it either")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            text = path.read_text(encoding="utf-8")
+            assert any(marker in text for marker in self.TABLE_RENDER_MARKERS), (
+                f"{name} is in `PRODUCT_PAGES_SHARING_PRICING` but renders none "
+                "of the table's markers — it no longer renders the shared "
+                "table, so the set is stale and the rows above pin a page "
+                "that has moved on")
+
+
+class TestPriceFragmentDetector:
+    """`PRICE_FRAGMENT_RE` pinned on its own, so the channel row cannot go blind.
+
+    The row above reads the LIVE pages, which carry no fragment today: nothing
+    inside it can tell a working detector from a dead one. These rows drive the
+    regex directly.
+    """
+
+    def test_a_concatenated_price_is_flagged(self):
+        assert PRICE_FRAGMENT_RE.search(
+            "d.innerHTML = '<div class=\"price\">$' + t.price + '</div>';")
+        assert PRICE_FRAGMENT_RE.search("document.title = 'from $' + t.price;")
+
+    def test_a_template_interpolation_is_not_a_fragment(self):
+        assert not PRICE_FRAGMENT_RE.search(
+            "`<div class=\"price\">${fmtPrice(t.price).big}</div>`")
+
+    def test_a_whole_figure_is_left_to_the_figure_detector(self):
+        # `$25` / `$0` / `$1,428` are `PRICE_FIGURE_RE`'s subject; this detector
+        # must not double-report them (or it reds correct markup on sight).
+        assert not PRICE_FRAGMENT_RE.search("'$25', '$0', '$1,428'")
+        assert not PRICE_FRAGMENT_RE.search("<div class=\"price\">$119<span>/mo</span></div>")
+
+
+class TestConsentSeam:
+    """#13696 review finding 1: the `tortoise:consent` seam has an assertion.
+
+    `website/consent.js` gained a real behaviour for #13645: it dispatches
+    `tortoise:consent` with `{ state: "granted" | "denied" }`, and the niche
+    page's only page-view capture listens for it
+    (`window.addEventListener('tortoise:consent', trackView)`). The seam is
+    load-bearing in the PR's own words: without it a visitor who accepts the
+    banner AFTER the page ran has their page view dropped, so the experiment
+    has clicks with no denominator.
+
+    Nothing asserted it. The page-side rows only prove the page LISTENS
+    (`test_the_three_funnel_events_are_named_in_the_source`), which a module
+    that never emits satisfies; and the guard that owns this file
+    (`tests/e2e/test_legal_pages.py::test_consent_js_served_and_banner_present`)
+    pinned no line of it. Deleting the dispatch therefore reddened zero rows.
+
+    Two halves, because they fail differently:
+
+    * `test_the_module_emits_the_event_the_page_listens_for` — the event NAME
+      is shared between two files, so it is asserted in both rather than
+      trusted to stay equal.
+    * `test_the_granted_event_is_dispatched_after_the_opt_in` — the ORDER is
+      the contract ("dispatched AFTER the opt-in/opt-out has been applied"),
+      and order is invisible to any assertion that only looks for the string.
+      A reordering re-introduces the pre-consent beacon the seam exists to
+      prevent, which is a privacy defect, not a cosmetic regression.
+    """
+
+    EVENT = "tortoise:consent"
+
+    #: Each `announceConsent("granted")` call site is the LAST statement of a
+    #: granted path, so its enclosing function also holds the opt-in it must
+    #: follow. Named rather than counted: a path that disappears reds here, and
+    #: a THIRD path added later is not refused by an expected-count pin.
+    GRANTED_PATHS = ("onAccept", "init")
+
+    @staticmethod
+    def _function_body(src: str, name: str) -> str:
+        """The body of the module-level `function <name>(…)`, by indentation.
+
+        consent.js is one IIFE whose own functions sit at two-space indent, so a
+        block runs from `  function <name>(` to the next line that opens a
+        sibling. Sliced by indentation rather than brace-counting: braces inside
+        the module's regex/string literals would break a naive counter.
+        """
+        starts = [m for m in re.finditer(r"^  function (\w+)\(", src, re.M)]
+        for i, m in enumerate(starts):
+            if m.group(1) != name:
+                continue
+            end = starts[i + 1].start() if i + 1 < len(starts) else len(src)
+            # ⛔ CODE ONLY. Every caller decides presence with `str.find`, and
+            # `find` matches a MENTION inside a comment as readily as the call
+            # itself: `opt_in_capturing()` deleted from `onAccept` while a
+            # `// opt_in_capturing() is now handled inside
+            # loadConsentedAnalytics()` sentence remained passed all three
+            # `TestConsentSeam` rows (measured, #13696 round 6). That deletion
+            # is not cosmetic — consent.js loads PostHog OPTED OUT and
+            # `loadConsentedAnalytics()` only loads GTM/Meta, so every accepting
+            # visitor's page view was dropped by an instrument that stayed green.
+            # The file's own `_strip_comment_lines` is the exact instrument and
+            # is already used by `_render_code`/`_inline_scripts` for this hazard.
+            return _code_only(src[m.start():end])
+        raise AssertionError(
+            f"no `function {name}(` at the module's own indent in consent.js — "
+            "this gate's subject moved, so it is no longer asserting order")
+
+    def test_the_module_emits_the_event_the_page_listens_for(self):
+        js = CONSENT_JS.read_text(encoding="utf-8")
+        assert f'"{self.EVENT}"' in js, (
+            f"consent.js never dispatches `{self.EVENT}`. The niche page's only "
+            "page-view capture waits for it, so with no emit every visit that "
+            "does not re-decide consent is silently uncounted — clicks with no "
+            "denominator (#13645)")
+        assert f"'{self.EVENT}'" in _without_html_comments(_product_teams_html()), (
+            f"the niche page no longer listens for `{self.EVENT}` — its page "
+            "view would then fire only when the decision happens mid-visit")
+
+    def test_the_granted_event_is_dispatched_after_the_opt_in(self):
+        js = CONSENT_JS.read_text(encoding="utf-8")
+        for path in self.GRANTED_PATHS:
+            body = self._function_body(js, path)
+            granted_m = GRANTED_STMT.search(body)
+            assert granted_m is not None, (
+                f"`{path}` grants consent but never dispatches "
+                f"`{self.EVENT}` with state `granted`: a visitor who accepts "
+                "the banner here has their page view dropped (#13645)")
+            # ⛔ A STATEMENT, not a substring. `str.find` was satisfied by a
+            # mention in a comment, and then by a mention in a STRING LITERAL
+            # (`throw new Error("opt_in_capturing() is handled by the caller")`)
+            # and by a `//` that directly followed a colon — so a deleted call
+            # stayed green through three successive spellings (#13696 rounds 6,
+            # 8, 9). An anchored pattern matches the call and nothing else.
+            opt_in_m = OPT_IN_STMT.search(body)
+            assert opt_in_m is not None, (
+                f"`{path}` no longer calls `opt_in_capturing()` — the path "
+                "this gate measures the ordering against moved")
+            assert opt_in_m.start() < granted_m.start(), (
+                f"`{path}` dispatches `{self.EVENT}` with state `granted` "
+                "BEFORE calling `opt_in_capturing()`. The event tells a page "
+                "consent has been applied, so announcing first is the "
+                "pre-consent beacon this seam exists to prevent — the page "
+                "would capture before the opt-in landed")
+            # ⛔ THE PRESENCE HALF IS ASSERTED FIRST, because the ordering
+            # comparison is VACUOUS without it: an absent call yields no match,
+            # so deleting the loader call from a granted path would pass a
+            # comparison-only row while GTM/Meta never get activated.
+            loaders_m = LOADERS_STMT.search(body)
+            assert loaders_m is not None, (
+                f"`{path}` grants consent but never calls "
+                "`loadConsentedAnalytics()`: the consent-gated GTM/Meta loaders "
+                "are never activated on the accept path, so a visitor who "
+                "explicitly opted in is measured by nothing downstream "
+                "(#13645)")
+            assert loaders_m.start() < granted_m.start(), (
+                f"`{path}` dispatches `{self.EVENT}` before activating the "
+                "consent-gated loaders (GTM/Meta), so a listener acts on a "
+                "decision the tags have not followed yet")
+
+    @staticmethod
+    def _page_function(src: str, name: str) -> str:
+        """The body of the page's own `function <name>(…)`, by indentation.
+
+        The page's inline script declares its helpers at six-space indent and
+        closes each at the same indent, so the body runs from the declaration
+        to the matching close brace. Sliced by indentation rather than
+        brace-counting: the literals inside these functions are the one place a
+        naive counter would drift.
+
+        Comments are cut first (`_without_html_comments`), so a function that a
+        `<!-- … -->` comment has disabled is not read as if the browser still
+        ran it — otherwise this gate is satisfied by `function track(` inside a
+        comment while the page beacons nothing.
+        """
+        src = _without_html_comments(src)
+        m = re.search(
+            rf"^( *)function {re.escape(name)}\(.*?\n\1\}}", src, re.S | re.M)
+        assert m, (
+            f"no `function {name}(` at the page's script indent — this gate's "
+            "subject moved, so it is no longer asserting the consent gate")
+        # ⛔ JS comments cut too, for the SAME reason `_function_body` uses
+        # `_code_only`: the rows below decide presence with `str.find`, which
+        # matches a MENTION in a comment. Without this, commenting out
+        # `if (!consented()) return;` in `track()` kept every row green — i.e.
+        # the pre-consent beacon this gate exists to prevent shipped green
+        # (#13696 round 8, P1).
+        return _code_only(m.group(0))
+
+    def test_the_page_gates_every_capture_on_the_consent_state(self):
+        """#13696 review finding 2: the page half of the seam is behavioural.
+
+        `track()` and `trackView()` are the page's ONLY path to a beacon
+        (`window.posthog.capture` is called nowhere else in the page's script),
+        and `trackView()` is reached from the consent event.
+
+        Two independent mutants survive every presence-only row:
+
+        * deleting `if (!consented()) return;` from `track()` ships an analytics
+          request from a visitor who never decided — the pre-consent beacon the
+          PR body itself calls a privacy defect;
+        * deleting `!consented()` from `trackView()` is the same defect one hop
+          earlier, and worse: the `viewed` latch would be set by the undecided
+          visit, so the later `granted` event would find `viewed === true` and
+          the page view would be lost for good.
+
+        `test_the_three_funnel_events_are_named_in_the_source` cannot see
+        either: it asserts the identifiers occur, and both mutants leave every
+        identifier in place.
+        """
+        track = self._page_function(_product_teams_html(), "track")
+        gate_m = NOT_CONSENTED_STMT.search(track)
+        assert gate_m is not None, (
+            "the page's `track()` has no `consented()` gate, so an undecided "
+            "visitor's click or page view reaches `posthog.capture` — the "
+            "pre-consent beacon this seam exists to prevent (#13645)")
+        gate = gate_m.start()
+        capture = track.find("posthog.capture(")
+        assert capture != -1, (
+            "this gate's subject moved: `track()` no longer calls "
+            "`posthog.capture`, so it is no longer the beacon path it pins")
+        assert gate < capture, (
+            "`track()` calls `posthog.capture` BEFORE checking `consented()`: "
+            "the check is no longer a gate, it is a post-capture filter")
+
+        view = self._page_function(_product_teams_html(), "trackView")
+        vgate = view.find("!consented()")
+        assert vgate != -1, (
+            "the page's `trackView()` has no `consented()` gate — the "
+            "`tortoise:consent` listener would capture a page view on a "
+            "decision that was never granted (#13645)")
+        latch = view.find("viewed = true")
+        assert latch != -1, (
+            "this gate's subject moved: `trackView()` no longer sets the "
+            "`viewed` latch")
+        assert vgate < latch, (
+            "`trackView()` latches `viewed = true` BEFORE checking "
+            "`consented()`: an undecided visit consumes the latch, so the "
+            "visitor's later `granted` event finds `viewed === true` and the "
+            "page view is lost silently — the exact undercount this seam "
+            "exists to prevent (#13645)")
+        assert vgate < view.find("track(EVENTS.view"), (
+            "`trackView()` calls `track()` BEFORE checking `consented()`, so "
+            "the gate is no longer the only thing between an undecided "
+            "visitor and a beacon (#13645)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 12. The niche product page's identity and its owner copy (#13645)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: The page's stable identity attribute. Pinned rather than trusted because the
+#: repo keys guards on `data-page`, and this page must stay distinguishable from
+#: `data-page="product"` (the tortoise-host root marker). ⛔ Nothing else reads
+#: this value at this head — `deploy-pages.yml`'s preflight greps only
+#: `data-page="product"` — so THIS pin is the whole guard for it: a silent loss
+#: reddens here and nowhere else.
+PRODUCT_TEAMS_DATA_PAGE = "product-teams"
+
+#: The URL the owner asked for, and the one the sitemap advertises.
+PRODUCT_TEAMS_URL = "https://premiselabs.co/tortoise-for-product-teams"
+
+#: The three funnel events the page names in its own source (owner decision,
+#: 2026-11-12: the experiment must carry a denominator).
+PRODUCT_TEAMS_EVENTS = (
+    "product_teams_view",
+    "product_teams_cta_primary",
+    "product_teams_cta_secondary",
+)
+
+
+def _product_teams_html() -> str:
+    return PRODUCT_TEAMS_HTML.read_text(encoding="utf-8")
+
+
+def _element_by_id(html: str, element_id: str) -> str:
+    """The whole element whose `id` is `element_id`, brace-counted by TAG.
+
+    Sliced by balanced tags rather than "to the next `</section>`": the beats
+    contain `<div>`s, and a slice that stopped at the first close would hide
+    most of the beat from a copy pin.
+    """
+    served = _served(html)
+    marker = f'id="{element_id}"'
+    assert marker in served, f"no element with {marker} — this gate's subject moved"
+    at = served.index(marker)
+    start = served.rindex("<", 0, at)
+    tag = re.match(r"<([a-zA-Z0-9]+)", served[start:])
+    assert tag, f"could not read the opening tag before {marker}"
+    name = tag.group(1)
+    depth = 0
+    for m in re.finditer(rf"<{name}\b|</{name}>", served[start:]):
+        depth += 1 if m.group(0) != f"</{name}>" else -1
+        if depth == 0:
+            return served[start:start + m.end()]
+    raise AssertionError(f"<{name} id={element_id}> has no balanced closing tag")
+
+
+class TestProductTeamsIdentity:
+    """The repo obligations that fail QUIETLY when a new page omits them.
+
+    Each assertion below is one of them, named with the failure it prevents.
+    The head/card/icon walkers in this file cover this page automatically (it is
+    in `PAGES_AT_11762`); what follows is the part that is specific to a page
+    that is ADDED ALONGSIDE another one rather than replacing it.
+    """
+
+    def test_the_hero_is_one_section_element(self):
+        """⛔ `#beat-hero` on this page must not nest a `<section>`.
+
+        The sibling gates in this file slice a beat to the FIRST `</section>`
+        (`_pricing_section`, `_automate_beat_markup`), so a nested section would push
+        most of the hero outside the slice and leave any copy pin over it
+        silently passing on the remainder. `_element_by_id` is tag-balanced, so
+        it sees the whole hero and a nested section is what makes the count 2.
+        """
+        hero = _element_by_id(_product_teams_html(), "beat-hero")
+        assert hero.count("<section") == 1, (
+            "website/tortoise-for-product-teams.html nests a <section> inside "
+            "#beat-hero — the hero must stay ONE section element, because a "
+            "slice that stops at the first </section> would then cover only "
+            "part of it. Re-scope the nested claim instead of nesting it.")
+
+    def test_the_identity_attribute_is_pinned(self):
+        root = _root_element(_product_teams_html(), "website/tortoise-for-product-teams.html")
+        assert f'data-page="{PRODUCT_TEAMS_DATA_PAGE}"' in root, (
+            "website/tortoise-for-product-teams.html lost "
+            f'data-page="{PRODUCT_TEAMS_DATA_PAGE}" from its <html> tag '
+            f"({root!r}). That attribute is how a page is identified without "
+            "reading its copy. Losing it is caught HERE and nowhere else: the "
+            "deploy preflight greps only `data-page=\"product\"`, and no E2E "
+            "keys on this page's value.")
+
+    def test_the_identity_attribute_does_not_collide_with_the_product_root(self):
+        """`product-teams` must not satisfy the product ROOT marker's grep.
+
+        `PRODUCT_ROOT_MARKER` is the literal `data-page="product"`, and the
+        deploy preflight greps for it with `grep -F`. A prefix collision would
+        make the preflight pass on THIS page, so the tortoise-host suite would
+        run its product assertions against a page that is not the product page.
+        """
+        marker = _product_root_marker()
+        assert marker not in _product_teams_html(), (
+            f'the niche page carries the product ROOT marker ({marker!r}), so '
+            "the tortoise-host preflight and `_assert_serves_product` cannot "
+            "tell the two pages apart")
+        assert f'data-page="{PRODUCT_TEAMS_DATA_PAGE}"' not in PRODUCT_HTML.read_text(
+            encoding="utf-8"), (
+            "website/product.html carries the niche page's identity attribute")
+
+    def test_the_canonical_names_the_url_that_serves_it(self):
+        # `_served`, not the raw document: a canonical inside `<!-- … -->` is
+        # one no browser parses, so the page would serve NO canonical while
+        # this row stayed green — and variant URLs of a link-tagged campaign
+        # page (`?utm_source=…`) would each index separately, which is the one
+        # thing a canonical exists to prevent here (#13696 round 7).
+        html = _served(_product_teams_html())
+        canon = re.search(r'<link[^>]*rel="canonical"[^>]*href="([^"]+)"', html)
+        assert canon, "the page declares no canonical"
+        assert canon.group(1) == PRODUCT_TEAMS_URL, (
+            f"canonical is {canon.group(1)!r}, not {PRODUCT_TEAMS_URL!r}. The "
+            "page is served at the company ROOT by Pages' pretty-URL "
+            "resolution — NOT under `/tortoise`, so a `/tortoise/...` canonical "
+            "would name a URL the middleware 404s.")
+
+    def test_the_sitemap_advertises_it_and_the_decision_is_indexed(self):
+        """The index/noindex decision, in the three places it has to agree.
+
+        INDEXED on purpose (an experiment nobody can find has no traffic to
+        measure), so the page must NOT declare noindex and a sitemap must carry
+        its URL. The reverse mutation — flipping the page to noindex and
+        leaving the `<loc>` — is caught by
+        `test_website_docs_consistency.py::test_no_sitemap_advertises_a_page_
+        that_is_deleted_or_noindex`; this is the half that reads the DECISION
+        itself rather than the sitemap.
+        """
+        html = _product_teams_html()
+        assert not re.search(
+            r'<meta\s[^>]*name\s*=\s*["\']?robots["\']?[^>]*noindex', html, re.I), (
+            "the page declares noindex. That is a legitimate decision, but it "
+            "is not the one recorded for #13645 (a GTM experiment needs to be "
+            "findable): if it is being changed, remove the sitemap <loc> and "
+            "this assertion together, and say why.")
+        locs = [loc for sm in sorted((REPO_ROOT / "website").glob("sitemap-*.xml"))
+                for loc in re.findall(r"<loc>\s*([^<]+?)\s*</loc>",
+                                      sm.read_text(encoding="utf-8"))]
+        assert PRODUCT_TEAMS_URL in locs, (
+            f"no sitemap advertises {PRODUCT_TEAMS_URL} — an indexable page "
+            "with no <loc> is invisible to a crawler")
+
+    def test_the_routing_decision_is_recorded_in_the_architecture_doc(self):
+        """The THIRD place the decision lives — and the one nothing read.
+
+        #13696 review finding 3: the PR body says the decision is "recorded in
+        three places kept in sync … pinned together by a test". Two of the three
+        were pinned (the page's own `<meta>` and the sitemap, above); the host-map
+        entry in `website/website_architecture.md` was prose only, so deleting it
+        reddened no row.
+
+        That entry is the one a later reader consults BEFORE re-cutting the routing
+        map, and it carries the two facts that are not visible anywhere else: this
+        page is served at the ROOT and is deliberately NOT a `PRODUCT_PAGES` member
+        (membership would 301 it to a 404), and it is INDEXED on purpose. With the
+        entry gone, the next routing change is free to "tidy" it into the product
+        prefix — the exact failure that would put the campaign URL at a 404 — so it
+        is held to the same decision as the meta and the sitemap rather than trusted
+        to stay in sync.
+        """
+        architecture = (REPO_ROOT / "website" / "website_architecture.md").read_text(
+            encoding="utf-8")
+        route = PRODUCT_TEAMS_URL.removeprefix("https://premiselabs.co")
+        # ⛔ BIND ON THE ROUTE, NOT ON THE STRING. The route is a SUBSTRING of the
+        # page's file name (`website/tortoise-for-product-teams.html`), so a
+        # `route in line` test is satisfied by a bullet that names only the FILE
+        # — the route can then disappear from the host map and this gate stays
+        # green (measured at the previous head: rewriting the bullet's first line
+        # to start with the file name left it PASSING). The doc writes routes in
+        # backticks, so the bullet's own heading is the route in backticks; and
+        # binding to a line that STARTS with `- ` stops an earlier mention of the
+        # route elsewhere in the document from stealing the binding.
+        marker = f"`{route}`"
+        lines = architecture.splitlines()
+        start = next((i for i, ln in enumerate(lines)
+                      if ln.startswith("- ") and marker in ln), None)
+        assert start is not None, (
+            f"`website/website_architecture.md` has no host-map bullet headed "
+            f"{marker} — the host map is where a later reader learns this page is "
+            "served at the COMPANY ROOT and is deliberately not a "
+            "`PRODUCT_PAGES` member. Without it the routing record makes the "
+            "prefix look like the place this page belongs, and 301ing it there "
+            "is a 404 on the URL the owner asked for.")
+        # The recorded decision is a MULTI-LINE bullet: bind to the bullet, not to
+        # the line, so re-wrapping the prose does not red this row.
+        # ⛔ A BLANK LINE ENDS THE BULLET. Skipping blanks so that a re-wrap "does
+        # not red" was tried and REVERTED: it lets a fact be moved OUT of the
+        # bullet into an ordinary paragraph below it and still satisfy the
+        # assertions below (measured green at `4886f8d097`). Ending the bullet on a
+        # blank line fails closed — the cost is that an editor who splits the
+        # bullet into two paragraphs of one list item gets a red, which is the
+        # direction this gate should err in.
+        bullet = [lines[start]]
+        for ln in lines[start + 1:]:
+            if ln.startswith(("- ", "#", "|")) or not ln.strip():
+                break
+            bullet.append(ln)
+        entry = "\n".join(bullet)
+        assert re.search(r"\*\*INDEXED\*\*", entry), (
+            f"the architecture doc's {route} entry no longer states the page is "
+            "INDEXED. `noindex` and `index` differ in whether the experiment can "
+            "be measured at all, so the recorded decision must name which one is "
+            "in force — the same reason the page's `<meta>` and the sitemap `<loc>` "
+            "are pinned above. NOTE: this row reads the ENTRY, and a blank line "
+            "ENDS the entry — if the sentence is still in the document but sits "
+            "below a blank line inside the bullet, move it back up rather than "
+            "adding a second copy.")
+        # ⛔ POLARITY, not a substring. `"INDEXED" in entry` is satisfied by its
+        # own negation — measured (#13696 round 9): `It is **NOT INDEXED** …`
+        # left 246/246 green across both website suites while the page still
+        # served `content="index,follow"` and the sitemap still carried the
+        # `<loc>`, i.e. the three surfaces disagreed with nothing red — and THIS
+        # doc is what a later lane reads before re-cutting the routing map, so
+        # it would then delete the experiment's only traffic channel.
+        #
+        # ⛔ SENTENCE-SCOPED, because an adjacency regex is not enough: measured
+        # (#13696 round 10), `It is **NOT** the case that this page is
+        # **INDEXED** …` has no negation TOUCHING the token, so it passed while
+        # negating the decision. Every sentence that names the decision must
+        # carry the positive token and must not negate or `noindex` it.
+        # NOTE: a bare `\bNO\b` here is WRONG — the baseline sentence contains
+        # "no traffic to measure", which is a reason, not a negation. Only
+        # `NOT` / `NEVER` / `noindex` are refused.
+        # ⛔ CASE-INSENSITIVE membership, because a contradicting sentence that
+        # spells the word in lower case escaped the guard entirely — measured
+        # (#13696 round 11): baseline + `It is NOT the case that this page is
+        # indexed.` left 247 passed, i.e. the doc could state the decision and
+        # then deny it with nothing red. `upper()` puts that sentence in scope
+        # for the positive-token assert below, which it then fails.
+        naming = [
+            s for s in re.split(r"(?<=[.!?])\s+", " ".join(entry.split()))
+            if "INDEXED" in s.upper()
+        ]
+        assert naming and all(re.search(r"\*\*INDEXED\*\*", s) for s in naming), (
+            f"the architecture doc's {route} entry names the INDEXED decision in a "
+            "sentence that does not carry the positive `**INDEXED**` token — so "
+            "the sentence can say `NOT … INDEXED`, or `noindex`, while this row "
+            "still passes. The page serves `content=\"index,follow\"` and the "
+            "sitemap carries its `<loc>`; the entry has to state the SAME decision "
+            "(#13645).")
+        assert not re.search(
+            r"\b(?:NOT|NEVER)\b|noindex|\b(?:NOT|NO|NON|UN)[- ]?INDEXED\b",
+            " ".join(naming), re.I,
+        ), (
+            f"the architecture doc's {route} entry NEGATES the decision while "
+            "naming it — the entry must say INDEXED, not `NOT INDEXED`: the page "
+            "serves `<meta name=\"robots\" content=\"index,follow\">` and the "
+            "sitemap carries its `<loc>`, so a negation here is the doc "
+            "contradicting both other surfaces with no row red (#13645).")
+        assert "PRODUCT_PAGES" in entry, (
+            f"the architecture doc's {route} entry no longer says why this page is "
+            "NOT a `PRODUCT_PAGES` member. That membership is a 301 to "
+            "`/tortoise/tortoise-for-product-teams`, which does not exist; the "
+            "reason has to live beside the route or the next reader removes it. "
+            "(Same caveat as the row above: a blank line ends the entry, so a "
+            "sentence moved below one is not read here.)")
+
+    def test_the_page_loads_the_consent_module(self):
+        """Every named event must be gated, so the gate must be loaded."""
+        srcs = _pricing_source_includes(_product_teams_html())
+        assert "/consent.js" in srcs, (
+            "the page does not load /consent.js, so its three funnel events "
+            "have no consent gate: a pre-consent beacon is both a privacy "
+            "defect and an undercount (blocked requests read as nobody clicked)")
+
+    def test_the_three_funnel_events_are_named_in_the_source(self):
+        html = _without_html_comments(_product_teams_html())
+        for event in PRODUCT_TEAMS_EVENTS:
+            assert f"'{event}'" in html, (
+                f"the page never names the `{event}` event. The owner decision "
+                "on #13645 requires the funnel to be visible in the page's OWN "
+                "source — page view with the campaign parameters, primary-CTA "
+                "click, secondary-CTA click — so a later reader does not have "
+                "to open a dashboard config to learn what is measured.")
+        assert "tortoise:consent" in html, (
+            "the page does not wait for /consent.js's decision event, so a "
+            "visitor who accepts the banner AFTER the page ran would have their "
+            "page view dropped — clicks with no denominator")
+        assert "consentState" in html, (
+            "the page never reads the consent state itself; every capture must "
+            "be gated on it, not merely deferred")
+
+    def test_the_campaign_tags_point_at_the_canonical_url(self):
+        # `_served`, not the raw document, and that is load-bearing: the page's
+        # own inline JS states the convention in a COMMENT
+        # (`utm_campaign=tortoise-for-product-teams + utm_source + utm_medium`),
+        # so a raw substring read is satisfied by that prose alone
+        # (#13696 round 7).
+        #
+        # ⛔ AND IT IS READ PER LINK, not once anywhere: a single `in html`
+        # still passes when THREE OF THE FOUR tagged links lose their tag
+        # (measured, #13696 round 8) — one entry path's attribution disappears
+        # silently, which is the owner's stated reason for tagging at all
+        # ("without that the experiment has no denominator").
+        html = _served(_product_teams_html())
+        tagged, untagged = [], []
+        for tag in re.findall(r"<a\b[^>]*>", html, re.I):
+            if "data-cta=" not in tag:
+                continue
+            m = re.search(r'href="([^"]+)"', tag)
+            if not m:
+                untagged.append(f"{tag} (no href)")
+                continue
+            href = m.group(1)
+            if href in self.OFF_SITE_CTAS:
+                # Exempt BY NAME, not by "anything off-site is exempt": that
+                # weaker rule also excuses a campaign CTA retargeted off our
+                # funnel, which is the defect one step further along.
+                continue
+            if all(p in href for p in self.CAMPAIGN_PARAMS):
+                tagged.append(href)
+            else:
+                untagged.append(href)
+        assert not untagged, (
+            "these CTAs do not carry the full campaign tag set "
+            f"({', '.join(self.CAMPAIGN_PARAMS)}) in their OWN href: {untagged!r}. "
+            "Each is an entry path whose traffic then cannot be separated from "
+            "/tortoise's in the same PostHog project — the experiment would "
+            "count that path with no denominator (#13645).")
+        assert tagged, (
+            "no `data-cta` link carries the campaign tags — this row's subject "
+            "moved (the hero CTAs are found by `data-cta`, so zero of them "
+            "means the markup changed and this gate now asserts nothing)")
+
+    #: The page's ONE off-site CTA: the repo link. GitHub takes no campaign
+    #: tags, so it is exempt by name — see the row above for why ``any off-site
+    #: link`` is NOT the rule.
+    OFF_SITE_CTAS = ("https://github.com/daniel-ospina/tortoise",)
+
+    #: The three parameters the owner's decision requires on every link we
+    #: control; each one answers a different question in the dashboard.
+    CAMPAIGN_PARAMS = (
+        "utm_campaign=tortoise-for-product-teams",
+        "utm_source=tortoise-for-product-teams",
+        "utm_medium=",
+    )
+
+    def test_the_page_links_to_the_canonical_product_page(self):
+        """The owner's rule: this page does not re-tell /tortoise's story."""
+        # ⛔ `_served`, not `_without_html_comments`: the latter deliberately
+        # KEEPS `<script>` bodies, so an `href="/tortoise?utm_…"` string inside
+        # an inline-JS COMMENT satisfied this row on its own (#13696 round 9:
+        # deleting the real footer CTA and leaving that string green-lit all
+        # 167 rows, with the funnel's only tagged entry to the canonical page
+        # gone). The sibling campaign-tag row already reads `_served`; the two
+        # halves of this invariant must agree on what "reads a link" means.
+        html = _served(_product_teams_html())
+        raw_hrefs = re.findall(r'href="([^"]+)"', html)
+        hrefs = [h.split("?", 1)[0] for h in raw_hrefs]
+        assert "/tortoise" in hrefs, (
+            "the niche page never links to /tortoise, whose full product story "
+            "it does not duplicate. The owner's decision requires the canonical "
+            "page to stay reachable from here (footer → Product).")
+        # …and the ONE that IS the campaign entry point into the canonical page
+        # must carry the tags. The other `/tortoise/<sub>` links are internal
+        # navigation and are deliberately untagged, so this binds the route, not
+        # a substring: retargeting the footer link, or dropping its tags, reds.
+        home = [h for h in raw_hrefs if h.split("?", 1)[0] == "/tortoise"]
+        assert home, (
+            "no footer link to the clean `/tortoise` route — only sub-page "
+            "navigation remains, so the canonical product page is one hop "
+            "further than the owner's decision allows")
+        assert all(
+            "utm_campaign=tortoise-for-product-teams" in h for h in home
+        ), ("the footer's link to `/tortoise` carries no utm_campaign, so the "
+            "traffic this page sends to the canonical page is counted as if it "
+            "had arrived from anywhere — the experiment's two arms stop being "
+            "separable (#13645)")
+
+    def test_the_three_step_story_replaced_the_fourth_beat(self):
+        """`#beat-automate` is ABSENT here and PRESENT on `/tortoise`.
+
+        Both halves are asserted, because this is the question
+        `TestAutomateBeatCopy` was retired-or-not on: the PDF has THREE steps,
+        and this page is a NEW file alongside `/tortoise` rather than a rewrite
+        of it. So the webhook beat (and its owner-ruled copy) is untouched on
+        the canonical page and simply not part of this one. ⛔ That copy is an
+        owner ruling (#8466 OVERRIDES): do not "fix" it here or there.
+        """
+        teams = _product_teams_html()
+        assert 'id="beat-automate"' not in teams, (
+            "the niche page carries the `04 · Automate` beat, but the owner's "
+            "PDF has three steps — so either the copy was invented or a beat "
+            "was copied from /tortoise")
+        assert 'id="beat-automate"' in PRODUCT_HTML.read_text(encoding="utf-8"), (
+            "website/product.html lost its `#beat-automate` beat. That beat "
+            "carries the owner's webhook paragraph (#8466 OVERRIDES) and is "
+            "pinned by TestAutomateBeatCopy — this page's three steps do not "
+            "retire it, because /tortoise is not being rewritten")
+
+
+class TestProductTeamsCopy:
+    """The owner's PDF copy, VERBATIM, section by section.
+
+    This is the pin the page most needs: the copy is the owner's prose, the
+    build was instructed to reproduce it unchanged, and nothing else in this
+    repo reads it (the product page's guard deliberately stopped pinning copy in
+    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
+    reason beside them — a builder "fixing" them is the failure this class
+    exists to catch.
+    """
+
+    #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
+    #: colour, so the pin is the rendered text either way.
+    H1 = "A Superbrain for Founders & Product Teams"
+    HERO_SUB = "A million moving pieces. One coherent & logical picture."
+
+    #: page 1 — the intro block (after the PDF's hairline rule).
+    INTRO = (
+        "Free up time from repetitive explaining, supervision, and managing dependencies.\n"
+        "When agents (and people) understand goal cascades, root causes, trade-offs, "
+        "and dependencies, they autonomously and reliably advance your business.\n"
+        "Tortoise builds a logical model of your business, product, and code. It "
+        "connects goals, insights and analytics, decisions, and execution so you, "
+        "your team, and agents have the whole context, current and logical."
+    )
+
+    #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
+    COMPUTE = (
+        "Tortoise then computes over this context, analysing hundreds or even "
+        "millions of variables so you and your agents make decision with "
+        "superintelligence."
+    )
+    OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
+    OUTCOMES_DOWN = ("Constant Supervision", "Drift & Regressions", "Slack Noise & Meetings")
+
+    #: pages 2-3 — the three steps, then onboarding.
+    STEPS = (
+        ("beat-ingest", "01 · Ingest Any Source",
+         "Automatically ingest agent sessions from any harness, GitHub issues, "
+         "documents, chat messages, systems of record, BI, or any other data you "
+         "want to connect."),
+        ("beat-organize", "02 · Organize Your Knowledge",
+         "Our ontology engine builds a logical model of how your business, product, "
+         "and code work, turning loose facts into knowledge. With deduplication and "
+         "superseding. This logical model enables your agents to not just retrieve "
+         "facts but understand your logic, eliminating drift and regressions."),
+        ("beat-reason", "03 · Reason",
+         "Improve decision-making with super intelligence, grounded in your "
+         "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
+         "inspired by interconnected prediction markets, Tortoise can compute "
+         "hundreds or even millions of data points."),
+    )
+    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI."
+    ONBOARD_P = (
+        "Tortoise connects via MCP or SDK, so you and your agents can use it in "
+        "Codex, Claude Code & Web, ChatGPT, Cursor, Pi, or any other harness."
+    )
+
+    def test_the_hero_carries_the_owners_headline_and_subtitle(self):
+        hero = _element_by_id(_product_teams_html(), "beat-hero")
+        h1 = re.search(r"<h1>(.*?)</h1>", hero, re.S)
+        assert h1, "#beat-hero has no <h1>"
+        assert _beat_text(h1.group(1)) == self.H1, (
+            f"the hero h1 reads {_beat_text(h1.group(1))!r}; the owner's page 1 "
+            f"reads {self.H1!r}. The copy is the owner's prose — reproduce it, "
+            "do not rewrite it.")
+        assert self.HERO_SUB in " ".join(_beat_text(p) for p in
+                                        re.findall(r"<p[^>]*>.*?</p>", hero, re.S)), (
+            f"the hero subtitle is not {self.HERO_SUB!r}")
+        assert "Connect your agent →" in _beat_text(hero), (
+            "the hero lost the owner's primary CTA label (`Connect your agent →`, "
+            "bracketed in the PDF = a button)")
+
+    def test_the_intro_block_carries_the_three_paragraphs(self):
+        intro = _element_by_id(_product_teams_html(), "beat-intro")
+        paragraphs = [_beat_text(p) for p in re.findall(r"<p[^>]*>.*?</p>", intro, re.S)]
+        assert "\n".join(paragraphs) == self.INTRO, (
+            f"the intro block reads {paragraphs!r}; the owner's page 1 reads "
+            f"{self.INTRO!r}")
+
+    def test_the_compute_claim_is_verbatim_including_its_defect(self):
+        """⛔ "make decision with superintelligence" is NOT a typo to fix.
+
+        The PDF reads "so you and your agents make decision with
+        superintelligence." (singular `decision`). It is a defect a copy editor
+        would flag, and the scoping recommended normalising it — but the owner
+        did not rule, and this lane's instruction is verbatim. So it ships as
+        written, and this pin is what keeps the next reader from "correcting"
+        it silently: if the owner rules, change the copy AND this pin together.
+        """
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
+        assert first, "#beat-compute has no paragraph"
+        assert _beat_text(first.group(1)) == self.COMPUTE, (
+            f"the compute claim reads {_beat_text(first.group(1))!r}; the "
+            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
+            "(singular) is the owner's text, not a builder typo.")
+
+    def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
+        compute = _element_by_id(_product_teams_html(), "beat-compute")
+        up = re.findall(r'<ul class="up">(.*?)</ul>', compute, re.S)
+        down = re.findall(r'<ul class="down">(.*?)</ul>', compute, re.S)
+        assert up and down, (
+            "#beat-compute has no `.up`/`.down` lists — the ↑/↓ grid is the "
+            "investors.html `.outcomes` component and the PDF's own figure")
+        def labels(chunk: str) -> tuple[str, ...]:
+            return tuple(_beat_text(m) for m in
+                         re.findall(r'<span class="a">[^<]*</span><span>(.*?)</span>',
+                                    chunk, re.S))
+        assert labels(up[0]) == self.OUTCOMES_UP, (
+            f"the ↑ column reads {labels(up[0])!r}; the PDF reads "
+            f"{self.OUTCOMES_UP!r} (row order matters — each ↑ is paired with "
+            "the ↓ beside it)")
+        assert labels(down[0]) == self.OUTCOMES_DOWN, (
+            f"the ↓ column reads {labels(down[0])!r}; the PDF reads "
+            f"{self.OUTCOMES_DOWN!r}")
+
+    def test_the_three_steps_are_verbatim(self):
+        html = _product_teams_html()
+        for section_id, heading, paragraph in self.STEPS:
+            beat = _element_by_id(html, section_id)
+            h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+            assert h2, f"#{section_id} has no <h2>"
+            assert _beat_text(h2.group(1)) == heading, (
+                f"#{section_id}'s heading reads {_beat_text(h2.group(1))!r}; the "
+                f"PDF reads {heading!r}")
+            body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
+            assert body == [paragraph], (
+                f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
+                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
+                "is the owner's spelling.")
+
+    def test_the_onboarding_beat_is_verbatim(self):
+        beat = _element_by_id(_product_teams_html(), "beat-onboard")
+        h2 = re.search(r"<h2>(.*?)</h2>", beat, re.S)
+        assert h2, "#beat-onboard has no <h2>"
+        assert _beat_text(h2.group(1)) == self.ONBOARD_H2, (
+            f"the onboarding heading reads {_beat_text(h2.group(1))!r}; the PDF "
+            f"reads {self.ONBOARD_H2!r}")
+        body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
+        assert body == [self.ONBOARD_P], (
+            f"the onboarding paragraph reads {body!r}; the PDF reads "
+            f"[{self.ONBOARD_P!r}]")
+
+    def test_the_beat_order_is_the_pdfs_section_order(self):
+        """Hero → intro → compute → 01 → 02 → 03 → onboarding, then pricing.
+
+        A re-order is invisible to every other assertion here (each beat's copy
+        is pinned in isolation) and to the heading outline (all h2s), so the
+        narrative could be shuffled with nothing red.
+        """
+        html = _served(_product_teams_html())
+        order = re.findall(r'<section id="(beat-[a-z]+)"', html)
+        assert order == ["beat-hero", "beat-intro", "beat-compute", "beat-ingest",
+                         "beat-organize", "beat-reason", "beat-onboard"], (
+            f"the beats are ordered {order!r}. The PDF's section order is hero, "
+            "intro, compute + the ↑/↓ block, 01, 02, 03, onboarding — the "
+            "narrative the owner wrote runs in that order.")
+        # The beat list lives in the SCRIPT, which `_served` strips — read the
+        # raw document for it.
+        raw = _product_teams_html()
+        listed = BEAT_LIST_RE.search(raw)
+        assert listed, "the script declares no `const beats = [...]` list"
+        assert re.findall(r"'([a-z-]+)'", listed.group(1)) == order, (
+            f"the script's scrubbed beat list {listed.group(1)!r} does not "
+            f"match the beat order {order!r}, so the wrong panel fades in for "
+            "the scroll position")

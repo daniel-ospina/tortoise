@@ -33,9 +33,10 @@ WHAT THIS FILE PINS, AND WHAT IT DOES NOT (#10487 residual)
 -----------------------------------------------------------
 The PRESENTATION half is now delivered (#10884/#10865 arm B): `/api/consent/start` renders a page
 for every REFUSAL arm instead of raw JSON, with the status unchanged and the machine reason in
-`x-consent-refusal` — `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`
+`x-consent-refusal` — `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`
 enumerates ALL of them, not the four either issue names by line. Two `json(...)` returns survive on
-purpose and are classified in the guard's own docstring (`test_the_route_has_NO_JSON_FAILURE_ARM_LEFT`):
+purpose and are classified in the guard's own docstring
+(`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`):
 the `400 invalid_request` caller error, and the terminal `200` flow state (#10865 records that as a
 different contract).
 
@@ -84,6 +85,70 @@ _PARAMS = {
     "state": "state-xyz",
     "scope": "mcp",
 }
+
+# A `resource` (RFC 8707) audience in a NON-http scheme. It is a real destination the page could be
+# talked into carrying and one the `http://`/`https://` origin assertion cannot see, which is why it
+# gets its own row in the echoed-value tuple below.
+_RESOURCE = "cursor://tools.internal/v1"
+
+# The OTHER destination the origin assertion cannot see, and the reason `resource` is NOT the only
+# parameter that can name one: `redirect_uri` accepts this exact shape — `consent-bridge.ts:64`
+# `NATIVE_REDIRECT_SCHEMES = ["cursor"]`, accepted at `:244-248` — because the beta's only native
+# harness redirects to `cursor://anysphere.cursor-mcp/oauth/callback` (pinned as an ACCEPTED row of
+# `_CROSS_HALF_URIS`). `cursor://…` carries no
+# `http(s)://`, so it is invisible to the origin assertion AND absent from the scheme-less
+# `client.example/cb` tail row: a page that rendered it passed every assertion in
+# `_assert_refusal_page` GREEN (review of #13712, F1).
+_NATIVE_REDIRECT = "cursor://sentinel.example/cb"
+
+# `scope` is unvalidated free text (`start.ts:135`), so the sentinel arm sends this instead of the
+# production-shaped `"mcp"`. A production-shaped value made the echo row's GREENNESS a coincidence of
+# the copy's capitalisation (the page renders "MCP"), so an ordinary copy edit to `your mcp client`
+# would red six arms with "the page ECHOES 'mcp' from the request" — an accusation of an interpolation
+# that does not exist (review of #13712, F2). A sentinel is absent for a reason no copy edit supplies.
+_SCOPE_SENTINEL = "scope-sentinel-mcp"
+
+# The params that carry what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
+# (widening it would change what every other arm proves), so the values that need to be distinctive —
+# both non-http destinations and the `scope` sentinel — ride on a copy of these instead. That copy is
+# a superset of `_PARAMS` in KEYS, with TWO VALUES overridden (`redirect_uri`, `scope`) — so an
+# arm presenting it does NOT prove every `_PARAMS` row: the scheme-less `client.example/cb` row is
+# presented by the five `_PARAMS` arms and by neither sentinel arm. Stated rather than glossed,
+# because a lane that added a row on "superset" would publish one that is vacuous on both refusal
+# copies (review of #13712, F12).
+#
+# ⛔ WHY BOTH REFUSAL COPIES NEED ONE OF THESE ARMS — and the revision of this comment that argued
+# otherwise had it backwards. The echoed-value tuple is checked against every arm's BODY, which makes
+# it copy-scoped but NOT parameter-scoped: a row can only red on a value the arm under test actually
+# PRESENTS. An ordinary `_PARAMS` `403` arm has no `resource` key at all, so a `FLOW_NOT_YOURS` copy
+# that interpolated it rendered empty there and the `_RESOURCE` row passed VACUOUSLY — F1's class (a
+# page carrying a destination the origin assertion cannot see) surviving in the very copy F1 named.
+# The `403` arm therefore presents the sentinel params too (same KEYS, so the `_PARAMS` rows still
+# apply except the overridden `redirect_uri`, and
+# the arm count stays 7), giving each refusal copy an arm that can red for what that copy could
+# interpolate. Measured, not assumed: hardcoding `cursor://tools.internal/v1` into `FLOW_NOT_YOURS`
+# reds exactly that arm (`1 failed, 6 passed`, opts6) and nothing else (review of #13712, F1b).
+_SENTINEL_PARAMS = dict(
+    _PARAMS, resource=_RESOURCE, redirect_uri=_NATIVE_REDIRECT, scope=_SCOPE_SENTINEL)
+
+# The WAYS AN ELEMENT, OR THE PAGE'S OWN CSS, CAN BE TALKED INTO A DESTINATION — each matched as a
+# PATTERN rather than as a bare token. HTML permits ASCII whitespace on BOTH sides of `=` in an
+# attribute (whatwg HTML: attribute name state → before attribute value state), so
+# `<img src = "//evil.example/x">` and `<link rel=stylesheet href = "/x.css">` are well-formed
+# documents that match none of the flat tokens (`"src="`, `"href="`).
+#
+# ⛔ THIS IS A LIST OF THE CHANNELS THAT EXIST, NOT A PROOF THAT NO OTHER ONE CAN. A universal is
+# what the previous revisions kept claiming and kept being falsified by — first `<img srcset>`, then
+# `<body background=…>` and the page's OWN `<style>` block, where `url(...)` and `@import` are
+# equally well-formed destinations carrying no scheme (review of #13712, F2 and F2b: each mutant
+# stayed GREEN under the narrower pattern before it was added). So the comment names what the pattern
+# enforces; a newly-found channel is APPENDED here rather than the sentence being widened to cover
+# it. The classes stay narrow enough that the page's legitimate `<meta charset>` / `<meta
+# name=viewport>` match nothing here, which the suite's unmutated negative control re-measures on
+# every run.
+_AFFORDANCE_RE = re.compile(
+    r"<\s*a[\s>]|(?:href|srcset|poster|formaction|ping|data|src|background)\s*="
+    r"|(?:<\s*form)|http-equiv|url\(|@import")
 
 _HOOKS_MJS = """
 export async function resolve(specifier, context, next) {
@@ -346,6 +411,13 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   if (opts.issuer !== undefined) e.CONSENT_TOKEN_ISSUER = opts.issuer;
   if (opts.appOrigin !== undefined) e.APP_ORIGIN = opts.appOrigin;
   if (opts.asOrigin !== undefined) e.CONSENT_AS_ORIGIN = opts.asOrigin;
+  // The KEY-SET deployment (#10794): the mint's `kid` and its signing bytes both come from this
+  // variable. Without an opt that can set it, EVERY executed mint runs the legacy single-secret
+  // branch, so `const kid = consentCurrentKid(env);` in `token.ts` was unpinned — deleting that
+  // line left the whole suite green while the header named `consent-1` and the HMAC used another
+  // key (the #10488 silent split, one field along).
+  if (opts.keys !== undefined) e.CONSENT_TOKEN_KEYS = opts.keys;
+  if (opts.currentKid !== undefined) e.CONSENT_TOKEN_CURRENT_KID = opts.currentKid;
   const headers = scenario === "mint_no_session" ? {} : { Cookie: "__Host-session=handle-1" };
   if (scenario === "mint_cross_origin") headers.Origin = "https://evil.example";
   const mintBody = opts.omitKey ? { state: "state-xyz" } : { state: "state-xyz", attempt_key: MINT_KEY };
@@ -458,6 +530,39 @@ if (scenario === "mint_no_session" || scenario === "mint_no_attempt" || scenario
   out.cases = cases;
   out.status = cases[0].status;
   out.body = cases[0].body;
+} else if (scenario === "attempt_key") {
+  // #10794 — the SIGNED attempt key, across the two halves in BOTH directions. The Python half mints
+  // (the AS does), the TypeScript half verifies (the app does), and the reverse is checked too
+  // because BOTH halves mint: `start` has to invent a signed key when it is handed none, or the
+  // next leg of the same flow would refuse it.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.cases = [];
+  for (const [label, value] of Object.entries(opts.values || {})) {
+    out.cases.push({ label, verified: await bridge.verifyAttemptKey(env({}), value) });
+  }
+  out.minted = await bridge.mintAttemptKey(env({}));
+} else if (scenario === "key_set") {
+  // #10794 — the KEY-SET PARSER, on both halves, over the same table of env shapes. The two
+  // implementations are separate code in separate languages and they decide WHICH BYTES a kid
+  // names; a one-sided edit makes a rotation mint under one key and verify under another, which
+  // presents as `401 invalid_token` on every redemption with no other symptom. So the shapes (not
+  // the results) are the input and the Python half answers the same table in the test.
+  const bridge = await import(CONSENT + "/../../_shared/auth/consent-bridge.ts");
+  out.cases = (opts.shapes || []).map((shape) => {
+    const e = {};
+    if (shape.keys !== undefined) e.CONSENT_TOKEN_KEYS = shape.keys;
+    if (shape.current !== undefined) e.CONSENT_TOKEN_CURRENT_KID = shape.current;
+    if (shape.secret !== undefined) e.CONSENT_TOKEN_SECRET = shape.secret;
+    const set = bridge.consentKeySet(e);
+    return {
+      label: shape.label,
+      kids: set ? [...set.keys.keys()] : null,
+      current: set ? set.currentKid : null,
+      signingSecret: set ? (set.keys.get(set.currentKid) ?? null) : null,
+      secret: bridge.consentSecret(e) ?? null,
+      mintKid: bridge.consentCurrentKid(e) ?? null,
+    };
+  });
 } else if (scenario.startsWith("start_")) {
   const sessions = scenario === "start_cold_browser" || scenario === "start_terminal_after_retry"
     ? [] : [sessionRow(opts.sessionUserId ? { user_id: opts.sessionUserId } : undefined)];
@@ -722,11 +827,16 @@ console.log("RESULT " + JSON.stringify(out));
 
 
 def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
-    """A hard failure of the carriage is a PAGE — with the status and the reason UNCHANGED.
+    """A REFUSAL of the carriage is a PAGE — with the status and the reason UNCHANGED.
 
     #10884 (the `503` store arms) and #10865 arm B (the `403`) are one root: `start` answered a
     browser with `json({error, reason})`, so a person saw a JSON blob on a blank page with no way
-    forward. The fix is deliberately presentation-only, and this helper is where that is enforced:
+    forward. "REFUSAL" is the load-bearing word: `start.ts` still returns JSON from the `400`
+    caller error and the terminal `200` flow state, so this helper does NOT assert that every hard
+    failure of the route is a page —
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left` is where those
+    two survivors are counted and classified. The fix is deliberately presentation-only, and this
+    helper is where that is enforced:
 
       * the STATUS is exactly what it was — the `403`'s deliberate, recorded exemption from §2.3's
         no-oracle rule is carried by the code, so a page that answered `200` would retire a refusal;
@@ -758,12 +868,89 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
         "invites a guess")
     assert "no-store" in (out.get("cacheControl") or ""), (
         f"{reason}: a refusal is cacheable ({out.get('cacheControl')!r}) and its URL carried a key")
-    # …and it DECIDES NOTHING: no script, no external asset, no echo of the request.
+    # …and it DECIDES NOTHING: no script, no external asset, no link, no echo of the request.
     assert "<script" not in body.lower(), f"{reason}: the refusal page carries script"
-    assert "http://" not in body and "https://" not in body, (
+    # `body.lower()` on BOTH sides of the pair: the affordance loop below is case-insensitive, so a
+    # scheme assertion over the raw body let an echoed `HTTPS://…` through the very property it
+    # guards (review of #13712, P2).
+    assert "http://" not in body.lower() and "https://" not in body.lower(), (
         f"{reason}: the refusal page names an origin (an external asset, or an echoed URL)")
-    for echoed in ("state-xyz", "client-abc", "attempt_key", "code_challenge"):
-        assert echoed not in body, f"{reason}: the page ECHOES {echoed!r} from the request"
+    # ⛔ NO AFFORDANCE THAT CAN BE TALKED INTO A DESTINATION. The module docstring says the retry
+    # is PROSE, not an `href`, "because any `href` would have to echo the query or choose a
+    # target" — and a relative `href` satisfies both assertions above, so the property had no
+    # guard at all. The sibling page this one is modelled on DOES carry one (`<a href="/contact">`
+    # in `website/functions/_middleware.ts`), which makes a copy-paste from the precedent the exact
+    # edit that would ship it green.
+    # `http-equiv`/`src=` add two MORE channels the forms above cannot express — *not* "the two
+    # ways", which would be the same false exhaustiveness this guard exists to stop:
+    # `<meta http-equiv="refresh" content="0;url=/contact">` is a redirect the page's CSP
+    # (`default-src 'none'`, no `navigate-to`) does not block, and a protocol-relative `<img src>`
+    # or `<iframe src>` is a subresource with no scheme. The enforced set is the pattern below, and
+    # it also carries `srcset`, `poster`, `formaction`, `ping`, `data`, `background` and CSS
+    # `url(`/`@import`; `<meta charset>`/`<meta name=viewport>` stay legal, which is what the page
+    # actually needs.
+    # ⛔ Matched as PATTERNS (`_AFFORDANCE_RE`), not as flat tokens: a whitespace-bearing attribute
+    # (`<img src = "//evil.example/x">`) is well-formed HTML and matched none of the bare strings a
+    # token loop carried — a hole in the very guard this change adds (review of #13712, note 1).
+    affordance = _AFFORDANCE_RE.search(body.lower())
+    assert affordance is None, (
+        f"{reason}: the refusal page carries an affordance ({affordance.group(0)!r}) — the retry "
+        "affordance must be prose, because any link would have to echo the query or choose a "
+        "destination")
+    # The VALUES, not only the param NAMES. `attempt_key` (the name) is not a substring of the key
+    # the arms actually present (`b-attempt-key`, `ak-guessed`), so a name-only tuple left a mutant
+    # that interpolates `url.searchParams.get(ATTEMPT_KEY_PARAM)` into the copy fully GREEN — and
+    # that key is the one secret this page's CSP + `Referrer-Policy` exist to keep out of a third
+    # party's log. These are the values a mutant can interpolate into the copy and still slip past
+    # every assertion above — a new arm that presents a different key is pinned by adding it here
+    # rather than by remembering to.
+    #
+    # ⛔ The tuple is checked against THIS arm's body, whatever params the arm presented — so an arm
+    # covers the copy it renders, and only that: a row can red only on a value the arm under test
+    # actually PRESENTS, so a value only one arm presents is rendered EMPTY in the other copy's arms
+    # and passes VACUOUSLY there. That is why each of the page's TWO copies (`STORE_FAULT` /
+    # `FLOW_NOT_YOURS`, `consent-refusal.ts:110-132`) has an arm PRESENTING the sentinel params,
+    # rather than one sentinel arm being assumed to cover both — the earlier revision of this
+    # paragraph claimed exactly that and was wrong (review of #13712, F1b — measured: hardcoding a
+    # sentinel into `FLOW_NOT_YOURS` reds the `403` arm, opts6, and nothing else).
+    #
+    # ⛔ `redirect_uri` appears TWICE, and the split is load-bearing. The `_PARAMS` literal is pinned
+    # only as its SCHEME-LESS tail (`client.example/cb`): the full `https://client.example/cb` is
+    # already forbidden by the origin assertion above (`#13671`), so the whole URL would be a row that
+    # can never be the failing one (the red would land on the origin assertion instead). The tail
+    # alone was NOT enough for the NATIVE-scheme form — see `_NATIVE_REDIRECT` — hence its own row.
+    #
+    # `code_challenge_method` stays production-shaped and is the one deliberate exception: it has
+    # exactly ONE legal value (`start.ts:124-125` upper-cases and requires `S256`), so there is
+    # nothing to make distinctive; the copy renders no "S256" today. If the copy ever explains PKCE
+    # this row must become a sentinel-or-nothing decision rather than a coupling to prose casing.
+    for echoed in (
+        _PARAMS["client_id"],
+        "client.example/cb",  # `_PARAMS["redirect_uri"]` minus the scheme the origin assert forbids
+        _PARAMS["state"],
+        _PARAMS["code_challenge"],
+        _PARAMS["code_challenge_method"],
+        # the native-scheme redirect the origin assertion structurally cannot see (`_NATIVE_REDIRECT`)
+        _NATIVE_REDIRECT,
+        # `resource` (RFC 8707) carries a URI with NO scheme check (`start.ts:136`), so it names a
+        # destination in a non-http scheme exactly as `redirect_uri` can — and the origin assertion
+        # is blind to both. Reachable only through `_SENTINEL_PARAMS`, which is why that arm exists.
+        _RESOURCE,
+        # a `scope` no copy edit can produce, so the row's greenness is not a coincidence of casing
+        _SCOPE_SENTINEL,
+        # the attempt keys the arms present (the one credential, #10487/#10884)
+        "b-attempt-key",
+        "ak-guessed",
+        # the param NAMES too: cheap, and it pins that the page never prints a query skeleton
+        "attempt_key",
+        "code_challenge",
+        "redirect_uri",
+        "client_id",
+    ):
+        assert echoed not in body, (
+            f"{reason}: the page ECHOES {echoed!r} from the request — the copy is compile-time "
+            "constants only (#10884/#13671): an echoed value is a destination or a credential "
+            "this page can be talked into carrying")
 
 
 def _run(scenario: str, **opts) -> dict:
@@ -1152,6 +1339,44 @@ def test_a_token_minted_by_the_bff_is_accepted_by_the_AS(monkeypatch) -> None:
         "state": _PARAMS["state"],
     }
     assert assertion["email"] is None, "email is display-only and must not be invented"
+
+
+def test_the_mint_stamps_the_CURRENT_kid_and_the_AS_verifies_it_under_the_same_set(monkeypatch) -> None:
+    """`token.ts`'s `kid` line is LOAD-BEARING, and this is the only arm that executes it.
+
+    A key set on both halves makes the minter stamp the CURRENT kid and sign with that kid's bytes.
+    If the route stamps anything else — `LEGACY_KID` via a deleted `const kid = consentCurrentKid(env);`
+    — the AS selects a key by a name it does not hold and answers `401 invalid_token` on every
+    redemption while the mint still answers `200`: the #10488 silent split, one field along, and
+    invisible to the fingerprint (§2.5). Every other mint scenario builds its env through `env()`,
+    which never sets `CONSENT_TOKEN_KEYS`, so `input.kid ?? LEGACY_KID` answered `"consent-1"` with
+    or without that line — the mutant left the whole suite green, which is why the pin exists.
+    """
+    keys = f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", keys)
+    monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "new")
+    monkeypatch.setenv("CONSENT_TOKEN_ISSUER", _ISSUER)
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+
+    out = _run("mint_ok", keys=keys, currentKid="new")
+    assert out["status"] == 200, out
+    token = out["body"]["token"]
+
+    import base64
+
+    header_seg = token.split(".")[0]
+    header = json.loads(base64.urlsafe_b64decode(header_seg + "=" * (-len(header_seg) % 4)))
+    assert header["kid"] == "new", (
+        f"the mint stamped kid {header['kid']!r} while resolving its signing key from a set whose "
+        "current kid is 'new' — the AS selects the verification key BY that name, so every "
+        "redemption would be refused with the mint still answering 200")
+
+    # …and the OTHER half accepts it, under the same set: the stamp and the bytes agree ACROSS the
+    # two languages, which is the property the split breaks and neither half can check alone.
+    from tortoise.consent_token import verify_consent_token
+
+    assertion = verify_consent_token(token, presented=_presented())
+    assert assertion["sub"] == "user-1"
 
 
 def _issuer_claim(token: str) -> str:
@@ -1649,7 +1874,8 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
     `ensureColumn`'s catch widened to `catch { return; }`, (b) the call site replaced by a local
     swallow-all. Both are the same shipped regression — a genuinely failed `ALTER TABLE` swallowed,
     leaving a half-evolved schema that 503s with nothing anywhere to act on, which is precisely the
-    outcome `start.ts`'s session-read `try`/`catch` exists to remove.
+    silence `start.ts`'s ATTEMPT-WRITE `try`/`catch` exists to break (it logs `consent attempt write
+    failed`; the session-read catch above it exists for a different reason - an untyped 500).
 
     SQLite makes this a MESSAGE question and not a code one: a duplicate column and a genuine DDL
     failure both surface as SQLITE_ERROR (https://sqlite.org/rescode.html §4 — the primary result
@@ -1671,7 +1897,7 @@ def test_a_GENUINE_DDL_fault_PROPAGATES_and_the_duplicate_column_does_not() -> N
         f"`duplicate column name` was PROPAGATED, so an already-evolved database could never mint: {evolved}")
 
 
-def test_the_keys_HOLDER_renews_the_attempt() -> None:
+def test_the_keys_HOLDER_renews_the_attempt(monkeypatch) -> None:
     """The mirror of the test below, and the half nothing pinned.
 
     `CONSENT_ATTEMPT_TTL_S` exists to outlive the sign-in round trip, and the return leg's renewal
@@ -1682,8 +1908,14 @@ def test_the_keys_HOLDER_renews_the_attempt() -> None:
     """
     # The hash is plain SHA-256 hex — computed here independently of the shipped helper, so this
     # also pins the digest choice the row is keyed on.
+    #
+    # ⛔ The key is a MINTED one (#10794): `expires_at` is refreshed only when the presented key
+    # proves ownership, and `start.ts` now establishes that with a MAC. An arbitrary literal here
+    # would be treated as absent — the row would not renew, and this test would red for a reason it
+    # is not about (the refusal arm has its own test).
     import hashlib
-    from_hash = hashlib.sha256(b"holder-key").hexdigest()
+    holder_key = _as_minted_key(monkeypatch)
+    from_hash = hashlib.sha256(holder_key.encode()).hexdigest()
     seeded = [{
         "state": "state-xyz", "client_id": "client-abc",
         "redirect_uri": "https://client.example/cb",
@@ -1692,7 +1924,7 @@ def test_the_keys_HOLDER_renews_the_attempt() -> None:
         "created_at": 0, "expires_at": 1_000, "attempt_key_hash": from_hash,
     }]
     out = _run("start_signed_in", seededAttempts=seeded, sessionUserId="user-1",
-               params=dict(_PARAMS, attempt_key="holder-key"))
+               params=dict(_PARAMS, attempt_key=holder_key))
     row = out["attempts"][0]
     assert row["expires_at"] > 1_000, (
         "the key's HOLDER did not renew the attempt — a sign-in round trip that outlives the TTL "
@@ -1873,26 +2105,48 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
-    # #10865 arm B — the `403`.
+    # The SENTINEL arm for a store fault — one of the TWO refusal copies that present the values a
+    # `_PARAMS` arm cannot (the `403` below is the other), all of them
+    # `cursor://`-class destinations or distinctive sentinels (see `_SENTINEL_PARAMS`). It matters
+    # because `resource` and `redirect_uri` are both DESTINATIONS that may carry a non-http scheme —
+    # `cursor://…` is not `http(s)://`, and this repo accepts exactly that scheme for `redirect_uri`
+    # in `NATIVE_REDIRECT_SCHEMES` — so a refusal page that interpolated either one would carry a
+    # target the `http://`/`https://` check cannot see. `_PARAMS` deliberately stays unnarrowed: it is
+    # the set EVERY arm presents, so widening it would change what every other arm proves.
+    ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
+     "consent_store_unavailable", 503),
+    # #10865 arm B — the `403`. It presents the SENTINEL params (the same KEYS as `_PARAMS`, with
+    # `redirect_uri`/`scope` overridden, so the `_PARAMS` rows apply to this copy except that one),
+    # because a row can only red on a value the arm
+    # PRESENTS: an ordinary `_PARAMS` arm has no `resource`, so a `FLOW_NOT_YOURS` copy interpolating
+    # it rendered empty and the `_RESOURCE` row passed vacuously — F1's class alive in the copy F1
+    # named. See the `_SENTINEL_PARAMS` comment above (review of #13712, F1b).
     ("start_signed_in", {"seededAttempts": _FOREIGN_OWNED_ROW, "sessionUserId": "user-2",
-                         "params": dict(_PARAMS, attempt_key="b-attempt-key")},
+                         "params": dict(_SENTINEL_PARAMS, attempt_key="b-attempt-key")},
      "flow_not_yours", 403),
 ])
-def test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status(
+def test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status(
     scenario: str, opts: dict, reason: str, status: int,
 ) -> None:
-    """#10884 + #10865 arm B, one root, ONE assertion: EVERY hard failure is a page.
+    """#10884 + #10865 arm B, one root, ONE assertion: EVERY REFUSAL is a page.
 
     The four `json({error, reason})` bodies were the defect: a person in a browser got a JSON blob
     and no way forward. Pinning only the arms the issues name by line would let the NEXT refusal
-    added to this route ship as JSON again — the root is "the carriage's failure states were never
+    added to this route ship as JSON again — the root is "the carriage's refusal states were never
     given a user-facing face", not "this arm at this line" — so the whole family is enumerated and
     each one is held to the same four properties (status unchanged, page, reason in a header, body
     not JSON) by ONE helper.
 
+    ⛔ The name says REFUSAL, and the narrowing is not pedantry: `return json(` still survives in
+    TWO places in `start.ts` (the `400` caller error, the terminal `200` flow state) and both reach
+    a browser, so "every hard failure is a page" was a claim the route falsified — and believing it
+    invites converting the terminal `200`, which #10865's owner comment records as a DIFFERENT
+    CONTRACT. The survivors are counted and classified by
+    `test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`.
+
     ⚠️ `as_origin_misconfigured` is included deliberately and is NOT named by either issue: it is
     the same route, the same class, and the same one-line fix. Leaving it as JSON would make the
-    claim "every hard failure of this route is a page" false, which is the kind of half-face that
+    claim "every REFUSAL of this route is a page" false, which is the kind of half-face that
     produced these issues in the first place.
     """
     _assert_refusal_page(_run(scenario, **opts), reason, status)
@@ -1958,7 +2212,7 @@ def test_the_refusal_page_makes_NO_outbound_request_and_carries_no_referrer() ->
         assert (out.get("referrerPolicy") or "").lower() == "no-referrer", (opts, out.get("referrerPolicy"))
 
 
-def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
+def test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left() -> None:
     """The class, not the instances: a NEW refusal added as `json(...)` reds here.
 
     The parametrised test enumerates the arms that exist TODAY. That is the right shape for
@@ -1992,6 +2246,333 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
         "`consentRefusalPage(...)` and keep the status (#10884/#10865)")
 
 
+# ⛔ The DENIAL this PR exists to keep out of the contract artifacts: "every hard failure is a
+# page" — the claim `start.ts` falsifies with its two surviving `json(...)` returns. Matched as the
+# three words in ORDER, with any run of non-word characters between them, so the re-introduction
+# cannot evade the guard by wrapping the phrase over a line, emphasising it, or hyphenating it.
+#
+# ⛔ AND THAT IS THE WHOLE CLAIM — it is a PHRASE match, not a semantic one. Two limits are known and
+# deliberate: markup that puts a WORD CHARACTER between them (`every <b>hard</b> failure`, where
+# `</b>` contains letters) does not match, and a different determiner (`all` / `each` / `any hard
+# failure`) is a different phrase. This guard pins the string this change retires; it does not claim
+# to catch a rephrased denial, and a comment that claimed it would be the class of over-claim this
+# PR exists to remove (review of #13712, F8).
+#
+# `IGNORECASE` rather than a `.lower()` copy of the corpus: lowercasing is not length-preserving for
+# every character, and the assertion below QUOTES the span it matched out of the ORIGINAL text, so
+# an index taken from a lowered copy could quote a different span than the one that earned the red.
+_FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
+
+# ⛔ THE PHRASE **IS** THE DEFECT, SO THERE IS NO EXEMPTION — and that is the final answer after
+# four defeated attempts to write one. The phrase is false of this route: `start.ts` returns JSON
+# from TWO places (the `400` caller error and the terminal `200` flow state), so "every hard
+# failure" is a claim the code falsifies, PRESENT OR PAST. A historical sentence is true but still
+# carries the false noun, which is exactly why this change rewrites main's "Every hard failure of
+# that route used to answer" into "Every REFUSAL on that route used to answer" — the moment the
+# guard LET a "hard failure ... used to answer" sentence through, reverting that hunk stopped
+# reddening the guard, i.e. the guard stopped pinning the fix it exists to pin.
+#
+# Every exemption shape before this one was defeated by ordinary prose, and the reasons are worth
+# keeping because they are the argument for deleting the mechanism rather than tuning it:
+#
+#   * a bare WORD LIST (`still` / `survives` / `remains`) — "…is a page; the status is still
+#     unchanged" went GREEN (F4);
+#   * a retro marker accepted ANYWHERE in the sentence — "every hard failure is a page, as noted
+#     before" went GREEN (F5);
+#   * a `used to` read from an unbounded tail — "…is a page, used to work" went GREEN (F5 again);
+#   * a clause-scoped past tense with `\w+ed` — deleting ONE COMMA flipped a shipped RED row to
+#     GREEN, and `documented` / `agreed` / `unchanged` counted as past tense (F6);
+#   * one anchored historical SHAPE — did not fail open, but made the guard VACUOUS: main's own
+#     pre-fix sentence matched it, so reverting this change redded nothing (measured).
+#
+# "Does this sentence mean the past?" is a semantic question, and a prose lint that answers
+# semantic questions either fails open (F4–F6) or stops pinning anything (the shape). Requiring the
+# phrase's ABSENCE is mechanical, cannot be defeated by any phrasing, and costs only a reword: the
+# corpus already writes the true sentence without it ("Every REFUSAL on that route used to answer
+# `json({error, reason})`"), and the assertion names that form. This is the A/B line applied to
+# itself — fail closed, never open.
+
+# A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
+# which carry no such pair), AND at a PARAGRAPH BREAK in either direction. The paragraph arm is not
+# decoration: a JSDoc blank line is ` *\n *\n`, never `\n\n`, so a `\n\n`-only head cut was dead in
+# every TS header it scans, and the tail had no paragraph arm at all. The HEAD is capped at 240
+# characters; the tail is capped at 240 only when it carries no terminator at all (`finish =
+# stop.end() if stop else …`), which is the run-on case, so the window can exceed 240 — length is a
+# message concern, never a decision, because the guard reads spans, not windows. This window now
+# serves only the MESSAGE (it quotes the sentence that earned the red), never a decision.
+_SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
+
+
+def _sentence_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """`(begin, finish)` of the sentence around `text[start:end]`, BOUNDED at both ends so the
+    sentence the assertion quotes is the one that carries the phrase.
+    """
+    head = text[:start]
+    breaks = list(_SENTENCE_BREAK_RE.finditer(head))
+    begin = breaks[-1].end() if breaks else 0
+    stop = _SENTENCE_BREAK_RE.search(text, end)
+    finish = stop.end() if stop else min(len(text), end + 240)
+    return max(begin, start - 240), finish
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence around `text[start:end]` — see `_sentence_bounds` for the window."""
+    begin, finish = _sentence_bounds(text, start, end)
+    return text[begin:finish]
+
+
+def _absolute_violations(text: str) -> list[tuple[str, str]]:
+    """Every `(matched span, its sentence window)` in which `text` states the false absolute.
+
+    The DECISION lives here, in one place: the corpus check and the committed table both drive THIS
+    function, so a widening of the pattern cannot pass by leaving a second, re-typed copy of the
+    loop behind (review of #13712, F7). There is no exemption to widen.
+    """
+    return [(m.group(0), _sentence_around(text, m.start(), m.end()))
+            for m in _FALSE_ABSOLUTE_RE.finditer(text)]
+
+
+def _false_absolute_in(text: str) -> str | None:
+    """The first false-absolute span in `text`, or None.
+
+    A thin accessor over `_absolute_violations`, so the table is exercised through the shipped
+    decision rather than through a retyped copy of its loop in the test that pins its shape.
+    """
+    violations = _absolute_violations(text)
+    return violations[0][0] if violations else None
+
+
+def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSIFY() -> None:
+    """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
+    claim the route FALSIFIES — and pinning that PHRASE, wherever only non-word characters separate
+    its three words (a line wrap, emphasis, a hyphen, a tab), is what keeps it corrected.
+
+    Why a prose claim earns a guard here rather than a comment: this is not untidiness. #10865's
+    owner comment records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the
+    absolute would "finish" the job by converting an arm whose retirement is the OWNER'S DECISION
+    (that comment offers it as an option and calls it "an owner-visible API decision, not a review
+    fix" — it does not rule it out, and this guard must not claim it does) — the false summary
+    actively steers a future lane to reverse a recorded decision, which no arm-level test can see.
+
+    The files scanned are the ones a reader takes the CONTRACT from: the route, the page builder
+    (added by this fold), and the bridge record. Test module docstrings are not scanned — the same
+    sentence appears there legitimately, as the thing being narrowed.
+
+    ⛔ WHERE THE RED CAN ACTUALLY LAND — one corpus, not three. Only `consent-refusal.ts` carried
+    the phrase until this change; `start.ts` and `consent-identity-bridge.md` contain it NOWHERE at
+    head (`git grep -i 'every hard failure'`), so their rows are FORWARD-LOOKING: they hold the next
+    author who writes the absolute there, and neither can be the red for a revert of this hunk.
+    Three files scanned is not three catches, and this docstring must not be read as though it were.
+
+    ⛔ THE MATCH IS NOT ONE WHITESPACE-EXACT SPELLING. A prose absolute comes back in whatever shape
+    the edit takes: wrapped inside the phrase (`every hard` / `   * failure`), emphasised
+    (`every **hard** failure`), or hyphenated (`hard-failure`). Pinning the literal
+    `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
+    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE wherever only NON-WORD
+    characters separate the three words — not "in any markup", which is FALSE of `every <b>hard</b>
+    failure` (the `</b>` carries letters); the limit is stated on the regex itself.
+
+    ⛔ AND THE PHRASE ALONE IS **NOT** A PHRASE-ONLY MATCH THAT NEEDS AN EXEMPTION — that was tried
+    four times and every exemption leaked or went vacuous (the argument is on `_FALSE_ABSOLUTE_RE`
+    and in the table below). The phrase is false of this route PRESENT OR PAST, because "hard
+    failure" is the wrong NOUN: `start.ts` answers JSON from the `400` caller error and the terminal
+    `200` TODAY, so a sentence about the past still carries the false universal. Requiring absence is
+    the mechanical rule, and this change's own wording ("every REFUSAL … used to answer") is the
+    true sentence it asks for. The message QUOTES the span it matched, so a red cannot be read as a
+    claim about a sentence nobody wrote.
+
+    ⛔ THE SHAPES ARE PINNED BY THEIR OWN TABLE, not only by this corpus: the phrase is UNREACHABLE
+    here at head — `git grep -i 'every hard failure'` over the three files below returns 0 hits — so
+    without `test_the_summary_guard_REDS_the_phrase_in_EVERY_shape` a later narrowing of the pattern
+    would ship with nothing red claiming to cover it. That table drives `_false_absolute_in` →
+    `_absolute_violations`, the same decision this loop calls.
+
+    Non-vacuous, and where the red actually lands: `origin/main`'s
+    `_shared/auth/consent-refusal.ts` still opens with "Every hard failure of that route used to
+    answer `json({error, reason})`" — the sentence this change rewrites — so reverting that hunk
+    REDS this guard. ⛔ It does NOT red on a `start.ts` header carrying the absolute: no header of
+    that file ever read `**Every hard failure is a PAGE, not a JSON blob**` (`git log -S 'Every
+    hard failure' -- …/api/consent/start.ts` is empty, and main's header already says "Every
+    REFUSAL is a PAGE"), so `consent-refusal.ts` is the real pre-fix red and the only provenance
+    this docstring may claim.
+    """
+    corpus = {
+        "start.ts": (CONSENT_DIR / "start.ts").read_text(encoding="utf-8"),
+        "consent-refusal.ts": (FUNCTIONS / "_shared/auth/consent-refusal.ts").read_text(
+            encoding="utf-8"),
+        "consent-identity-bridge.md": (REPO / "docs" / "engineering" / "auth" /
+                                      "consent-identity-bridge.md").read_text(encoding="utf-8"),
+    }
+    for name, text in corpus.items():
+        # The message QUOTES the span it matched, out of the ORIGINAL text, so a reader can tell
+        # which sentence earned the red instead of being told what it supposedly claims.
+        span = _false_absolute_in(text)
+        if span is None:
+            continue
+        raise AssertionError(
+            f"`{name}` carries the phrase {span!r}, which is the absolute this change retires: "
+            "`start.ts` returns JSON from TWO places (the `400` caller error and the terminal `200` "
+            "flow state — see "
+            "`test_the_route_keeps_exactly_TWO_json_arms_and_NO_refusal_arm_left`), so "
+            "\"hard failure\" is false of this route PAST OR PRESENT. Say every REFUSAL; a "
+            "historical sentence says `every REFUSAL … used to answer` (that is what the corpus "
+            "writes). The terminal `200` is #10865's recorded decision, and a summary that denies "
+            "it invites converting it.")
+
+
+# One row per shape the pattern must RED, run through the SAME shipped decision the corpus guard
+# calls (`_false_absolute_in` → `_absolute_violations`). There is no exemption left to test, so this
+# table's job is the opposite one: it pins that no PHRASING gets a sentence with the false noun past
+# the guard — including the historical forms the deleted exemptions were written to allow.
+#
+# ⛔ FIVE EXEMPTION SHAPES WERE TRIED — four failed OPEN and the fifth made the guard VACUOUS — and
+# each one is the argument for deleting the mechanism rather than tuning it: a bare word list
+# (`bf5202ce79`), a retro marker accepted anywhere in the sentence (`4ab3033e32`), a `used to` read
+# from an unbounded tail, a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and an
+# anchored historical shape that did not fail open but matched `origin/main`'s own pre-fix sentence,
+# so reverting the copy hunk redded nothing.
+#
+# ⛔ THE TABLE IS NOT "EVERY ROW BELOW WAS GREEN UNDER ONE OF THOSE", and two earlier wordings of this
+# comment said exactly that and were falsified by the table itself (review of #13712, F15/F16 —
+# measured: 8 of the rows are RED under ALL FIVE schemes, GREEN under none — 35 rows when that was
+# measured; the table has 36 because this very comment block added the F6 row). A row whose own
+# comment names a revision is a casualty of that scheme; the rest are here for their own reason — the
+# bare denial, and the spelling rows (wrap, `**hard**`, `hard-failure`, tab) that hold the PATTERN
+# rather than an exemption. Both kinds belong in the table; what must never be written is that a row
+# demonstrates a discrimination it does not perform — which is the class of over-claim this PR
+# exists to remove.
+_SUMMARY_ABSOLUTE_ROWS: list[str] = [
+    # the denial itself, however it is dressed
+    ("Every hard failure is a page, not a JSON blob."),
+    # ⛔ AND HOWEVER IT IS SPELLED — the shape tolerance `_FALSE_ABSOLUTE_RE` exists for, which the
+    # rows below this one would NOT pin on their own: every other row carries the contiguous literal,
+    # so a table without these stayed all-green when the pattern was swapped back to the bare
+    # literal and the tie to F3's fix was lost (measured — review of #13712, F8). The assertion
+    # compares by ORDERED CONTAINMENT of the three words, not by equality, so a span carrying `**`
+    # or a line wrap is accepted here.
+    # ⛔ WRAP-ONLY, and that is load-bearing (review of #13712, F11). The earlier text opened with a
+    # CONTIGUOUS copy ("Every hard failure is a page, …") before the wrapped one, so the FIRST match
+    # was the contiguous span and this row stayed GREEN under a newline-hostile pattern — measured:
+    # `re.compile(r"every(?:(?!\n)\W)+hard(?:(?!\n)\W)+failure", re.I)` matches the old row and does
+    # NOT match this one. The row exists to pin the wrap tolerance, so it must carry nothing but the
+    # wrapped copy.
+    ("Wrapped over a line:\n * every hard\n * failure is a page."),
+    ("Every **hard** failure is a page, not a JSON blob."),
+    ("Every hard-failure is a page, not a JSON blob."),
+    ("Every\thard\tfailure is a page, not a JSON blob."),
+    ("EVERY HARD FAILURE IS A PAGE, not a JSON blob."),
+    # ordinary-English clauses: a word list (`still` / `remains`) exempted ALL FOUR under `bf5202ce79`
+    ("Every hard failure is a page; the consent cookie is still set before the flow starts."),
+    ("Every hard failure of the route is a page, and the store remains the source of truth."),
+    ("Every hard failure is a page, which still leaves the graph as the source of truth."),
+    ("Every hard failure is a page, and the status is still unchanged."),
+    # a survivor in the NEXT sentence is a different sentence
+    ("Every hard failure is a page. Two arms still answer JSON."),
+    # counted survivors alone are not enough
+    ("Every hard failure is a page, because two arms still answer JSON."),
+    # …and a retro frame alone is not enough
+    ("Before #13671, every hard failure is a page, and the store remains the source of truth."),
+    # LATER CLAUSE (F5): the retro word is about another subject and comes AFTER the universal
+    ("Every hard failure is a page, as noted before, and two arms still return JSON."),
+    ("Every hard failure is a page, and the two arms still return JSON, as we said before."),
+    # `before` / `until` as present-tense conjunctions name nothing that used to be true
+    ("Until the cookie is set, every hard failure is a page; two arms still return JSON."),
+    ("Before the cookie is set, every hard failure is a page; two arms still return JSON."),
+    # a past PARTICIPLE is not a past tense: "is answered" is present
+    ("Every hard failure is answered with a page; two arms still return JSON."),
+    # `used to` in a LATER clause is another subject's verb
+    ("Every hard failure is a page, used to work; two arms still return JSON."),
+    ("Every hard failure is a page, which used to be documented; two arms still return JSON."),
+    # an anchored `before` cannot lend its frame to a present-tense universal
+    ("Before #13671, every hard failure is a page; two arms still write JSON."),
+    # ⛔ F6 — THE COMMA. These two are the SAME sentence; deleting one comma flipped the first from
+    # RED to GREEN under the clause-scoped `\w+ed` rule, because the neighbouring clause's `-ed` verb
+    # landed inside the denial's own clause. Both are RED now, and they are kept as a PAIR so the
+    # scoping cannot come back as a punctuation dependency.
+    ("Before #13671, every hard failure answered raw JSON; two arms converted, so now every hard "
+     "failure is a page."),
+    ("Before #13671, every hard failure answered raw JSON; two arms converted so now every hard "
+     "failure is a page."),
+    ("Before #13671, every hard failure of that route answered raw JSON; we have since converted "
+     "two places, so every hard failure is a page."),
+    ("Before #13671 every hard failure was JSON; two arms of the route still answer JSON, and "
+     "every hard failure is a page."),
+    ("Every hard failure is a page, and before #13671 every hard failure was JSON; two arms "
+     "still do."),
+    # ⛔ F6, the other half: an `-ed` word is not a tense. ⛔ THE NEXT TWO ROWS ARE NOT ITS CASUALTIES,
+    # and an earlier comment credited them with a discrimination they do not perform (review of
+    # #13712, F17 — measured at `094c824817` AND `ceb8ab564f`, the TWO revisions that shipped the
+    # clause-scoped `\w+ed` rule — an earlier wording of this line said "only", and `094c824817` is an
+    # ancestor, so that superlative was itself a provenance claim a re-measuring reader falsifies,
+    # review F18). Both rows are RED at BOTH revisions, and both go GREEN the moment a retro frame is
+    # added, because that rule ALSO required one and neither row carries it; here they are casualties
+    # of the bare word list at `bf5202ce79`. The row BELOW them is the one that rule EXEMPTS: it
+    # carries the retro frame AND `documented`, it is GREEN at `ceb8ab564f`, and it REDs the moment
+    # `documented` is removed — that measured dependence is the discrimination it is here to pin.
+    ("Two arms remain, and every hard failure is a page as documented."),
+    ("Two arms were converted and every hard failure is a page now."),
+    ("Before #13671, every hard failure is a page as documented; two arms still do."),
+    # a true past prefix does not excuse the SAME sentence asserting the present
+    ("Every hard failure answered raw JSON, and is a page now."),
+    # ⛔ AND SO IS THE HISTORICAL FORM — this is the row that decides whether the guard pins the fix.
+    # main's own pre-fix sentence is grammatically true ("used to answer") and still false of the
+    # route, because "hard failure" is the wrong noun: two arms answer JSON TODAY. When an anchored
+    # historical-shape exemption was tried, this sentence was allowed, reverting the copy hunk
+    # stopped reddening the guard, and the guard stopped pinning anything (measured through
+    # `_absolute_violations` against `origin/main`). It REDS, and the fix's own wording —
+    # "every REFUSAL … used to answer" — is what the corpus writes instead.
+    ("Before #13671, every hard failure of that route answered raw JSON; two arms still do."),
+    ("Every hard failure of that route used to answer `json({error, reason})`; two arms still do."),
+    ("Previously every hard failure of that route answered raw JSON; both arms return one."),
+    ("Every hard failure used to answer raw JSON; two arms still do."),
+    ("Before this change, every hard failure returned raw JSON; both returns remain."),
+    # a ` * ` line is layout, not a clause boundary, so wrapping the sentence must not change it
+    ("Before #13671, every hard failure of that route\n * answered raw JSON; two arms still do."),
+]
+
+
+@pytest.mark.parametrize("sentence", _SUMMARY_ABSOLUTE_ROWS)
+def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(sentence: str) -> None:
+    r"""A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
+
+    ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a
+    measurement that lives only in a commit message is the "reads as coverage it does not have"
+    pattern this PR has corrected twice (review of #13712). The rows ARE the measurement, and they
+    drive `_false_absolute_in` → `_absolute_violations`, the same decision the corpus guard calls —
+    never a retyped copy of the loop.
+
+    ⛔ WHY EVERY ROW IS RED AND THERE IS NO EXEMPT COLUMN. Each of the four revisions before this one
+    tried to DECIDE whether a sentence meant the past, and each failed OPEN on ordinary prose: a
+    word list at `bf5202ce79`, a whole-sentence retro search at `4ab3033e32`, an unbounded tail
+    after that, and a clause-scoped `\w+ed` whose verdict turned on a comma (the two paired rows
+    above are one sentence with and without it). A fifth, anchored historical shape did not fail
+    open — it made the guard VACUOUS, because `origin/main`'s own pre-fix sentence matched it. "Does
+    this sentence mean the past?" is a semantic question; a prose lint that answers semantic
+    questions has no safe answer, so the phrase is required to be ABSENT and a historical sentence
+    is REWORDED (the corpus writes "every REFUSAL … used to answer"). The cost is a false block,
+    never a false pass — the direction this repo's A/B line demands.
+
+    ⛔ SO THE TABLE PINS THE PATTERN, INCLUDING ITS SHAPE TOLERANCE. Rows below carry the phrase
+    wrapped over a line, emphasised, hyphenated and tab-separated, because the assertion compares by
+    case-insensitive CONTAINMENT of `every`, `hard`, `failure` in order rather than by equality with
+    the bare literal: an equality check would reject the very variants `_FALSE_ABSOLUTE_RE` exists to
+    catch, leaving F3's fix unpinned (measured: with the literal regex swapped back in, an
+    equality-checking table stayed all green — review of #13712, F8).
+
+    ⛔ THE NEGATION FORM ("NOT every hard failure is a page") IS NOT EXEMPT, deliberately: a
+    mechanical negator test would exempt "not only is every hard failure a page", which is the
+    fail-open direction. Reword instead.
+    """
+    span = _false_absolute_in(sentence)
+    assert span is not None, (
+        f"the guard FAILS OPEN on {sentence!r}: it states the denial and nothing reds it")
+    # The span is quoted out of the ORIGINAL text, so compare case-insensitively and by ORDER, not
+    # by equality: a wrap/emphasis/hyphen variant spans more than the bare literal.
+    words = [w for w in re.findall(r"[a-z]+", span.lower()) if w in {"every", "hard", "failure"}]
+    assert words == ["every", "hard", "failure"], (
+        f"the guard matched {span!r} for {sentence!r}, which is not the phrase itself")
+
+
 def _key_from(location: str | None) -> str:
     """The attempt key the route handed back in its `/auth?next=` return target."""
     assert location, "the cold-browser leg must answer a redirect, not a body"
@@ -2001,7 +2582,26 @@ def _key_from(location: str | None) -> str:
     return keys[0]
 
 
-def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> None:
+def _as_minted_key(monkeypatch) -> str:
+    """A SIGNED attempt key (#10794), minted the way the AS mints it.
+
+    ⛔ THE SECRET IS THE ONE THE DRIVER'S ENV HOLDS (`_TEST_SECRET`), and that is the point: the key
+    is verified by the app half under node, so a key minted here with any other bytes would be
+    refused there and the test would prove nothing about adoption. Setting it explicitly also pins
+    the CROSS-HALF agreement the fix rests on — Python signs, TypeScript verifies, same bytes.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+    minted = consent_token.mint_attempt_key()
+    assert consent_token.verify_attempt_key(minted) is not None, (
+        f"the fixture minted a key the PYTHON half will not verify: {minted!r}")
+    return minted
+
+
+def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes(monkeypatch) -> None:
     """The JOINT seam: the bounce URL the AS actually emits, fed to the route that must adopt it.
 
     The two halves are pinned separately (the bounce carries a key; `start` adopts a presented
@@ -2012,6 +2612,15 @@ def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> 
     is lost or shadowed on the way in.
     """
     from tortoise.oauth import consent_bounce_url
+
+    # ⛔ THE TWO HALVES MUST HOLD THE SAME KEY for the AS-minted value to be adoptable (#10794): the
+    # bounce is signed with THIS process's key and verified under node against the driver's
+    # `CONSENT_TOKEN_SECRET`, which is `_TEST_SECRET`. Before the key was signed this did not matter
+    # — anything non-empty was adopted. Now a split here is exactly what the fix detects, so the test
+    # states the shared key rather than inheriting whatever the host happens to export.
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
 
     emitted = consent_bounce_url("https://app.premiselabs.co", urllib.parse.urlencode(_PARAMS))
     inner_url = urllib.parse.parse_qs(urllib.parse.urlsplit(emitted).query)["next"][0]
@@ -2041,7 +2650,7 @@ def test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes() -> 
     assert back["attempts"][0]["user_id"] == "user-1"
 
 
-def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> None:
+def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return(monkeypatch) -> None:
     """#10487: the key must belong to the FLOW, not to one URL the route happened to emit.
 
     Measured in production: a visitor who signed in during the flow came back through the AS
@@ -2051,23 +2660,24 @@ def test_start_ADOPTS_a_presented_attempt_key_so_a_cold_flow_can_return() -> Non
     only leg where none exists yet), and this pins the half that makes that work: a PRESENTED key
     is ADOPTED on the insert rather than replaced by a freshly generated one.
 
-    Non-vacuity: this is a PIN, not the fix's proof. `presentedKey || newAttemptKey()` predates
-    this PR — `website/` is not in its diff at all — so this test passes on the PRE-FIX tree. Its
-    sensitivity is to the browser-side code the harness executes (`start.ts`, the
-    `consent-bridge.ts` store, and the `_shared/auth` modules they import) — given as a CATEGORY
-    on purpose, because two earlier cuts of this sentence named a finite set and each was
-    falsified by the next file measured. The fix's proof is
-    `test_the_AS_bounce_key_is_the_key_start_records_and_the_flow_completes` above: it crosses the
-    AS→app seam and `KeyError`s on `attempt_key` without the AS mint (measured: reverting
-    `consent_bounce_url` to `origin/main`'s no-mint form reds that test and leaves this one green).
+    ⛔ RE-STATED BY #10794, and the re-statement is the whole reason this test exists twice in
+    different clothes. The presented value below USED TO BE an arbitrary 29-character string,
+    because `start.ts` adopted whatever it was handed — which is the defect. It is now a KEY THE AS
+    MINTED (a MAC over its random part, under the same secret the app half holds), and the ADOPTION
+    this test pins is now conditional on exactly that. What the test asserts is unchanged: a
+    presented key survives the insert and the return leg. What moved is what a "presented key" can
+    be, and the sibling below (`test_start_refuses_a_presented_key_the_AS_did_not_mint`) is the
+    other half of that biconditional — one test would be satisfied by adopting everything, the
+    other by adopting nothing.
 
-    ⛔ NO PYTHON IN THAT LIST, deliberately: `_run` spawns ONE process (`node driver.mjs`), and the
-    TS modules call no Python, so `tortoise/consent_token.py` drift cannot red THIS test. An
-    earlier cut of this paragraph claimed "the Python verifier they call" and that was false on
-    all three of its own terms — not browser-side, not called by them, not executed here. The
-    cross-language half is pinned by the arms that actually import the verifier, not here.
+    Non-vacuity: this one is a PIN, not the fix's proof — and it cannot even RUN on the PRE-FIX tree,
+    in either direction. `_as_minted_key` calls `consent_token.mint_attempt_key()`, which does not
+    exist there (`git show origin/main:tortoise/consent_token.py | grep -c mint_attempt_key` → 0),
+    so the pre-fix tree raises `AttributeError` rather than passing. The fix's proof is the refusal
+    test (`test_start_refuses_a_presented_key_the_AS_did_not_mint`), which reds on that tree because
+    `start.ts` adopted whatever it was handed.
     """
-    presented = "ak-as-minted-0123456789abcdef"
+    presented = _as_minted_key(monkeypatch)
     first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
     assert first["status"] == 302, first
     assert _key_from(first["location"]) == presented, (
@@ -2372,7 +2982,7 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     raises. ⚠️ Read the biconditional for what it actually holds: it is the ARM
     that is still emitted, not the raw body. Since #10884/#10865 arm B the
     `start` leg renders that arm as a PAGE (`x-consent-refusal: …`, asserted by
-    `test_every_hard_failure_of_the_carriage_is_a_page_and_keeps_its_status`),
+    `test_every_REFUSAL_arm_of_the_carriage_is_a_page_and_keeps_its_status`),
     and the mint leg (`token.ts`) still answers JSON — deliberately, because the
     AS page's `fetch()` is its reader and that page renders the human copy.
     The CONDITION is what is unfixed: which store call raises is not
@@ -2409,81 +3019,91 @@ def test_the_store_fault_residual_names_a_home_this_fold_does_not_close() -> Non
     )
 
 
-def test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close() -> None:
-    """#10790 review (P2): the THIRD residual must point at an OPEN home too.
+def test_the_whitespace_attempt_key_residual_is_CLOSED_and_says_so(monkeypatch) -> None:
+    """#10790 review (P2) → RE-STATED by #10794: the arm is closed, and the record must move.
 
-    `presented_consent_attempt_key`'s docstring records a residual the AS hop does
-    not close: the page and `start.ts` do not strip, so a whitespace
-    `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS —
-    is still adopted verbatim (`start.ts::presentedKey || newAttemptKey()`).
-    That residual was written down on #10487,
-    which this fold retires, so the docstring points a reader at #10884 instead.
+    THE RESIDUAL THIS PINNED, verbatim from the version before #10794: "`presented_consent_attempt_key`'s
+    docstring records a residual the AS hop does not close: the page and `start.ts` do not strip, so a
+    whitespace `attempt_key` presented STRAIGHT to `/api/consent/start` — bypassing the AS — is still
+    adopted verbatim (`start.ts::presentedKey || newAttemptKey()`)."
 
-    A pointer is a CLAIM, and the previous review found it was one the artifact
-    did not support: #10884's body recorded the store-fault arm and the
-    keyless-re-entry hole, but not this one. The body now carries it (the
-    decision-relay rule: record the answer where the next lane reads it).
+    That is now FALSE BY CONSTRUCTION: `start.ts` adopts a presented key only when its MAC verifies,
+    so `%20` (or any other value nobody minted) verifies nowhere and is replaced by a MINTED one. The
+    biconditional is therefore re-stated in the direction the new code runs:
 
-    The assertion is a BICONDITIONAL, so the guard cannot rot into a tautology
-    either way: while `start.ts` still adopts a presented key unstripped, the
-    docstring must name the OPEN home; once the adoption strips (or refuses a
-    blank one), the note must be DELETED rather than re-pointed.
+      * the GATE must exist in `start.ts` while the docstring claims the arm is closed → RED if the
+        verification is ever removed (the claim would become the lie this pin exists for);
+      * a well-formed CHOSEN key is proved to be refused END TO END below, so "the gate exists" is
+        not being read as "the gate works".
+
+    ⛔ NOT a deletion and not a weakening: the previous version could be satisfied by a docstring
+    sentence alone. This one requires the shipped code to carry the gate AND requires the behaviour
+    to be measured, which is the only form of this claim that can fail.
     """
     start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
-    adopted_verbatim = (
-        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";'
-        in start_ts
+    adopts_verbatim = (
+        'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
         and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
     )
+    gated_by_a_mac = (
+        "const verifiedPresented = await verifyAttemptKey(env, presentedKey);" in start_ts
+        and "await mintedAttemptKey(env)" in start_ts
+    )
+    assert not adopts_verbatim, (
+        "start.ts still adopts a presented attempt key WITHOUT verifying it — that is the #10794 "
+        "defect (a caller choosing a flow's key), and no docstring can close it")
 
-    # Read the emitting predicate's own docstring, not the module: the pointer
-    # lives beside the predicate a reader lands on when they ask what "present"
-    # means on this hop.
     source = (REPO / "tortoise" / "oauth.py").read_text(encoding="utf-8")
     start = source.index("def presented_consent_attempt_key")
     end = source.find("\ndef ", start + 1)
     docstring = source[start:end if end != -1 else len(source)]
-    declared = "#10884" in docstring
+    declares_it_closed = "THE WHITESPACE ARM IS CLOSED by #10794" in docstring
 
-    assert adopted_verbatim == declared, (
-        "the whitespace-attempt-key residual and its declared home disagree "
-        f"(#10487 is retired; its open home is #10884): "
-        f"start_ts_adopts_a_presented_key_unstripped={adopted_verbatim}, "
-        f"docstring_names_the_open_home={declared}. If the residual is present, keep "
-        "#10884 in `presented_consent_attempt_key`'s docstring AND in #10884's body; "
-        "if it was fixed, DELETE the note instead of re-pointing it."
+    # ⛔ ONE assertion, so both directions of the claim are REACHABLE (#13721 review, rule 3).
+    # A separate unconditional `assert gated_by_a_mac` above this line made the "gate removed ⇒ the
+    # sentence must go" direction unreachable — it fired first, and what survived was equivalent to
+    # `assert declares_it_closed`. The gate's EXISTENCE is not lost by folding: it is measured
+    # behaviourally a few lines down (a well-formed CHOSEN key must not become the row's key), which
+    # is the only form of that claim a source-shape check could not substitute for anyway.
+    assert gated_by_a_mac == declares_it_closed, (
+        "the whitespace-arm record and the code disagree: "
+        f"start_ts_gates_adoption_by_a_mac={gated_by_a_mac}, "
+        f"docstring_declares_the_arm_closed={declares_it_closed}. Both directions are the claim: "
+        "while the gate exists the docstring must say the arm is closed; if the gate is removed the "
+        "sentence must go rather than stand as a false claim."
     )
+
+    # …and the behaviour, not just the source shape: a well-formed CHOSEN key — 43 chars, exactly
+    # what a shape check would accept — must NOT become the row's key.
+    chosen = "a" * 43
+    out = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=chosen))
+    assert out["status"] == 302, out
+    assert _key_from(out["location"]) != chosen, (
+        "a client-CHOSEN key was adopted as the flow's key — RFC 9126 §2 says the flow reference "
+        "must not be client-chosen, and this is the one assertion that measures it end to end")
+    import hashlib
+    assert out["attempts"][0]["attempt_key_hash"] != hashlib.sha256(chosen.encode()).hexdigest(), (
+        "the row is keyed on the value the CLIENT chose: whoever chose it owns the flow")
 
 
 def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -> None:
-    """#10790 review (P2): the security record must not state an absolute the code falsifies.
+    """#10790 review (P2) → RE-STATED by #10794: the entry leg STILL mints, and the record says so.
 
-    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule
-    as "…ADOPTED by `/api/consent/start` on the insert — the entry leg no longer
-    invents one". The entry leg still invents one: `start.ts` still has
+    `docs/engineering/auth/consent-identity-bridge.md` described the delivered rule as "…ADOPTED by
+    `/api/consent/start` on the insert — the entry leg no longer invents one". It still does: when
+    `start` is handed no key, or a key it cannot verify, it mints one (`mintedAttemptKey`, now SIGNED
+    so the NEXT leg of the same flow accepts it — an unsigned replacement would be refused by the very
+    check this change adds, rebuilding the #10487 dead end). That IS the residual: a caller can begin
+    a flow holding a key only it has, the first-mover dead end tracked on #10884/#10865. A record that
+    denied it would make the residual read narrower than it is.
 
-        const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
-        const attemptKey = presentedKey || newAttemptKey();
-
-    and `newAttemptKey()` mints 32 CSPRNG bytes. No earlier guard in `onRequestGet`
-    requires a presented key, so a request presented straight to `/api/consent/start`
-    (bypassing the AS) is handed a fresh key — exactly the residual the pins below
-    on `presented_consent_attempt_key` call "the direct-to-`start` residual".
-
-    A wrong absolute in the *delivered security rule* is not cosmetic: the reader
-    concludes no entry-leg-minted key can exist, so the residual tracked OPEN on
-    #10884 reads narrower than it is ("only adopts a whitespace key verbatim",
-    never "mints one when handed none") and the next lane reasons about the
-    ownerless window from a code shape that is not in the tree.
-
-    BICONDITIONAL, so it cannot rot into a tautology in either direction: while
-    `start.ts` mints on the empty path the record MUST say so; once that path is
-    removed, the sentence must be deleted rather than left standing.
+    BICONDITIONAL, re-stated for the new code shape: while the fallback mint exists the record MUST
+    name it; once that path is removed, the sentence must be DELETED rather than left standing.
     """
     start_ts = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
     mints_when_handed_none = (
         'const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";' in start_ts
-        and "const attemptKey = presentedKey || newAttemptKey();" in start_ts
+        and "await mintedAttemptKey(env)" in start_ts
     )
 
     doc = (
@@ -2491,11 +3111,11 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
     ).read_text(encoding="utf-8")
 
     assert "the entry leg no longer" not in doc, (
-        "the bridge record claims the ENTRY leg stopped minting an attempt key, but "
-        "`start.ts::presentedKey || newAttemptKey()` still does, and no "
-        "guard before it requires a presented key. Restore the qualifier — the entry "
-        "leg mints one when it is handed none (the direct-to-`start` residual on "
-        "#10884/#10865) — instead of stating an absolute the code falsifies.")
+        "the bridge record claims the ENTRY leg stopped minting an attempt key, but `start.ts` "
+        "still mints one (`await mintedAttemptKey(env)`) when it is handed none or cannot verify "
+        "what it was handed. Restore the qualifier — the entry leg mints one when it is handed none "
+        "(the direct-to-`start` residual on #10884/#10865) — instead of stating an absolute the "
+        "code falsifies.")
 
     declares_the_residual = (
         "the entry leg still mints one when it is handed none" in doc
@@ -2503,9 +3123,9 @@ def test_the_bridge_record_does_not_claim_the_entry_leg_ever_stopped_minting() -
     assert mints_when_handed_none == declares_the_residual, (
         "the entry-leg mint and the record disagree: "
         f"start_ts_mints_when_handed_none={mints_when_handed_none}, "
-        f"record_states_the_residual={declares_the_residual}. While `start.ts` has the "
-        "`||newAttemptKey()` fallback the record must name it; if the fallback is "
-        "removed, DELETE the sentence instead of leaving a stale claim."
+        f"record_states_the_residual={declares_the_residual}. While `start.ts` mints a key it was "
+        "not handed the record must name it; if that path is removed, DELETE the sentence instead "
+        "of leaving a stale claim."
     )
 
 
@@ -2678,3 +3298,225 @@ def test_the_key_route_answers_every_non_GET_verb_itself() -> None:
         assert cases[label]["nextCalled"] is False, (
             f"{label} was handed to next() — the asset server's 404 is what this arm prevents"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10794 — the `kid`-keyed key set, CROSS-HALF
+#
+# `CONSENT_TOKEN_KEYS` is parsed twice, in two languages: `consent_token.py::parse_consent_token_keys`
+# (the AS, which VERIFIES) and `consent-bridge.ts::consentKeySet` (the app, which MINTS). They decide
+# which BYTES a kid names. A one-sided edit — a trimmed secret, a different split, a different
+# fallback kid — makes a rotation mint under one key and verify under another, and the symptom is
+# `401 invalid_token` on every redemption with the mint still answering 200 (the #10488 class, one
+# field along). So the TABLE below is the input to both implementations and the assertions compare
+# their answers, rather than each half being checked against itself.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_KEY_SET_OLD = "consent-key-OLD-0123456789abcdef0123456789abcdef"
+_KEY_SET_NEW = "consent-key-NEW-0123456789abcdef0123456789abcdef"
+
+#: Every shape an operator (or a typo) can present. Literal on purpose: a computed set would make
+#: the table auto-agree with whatever the code under test does.
+_KEY_SET_SHAPES = [
+    {"label": "legacy_single_secret", "secret": _TEST_SECRET},
+    {"label": "two_kids_declared_order", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}"},
+    {"label": "current_named", "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "new"},
+    # A base64 secret carries its own padding, and each entry splits on its FIRST `=` so it survives.
+    {"label": "base64_padding_kept", "keys": f"k1={_KEY_SET_OLD}=="},
+    {"label": "current_names_nothing", "keys": f"old={_KEY_SET_OLD}", "current": "typo"},
+    {"label": "no_separator", "keys": "no-separator-here"},
+    {"label": "duplicate_kid", "keys": f"k1={_KEY_SET_OLD},k1={_KEY_SET_NEW}"},
+    {"label": "empty_secret", "keys": "k1="},
+    # Absent-or-blank is the LEGACY deployment, not a fault: `None, None` from the Python parser and
+    # the single-secret shape from TypeScript.
+    {"label": "blank_keys_falls_back", "keys": "   ", "secret": _TEST_SECRET},
+    # Whitespace is not a kid name: the strip happens before the membership test on BOTH halves.
+    {"label": "whitespace_current_is_unset",
+     "keys": f"old={_KEY_SET_OLD},new={_KEY_SET_NEW}", "current": "   "},
+    # A kid carrying the attempt-key separator could re-select another key (#10794).
+    {"label": "kid_with_dot", "keys": f"k.1={_KEY_SET_OLD}"},
+]
+
+
+def _set_consent_key_env(monkeypatch, shape: dict) -> None:
+    for name in ("CONSENT_TOKEN_KEYS", "CONSENT_TOKEN_CURRENT_KID", "CONSENT_TOKEN_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    if shape.get("keys") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_KEYS", shape["keys"])
+    if shape.get("current") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", shape["current"])
+    if shape.get("secret") is not None:
+        monkeypatch.setenv("CONSENT_TOKEN_SECRET", shape["secret"])
+
+
+def test_the_key_set_is_PARSED_the_SAME_WAY_by_both_halves(monkeypatch) -> None:
+    """THE cross-half pin: same shapes in, same kids/current/signing-bytes out.
+
+    `secret` is compared too, because "the same kid" is worthless if the two halves then sign with
+    different bytes — that is precisely the split #10488's fingerprint exists to detect, and a
+    parser that normalised on one side would CREATE it rather than report it.
+    """
+    from tortoise import consent_token
+
+    out = _run("key_set", shapes=_KEY_SET_SHAPES)
+    assert [c["label"] for c in out["cases"]] == [s["label"] for s in _KEY_SET_SHAPES], out
+
+    for shape, ts in zip(_KEY_SET_SHAPES, out["cases"], strict=True):
+        _set_consent_key_env(monkeypatch, shape)
+        # The EFFECTIVE set, i.e. what the verifier will accept — not the raw parse. On the legacy
+        # deployment the parse is `None` and this function synthesises the one key under `LEGACY_KID`,
+        # which is exactly the set the app half must also see.
+        accepted = consent_token.consent_token_keys()
+        py_kids = list(accepted) if accepted else None
+        fault = consent_token.consent_token_secret_problem()
+        py_current = consent_token.consent_token_current_kid()
+        py_secret = consent_token.consent_token_secret()
+
+        assert ts["kids"] == py_kids, (
+            f"{shape['label']}: the two halves disagree about which kids exist — "
+            f"TS {ts['kids']} vs Python {py_kids} (fault={fault!r})")
+        assert ts["current"] == py_current, (
+            f"{shape['label']}: the halves disagree about which kid MINTS — "
+            f"TS {ts['current']!r} vs Python {py_current!r}")
+        assert ts["secret"] == py_secret, (
+            f"{shape['label']}: the halves disagree about the SIGNING BYTES for that kid — "
+            f"TS {ts['secret']!r} vs Python {py_secret!r}")
+        assert ts["mintKid"] == py_current, (
+            f"{shape['label']}: `consentCurrentKid` and `consent_token_current_kid` disagree — "
+            "the mint route would stamp a kid the AS refuses")
+
+
+def test_the_padding_of_a_base64_secret_SURVIVES_the_parse_on_both_halves() -> None:
+    """Named separately because it is the shape a "tidy" edit breaks first.
+
+    Splitting each entry on its LAST `=` (or using a `split("=")` bound to exactly two parts) would
+    strip a secret's own padding — silently signing with different bytes than the other half holds.
+    """
+    shape = next(s for s in _KEY_SET_SHAPES if s["label"] == "base64_padding_kept")
+    out = _run("key_set", shapes=[shape])
+    assert out["cases"][0]["secret"] == _KEY_SET_OLD + "==", out["cases"][0]
+    assert out["cases"][0]["kids"] == ["k1"], out["cases"][0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10794 — the AS signs `attempt_key`, and the page adopts ONLY a verified key
+#
+# The defect: `/api/consent/start` is directly navigable (it is the one API path `/auth`'s return
+# allowlist admits) and it adopted WHATEVER `attempt_key` it was handed. The row's insert-only hash
+# is the flow's ownership proof, so a caller could choose the key of a flow it did not create —
+# RFC 9126 §2's "must not be client-chosen", and RFC 9700's reused-value detection.
+#
+# ⛔ A SHAPE CHECK IS NOT THE FIX, and the first test below is written to make that visible: the
+# value it presents is a well-formed 43-character base64url string, which any shape gate accepts.
+# What distinguishes a minted key from a chosen one is a MAC only the key holder can produce.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_start_refuses_a_presented_key_the_AS_did_not_mint(monkeypatch) -> None:
+    """⭐ THE FAIL-FIRST TEST: a key the CLIENT chose must not become the row's key.
+
+    MEASURED ON `origin/main` (before this change): the presented value below is adopted — the route
+    returns it in its own return target and the row's `attempt_key_hash` is `sha256(<that value>)`,
+    so whoever chose it owns the flow. This test REDS there and passes here.
+
+    The presented value is deliberately WELL-FORMED — 43 base64url characters, the same length the
+    AS mints — because that is the value a shape-only "fix" would still adopt. What it is missing is
+    a MAC, which is the only thing an unprivileged caller cannot produce.
+
+    AND THE FLOW STILL COMPLETES, which is the other half of the contract: a refused key is treated
+    as ABSENT, so the visitor is handed a MINTED one and their sign-in return leg still works. A
+    refusal that dead-ended here would trade one defect for the #10487 one.
+    """
+    import hashlib
+
+    # ⛔ TWO CHOSEN VALUES, and the SECOND is the one that matters: `well_shaped` has the exact
+    # structure and segment lengths of a minted key (kid, 43-char random part, 43-char MAC) and only
+    # the MAC is wrong. A SHAPE check — the option the standards exclude — accepts it, so a suite
+    # that only tried the first value would let "looks minted" pass as "was minted". Measured: with
+    # `verifyAttemptKey` reduced to a shape check, the first value alone still red the route test by
+    # its LENGTH check, not by its MAC.
+    chosen = "a" * 43
+    well_shaped = "consent-1." + "b" * 43 + "." + "c" * 43
+    for label, presented in (("no_segments", chosen), ("forged_mac", well_shaped)):
+        first = _run("start_cold_browser", params=dict(_PARAMS, attempt_key=presented))
+        assert first["status"] == 302, (label, first)
+        minted_key = _key_from(first["location"])
+        assert minted_key != presented, (
+            f"[{label}] the route ADOPTED a key the client chose — the client now owns this flow, "
+            "and every later leg (the owner fill, the mid-flow return, the mint) will be satisfied "
+            "by a value it holds")
+        assert first["attempts"][0]["attempt_key_hash"] != hashlib.sha256(
+            presented.encode()).hexdigest(), (
+            f"[{label}] the ROW is keyed on the value the client chose, even though the browser was "
+            "handed another one — the two are now split, and the visitor's own return leg will be "
+            "refused")
+        assert first["attempts"][0]["attempt_key_hash"] == hashlib.sha256(
+            minted_key.encode()).hexdigest(), (
+            f"[{label}] the row is keyed on neither the chosen nor the minted value — the attempt "
+            "key is no longer the thing the row is keyed on, which is the whole ownership proof "
+            "(#10208)")
+        # …the caller cannot then walk in on the key it tried to install.
+        foreign = _run("start_signed_in", seededAttempts=first["attempts"],
+                       sessionUserId="user-1", params=dict(_PARAMS, attempt_key=presented))
+        _assert_refusal_page(foreign, "flow_not_yours", 403)
+    # …and the MINTED key works end to end: return leg fills the owner and advances.
+    back = _run("start_signed_in", seededAttempts=first["attempts"],
+                sessionUserId="user-1", params=dict(_PARAMS, attempt_key=minted_key))
+    assert back["status"] == 302, f"the replacement key dead-ended the flow: {back}"
+    assert back["attempts"][0]["user_id"] == "user-1", back["attempts"][0]
+
+
+def test_the_SIGNED_attempt_key_crosses_the_halves_in_BOTH_directions(monkeypatch) -> None:
+    """Python signs and TypeScript verifies (the AS→app leg), and the reverse (the entry leg).
+
+    Both halves mint, so both directions are load-bearing: the AS mints on the bounce, `start` mints
+    when it is handed none or something unverifiable. A one-sided change to the MAC input or to the
+    value's format makes exactly one of these directions fail — silently, since an unverifiable key
+    is replaced rather than refused — so the pair is compared here rather than each half against
+    itself.
+    """
+    from tortoise import consent_token
+
+    monkeypatch.setenv("CONSENT_TOKEN_SECRET", _TEST_SECRET)
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_CURRENT_KID", raising=False)
+
+    as_minted = consent_token.mint_attempt_key()
+    random_part = as_minted.split(".")[1]
+    chosen = "b" * 43
+    # ⛔ THE MUTATION MUST BE A REAL ONE, AND THE READING THAT MATTERS IS BYTES. The MAC is 43
+    # base64url chars for 32 bytes, so the LAST character carries only 4 significant bits and its
+    # low 2 are padding: an encoder that emitted them non-zero (or a value minted by anything but
+    # `_b64url_encode`) makes `…[:-3] + "AAA"` a different STRING that decodes to the IDENTICAL
+    # signature — `verifyAttemptKey` correctly accepts it, and the arm below reds a correct tree.
+    # Mutating position 0 changes the first 6 bits of the MAC's first byte under EVERY encoding, so
+    # the mutation cannot be a no-op by construction; the decoded-bytes assertion below is what
+    # makes that a MEASUREMENT rather than a claim about the encoder. (Same class, and the same
+    # remedy, as `test_oauth_consent_bridge.py::test_a_TAMPERED_attempt_key_is_refused`, where
+    # `…[:-1] + "A"` collided once in 16.)
+    mac = as_minted.rsplit(".", 1)[1]
+    flipped = ("A" if mac[0] != "A" else "B") + mac[1:]
+    forged_mac = as_minted[:-len(mac)] + flipped
+    assert forged_mac != as_minted, "the test's own mutation was a no-op"
+    assert (consent_token._b64url_decode(flipped, "the forged MAC")
+            != consent_token._b64url_decode(mac, "the minted MAC")), (
+        "the test's own mutation decoded to the SAME 32 bytes — the MAC comparison would accept it "
+        "and the assertion below would red a correct tree")
+
+    out = _run("attempt_key", values={"as_minted": as_minted, "chosen": chosen,
+                                      "empty": "", "forged_mac": forged_mac})
+    got = {c["label"]: c["verified"] for c in out["cases"]}
+    assert got["as_minted"] == random_part, (
+        "the app half did not verify a key the AS half minted — every AS bounce key would be "
+        "replaced (silently) and the mid-flow return would 403, the #10487 dead end")
+    assert got["chosen"] is None, got
+    assert got["empty"] is None, got
+    assert got["forged_mac"] is None, (
+        "a key whose MAC was edited still verified — the MAC is not being compared")
+
+    # …and the OTHER direction: a key the APP minted must verify on the AS half.
+    assert out["minted"], out
+    app_minted = out["minted"]
+    assert consent_token.verify_attempt_key(app_minted) is not None, (
+        "the app half minted a key the AS half cannot verify — the entry leg's own replacement value "
+        "would be refused on the very next leg of the same flow")
+    assert len(app_minted.split(".")[1]) >= 43, app_minted

@@ -66,9 +66,12 @@ payload was the production one, and it was right.
 ⚠️ ``record_vector.coverage`` compares
 ``record_vectors >= graph_vectors``, and **0 >= 0 is VERIFIED** — so an unseeded
 population does not fail the coverage gate, it *passes* it and then serves an
-empty record cohort as ``mechanism=pgvector, reason=ok``. That is why
-:func:`require_seeded` asserts a non-zero vector count on BOTH sides before any
-arm runs; a gate that can be satisfied by two zeros is not a gate.
+empty record cohort as ``mechanism=pgvector, reason=ok``. That is why the
+zero-zero state is refused from BOTH sides before an arm runs — by
+:func:`require_record_measured` for the record and by
+:func:`require_graph_population` for the graph. One function asserting both was
+what let a GRAPH fact refuse the RECORD arm; a gate that can be satisfied by two
+zeros is not a gate.
 
 ⛔ **AND THE COUNT IS NOT THE WHOLE GUARD — the IDS are.** ``coverage`` asks a
 LABEL-WIDE question by design (*"does the record hold as many vectors as the
@@ -181,7 +184,10 @@ Exit codes: ``0`` ran · ``2`` precondition refused (named) · ``3`` an arm's tr
 contradicted its own declaration, **or an arm was BLOCKED by a precondition**
 (recorded by name in ``arms``/``not_measured``, with the artifact still written)
 · ``4`` argument error **for a flag the tool validates ITSELF** (--ks, --deep,
-and the positive-integer bounds on --population/--points/--min-population).
+and the positive-integer bounds on --population/--points/--min-population),
+**or an unsupported interpreter** — the ``#5128`` guard below exits ``4`` on
+Python < 3.12, because ``0``/``3`` are ANSWERS a reader branches on and ``1`` is
+an uncaught traceback.
 ⚠️ An argparse-**typed** flag (--population, --points, --min-population, --deep
 with a non-integer) fails through ``parser.error()``, which exits **2** with
 usage and NO ``REFUSED[...]`` marker — so ``2`` covers both "a precondition
@@ -195,12 +201,32 @@ measurement.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse an old interpreter BEFORE the imports below — a module-level
+# 3.11+-only import raises ImportError before a later guard could run.
+#
+# The refusal wears THIS tool's own "could not run" status, 4 (the docstring's
+# exit table: 0 ran, 2 precondition refused, 3 published-but-incomplete, 4 the
+# tool's own non-answer status), because 0 and 3 are ANSWERS a caller branches on
+# and 1 is an uncaught traceback — an old interpreter would otherwise read as a
+# crash or, worse, as a published figure. The table states this fourth meaning of
+# 4 too, so a reader of the published contract is not left to infer it here.
+# Pinned by `tests/test_entry_point_python_guard.py::REFUSAL_CODES`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/claim_dense_leg_13732.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/claim_dense_leg_13732.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(4)
+
 import argparse
 import contextlib
 import json
 import math
 import os
-import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -789,22 +815,26 @@ def require_record(dsn: str | None):
     return dsn
 
 
-def require_seeded(graph_vectors: int, record_vectors: int | None) -> None:
-    """Both stores must hold vectors, or the coverage gate is satisfied by zeros.
+def require_record_measured(record_vectors: int | None) -> None:
+    """The RECORD's count must be a measurement, and a non-zero one.
 
     ⛔ ``record_vector.coverage`` compares ``record_vectors >= graph_vectors`` and
     **0 >= 0 is verified**. An unseeded population therefore PASSES the gate and
     then serves an empty cohort as ``mechanism=pgvector, reason=ok`` — the
     failure mode that would have made M2's population look like a dense leg with
     no recall rather than a population with no vectors.
+
+    ⛔ AND THIS IS THE RECORD HALF ONLY — the zero-zero trap is closed by TWO
+    guards now that each own their fact (#13745 review round 2). It used to be
+    one function asserting both sides, called inside the record block's
+    ``try/except``: a zero-vector GRAPH therefore raised ``graph_unseeded``
+    somewhere that caught it as a RECORD block, so the ``record_dense`` arm was
+    blocked by a graph fact — under a message ("every arm would measure the
+    lexical leg") that is false for an arm reading Postgres — and the headline
+    ``record_dense_vs_lexical`` comparison went ``UNMEASURED``. The graph fact
+    now refuses where it belongs, on the ``graph_dense`` arm, via
+    :func:`require_graph_population`; this function never names the graph.
     """
-    if graph_vectors <= 0:
-        raise Refused(
-            "graph_unseeded",
-            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
-            f"population was written without embeddings, so no dense leg can "
-            f"find anything and every arm would measure the lexical leg",
-        )
     if record_vectors is None:
         raise Refused(
             "record_unmeasurable",
@@ -823,8 +853,8 @@ def require_seeded(graph_vectors: int, record_vectors: int | None) -> None:
 def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> int | None:
     """How many of THIS population's ids does the record hold a VECTOR for?
 
-    The id-SCOPED half of the precondition :func:`require_seeded` can only state
-    as a label-wide count, and the one number that tells *"the record serves this
+    The id-SCOPED half of the precondition :func:`require_record_measured` can
+    only state as a label-wide count, and the one number that tells *"the record serves this
     cohort"* from *"the record serves some other cohort of the same label"*.
 
     ⛔ The predicates are :func:`tortoise.record_vector._record_vector_count`'s,
@@ -870,10 +900,161 @@ def record_population_vectors(ids: list[str], scope, record_dsn: str | None) -> 
             conn.close()
 
 
+def graph_population_vectors(proj, population: list[dict]) -> int | None:
+    """How many of THIS population's rows carry a vector AND THIS run's TEXT?
+
+    ⛔ THAT IS THE WHOLE CONTRACT — read the body before quoting it. It asserts
+    the write REACHED the row, not that the stored VECTOR is this run's: the fold
+    preserves an old vector when the payload's is refused, so a reused ``--graph``
+    can pass this count with a foreign vector (see the residual below).
+
+    The graph half of the same question :func:`record_population_vectors` asks
+    the record, and it exists because the run-level gate beside the seed asks a
+    PREFIX-wide question: ``MATCH (n:Point) WHERE n.id STARTS WITH … AND
+    n.embedding IS NOT NULL`` counts whatever the prefix happens to hold, not
+    what this run wrote. Ways that count is above zero while the population is
+    only partly seeded — and ⛔ ONLY THE TWO THIS WRITE PATH CAN REACH, because
+    a message that names an unreachable cause sends the operator to a dead end
+    (``#13745`` review round 6, finding 3). ``_seed_graph`` calls
+    ``_upsert_point_props`` with ``{"id", "content", "embedding"}``, so
+    ``owns_embedding`` is ALWAYS true and the fold never reaches its
+    ``encode_for_row`` derive branch: an operator point, an EMBED-gate refusal
+    (``#5008``) and a swallowed encode failure are all UNREACHABLE here (and a
+    ``None`` from ``compute_embeddings`` is refused by name as
+    ``seed_vectors_missing`` before a single write). What IS reachable:
+
+    * an embedding-WIDTH mismatch — the fold warns and leaves the node's vector
+      alone rather than write a vector the index cannot hold (``#5004``);
+    * a vector the fold REFUSES as unusable — ``_writable_journalled_vector``
+      answers ``None`` for an empty list, an implausibly long one, or one
+      carrying a non-finite/non-numeric entry, and the payload then owns a
+      field with no usable value, so nothing is written.
+
+    ⛔ AND NOTHING ELSE. A row this run's own write never created cannot be the
+    explanation here: ``_seed_graph`` upserts every population row before this
+    guard runs and a failure raises straight out of it, so ``matched < n`` means
+    the VECTOR is missing, never the row. The text half of the pairing is still
+    kept — it is what would catch a store that lost a row, or a guard reading a
+    different graph than the seed wrote — but it is DEFENSIVE, not a cause to
+    name at an operator.
+
+    ⛔ WHAT THE PAIRING PROVES, AND WHAT IT DOES NOT. It proves the write
+    REACHED the node: the returned row's text must be the text this run asked
+    for, so a row the seed did not write — a node absent, or one still holding an
+    earlier population's text at that id — is not counted. That is a DEFENSIVE
+    guard, not the cause of a shortfall (see "AND NOTHING ELSE" above;
+    ``#13745`` review round 3, finding 1: an earlier cut of this docstring
+    claimed more than that, and the claim was false).
+
+    It does NOT prove the stored VECTOR is this run's. ``_upsert_point_props``
+    rewrites ``n.content`` unconditionally (``"n.content=$content"``) while its
+    embedding clause PRESERVES ``n.embedding`` when the payload's vector was
+    refused (the width gate, ``#5004``) — so on a reused ``--graph`` (the ids are
+    deterministic, ``f"{ID_PREFIX['point']}{index:06d}"``, so every one collides)
+    a refused vector leaves THIS run's text beside the OLD vector and this count
+    passes.
+
+    Residual, named rather than papered over: same id + THIS run's text + a
+    preserved vector is indistinguishable HERE, because this is a RE-READ. It is
+    closable without touching the store: ``_upsert_point_props`` already returns
+    whether the row's vector was written (``(embedding is not None, …)``,
+    ``projection/entities.py:3339``) and ``_seed_graph`` DISCARDS that value —
+    capturing it per row would make the count exact, where a re-read cannot. Until
+    then this guard is an assertion that the population WAS WRITTEN, not that
+    every vector was REPLACED.
+
+    A ``graph_dense`` arm over a partially seeded population ranks only the
+    seeded part, so its delta against ``record_dense`` is a figure about the
+    seed step wearing the leg's name — the same false PASS the record-side guard
+    closes, one store over.
+
+    ``None`` for an UNREADABLE graph, never ``0``; an empty result is a real
+    measurement (``0``, an empty graph) and the guard refuses it by name.
+    """
+    if not population:
+        return None
+    expected = {row["id"]: row.get("content") for row in population}
+    try:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETURN n.id, n.content",
+            params={"ids": list(expected)},
+        ).result_set
+        # ⛔ THE WHOLE PAIRING IS INSIDE THE GUARD: a row shape this code does not
+        # expect must answer `None` (unmeasurable) like every other failure, not
+        # raise out of `run_measurement` as a traceback where the artifact
+        # promises `REFUSED[...]` — the record twin converts inside its own
+        # `try` for the same reason. AND a short row must not be read as "no
+        # nodes": a 1-column answer to a 2-column query is a client shape this
+        # code does not understand, and calling that an EMPTY graph would refuse
+        # the run with the wrong reason.
+        paired = set()
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                raise ValueError(f"unexpected graph row shape: {row!r}")
+            if expected.get(str(row[0])) == row[1]:
+                paired.add(str(row[0]))
+        return len(paired)
+    except Exception:  # noqa: BLE001, RUF100 — unmeasurable, not zero
+        return None
+
+
+def require_graph_population(matched: int | None, population_n: int) -> None:
+    """Every id the ``graph_dense`` arm would score must carry a vector AND this run's text.
+
+    ⛔ NOT "this run's VECTOR" — the summary said exactly that and claimed more
+    than :func:`graph_population_vectors` can see (`#13745` review round 4,
+    finding 2). A preserved vector under a refused write passes this guard; the
+    residual is named on that function.
+
+    ⛔ IT GATES THE ``graph_dense`` ARM, NOT THE RUN — and the reason is the one
+    the record gate beside it already states: a run-level refusal DISCARDS the
+    arms that do not depend on the thing that is missing. A partly seeded graph
+    does **not** degrade ``lexical``: that arm forces ``EmbeddingModel.get()`` to
+    ``None`` and the full-text index it reads is built from ``n.content``, which
+    the apply-fold writes UNCONDITIONALLY — only the vector is held back. And it
+    does not degrade ``record_dense`` either, which reads Postgres. So the graph
+    cohort is a precondition of exactly one arm, and refusing the run over it
+    would throw away ``record_dense_vs_lexical`` — the lane's own headline
+    question — while looking like a strict gate. That is the failure this file's
+    record gate was moved out of, and the graph gate starts where it ended.
+
+    Satisfiable, unlike the record's: this instrument SEEDS the graph itself, so
+    ``_seed_graph`` has already written the cohort by the time the arm consults
+    this. When the graph cannot hold the cohort, the arm is recorded
+    ``BLOCKED[graph_population_absent]`` by name and the run exits ``3``.
+    """
+    if matched is None:
+        raise Refused(
+            "graph_population_unmeasurable",
+            "how many of this population's rows the graph holds THIS RUN'S TEXT "
+            "and a vector for could not be measured — unmeasured is not zero, "
+            "and it is not a verdict",
+        )
+    if matched < population_n:
+        raise Refused(
+            "graph_population_absent",
+            f"the graph holds THIS RUN'S TEXT and a vector for {matched} of the "
+            f"{population_n} population row(s) this run would score — ⛔ THE COUNT "
+            f"IS NOT A VECTOR COUNT: it is the id-AND-text pair, so a row whose "
+            f"text is not this run's is not counted even though the graph holds a "
+            f"vector for it (that pairing is DEFENSIVE — the seed writes every "
+            f"row — so it is not a cause to look for). On this write path the "
+            f"reachable causes, and only these: an embedding-WIDTH mismatch (the "
+            f"fold leaves the node's "
+            f"vector alone rather than write one the index cannot hold, #5004), a "
+            f"vector the fold refuses as unusable (`_writable_journalled_vector` "
+            f"answers None for empty, over-long, or non-finite values, so nothing "
+            f"is written). A "
+            f"`graph_dense` arm over that "
+            f"population ranks only the seeded part, so its delta against "
+            f"`record_dense` is a figure about the seed step and not about the leg",
+        )
+
+
 def require_population_in_record(matched: int | None, population_n: int) -> None:
     """The record must hold a VECTOR for every id this run would score.
 
-    ⛔ ``coverage``/``require_seeded`` count the whole ``point`` label, so on any
+    ⛔ ``coverage``/``require_record_measured`` count the whole ``point`` label, so on any
     tenant holding enough embedded claims they answer VERIFIED for a population
     whose own ids are in NEITHER store. The ``record_dense`` arm would then rank
     none of them and publish ``recall@3 = 0.0`` — with a valid McNemar p-value —
@@ -906,8 +1087,32 @@ def require_population_in_record(matched: int | None, population_n: int) -> None
         )
 
 
-def require_coverage(verdict) -> dict:
-    """The per-label coverage verdict must be VERIFIED for the claim label."""
+def require_coverage(verdict, denominator: int | None = None) -> dict:
+    """The per-label coverage verdict must be VERIFIED for the claim label.
+
+    ⛔ A ZERO DENOMINATOR VERIFIES NOTHING (`#13745` review round 13). The gate
+    decides ``record_vectors >= graph_vectors``, so a graph holding no vector
+    makes it ``>= 0`` — TAUTOLOGICALLY verified for any record at all — and the
+    artifact would publish ``verified: true`` off the exact state this module
+    calls "a gate that can be satisfied by two zeros". It is recorded as
+    ``verified: None`` with its reason instead: unmeasured is not a pass, and the
+    record arm keeps its real protection (the id-scoped cohort guard plus its own
+    mechanism check), so the headline comparison still publishes.
+    """
+    if denominator is not None and denominator <= 0:
+        return {
+            "label": "point",
+            "verified": None,
+            "reason": "denominator_zero",
+            "note": (
+                f"the graph holds {denominator} vector-bearing claim(s), so "
+                f"`record_vectors >= graph_vectors` is a tautology — this gate is "
+                f"UNVERIFIABLE, not verified; the record arm's cohort is asserted "
+                f"by the id-scoped guard instead"
+            ),
+            "record_vectors": getattr(verdict, "record_vectors", None),
+            "graph_vectors": getattr(verdict, "graph_vectors", denominator),
+        }
     if not getattr(verdict, "verified", False):
         raise Refused(
             "coverage_unverified",
@@ -1138,19 +1343,69 @@ def run_measurement(args: argparse.Namespace) -> int:
         )
 
     graph_name = args.graph or f"claimdense_{os.getpid()}"
-    sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
-    proj = sdk._get_proj()
-    written = _seed_graph(proj, population)
+    # ⛔ OPENING THE STORE IS A STORE OPERATION TOO, AND IT IS THE ONE A DEAD
+    # STORE FAILS ON (`#13745` review round 16). `_get_proj()` runs the OPEN-TIME
+    # HEALTH PROBE (`FalkorProjection.from_uri(..., skip_health_check=False)`), so
+    # a graph that is simply DOWN raises HERE — before the write guard below ever
+    # runs. Guarding only the write therefore left the realistic case producing
+    # exit 1, a traceback and no artifact, because `main()` catches only
+    # `Refused`; the round-13 comment claimed that case was covered, and it was
+    # not. This guard is the one that covers "the store is down".
+    try:
+        sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
+        proj = sdk._get_proj()
+    except Refused:
+        raise
+    except Exception as exc:
+        raise Refused(
+            "graph_unopenable",
+            f"the graph could not be OPENED ({exc.__class__.__name__}: {exc}) — a "
+            f"store that will not answer the open-time health probe cannot be "
+            f"measured against, so this run publishes no artifact rather than a "
+            f"result about a graph it never reached",
+        ) from exc
+    # ⛔ AND THE WRITE IS A STORE OPERATION TOO (`#13745` review round 13). This
+    # one covers the NARROWER case the open probe cannot: a store that accepts
+    # the open and then refuses the write. `except Refused: raise` is what keeps a
+    # `Refused` raised INSIDE the seed (the embedder answered no vector) from
+    # being re-labelled as a store fault — see `#13745` review round 15.
+    try:
+        written = _seed_graph(proj, population)
+    except Refused:
+        raise
+    except Exception as exc:
+        raise Refused(
+            "graph_unwritable",
+            f"the population could not be written to the graph "
+            f"({exc.__class__.__name__}: {exc}) — no arm can be measured against a "
+            f"store that will not hold the cohort, so this run publishes no artifact "
+            f"rather than a result about a graph that was never seeded",
+        ) from exc
 
-    graph_vectors = len(
-        [
-            1
-            for r in proj.g.query(
-                f"MATCH (n:Point) WHERE n.id STARTS WITH '{point_prefix}' "
-                "AND n.embedding IS NOT NULL RETURN n.id"
-            ).result_set
-        ]
-    )
+    # ⛔ THE PREFIX COUNT IS A READ TOO, AND AN UNREADABLE GRAPH MUST BE A NAMED
+    # REFUSAL, NOT A TRACEBACK (`#13745` review round 12). This count is the
+    # coverage DENOMINATOR: without it there is no gate to consult, so nothing
+    # downstream can be measured — `main()` catches only `Refused`, so an
+    # exception here gave the operator exit 1, a traceback and NO artifact,
+    # bypassing every named refusal the file promises. Refuse by name instead.
+    try:
+        graph_vectors = len(
+            [
+                1
+                for r in proj.g.query(
+                    f"MATCH (n:Point) WHERE n.id STARTS WITH '{point_prefix}' "
+                    "AND n.embedding IS NOT NULL RETURN n.id"
+                ).result_set
+            ]
+        )
+    except Exception as exc:
+        raise Refused(
+            "graph_unreadable",
+            f"the graph could not be read for the coverage denominator ({exc.__class__.__name__}: "
+            f"{exc}) — nothing downstream can be measured against a store that will "
+            f"not answer, so this run publishes no artifact rather than a result "
+            f"about the wrong store",
+        ) from exc
 
     # ⛔ THE ID-SCOPED HALF (see the docstring): `coverage` is a LABEL-WIDE count
     # by design, so it verifies a tenant whose record holds SOME embedded points
@@ -1170,28 +1425,32 @@ def run_measurement(args: argparse.Namespace) -> int:
     # carries the refusal BY NAME against the one arm it blocks (exit 3) rather
     # than skipping it silently.
     population_ids = [row["id"] for row in population]
+    # ⛔ THE GRAPH HALF IS GUARDED BY THE ID-AND-TEXT QUESTION, AND IT GATES THE
+    # `graph_dense` ARM (not the run — see `require_graph_population`). The count
+    # above is PREFIX-wide, so it asks *"does this graph hold any embedded
+    # claim?"* — not *"did THIS run seed THIS population?"*. It passes over a
+    # partly seeded population (a width mismatch, a vector the fold refuses) and
+    # over a `--graph` served from a previous run.
+    # `graph_population_vectors` asks the id-and-text scoped question; it is
+    # computed HERE because it needs the graph, and consumed
+    # INSIDE the arms loop, where only `graph_dense` reads graph vectors.
+    #
+    # ⛔ AND IT REPLACES THE `graph_vectors <= 0` BRANCH THAT USED TO SIT HERE.
+    # That branch refused the whole run when the graph held no vector at all, so
+    # a box that could still publish the lexical baseline and the record
+    # comparison published NOTHING. The zero case is now just the extreme of a
+    # partly seeded population: the arm is blocked by name, the other two
+    # measure, and the exit says the run is incomplete.
+    graph_population = graph_population_vectors(proj, population)
     coverage: dict = {}
     population_vectors: int | None = None
-    # ⛔ THE GRAPH HALF STAYS RUN-LEVEL. `graph_vectors <= 0` is a fact about the
-    # population THIS TOOL just seeded, not about the record — every arm would be
-    # measuring the lexical leg, so it refuses the run by name (the case
-    # `projection/entities.py` produces by warning and leaving `n.embedding`
-    # unset on an embedding-width mismatch, after `_seed_graph` looked fine).
-    # Caught into `record_blocked` it would have recorded a GRAPH fact as a
-    # record block and stopped refusing the one case it was written for.
-    if graph_vectors <= 0:
-        raise Refused(
-            "graph_unseeded",
-            f"the graph holds {graph_vectors} vector-bearing claim(s) — the "
-            f"population was written without embeddings, so no dense leg can "
-            f"find anything and every arm would measure the lexical leg",
-        )
     if record_blocked is None:
         try:
             coverage = require_coverage(
-                record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn)
+                record_vector.coverage("point", scope, graph_vectors=graph_vectors, record_dsn=dsn),
+                denominator=graph_vectors,
             )
-            require_seeded(graph_vectors, coverage["record_vectors"])
+            require_record_measured(coverage["record_vectors"])
             # ⛔ DROP THE CACHE `coverage` JUST WROTE. The cached verdict is keyed
             # by LABEL and stored stickily, and this call supplied a POPULATION
             # count as the label's denominator — so the shipped read path, which
@@ -1208,19 +1467,27 @@ def run_measurement(args: argparse.Namespace) -> int:
 
     queries = [(row["id"], row["query"]) for row in population]
     arms: dict[str, dict] = {}
-    blocked: Refused | None = None
+    # ⛔ ONE BLOCKED-DICT, NOT ONE `blocked` — two arms can be blocked for two
+    # different reasons, and a single slot made the LAST one win: the artifact's
+    # `not_measured` note, the stderr line and the comparisons all reported one
+    # arm's cause as if it were the run's.
+    blockages: dict[str, Refused] = {}
+    if record_blocked is not None:
+        blockages[ARM_RECORD_DENSE] = record_blocked
     for arm in ARMS:
-        if arm == ARM_RECORD_DENSE:
-            gate = record_blocked
-            if gate is None:
-                try:
+        gate = blockages.get(arm)
+        if gate is None:
+            try:
+                if arm == ARM_RECORD_DENSE:
                     require_population_in_record(population_vectors, len(population_ids))
-                except Refused as exc:
-                    gate = exc
-            if gate is not None:
-                blocked = gate
-                arms[arm] = {"arm": arm, "blocked": gate.code, "message": gate.message}
-                continue
+                elif arm == ARM_GRAPH_DENSE:
+                    require_graph_population(graph_population, len(population_ids))
+            except Refused as exc:
+                gate = exc
+        if gate is not None:
+            blockages[arm] = gate
+            arms[arm] = {"arm": arm, "blocked": gate.code, "message": gate.message}
+            continue
         ranks, _traces, verdict = _read_arm(sdk, arm, queries, args.deep, _sanitise_query_text)
         arms[arm] = {
             "summary": summarise(ranks, K_PRIMARY),
@@ -1236,10 +1503,11 @@ def run_measurement(args: argparse.Namespace) -> int:
         (ARM_GRAPH_DENSE, ARM_RECORD_DENSE),
     ):
         key = f"{cand}_vs_{base}"
-        if ARM_RECORD_DENSE in (base, cand) and blocked is not None:
+        if any(a in blockages for a in (base, cand)):
             # A comparison against an arm that was blocked by name is
             # UNMEASURED — never an empty delta a reader could mistake for 0.0.
-            comparisons[key] = {"label": "UNMEASURED", "blocked": blocked.code}
+            blocking = next(blockages[a] for a in (base, cand) if a in blockages)
+            comparisons[key] = {"label": "UNMEASURED", "blocked": blocking.code}
             continue
         per_k = {
             f"k{k}": paired(arms[base]["_ranks"], arms[cand]["_ranks"], k, preregistered_n)
@@ -1296,7 +1564,17 @@ def run_measurement(args: argparse.Namespace) -> int:
             ),
         },
         "corpus": {"files": len(files), "stats": corpus_stats, "point_build": funnel},
-        "population": {"built": len(population), "written": written},
+        "population": {
+            "built": len(population),
+            "written": written,
+            # ⛔ BOTH COUNTS, because they answer different questions and the
+            # prefix-wide one passes over a partly seeded population. A reader
+            # who sees only `graph_vectors` cannot tell a full seed from a
+            # partial one; `graph_population_vectors` is the id-scoped count
+            # `require_graph_population` refused on.
+            "graph_vectors": graph_vectors,
+            "graph_population_vectors": graph_population,
+        },
         "coverage": coverage,
         "preregistered": preregistration(preregistered_n),
         "population_mismatch": (
@@ -1326,18 +1604,17 @@ def run_measurement(args: argparse.Namespace) -> int:
             "any end-to-end answer quality: the queries are verbatim spans of "
             "the claim's own text (#12186's declared self-retrieval bound)",
         ]
-        + (
-            [
-                # ⛔ THE SENTENCE IS THE REFUSAL'S OWN. `blocked` can be any of a
-                # dozen codes (no_record_dsn, no_tenant, coverage_unverified,
-                # record_unseeded, graph_unseeded, …), and only the cohort pair
-                # supports prose about a cohort the record does not hold.
-                # Keying on the code family wrote a false cause for the rest.
-                f"the `{ARM_RECORD_DENSE}` arm — BLOCKED[{blocked.code}]: {blocked.message}"
-            ]
-            if blocked is not None
-            else []
-        ),
+        + [
+            # ⛔ THE SENTENCE IS THE REFUSAL'S OWN. Each code can be any of a
+            # dozen (no_record_dsn, no_tenant, coverage_unverified,
+            # record_unseeded, graph_population_absent, …), and only some support
+            # prose about a cohort. Keying on the code family wrote a false cause
+            # for the rest. ONE NOTE PER BLOCKED ARM: two arms can be blocked for
+            # two reasons, and the earlier single-slot version reported whichever
+            # came last as if it were the run's only cause.
+            f"the `{arm}` arm — BLOCKED[{exc.code}]: {exc.message}"
+            for arm, exc in blockages.items()
+        ],
     }
     out = Path(args.out) if args.out else None
     text = json.dumps(artifact, indent=2, sort_keys=True)
@@ -1352,12 +1629,17 @@ def run_measurement(args: argparse.Namespace) -> int:
     # arm: it wrote the artifact, printed only `wrote …`, and reported success.
     # The one signal the run promises was dead on every documented invocation,
     # and it is the false-PASS class this file exists to close.
-    if blocked is not None:
+    for exc in blockages.values():
         # ⛔ THE ARTIFACT IS WRITTEN FIRST, THEN THE REFUSAL IS NAMED. The arms
-        # that need no record cohort are real measurements and are kept; the
+        # that need no blocked cohort are real measurements and are kept; the
         # exit says the run is INCOMPLETE, so no caller can mistake it for the
-        # paired answer the pre-registration exists to price.
-        print(f"REFUSED[{blocked.code}]: {blocked.message}", file=sys.stderr)
+        # paired answer the pre-registration exists to price. One line per
+        # blocked arm — a run with two different causes names both.
+        print(f"REFUSED[{exc.code}]: {exc.message}", file=sys.stderr)
+    # ⛔ DERIVED FROM `blockages`, WHICH IS SEEDED FROM `record_blocked` TOO — so
+    # this is the aggregate of every gate, not the DSN/tenant lookalike. The
+    # single `return _exit_code(blocked)` at the end stays the one exit.
+    blocked = next(iter(blockages.values()), None)
     return _exit_code(blocked)
 
 

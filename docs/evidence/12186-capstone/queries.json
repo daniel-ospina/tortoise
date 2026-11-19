@@ -1,0 +1,6341 @@
+{
+ "built_at": "2026-11-18T23:28:26Z",
+ "corpus": {
+  "dir": "/Users/danielospina/.tortoise/session-events",
+  "elapsed_s": 729.0,
+  "files": 104,
+  "harvested_distinct": {
+   "definite": 1320079,
+   "ident": 59324,
+   "path": 26166
+  },
+  "lines": 122912,
+  "parse_errors": 0,
+  "records_without_text": 0
+ },
+ "digest": "90122e99a38caf45",
+ "issue": "12186",
+ "population_rows": [
+  {
+   "cls": "definite",
+   "id": "cap-000000",
+   "name": "the repo",
+   "records": 21915
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000001",
+   "name": "the diff",
+   "records": 18400
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000002",
+   "name": "the code",
+   "records": 15269
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000003",
+   "name": "the file",
+   "records": 15103
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000004",
+   "name": "the worktree",
+   "records": 13197
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000005",
+   "name": "the comment",
+   "records": 12349
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000006",
+   "name": "the fix",
+   "records": 10879
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000007",
+   "name": "the new",
+   "records": 10552
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000008",
+   "name": "the guard",
+   "records": 9869
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000009",
+   "name": "the issue",
+   "records": 9282
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000010",
+   "name": "the pre-fix code",
+   "records": 9163
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000011",
+   "name": "the changed files",
+   "records": 9099
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000012",
+   "name": "the test",
+   "records": 8738
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000013",
+   "name": "the gate",
+   "records": 8094
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000014",
+   "name": "the plan",
+   "records": 7911
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000015",
+   "name": "the diff hunks",
+   "records": 7324
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000016",
+   "name": "the discipline",
+   "records": 7201
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000017",
+   "name": "the file is never selected",
+   "records": 7148
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000018",
+   "name": "the merge-gate audit artifact",
+   "records": 7148
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000019",
+   "name": "the manifest-integrity leg fails",
+   "records": 7146
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000020",
+   "name": "the branch",
+   "records": 7107
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000021",
+   "name": "the suite",
+   "records": 6672
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000022",
+   "name": "the body",
+   "records": 6437
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000023",
+   "name": "the real",
+   "records": 6233
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000024",
+   "name": "the review",
+   "records": 6132
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000025",
+   "name": "the exact",
+   "records": 6058
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000026",
+   "name": "the tool",
+   "records": 5752
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000027",
+   "name": "the repository root",
+   "records": 5593
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000028",
+   "name": "the home directory",
+   "records": 5575
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000029",
+   "name": "the fixer runs tests",
+   "records": 5569
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000030",
+   "name": "the change",
+   "records": 5417
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000031",
+   "name": "the existing",
+   "records": 5012
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000032",
+   "name": "the tests",
+   "records": 4994
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000033",
+   "name": "the owner",
+   "records": 4964
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000034",
+   "name": "the head",
+   "records": 4869
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000035",
+   "name": "the artifact",
+   "records": 4600
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000036",
+   "name": "the full",
+   "records": 4542
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000037",
+   "name": "the commit",
+   "records": 4444
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000038",
+   "name": "the claim",
+   "records": 4299
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000039",
+   "name": "the model",
+   "records": 4223
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000040",
+   "name": "the doc",
+   "records": 4210
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000041",
+   "name": "the record",
+   "records": 4192
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000042",
+   "name": "the test file",
+   "records": 4114
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000043",
+   "name": "the docstring",
+   "records": 4106
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000044",
+   "name": "the module",
+   "records": 4071
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000045",
+   "name": "the finding",
+   "records": 3936
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000046",
+   "name": "the tree",
+   "records": 3676
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000047",
+   "name": "the evidence",
+   "records": 3623
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000048",
+   "name": "the report",
+   "records": 3609
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000049",
+   "name": "the rail",
+   "records": 3589
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000050",
+   "name": "the delta",
+   "records": 3561
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000051",
+   "name": "the merge",
+   "records": 3549
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000052",
+   "name": "the old",
+   "records": 3483
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000053",
+   "name": "the end",
+   "records": 3480
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000054",
+   "name": "the brief",
+   "records": 3398
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000055",
+   "name": "the reason",
+   "records": 3343
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000056",
+   "name": "the project root",
+   "records": 3342
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000057",
+   "name": "the config gap",
+   "records": 3284
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000058",
+   "name": "the row",
+   "records": 3273
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000059",
+   "name": "the error you saw",
+   "records": 3269
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000060",
+   "name": "the lane was never asked",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000061",
+   "name": "the rung in the",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000062",
+   "name": "the rung is not allowed",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000063",
+   "name": "the rung you took",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000064",
+   "name": "the rung you will actually",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000065",
+   "name": "the tracker already held",
+   "records": 3267
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000066",
+   "name": "the three",
+   "records": 3208
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000067",
+   "name": "the verdict",
+   "records": 3144
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000068",
+   "name": "the reviewer",
+   "records": 3130
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000069",
+   "name": "the literal",
+   "records": 3046
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000070",
+   "name": "the skill",
+   "records": 2983
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000071",
+   "name": "the count",
+   "records": 2916
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000072",
+   "name": "the worktree and reading the",
+   "records": 2904
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000073",
+   "name": "the loop",
+   "records": 2879
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000074",
+   "name": "the live",
+   "records": 2873
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000075",
+   "name": "the pin",
+   "records": 2867
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000076",
+   "name": "the full suite",
+   "records": 2851
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000077",
+   "name": "the run",
+   "records": 2830
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000078",
+   "name": "the pre",
+   "records": 2804
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000079",
+   "name": "the test suite",
+   "records": 2762
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000080",
+   "name": "the source",
+   "records": 2739
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000081",
+   "name": "the pre-existing",
+   "records": 2727
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000082",
+   "name": "the caller",
+   "records": 2715
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000083",
+   "name": "the lane",
+   "records": 2698
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000084",
+   "name": "the tracker",
+   "records": 2693
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000085",
+   "name": "the defect",
+   "records": 2681
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000086",
+   "name": "the tortoise repo",
+   "records": 2679
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000087",
+   "name": "the fixes",
+   "records": 2662
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000088",
+   "name": "the script",
+   "records": 2661
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000089",
+   "name": "the working tree",
+   "records": 2604
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000090",
+   "name": "the actual",
+   "records": 2520
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000091",
+   "name": "the full diff",
+   "records": 2510
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000092",
+   "name": "the harness",
+   "records": 2508
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000093",
+   "name": "the default",
+   "records": 2503
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000094",
+   "name": "the graph",
+   "records": 2503
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000095",
+   "name": "the shared",
+   "records": 2452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000096",
+   "name": "the documented",
+   "records": 2449
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000097",
+   "name": "the probe",
+   "records": 2410
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000098",
+   "name": "the check",
+   "records": 2398
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000099",
+   "name": "the new head",
+   "records": 2397
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000100",
+   "name": "the current",
+   "records": 2396
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000101",
+   "name": "the line",
+   "records": 2395
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000102",
+   "name": "the issue is already fixed",
+   "records": 2360
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000103",
+   "name": "the earlier review comments on",
+   "records": 2358
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000104",
+   "name": "the files",
+   "records": 2309
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000105",
+   "name": "the marker",
+   "records": 2302
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000106",
+   "name": "the workflow",
+   "records": 2288
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000107",
+   "name": "the task",
+   "records": 2256
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000108",
+   "name": "the new test",
+   "records": 2240
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000109",
+   "name": "the mechanism",
+   "records": 2235
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000110",
+   "name": "the key",
+   "records": 2234
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000111",
+   "name": "the fixture",
+   "records": 2210
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000112",
+   "name": "the current state of the",
+   "records": 2194
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000113",
+   "name": "the table",
+   "records": 2192
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000114",
+   "name": "the author",
+   "records": 2168
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000115",
+   "name": "the header",
+   "records": 2106
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000116",
+   "name": "the decision",
+   "records": 2085
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000117",
+   "name": "the opposite",
+   "records": 2063
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000118",
+   "name": "the list",
+   "records": 2060
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000119",
+   "name": "the four",
+   "records": 2047
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000120",
+   "name": "the seam",
+   "records": 2047
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000121",
+   "name": "the session",
+   "records": 2030
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000122",
+   "name": "the commit message",
+   "records": 2029
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000123",
+   "name": "the function",
+   "records": 1971
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000124",
+   "name": "the helper",
+   "records": 1943
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000125",
+   "name": "the current head",
+   "records": 1927
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000126",
+   "name": "the sibling",
+   "records": 1912
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000127",
+   "name": "the plan doc",
+   "records": 1910
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000128",
+   "name": "the class",
+   "records": 1900
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000129",
+   "name": "the repo root",
+   "records": 1896
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000130",
+   "name": "the findings",
+   "records": 1864
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000131",
+   "name": "the window",
+   "records": 1844
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000132",
+   "name": "the page",
+   "records": 1838
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000133",
+   "name": "the result",
+   "records": 1828
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000134",
+   "name": "the message",
+   "records": 1826
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000135",
+   "name": "the main checkout",
+   "records": 1818
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000136",
+   "name": "the user",
+   "records": 1813
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000137",
+   "name": "the full review is the",
+   "records": 1805
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000138",
+   "name": "the sweep",
+   "records": 1798
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000139",
+   "name": "the cap",
+   "records": 1794
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000140",
+   "name": "the conflict",
+   "records": 1788
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000141",
+   "name": "the build",
+   "records": 1771
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000142",
+   "name": "the staged diff",
+   "records": 1765
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000143",
+   "name": "the document",
+   "records": 1761
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000144",
+   "name": "the mutation",
+   "records": 1738
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000145",
+   "name": "the word",
+   "records": 1738
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000146",
+   "name": "the index",
+   "records": 1709
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000147",
+   "name": "the full test suite",
+   "records": 1705
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000148",
+   "name": "the parent",
+   "records": 1682
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000149",
+   "name": "the command",
+   "records": 1670
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000150",
+   "name": "the required",
+   "records": 1664
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000151",
+   "name": "the base",
+   "records": 1655
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000152",
+   "name": "the cause as well",
+   "records": 1649
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000153",
+   "name": "the write",
+   "records": 1631
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000154",
+   "name": "the docs",
+   "records": 1628
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000155",
+   "name": "the assertion",
+   "records": 1612
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000156",
+   "name": "the actual code",
+   "records": 1609
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000157",
+   "name": "the diff with",
+   "records": 1590
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000158",
+   "name": "the block",
+   "records": 1586
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000159",
+   "name": "the registry",
+   "records": 1586
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000160",
+   "name": "the deliverable",
+   "records": 1579
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000161",
+   "name": "the fleet",
+   "records": 1575
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000162",
+   "name": "the stale",
+   "records": 1542
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000163",
+   "name": "the epic",
+   "records": 1533
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000164",
+   "name": "the app",
+   "records": 1531
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000165",
+   "name": "the three files",
+   "records": 1524
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000166",
+   "name": "the raw",
+   "records": 1519
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000167",
+   "name": "the manifest",
+   "records": 1518
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000168",
+   "name": "the targeted tests",
+   "records": 1514
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000169",
+   "name": "the scope",
+   "records": 1512
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000170",
+   "name": "the failure",
+   "records": 1511
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000171",
+   "name": "the operator",
+   "records": 1493
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000172",
+   "name": "the single",
+   "records": 1481
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000173",
+   "name": "the sentence",
+   "records": 1478
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000174",
+   "name": "the rule",
+   "records": 1470
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000175",
+   "name": "the single line",
+   "records": 1455
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000176",
+   "name": "the shipped",
+   "records": 1453
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000177",
+   "name": "the attestation",
+   "records": 1452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000178",
+   "name": "the concrete fix",
+   "records": 1441
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000179",
+   "name": "the number",
+   "records": 1441
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000180",
+   "name": "the log",
+   "records": 1440
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000181",
+   "name": "the string",
+   "records": 1440
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000182",
+   "name": "the path",
+   "records": 1433
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000183",
+   "name": "the target",
+   "records": 1429
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000184",
+   "name": "the refusal",
+   "records": 1423
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000185",
+   "name": "the full picture",
+   "records": 1410
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000186",
+   "name": "the bare",
+   "records": 1405
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000187",
+   "name": "the dashboard",
+   "records": 1405
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000188",
+   "name": "the implementation",
+   "records": 1399
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000189",
+   "name": "the branch is behind",
+   "records": 1396
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000190",
+   "name": "the design",
+   "records": 1394
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000191",
+   "name": "the contract",
+   "records": 1389
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000192",
+   "name": "the new tests",
+   "records": 1383
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000193",
+   "name": "the false",
+   "records": 1373
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000194",
+   "name": "the server",
+   "records": 1370
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000195",
+   "name": "the product",
+   "records": 1368
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000196",
+   "name": "the bound",
+   "records": 1361
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000197",
+   "name": "the wrong reason",
+   "records": 1361
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000198",
+   "name": "the residual",
+   "records": 1355
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000199",
+   "name": "the sibling suites the review",
+   "records": 1327
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000200",
+   "name": "the token",
+   "records": 1325
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000201",
+   "name": "the conflict is the whole",
+   "records": 1319
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000202",
+   "name": "the fix at the stated",
+   "records": 1319
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000203",
+   "name": "the original",
+   "records": 1318
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000204",
+   "name": "the final",
+   "records": 1307
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000205",
+   "name": "the writer",
+   "records": 1305
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000206",
+   "name": "the job",
+   "records": 1295
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000207",
+   "name": "the module docstring",
+   "records": 1282
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000208",
+   "name": "the predicate",
+   "records": 1279
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000209",
+   "name": "the copy",
+   "records": 1278
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000210",
+   "name": "the field",
+   "records": 1272
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000211",
+   "name": "the runner",
+   "records": 1271
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000212",
+   "name": "the step",
+   "records": 1268
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000213",
+   "name": "the canonical",
+   "records": 1265
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000214",
+   "name": "the migration",
+   "records": 1253
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000215",
+   "name": "the value",
+   "records": 1253
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000216",
+   "name": "the minimal fix",
+   "records": 1237
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000217",
+   "name": "the flag",
+   "records": 1231
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000218",
+   "name": "the lock",
+   "records": 1217
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000219",
+   "name": "the verification steps",
+   "records": 1216
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000220",
+   "name": "the verification checks",
+   "records": 1213
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000221",
+   "name": "the controller",
+   "records": 1200
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000222",
+   "name": "the reader",
+   "records": 1200
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000223",
+   "name": "the remaining",
+   "records": 1190
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000224",
+   "name": "the send",
+   "records": 1176
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000225",
+   "name": "the fallback",
+   "records": 1167
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000226",
+   "name": "the state",
+   "records": 1167
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000227",
+   "name": "the codebase",
+   "records": 1163
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000228",
+   "name": "the public",
+   "records": 1162
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000229",
+   "name": "the issue body",
+   "records": 1161
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000230",
+   "name": "the review skill and gathering",
+   "records": 1147
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000231",
+   "name": "the docker lane",
+   "records": 1144
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000232",
+   "name": "the read",
+   "records": 1140
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000233",
+   "name": "the boundary",
+   "records": 1136
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000234",
+   "name": "the journal",
+   "records": 1136
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000235",
+   "name": "the work",
+   "records": 1136
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000236",
+   "name": "the baseline",
+   "records": 1133
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000237",
+   "name": "the hosted",
+   "records": 1128
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000238",
+   "name": "the filesystem for an interpreter",
+   "records": 1123
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000239",
+   "name": "the worktree state",
+   "records": 1118
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000240",
+   "name": "the name",
+   "records": 1114
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000241",
+   "name": "the exit code",
+   "records": 1112
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000242",
+   "name": "the pass",
+   "records": 1109
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000243",
+   "name": "the gap",
+   "records": 1104
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000244",
+   "name": "the verifier",
+   "records": 1095
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000245",
+   "name": "the committed",
+   "records": 1080
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000246",
+   "name": "the map",
+   "records": 1077
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000247",
+   "name": "the shape",
+   "records": 1073
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000248",
+   "name": "the root",
+   "records": 1072
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000249",
+   "name": "the earlier",
+   "records": 1065
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000250",
+   "name": "the bug",
+   "records": 1064
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000251",
+   "name": "the merged",
+   "records": 1055
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000252",
+   "name": "the suite green",
+   "records": 1054
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000253",
+   "name": "the surface",
+   "records": 1053
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000254",
+   "name": "the prose",
+   "records": 1050
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000255",
+   "name": "the review discipline",
+   "records": 1046
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000256",
+   "name": "the daemon",
+   "records": 1044
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000257",
+   "name": "the artifacts",
+   "records": 1043
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000258",
+   "name": "the verification",
+   "records": 1043
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000259",
+   "name": "the call",
+   "records": 1041
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000260",
+   "name": "the local",
+   "records": 1033
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000261",
+   "name": "the changed files in full",
+   "records": 1030
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000262",
+   "name": "the constant",
+   "records": 1026
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000263",
+   "name": "the point",
+   "records": 1020
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000264",
+   "name": "the shared main checkout",
+   "records": 1017
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000265",
+   "name": "the sha256 of each file",
+   "records": 1014
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000266",
+   "name": "the payload",
+   "records": 1008
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000267",
+   "name": "the hub",
+   "records": 1005
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000268",
+   "name": "the rebase",
+   "records": 1001
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000269",
+   "name": "the queue",
+   "records": 999
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000270",
+   "name": "the diff and the relevant",
+   "records": 997
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000271",
+   "name": "the floor",
+   "records": 992
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000272",
+   "name": "the output",
+   "records": 987
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000273",
+   "name": "the recorded",
+   "records": 987
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000274",
+   "name": "the failing check",
+   "records": 985
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000275",
+   "name": "the handler",
+   "records": 984
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000276",
+   "name": "the current state",
+   "records": 982
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000277",
+   "name": "the child",
+   "records": 981
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000278",
+   "name": "the arm",
+   "records": 980
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000279",
+   "name": "the runbook",
+   "records": 980
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000280",
+   "name": "the four files",
+   "records": 976
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000281",
+   "name": "the checks",
+   "records": 968
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000282",
+   "name": "the exact line",
+   "records": 964
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000283",
+   "name": "the final line",
+   "records": 960
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000284",
+   "name": "the new test file",
+   "records": 958
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000285",
+   "name": "the code-review skill",
+   "records": 956
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000286",
+   "name": "the research skill",
+   "records": 953
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000287",
+   "name": "the review gate",
+   "records": 952
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000288",
+   "name": "the set",
+   "records": 949
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000289",
+   "name": "the store",
+   "records": 944
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000290",
+   "name": "the clause",
+   "records": 937
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000291",
+   "name": "the pattern",
+   "records": 934
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000292",
+   "name": "the measurement",
+   "records": 932
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000293",
+   "name": "the failures",
+   "records": 930
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000294",
+   "name": "the fold",
+   "records": 928
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000295",
+   "name": "the label",
+   "records": 926
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000296",
+   "name": "the node",
+   "records": 924
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000297",
+   "name": "the hash",
+   "records": 919
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000298",
+   "name": "the cause",
+   "records": 918
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000299",
+   "name": "the driver",
+   "records": 916
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000300",
+   "name": "the fake",
+   "records": 914
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000301",
+   "name": "the text",
+   "records": 906
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000302",
+   "name": "the five",
+   "records": 899
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000303",
+   "name": "the spec",
+   "records": 899
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000304",
+   "name": "the problem",
+   "records": 896
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000305",
+   "name": "the removed",
+   "records": 893
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000306",
+   "name": "the prompt",
+   "records": 892
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000307",
+   "name": "the pre-fix code at",
+   "records": 890
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000308",
+   "name": "the project root above",
+   "records": 889
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000309",
+   "name": "the invariant",
+   "records": 886
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000310",
+   "name": "the commit instead of fixing",
+   "records": 884
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000311",
+   "name": "the earlier fix attempts on",
+   "records": 884
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000312",
+   "name": "the note",
+   "records": 884
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000313",
+   "name": "the ledger",
+   "records": 878
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000314",
+   "name": "the ruling",
+   "records": 875
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000315",
+   "name": "the outcome",
+   "records": 871
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000316",
+   "name": "the files above",
+   "records": 870
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000317",
+   "name": "the end of the run",
+   "records": 869
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000318",
+   "name": "the counts",
+   "records": 868
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000319",
+   "name": "the legacy",
+   "records": 868
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000320",
+   "name": "the modified files",
+   "records": 865
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000321",
+   "name": "the relevant files",
+   "records": 865
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000322",
+   "name": "the renderer",
+   "records": 863
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000323",
+   "name": "the tree before you touch",
+   "records": 860
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000324",
+   "name": "the tree worse",
+   "records": 860
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000325",
+   "name": "the wrong work",
+   "records": 860
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000326",
+   "name": "the merge chain reads",
+   "records": 858
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000327",
+   "name": "the shape this rule exists",
+   "records": 858
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000328",
+   "name": "the tree you just found",
+   "records": 858
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000329",
+   "name": "the worktree being reaped",
+   "records": 858
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000330",
+   "name": "the run id and the",
+   "records": 845
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000331",
+   "name": "the projection",
+   "records": 833
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000332",
+   "name": "the tail",
+   "records": 833
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000333",
+   "name": "the pinned",
+   "records": 828
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000334",
+   "name": "the sha256 of each of",
+   "records": 826
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000335",
+   "name": "the pre-fix",
+   "records": 822
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000336",
+   "name": "the client",
+   "records": 819
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000337",
+   "name": "the push",
+   "records": 818
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000338",
+   "name": "the classifier",
+   "records": 812
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000339",
+   "name": "the research pass",
+   "records": 812
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000340",
+   "name": "the checkout",
+   "records": 811
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000341",
+   "name": "the entry",
+   "records": 807
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000342",
+   "name": "the explicit",
+   "records": 807
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000343",
+   "name": "the added",
+   "records": 800
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000344",
+   "name": "the config",
+   "records": 798
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000345",
+   "name": "the missing",
+   "records": 797
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000346",
+   "name": "the section",
+   "records": 797
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000347",
+   "name": "the claims",
+   "records": 796
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000348",
+   "name": "the root cause",
+   "records": 796
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000349",
+   "name": "the summary",
+   "records": 796
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000350",
+   "name": "the shell",
+   "records": 794
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000351",
+   "name": "the merge commit",
+   "records": 781
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000352",
+   "name": "the fix commit",
+   "records": 779
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000353",
+   "name": "the resolver",
+   "records": 777
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000354",
+   "name": "the process",
+   "records": 776
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000355",
+   "name": "the description",
+   "records": 775
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000356",
+   "name": "the code does not support",
+   "records": 774
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000357",
+   "name": "the staged diff and the",
+   "records": 774
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000358",
+   "name": "the declaration",
+   "records": 766
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000359",
+   "name": "the phrase",
+   "records": 766
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000360",
+   "name": "the final head",
+   "records": 763
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000361",
+   "name": "the answer",
+   "records": 760
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000362",
+   "name": "the capture",
+   "records": 760
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000363",
+   "name": "the worktree root",
+   "records": 757
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000364",
+   "name": "the corrected",
+   "records": 754
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000365",
+   "name": "the hook",
+   "records": 753
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000366",
+   "name": "the reviewed head",
+   "records": 752
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000367",
+   "name": "the stub",
+   "records": 752
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000368",
+   "name": "the environment",
+   "records": 750
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000369",
+   "name": "the producer",
+   "records": 750
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000370",
+   "name": "the literal line",
+   "records": 746
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000371",
+   "name": "the mandated",
+   "records": 745
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000372",
+   "name": "the snapshot",
+   "records": 745
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000373",
+   "name": "the post",
+   "records": 744
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000374",
+   "name": "the embedded lane",
+   "records": 737
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000375",
+   "name": "the form",
+   "records": 737
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000376",
+   "name": "the suites",
+   "records": 737
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000377",
+   "name": "the call site",
+   "records": 736
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000378",
+   "name": "the specific fix",
+   "records": 736
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000379",
+   "name": "the split",
+   "records": 734
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000380",
+   "name": "the parser",
+   "records": 733
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000381",
+   "name": "the trigger",
+   "records": 733
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000382",
+   "name": "the unconditional",
+   "records": 723
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000383",
+   "name": "the repo state and the",
+   "records": 721
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000384",
+   "name": "the declared",
+   "records": 719
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000385",
+   "name": "the open",
+   "records": 719
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000386",
+   "name": "the reaper",
+   "records": 716
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000387",
+   "name": "the register",
+   "records": 713
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000388",
+   "name": "the extractor",
+   "records": 711
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000389",
+   "name": "the parenthetical",
+   "records": 711
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000390",
+   "name": "the staged",
+   "records": 706
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000391",
+   "name": "the agent",
+   "records": 699
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000392",
+   "name": "the anchor",
+   "records": 699
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000393",
+   "name": "the project",
+   "records": 696
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000394",
+   "name": "the question",
+   "records": 696
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000395",
+   "name": "the regex",
+   "records": 695
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000396",
+   "name": "the identical",
+   "records": 689
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000397",
+   "name": "the prior",
+   "records": 684
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000398",
+   "name": "the issues",
+   "records": 681
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000399",
+   "name": "the review comment",
+   "records": 680
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000400",
+   "name": "the actual files",
+   "records": 679
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000401",
+   "name": "the edge",
+   "records": 679
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000402",
+   "name": "the repo and reading the",
+   "records": 679
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000403",
+   "name": "the audit",
+   "records": 676
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000404",
+   "name": "the pool",
+   "records": 676
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000405",
+   "name": "the remote",
+   "records": 675
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000406",
+   "name": "the review skill",
+   "records": 675
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000407",
+   "name": "the edits",
+   "records": 674
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000408",
+   "name": "the six",
+   "records": 673
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000409",
+   "name": "the repository state and the",
+   "records": 672
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000410",
+   "name": "the request",
+   "records": 671
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000411",
+   "name": "the deleted",
+   "records": 670
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000412",
+   "name": "the git worktree",
+   "records": 667
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000413",
+   "name": "the control",
+   "records": 666
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000414",
+   "name": "the engine",
+   "records": 664
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000415",
+   "name": "the scan",
+   "records": 663
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000416",
+   "name": "the top",
+   "records": 662
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000417",
+   "name": "the bar",
+   "records": 661
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000418",
+   "name": "the comment at",
+   "records": 660
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000419",
+   "name": "the id",
+   "records": 660
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000420",
+   "name": "the orchestrator",
+   "records": 658
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000421",
+   "name": "the campaign",
+   "records": 656
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000422",
+   "name": "the census",
+   "records": 652
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000423",
+   "name": "the concrete failure",
+   "records": 652
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000424",
+   "name": "the endpoint",
+   "records": 651
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000425",
+   "name": "the extension",
+   "records": 648
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000426",
+   "name": "the comments",
+   "records": 647
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000427",
+   "name": "the box",
+   "records": 645
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000428",
+   "name": "the entire",
+   "records": 645
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000429",
+   "name": "the try",
+   "records": 645
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000430",
+   "name": "the correct",
+   "records": 644
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000431",
+   "name": "the union",
+   "records": 642
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000432",
+   "name": "the stated",
+   "records": 640
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000433",
+   "name": "the wizard",
+   "records": 638
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000434",
+   "name": "the worktree state and the",
+   "records": 636
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000435",
+   "name": "the watchdog",
+   "records": 634
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000436",
+   "name": "the staged content",
+   "records": 623
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000437",
+   "name": "the exact command",
+   "records": 622
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000438",
+   "name": "the browser",
+   "records": 618
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000439",
+   "name": "the budget",
+   "records": 618
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000440",
+   "name": "the embedded",
+   "records": 618
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000441",
+   "name": "the generator",
+   "records": 618
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000442",
+   "name": "the card",
+   "records": 617
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000443",
+   "name": "the leg",
+   "records": 617
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000444",
+   "name": "the merge rail",
+   "records": 615
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000445",
+   "name": "the trailing",
+   "records": 615
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000446",
+   "name": "the host",
+   "records": 610
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000447",
+   "name": "the installer",
+   "records": 607
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000448",
+   "name": "the numbers",
+   "records": 606
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000449",
+   "name": "the correction",
+   "records": 604
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000450",
+   "name": "the property",
+   "records": 601
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000451",
+   "name": "the verification gate",
+   "records": 601
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000452",
+   "name": "the repo at",
+   "records": 600
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000453",
+   "name": "the scoping doc",
+   "records": 600
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000454",
+   "name": "the main",
+   "records": 599
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000455",
+   "name": "the new code",
+   "records": 592
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000456",
+   "name": "the instrument",
+   "records": 591
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000457",
+   "name": "the behaviour",
+   "records": 588
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000458",
+   "name": "the changed",
+   "records": 586
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000459",
+   "name": "the bundle",
+   "records": 582
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000460",
+   "name": "the mac",
+   "records": 582
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000461",
+   "name": "the response",
+   "records": 580
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000462",
+   "name": "the dead",
+   "records": 579
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000463",
+   "name": "the before",
+   "records": 576
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000464",
+   "name": "the retry",
+   "records": 574
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000465",
+   "name": "the event loop",
+   "records": 573
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000466",
+   "name": "the merged tree",
+   "records": 573
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000467",
+   "name": "the changed code",
+   "records": 572
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000468",
+   "name": "the docker",
+   "records": 569
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000469",
+   "name": "the carve-out",
+   "records": 565
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000470",
+   "name": "the draft",
+   "records": 565
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000471",
+   "name": "the non",
+   "records": 565
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000472",
+   "name": "the per",
+   "records": 565
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000473",
+   "name": "the test suites",
+   "records": 565
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000474",
+   "name": "the previous",
+   "records": 564
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000475",
+   "name": "the new file",
+   "records": 562
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000476",
+   "name": "the journey",
+   "records": 561
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000477",
+   "name": "the fixer",
+   "records": 560
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000478",
+   "name": "the selector",
+   "records": 559
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000479",
+   "name": "the empty",
+   "records": 558
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000480",
+   "name": "the machine",
+   "records": 557
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000481",
+   "name": "the receipt",
+   "records": 557
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000482",
+   "name": "the gates",
+   "records": 555
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000483",
+   "name": "the previous round",
+   "records": 554
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000484",
+   "name": "the query",
+   "records": 554
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000485",
+   "name": "the inline",
+   "records": 553
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000486",
+   "name": "the resolution",
+   "records": 553
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000487",
+   "name": "the write path",
+   "records": 552
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000488",
+   "name": "the title",
+   "records": 550
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000489",
+   "name": "the premise",
+   "records": 549
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000490",
+   "name": "the background",
+   "records": 548
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000491",
+   "name": "the case",
+   "records": 547
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000492",
+   "name": "the error",
+   "records": 546
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000493",
+   "name": "the sha256 of the file",
+   "records": 543
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000494",
+   "name": "the profile",
+   "records": 542
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000495",
+   "name": "the hashes",
+   "records": 537
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000496",
+   "name": "the mutant",
+   "records": 537
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000497",
+   "name": "the top of",
+   "records": 535
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000498",
+   "name": "the truth",
+   "records": 535
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000499",
+   "name": "the current code",
+   "records": 533
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000500",
+   "name": "the crux",
+   "records": 532
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000501",
+   "name": "the shipped code",
+   "records": 531
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000502",
+   "name": "the full file",
+   "records": 530
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000503",
+   "name": "the real code",
+   "records": 528
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000504",
+   "name": "the wrapper",
+   "records": 525
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000505",
+   "name": "the human anything",
+   "records": 524
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000506",
+   "name": "the remedy",
+   "records": 523
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000507",
+   "name": "the ordering",
+   "records": 522
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000508",
+   "name": "the comparison",
+   "records": 521
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000509",
+   "name": "the test files",
+   "records": 521
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000510",
+   "name": "the wrong",
+   "records": 521
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000511",
+   "name": "the edit",
+   "records": 520
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000512",
+   "name": "the intended",
+   "records": 520
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000513",
+   "name": "the pipeline",
+   "records": 520
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000514",
+   "name": "the reverse",
+   "records": 520
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000515",
+   "name": "the filter",
+   "records": 519
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000516",
+   "name": "the diff touches",
+   "records": 517
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000517",
+   "name": "the hub checkout",
+   "records": 517
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000518",
+   "name": "the current tree",
+   "records": 516
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000519",
+   "name": "the red",
+   "records": 515
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000520",
+   "name": "the cache",
+   "records": 514
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000521",
+   "name": "the ceiling",
+   "records": 514
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000522",
+   "name": "the matrix",
+   "records": 512
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000523",
+   "name": "the vendor",
+   "records": 511
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000524",
+   "name": "the duplicate",
+   "records": 510
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000525",
+   "name": "the site",
+   "records": 510
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000526",
+   "name": "the staged change",
+   "records": 509
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000527",
+   "name": "the exception",
+   "records": 508
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000528",
+   "name": "the link",
+   "records": 508
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000529",
+   "name": "the mint",
+   "records": 507
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000530",
+   "name": "the required research pass",
+   "records": 507
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000531",
+   "name": "the import",
+   "records": 502
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000532",
+   "name": "the template",
+   "records": 500
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000533",
+   "name": "the actual diff",
+   "records": 497
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000534",
+   "name": "the contradiction test",
+   "records": 497
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000535",
+   "name": "the chain",
+   "records": 496
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000536",
+   "name": "the merge base",
+   "records": 495
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000537",
+   "name": "the account",
+   "records": 493
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000538",
+   "name": "the standard",
+   "records": 493
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000539",
+   "name": "the corpus",
+   "records": 491
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000540",
+   "name": "the batch",
+   "records": 490
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000541",
+   "name": "the authority",
+   "records": 486
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000542",
+   "name": "the key files",
+   "records": 486
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000543",
+   "name": "the pair",
+   "records": 486
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000544",
+   "name": "the repository",
+   "records": 485
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000545",
+   "name": "the status",
+   "records": 485
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000546",
+   "name": "the data",
+   "records": 482
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000547",
+   "name": "the platform",
+   "records": 479
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000548",
+   "name": "the generic",
+   "records": 478
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000549",
+   "name": "the counter",
+   "records": 477
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000550",
+   "name": "the relevant code",
+   "records": 477
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000551",
+   "name": "the definition",
+   "records": 476
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000552",
+   "name": "the measured",
+   "records": 476
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000553",
+   "name": "the sdk",
+   "records": 476
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000554",
+   "name": "the staged blob",
+   "records": 476
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000555",
+   "name": "the confirmed problem",
+   "records": 475
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000556",
+   "name": "the banner",
+   "records": 473
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000557",
+   "name": "the staged files",
+   "records": 473
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000558",
+   "name": "the route",
+   "records": 472
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000559",
+   "name": "the org",
+   "records": 471
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000560",
+   "name": "the dispatch",
+   "records": 469
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000561",
+   "name": "the extras",
+   "records": 469
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000562",
+   "name": "the message with the",
+   "records": 469
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000563",
+   "name": "the agent-infra repo",
+   "records": 467
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000564",
+   "name": "the allowlist",
+   "records": 466
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000565",
+   "name": "the divergence",
+   "records": 465
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000566",
+   "name": "the bridge",
+   "records": 464
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000567",
+   "name": "the cell",
+   "records": 463
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000568",
+   "name": "the sentinel",
+   "records": 461
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000569",
+   "name": "the git worktree at",
+   "records": 457
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000570",
+   "name": "the live head",
+   "records": 455
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000571",
+   "name": "the drift",
+   "records": 454
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000572",
+   "name": "the five files",
+   "records": 454
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000573",
+   "name": "the plist",
+   "records": 453
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000574",
+   "name": "the third",
+   "records": 453
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000575",
+   "name": "the expected",
+   "records": 452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000576",
+   "name": "the merge-base",
+   "records": 452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000577",
+   "name": "the primary source",
+   "records": 452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000578",
+   "name": "the surrounding code",
+   "records": 452
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000579",
+   "name": "the read tool",
+   "records": 451
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000580",
+   "name": "the event",
+   "records": 450
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000581",
+   "name": "the right reason",
+   "records": 450
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000582",
+   "name": "the walk",
+   "records": 449
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000583",
+   "name": "the mandatory",
+   "records": 448
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000584",
+   "name": "the body where they disagree",
+   "records": 447
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000585",
+   "name": "the merged head",
+   "records": 446
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000586",
+   "name": "the worktree at",
+   "records": 446
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000587",
+   "name": "the enumeration",
+   "records": 445
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000588",
+   "name": "the protocol",
+   "records": 445
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000589",
+   "name": "the prototype",
+   "records": 445
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000590",
+   "name": "the input",
+   "records": 444
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000591",
+   "name": "the canonical dev env",
+   "records": 443
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000592",
+   "name": "the schema",
+   "records": 443
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000593",
+   "name": "the changes",
+   "records": 441
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000594",
+   "name": "the paragraph",
+   "records": 441
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000595",
+   "name": "the defect is already fixed",
+   "records": 440
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000596",
+   "name": "the remaining checks",
+   "records": 439
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000597",
+   "name": "the unrelated",
+   "records": 439
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000598",
+   "name": "the checker",
+   "records": 437
+  },
+  {
+   "cls": "definite",
+   "id": "cap-000599",
+   "name": "the others",
+   "records": 437
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000600",
+   "name": "verified_files",
+   "records": 35847
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000601",
+   "name": "check_type",
+   "records": 16790
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000602",
+   "name": "hosted_api",
+   "records": 15861
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000603",
+   "name": "web_search",
+   "records": 14202
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000604",
+   "name": "ci_selection",
+   "records": 12956
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000605",
+   "name": "py_compile",
+   "records": 6812
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000606",
+   "name": "test_ci_selection",
+   "records": 6273
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000607",
+   "name": "mcp_server",
+   "records": 6235
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000608",
+   "name": "tortoise_test_matrix",
+   "records": 6155
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000609",
+   "name": "web_fetch",
+   "records": 4807
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000610",
+   "name": "node_modules",
+   "records": 4156
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000611",
+   "name": "extractor_v2",
+   "records": 3556
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000612",
+   "name": "longmem_eval",
+   "records": 3545
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000613",
+   "name": "#2258",
+   "records": 3311
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000614",
+   "name": "tool_registry",
+   "records": 3244
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000615",
+   "name": "safe_load",
+   "records": 3185
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000616",
+   "name": "surface_manifest",
+   "records": 3119
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000617",
+   "name": "rebuild_all",
+   "records": 3105
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000618",
+   "name": "create_point",
+   "records": 3042
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000619",
+   "name": "pull_request",
+   "records": 2777
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000620",
+   "name": "slow_files",
+   "records": 2736
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000621",
+   "name": "search_engine",
+   "records": 2609
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000622",
+   "name": "supabase_control",
+   "records": 2502
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000623",
+   "name": "collision_preflight",
+   "records": 2446
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000624",
+   "name": "test_hosted_api",
+   "records": 2353
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000625",
+   "name": "org_id",
+   "records": 2336
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000626",
+   "name": "test_markers",
+   "records": 2174
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000627",
+   "name": "session_id",
+   "records": 1826
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000628",
+   "name": "per_page",
+   "records": 1764
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000629",
+   "name": "head_sha",
+   "records": 1740
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000630",
+   "name": "created_at",
+   "records": 1640
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000631",
+   "name": "test_capture_session",
+   "records": 1631
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000632",
+   "name": "team_id",
+   "records": 1602
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000633",
+   "name": "carve_out",
+   "records": 1596
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000634",
+   "name": "test_projection",
+   "records": 1547
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000635",
+   "name": "mcp_load",
+   "records": 1531
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000636",
+   "name": "test_agent_signup",
+   "records": 1497
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000637",
+   "name": "capture_session",
+   "records": 1490
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000638",
+   "name": "test_lane",
+   "records": 1480
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000639",
+   "name": "mcp_auth",
+   "records": 1470
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000640",
+   "name": "in_progress",
+   "records": 1464
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000641",
+   "name": "commit_ops",
+   "records": 1420
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000642",
+   "name": "create_operator",
+   "records": 1400
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000643",
+   "name": "update_point",
+   "records": 1386
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000644",
+   "name": "test_files",
+   "records": 1368
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000645",
+   "name": "embedded_reaper",
+   "records": 1338
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000646",
+   "name": "ci_timing",
+   "records": 1308
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000647",
+   "name": "test_ci_timing",
+   "records": 1300
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000648",
+   "name": "read_text",
+   "records": 1276
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000649",
+   "name": "test_collision_preflight",
+   "records": 1262
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000650",
+   "name": "commit_schema",
+   "records": 1241
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000651",
+   "name": "graph_name",
+   "records": 1225
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000652",
+   "name": "hosted_backup",
+   "records": 1139
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000653",
+   "name": "supersede_point",
+   "records": 1133
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000654",
+   "name": "sdk_rename_table",
+   "records": 1130
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000655",
+   "name": "#2981",
+   "records": 1089
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000656",
+   "name": "tmp_path",
+   "records": 1082
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000657",
+   "name": "fake_control_plane",
+   "records": 1043
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000658",
+   "name": "user_id",
+   "records": 1034
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000659",
+   "name": "test_website_docs_consistency",
+   "records": 1033
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000660",
+   "name": "tortoise_fts_query",
+   "records": 1031
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000661",
+   "name": "test_extractor_v2",
+   "records": 1025
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000662",
+   "name": "model_adapters",
+   "records": 1017
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000663",
+   "name": "write_path",
+   "records": 1003
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000664",
+   "name": "test_surface_manifest",
+   "records": 1002
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000665",
+   "name": "test_reaper",
+   "records": 999
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000666",
+   "name": "pack_registry",
+   "records": 980
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000667",
+   "name": "is_operator",
+   "records": 978
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000668",
+   "name": "test_sdk_rename_table",
+   "records": 974
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000669",
+   "name": "#1484",
+   "records": 960
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000670",
+   "name": "content_hash",
+   "records": 954
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000671",
+   "name": "db_path",
+   "records": 953
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000672",
+   "name": "to_thread",
+   "records": 950
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000673",
+   "name": "recover_from_log",
+   "records": 948
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000674",
+   "name": "test_dr_endpoints",
+   "records": 947
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000675",
+   "name": "doc_status",
+   "records": 937
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000676",
+   "name": "test_harness_mcp_config",
+   "records": 935
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000677",
+   "name": "ingest_v2",
+   "records": 929
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000678",
+   "name": "embedded_lifecycle",
+   "records": 911
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000679",
+   "name": "create_entity",
+   "records": 908
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000680",
+   "name": "#1100",
+   "records": 895
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000681",
+   "name": "op_type",
+   "records": 869
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000682",
+   "name": "#709",
+   "records": 854
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000683",
+   "name": "test_website_static",
+   "records": 849
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000684",
+   "name": "test_embedded_lifecycle",
+   "records": 846
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000685",
+   "name": "#4282",
+   "records": 817
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000686",
+   "name": "backup_sweep",
+   "records": 798
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000687",
+   "name": "hook_install",
+   "records": 795
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000688",
+   "name": "test_supabase_control",
+   "records": 787
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000689",
+   "name": "test_onboarding_variants",
+   "records": 782
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000690",
+   "name": "test_capture_install",
+   "records": 781
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000691",
+   "name": "test_ship_test_onboarding",
+   "records": 769
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000692",
+   "name": "#1266",
+   "records": 768
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000693",
+   "name": "get_point",
+   "records": 763
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000694",
+   "name": "test_capture_loop_responsiveness",
+   "records": 760
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000695",
+   "name": "test_longmem_runner",
+   "records": 759
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000696",
+   "name": "test_onboarding_endpoints",
+   "records": 755
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000697",
+   "name": "workflow_dispatch",
+   "records": 745
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000698",
+   "name": "test_health_ready_nonblocking",
+   "records": 743
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000699",
+   "name": "bridge_table",
+   "records": 738
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000700",
+   "name": "is_episodic",
+   "records": 735
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000701",
+   "name": "api_key",
+   "records": 733
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000702",
+   "name": "session_start",
+   "records": 731
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000703",
+   "name": "update_entity",
+   "records": 724
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000704",
+   "name": "test_durability_posture",
+   "records": 723
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000705",
+   "name": "test_oauth_mcp",
+   "records": 723
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000706",
+   "name": "service_role",
+   "records": 720
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000707",
+   "name": "#1647",
+   "records": 719
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000708",
+   "name": "ask_lane",
+   "records": 709
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000709",
+   "name": "create_source",
+   "records": 705
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000710",
+   "name": "test_assembly_pure",
+   "records": 698
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000711",
+   "name": "ask_spotcheck",
+   "records": 685
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000712",
+   "name": "tool_call",
+   "records": 685
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000713",
+   "name": "test_billing",
+   "records": 679
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000714",
+   "name": "graph_id",
+   "records": 676
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000715",
+   "name": "test_tool_registry",
+   "records": 674
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000716",
+   "name": "pull_request_target",
+   "records": 671
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000717",
+   "name": "test_dashboard_onboarding",
+   "records": 669
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000718",
+   "name": "record_projection",
+   "records": 664
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000719",
+   "name": "event_id",
+   "records": 663
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000720",
+   "name": "test_mcp_http",
+   "records": 656
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000721",
+   "name": "test_assembly_sdk",
+   "records": 645
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000722",
+   "name": "load_manifest",
+   "records": 644
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000723",
+   "name": "ci_exemption",
+   "records": 640
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000724",
+   "name": "expires_at",
+   "records": 640
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000725",
+   "name": "#7391",
+   "records": 629
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000726",
+   "name": "updated_at",
+   "records": 619
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000727",
+   "name": "test_legal_pages",
+   "records": 617
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000728",
+   "name": "test_deploy_workflow",
+   "records": 616
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000729",
+   "name": "test_pages_bindings",
+   "records": 615
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000730",
+   "name": "ship_test_onboarding",
+   "records": 611
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000731",
+   "name": "test_bridge_table",
+   "records": 610
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000732",
+   "name": "#883",
+   "records": 607
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000733",
+   "name": "api_keys",
+   "records": 606
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000734",
+   "name": "duration_coverage_issues",
+   "records": 606
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000735",
+   "name": "entity_type",
+   "records": 604
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000736",
+   "name": "compute_confidence",
+   "records": 599
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000737",
+   "name": "#1349",
+   "records": 596
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000738",
+   "name": "alert_store",
+   "records": 595
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000739",
+   "name": "select_graph",
+   "records": 594
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000740",
+   "name": "test_export_delete",
+   "records": 594
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000741",
+   "name": "session_verify",
+   "records": 593
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000742",
+   "name": "status_code",
+   "records": 591
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000743",
+   "name": "test_monitoring",
+   "records": 590
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000744",
+   "name": "search_keys",
+   "records": 589
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000745",
+   "name": "value_extractor",
+   "records": 581
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000746",
+   "name": "capture_install",
+   "records": 579
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000747",
+   "name": "test_quota",
+   "records": 578
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000748",
+   "name": "in_flight",
+   "records": 575
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000749",
+   "name": "diff_sha256",
+   "records": 568
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000750",
+   "name": "created_by",
+   "records": 567
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000751",
+   "name": "test_ask_sdk",
+   "records": 567
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000752",
+   "name": "access_token",
+   "records": 565
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000753",
+   "name": "test_sdk",
+   "records": 565
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000754",
+   "name": "mitigate_operator",
+   "records": 563
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000755",
+   "name": "tortoise_health",
+   "records": 560
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000756",
+   "name": "invalidate_point",
+   "records": 557
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000757",
+   "name": "push_legs",
+   "records": 557
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000758",
+   "name": "registry_integrity",
+   "records": 557
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000759",
+   "name": "execute_embed",
+   "records": 549
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000760",
+   "name": "fast_pool",
+   "records": 548
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000761",
+   "name": "test_validity_windows",
+   "records": 546
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000762",
+   "name": "session_indexer",
+   "records": 545
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000763",
+   "name": "test_merge_throughput",
+   "records": 539
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000764",
+   "name": "session_link",
+   "records": 538
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000765",
+   "name": "#3863",
+   "records": 536
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000766",
+   "name": "extract_session_v2",
+   "records": 535
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000767",
+   "name": "selfhost_api",
+   "records": 532
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000768",
+   "name": "#1148",
+   "records": 530
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000769",
+   "name": "test_skip_guard",
+   "records": 527
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000770",
+   "name": "#2982",
+   "records": 526
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000771",
+   "name": "website_architecture",
+   "records": 522
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000772",
+   "name": "test_commit_endpoint",
+   "records": 519
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000773",
+   "name": "ask_shape_rate",
+   "records": 518
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000774",
+   "name": "reviewed_at",
+   "records": 518
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000775",
+   "name": "capture_spool",
+   "records": 514
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000776",
+   "name": "result_set",
+   "records": 510
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000777",
+   "name": "check_consistency",
+   "records": 507
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000778",
+   "name": "test_docs_lint_baseline",
+   "records": 507
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000779",
+   "name": "mergify_config_guard",
+   "records": 500
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000780",
+   "name": "test_search_engine",
+   "records": 500
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000781",
+   "name": "test_writer_inventory",
+   "records": 500
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000782",
+   "name": "from_uri",
+   "records": 498
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000783",
+   "name": "dry_run",
+   "records": 497
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000784",
+   "name": "cmux_dispatch",
+   "records": 494
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000785",
+   "name": "very_safe",
+   "records": 490
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000786",
+   "name": "delete_point",
+   "records": 485
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000787",
+   "name": "test_search_engine_gaps",
+   "records": 485
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000788",
+   "name": "test_pointsuperseded_rebuild",
+   "records": 480
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000789",
+   "name": "run_vector_query",
+   "records": 477
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000790",
+   "name": "test_mcp_rename_table",
+   "records": 477
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000791",
+   "name": "test_session_verify",
+   "records": 477
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000792",
+   "name": "sdk_surface",
+   "records": 476
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000793",
+   "name": "valid_from",
+   "records": 476
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000794",
+   "name": "max_tokens",
+   "records": 471
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000795",
+   "name": "event_store",
+   "records": 467
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000796",
+   "name": "test_embedded_concurrency",
+   "records": 466
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000797",
+   "name": "test_session_extraction_modes",
+   "records": 466
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000798",
+   "name": "embedded_evidence",
+   "records": 465
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000799",
+   "name": "mcp_rename_table",
+   "records": 465
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000800",
+   "name": "test_capture_cost_measurement",
+   "records": 465
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000801",
+   "name": "#548",
+   "records": 464
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000802",
+   "name": "create_direct_edge",
+   "records": 463
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000803",
+   "name": "retract_point",
+   "records": 462
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000804",
+   "name": "parallel_work_check",
+   "records": 461
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000805",
+   "name": "pack_state",
+   "records": 459
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000806",
+   "name": "test_pack_kinds",
+   "records": 459
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000807",
+   "name": "test_welcome_page",
+   "records": 458
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000808",
+   "name": "test_mcp_server",
+   "records": 454
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000809",
+   "name": "apply_supersessions",
+   "records": 453
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000810",
+   "name": "recall_state",
+   "records": 452
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000811",
+   "name": "tortoise_ask",
+   "records": 452
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000812",
+   "name": "tortoise_search",
+   "records": 452
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000813",
+   "name": "merge_throughput",
+   "records": 450
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000814",
+   "name": "kind_classifier",
+   "records": 449
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000815",
+   "name": "merged_at",
+   "records": 448
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000816",
+   "name": "test_indexes",
+   "records": 444
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000817",
+   "name": "test_pi_capture_hooks",
+   "records": 444
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000818",
+   "name": "sdk_method",
+   "records": 443
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000819",
+   "name": "get_current_team",
+   "records": 441
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000820",
+   "name": "github_indexer",
+   "records": 439
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000821",
+   "name": "create_edge",
+   "records": 437
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000822",
+   "name": "test_abuse_integration",
+   "records": 437
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000823",
+   "name": "approval_status",
+   "records": 434
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000824",
+   "name": "#1224",
+   "records": 432
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000825",
+   "name": "create_object",
+   "records": 432
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000826",
+   "name": "test_import_endpoint",
+   "records": 430
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000827",
+   "name": "test_unjournaled_mutation_class",
+   "records": 430
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000828",
+   "name": "cmd_check",
+   "records": 427
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000829",
+   "name": "workflow_call",
+   "records": 427
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000830",
+   "name": "create_event",
+   "records": 426
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000831",
+   "name": "event_name",
+   "records": 426
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000832",
+   "name": "carve_out_run",
+   "records": 425
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000833",
+   "name": "#3501",
+   "records": 423
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000834",
+   "name": "test_doctor",
+   "records": 423
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000835",
+   "name": "duration_issues",
+   "records": 422
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000836",
+   "name": "test_wipe_server",
+   "records": 421
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000837",
+   "name": "tortoise_session_capture",
+   "records": 420
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000838",
+   "name": "ep_alpha",
+   "records": 419
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000839",
+   "name": "#1088",
+   "records": 416
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000840",
+   "name": "deleted_at",
+   "records": 416
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000841",
+   "name": "test_selfhost",
+   "records": 413
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000842",
+   "name": "test_transport_wait_bound",
+   "records": 413
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000843",
+   "name": "total_count",
+   "records": 412
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000844",
+   "name": "test_ci_exemption",
+   "records": 411
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000845",
+   "name": "resolve_api_key",
+   "records": 406
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000846",
+   "name": "#2935",
+   "records": 405
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000847",
+   "name": "promote_point",
+   "records": 405
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000848",
+   "name": "vet_gate",
+   "records": 403
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000849",
+   "name": "test_backup_sweep",
+   "records": 402
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000850",
+   "name": "test_record_projection",
+   "records": 400
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000851",
+   "name": "#2552",
+   "records": 398
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000852",
+   "name": "test_status_projection",
+   "records": 397
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000853",
+   "name": "#2850",
+   "records": 396
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000854",
+   "name": "test_entity_identity",
+   "records": 396
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000855",
+   "name": "tortoise_create_point",
+   "records": 395
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000856",
+   "name": "capture_ok",
+   "records": 394
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000857",
+   "name": "#5048",
+   "records": 393
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000858",
+   "name": "test_hosted_backup",
+   "records": 393
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000859",
+   "name": "backup_watcher",
+   "records": 392
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000860",
+   "name": "run_id",
+   "records": 392
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000861",
+   "name": "mergeable_state",
+   "records": 391
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000862",
+   "name": "test_capture_spool",
+   "records": 391
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000863",
+   "name": "test_retention_promise",
+   "records": 391
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000864",
+   "name": "event_log_path",
+   "records": 390
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000865",
+   "name": "test_ci_manifest",
+   "records": 390
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000866",
+   "name": "write_text",
+   "records": 390
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000867",
+   "name": "embedded_only",
+   "records": 387
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000868",
+   "name": "lease_until",
+   "records": 387
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000869",
+   "name": "commit_session",
+   "records": 385
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000870",
+   "name": "session_recording",
+   "records": 385
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000871",
+   "name": "test_ask_api",
+   "records": 384
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000872",
+   "name": "test_cohort_cost_cap",
+   "records": 384
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000873",
+   "name": "test_object_registered_journal",
+   "records": 380
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000874",
+   "name": "merge_commit_sha",
+   "records": 377
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000875",
+   "name": "session_auth",
+   "records": 377
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000876",
+   "name": "required_status_checks",
+   "records": 376
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000877",
+   "name": "revoked_at",
+   "records": 376
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000878",
+   "name": "test_rebuild_config_preservation",
+   "records": 376
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000879",
+   "name": "test_derived_names",
+   "records": 375
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000880",
+   "name": "test_alert_store",
+   "records": 372
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000881",
+   "name": "test_oauth_token_fault",
+   "records": 372
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000882",
+   "name": "#1509",
+   "records": 369
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000883",
+   "name": "slow_run",
+   "records": 369
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000884",
+   "name": "split_fast_gate",
+   "records": 369
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000885",
+   "name": "run_protocol",
+   "records": 368
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000886",
+   "name": "test_admin_return_to",
+   "records": 368
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000887",
+   "name": "test_guard",
+   "records": 368
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000888",
+   "name": "#1714",
+   "records": 367
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000889",
+   "name": "#5215",
+   "records": 367
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000890",
+   "name": "create_document",
+   "records": 367
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000891",
+   "name": "#1005",
+   "records": 366
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000892",
+   "name": "test_extractor_reliability",
+   "records": 366
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000893",
+   "name": "test_consistency_divergence_5011",
+   "records": 365
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000894",
+   "name": "#3400",
+   "records": 364
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000895",
+   "name": "#7951",
+   "records": 364
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000896",
+   "name": "#5049",
+   "records": 363
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000897",
+   "name": "#329",
+   "records": 362
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000898",
+   "name": "test_abuse",
+   "records": 361
+  },
+  {
+   "cls": "ident",
+   "id": "cap-000899",
+   "name": "test_minutes_installer",
+   "records": 361
+  },
+  {
+   "cls": "path",
+   "id": "cap-000900",
+   "name": "config/ci-surfaces.yml",
+   "records": 23134
+  },
+  {
+   "cls": "path",
+   "id": "cap-000901",
+   "name": "tortoise/sdk.py",
+   "records": 12561
+  },
+  {
+   "cls": "path",
+   "id": "cap-000902",
+   "name": "tools/ci_selection.py",
+   "records": 11420
+  },
+  {
+   "cls": "path",
+   "id": "cap-000903",
+   "name": "tortoise/hosted_api.py",
+   "records": 11005
+  },
+  {
+   "cls": "path",
+   "id": "cap-000904",
+   "name": "skills/code-review/SKILL.md",
+   "records": 8338
+  },
+  {
+   "cls": "path",
+   "id": "cap-000905",
+   "name": "tests/test_ci_selection.py",
+   "records": 5355
+  },
+  {
+   "cls": "path",
+   "id": "cap-000906",
+   "name": "tortoise/projection/__init__.py",
+   "records": 5211
+  },
+  {
+   "cls": "path",
+   "id": "cap-000907",
+   "name": "github/workflows/ci.yml",
+   "records": 4362
+  },
+  {
+   "cls": "path",
+   "id": "cap-000908",
+   "name": "scripts/admin-merge.sh",
+   "records": 3946
+  },
+  {
+   "cls": "path",
+   "id": "cap-000909",
+   "name": "tortoise/mcp_server.py",
+   "records": 3888
+  },
+  {
+   "cls": "path",
+   "id": "cap-000910",
+   "name": "docs/ONTOLOGY.md",
+   "records": 3580
+  },
+  {
+   "cls": "path",
+   "id": "cap-000911",
+   "name": "github/workflows/python-ci.yml",
+   "records": 3287
+  },
+  {
+   "cls": "path",
+   "id": "cap-000912",
+   "name": "tortoise/__main__.py",
+   "records": 3209
+  },
+  {
+   "cls": "path",
+   "id": "cap-000913",
+   "name": "tortoise/projection/entities.py",
+   "records": 2917
+  },
+  {
+   "cls": "path",
+   "id": "cap-000914",
+   "name": "docs/00_index.md",
+   "records": 2704
+  },
+  {
+   "cls": "path",
+   "id": "cap-000915",
+   "name": "tools/surface_manifest.py",
+   "records": 2657
+  },
+  {
+   "cls": "path",
+   "id": "cap-000916",
+   "name": "config/surface-manifest.yml",
+   "records": 2550
+  },
+  {
+   "cls": "path",
+   "id": "cap-000917",
+   "name": "tests/conftest.py",
+   "records": 2549
+  },
+  {
+   "cls": "path",
+   "id": "cap-000918",
+   "name": "src/main.ts",
+   "records": 2536
+  },
+  {
+   "cls": "path",
+   "id": "cap-000919",
+   "name": "projection/__init__.py",
+   "records": 2451
+  },
+  {
+   "cls": "path",
+   "id": "cap-000920",
+   "name": "tortoise/extractor_v2.py",
+   "records": 2366
+  },
+  {
+   "cls": "path",
+   "id": "cap-000921",
+   "name": "scripts/record-review.sh",
+   "records": 2341
+  },
+  {
+   "cls": "path",
+   "id": "cap-000922",
+   "name": "tortoise/tool_registry.py",
+   "records": 2219
+  },
+  {
+   "cls": "path",
+   "id": "cap-000923",
+   "name": "tools/collision_preflight.py",
+   "records": 2124
+  },
+  {
+   "cls": "path",
+   "id": "cap-000924",
+   "name": "daemon-src/run.ts",
+   "records": 2095
+  },
+  {
+   "cls": "path",
+   "id": "cap-000925",
+   "name": "twitter-daemon/run.ts",
+   "records": 2021
+  },
+  {
+   "cls": "path",
+   "id": "cap-000926",
+   "name": "scripts/scratch-worktree.sh",
+   "records": 1984
+  },
+  {
+   "cls": "path",
+   "id": "cap-000927",
+   "name": "linkedin-daemon/run.ts",
+   "records": 1892
+  },
+  {
+   "cls": "path",
+   "id": "cap-000928",
+   "name": "docs/architecture/STORAGE-ARCHITECTURE.md",
+   "records": 1796
+  },
+  {
+   "cls": "path",
+   "id": "cap-000929",
+   "name": "tests/test_hosted_api.py",
+   "records": 1791
+  },
+  {
+   "cls": "path",
+   "id": "cap-000930",
+   "name": "tools/surface-guard.py",
+   "records": 1786
+  },
+  {
+   "cls": "path",
+   "id": "cap-000931",
+   "name": "tests/test_markers.py",
+   "records": 1726
+  },
+  {
+   "cls": "path",
+   "id": "cap-000932",
+   "name": "tortoise/search_engine.py",
+   "records": 1659
+  },
+  {
+   "cls": "path",
+   "id": "cap-000933",
+   "name": "tests/admin-merge/run.sh",
+   "records": 1624
+  },
+  {
+   "cls": "path",
+   "id": "cap-000934",
+   "name": "docs/infra-runbook.md",
+   "records": 1613
+  },
+  {
+   "cls": "path",
+   "id": "cap-000935",
+   "name": "tortoise/supabase_control.py",
+   "records": 1556
+  },
+  {
+   "cls": "path",
+   "id": "cap-000936",
+   "name": "tests/_embedded.py",
+   "records": 1552
+  },
+  {
+   "cls": "path",
+   "id": "cap-000937",
+   "name": "tortoise/monitoring.py",
+   "records": 1455
+  },
+  {
+   "cls": "path",
+   "id": "cap-000938",
+   "name": "tools/test_lane.py",
+   "records": 1411
+  },
+  {
+   "cls": "path",
+   "id": "cap-000939",
+   "name": "daemon-src/local-store.ts",
+   "records": 1408
+  },
+  {
+   "cls": "path",
+   "id": "cap-000940",
+   "name": "agent/skills/code-review/SKILL.md",
+   "records": 1364
+  },
+  {
+   "cls": "path",
+   "id": "cap-000941",
+   "name": "tortoise/oauth.py",
+   "records": 1340
+  },
+  {
+   "cls": "path",
+   "id": "cap-000942",
+   "name": "docs/epics/2026-10-04-behaviours-as-intents/06-interfaces.md",
+   "records": 1269
+  },
+  {
+   "cls": "path",
+   "id": "cap-000943",
+   "name": "docs/product/sdk-rename-table.md",
+   "records": 1263
+  },
+  {
+   "cls": "path",
+   "id": "cap-000944",
+   "name": "tests/test_capture_session.py",
+   "records": 1260
+  },
+  {
+   "cls": "path",
+   "id": "cap-000945",
+   "name": "tortoise/consistency.py",
+   "records": 1253
+  },
+  {
+   "cls": "path",
+   "id": "cap-000946",
+   "name": "agent/skills/research/SKILL.md",
+   "records": 1238
+  },
+  {
+   "cls": "path",
+   "id": "cap-000947",
+   "name": "tortoise/onboarding/SKILL.md",
+   "records": 1205
+  },
+  {
+   "cls": "path",
+   "id": "cap-000948",
+   "name": "tortoise/projection/edges.py",
+   "records": 1198
+  },
+  {
+   "cls": "path",
+   "id": "cap-000949",
+   "name": "tests/test_projection.py",
+   "records": 1181
+  },
+  {
+   "cls": "path",
+   "id": "cap-000950",
+   "name": "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+   "records": 1174
+  },
+  {
+   "cls": "path",
+   "id": "cap-000951",
+   "name": "docs/product/mcp-sdk-surface.md",
+   "records": 1161
+  },
+  {
+   "cls": "path",
+   "id": "cap-000952",
+   "name": "tools/ci_timing.py",
+   "records": 1161
+  },
+  {
+   "cls": "path",
+   "id": "cap-000953",
+   "name": "tests/test_ci_timing.py",
+   "records": 1160
+  },
+  {
+   "cls": "path",
+   "id": "cap-000954",
+   "name": "tests/test_collision_preflight.py",
+   "records": 1135
+  },
+  {
+   "cls": "path",
+   "id": "cap-000955",
+   "name": "scripts/atomic-land.sh",
+   "records": 1126
+  },
+  {
+   "cls": "path",
+   "id": "cap-000956",
+   "name": "tortoise/embedded_reaper.py",
+   "records": 1105
+  },
+  {
+   "cls": "path",
+   "id": "cap-000957",
+   "name": "scripts/run-bash-shards.sh",
+   "records": 1104
+  },
+  {
+   "cls": "path",
+   "id": "cap-000958",
+   "name": "projection/entities.py",
+   "records": 1095
+  },
+  {
+   "cls": "path",
+   "id": "cap-000959",
+   "name": "extensions/builtin-tools/index.ts",
+   "records": 1060
+  },
+  {
+   "cls": "path",
+   "id": "cap-000960",
+   "name": "tools/longmem_eval/run.py",
+   "records": 1055
+  },
+  {
+   "cls": "path",
+   "id": "cap-000961",
+   "name": "scripts/orchestrator-harness/README.md",
+   "records": 1045
+  },
+  {
+   "cls": "path",
+   "id": "cap-000962",
+   "name": "tests/test_uri_env_mutations_declared.py",
+   "records": 1026
+  },
+  {
+   "cls": "path",
+   "id": "cap-000963",
+   "name": "tools/sdk_rename_table.py",
+   "records": 1014
+  },
+  {
+   "cls": "path",
+   "id": "cap-000964",
+   "name": "tortoise/quota.py",
+   "records": 1003
+  },
+  {
+   "cls": "path",
+   "id": "cap-000965",
+   "name": "github/workflows/ci-main.yml",
+   "records": 999
+  },
+  {
+   "cls": "path",
+   "id": "cap-000966",
+   "name": "scripts/check-no-sigpipe-grep.sh",
+   "records": 997
+  },
+  {
+   "cls": "path",
+   "id": "cap-000967",
+   "name": "scripts/workflow-lock.json",
+   "records": 992
+  },
+  {
+   "cls": "path",
+   "id": "cap-000968",
+   "name": "scripts/check-pipeline-compliance.sh",
+   "records": 949
+  },
+  {
+   "cls": "path",
+   "id": "cap-000969",
+   "name": "tests/fake_control_plane.py",
+   "records": 949
+  },
+  {
+   "cls": "path",
+   "id": "cap-000970",
+   "name": "extensions/review-enforcer/index.ts",
+   "records": 931
+  },
+  {
+   "cls": "path",
+   "id": "cap-000971",
+   "name": "tortoise/assembly.py",
+   "records": 920
+  },
+  {
+   "cls": "path",
+   "id": "cap-000972",
+   "name": "tests/test_website_docs_consistency.py",
+   "records": 917
+  },
+  {
+   "cls": "path",
+   "id": "cap-000973",
+   "name": "pi-bootstrap/setup.sh",
+   "records": 908
+  },
+  {
+   "cls": "path",
+   "id": "cap-000974",
+   "name": "scripts/orchestrator-harness/orch-loop.sh",
+   "records": 904
+  },
+  {
+   "cls": "path",
+   "id": "cap-000975",
+   "name": "scripts/orchestrator-harness/selftest.sh",
+   "records": 886
+  },
+  {
+   "cls": "path",
+   "id": "cap-000976",
+   "name": "tortoise/retrieval.py",
+   "records": 878
+  },
+  {
+   "cls": "path",
+   "id": "cap-000977",
+   "name": "tortoise/commit_ops.py",
+   "records": 868
+  },
+  {
+   "cls": "path",
+   "id": "cap-000978",
+   "name": "tests/test_harness_mcp_config.py",
+   "records": 865
+  },
+  {
+   "cls": "path",
+   "id": "cap-000979",
+   "name": "docs/ops/registry-backup-dr.md",
+   "records": 856
+  },
+  {
+   "cls": "path",
+   "id": "cap-000980",
+   "name": "tests/test_extractor_v2.py",
+   "records": 846
+  },
+  {
+   "cls": "path",
+   "id": "cap-000981",
+   "name": "extensions/verification-gate/index.ts",
+   "records": 841
+  },
+  {
+   "cls": "path",
+   "id": "cap-000982",
+   "name": "tests/test_surface_manifest.py",
+   "records": 838
+  },
+  {
+   "cls": "path",
+   "id": "cap-000983",
+   "name": "daemon-src/shared/profiles.ts",
+   "records": 830
+  },
+  {
+   "cls": "path",
+   "id": "cap-000984",
+   "name": "tests/test_reaper.py",
+   "records": 819
+  },
+  {
+   "cls": "path",
+   "id": "cap-000985",
+   "name": "smoke/config-behaviors.test.ts",
+   "records": 816
+  },
+  {
+   "cls": "path",
+   "id": "cap-000986",
+   "name": "skills/issue-scoping/SKILL.md",
+   "records": 815
+  },
+  {
+   "cls": "path",
+   "id": "cap-000987",
+   "name": "tests/test_sdk_rename_table.py",
+   "records": 815
+  },
+  {
+   "cls": "path",
+   "id": "cap-000988",
+   "name": "public/skills/tortoise-onboarding/SKILL.md",
+   "records": 794
+  },
+  {
+   "cls": "path",
+   "id": "cap-000989",
+   "name": "tortoise/ep.py",
+   "records": 794
+  },
+  {
+   "cls": "path",
+   "id": "cap-000990",
+   "name": "extensions/main-worktree-guard/index.ts",
+   "records": 788
+  },
+  {
+   "cls": "path",
+   "id": "cap-000991",
+   "name": "pi/agent/scripts/record-review.sh",
+   "records": 777
+  },
+  {
+   "cls": "path",
+   "id": "cap-000992",
+   "name": "tortoise/api.py",
+   "records": 773
+  },
+  {
+   "cls": "path",
+   "id": "cap-000993",
+   "name": "extensions/review-enforcer/index.test.ts",
+   "records": 765
+  },
+  {
+   "cls": "path",
+   "id": "cap-000994",
+   "name": "tests/test_embedded_lifecycle.py",
+   "records": 763
+  },
+  {
+   "cls": "path",
+   "id": "cap-000995",
+   "name": "tests/test_dr_endpoints.py",
+   "records": 759
+  },
+  {
+   "cls": "path",
+   "id": "cap-000996",
+   "name": "scripts/cloud-cell-supervisor.sh",
+   "records": 754
+  },
+  {
+   "cls": "path",
+   "id": "cap-000997",
+   "name": "github/workflows/deploy-pages.yml",
+   "records": 753
+  },
+  {
+   "cls": "path",
+   "id": "cap-000998",
+   "name": "tests/test_website_static.py",
+   "records": 753
+  },
+  {
+   "cls": "path",
+   "id": "cap-000999",
+   "name": "tortoise/embedded_lifecycle.py",
+   "records": 753
+  }
+ ],
+ "purpose": "FIXED query set for the #12186 capstone \u2014 one population, one 300-name stratified sample, frozen so a re-run measures the same names",
+ "query_digest": "5604d0ad3769bd52",
+ "query_ids": [
+  "cap-000000",
+  "cap-000001",
+  "cap-000002",
+  "cap-000003",
+  "cap-000004",
+  "cap-000005",
+  "cap-000006",
+  "cap-000007",
+  "cap-000008",
+  "cap-000009",
+  "cap-000010",
+  "cap-000011",
+  "cap-000012",
+  "cap-000013",
+  "cap-000014",
+  "cap-000015",
+  "cap-000016",
+  "cap-000017",
+  "cap-000018",
+  "cap-000019",
+  "cap-000020",
+  "cap-000021",
+  "cap-000022",
+  "cap-000023",
+  "cap-000024",
+  "cap-000025",
+  "cap-000026",
+  "cap-000027",
+  "cap-000028",
+  "cap-000029",
+  "cap-000030",
+  "cap-000031",
+  "cap-000032",
+  "cap-000033",
+  "cap-000034",
+  "cap-000035",
+  "cap-000036",
+  "cap-000037",
+  "cap-000038",
+  "cap-000039",
+  "cap-000040",
+  "cap-000041",
+  "cap-000042",
+  "cap-000043",
+  "cap-000044",
+  "cap-000045",
+  "cap-000046",
+  "cap-000047",
+  "cap-000048",
+  "cap-000049",
+  "cap-000050",
+  "cap-000051",
+  "cap-000052",
+  "cap-000053",
+  "cap-000054",
+  "cap-000055",
+  "cap-000056",
+  "cap-000057",
+  "cap-000058",
+  "cap-000059",
+  "cap-000060",
+  "cap-000061",
+  "cap-000062",
+  "cap-000063",
+  "cap-000064",
+  "cap-000065",
+  "cap-000066",
+  "cap-000067",
+  "cap-000068",
+  "cap-000069",
+  "cap-000070",
+  "cap-000071",
+  "cap-000072",
+  "cap-000073",
+  "cap-000074",
+  "cap-000075",
+  "cap-000076",
+  "cap-000077",
+  "cap-000078",
+  "cap-000079",
+  "cap-000080",
+  "cap-000081",
+  "cap-000082",
+  "cap-000083",
+  "cap-000084",
+  "cap-000085",
+  "cap-000086",
+  "cap-000087",
+  "cap-000088",
+  "cap-000089",
+  "cap-000090",
+  "cap-000091",
+  "cap-000092",
+  "cap-000093",
+  "cap-000094",
+  "cap-000095",
+  "cap-000096",
+  "cap-000097",
+  "cap-000098",
+  "cap-000099",
+  "cap-000100",
+  "cap-000101",
+  "cap-000102",
+  "cap-000103",
+  "cap-000104",
+  "cap-000105",
+  "cap-000106",
+  "cap-000107",
+  "cap-000108",
+  "cap-000109",
+  "cap-000110",
+  "cap-000111",
+  "cap-000112",
+  "cap-000113",
+  "cap-000114",
+  "cap-000115",
+  "cap-000116",
+  "cap-000117",
+  "cap-000118",
+  "cap-000119",
+  "cap-000120",
+  "cap-000121",
+  "cap-000122",
+  "cap-000123",
+  "cap-000124",
+  "cap-000125",
+  "cap-000126",
+  "cap-000127",
+  "cap-000128",
+  "cap-000129",
+  "cap-000130",
+  "cap-000131",
+  "cap-000132",
+  "cap-000133",
+  "cap-000134",
+  "cap-000135",
+  "cap-000136",
+  "cap-000137",
+  "cap-000138",
+  "cap-000139",
+  "cap-000140",
+  "cap-000141",
+  "cap-000142",
+  "cap-000143",
+  "cap-000144",
+  "cap-000145",
+  "cap-000146",
+  "cap-000147",
+  "cap-000148",
+  "cap-000149",
+  "cap-000150",
+  "cap-000151",
+  "cap-000152",
+  "cap-000153",
+  "cap-000154",
+  "cap-000155",
+  "cap-000156",
+  "cap-000157",
+  "cap-000158",
+  "cap-000159",
+  "cap-000160",
+  "cap-000161",
+  "cap-000162",
+  "cap-000163",
+  "cap-000164",
+  "cap-000165",
+  "cap-000166",
+  "cap-000167",
+  "cap-000168",
+  "cap-000169",
+  "cap-000170",
+  "cap-000171",
+  "cap-000172",
+  "cap-000173",
+  "cap-000174",
+  "cap-000175",
+  "cap-000176",
+  "cap-000177",
+  "cap-000178",
+  "cap-000179",
+  "cap-000600",
+  "cap-000601",
+  "cap-000602",
+  "cap-000603",
+  "cap-000604",
+  "cap-000605",
+  "cap-000606",
+  "cap-000607",
+  "cap-000608",
+  "cap-000609",
+  "cap-000610",
+  "cap-000611",
+  "cap-000612",
+  "cap-000613",
+  "cap-000614",
+  "cap-000615",
+  "cap-000616",
+  "cap-000617",
+  "cap-000618",
+  "cap-000619",
+  "cap-000620",
+  "cap-000621",
+  "cap-000622",
+  "cap-000623",
+  "cap-000624",
+  "cap-000625",
+  "cap-000626",
+  "cap-000627",
+  "cap-000628",
+  "cap-000629",
+  "cap-000630",
+  "cap-000631",
+  "cap-000632",
+  "cap-000633",
+  "cap-000634",
+  "cap-000635",
+  "cap-000636",
+  "cap-000637",
+  "cap-000638",
+  "cap-000639",
+  "cap-000640",
+  "cap-000641",
+  "cap-000642",
+  "cap-000643",
+  "cap-000644",
+  "cap-000645",
+  "cap-000646",
+  "cap-000647",
+  "cap-000648",
+  "cap-000649",
+  "cap-000650",
+  "cap-000651",
+  "cap-000652",
+  "cap-000653",
+  "cap-000654",
+  "cap-000655",
+  "cap-000656",
+  "cap-000657",
+  "cap-000658",
+  "cap-000659",
+  "cap-000660",
+  "cap-000661",
+  "cap-000662",
+  "cap-000663",
+  "cap-000664",
+  "cap-000665",
+  "cap-000666",
+  "cap-000667",
+  "cap-000668",
+  "cap-000669",
+  "cap-000670",
+  "cap-000671",
+  "cap-000672",
+  "cap-000673",
+  "cap-000674",
+  "cap-000675",
+  "cap-000676",
+  "cap-000677",
+  "cap-000678",
+  "cap-000679",
+  "cap-000680",
+  "cap-000681",
+  "cap-000682",
+  "cap-000683",
+  "cap-000684",
+  "cap-000685",
+  "cap-000686",
+  "cap-000687",
+  "cap-000688",
+  "cap-000689",
+  "cap-000900",
+  "cap-000901",
+  "cap-000902",
+  "cap-000903",
+  "cap-000904",
+  "cap-000905",
+  "cap-000906",
+  "cap-000907",
+  "cap-000908",
+  "cap-000909",
+  "cap-000910",
+  "cap-000911",
+  "cap-000912",
+  "cap-000913",
+  "cap-000914",
+  "cap-000915",
+  "cap-000916",
+  "cap-000917",
+  "cap-000918",
+  "cap-000919",
+  "cap-000920",
+  "cap-000921",
+  "cap-000922",
+  "cap-000923",
+  "cap-000924",
+  "cap-000925",
+  "cap-000926",
+  "cap-000927",
+  "cap-000928",
+  "cap-000929"
+ ],
+ "rules": {
+  "harness": "tools/candidate_recall_11901.py",
+  "imported": [
+   "harvest",
+   "build_population",
+   "_allocate_shares",
+   "_interleave"
+  ],
+  "population": 1000,
+  "sample": 300,
+  "shares": {
+   "definite": 180,
+   "ident": 90,
+   "path": 30
+  }
+ },
+ "schema": "12186-capstone-queries-v1"
+}
