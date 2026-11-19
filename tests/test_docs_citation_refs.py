@@ -751,6 +751,14 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     actually shipped and survived a merge — including the ones that do not sit beside the
     command, which a shape match cannot reach.
 
+    ⛔ SCOPE: THIS PAIR OF ARMS POLICES ONE COMMAND — `-- tortoise/` — AND NOTHING
+    ELSE (#13807 review round 9, P2). The ledger and the shape matcher are both keyed
+    to `_TORTOISE_CENSUS_CMD`, so a head-bound verdict about `docs/00_index.md`, the
+    epic's `04-plan.md`, or any other path's residual sails past them; a green here is
+    the absence of RETIRED `-- tortoise/` SPELLINGS, never a proof that the section
+    contains no head-bound claim. Stated so the next lane does not read a green as
+    completeness.
+
     ⛔ THE OVER-BLOCK THIS ACCEPTS, STATED RATHER THAN HIDDEN (#13807 review round 3, F3).
     Matching is an unconditional substring test, so a QUOTED RETRACTION that re-spells one
     of these strings verbatim is refused, where `_typed_answers_to_tortoise_cmd`'s
