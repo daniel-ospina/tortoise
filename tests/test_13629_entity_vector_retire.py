@@ -38,6 +38,8 @@ that fails OPEN the day someone deletes a branch.
 | `test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason` | "proved short" is a DIFFERENT answer from "not proved" | a measured deficit is reported as an unmeasured one, sending the operator back to a census already run |
 | `test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers` | coverage clears a plan in a fresh process, and the READY reason is the measurement | `strip_ready: True` without the two counts beside it — an assertion nobody can check |
 | `test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason` | **#13796** acceptance (b)+(c) — the refusal is the MEASUREMENT | a short record certifies a strip, or refuses with "not proved" when the counts were taken |
+| `test_the_destructive_arm_hands_the_gate_the_runs_own_denominator` | **#13796**'s reachability on the `--execute` arm — the second of `main`'s two hops | the destructive path drops the population while the preview keeps it, so `execute` re-checks an unsatisfiable gate (measured: 107 passed under that mutant) |
+| `test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper` | `_write_gate`'s version-skew arm answers with the FAIL-CLOSED twin, never with a measurement it could not take | an old stripper is answered by a probe that reports `ready` with no counts behind it |
 | `test_a_tools_only_diff_selects_this_pin` | these falsifiers actually RUN in CI | `tools/` stays a flat non-python prefix and this file is never selected |
 """
 
@@ -63,6 +65,22 @@ from tools import strip_graph_entity_vectors as strip
 #: that monkeypatched the package-qualified one would patch a module the code under
 #: test never calls — the patch would appear to work and assert nothing.
 parity = strip.parity
+
+
+def _census_strip():
+    """The stripper module object the CENSUS imports — NOT the same object as `strip`.
+
+    `tools.strip_graph_entity_vectors` and the top-level `strip_graph_entity_vectors` that
+    `entity_vector_parity_census._write_gate` resolves are two module objects around one
+    file (the tool puts its own directory on `sys.path`). A monkeypatch applied to `strip`
+    is therefore INVISIBLE to the census's own call — measured: patching `strip`'s
+    `_fold_consults_gate` left the census running the real writer check and refusing
+    `:Object` on two ungated writers. A test that patched only the package-qualified
+    module would read as green while asserting nothing about the census CLI.
+    """
+    import strip_graph_entity_vectors
+
+    return strip_graph_entity_vectors
 
 
 # ── a hermetic stand-in for the two stores ──────────────────────────────────
@@ -2074,6 +2092,103 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
         "the census's gate was not given the run's projection/tenant, so it answers "
         f"\"not proved\" for a covered label (#13796's symptom): {reason}")
     assert "has not proved" not in reason, reason
+
+
+# ── #13796: the two hops the CLI tests above do NOT pin ─────────────────────
+
+
+def test_the_destructive_arm_hands_the_gate_the_runs_own_denominator(
+        stores, tmp_path, monkeypatch):
+    """⛔ `main`'s SECOND hop, and the one still unpinned after the preview fix.
+
+    `main` builds the population once and threads it into BOTH arms — `build_plan` on the
+    preview and `execute` on the destructive path. The sibling CLI test above drives the
+    preview, so it pins the first hop; dropping the argument from the `execute` call alone
+    leaves this file at **107 passed, measured** — the same class of gap the round-2
+    finding filed, one arm over. `execute` re-checks the gate before it removes anything,
+    so without the denominator the destructive run re-asks a question no fresh process can
+    answer and refuses with #13796's own sentence.
+
+    ⚠️ THE ASSERTION IS A REAL MEASUREMENT, NOT AN IDENTITY. The supplier is the
+    projection's own count, so it is asked here for `object` and must answer the number of
+    nodes THIS graph carries an `embedding` on (one). A wiring that passed a constant, an
+    empty callable, or the unmeasured `None` would satisfy no such reading — and the
+    supplier is exactly what `record_vector.coverage` binds, so this is the value the gate
+    compares rather than a proxy for it.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    _cli_harness(monkeypatch, graph)
+
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "graph": "g", "graph_uri": "docker://h:6379/g", "org_id": "o", "graph_id": "g",
+        "labels": [{"label": "Object", "keys": ["obj-1"], "nodes": 1,
+                    "unkeyed_nodes_blocking": 0, "strip_ready": True,
+                    "blocked_reason": None}],
+        "total_nodes": 1,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    executed: dict = {}
+    monkeypatch.setattr(strip, "execute",
+                        lambda **kwargs: executed.update(kwargs) or {"removed": 0})
+    monkeypatch.setattr(strip, "result_exit_code", lambda result: 0)
+
+    assert strip.main(["--uri", "docker://:pw@h:6379/g", "--graph-name", "g",
+                       "--record-dsn", "postgresql://localhost/record",
+                       "--org-id", "o", "--graph-id", "g",
+                       "--execute", "--plan", str(plan_path),
+                       "--confirm-plan-digest", plan["digest"]]) == 0
+
+    supply = executed.get("graph_population")
+    assert callable(supply), (
+        "the destructive arm ran without the denominator this run holds, so `execute` "
+        f"re-checks the gate #13796 made unsatisfiable: {supply!r}")
+    assert supply("object") == 1, (
+        "the destructive arm carried a supplier that is not this graph's own count — the "
+        f"gate would compare against the wrong population: {supply('object')!r}")
+
+
+def test_the_census_write_gate_degrades_to_the_unmeasured_fallback_on_an_old_stripper(
+        stores, monkeypatch):
+    """⛔ THE VERSION-SKEW ARM: a stripper predating `readiness_probe` must still ANSWER.
+
+    `_write_gate` prefers `readiness_probe(… measurement context …)` and falls back to the
+    bare `strip_readiness` name. The fallback is a same-signature FAIL-CLOSED twin that
+    looks exactly like the real answer, which is why the arm needs a falsifier: a caller
+    that reached for it on a modern tree, or a `_write_gate` that answered with a probe it
+    could not build, would report `ready` with no counts behind it — the unmeasured gate
+    #13796 is about, restored in the second tool.
+
+    ⛔ ORDER IS LOAD-BEARING: the fallback's own polarity is measured FIRST, while
+    `readiness_probe` still resolves. Removing it is what makes `strip_readiness` refuse on
+    a real old tree, so calling it afterwards is not possible — and asserting only the
+    identity would pin which function was returned without pinning that it refuses.
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+    census_strip = _census_strip()
+
+    # ── the fallback REFUSES: no measurement context, so no label can be cleared.
+    ready, reason = census_strip.strip_readiness("Object")
+    assert ready is False, (
+        f"the unmeasured fallback certified a strip it never measured: {reason}")
+
+    # ── and on a tree without `readiness_probe`, that name is what `_write_gate` returns.
+    monkeypatch.delattr(census_strip, "readiness_probe", raising=False)
+    fallback = parity._write_gate(
+        _Projection(graph), org_id="o", graph_id="g",
+        record_dsn="postgresql://localhost/record")
+    assert fallback is census_strip.strip_readiness, (
+        "a stripper without `readiness_probe` was answered by something other than the "
+        f"fail-closed twin: {fallback!r}")
 
 
 # ── preview is the default and writes nothing ───────────────────────────────
