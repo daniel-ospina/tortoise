@@ -8201,7 +8201,7 @@ def _stylesheet_imports(css: str) -> list[str]:
     found = re.findall(
         r"""@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^\s"')]+))""",
         _strip_comment_lines(css), re.I)
-    return [next(g for groups in found for g in groups if g) for groups in found]
+    return [next(g for g in groups if g) for groups in found]
 
 
 def _pricing_stylesheet_hrefs(html: str) -> list[str]:
@@ -9367,7 +9367,7 @@ class TestConsentSeam:
             r"<script\b([^>]*)>(.*?)</script>", _without_html_comments(html),
             re.S | re.I))
         listener = [m for m in scripts
-                    if "addEventListener('tortoise:consent'" in m.group(2)]
+                    if "addEventListener('tortoise:consent'" in _code_only(m.group(2))]
         assert listener, (
             "the page no longer registers a `tortoise:consent` listener at all "
             "(#13696)")
@@ -9531,6 +9531,45 @@ class TestConsentSeam:
             "`trackView()` calls `track()` BEFORE checking `consented()`, so "
             "the gate is no longer the only thing between an undecided "
             "visitor and a beacon (#13645)")
+
+    def test_the_click_delegate_counts_the_entry_points_the_legend_names(self):
+        """The funnel's only conversion event must have a pinned selector.
+
+        Nothing else binds the delegate. MEASURED (round 4): retargeting
+        `ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')`
+        to a bare `[data-cta]` left the whole file green, while the four tier
+        cards' and the self-host block's `/auth` links stopped being counted as
+        `product_teams_cta_primary` — the campaign's one conversion event,
+        silently zeroed on the page whose stated purpose is to carry its own
+        denominator. The legend above the handler would have kept describing
+        the old behaviour with no red anywhere.
+        """
+        code = _code_only(_product_teams_html())
+        assert '[data-cta], #pricing-section a[href^="/auth"]' in code, (
+            "the click delegate no longer selects the funnel's `/auth` entry "
+            "points: the tier cards' and the self-host block's links would "
+            "raise no event, and nothing else in this suite would notice")
+        assert "el.getAttribute('data-cta') === 'primary'" in code, (
+            "the hero's primary CTA is no longer classified as "
+            "`product_teams_cta_primary`")
+        assert "el.closest('#pricing-section')" in code, (
+            "the `/auth` links inside `#pricing-section` are no longer "
+            "classified as `product_teams_cta_primary`")
+
+        # The legend's decomposition, derived from the MARKUP rather than from
+        # the prose it is written in: four tier cards, plus the self-host
+        # block's one `/auth` link.
+        pricing = _element_by_id(_product_teams_html(), "pricing-section")
+        cards = len(re.findall(r'class="[^"]*\bpricing-card\b', pricing))
+        auth = len(re.findall(r'href="/auth"', pricing))
+        assert cards == 4, (
+            f"#pricing-section carries {cards} tier cards; the funnel legend "
+            "names four — update the legend and this row together")
+        assert auth == cards + 1, (
+            f"#pricing-section carries {auth} `/auth` links but {cards} tier "
+            "cards. The legend says 'the four tier cards and the self-host "
+            "block's \"Migrate to cloud anytime\", the only self-host CTA "
+            "that reaches /auth' — a new entry point must be named there too")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

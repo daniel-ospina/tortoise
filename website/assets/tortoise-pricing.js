@@ -7,8 +7,10 @@
  * worse than no campaign page. So the tier table + the formatting contract live
  * HERE, both pages load this file, and
  * `tests/test_website_static.py::TestPricingSourceIsShared` holds the two pages
- * to it (the pages' static cards are a no-JS fallback and are pinned to this
- * source by `TestStaticPricingFallback`).
+ * to it. The pages' static cards are a no-JS fallback: product.html's are
+ * derived from this source by `TestStaticPricingFallback`, and the campaign
+ * page's by
+ * `TestPricingSourceIsShared::test_the_static_cards_on_both_pages_carry_the_shared_numbers`.
  *
  * ⛔ DO NOT add a second copy of this object to a page. Both pages load
  * `/assets/tortoise-pricing.js`, and the list of pages that render the table is
