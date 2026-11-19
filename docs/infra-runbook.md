@@ -1198,13 +1198,25 @@ passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is w
 attempt started, so a starved loader may legitimately run past its bound (this PR's own bound exists
 because the same import measured 156.5 s under load). Before restarting a machine on this reading,
 get independent evidence that the import is not advancing — a stack from OUTSIDE the process
-(`py-spy dump --pid <pid>`), or an in-process `sys._current_frames()` dump (the shape
-`monitoring.py` already uses), showing where the import sits. ⛔ NOT `faulthandler`: nothing in this
-image registers a handler for it, so it yields nothing without sending a fatal signal — which is the
-restart this paragraph is arguing against. An ABSENCE of further `embedder:` lines is also NOT
-evidence, because the loader logs nothing between the timeout line and the load finishing or its
-overrun ending. A restart throws away an import that may be about to finish and re-pays the whole
-cold cost.
+(`py-spy dump --pid <pid>`, which this runbook already uses elsewhere), showing where the import
+sits.
+
+⛔ **Three routes that look like evidence and are not, on this image.** (1) **`faulthandler`** —
+nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER` unset in
+`fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
+(`tools/embedder_provision.py`) is a CI tool that is not in the image. A fatal signal dumps nothing
+either — without `enable()` the default handler prints no Python traceback — so `kill -ABRT` only
+ends the load and proves nothing. (2) **An in-process `sys._current_frames()` dump from a fresh
+interpreter** sees its OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
+`LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread — so the
+loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway (the
+same fresh-interpreter trap warned about above). (3) **Absence of further `embedder:` lines** — the
+loader logs nothing between the timeout line and the load finishing or its overrun ending, so
+silence is the expected state for BOTH progress and a wedge.
+
+A restart on this reading throws away an import that may be about to finish and re-pays the whole
+cold cost, so get the stack FIRST — the block alone cannot justify it.
+
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),
