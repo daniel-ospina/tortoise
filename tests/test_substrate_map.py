@@ -1669,9 +1669,14 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "this test guards against was not reproduced — the exclusion assertion "
         "below would then be vacuous"
     )
-    assert tracked_ambient in [p for p, _ in everything], (
-        "the recorder did not see the tracked ambient read, so the union arm below "
-        "would be vacuous"
+    assert ({name for p, name in everything if p == tracked_ambient}
+            == {_an_ambient_read.__code__.co_name, _LABEL_HITS_CODE.co_name}), (
+        "the recorder did not see the tracked ambient read made by "
+        f"{_an_ambient_read.__code__.co_name} — it saw "
+        f"{sorted({name for p, name in everything if p == tracked_ambient})}. ⛔ "
+        "Membership CANNOT be this guard: `tracked_ambient` is in `_label_hits`'s own "
+        "population, so it appears in `everything` whether or not the helper frame "
+        "reads it, and the union arm below would go vacuous silently"
     )
     assert imposter_file in [p for p, _ in everything], (
         "the recorder did not see the IMPOSTER's read, so the code-object arm below "
@@ -1805,21 +1810,22 @@ def test_a_same_thread_read_outside_the_index_is_still_drift(monkeypatch, tmp_pa
     #: (correctly) refuses it and this control pins nothing.
     with monkeypatch.context() as inside:
         inside.setattr(sys.modules[__name__], "_tracked_files_under", _widened)
-        #: ⛔ THE SCOPING IS LOAD-BEARING AND PINNED HERE. If `_widened` widened
-        #: unconditionally, a recorder that derives its own view of the population
-        #: would see the stales as tracked, record them, and this arm's `drifted ==`
-        #: assertion would pass for a recorder that drops nothing — mutant (d)
-        #: survives. Measured: with the scoping deleted the file was 48 passed AND (d)
-        #: also passed. Called from THIS frame (not `_label_hits`'s), the population
-        #: must be the REAL one.
-        assert inside_checkout not in _tracked_files_under(_TRACKED_DIR), (
-            "the widening is visible from a frame that is not `_label_hits`'s, so a "
-            "recorder deriving its own population sees the stale as tracked and this "
-            "arm can no longer discriminate — the population-filter mutant survives"
-        )
-        assert outside_checkout not in _tracked_files_under(_TRACKED_DIR), (
-            "the out-of-checkout widening leaks outside `_label_hits`'s frame for the "
-            "same reason, and the containment mutant survives with it"
+        #: ⛔ THE SCOPING IS LOAD-BEARING AND PINNED HERE. Called from THIS frame
+        #: (not `_label_hits`'s), the population must be the REAL one — `_widened`
+        #: must not be visible to any caller that is not `_label_hits` itself.
+        #: ⛔ BOTH stales are checked in ONE assertion, because they sit under the SAME
+        #: frame guard: a second `assert` on the other path could never fire first and
+        #: would be a vacuous assertion, which this file bars.
+        leaked = [
+            p for p in (inside_checkout, outside_checkout)
+            if p in _tracked_files_under(_TRACKED_DIR)
+        ]
+        assert not leaked, (
+            f"the widening leaks outside `_label_hits`'s frame ({leaked}), so any "
+            "caller deriving its own view of the population sees the stale as "
+            "tracked — this arm's own `_population_drift` included, whose "
+            "`drifted ==` assertion then can never be satisfied, so the arm stops "
+            "discriminating instead of failing"
         )
         read = _label_hits_reads(monkeypatch)
 
