@@ -1545,6 +1545,19 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     if isinstance(node, ast.IfExp):
         return (_mapping_literal_stores_the_vector(node.body)
                 or _mapping_literal_stores_the_vector(node.orelse))
+    # ⛔ `or`/`and` AND THE WALRUS ARE THE SAME TRANSPARENT WRAPPER (`#13788`, measured at
+    # `105b047b`): `x or y` IS `x if x else y`, which the arm above already answers, and
+    # `(p := x)` evaluates to `x` with no name to resolve. Typing only an `if`-expression
+    # left both CERTIFIED while their `if`-expression twin was refused — `props |= {} or
+    # {"embedding": vec}`, `props = {} or {"embedding": vec}`, `props.update(**({} or
+    # {"embedding": vec}))` and `props = (p := {"embedding": vec})` all placed the vector
+    # on a stop arm and still lifted `REFUSE_WRITE_STILL_EMITS`.
+    # REFUSAL-ONLY: either operand may be the one SELECTED, so a store in ANY of them is a
+    # store. A `BoolOp` whose operands place nothing still answers False, exactly as before.
+    if isinstance(node, ast.BoolOp):
+        return any(_mapping_literal_stores_the_vector(value) for value in node.values)
+    if isinstance(node, ast.NamedExpr):
+        return _mapping_literal_stores_the_vector(node.value)
     # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THE SAME MAPPING (`#13788` F4):
     # `[{"embedding": vec}][0]` is the literal itself, one constant index in, and it CERTIFIED
     # the ASSIGN arm (`props = [{"embedding": vec}][0]`, runtime-checked to leave the key)
@@ -1559,14 +1572,17 @@ def _mapping_literal_stores_the_vector(node) -> bool:
     # refused — the container arms and the index arm were added in the same round and only
     # met when the literal was BARE. `_container_literal` answers the transparent
     # container wrappers (a FULL slice, `list(…)`/`tuple(…)`) and nothing else.
+    # ⛔ AND THE CONTAINER MAY BE A *CONDITIONAL* OF LITERALS, not one literal
+    # (`#13788`, measured at `105b047b`): `([{"embedding": vec}] if f else [{}])[0]`
+    # CERTIFIED because this arm demanded `_container_literal`'s single literal while the
+    # `if`-expression arm below answered only a bare operand — the two arms met only when
+    # the literal was bare. `_const_index_candidates` answers EVERY branch, which is what a
+    # refusal-only rule must do: either branch can be the one selected.
     if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
-        container = _container_literal(node.value)
-        if container is None:
-            return False
-        elements = container.elts
-        if -len(elements) <= index < len(elements):
-            return _mapping_literal_stores_the_vector(elements[index])
-        return False
+        return any(
+            -len(literal.elts) <= index < len(literal.elts)
+            and _mapping_literal_stores_the_vector(literal.elts[index])
+            for literal in _const_index_candidates(node.value))
     return False
 
 
@@ -1976,17 +1992,28 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     # `40db94f1`) — the same gap the mapping rule above carries: `[pairs][0:][0]` and
     # `list([pairs])[0]` CERTIFIED beside `[pairs][0]` refused. One helper answers both
     # rules, so the two cannot answer the same spelling differently.
+    # ⛔ AND THE CONTAINER MAY BE A *CONDITIONAL* OF LITERALS (`#13788`, measured at
+    # `105b047b`) — the same gap the mapping rule carries, answered by the same helper so the
+    # two rules cannot answer one spelling differently.
     if isinstance(node, ast.Subscript) and (index := _constant_index(node.slice)) is not None:
-        container = _container_literal(node.value)
-        if container is None:
-            return False
-        elements = container.elts
-        if -len(elements) <= index < len(elements):
-            return _operand_stores_the_vector(elements[index])
-        return False
+        return any(
+            -len(literal.elts) <= index < len(literal.elts)
+            and _operand_stores_the_vector(literal.elts[index])
+            for literal in _const_index_candidates(node.value))
     if isinstance(node, ast.IfExp):
         return (_operand_stores_the_vector(node.body)
                 or _operand_stores_the_vector(node.orelse))
+    # ⛔ `or`/`and` AND THE WALRUS ARE THE SAME TRANSPARENT WRAPPER, HERE TOO (`#13788`,
+    # measured at `105b047b`). This rule answered the `if`-expression above but not its
+    # boolean spelling, so `props |= [] or [("embedding", vec)]`, `props |= [("x", 1)] and
+    # [("embedding", vec)]`, `props.update([] or [("embedding", vec)])` and
+    # `props |= (p := [("embedding", vec)])` CERTIFIED a stop arm that stores. One rule, one
+    # wrapper family — and the mapping rule above carries the identical two arms, which is
+    # the whole reason they are written as a pair here rather than one at a time.
+    if isinstance(node, ast.BoolOp):
+        return any(_operand_stores_the_vector(value) for value in node.values)
+    if isinstance(node, ast.NamedExpr):
+        return _operand_stores_the_vector(node.value)
     return False
 
 
@@ -2354,6 +2381,38 @@ def _container_literal(node):
     return None
 
 
+def _const_index_candidates(node) -> list:
+    """Every List/Tuple literal this CONTAINER expression can be, through wrappers.
+
+    ⛔ A CONDITIONAL CONTAINER IS *EVERY* BRANCH, NOT ONE (`#13788`, measured at
+    `105b047b`). `_container_literal` answers a single literal (behind a full slice or
+    `list(…)`/`tuple(…)`), so `([{"embedding": vec}] if f else [{}])[0]` CERTIFIED while
+    both arms it COMPOSES were already implemented — the const-index arm (`[…][0]`) and the
+    `if`-expression arm. The two only met when the literal was bare, which is this series'
+    recurring shape: a spelling one wrapper out from a covered one.
+
+    ⛔ SO THE SAME WRAPPER FAMILY IS UNWRAPPED HERE — the `if`-expression, plus `or`/`and`
+    and the walrus, which are the same conditional SELECTION (`x or y` is `x if x else y`;
+    `(p := x)` evaluates to `x`). Either branch may be the one selected, so a store reached
+    through ANY of them is a store: that is what keeps this refusal-only. A branch that is
+    not a literal contributes no candidate — and an expression with NO candidate yields an
+    empty list, which answers False exactly as the `container is None` early return it
+    replaced did, so the stated name-bound container residual (`pairs[0]`) is unchanged.
+    """
+    import ast
+
+    if isinstance(node, ast.IfExp):
+        return (_const_index_candidates(node.body)
+                + _const_index_candidates(node.orelse))
+    if isinstance(node, ast.BoolOp):
+        return [literal for value in node.values
+                for literal in _const_index_candidates(value)]
+    if isinstance(node, ast.NamedExpr):
+        return _const_index_candidates(node.value)
+    literal = _container_literal(node)
+    return [literal] if literal is not None else []
+
+
 def _pairs_store_the_vector(node) -> bool:
     """Does this list/tuple/SET literal hold an `(EXACT property, non-constant)` pair?
 
@@ -2526,6 +2585,15 @@ def _mapping_values(node):
     elif isinstance(node, ast.IfExp):
         yield from _mapping_values(node.body)
         yield from _mapping_values(node.orelse)
+    elif isinstance(node, ast.BoolOp):
+        # ⛔ `or`/`and` IS THE SAME CONDITIONAL SELECTION (`#13788`, measured at
+        # `105b047b`): `_set(props, **({} or {"key": "embedding", "value": vec}))`
+        # CERTIFIED beside its refused `if`-expression twin, so the scan that reads a ``**``
+        # operand's key/value PAIR had to follow the boolean spelling of the same wrapper.
+        for value in node.values:
+            yield from _mapping_values(value)
+    elif isinstance(node, ast.NamedExpr):
+        yield from _mapping_values(node.value)   # `(p := {…})` IS `{…}`
     elif isinstance(node, ast.Call):
         name = _callee_name(node)
         copied = _transparent_copy_operand(node)
