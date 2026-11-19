@@ -6586,14 +6586,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # START is again confirmed by structure rather than by a bumped number:
         # ⛔ RE-DERIVED AGAIN at the forward merge of `origin/main` `0774035055` (this merge):
         # `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split) inserts 22 lines above
-        # `org_info`, so the span start is now 15202 and the END — the blank line before
-        # `return OrgInfoResponse(` — is 15279 (the call itself is `:15280`). The three offsets
-        # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
-        # is how the figures below were re-derived rather than nudged: `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15225`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15254` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
-        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
+        # `org_info`, so the span is `:15261-15338` at THIS head — the START is the `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line, and the END is
+        # the blank line before `return OrgInfoResponse(` (`:15339`, measured at this head).
+        # The three offsets (+29 `nodes_used` -> `:15290`, +39 `max_nodes` -> `:15300`, +77 END)
+        # hold EXACTLY from that START, which is how the figures below were re-derived rather
+        # than nudged. ⛔ An earlier cut of this comment carried the PRE-`#13589` pair
+        # (`:15225`/`:15254`/`:15264`/`:15302`), which names different statements at this
+        # head — every one of those four was re-measured against the tree, not inferred.
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span
@@ -6812,16 +6812,16 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15225-15302`, and the END of that range is a BLANK line — so the row
+    # `hosted_api.py:15261-15338`, and the END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15264` (both needles are the file's only occurrences —
-    # `:15254` and `:15264` — so a later end cannot change the sum). Ends below `:15264` fail
+    # true for any end at or beyond `:15300` (both needles are the file's only occurrences —
+    # `:15290` and `:15300` — so a later end cannot change the sum). Ends below `:15300` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15225`-`:15263` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15225` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15261`-`:15299` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15261` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
@@ -16580,17 +16580,16 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     for stale in ("carries TWO numeric re-points", "a document that carries two"):
         assert stale not in text, (
             f"D5 states `{stale}` about `04-plan.md`. The `hosted_api.py` "
-            "`:15202-15279` -> `:15225-15302` move it is paired with is `origin/main`'s "
+            "`:15202-15279` -> `:15261-15338` move it is paired with is `origin/main`'s "
             "own and is INHERITED, not contributed (`git show origin/main:docs/epics/"
             "2026-11-04-7949-extractor-v4-capstone/04-plan.md` already carries "
-            "`:15225-15302`). Do not re-inflate the count")
+            "`:15261-15338`). Do not re-inflate the count")
     assert "carries ONE numeric re-point" not in text, (
         "D5 states that `04-plan.md` carries a numeric re-point in this PR's diff, and the "
         "claim this assertion exists to stop is the PAIR it used to name, not the fact: "
-        "measured at this head `git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `2 2`, so the "
-        "file IS in the diff and one of its two changed lines is the "
-        "`declared_relation_predicates()` re-point. What is false is the "
+        "measured at this head `git diff --name-only origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` is EMPTY — the file is "
+        "NOT in this diff, so no re-point of it is this PR's. What is also false is the "
         "`sdk.py:28559` -> `:28592` pair: no version of that row carries it at this head")
     # ⛔ DERIVED FROM `04-plan.md`, never typed (#13746 review round 4, P1). This asserted
     # the literal `sdk.py:28607`, which was that row's value at this branch's BASE and
