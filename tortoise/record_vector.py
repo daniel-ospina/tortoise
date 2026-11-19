@@ -853,7 +853,8 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
             # claim about NOW while the read answering with it may return rows the
             # count never saw (the normal fresh-tenant lifecycle: measure 0/0,
             # then write). Past tense plus "measured" dates the number, which is
-            # what the measurement-instant marker above it promises.
+            # what the TRIVIALLY trace's own measurement-time framing
+            # (`searcher()`'s `if verdict.trivial` block) already promises.
             reason = (f"the count measured {record_vectors} vector(s) in the "
                       f"record for {label} against {graph_vectors} in the graph")
             if trivial:
