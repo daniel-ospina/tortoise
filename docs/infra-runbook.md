@@ -1204,6 +1204,18 @@ attempt yet" sends an operator hunting a pre-warm that is 190 s into its own 300
 - **`threads` is the intra-op pin** (#10296), published for the same "why is this host slow" question;
 `null` before any load attempt.
 
+⛔ **`available: null` is NOT "the model is unavailable" — it is "this block could not be read".**
+If `status()` itself raises (an embeddings import half-written by a deploy, a partial wheel), the
+block still arrives — with the SAME key set, every value `null`, plus `error`
+(`hosted_api.py::_embedder_health`, its never-raise arm) — and `/health` is still a **200**. Read it
+as INCONCLUSIVE: `available: false` means the dense leg is down **and measured** (then read `state`
+and `failure_kind`), while `available: null` means the reading failed and this process knows
+nothing about the leg. Check `error` and the process's own logs; do NOT page on `available` alone,
+and do not read `null` as "no attempt yet" — that reading is `available: false` with
+`state: "unavailable"`, `failure_kind: null` and `load_in_progress: false`. All four terms are
+needed: drop `failure_kind` and the same tuple describes a load that FAILED and whose 60 s
+cooldown has since expired (#13819 review).
+
 ```bash
 curl -sS https://api.premiselabs.co/health \
   | jq '.embedder | {available, state, failure_kind, load_timeout_s, load_in_progress_s}'
