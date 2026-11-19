@@ -3889,6 +3889,33 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and the ITERABLE-OF-PAIRS spelling of the `|=` merge, which `dict.__ior__`
+        # accepts exactly as it accepts the literal: `props |= [("embedding", vec)]`. The
+        # AugAssign arm narrowed to `ast.Dict` and walked past it — measured CERTIFIED by the
+        # review of this branch while the CALL form `props.update([("embedding", vec)])` was
+        # already refused. Both narrowings of the pairs rule still hold, which is what the two
+        # `accepted` controls below assert.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", _encode(ev))]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= (("embedding", _encode(ev)),)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding_model", _m()), ("embedding", _encode(ev))]
+        return None
+    _write(props)
+""",
         # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
         # in all three spellings the review of this branch measured CERTIFIED: the functional,
         # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
@@ -4578,6 +4605,20 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= dict([("embedding", None)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding", None)]
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= [("embedding_model", _m())]
         return None
     _write(props)
 """,

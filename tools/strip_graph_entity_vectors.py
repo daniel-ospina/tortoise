@@ -1207,9 +1207,28 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                        for target in targets):
                     return True           # `q = "SET n.embedding = $e"; session.run(q)`
                 continue                  # text nothing runs
-            if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
-                    and _dict_stores_the_vector(sub.value):
-                # `props |= {"embedding": vec}` — a merge that places the vector.
+            if isinstance(sub, ast.AugAssign) and (
+                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(sub.value))
+                    # ⛔ THE ITERABLE-OF-PAIRS SPELLING, STOP-ARM ONLY. `dict.__ior__` accepts
+                    # `[("embedding", vec)]` exactly as it accepts the literal, and the
+                    # `isinstance(..., ast.Dict)` narrowing walked past it (measured CERTIFIED
+                    # by the review of this branch while the CALL form
+                    # `props.update([("embedding", vec)])` was already refused).
+                    # ⛔ STOP-ARM ONLY IS LOAD-BEARING: the mirror arm's widest arm is reached
+                    # for EVERY statement, and recognizing a new spelling there is a new
+                    # ACCEPTANCE, not a new refusal — measured: the same recognition
+                    # unconditionally turned a `refused` mirror-arm fixture GATED. A fix may add
+                    # refusals, never acceptances.
+                    or (anywhere and _mapping_operand_stores_the_vector(sub.value))):
+                # `props |= {"embedding": vec}` — a merge that places the vector. ⛔ AND THE
+                # ITERABLE-OF-PAIRS SPELLING IS THE SAME MERGE: `props |= [("embedding", vec)]`
+                # (and its tuple twin) is accepted by `dict.__ior__` exactly as the literal is,
+                # and the `isinstance(..., ast.Dict)` narrowing this arm used to carry walked
+                # straight past it — measured CERTIFIED by the review of this branch, while the
+                # CALL form `props.update([("embedding", vec)])` was already refused. One
+                # operand rule, not two: `_pairs_store_the_vector` keeps the same two
+                # narrowings, so `props |= [("embedding", None)]` and
+                # `props |= [("embedding_model", _m())]` stay certified.
                 return True
             # ⛔ A MAPPING LITERAL ASSIGNED IN THE ARM IS A STORE TOO, and a `{**{…}}` merge
             # needs the RECURSIVE form — hence `stop_arm=True` here and `anywhere`-only, both
