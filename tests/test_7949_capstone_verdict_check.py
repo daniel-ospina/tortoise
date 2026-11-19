@@ -4866,12 +4866,16 @@ def _pytest_budget() -> int:
     return budget
 
 
-def _bounded_probes(monkeypatch, *, object_db_answers: bool) -> Counter:
+def _bounded_probes(monkeypatch, *, object_db_answers: bool,
+                    criteria: tuple[str, ...] = cvc.CRITERIA) -> Counter:
     """Every bound ONE `check()` asks for, on the recorded 5/5-GREEN shape.
 
-    The shape is the worst one this gate can be handed: five GREEN rows with
-    DISTINCT shas (the memos are per sha) and a run that declares a conditional
-    step (so `_step_accounting` reads the frozen record, the ONE blob read).
+    The shape is the worst one this gate can be handed at that cardinality: N
+    GREEN rows with DISTINCT shas (the memos are per sha) and a run that
+    declares a conditional step (so `_step_accounting` reads the frozen record,
+    the ONE blob read). ``criteria`` is a parameter because N is NOT fixed at
+    five — the vocabulary V2 accepts is `RECOGNISED_CRITERIA` (11 ids), which is
+    the real ceiling (#13800 review round 4).
     """
     bounds: list[float] = []
 
@@ -4891,16 +4895,14 @@ def _bounded_probes(monkeypatch, *, object_db_answers: bool) -> Counter:
     cvc._clear_git_memos()
     rec = _idle_green(_record())
     lead = rec["rows"][0]
+    # ⛔ `_green()` greens rows[0] ONLY. Rebuilding the row set as one copy of
+    # that row PER CRITERION is what makes this an N/N table — without it the
+    # fixture is 1 green + 4 refused, the ancestry arm runs once, and the
+    # measured sum proves nothing about the shape the epic actually ships.
+    rec["rows"] = [dict(lead, criterion=c) for c in criteria]
     for i, row in enumerate(rec["rows"]):
-        # ⛔ `_green()` greens rows[0] ONLY. Copying that row onto the other four
-        # is what makes this a 5/5 table — without it the fixture is 1 green + 4
-        # refused, the ancestry arm runs once, and the measured sum proves
-        # nothing about the shape the epic actually ships.
-        row.update({k: lead[k] for k in ("verdict", "evidence_kind", "evidence",
-                                         "numerator", "denominator", "blocked_by",
-                                         "corpus_sha256")})
         row["sha"] = f"{i + 1:040x}"
-    assert [r["verdict"] for r in rec["rows"]] == ["GREEN"] * 5, rec["rows"]
+    assert [r["verdict"] for r in rec["rows"]] == ["GREEN"] * len(criteria), rec["rows"]
     cvc.check(rec, repo=_REPO, require_green=False)
     assert bounds, "no probe reached the runner — the sum below would be vacuous"
     return Counter(bounds)
@@ -4915,12 +4917,20 @@ def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
     quantity that has to fit is the sum of the probes one `check()` makes, and
     the ceiling is the 5/5-GREEN shape, where EVERY call site is reached.
 
-    MEASURED, both shapes, same fixture and runner (this test asserts them):
+    ⛔ AND THE ROW COUNT IS NOT FIVE EITHER (#13800 review round 4): five is
+    the required MINIMUM, not the ceiling — `RECOGNISED_CRITERIA` (11 ids) is
+    what V2 accepts, and the sum is `(2N + 2) x GIT_TIMEOUT + BLOB_TIMEOUT`, so
+    a guard that builds a 5-row table proves the fixture, not the bound. The
+    vocabulary-ceiling arm below builds the table the gate actually permits, and
+    the bound is derived from `len(RECOGNISED_CRITERIA)` rather than typed in.
 
-    | shape | before the memos (`4bd26f535f`) | this head |
+    MEASURED, same fixture and runner (this test asserts them):
+
+    | shape | before the memos (`4bd26f535f`, `GIT_TIMEOUT=15`) | this head (`=8`) |
     |---|---|---|
-    | 5/5 GREEN, every probe answers (the CEILING) | 26 probes / **615 s** | 13 / **240 s** |
-    | object DB wedged (the #13800 shape) | 20 / 525 s | 7 / 150 s |
+    | 5/5 GREEN, every probe answers (the 5-row shape) | 26 probes / **615 s** | 13 / **156 s** |
+    | object DB wedged (the #13800 shape) | 20 / 525 s | 7 / 108 s |
+    | the VOCABULARY ceiling (11 GREEN rows) | — | 25 / **252 s** |
 
     So the sum assertion is RED on the reviewed head — this is a real guard, not
     a restatement. The `Counter` equality per shape is deliberate: it makes the
@@ -4932,8 +4942,8 @@ def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
     # 1 work-tree probe (memoised) + 5 distinct row shas + 1 prereg sha (a
     # distinct key) + 5 `merge-base` (one per GREEN row) and the ONE blob read.
     assert ceiling == Counter({cvc.GIT_TIMEOUT: 12, cvc.BLOB_TIMEOUT: 1}), (
-        "the enumerated call sites changed — re-derive the count in "
-        "`GIT_TIMEOUT`'s comment, then this row", dict(ceiling))
+        "the enumerated call sites or their bounds changed — re-derive the "
+        "count in `GIT_TIMEOUT`'s comment, then this row", dict(ceiling))
     assert sum(b * n for b, n in ceiling.items()) < budget, (
         sum(b * n for b, n in ceiling.items()), dict(ceiling), budget)
 
@@ -4944,8 +4954,68 @@ def test_a_wedged_git_costs_less_than_the_pytest_budget(monkeypatch):
     assert wedged == Counter({cvc.GIT_TIMEOUT: 6, cvc.BLOB_TIMEOUT: 1}), dict(wedged)
     assert sum(b * n for b, n in wedged.items()) < budget, (
         sum(b * n for b, n in wedged.items()), dict(wedged), budget)
+
+    # ⛔ THE CEILING, at the cardinality the gate ACCEPTS (11 recognised ids).
+    # This is the arm that reds if the constant is raised "inside the budget" by
+    # the five-row arithmetic, and it reds if the vocabulary grows past what the
+    # constant can carry — two axes, one assertion.
+    rows_max = len(cvc.RECOGNISED_CRITERIA)
+    vocabulary = _bounded_probes(monkeypatch, object_db_answers=True,
+                                 criteria=cvc.RECOGNISED_CRITERIA)
+    assert vocabulary == Counter({cvc.GIT_TIMEOUT: 2 + 2 * rows_max,
+                                 cvc.BLOB_TIMEOUT: 1}), (
+        "the vocabulary-ceiling enumeration changed — re-derive `GIT_TIMEOUT`'s "
+        "comment, then this row", dict(vocabulary))
+    worst = (2 + 2 * rows_max) * cvc.GIT_TIMEOUT + cvc.BLOB_TIMEOUT
+    assert sum(b * n for b, n in vocabulary.items()) == worst, (
+        sum(b * n for b, n in vocabulary.items()), worst)
+    assert worst < budget, (
+        f"(2 + 2 x {rows_max}) x {cvc.GIT_TIMEOUT} + {cvc.BLOB_TIMEOUT} = {worst} s "
+        f"is at or past the {budget} s per-test budget — a table the gate ACCEPTS "
+        "can restore `Failed: Timeout`. Lower a bound (or bound the row count).",
+        worst, budget)
     assert budget > cvc.GIT_TIMEOUT, (cvc.GIT_TIMEOUT, budget)
     assert budget > cvc.BLOB_TIMEOUT, (cvc.BLOB_TIMEOUT, budget)
+
+
+def test_the_default_note_does_not_name_a_squash_merge_for_a_clock(tmp_path, monkeypatch,
+                                                                  capsys):
+    """`main()`'s ONE note is the whole message a DEFAULT run shows.
+
+    A wedged git lands in the same `unresolved` list as a genuinely absent sha,
+    and the note used to assert the benign cause — *"expected after a squash
+    merge"* — plus a remediation, for both. The three sites that RENDER a reason
+    had been fixed; `main()` discards `why` (`for kind, _p, _w in unresolved`) and
+    printed past them, so the one string the shipped invocation shows still named
+    a cause the clock had not established (#13800 review round 4, P2).
+
+    Both arms, so this cannot pass by naming the clock unconditionally.
+    """
+    def _expire(repo_path, *args, timeout=cvc.GIT_TIMEOUT):
+        return subprocess.CompletedProcess(["git", *args], 124, "", "exceeded")
+
+    log = tmp_path / "expired.log"
+    log.write_text(f"{cvc.BEGIN}\n{json.dumps(_record())}\n{cvc.END}\n")
+    monkeypatch.setattr(cvc, "_git", _expire)
+    cvc._clear_git_memos()
+    assert cvc.main([str(log), "--repo", str(_REPO)]) == 0
+    out = capsys.readouterr().out
+    assert "expected after a squash merge" not in out, out
+    assert "did not answer within" in out, out
+    assert "NOT a finding of absence" in out, out
+
+    # CONTROL: a genuinely ABSENT sha keeps the benign cause and its remediation.
+    absent = _record()
+    for row in absent["rows"]:
+        row["sha"] = "0" * 40
+    absent_log = tmp_path / "absent.log"
+    absent_log.write_text(f"{cvc.BEGIN}\n{json.dumps(absent)}\n{cvc.END}\n")
+    monkeypatch.undo()
+    cvc._clear_git_memos()
+    assert cvc.main([str(absent_log), "--repo", str(_REPO)]) == 0
+    out = capsys.readouterr().out
+    assert "expected after a squash merge" in out, out
+    assert "did not answer" not in out, out
 
 
 def test_the_epic_scopes_verdict_gate_cites_resolve_where_they_say():

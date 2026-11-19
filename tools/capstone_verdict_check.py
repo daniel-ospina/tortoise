@@ -910,20 +910,20 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
 
 
 # Every git invocation here is BOUNDED (#13800). A probe that cannot answer is a
-# verdict, but a probe that never returns is a hung gate — and this tool gates a
-# merge. `GIT_TIMEOUT` is generous for the operations bounded by it (a commit or
-# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that a WEDGED
-# `check()` still fits a `pytest-timeout` budget — which applies to the TEST, so
-# the SUM of the probes one `check()` makes must fit, never one bound alone
-# (#13800 review round 3). Enumerated at the call sites, worst (5-GREEN) shape:
-# 1 work-tree probe (memoised) + 5 distinct row shas + 1 prereg sha (a distinct
-# memo key) = 7 x `GIT_TIMEOUT`; the frozen record, memoised = 1 x `BLOB_TIMEOUT`;
-# and `merge-base` once per GREEN row = 5 x `GIT_TIMEOUT` → 12 x 15 + 60 = 240 s,
-# inside the 300 s budget. An object-DB wedge is cheaper (150 s): an unresolvable
-# row sha skips that row's ancestry probe. `tests/…::
-# test_a_wedged_git_costs_less_than_the_pytest_budget` MEASURES both shapes (615 s
-# of bounds at the reviewed head) — add NO line here without re-deriving the cites.
-GIT_TIMEOUT = 15.0
+# verdict; a probe that never returns is a hung gate, and this tool gates a merge.
+# `GIT_TIMEOUT` is generous for what it bounds (a commit or ref lookup is ~8 ms
+# even on a 2.4 M-file repo) and small enough that a WEDGED `check()` fits a
+# `pytest-timeout` budget — which applies to the TEST, so the SUM of the probes
+# one `check()` makes must fit, never one bound alone (#13800 review round 4).
+# Enumerated at the call sites, a table of N GREEN rows with DISTINCT shas (the
+# memos are per sha): 1 work-tree probe (memoised) + N row shas + 1 prereg sha,
+# plus `merge-base` once per GREEN row → (2N + 2) x `GIT_TIMEOUT`, and the frozen
+# record (memoised) = 1 x `BLOB_TIMEOUT`. ⛔ N IS NOT FIVE: the vocabulary V2
+# accepts is `RECOGNISED_CRITERIA` (11 ids), so the CEILING is N = 11 →
+# 24 x 8 + 60 = 252 s, inside the 300 s budget. An object-DB wedge is cheaper: an
+# unresolvable row sha skips its ancestry probe. The budget pin —
+# `tests/…::test_a_wedged_git_costs_less_than_the_pytest_budget` — MEASURES both.
+GIT_TIMEOUT = 8.0
 BLOB_TIMEOUT = 60.0
 
 
@@ -1001,7 +1001,7 @@ def _repo_refusal(proc: subprocess.CompletedProcess) -> str:
     than about the clock.
     """
     if proc.returncode == 124:
-        return (f"git could not answer within {GIT_TIMEOUT:g}s whether this is a "
+        return (f"{CLOCK_REASON_PREFIX} within {GIT_TIMEOUT:g}s whether this is a "
                 "work tree (a wedged git, not a missing checkout)")
     return "not a git work tree"
 
@@ -1027,6 +1027,10 @@ _RECORD_MEMO: dict[tuple[str, str, str], tuple[set[str] | None, str]] = {}
 #: The three states a resolve probe can reach. Absence and a clock that ran out
 #: are DIFFERENT CLAIMS — one is about the object database, the other about this
 #: machine — so the reason a row is unreported names which one it was.
+#: Every reason a bounded probe could not answer OPENS with this, so `main()` can
+#: tell a CLOCK from a missing commit without re-deriving a state it does not hold
+#: (#13800 review round 4: the note used to name the squash-merge cause for both).
+CLOCK_REASON_PREFIX = "git could not answer"
 RESOLVED, ABSENT, EXPIRED = "resolved", "absent", "expired"
 
 
@@ -1060,7 +1064,7 @@ def _resolve_state(repo: Path, sha: str) -> str:
 def _resolve_reason(state: str, sha: str) -> str:
     """The reason a row / prereg pointer was left unresolved, in the state's words."""
     if state == EXPIRED:
-        return (f"git could not answer within {GIT_TIMEOUT:g}s whether {sha} is in "
+        return (f"{CLOCK_REASON_PREFIX} within {GIT_TIMEOUT:g}s whether {sha} is in "
                 "this object DB (a wedged git, or a partial clone proving absence "
                 "the slow way) — that is NOT a finding of absence")
     return "not in this object DB"
@@ -1344,7 +1348,7 @@ def check(record: dict, *, repo: Path,
                         # disproved.
                         f.unresolved.append(
                         ("prereg", prereg_sha,
-                         "git could not answer whether the evidence predates "
+                         f"{CLOCK_REASON_PREFIX} whether the evidence predates "
                          "the pre-registration (both commits resolve here, but "
                          "`merge-base --is-ancestor` exited neither 0 nor 1)"))
                     elif ancestry is False:
@@ -1863,9 +1867,25 @@ def main(argv: list[str] | None = None) -> int:
             parts.append(f"{rows_n} row sha(s)")
         if prereg_n:
             parts.append(f"{prereg_n} pre-registration commit(s)")
-        print(f"  note: {' + '.join(parts)} not resolvable in this checkout "
-              "(expected after a squash merge; re-run with "
-              "--require-resolvable where the commit exists)")
+        # ⛔ A CLOCK IS NOT A SQUASH MERGE (#13800 review round 4): an EXPIRED
+        # probe reaches here too, and the parenthetical below used to name a
+        # cause — and a remediation — the clock had not established, while the
+        # three sites that RENDER a reason were fixed. `why` is the only place
+        # the distinction survives, so it is read here.
+        clock_n = sum(1 for _k, _p, why in unresolved
+                      if why.startswith(CLOCK_REASON_PREFIX))
+        if clock_n:
+            print(f"  note: {' + '.join(parts)} not resolvable in this checkout "
+                  f"— {clock_n} of them because git did not answer within the "
+                  f"{GIT_TIMEOUT:g}s bound (a wedged git, or a partial clone "
+                  "proving absence the slow way). That is a CLOCK, not a squash "
+                  "merge, and it is NOT a finding of absence; re-run where git "
+                  "can answer, or with --require-resolvable where the commit "
+                  "exists")
+        else:
+            print(f"  note: {' + '.join(parts)} not resolvable in this checkout "
+                  "(expected after a squash merge; re-run with "
+                  "--require-resolvable where the commit exists)")
     if findings:
         print(f"❌ {len(findings.items)} finding(s):", file=sys.stderr)
         print(findings.render(), file=sys.stderr)
