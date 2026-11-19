@@ -1779,16 +1779,24 @@ def _pairs_operand_stores_the_vector(node) -> bool:
                 and not isinstance(node.value, ast.Constant)):
             return True
         if not isinstance(node.key, ast.Name):
-            return any(_pairs_operand_stores_the_vector(generator.iter)
-                       # ⛔ …AND THE EXTRAS TERM IS NOT NAMED-KEY ONLY (`#13788`, measured by
-                       # the review of this branch): a NON-`Name` key reads a pair-with-extras
-                       # exactly as an unpacking clause does — `{v[0]: v[1] for v in
-                       # [("embedding", vec, 1)]}` places the vector and CERTIFIED while the
-                       # two-element source was refused, in every position (`|=`, `update(…)`,
-                       # plain assign). The extras term was added 20 lines below by the same
-                       # commit and wired only into the `Name` branch.
-                       or _unpacked_element_stores_the_vector(generator.iter)
-                       for generator in node.generators)
+            return any(
+                # ⛔ …AND THIS TERM IS NOT NAMED-KEY ONLY (`#13788`, measured by the review of
+                # this branch): a NON-`Name` key reads a pair-with-extras exactly as an
+                # unpacking clause does — `{v[0]: v[1] for v in [("embedding", vec, 1)]}`
+                # places the vector and CERTIFIED while the two-element source was refused, in
+                # every position (`|=`, `update(…)`, plain assign). The extras term was added
+                # 20 lines below by the same commit and wired only into the `Name` branch.
+                # ⛔ AND THE SOURCE RESOLVER IS ADDED BESIDE THE PAIRS RULE, NEVER INSTEAD OF
+                # IT (`#13788`, measured by replaying this lane's own diff): swapping the pairs
+                # rule for the resolver here and below turned
+                # `[("embedding", vec)].copy()` from REFUSED into CERTIFIED — the resolver
+                # does not read a list's own `.copy()`, the pairs rule does. One vocabulary
+                # that is a SUPERSET is not one that is a REPLACEMENT, and narrowing
+                # acceptance is the one direction this file forbids.
+                _pairs_operand_stores_the_vector(generator.iter)
+                or _unpacked_element_stores_the_vector(generator.iter)
+                or _comprehension_source_pairs_the_property_with_a_value(generator.iter)
+                for generator in node.generators)
         # ⛔ AND THE VECTOR CAN BE THE PRODUCED **VALUE**, with the key the property by a
         # literal BINDING (`#13788`, measured by the review of this branch). Every arm above
         # hunts the vector inside the SOURCE's pair, so the shapes with no pair in the source
@@ -1808,12 +1816,16 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # clause must unpack and the produced KEY must be its FIRST name.
         return any(
             _generator_unpacks_the_pair_into_the_key(node.key, generator)
+            # ⛔ …AND A PAIR WITH EXTRAS IS STILL READ AS `(key, …)` BY AN UNPACKING CLAUSE:
+            # `{k: v for k, v, *rest in [("embedding", vec, 1)]}` places the vector, and the
+            # pairs rule rejects a three-element element by design (it mirrors what
+            # `dict([...])` accepts). ⛔ THE THREE LEGS ARE ADDITIVE, NOT INTERCHANGEABLE: the
+            # resolver cannot read a list's own `.copy()` and the pairs rule can, so replacing
+            # one with the other narrowed acceptance (`[("embedding", vec)].copy()` went from
+            # REFUSED to CERTIFIED in this lane's own first draft — measured).
             and (_pairs_operand_stores_the_vector(generator.iter)
-                 # ⛔ …AND A PAIR WITH EXTRAS IS STILL READ AS `(key, …)` BY AN UNPACKING
-                 # CLAUSE: `{k: v for k, v, *rest in [("embedding", vec, 1)]}` places the
-                 # vector, and the pairs rule rejects a three-element element by design (it
-                 # mirrors what `dict([...])` accepts). Measured CERTIFIED at this head.
-                 or _unpacked_element_stores_the_vector(generator.iter))
+                 or _unpacked_element_stores_the_vector(generator.iter)
+                 or _comprehension_source_pairs_the_property_with_a_value(generator.iter))
             for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
@@ -1959,36 +1971,151 @@ def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
             and key.id == first.id)
 
 
-def _comprehension_bound_source_constants(source):
-    """The CONSTANT elements of a clause's source, behind the wrappers a refactor puts there.
+def _comprehension_yielded_item(node):
+    """One ELEMENT of a clause's source, as what unpacking actually BINDS for it.
 
-    The value-side rule needs the literal VALUES a clause iterates over, so it asks the same
-    wrapper vocabulary the pairs rule does rather than a second, weaker one (`#13788`,
-    measured by the review of this branch): a bare literal was answered while `[..., ][:]`
-    and `[*[...]]` were ACCEPTED — one transparent wrapper re-opening the hole the plain
-    spelling had just closed, the exact shape this branch's `.copy()` history records.
-
-    `_container_literal` supplies the `list(...)`/`tuple(...)`/full-slice arms; a SET literal
-    is added here (the pairs rule accepts one), and a `Starred` element splices another
-    sequence in (`[*["embedding"]]`), which is followed.
-
-    ⛔ A source that is not a literal this check can read returns () — the clause's source is
-    then unreadable and the caller's other arms, plus the disclosed residual, still apply.
+    A scalar element binds one name (`for k in ["embedding"]`); an element that is itself a
+    tuple/list binds one name per position (`for k, v in [("embedding", vec)]`). Answering
+    both as a tuple of expressions is what lets ONE resolver serve the value-side term and
+    the pair term — the two questions differ only in WHICH position they read.
     """
     import ast
 
-    literal = _container_literal(source)
-    if literal is None and isinstance(source, ast.Set):
-        literal = source
-    if literal is None:
-        return ()
-    found = []
-    for element in literal.elts:
-        if isinstance(element, ast.Starred):
-            found.extend(_comprehension_bound_source_constants(element.value))
-        elif isinstance(element, ast.Constant):
-            found.append(element)
-    return tuple(found)
+    if isinstance(node, ast.Tuple | ast.List):
+        return tuple(node.elts)
+    return (node,)
+
+
+def _comprehension_source_yields(source, _depth: int = 0):
+    """What ONE iteration of a clause over `source` yields — as tuples of expressions.
+
+    ⛔ ONE RESOLVER FOR EVERY SOURCE SPELLING (`#13788`, measured by the review of this
+    branch). The value-side term and the pair term ask the same question of the same SOURCE
+    — "what does this clause iterate over?" — so they resolve it with ONE function instead of
+    two vocabularies that drift. The first cut of the value-side term answered the BARE
+    literal and left one transparent wrapper open, and that one wrapper re-opened the hole the
+    plain spelling had just closed, in TEN measured spellings at once:
+
+        props |= {k: _encode(ev) for k in ["embedding"][:]}                 # CERTIFIED
+        props |= {k: _encode(ev) for k in [*["embedding"]]}               # CERTIFIED
+        props |= {k: _encode(ev) for k in list(["embedding"])}            # CERTIFIED
+        props |= {k: _encode(ev) for k in ["embedding"] + []}              # CERTIFIED
+        props |= {k: _encode(ev) for k in ["embedding"] * 1}               # CERTIFIED
+        props |= {k: _encode(ev) for k in set(["embedding"])}              # CERTIFIED
+        props |= {k: _encode(ev) for k in {"embedding": 1}}                # CERTIFIED
+        props |= {k: _encode(ev) for k in {"embedding": 1}.keys()}         # CERTIFIED
+        props |= {k: _encode(ev) for k, _i in {"embedding": 1}.items()}    # CERTIFIED
+        props |= {k: _encode(ev) for k in dict.fromkeys(["embedding"])}    # CERTIFIED
+
+    A MAPPING is in that list because iterating one yields its KEYS, and `.items()` yields
+    its `(key, value)` pairs — the same store reached through the view (the module already
+    answers `.items()` on the operand side, `#13788` F1, for the same reason).
+
+    A SCALAR yield is a 1-tuple; an ELEMENT that is itself a tuple/list is the pair, because
+    that is what unpacking binds. `None` means "not a literal this check can read", and the
+    caller's other arms plus the disclosed residual still apply.
+
+    ⛔ STATED RESIDUAL, NARROWED (`#13788`): a TRANSFORMING comprehension
+    (`[x.upper() for x in ["embedding"]]`) is unreadable here, because answering it means
+    evaluating the inner clause — the same data flow this module declines for a pairs sequence
+    built by a call. The IDENTITY spelling (`[x for x in ["embedding"]]`) transforms nothing
+    and IS answered: it yields exactly its source's elements.
+    """
+    import ast
+
+    if _depth > 8:                      # a wrapper stack is finite in real code; bound it
+        return None
+    if isinstance(source, ast.Starred):
+        return _comprehension_source_yields(source.value, _depth + 1)
+    if isinstance(source, ast.List | ast.Tuple | ast.Set):
+        yielded = []
+        for element in source.elts:
+            if isinstance(element, ast.Starred):
+                spliced = _comprehension_source_yields(element.value, _depth + 1)
+                if spliced is None:
+                    return None
+                yielded.extend(spliced)
+            else:
+                yielded.append(_comprehension_yielded_item(element))
+        return yielded
+    if isinstance(source, ast.Dict):
+        # Iterating a mapping yields its KEYS. A `**` merge (`key is None`) makes the key set
+        # unreadable, so the whole source is.
+        if any(key is None for key in source.keys):
+            return None
+        return [_comprehension_yielded_item(key) for key in source.keys]
+    if isinstance(source, ast.BinOp):
+        # ⛔ CONCATENATION AND REPETITION ARE THE SAME SEQUENCE — the pairs rule makes exactly
+        # this call, so a `+ []` or `* 1` here must not answer differently.
+        if isinstance(source.op, ast.Add):
+            left = _comprehension_source_yields(source.left, _depth + 1)
+            right = _comprehension_source_yields(source.right, _depth + 1)
+            if left is None or right is None:
+                return None
+            return [*left, *right]
+        if isinstance(source.op, ast.Mult):
+            # `[...] * 0` iterates NOTHING, so it is not a store; any other constant count
+            # repeats the same values.
+            if isinstance(source.right, ast.Constant) and isinstance(source.right.value, int):
+                count, sequence = source.right.value, source.left
+            elif isinstance(source.left, ast.Constant) and isinstance(source.left.value, int):
+                count, sequence = source.left.value, source.right
+            else:
+                return None
+            return [] if count <= 0 else _comprehension_source_yields(sequence, _depth + 1)
+        return None
+    if isinstance(source, ast.Subscript) and _is_full_slice(source.slice):
+        return _comprehension_source_yields(source.value, _depth + 1)
+    if isinstance(source, ast.Call):
+        name = _callee_name(source)
+        if name in ("list", "tuple", "set") and len(source.args) == 1 and not source.keywords:
+            return _comprehension_source_yields(source.args[0], _depth + 1)
+        # ⛔ NO `dict(...)` ARM HERE, DELIBERATELY (`#13788`, measured): the constructor rule
+        # answers `dict({…})` on the NODE ITSELF (`_own_walk` visits the inner call whatever
+        # position it holds), so an arm in this resolver changed no verdict on any fixture —
+        # an unreachable guard, which this repo treats as a defect rather than as depth.
+        if name == "fromkeys" and source.args and not source.keywords:
+            return _comprehension_source_yields(source.args[0], _depth + 1)
+        if (isinstance(source.func, ast.Attribute) and not source.args
+                and not source.keywords):
+            if source.func.attr == "keys":
+                return _comprehension_source_yields(source.func.value, _depth + 1)
+            if source.func.attr == "items":
+                mapping = source.func.value
+                if (isinstance(mapping, ast.Dict)
+                        and not any(key is None for key in mapping.keys)):
+                    return list(zip(mapping.keys, mapping.values, strict=True))
+        return None                     # a builder, `zip(…)`, `map(…)`: stated residual
+    if isinstance(source, ast.GeneratorExp | ast.ListComp | ast.SetComp):
+        # ⛔ THE IDENTITY COMPREHENSION IS A TRANSPARENT WRAPPER (`[x for x in L]` is L's
+        # elements, in order); a TRANSFORMING one is the stated residual above.
+        if len(source.generators) == 1 and not source.generators[0].ifs:
+            inner = source.generators[0]
+            if (isinstance(inner.target, ast.Name) and isinstance(source.elt, ast.Name)
+                    and source.elt.id == inner.target.id):
+                return _comprehension_source_yields(inner.iter, _depth + 1)
+        return None
+    return None
+
+
+def _comprehension_source_pairs_the_property_with_a_value(source) -> bool:
+    """Does one iteration of this clause yield `(EXACT property, non-constant)`?
+
+    ⛔ NOT THE PAIRS RULE, DELIBERATELY, and the difference is the ELEMENT LENGTH. That rule
+    mirrors what `dict([...])` accepts (exactly two), while an unpacking clause reads a longer
+    element as `(key, value, *rest)` — `{k: v for k, v, *rest in [("embedding", vec, 1)]}`
+    places the vector and CERTIFIED while the two-element source was refused (measured). Here
+    the question is the comprehension's own, so any length of two or more answers it, and the
+    exactly-two rule stays where it belongs.
+    """
+    import ast
+
+    for item in _comprehension_source_yields(source) or ():
+        if (len(item) >= 2 and isinstance(item[0], ast.Constant)
+                and item[0].value == EMBEDDING_PROPERTY
+                and not isinstance(item[1], ast.Constant)):
+            return True
+    return False
 
 
 def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
@@ -2006,13 +2133,14 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     (`for k, _i in [("embedding", 1)]`, `for _i, v in [(1, "embedding")]`). ⛔ IT MENTIONS AND
     IS NOT THE KEY, on purpose: `{f"{k}": _encode(ev) for k, _i in [("embedding", 1)]}`
     computes the same key and is the same store, and a `Name`-only version accepted it
-    (measured). The source is resolved through `_comprehension_bound_source_constants`, which
-    is the same wrapper vocabulary the pairs rule uses — a bare literal answered while
-    `[..., ][:]` and `[*[...]]` were ACCEPTED (measured), one transparent wrapper re-opening
-    the hole the plain spelling had just closed. ⛔ THE STATED RESIDUAL IS A SOURCE THAT IS
-    ITSELF A COMPREHENSION — `{k: _encode(ev) for k in [x for x in ["embedding"]]}` is
-    ACCEPTED, because answering it means evaluating the inner clause, which is the same data
-    flow this module declines for a pairs sequence built by a call.
+    (measured). The source is resolved through `_comprehension_source_yields`, the ONE resolver
+    both comprehension terms share, so a wrapper this module already answers elsewhere cannot
+    answer differently here — the first cut of this term answered the BARE literal and left
+    `[..., ][:]`, `[*[...]]`, `list(...)`, `+ []`, `* 1`, `set(...)`, a mapping literal,
+    `.keys()`, `.items()` and `dict.fromkeys(...)` ACCEPTED (all measured on the merged head).
+    The identity comprehension (`[x for x in ["embedding"]]`) is answered too; a TRANSFORMING
+    one is the resolver's stated residual, because answering it means evaluating the inner
+    clause.
     The cost is the same over-refusal of a key that transforms the name AWAY
     (`k.upper()`) that the unreadable-key term beside it already pays, and the doctrine permits
     it. A source this check cannot read answers False, and the caller's other arms still run.
@@ -2023,36 +2151,27 @@ def _comprehension_key_mentions_the_bound_property(key, generators) -> bool:
     if not referenced:
         return False
     for generator in generators:
+        yielded = _comprehension_source_yields(generator.iter)
+        if not yielded:
+            continue
         target = getattr(generator, "target", None)
         if isinstance(target, ast.Name):
-            if target.id in referenced and any(
-                    isinstance(element, ast.Constant)
-                    and element.value == EMBEDDING_PROPERTY
-                    for element in _comprehension_bound_source_constants(generator.iter)):
+            # ⛔ A NAME BINDS THE WHOLE YIELD, so only a SCALAR yield can BE the property:
+            # `for k in [("embedding", 1)]` binds the PAIR to `k`, which is not a store.
+            if target.id not in referenced:
+                continue
+            if any(len(item) == 1 and isinstance(item[0], ast.Constant)
+                   and item[0].value == EMBEDDING_PROPERTY for item in yielded):
                 return True
             continue
         if not isinstance(target, ast.Tuple | ast.List):
             continue
-        literal = _container_literal(generator.iter)
-        if literal is None and isinstance(generator.iter, ast.Set):
-            literal = generator.iter
-        if literal is None:
-            continue
-        elements = []
-        for element in literal.elts:
-            if isinstance(element, ast.Tuple | ast.List):
-                elements.append(element)
-            elif isinstance(element, ast.Starred) and isinstance(
-                    element.value, ast.Tuple | ast.List):
-                elements.extend(element.value.elts)
-        for index, bound in enumerate(target.elts):
+        for position, bound in enumerate(target.elts):
             if not (isinstance(bound, ast.Name) and bound.id in referenced):
                 continue
-            for element in elements:
-                if (index < len(element.elts)
-                        and isinstance(element.elts[index], ast.Constant)
-                        and element.elts[index].value == EMBEDDING_PROPERTY):
-                    return True
+            if any(position < len(item) and isinstance(item[position], ast.Constant)
+                   and item[position].value == EMBEDDING_PROPERTY for item in yielded):
+                return True
     return False
 
 
@@ -2063,6 +2182,11 @@ def _unpacked_element_stores_the_vector(node) -> bool:
     `{k: v for k, v, *rest in [...]}`. ⛔ NOT the pairs rule, deliberately: that one mirrors
     what `dict([...])` accepts (exactly two), and the unpacking clause reads a longer element
     as `(key, value, *rest)`. Stop arm only, like every caller of the rules above.
+
+    ⛔ BARE LITERAL ONLY, and it stays that way: `_comprehension_source_pairs_the_property_with_a_value`
+    is the WRAPPER-aware leg beside it, so this one must not grow a second vocabulary — the
+    two are OR'd by the comprehension terms, which is what keeps the wrapper family closed
+    without narrowing what this arm already refused (`#13788`, measured).
     """
     import ast
 
