@@ -751,6 +751,28 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         f"`{_tortoise_cmd}` at the head you merge. State the command and let the reader "
         "run it; a set named here rots the moment `main` lands the same re-derivation "
         "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
+    # ⛔ AND EVERY ANSWER THE SIBLING SHAPE DETECTOR KNOWS, NOT JUST THIS REGEX'S VERBS
+    # (#13802 review, round 4, P2 — MEASURED): `_TORTOISE_SET_DIRECTION_CLAIM` names four
+    # answer FORMS, while the sibling `_typed_answers_to_tortoise_cmd` names fourteen. A
+    # refuted claim spelled with one of the other ten (`reports exactly two paths`,
+    # `carries no paths`, `lists one path`, …) was seen by NEITHER arm where it matters:
+    # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
+    # merge), and this regex did not match the verb. Measured on the depth-1 topology with
+    # `` `…-- tortoise/` reports exactly two paths `` injected: `15 passed, 1 skipped` —
+    # green over a refuted membership claim. Both checks are TEXT-ONLY, so neither needs a
+    # base ref and neither can be skipped away; they are kept BESIDE each other because
+    # they cover different spellings (this regex knows the `-- tortoise/` shorthand the
+    # detector's full-command anchor does not; the detector knows the answer forms this
+    # regex's verb list does not).
+    _typed_direction = [
+        _answer for _answer, _claims_empty
+        in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd)]
+    assert not _typed_direction, (
+        f"05-verify.md TYPES {_typed_direction[0]!r} as the answer to `{_tortoise_cmd}` — "
+        "a typed present-tense ANSWER to a head-bound measurement is the defect class this "
+        "arm exists for, and it is refused in EVERY checkout because the ban is on the "
+        "TEXT, not on a reading this clone may be unable to take (#13802 review, round 4, "
+        "P2). State the command and let the reader run it at the head they merge")
     # (c) TYPED ANSWERS live in `test_the_bundles_tortoise_set_answers_are_not_typed_against
     # _the_tree`, deliberately NOT here. Their direction is read from `git diff
     # origin/main...HEAD`, which a depth-1 `test` job cannot answer at all (rc=128, empty
