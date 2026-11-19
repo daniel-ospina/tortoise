@@ -16478,6 +16478,66 @@ def test_the_D5_row_is_still_one_table_row():
         "for the stray or missing delimiter. Delete or add it; do not re-word around it")
 
 
+#: Readings this row carried that a MEASUREMENT refuted, each kept beside the measurement
+#: that killed it (#13794). ⛔ An ABSENCE pin, deliberately: the three defects below are
+#: PROSE, so there is no tree line to bind them to, and the only rot-proof assertion is
+#: that the refuted reading is not stated again. A reword is free — this fires only when
+#: the claim comes BACK. ⛔ No literal `hosted_api.py:<n>` token is spelled here: the
+#: census greps every tracked file, so one would join the population it measures.
+_D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
+    (
+        "is a bare `#` comment marker",
+        "measured at `origin/main`: `:14471` is a docstring line in "
+        "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
+        "comment marker (#13794 review, P2). Keep the half that IS true: no cite TOKEN "
+        "for that line exists on `main`",
+    ),
+    (
+        "`:45728`, a DIFFERENT call site",
+        "measured at this head: `:45728` is a NAME in an import list "
+        "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
+        "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
+        "prints (#13794 measurement, P2)",
+    ),
+    (
+        # ⛔ The ASSERTING frame, not the bare phrase: a retraction legitimately QUOTES
+        # this claim (the peer lane's fix writes `the claim, "AND THE BOX IS NO LONGER
+        # SHALLOW", is DELETED`), so a bare-substring pin would red on the REPAIR itself.
+        # The `, so` continuation is what makes it an assertion about this box.
+        "AND THE BOX IS NO LONGER SHALLOW, so",
+        "measured on the clone this row was repaired on: "
+        "`git rev-parse --is-shallow-repository` -> `true` and "
+        "`git merge-base 2584a86ec1 origin/main` -> rc=1, so the unshallow is a REPAIR a "
+        "reader may perform, never a state this row may assert — shallowness is a "
+        "property of the clone (#13794 measurement, P2)",
+    ),
+)
+
+
+def test_the_D5_row_does_not_restate_a_refuted_reading():
+    """Three prose claims on D5 were false at the head they were written for (#13794).
+
+    ⛔ MEASURED, which is why this is a pin and not a note: at `43438fbe31` the row said
+    `origin/main`'s `:14471` is a bare `#` comment marker (it is a docstring line in one
+    file and code in the other), called `:45728` a "call site" (it is a name in an import
+    list), and asserted "the box is no longer shallow" (that clone reports `true`, and
+    `git merge-base 2584a86ec1 origin/main` -> rc=1). No guard in the tree read any of
+    the three, which is how they survived nine heads while the suite was green.
+
+    A reword is free here: the assertion is that the refuted READING is not stated again,
+    not that any particular sentence survives.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
+                if claim in d5[0]]
+    assert not restated, (
+        "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated))
+
 
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
