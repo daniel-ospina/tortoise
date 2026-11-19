@@ -1972,9 +1972,23 @@ def test_every_window_lands_in_exactly_one_mode(artifact):
     `per_query`.
     """
     for name, arm in artifact["arms"].items():
-        modes = arm.get("window_modes")
-        if modes is None:
-            continue
+        #: ⛔ ABSENCE MUST FAIL, not disappear (round 34, F1). The first cut read this
+        #: as `arm.get("window_modes")` + `continue`, so DELETING
+        #: `arms.mint_rate.window_modes` left the suite GREEN at 60 passed — the field
+        #: this test exists to make "read" was read by nothing the moment it went
+        #: missing, which is exactly the state the round-33 commit describes as the
+        #: defect. `mint_rate` is the arm that carries `retrieval_mode: MIXED` and no
+        #: other reader of its `window_modes` exists, so a reader following the
+        #: artifact's own `read_the_retrieval_mode_beside_every_cell` note would find
+        #: the mixture asserted with its only evidence gone. This file already pins
+        #: `pytest.skip`-on-absent as a 26-pin fail-open; a `continue` is the same
+        #: shape one line down. The presence assertion makes the absence a FAILURE with
+        #: a message that says what was lost.
+        assert "window_modes" in arm, (
+            f"`arms[{name}]` publishes no `window_modes`: the retrieval-mode split is "
+            f"the only evidence for the leg this arm's cells were measured on, so its "
+            f"absence is a lost measurement, not an arm that does not have one")
+        modes = arm["window_modes"]
         windows = arm["n"] if "n" in arm else arm["pairs"]
         assert sum(modes.values()) == windows, (
             f"`arms[{name}].window_modes` splits {windows} windows into {modes} — "
