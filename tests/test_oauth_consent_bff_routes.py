@@ -111,7 +111,11 @@ _SCOPE_SENTINEL = "scope-sentinel-mcp"
 # The params that carry what a `_PARAMS` arm cannot. `_PARAMS` stays the set EVERY arm presents
 # (widening it would change what every other arm proves), so the values that need to be distinctive —
 # both non-http destinations and the `scope` sentinel — ride on a copy of these instead. That copy is
-# a SUPERSET of `_PARAMS`, so an arm presenting it proves at least what a `_PARAMS` arm proves.
+# a superset of `_PARAMS` in KEYS, with TWO VALUES overridden (`redirect_uri`, `scope`) — so an
+# arm presenting it does NOT prove every `_PARAMS` row: the scheme-less `client.example/cb` row is
+# presented by the five `_PARAMS` arms and by neither sentinel arm. Stated rather than glossed,
+# because a lane that added a row on "superset" would publish one that is vacuous on both refusal
+# copies (review of #13712, F12).
 #
 # ⛔ WHY BOTH REFUSAL COPIES NEED ONE OF THESE ARMS — and the revision of this comment that argued
 # otherwise had it backwards. The echoed-value tuple is checked against every arm's BODY, which makes
@@ -119,7 +123,8 @@ _SCOPE_SENTINEL = "scope-sentinel-mcp"
 # PRESENTS. An ordinary `_PARAMS` `403` arm has no `resource` key at all, so a `FLOW_NOT_YOURS` copy
 # that interpolated it rendered empty there and the `_RESOURCE` row passed VACUOUSLY — F1's class (a
 # page carrying a destination the origin assertion cannot see) surviving in the very copy F1 named.
-# The `403` arm therefore presents the sentinel params too (superset, so no `_PARAMS` row is lost and
+# The `403` arm therefore presents the sentinel params too (same KEYS, so the `_PARAMS` rows still
+# apply except the overridden `redirect_uri`, and
 # the arm count stays 7), giving each refusal copy an arm that can red for what that copy could
 # interpolate. Measured, not assumed: hardcoding `cursor://tools.internal/v1` into `FLOW_NOT_YOURS`
 # reds exactly that arm (`1 failed, 6 passed`, opts6) and nothing else (review of #13712, F1b).
@@ -864,7 +869,7 @@ def _assert_refusal_page(out: dict, reason: str, status: int) -> None:
     # covers the copy it renders, and only that: a row can red only on a value the arm under test
     # actually PRESENTS, so a value only one arm presents is rendered EMPTY in the other copy's arms
     # and passes VACUOUSLY there. That is why each of the page's TWO copies (`STORE_FAULT` /
-    # `FLOW_NOT_YOURS`, `consent-refusal.ts:108-130`) has an arm PRESENTING the sentinel params,
+    # `FLOW_NOT_YOURS`, `consent-refusal.ts:110-132`) has an arm PRESENTING the sentinel params,
     # rather than one sentinel arm being assumed to cover both — the earlier revision of this
     # paragraph claimed exactly that and was wrong (review of #13712, F1b — measured: hardcoding a
     # sentinel into `FLOW_NOT_YOURS` reds the `403` arm, opts6, and nothing else).
@@ -2016,7 +2021,8 @@ _FOREIGN_OWNED_ROW = [{
     ("start_signed_in", {"noStore": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"sessionReadThrows": True}, "session_store_unavailable", 503),
     ("start_signed_in", {"asOrigin": "api.premiselabs.co"}, "as_origin_misconfigured", 503),
-    # The SENTINEL arm: the one refusal that presents the values a `_PARAMS` arm cannot, all of them
+    # The SENTINEL arm for a store fault — one of the TWO refusal copies that present the values a
+    # `_PARAMS` arm cannot (the `403` below is the other), all of them
     # `cursor://`-class destinations or distinctive sentinels (see `_SENTINEL_PARAMS`). It matters
     # because `resource` and `redirect_uri` are both DESTINATIONS that may carry a non-http scheme —
     # `cursor://…` is not `http(s)://`, and this repo accepts exactly that scheme for `redirect_uri`
@@ -2025,8 +2031,9 @@ _FOREIGN_OWNED_ROW = [{
     # the set EVERY arm presents, so widening it would change what every other arm proves.
     ("start_signed_in", {"storeThrows": True, "params": _SENTINEL_PARAMS},
      "consent_store_unavailable", 503),
-    # #10865 arm B — the `403`. It presents the SENTINEL params (a superset of `_PARAMS`, so the
-    # `_PARAMS` rows still apply to this copy), because a row can only red on a value the arm
+    # #10865 arm B — the `403`. It presents the SENTINEL params (the same KEYS as `_PARAMS`, with
+    # `redirect_uri`/`scope` overridden, so the `_PARAMS` rows apply to this copy except that one),
+    # because a row can only red on a value the arm
     # PRESENTS: an ordinary `_PARAMS` arm has no `resource`, so a `FLOW_NOT_YOURS` copy interpolating
     # it rendered empty and the `_RESOURCE` row passed vacuously — F1's class alive in the copy F1
     # named. See the `_SENTINEL_PARAMS` comment above (review of #13712, F1b).
@@ -2204,8 +2211,10 @@ _FALSE_ABSOLUTE_RE = re.compile(r"every\W+hard\W+failure", re.IGNORECASE)
 # A sentence ends at a `.` that whitespace follows (never at `start.ts` or `json({error, reason})`,
 # which carry no such pair), AND at a PARAGRAPH BREAK in either direction. The paragraph arm is not
 # decoration: a JSDoc blank line is ` *\n *\n`, never `\n\n`, so a `\n\n`-only head cut was dead in
-# every TS header it scans, and the tail had no paragraph arm at all. Both ends are capped at 240
-# characters so a run-on paragraph cannot hide the match behind a distant terminator. This window now
+# every TS header it scans, and the tail had no paragraph arm at all. The HEAD is capped at 240
+# characters; the tail is capped at 240 only when it carries no terminator at all (`finish =
+# stop.end() if stop else …`), which is the run-on case, so the window can exceed 240 — length is a
+# message concern, never a decision, because the guard reads spans, not windows. This window now
 # serves only the MESSAGE (it quotes the sentence that earned the red), never a decision.
 _SENTENCE_BREAK_RE = re.compile(r"\.\s|\n\s*\n|\n[ \t]*\*[ \t]*\n")
 
