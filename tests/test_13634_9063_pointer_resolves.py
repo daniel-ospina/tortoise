@@ -36,8 +36,9 @@ replacement text would convert this guard into a false block on the repair it ex
   is the fix, not a regression. It does **not** strip every quoted span — an ordinary quotation is
   not a correction, so the claim surviving inside "…" is still the claim (measuring every span was a
   false pass) — and the marker must be adjacent, because the entry is collapsed to one line and a
-  free window after `says` / `reads` laundered an assertion. Both directions are pinned by the last
-  two tests in this file.
+  free window after `says` / `reads` laundered an assertion. Both directions are pinned, by name, in
+  `test_a_correction_that_RECORDS_the_claim_is_not_offending` and
+  `test_an_ASSERTION_of_the_claim_is_caught_in_every_phrasing`.
 * It reads **every** `v3.38` block, not the first one. This file's append practice can add a second block
   with the same heading (`v3.33` already has two), and a claim restored there would otherwise stay green.
 
@@ -336,6 +337,10 @@ def test_a_correction_that_RECORDS_the_claim_is_not_offending(passage):
         # The `[` separator alternative, and `re.I`: without either, `remains open [#9063]`
         # and a sentence-initial `Remains open (#9063)` escape.
         "remains open [#9063]",
+        # The LEADING code-span tick of every form (`h`): a ticked reference after a link preposition
+        # is the same reference, and without the leading `?` it escapes (false pass).
+        "remains open at `#9063`",
+        "declared priors are tracked in `#9063`",
         "Remains open (#9063).",
         # Form 6's inner alternatives and both `{0,3}` bounds, each of which no other form reaches.
         "#9063 is the open belief-model question",
