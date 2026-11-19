@@ -10007,7 +10007,9 @@ class TestProductTeamsCopy:
     H1 = "A Superbrain for Founders & Product Teams"
     HERO_SUB = "A million moving pieces. One coherent & logical picture."
 
-    #: page 1 — the intro block (after the PDF's hairline rule).
+    #: page 1 — the intro block. The first line is a `.lead` since #13696 (it
+    #: reads as the section's title) and the PDF's hairline rule above it was
+    #: removed on the owner's instruction — neither changes the text.
     INTRO = (
         "Free up time from repetitive explaining, supervision, and managing dependencies.\n"
         "When agents (and people) understand goal cascades, root causes, trade-offs, "
@@ -10043,7 +10045,7 @@ class TestProductTeamsCopy:
          "inspired by interconnected prediction markets, Tortoise can compute "
          "hundreds or even millions of data points."),
     )
-    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI."
+    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI"
     ONBOARD_P = (
         "Tortoise connects via MCP or SDK, so you and your agents can use it in "
         "Codex, Claude Code & Web, ChatGPT, Cursor, Pi, or any other harness."
