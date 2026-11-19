@@ -143,7 +143,9 @@ Two things the review surfaced that are NOT fixed here, because they are not thi
 row's to decide, and are recorded instead of absorbed:
 
 * ``tortoise_expand_relationships`` declares ``http_policy=False`` yet answers over
-  the tenant HTTP surface — see ``HTTP_POLICY_DISAGREEMENTS``. A new
+  the tenant HTTP surface — tracked in **#13170**, which predates this row; this
+  suite is independent confirmation and deliberately does not file a peer issue
+  (see ``HTTP_POLICY_DISAGREEMENTS``). A new
   ``test_every_http_excluded_tool_is_accounted_for`` binds the file to
   ``http_policy`` so the registry is the authority and this cannot drift silently.
 * ``approve_merge``'s success arm, ``manage_sources(enable)`` and
@@ -215,11 +217,11 @@ ARM_GAPS: dict[str, str] = {
 HTTP_POLICY_DISAGREEMENTS: dict[str, str] = {
     "tortoise_expand_relationships":
         "Declared `http_policy=False` (not on the tenant HTTP surface) yet its "
-        "handler carries NO transport check, so it ANSWERS over HTTP with a real "
-        "payload. Either the registry row or the handler is wrong; untracked at "
-        "the time of writing (filed from this lane). The case below drives it and "
-        "asserts the payload, because the behaviour is real whichever way the "
-        "row is settled.",
+        "handler carries NO first-statement transport guard, so it ANSWERS over "
+        "HTTP with a real payload. Tracked in #13170 (opened 2026-11-17, before "
+        "this row; this suite is independent confirmation and adds no peer issue). "
+        "The case below drives it and asserts the payload, because the behaviour "
+        "is real whichever way the registry row is settled.",
 }
 
 
