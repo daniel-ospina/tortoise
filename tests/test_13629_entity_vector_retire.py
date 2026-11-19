@@ -5841,6 +5841,100 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+
+        # ⛔ AND THE RESOLVER'S OWN FOUR ARMS (`#13788`, measured by a fix lane at `b3f06c38`).
+        # The resolver carries the transparent-container vocabulary the operand rules use, and
+        # yet answered neither the TRANSPARENT COPY nor the `if…else` of its own source, nor a
+        # MAPPING reached through a builder / a union / a constant index. Every row below was
+        # CERTIFIED before its arm existed, each runtime-checked to leave `{"embedding": VEC}`
+        # in `props`:
+        #
+        #     {k: _encode(ev) for k in ["embedding"].copy()}                      <- CERTIFIED
+        #     {k: _encode(ev) for k in copy.copy(["embedding"])}                  <- CERTIFIED
+        #     {k: _encode(ev) for k in (["embedding"] if _flag(ev) else [])}      <- CERTIFIED
+        #     {k: _encode(ev) for k in ChainMap({"embedding": 1})}                <- CERTIFIED
+        #     {k: _encode(ev) for k in dict({"embedding": 1})}                    <- CERTIFIED
+        #     {k: _encode(ev) for k in ({"embedding": 1} | {})}                   <- CERTIFIED
+        #     {k: _encode(ev) for k in [{"embedding": 1}][0]}                     <- CERTIFIED
+        #     {k: _encode(ev) for k in dict(embedding=1)}                          <- CERTIFIED
+        #
+        # ⛔ THE `dict({…})` ROW IS THE ONE THE RESOLVER'S OWN NOTE CALLED REDUNDANT. It is not:
+        # the inner literal's VALUE is a CONSTANT (`{"embedding": 1}`), so no store rule reads it,
+        # and the store is made by the comprehension's own value expression. The constructor rule
+        # answers a DIFFERENT question (does the constructor's operand STORE the vector), so the
+        # claim is now a fixture instead of a sentence.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ["embedding"].copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in copy.copy(["embedding"])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (["embedding"] if _flag(ev) else [])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ChainMap({"embedding": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict({"embedding": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ({"embedding": 1} | {})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in [{"embedding": 1}][0]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(embedding=1)}
+        return None
+    _write(props)
+""",
+        # …and TWO OTHER POSITIONS: the arms are in the resolver, which every position asks, so
+        # a row in one position alone would not show that.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({k: _encode(ev) for k in ChainMap({"embedding": 1})})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {k: _encode(ev) for k in ["embedding"].copy()}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -6656,6 +6750,52 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {x: 1 for x in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE FOUR NEW ARMS ARE NARROWED, one control each (`#13788`): a copy, an
+        # `if…else` branch, a builder's keys, a union, a constant index and the keyword form are
+        # only a STORE when what they yield is the PROPERTY. Without them an arm could answer
+        # True and the suite would not notice — the rule would be inert instead of narrow.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ["embedding_model"].copy()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in (["embedding_model"] if _flag(ev) else [])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ChainMap({"embedding_model": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in ({"embedding_model": 1} | {})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in [{"embedding_model": 1}][0]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(embedding_model=1)}
         return None
     _write(props)
 """,

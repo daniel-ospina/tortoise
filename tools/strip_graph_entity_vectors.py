@@ -2145,6 +2145,32 @@ def _comprehension_source_yields(source, _depth: int = 0):
         return None
     if isinstance(source, ast.Starred):
         return _comprehension_source_yields(source.value, _depth + 1)
+    # ⛔ THE TRANSPARENT COPY OF THE SOURCE IS THE SAME SOURCE (`#13788`, measured by the fix
+    # lane after the resolver landed). EVERY other rule in this module follows this wrapper —
+    # the pairs rule, both operand rules, the mapping-literal rule — and the one resolver the
+    # two comprehension terms share did not, so the whole wrapper family re-opened here:
+    #
+    #     props |= {k: _encode(ev) for k in ["embedding"].copy()}         # CERTIFIED
+    #     props |= {k: _encode(ev) for k in copy.copy(["embedding"])}     # CERTIFIED
+    #
+    # each runtime-checked to leave `{"embedding": VEC}` in `props`, each beside the bare
+    # spelling refused. `_transparent_copy_operand` is the ONE answer for the family
+    # (`.copy()`, `copy.copy(…)`, `copy.deepcopy(…)`), so it is asked here rather than
+    # re-spelled, which is how this branch has paid twice already.
+    copied = _transparent_copy_operand(source)
+    if copied is not None:
+        return _comprehension_source_yields(copied, _depth + 1)
+    if isinstance(source, ast.IfExp):
+        # ⛔ AN `if…else` PICKS ONE OF TWO SOURCES, and either branch can be the store
+        # (`#13788`, measured): `{k: _encode(ev) for k in (["embedding"] if f else [])}`
+        # CERTIFIED beside both of its branches refused. The readable branches are UNIONED —
+        # fail-closed, because refusing when EITHER branch stores is the safe direction — and
+        # an unreadable branch contributes nothing, so the disclosed residual still applies.
+        body = _comprehension_source_yields(source.body, _depth + 1)
+        orelse = _comprehension_source_yields(source.orelse, _depth + 1)
+        if body is None and orelse is None:
+            return None
+        return [*(body or ()), *(orelse or ())]
     if isinstance(source, ast.List | ast.Tuple | ast.Set):
         yielded = []
         for element in source.elts:
@@ -2171,6 +2197,18 @@ def _comprehension_source_yields(source, _depth: int = 0):
             if left is None or right is None:
                 return None
             return [*left, *right]
+        if isinstance(source.op, ast.BitOr):
+            # ⛔ A UNION OF MAPPINGS ITERATES ITS KEYS (`#13788`, measured): PEP 584's `|`
+            # “behaves like `dict.update()`”, so
+            # `{k: _encode(ev) for k in ({"embedding": 1} | {})}` yields `"embedding"` and
+            # places the vector — and it CERTIFIED beside the bare mapping source refused.
+            # Either readable side can carry the key, so the sides are unioned for the same
+            # fail-closed reason as the `if…else` arm above.
+            left = _comprehension_source_yields(source.left, _depth + 1)
+            right = _comprehension_source_yields(source.right, _depth + 1)
+            if left is None and right is None:
+                return None
+            return [*(left or ()), *(right or ())]
         if isinstance(source.op, ast.Mult):
             # `[...] * 0` iterates NOTHING, so it is not a store; any other constant count
             # repeats the same values.
@@ -2184,14 +2222,47 @@ def _comprehension_source_yields(source, _depth: int = 0):
         return None
     if isinstance(source, ast.Subscript) and _is_full_slice(source.slice):
         return _comprehension_source_yields(source.value, _depth + 1)
+    # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THAT ELEMENT (`#13788`, measured):
+    # `{k: _encode(ev) for k in [{"embedding": 1}][0]}` iterates the mapping ONE INDEX in and
+    # CERTIFIED, while `{k: _encode(ev) for k in {"embedding": 1}}` was refused. `_constant_index`
+    # and `_container_literal` are the ONE answer the operand rules already give this spelling,
+    # so the resolver asks them instead of spelling a second vocabulary.
+    if isinstance(source, ast.Subscript) and (index := _constant_index(source.slice)) is not None:
+        container = _container_literal(source.value)
+        if container is None:
+            return None
+        elements = container.elts
+        if -len(elements) <= index < len(elements):
+            return _comprehension_source_yields(elements[index], _depth + 1)
+        return None
     if isinstance(source, ast.Call):
         name = _callee_name(source)
         if name in ("list", "tuple", "set") and len(source.args) == 1 and not source.keywords:
             return _comprehension_source_yields(source.args[0], _depth + 1)
-        # ⛔ NO `dict(...)` ARM HERE, DELIBERATELY (`#13788`, measured): the constructor rule
-        # answers `dict({…})` on the NODE ITSELF (`_own_walk` visits the inner call whatever
-        # position it holds), so an arm in this resolver changed no verdict on any fixture —
-        # an unreachable guard, which this repo treats as a defect rather than as depth.
+        # ⛔ A MAPPING BUILDER'S KEYS ARE ITS OPERAND'S KEYS (`#13788`, measured). The note
+        # that used to stand here said a `dict(...)` arm was redundant because `_own_walk`
+        # answers the inner call — that is FALSE for this call: the inner literal's VALUE is a
+        # CONSTANT (`{"embedding": 1}`), so no rule reads it as a store, and the store is made
+        # by the comprehension's own value expression. Measured CERTIFIED beside the bare source
+        # refused, in all three positions:
+        #
+        #     props |= {k: _encode(ev) for k in dict({"embedding": 1})}
+        #     props |= {k: _encode(ev) for k in OrderedDict({"embedding": 1})}
+        #     props |= {k: _encode(ev) for k in ChainMap({"embedding": 1})}
+        #     props |= {k: _encode(ev) for k in MappingProxyType({"embedding": 1})}
+        #
+        # `_is_mapping_constructor` is the include list the operand side already owns, so a
+        # builder it names is read here without a second name list to drift. And a KEYWORD
+        # operand is a key too (`dict(embedding=1)` iterates `"embedding"`), which is why that
+        # spelling is answered beside the single-positional one.
+        if _is_mapping_constructor(name):
+            if len(source.args) == 1 and not source.keywords:
+                return _comprehension_source_yields(source.args[0], _depth + 1)
+            if not source.args and source.keywords and all(
+                    keyword.arg is not None for keyword in source.keywords):
+                return [_comprehension_yielded_item(ast.Constant(value=keyword.arg))
+                        for keyword in source.keywords]
+            return None
         if name == "fromkeys" and source.args and not source.keywords:
             return _comprehension_source_yields(source.args[0], _depth + 1)
         if (isinstance(source.func, ast.Attribute) and not source.args
