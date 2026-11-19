@@ -2126,34 +2126,56 @@ _READER_NEEDLE = {
 }
 
 
-def _embedder_warmup_reader_citations() -> list[tuple[str, int, int]]:
-    """(file, start, end) for every cite inside the manifest's reader list.
+def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
+    """(file, start, end, symbol) for every cite in the manifest's #13674 block.
 
     Derived from the SHIPPED manifest text — the artifact a reviewer reads — not
     from a copy here, so a cite edited out of the block cannot stay green in the
     test. The region is the numbered reader list (the `:40-50` resolver line
-    through reader 5); the prose AFTER it deliberately cites a NON-reader (the
-    `warm_up` body), so it is outside the span.
+    through reader 5) PLUS the two range cites in the prose below it (`:1466-1470`
+    / `:1592-1593`, the bound readers' `return None` spans); it stops before the
+    paragraph that deliberately cites a NON-reader (the `warm_up` body), which is
+    why that one is outside the span.
+
+    `symbol` is the function the block names for that cite (`::start_warm_up` and
+    so on), or `None` where it names none (the `:40-50` resolver line and the two
+    prose range cites). The numbered-list symbol is tracked per ENTRY, so reader
+    2's cite cannot inherit reader 1's function.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
     start = next(
         i for i, ln in enumerate(lines)
         if "is the resolver's DEFINITION; the readers are" in ln
     )
+    # Past the numbered list AND the two range cites below it.
     end = next(
-        i for i, ln in enumerate(lines) if "The FUNCTION NAMES above are the invariant" in ln
+        i for i, ln in enumerate(lines)
+        if "Two records in the tree understate the set" in ln
     )
     assert start < end, (start, end)
-    cites: list[tuple[str, int, int]] = []
+    cites: list[tuple[str, int, int, str | None]] = []
     current = "embeddings.py"
+    symbol: str | None = None
     for ln in lines[start:end]:
+        # A numbered reader entry starts a new claim: its symbol is its own.
+        if re.match(r"\s*#\s+\d+\.\s", ln):
+            symbol = None
+        # The list ends here; the prose below names no function, so nothing in it
+        # may inherit reader 5's symbol.
+        if "The FUNCTION NAMES above are the invariant" in ln:
+            symbol = None
         for token in ("hosted_api.py", "entrypoint.sh", "embeddings.py"):
             if token in ln:
                 current = token
                 break
+        named = re.search(
+            r"(?:tortoise/)?(?:embeddings\.py|hosted_api\.py|entrypoint\.sh)::([A-Za-z_]\w*)", ln
+        )
+        if named:
+            symbol = named.group(1)
         for m in _READER_CITE_RE.finditer(ln):
             lo = int(m.group(1))
-            cites.append((current, lo, int(m.group(2) or lo)))
+            cites.append((current, lo, int(m.group(2) or lo), symbol))
     return cites
 
 
@@ -2167,8 +2189,8 @@ def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
     """
     cites = _embedder_warmup_reader_citations()
     # Non-vacuity: a parser that found nothing would clear every assertion below.
-    assert len(cites) >= 6, f"the reader list's citations could not be read: {cites}"
-    for fname, lo, hi in cites:
+    assert len(cites) >= 8, f"the reader list's citations could not be read: {cites}"
+    for fname, lo, hi, symbol in cites:
         assert fname in _READER_NEEDLE, f"unattributed citation: {fname}:{lo}-{hi}"
         path = (REPO_ROOT / fname) if fname == "entrypoint.sh" else (REPO_ROOT / "tortoise" / fname)
         body = path.read_text().splitlines()
@@ -2181,6 +2203,48 @@ def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
             f"(the function names are the invariant; the numbers are a convenience). "
             f"Cited lines: {span[:300]!r}"
         )
+        if symbol is None:
+            # The block names no function for this cite, so there is nothing to
+            # bind it to (the resolver definition `:40-50`, and the two range
+            # cites in the prose).
+            continue
+        # NAME↔NUMBER: the cited line must sit inside the function the block
+        # names for it. Without this, a swap between two byte-identical gate
+        # lines (`if not _embedder_warmup_enabled():`) passes the needle check.
+        enclosing = _enclosing_definition(body, lo, symbol)
+        assert enclosing == symbol, (
+            f"{fname}:{lo} is cited as {symbol}, but the function enclosing that line "
+            f"is {enclosing!r} — the number was re-pinned against the wrong reader, or "
+            f"the block's names and numbers have drifted apart."
+        )
+
+
+def _enclosing_definition(body: list[str], line_no: int, symbol: str) -> str | None:
+    """Whether `symbol` encloses `line_no` (1-based); returns the enclosing name.
+
+    A NESTED definition is inside another one, so the nearest `def` above a cited
+    line is not necessarily the reader the block names — `hosted_api.py`'s
+    `_lifespan` contains a `_prewarm_embeddings` helper. The enclosing chain is
+    therefore read by INDENTATION: the nearest definition at the same indent as
+    the named one is the one that encloses the cite.
+    """
+    defs: list[tuple[int, str]] = []  # (indent, name), in file order, above line_no
+    for raw in body[: max(line_no, 0)]:
+        py = re.match(r"(\s*)(?:async\s+)?def\s+([A-Za-z_]\w*)", raw)
+        if py:
+            defs.append((len(py.group(1)), py.group(2)))
+            continue
+        sh = re.match(r"([A-Za-z_]\w*)\(\)\s*\{", raw)
+        if sh:
+            defs.append((0, sh.group(1)))
+    target = next((d for d in reversed(defs) if d[1] == symbol), None)
+    if target is None:
+        return None
+    indent = target[0]
+    for d_indent, d_name in reversed(defs):
+        if d_indent == indent:
+            return d_name
+    return None
 
 
 # ── The allowlist shape predicate, on its own (#10472 review F1) ─────────────
