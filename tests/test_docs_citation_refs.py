@@ -2527,6 +2527,66 @@ def test_every_attribution_spelling_is_also_a_live_diff_claim():
         "(#13802 review, finding 2, residual)")
 
 
+#: ⛔ THE `#13724` / `#13750` ATTRIBUTION SWAP — the D5 chain with the two commits in the
+#: wrong roles (#13802 review, F2 — MEASURED at this head). The measured chain is
+#: `:21556` →#13551→ `:21604` →#13617/#13675 `+75`→ `:21679` →**#13724 `+36`**→ `:21715`,
+#: and `#13750` is the DOCUMENT re-point to `:21715` — it moves no `tortoise/` path at all:
+#:
+#:   git show aeb4882c18 --name-only --format='' | grep -c '^tortoise/'   -> 0     (#13750)
+#:   git show e679d22286 --stat --format='' -- tortoise/sdk.py            -> 46 +, 10 -   (#13724)
+#:   git show e679d22286^:tortoise/sdk.py | grep -n '"stats": _capture_stats_with_step_witness'  -> 21679
+#:   git show e679d22286:tortoise/sdk.py  | grep -n …same…              -> 21715  (the `+36`)
+#:   git show e679d22286 -- docs/00_index.md | grep 'sdk.py:'           -> 28142 -> 28178
+#:
+#: ⛔ A TEXT ban and not a measurement, for the reason the direction ban above states: those
+#: `git show`s need history the depth-1 `test` job does not have, so an arm keyed on them
+#: asserts NOTHING in the job that gates merges. The three spellings below are the ones that
+#: actually shipped and survived a merge inside this PR; a RE-WORDED swap is the documented
+#: residual, caught only by review.
+_PR_ATTRIBUTION_SWAP = (
+    "`#13750` (`aeb4882c18`) a further `+36`",
+    "`#13750` moved the anchor `+36`",
+    "`#13750`/`#13786`",
+)
+
+#: The corrected attribution that must STAY: a red row above must not be made green by
+#: deleting the clause, which would drop the chain's provenance instead of fixing its roles.
+_PR_ATTRIBUTION_CORRECT = "`#13724` (`e679d22286`) a further `+36`"
+
+
+def test_the_13724_13750_attribution_is_not_swapped_in_the_verify_doc():
+    """⛔ The sentence this PR exists to make true still gave `#13750` `#13724`'s `+36`.
+
+    F2 of the #13802 review, and it is the SECOND round in which the document disagreed
+    with the PR body on this pair — the body already said `#13724` `+36`, the shipped D5
+    cell did not. The tree refutes the swap in four commands (see `_PR_ATTRIBUTION_SWAP`),
+    and the module-level tuple records them because this arm cannot run them here.
+
+    NON-VACUITY, MEASURED: against the PRE-FIX document (`git show
+    ee699827b4:docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`) the first
+    and second entries hit the D5 cell and the third hits both `main`'s own
+    `#13750`/`#13786` clauses, so this arm reds on exactly three sites there; against the
+    fixed document all three are absent and `_PR_ATTRIBUTION_CORRECT` is present.
+    Re-measure the commands, never the sentence: a RE-WORDED swap passes this ban, which is
+    the stated residual.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    swapped = [spelling for spelling in _PR_ATTRIBUTION_SWAP if spelling in doc]
+    assert not swapped, (
+        f"05-verify.md carries the #13724/#13750 ATTRIBUTION SWAP ({swapped[0]!r}): "
+        "`#13750` (`aeb4882c18`) moves NO `tortoise/` path — it is the DOCUMENT re-point to "
+        "`:21715` — while the `+36` code move to `:21715`, and the `#12296` row's "
+        "re-derivation to `:28178`, are `#13724`'s (`e679d22286`). Re-derive with the four "
+        "commands on `_PR_ATTRIBUTION_SWAP` and state each role from them "
+        "(#13802 review, F2)")
+    assert _PR_ATTRIBUTION_CORRECT in doc, (
+        "05-verify.md no longer states the measured attribution "
+        f"{_PR_ATTRIBUTION_CORRECT!r} — deleting the clause is not a fix for the swap "
+        "above, it drops the chain's provenance. Restore it with its roles taken from "
+        "`git show e679d22286^|:tortoise/sdk.py` (#13802 review, F2)")
+
+
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
     """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
 
