@@ -9546,9 +9546,15 @@ class TestProductTeamsIdentity:
         # NOTE: a bare `\bNO\b` here is WRONG — the baseline sentence contains
         # "no traffic to measure", which is a reason, not a negation. Only
         # `NOT` / `NEVER` / `noindex` are refused.
+        # ⛔ CASE-INSENSITIVE membership, because a contradicting sentence that
+        # spells the word in lower case escaped the guard entirely — measured
+        # (#13696 round 11): baseline + `It is NOT the case that this page is
+        # indexed.` left 247 passed, i.e. the doc could state the decision and
+        # then deny it with nothing red. `upper()` puts that sentence in scope
+        # for the positive-token assert below, which it then fails.
         naming = [
             s for s in re.split(r"(?<=[.!?])\s+", " ".join(entry.split()))
-            if "INDEXED" in s
+            if "INDEXED" in s.upper()
         ]
         assert naming and all(re.search(r"\*\*INDEXED\*\*", s) for s in naming), (
             f"the architecture doc's {route} entry names the INDEXED decision in a "
