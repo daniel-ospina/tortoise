@@ -16488,6 +16488,18 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `:28682`, and the range's TARGET was typed as the base's own value). A count in
     # prose AND a count in the guard is the same head-bound figure twice, which is D5's
     # own thesis — so the PAIRS are pinned and every count spelling is refused.
+    # ⛔ AND THE SAME RULE ONE ROW UP (#13750 review, cycle 4): the `hosted_api.py` re-point
+    # enumeration this cell carried typed a count ("re-points SEVEN prefixed …") that the
+    # blacklist below did not cover, so a refuted count sat in the cell over five passing
+    # arms. Every count spelling is refused — the phrase is read by REGEX so a new word
+    # cannot slip past a literal list.
+    import re as _re
+    assert not _re.search(r"re-points (ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|\d+)\s+prefixed", text), (
+        "D5 types a COUNT of the `hosted_api.py` re-points. A count is head-bound (this "
+        "cell's own thesis) and the enumeration it carried was refuted twice — its left "
+        "halves were minted by the spelling itself and it mixed two numberings. Name the "
+        "command (`git grep -o -h -E 'hosted_api\\.py:[0-9]+(-[0-9]+)?' <rev> -- docs/`) "
+        "instead (#13750 review, cycles 3-4)")
     for _stale_count in ("carries ONE numeric re-point", "carries TWO numeric re-point",
                          "carries THREE numeric re-point", "carries FOUR numeric re-point",
                          "a document that carries two"):
