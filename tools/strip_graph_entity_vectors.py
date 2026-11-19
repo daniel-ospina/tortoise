@@ -1951,6 +1951,21 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
                 node.key, node.generators, alias_keys=alias_keys)
                 and not isinstance(node.value, ast.Constant)):
             return True
+        # ⛔ AND THE KEY MAY BE AN ALIAS BOUND IN THE WRITER'S OWN SCOPE, which NO term here can
+        # see (`#13788`, measured at `e21a2fcb` by the cycle-7 matrix): the clause binds the pair
+        # (`for _i, v in [("x", 1)]`), the key is a `Name` the clause does NOT bind, and the
+        # binding lives in the enclosing scope — so every term above answers False and this arm
+        # CERTIFIED `props |= {key: _encode(ev) for _i, v in [("x", 1)]}` while the bare
+        # `props[ key ] = …` and every LITERAL-key spelling were refused. `_dict_comp_keyed_by_alias`
+        # is the alias arm that already existed for the assignment position (one caller, the
+        # `Assign`/`AugAssign` arm), and it was never asked from the operand positions — so
+        # `update(…)`, `.copy()`, `copy.copy(…)`, a constant index, an `if`-expression and
+        # `__ior__(…)` all CERTIFIED, 113 in-surface rows in one matrix. Its own narrowings hold
+        # here: the key must be a NAME in the alias set, the produced value NON-CONSTANT, and
+        # `alias_keys` is EMPTY on the mirror arm (so nothing widens — a fix may add refusals,
+        # never acceptances).
+        if _dict_comp_keyed_by_alias(node, alias_keys):
+            return True
         if not isinstance(node.key, ast.Name):
             return any(
                 # ⛔ …AND THIS TERM IS NOT NAMED-KEY ONLY (`#13788`, measured by the review of

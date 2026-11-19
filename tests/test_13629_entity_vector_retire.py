@@ -6593,6 +6593,44 @@ def _upsert_object(ev):
         return None
     props["embedding"] = _encode(ev)
 """,
+
+        # ⛔ AND THE ALIAS KEY THAT THE CLAUSE DOES *NOT* BIND (`#13788`, measured at `e21a2fcb`).
+        # `_dict_comp_keyed_by_alias` existed for the ASSIGNMENT position only, so a
+        # comprehension keyed by a scope alias CERTIFIED through every operand position —
+        # 113 in-surface rows in one matrix — while `props[key] = …` and every literal-key
+        # spelling were refused. The operand-rule `DictComp` branch asks it now.
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props.update({key: _encode(ev) for _i, v in [("x", 1)]})
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= ({key: _encode(ev) for _i, v in [("x", 1)]}).copy()
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= [{key: _encode(ev) for _i, v in [("x", 1)]}][0]
+        return None
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(ev):
+    key = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= ({key: _encode(ev) for _i, v in [("x", 1)]} if _f() else {})
+        return None
+    props["embedding"] = _encode(ev)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
