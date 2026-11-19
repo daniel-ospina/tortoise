@@ -1970,9 +1970,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
     r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
-    r"|empty|EMPTY|exactly those two|exactly (?:one|two)"
+    r"|empty|EMPTY|non-empty|nonempty|not empty"
+    r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
+    # ⛔ AND `both` WITH ANY NOUN, NOT ONLY `modules` (#13802 review, round 9, P1 — MEASURED
+    # GREEN on the `set`/deictic anchor, where this ban is the only layer: `both files`,
+    # `both paths` were read by nothing while `both modules` red)
+    r"|both\s+(?:files?|paths?|modules?|entries|diffs?|hits?)"
     r"|(?:the\s+)?(?:one|two|three|four|five)\s+[\w-]+\s+modules"
     r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?"
     # ⛔ AND THE TAIL SPELLINGS 15 FRESHLY-INVENTED SENTENCES REACHED FOR (#13802 review,
@@ -2111,6 +2116,11 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` comes back with an empty list",
         "`-- tortoise/` prints single path",
         "`-- tortoise/` reports 0 paths",
+        # ⛔ AND `both`/`non-empty` WITH THE SET ANCHOR (#13802 review, round 9, P1 — all
+        # three measured GREEN through the ban AND the detector AND the spelling ledger)
+        "The `tortoise/` set prints both files at this head.",
+        "The `tortoise/` set is non-empty at this head.",
+        "At this head the `tortoise/` set holds both paths.",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
