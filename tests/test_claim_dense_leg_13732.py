@@ -1674,6 +1674,53 @@ class TestTheDocumentedRunPath:
         assert "summary" in artifact["arms"]["record_dense"], artifact["arms"]["record_dense"]
         assert rc == 3, rc
 
+    def test_the_seed_cannot_leave_a_row_unwritten(self, tool_mod):
+        """The cause list's COMPLETENESS is a property of the SEED — pin it there.
+
+        ⛔ `require_graph_population`'s message names only the two VECTOR-side
+        causes because a missing ROW cannot occur after this run's seed: every
+        population row is upserted through the fold with an explicit `embedding`,
+        and there is no `try` around the write, so a failed upsert raises out of
+        the run before the guard is asked. Two rounds tried to pin that on the
+        message's wording and failed in both directions — a synonym passed, and an
+        accurate edit that mentioned a row false-reddened (`#13745` reviews rounds
+        6-7). This asserts the fact the wording rests on.
+        """
+        tree = ast.parse(TOOL.read_text())
+        seed = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_seed_graph"
+        )
+        assert not [n for n in ast.walk(seed) if isinstance(n, ast.Try)], (
+            "a `try` around the upsert would swallow a failed write and leave a "
+            "row uncreated — the message's cause list assumes a failure propagates"
+        )
+        payloads = [
+            node
+            for node in ast.walk(seed)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(k, ast.Constant) and k.value == "embedding" for k in node.keys
+            )
+        ]
+        assert payloads, (
+            "the seed payload must always carry an explicit `embedding` — without "
+            "it the fold reaches its encode derive and a new cause appears"
+        )
+        write_loops = [
+            node
+            for node in ast.walk(seed)
+            if isinstance(node, ast.For)
+            and isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Name)
+            and node.iter.func.id == "zip"
+        ]
+        assert write_loops, (
+            "the seed must write one row per population entry (a `for row, vec in "
+            "zip(population, vectors, strict=True)` loop)"
+        )
+
     def test_two_blocked_arms_name_TWO_causes(self, tool_mod, monkeypatch, tmp_path, capsys):
         """⛔ The single-`blocked` slot made the LAST cause win; this pins both.
 
@@ -2063,13 +2110,17 @@ class TestGraphMembership:
         assert "EMBED gate" not in ei.value.message, ei.value.message
         assert "swallowed" not in ei.value.message, ei.value.message
         assert "never reached the row" not in ei.value.message, ei.value.message
-        # ⛔ THE CLAIM, NOT THE PHRASING. The negative assertions above match
-        # literals, so the same unreachable cause re-enters green as soon as it is
-        # spelled differently ("a population row the seed's write did not land on"
-        # → 96 passed; `#13745` review round 6, finding 1). The message names a row
-        # exactly ONCE — in "of the {population_n} population row(s)" — so ANY
-        # row-missing cause adds an occurrence and reds here.
-        assert ei.value.message.count("row") == 1, ei.value.message
+        # ⛔ THE COMPLETENESS OF THAT LIST IS PINNED AS A CODE FACT, NOT AS PROSE.
+        # Two attempts to pin the MESSAGE structurally failed the same way: one
+        # matched literals (a synonym passed), the next counted the word "row" (a
+        # synonym without it passed, and an accurate edit that mentioned a row
+        # false-REDDENED). Prose cannot be pinned this way (`#13745` reviews
+        # rounds 6-7), and a pin that refuses a correct edit is a trap for the next
+        # fixer, so the claim it was reaching for is asserted where it lives — on
+        # the SEED (see `test_the_seed_cannot_leave_a_row_unwritten` below): the
+        # list is complete BECAUSE the seed writes every row and raises on failure.
+        # This negative assertion stays only for the exact regressions we have
+        # already shipped.
         # ⛔ AND IT MUST NOT PROMISE MORE THAN THE GUARD CAN SEE. It once said the
         # text pairing refuses a node that kept "an EARLIER text's vector" — which
         # the pairing cannot detect, because this run's text is written
