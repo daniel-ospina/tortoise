@@ -159,15 +159,15 @@ SELECTED = [
     ("what are our commitments", "commitments", "determined_noun"),
     ("our commitments", "commitments", "determined_noun"),
     # #13558 — Q6, and the other shapes a customer uses for it.
-    ("has anything we relied on been withdrawn", "ended", "aux_participle"),
-    ("has anything been retired", "ended", "aux_participle"),
-    ("has anything been archived", "ended", "aux_participle"),
-    ("what has been withdrawn", "ended", "aux_participle"),
-    ("which commitments were withdrawn", "ended", "aux_participle"),
-    ("which claims were superseded", "ended", "aux_participle"),
-    ("what ended", "ended", "predicate_tail"),
-    ("what ended?", "ended", "predicate_tail"),
-    ("list what we retired", "ended", "predicate_tail"),
+    ("has anything we relied on been withdrawn", "ended", "existence"),
+    ("has anything been retired", "ended", "existence"),
+    ("have any claims been archived", "ended", "existence"),
+    ("what ended", "ended", "wh_whole_question"),
+    ("what ended?", "ended", "wh_whole_question"),
+    ("what has been withdrawn", "ended", "wh_whole_question"),
+    ("what was retracted", "ended", "wh_whole_question"),
+    ("which commitments were withdrawn", "ended", "which_predicate"),
+    ("which claims were archived", "ended", "which_predicate"),
     ("what did we archive last quarter", "ended", "do_support"),
     ("did we retire the onboarding flow", "ended", "do_support"),
 ]
@@ -223,10 +223,6 @@ NOT_SELECTED = [
     "our commitment to privacy",
     "sponsorship commitment review",
     # ── the ATTRIBUTIVE-participle class (round-2 review, measured) ────────
-    # A participle before a noun names a TOPIC; a wh-word is not by itself a
-    # request for a set. Every one of these was answered with the whole ended
-    # population by the cut that only required "an ending word within N chars of
-    # a wh-word".
     "what is our abandoned cart recovery rate",
     "what's our refund policy for cancelled orders",
     "what did the customer say when we cancelled their order",
@@ -234,16 +230,29 @@ NOT_SELECTED = [
     "which archived report has the Q3 numbers",
     "what is the archived pricing document",
     "what did we learn from the cancelled launch",
-    # ── the SUBORDINATE-clause class (round-2 review, measured) ────────────
-    # An ending asserted in a clause the caller mentioned is not the question.
+    # ── the COPULA-IN-A-SUBORDINATE-CLAUSE class (round-3 review, measured) ─
+    # A passive in a clause the caller tacked on is not the question. Each of
+    # these was answered with the whole ended population by the cut that accepted
+    # "a copula anywhere within 60 characters of a wh-word".
+    "what happens when an order is cancelled",
+    "what is the policy when a booking is cancelled",
+    "what is our refund policy for orders that were cancelled",
+    "what documents are archived",
+    "what data is archived in S3",
+    "what features are deprecated in v3",
+    "what do I do if my booking is cancelled",
+    "what do we do when we cancel a subscription",
+    "what is the payment terms clause given the contract was archived",
     "what is the payment terms clause, given the contract was archived",
-    # ── the fact-question class about commitments (round-2 review) ─────────
+    # ── the fact-question class about commitments (round-2/3 review) ────────
     "what commitments did the vendor make in the SLA",
     "which commitments are in the contract",
     "how much have we committed to the SOC2 audit",
     "current commitments in EMEA",
-    # ── a statement, and a third-party action ──────────────────────────────
+    # ── STATEMENTS, third-party actions, and boundaries stated in the module ─
     "did the customer cancel their order",
+    "what has ended recently",
+    "what commitments do we have",
     "",
     "   ",
 ]

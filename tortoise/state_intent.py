@@ -147,59 +147,79 @@ _ENDING_BASE = (
     r"|cancel"
 )
 
-#: The copulas and auxiliaries that put a participle in PREDICATE position. The
-#: participle must follow one of these IMMEDIATELY (allowing "not"/"already"/"ever"
-#: and the like to sit between), because that adjacency — not the word itself — is
-#: what makes the word a predicate rather than a modifier.
-_AUX = r"(?:been|being|be|is|are|was|were|got|gets|gotten)"
-
-#: ENDING-question shapes. ⛔ THE SHAPE IS SYNTACTIC, NOT LEXICAL, and this is the
-#: lesson of review round 2. A past participle in ATTRIBUTIVE position names a
-#: content TOPIC, and a wh-word is not by itself a request for a set — so an
-#: earlier cut that only required "a wh-word within N characters of an ending
-#: word" routed `what is our abandoned cart recovery rate`,
-#: `what's our refund policy for cancelled orders`,
-#: `which archived report has the Q3 numbers` and
-#: `what is the archived pricing document` into the ended population. The three
-#: shapes below all require the ending word to be PREDICATED of something:
+#: ENDING-question shapes. ⛔ EVERY SHAPE IS ANCHORED, and that is the lesson of
+#: three review rounds. A lexical approximation of "the ending is the question's
+#: predicate" leaks: the first cut matched bare words ("what is the end date"),
+#: the second matched a wh-word near a participle ("what is our abandoned cart
+#: recovery rate", `which archived report has the Q3 numbers`), and the third
+#: matched a copula ANYWHERE in the sentence ("what happens when an order is
+#: cancelled", `what features are deprecated in v3`) — every one of those is a
+#: content question and every one of them was answered with the whole ended
+#: population instead of matching rows.
 #:
-#: * ``aux_participle`` — an auxiliary, then the participle. This is the shape of
-#:   "has anything we relied on BEEN withdrawn", "which claims WERE archived",
-#:   "what has BEEN superseded". It is also the commonest hijack-free form
-#:   because a modifier can never be preceded by a copula — AND it carries a
-#:   wh-word/quantifier, because a bare statement is not a question:
-#:   `the meeting was cancelled` is a note lookup and must not be routed.
-#: * ``predicate_tail`` — the participle ENDS the question, within 30 characters
-#:   of a "what": "what ended", "what has been withdrawn", "list what we retired".
-#:   A trailing constraint kills it ("what is the archived pricing document" does
-#:   not end on the participle), which also bounds the window the earlier cut
-#:   claimed to have bounded and had not.
+#: The shapes below therefore each fix the grammatical role of the ending word,
+#: and none of them matches a word that is merely PRESENT:
 #:
-#: ⛔ AND THE SHAPES ARE MATCHED ON THE FIRST CLAUSE (split on a comma or a
-#: semicolon), because an ending asserted in a SUBORDINATE clause is a fact the
-#: caller mentioned, not the question they asked: `what is the payment terms
-#: clause, given the contract was archived` is a lookup for the terms.
-#: * ``do_support`` — "did/do/does WE|I … <base verb>": "what did we archive",
-#:   "did we retire the onboarding flow". Base forms only (from
-#:   :data:`_ENDING_BASE`) and FIRST PERSON only — "did the customer cancel their
-#:   order" asks about someone else's action, which this population cannot answer.
+#: * ``existence`` — "has anything we relied on BEEN withdrawn",
+#:   "have any claims been retained". An auxiliary plus an existential quantifier
+#:   is a question about whether such a record EXISTS; the relative clause between
+#:   them is the thing asked about, and it is the only place a window is allowed.
+#: * ``wh_whole_question`` — the WHOLE question is "what (has been) <participle>":
+#:   "what ended", "what has been withdrawn". Anchored at both ends, so a trailing
+#:   constraint (`what is the archived pricing document`) cannot reach it.
+#: * ``which_predicate`` — the wh-word's OWN predicate: "which claims were
+#:   archived". Anchored at the start and requiring the auxiliary immediately, so
+#:   `which archived report has the Q3 numbers` (an attributive use) cannot.
+#: * ``do_support`` — "what did WE <base verb>", "did we retire …". Anchored, and
+#:   the base verb must follow the pronoun IMMEDIATELY — a window let
+#:   `what do we do when we cancel a subscription` (a how-to question) through.
 #:
-#: ⛔ THERE IS DELIBERATELY NO `list`/`show` SHAPE. It was measured in review as a
-#: hijack — `show me the retired onboarding flow` is a lookup for ONE record, and
-#: routing it returned the whole ended population. A set-asking imperative still
-#: reaches this read through ``predicate_tail`` ("list what we retired").
+#: ⛔ AND THE SHAPES ARE MATCHED ON THE FIRST CLAUSE (see ``detect_state_question``),
+#: so an ending asserted in a clause the caller tacked on does not carry the
+#: question: `what is the payment terms clause, given the contract was archived`.
+#:
+#: THE POINT IS PRECISION, NOT RECALL — a misroute answers a content question
+#: with a population, which is the defect this whole change exists to remove, so
+#: where a shape could go either way it does not fire. The phrasings that
+#: therefore do NOT reach this read are stated rather than discovered:
+#:
+#: * "is the onboarding flow retired?" — a yes/no question about an id-less
+#:   record; ``read_entity`` and the ordinary currency read answer it.
+#: * "what has ended recently" / "what ended recently" — a trailing adverb;
+#:   "what ended" and "what has been withdrawn" do route.
+#: * "what commitments do we have" / "what are the commitments" — a commitment
+#:   noun that does not END the question or is not preceded by a set determiner;
+#:   "current commitments", "our commitments" and "what are we committed to" do
+#:   route.
+#: * "list what we retired" / "show me the retired onboarding flow" — an
+#:   imperative, which was measured as a hijack: `show me the retired onboarding
+#:   flow` is a lookup for ONE record.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # "has anything we relied on been withdrawn?" / "which claims were archived?"
-    ("aux_participle", re.compile(
-        rf"\b(?:anything|something|everything|what|which)\b[^?]{{0,60}}?\b{_AUX}"
-        rf"\s+(?:not\s+|already\s+|ever\s+|also\s+|just\s+|still\s+"
-        rf"|never\s+)?(?:{_ENDING_WORDS})\b")),
-    # "what ended" / "what has been withdrawn" / "list what we retired"
-    ("predicate_tail", re.compile(
-        rf"\bwhat\b[^?]{{0,30}}?\b(?:{_ENDING_WORDS})\s*[?.!]*$")),
-    # "what did we archive last quarter" / "did we retire the flow"
+    # "has anything we relied on been withdrawn?" / "have any claims been retired?"
+    # An EXISTENCE question about an ending: the auxiliary + quantifier is the
+    # subject of the question, and the relative clause in between is the thing
+    # asked about.
+    ("existence", re.compile(
+        rf"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)"
+        rf"\b[^?]{{0,60}}?\b(?:been\s+|already\s+|ever\s+)?(?:{_ENDING_WORDS})\b")),
+    # "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
+    # question, anchored at both ends, so a trailing constraint ("what is the
+    # archived pricing document") and a wh-word in a subordinate clause cannot
+    # reach it.
+    ("wh_whole_question", re.compile(
+        rf"^what\s+(?:(?:is|are|was|were|has|have|had)\s+)?(?:been\s+)?"
+        rf"(?:{_ENDING_WORDS})\s*[?.!]*$")),
+    # "which claims were archived?" / "which commitments were withdrawn?" — the
+    # wh-word's own predicate, anchored at the start of the question.
+    ("which_predicate", re.compile(
+        rf"^which\b[^?]{{0,30}}?\b(?:is|are|was|were|has|have|had)\s+"
+        rf"(?:been\s+)?(?:{_ENDING_WORDS})\b")),
+    # "what did we archive last quarter" / "did we retire the onboarding flow".
+    # ⛔ THE BASE VERB MUST FOLLOW THE PRONOUN IMMEDIATELY. A window let a
+    # subordinate clause through: `what do we do when we cancel a subscription`
+    # is a how-to question, and the earlier cut served it the ended population.
     ("do_support", re.compile(
-        rf"\b(?:did|do|does)\s+(?:we|i)\b[^?]{{0,30}}?\b(?:{_ENDING_BASE})\b")),
+        rf"^(?:what\s+)?(?:did|do|does)\s+(?:we|i)\s+(?:{_ENDING_BASE})\b")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,

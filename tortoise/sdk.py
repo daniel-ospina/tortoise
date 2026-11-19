@@ -45047,8 +45047,14 @@ class TortoiseSDK:
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         # #13302: the ENDED SCOPE — the read whose QUESTION is "what ended, and
-        # how?". Default False = byte-identical (every existing caller keeps the
-        # current-picture read it has). When True the population is the OTHER
+        # how?". Default False = the current-picture read it has always been, WITH
+        # ONE ADDITION (#13558): a plain question about endings reaches this same
+        # population without the flag (a `query` routed by
+        # ``tortoise/state_intent.py``). ⛔ An earlier version of this comment said
+        # the default keeps "every existing surface answering exactly what it
+        # answered before" — that stopped being true when the routing landed, and
+        # a reader trusting it would conclude the default is byte-identical, which
+        # is exactly what #13558 asked to change. When True the population is the OTHER
         # half of the one determinant (design §6): the records
         # ``live._terminal_expression`` treats as ended, served with the ending
         # the record itself carries (its lifecycle word, the successor it names,
@@ -45275,8 +45281,9 @@ class TortoiseSDK:
 
         ── #13557 / #13558: a STATE QUESTION is routed to its population ────
         Two questions the capstone (#13038) measured as UNREACHABLE are answered
-        from state rather than from words, and no call site has to change to
-        reach them: `search('current commitments', object)` answered **0 rows**
+        from state rather than from words, with no NEW argument and no new tool —
+        the sentence alone reaches them: `search('current commitments', object)`
+        answered **0 rows**
         while the live launch plan sat in the same graph (#13557), and the
         sentence "has anything we relied on been withdrawn" answered with two
         rows that shared no word with it (#13558) while the ended records were

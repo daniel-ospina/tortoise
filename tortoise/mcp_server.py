@@ -5536,17 +5536,21 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     Two question shapes are answered from STATE instead of from the words, because
     their answer is a population and not a match set (#13557/#13558):
-    a commitment question ("what are we committed to", "current commitments")
+    a commitment question ("current commitments", "what are we committed to")
     reads the live commitments by KIND + STAGE — so it returns a plan/goal/target
     whose text never says "commitment" — and an ending question ("has anything
     been withdrawn", "what ended") reads the ended records, each with how it
     ended (its lifecycle word, the successor it names, or its terminal stage and
-    outcome). Neither needs a special argument from the caller. The route is only
-    taken for a plain question: pass any retrieval knob (`threshold`,
+    outcome). No new argument and no new tool is needed for the ending question:
+    the sentence reaches it. ⛔ THE COMMITMENT ONE HAS A FAMILY BOUNDARY, and it is
+    a real caller obligation: the commitment kinds are OBJECT kinds (ONTOLOGY §5),
+    so this call must pass `entity_type='object'` to receive them — with this
+    tool's default `entity_type='point'` a commitment question still returns
+    Points (the capstone's own Q1 point read, which already answered with the live
+    claims). A single call does not return both families. The route is also taken
+    only for a plain question: pass any retrieval knob (`threshold`,
     `min_confidence`, `order_by`, …) and this stays the relevance read it always
-    was. The commitment kinds are Object kinds, so a commitment question is
-    answered from `entity_type='object'` — a `point`-scoped one keeps the
-    relevance read.
+    was.
 
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
