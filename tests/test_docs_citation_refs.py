@@ -536,6 +536,12 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     both present while the false green sat beside them — so they are REGRESSION
     legs: they keep the reader pointed at the verb and at the inherited-red
     attribution after the deletion, and an edit that drops either reds here.
+
+    ⛔ AND THE INHERITED-RED ATTRIBUTION ITSELF WAS RETIRED AT #13760's MERGE, with the
+    cycle-6 note below: it was measured at a head where this branch touched no `tortoise/`
+    path, and `812b33f97e` retook the census on this branch afterwards, so the leg that
+    REQUIRED "is EMPTY" was demanding a false statement. What replaced it is
+    head-qualification in either direction — see the block comment on the legs.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
@@ -578,22 +584,40 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # that quoted retraction apart from a re-assertion (the pattern matches only the unquoted
     # form, so the retraction that still records the false spelling stays legal).
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
-    for _negation in (
-        f"neither is `{_tortoise_cmd}`",
-        f"{_tortoise_cmd}` is NOT empty",
-        f"{_tortoise_cmd}` returns exactly those two",
-    ):
-        assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints 0 lines at "
-            "this head (the `#12943` modules landed on `main`, so they sit on BOTH sides "
-            "of the merge and contribute no path here), so the sentence is refuted by the "
-            "very command it quotes — and it satisfied the presence-only leg above while "
-            "contradicting the empty claims beside it (#13489 review, P1)")
-    assert any(f"{_tortoise_cmd}` {_word}" in doc
-               for _word in ("is empty", "-> empty", "is EMPTY")), (
-        "05-verify.md must still state, in words, that the `tortoise/` path list is EMPTY "
-        "— naming the command is not an answer, and deleting the FALSE reading must leave a "
-        "reader who can see which way the measurement went (#13489 review, P1)")
+    # ⛔ THE DIRECTION IS NO LONGER PINNED, AND THAT IS THE FIX (#13760, merging `main`). The
+    # two legs that used to stand here REQUIRED the document to say the list "is EMPTY" and
+    # FORBADE it to say "is NOT empty" — true of the head #13489 review measured, where the
+    # branch touched no `tortoise/` path. `812b33f97e` then retook both census notes ON THIS
+    # BRANCH, so at the merge head the command names three `tortoise/` paths and the checker
+    # exits `0` (measured: `git diff --name-only origin/main...HEAD -- tortoise/` -> 3 lines;
+    # `tools/hosted_api_cite_census.py --check` -> exit 0, twelve `ok`). A direction pin then
+    # DEMANDED a false statement — the exact rot this test exists to catch, in the instrument
+    # rather than the document. So the property asserted is the one that cannot rot: EVERY
+    # statement of the measurement names the HEAD it was measured at, and names which way it
+    # went. A verdict with no head is the defect (#13489 review, P1); its direction is a fact
+    # about that head and is read from the tree.
+    assert f"{_tortoise_cmd}` returns exactly those two" not in doc, (
+        "05-verify.md says the command `returns exactly those two` — a claim refuted at "
+        "every head this row has been written for, and not a measurement of any tree "
+        "(#13489 review, P1)")
+    _heads = re.compile(r"\b[0-9a-f]{7,40}\b")
+    _directions = ("is empty", "-> empty", "is EMPTY", "is NOT empty", "names both note files")
+    _verdict_paras = [p for p in doc.split("\n\n") if _tortoise_cmd in p]
+    assert _verdict_paras, (
+        "05-verify.md names neither the `tortoise/` path command nor a head beside it — "
+        "the presence leg above already requires the command, so this can only mean the "
+        "document was reflowed into a shape this test can no longer read")
+    for _para in _verdict_paras:
+        assert _heads.search(_para), (
+            "05-verify.md states what `git diff --name-only origin/main...HEAD -- "
+            "tortoise/` measures WITHOUT naming the head it was measured at. The set is a "
+            "fact about a HEAD, and it moved twice on this row already — name the sha "
+            "beside the verdict (#13489 review, P1)")
+        assert any(_d in _para for _d in _directions), (
+            "05-verify.md names the `tortoise/` path command beside a head but never says "
+            "which way the measurement went — a reader cannot tell an empty set from a "
+            "populated one, and `--refresh` is only correct for the second "
+            "(#13489 review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
     # head they were measured at". The first cut of the repair said "at the head that still
