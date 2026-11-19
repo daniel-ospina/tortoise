@@ -30,8 +30,14 @@ WHAT IT DOES *NOT* DO
   say so — a token minted here would be a second vocabulary for one fact.
 - **It does not text-match.** "What ended" is a STATE question, so the selector
   is the state, not the relevance of a query: ``tortoise_fts_query`` refuses a
-  ``query`` beside ``ended_scope`` rather than silently ranking the ended set by
-  words the caller did not mean as a filter (see that method's refusal).
+  ``query`` beside an **explicit** ``ended_scope`` rather than silently ranking
+  the ended set by words the caller did not mean as a filter (see that method's
+  refusal). ⛔ That refusal holds for an explicit scope ONLY: since #13558 a
+  plain question about endings reaches this population WITHOUT the flag, and the
+  ``query`` that selected it is **applied** — it chose the population — not
+  refused beside it. This paragraph stated the refusal unconditionally until the
+  routing landed; the two cases are not the same, and a reader who needs the
+  exact boundary should read the seam in ``sdk.tortoise_fts_query``.
 
 THE "PLANNED AND NEVER HAPPENED" SHAPE
 --------------------------------------
