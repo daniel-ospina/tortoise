@@ -3272,25 +3272,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # both guards stayed green.
     # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
     # `c50a03a` (the commit carrying this note), by the texts pinned below.
-    #
-    # ⛔ ALL FOUR `sdk.py` ADDRESSES moved again on `main` AFTER #13767 (`+36`), and
-    # `origin/main` still carried the pre-move keys at the base of the #13728 forward
-    # merge — that guard is RED on `main` itself, and inheriting the keys carries the
-    # red in. Re-derived at THIS tree BY CONTENT (the rule above: never by an offset,
-    # and the uniform `+36` is only the consistency check):
-    # `grep -n 'A row that ALREADY holds a non-scalar' tortoise/sdk.py` -> 55353;
-    # `grep -n 'if (_np_dead == [_SUPERSEDED_STATUS]'` -> 55505 (the arm head — the
-    # second hit, 55544, is the message builder), its end located as that same
-    # 10-line arm's `continue` -> 55514; `grep -n 'def update_knowledge('` -> 22629,
-    # its end located as the function's own last line `return
-    # self._update_entity_any(id, **props)` -> 22804; and the per-label write
-    # -> 55954. `tortoise/indexer/github_indexer.py`'s citations to the same
-    # statements were re-pointed with them (same map, same commit), so the citing
-    # file and this pin set cannot disagree.
     ("sdk.py", 55353, 55355): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 55505, 55514): (
-        "if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 55505, 55514): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22629, 22804): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
     ("sdk.py", 55954, 55954): (
