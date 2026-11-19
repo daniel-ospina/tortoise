@@ -262,6 +262,35 @@ def test_error_detail_is_scrubbed_of_credentials():
     assert "db.internal" in detail and "connect failed" in detail
 
 
+def test_the_persisted_repr_is_scrubbed_too():
+    """``error`` is persisted AND republished, so it may not be the leak either.
+
+    ``RedisError``'s repr drops ``args`` — the one family that CANNOT leak —
+    so a credential pin built only on it proves nothing about the rest. This
+    uses a plain exception, whose repr embeds the message verbatim, which is
+    the shape that actually reaches ``report.py``'s ``failures``.
+    """
+    exc = ValueError(
+        "connect failed for redis://user:s3cr3t-pw@db.internal:6379/0 and "
+        f"key sk-{'a' * 40} rejected")
+    err = _entry(exc)["error"]
+    assert "s3cr3t-pw" not in err
+    assert "a" * 40 not in err
+    assert "REDACTED" in err
+    # the class name the legacy rescue greps for must survive redaction
+    assert "ValueError" in err
+
+
+def test_the_legacy_rescue_still_matches_after_scrubbing():
+    """``_legacy_repr_match`` greps the persisted ``error`` for a transport
+    class name; redaction must not remove it, or a pre-feature checkpoint stops
+    being recoverable."""
+    exc = TimeoutError("connect failed for redis://u:pw@db.internal:6379/0")
+    err = _entry(exc)["error"]
+    assert "TimeoutError" in err
+    assert runner._legacy_repr_match(err) is True
+
+
 def test_error_detail_is_bounded_and_collapsed():
     exc = redis_exc.ResponseError("line one\nline two " + "x" * 5000)
     detail = _entry(exc)["error_detail"]

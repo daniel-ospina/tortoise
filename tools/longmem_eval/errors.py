@@ -39,12 +39,12 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import logging
 from collections import Counter
 
-import redis.exceptions
-
 from tortoise.model_adapters import classify_llm_error
 from tortoise.retry import (  # noqa: F401  — re-exported for the eval harness
     WriteStageRetriesExhausted,
     call_with_predicate,
+    graph_abort_family,
+    retryable_aborted_write,
     retryable_transient,
 )
 
@@ -87,12 +87,20 @@ _SITES = ("reader", "judge", "ingest")
 # ── #8486 F1: the recoverable-class set — ONE source of truth ──────────────
 #: The bare classes a persisted failure entry may be RE-ATTEMPTED from.
 #:
-#: ``retryable`` in a failure record answers exactly one question: *may a
-#: ``--retry-failed`` resume re-attempt this question?* It is derived from the
-#: entry's ``error_class`` through :func:`class_is_recoverable`, gated by ONE
-#: further condition — :func:`failure_is_recoverable` also requires that the
-#: exception be INFRA rather than a deterministic bug — and from nothing else.
-#: The class alone is deliberately NOT ``retryable_transient`` (the write-path
+#: ``retryable`` in a failure record answers ONE question — *is re-attempting
+#: this question plausible?* — and it is deliberately ONE half of the
+#: eligibility test, not the whole of it. The gate (``run.py``'s
+#: ``_retry_failed_skip_reason``) requires ``error_class ==
+#: "ingest:retries_exhausted"`` as well, so a ``reader:``/``judge:`` entry can
+#: record ``retryable: true`` and still never be re-attempted — the tier, not
+#: the flag, is what scopes ``--retry-failed`` to the write-path surface
+#: (the plan's P2-G). Read the flag as "recoverable in principle".
+#:
+#: It is derived from the entry's ``error_class`` through
+#: :func:`class_is_recoverable`, gated by ONE further condition —
+#: :func:`failure_is_recoverable` also requires that the exception be INFRA
+#: rather than a deterministic bug — and from nothing else. The class alone is
+#: deliberately NOT ``retryable_transient`` (the write-path
 #: predicate in ``tortoise/retry.py``), which answers a DIFFERENT question —
 #: *may THIS write be retried at THIS layer right now* — and returns False for
 #: error families that are recoverable at a higher layer (a replaced-graph /
@@ -155,18 +163,34 @@ def infra_failure(exc: BaseException) -> bool:
     * ``retryable_transient(exc)`` — the write seam's own transport/provider
       predicate (``tortoise/retry.py``); an extractor LLM transient
       (``requests.Timeout``/``URLError``) is in scope by the plan's P2-2 pin.
-    * a ``redis.exceptions.RedisError`` — the server REFUSED, timed out, or
-      dropped the graph. That family is infra by construction (its ``repr``
-      drops ``args``, which is #8486 finding 2) and it is exactly the shape
-      finding 1 was about, so it may not be re-graded as a deterministic bug
-      just because both predicates said False.
+    * ``graph_abort_family(exc)`` — the engine ABORTED the statement because the
+      graph was deleted or replaced (``_GRAPH_ABORT_RE``). This is the smoke's
+      OWN failure, and the reason finding 1 exists.
+    * ``retryable_aborted_write(exc)`` — the write-slot refusal and the
+      MISCONF/disk-full family (``_WRITE_LOCK_RE`` / ``_MISCONF_RE``), which
+      the plan's P1-7 pin already treats as re-attemptable. ``graph_exists`` is
+      omitted on purpose: that argument gates the graph-abort arm ONLY, which
+      the line above decides from the error text, so the omitted probe is not
+      a silent refusal of anything in scope here.
+
+    ⛔ NOT ``isinstance(exc, redis.exceptions.RedisError)``. That base class is
+    emphatically not infra: it covers the deterministic refusals — ``WRONGTYPE``
+    (the client sent the wrong operation for the key), ``NOPERM`` (an ACL that
+    will refuse again on every attempt), ``ERR unknown command``, and
+    ``redis.exceptions.DataError``, which redis-py's ENCODER raises before a
+    byte reaches the server. Marking those recoverable re-introduces exactly
+    the burn the plan's guard forbids, at 2 × ~25 min per question.
 
     Everything else — a ``TypeError``/``KeyError``/``RuntimeError`` from our
-    own code — is deterministic and stays excluded.
+    own code, and the deterministic redis refusals above — is excluded.
+
+    ⚠️ Deliberately NOT in scope: a bare ``ResponseError('Query timed out')``
+    matches none of the three families, so it stays excluded — which is what
+    it did before this change. Adding it would be a new decision, not a fix.
     """
-    if retryable_transient(exc):
-        return True
-    return isinstance(exc, redis.exceptions.RedisError)
+    return (retryable_transient(exc)
+            or graph_abort_family(exc)
+            or retryable_aborted_write(exc))
 
 
 def failure_is_recoverable(exc: BaseException, *,
@@ -210,11 +234,11 @@ INGEST_QUESTION_RETRIES = 1
 #: of a field named ``attempts``, and it is what an operator needs to tell a
 #: 12-minute ingest that failed once from one that failed three times. The cap
 #: is +1 (2 → 3) so the SAME worst-case recovery surface is preserved —
-#: TWO resumes either way, ~2 × ~25 min: a question that exhausted the
-#: write-stage retries and its in-run R2 (attempts 2) gets one resume (3),
-#: and a plain initial failure (attempts 1) gets two (2, then 3). ⚠️ Say TWO
-#: for the plain path, not one: the gate admits while ``attempts < 3``.
-#: A resumed checkpoint
+#: TWO re-burns either way, ~2 × 25 min: a question that exhausted the
+#: write-stage retries and its in-run R2 (attempts 2) burns them as R2 + one
+#: resume (3), and a plain initial failure (attempts 1) burns two resumes
+#: (2, then 3). ⚠️ Only the PLAIN path gets two resumes; the R2 path gets one
+#: because R2 itself was the first re-burn. A resumed checkpoint
 #: written under the old accounting is refused by the fingerprint (the value
 #: rides ``resume_attempts_cap``), which is the correct outcome — its
 #: ``attempts`` numbers would be read two ways.

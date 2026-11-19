@@ -1395,6 +1395,20 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
     return _retry_failed_skip_reason(entry) is None
 
 
+def _scrub(text: str) -> str:
+    """The PRODUCT's credential redactor, applied to anything persisted.
+
+    ``tortoise.security.redact_secrets`` replaces credential-shaped spans
+    (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
+    ``[REDACTED:<kind>]`` and leaves everything else byte-identical, so a
+    failure record can never be the thing that leaks a key.
+    """
+    from tortoise.security import redact_secrets
+
+    scrubbed, _counts = redact_secrets(text)
+    return scrubbed
+
+
 def _error_detail(exc: BaseException) -> str:
     """The exception's OWN message, secret-scrubbed and bounded (#8486 F2).
 
@@ -1420,8 +1434,6 @@ def _error_detail(exc: BaseException) -> str:
     Returns ``""`` when the exception carries no message — the entry then omits
     the key entirely rather than writing an empty string.
     """
-    from tortoise.security import redact_secrets
-
     try:
         text = str(exc) or ""
     except Exception:  # noqa: BLE001, RUF100 — a broken __str__ is not the failure
@@ -1429,7 +1441,7 @@ def _error_detail(exc: BaseException) -> str:
     text = " ".join(text.split())
     if not text:
         return ""
-    text, _counts = redact_secrets(text)
+    text = _scrub(text)
     if len(text) > ERROR_DETAIL_CAP:
         text = text[:ERROR_DETAIL_CAP] + "…<truncated>"
     return text
@@ -1478,13 +1490,21 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     ``'server:ResponseError'``), DROPPING ``args``. The server's own sentence
     therefore never reached the record, so a refused query and a deleted graph
     were indistinguishable. ``error_detail`` carries it (scrubbed, bounded),
-    additively — ``error`` keeps its exact bytes because the legacy resume
-    rescue and every on-disk entry key on it."""
+    additively. ⚠️ ``error`` is scrubbed TOO (#8486 review round 2): it is
+    persisted and republished verbatim (``report.py`` passes ``failures``
+    through), so leaving ``repr(exc)`` raw makes this record the one place a
+    connection-string password or an ``sk-`` key survives — and the family that
+    cannot leak (``RedisError``, whose repr drops ``args``) is exactly the one a
+    credential test would naturally pick. ``redact_secrets`` replaces only
+    credential-SHAPED spans and leaves class names byte-identical, so the
+    legacy resume rescue (``_legacy_repr_match``, which looks for the
+    ``TimeoutError``/``ConnectionError`` substrings) is unaffected.
+    """
     error_class = eval_failure_class(exc, site=stage)
     if prior and prior.get("error_class") == "ingest:retries_exhausted":
         error_class = "ingest:retries_exhausted"
     retryable = failure_is_recoverable(exc, error_class=error_class)
-    err = repr(exc)
+    err = _scrub(repr(exc))
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
     entry = {

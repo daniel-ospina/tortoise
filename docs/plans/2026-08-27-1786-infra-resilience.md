@@ -320,3 +320,51 @@ The eval pipeline loses questions when the shared FalkorDB container stalls unde
 ---
 <!-- plan-review: cycles=5, status=capped, version=2.3.0 -->
 <!-- Recovery: 5-cycle cap reached with 16 remaining issues → orchestrator deep-fix (16 fixed) → second-model gate deepseek-v4-pro 2 cycles (8 issues fixed, final gate clean) → final verification 2 cycles (7 issues fixed, final pass clean). All reviewer cycles' issues resolved; plan converged. -->
+
+## 12. Amendments after the fact
+
+**2026-11-19 — `RESUME_ATTEMPTS_CAP` is 3, and `attempts` counts PIPELINE ATTEMPTS
+(#8486, PR #13742).** Task 2 Step 3 above names `RESUME_ATTEMPTS_CAP = 2` and
+pins "a provider-transient entry created WITHOUT an R2 starts at `attempts=0`".
+The 10-question smoke measured what that accounting produced in practice: a
+question whose ingest failed after ~12 minutes persisted
+`error_class=ingest:retries_exhausted` — "the retry budget burned" — next to
+`attempts: 0`, "nothing was tried". Two numbers, three wrong readings. The
+constant is now **3** and the field counts attempts MADE: the initial attempt is
+1, the in-run R2 makes it 2, and each failed `--retry-failed` re-attempt adds
+one.
+
+The budget this plan pins is UNCHANGED — still **2 × ~25 min** worst case. What
+moves is which counter values spell it: a question that exhausted the
+write-stage retries and its in-run R2 (attempts 2) gets ONE resume (3), and a
+plain initial failure (attempts 1) gets TWO (2, then 3), because the gate admits
+while `attempts < 3`. The 3 × case this plan rules out remains ruled out for the
+same reason it did before: the R2 marker is disarmed during resume re-attempts,
+so a resume can never fire an R2. A checkpoint written under the old accounting
+is REFUSED by the fingerprint rather than misread — `resume_attempts_cap` rides
+it, so the value change is the refusal mechanism, and that is the intended
+outcome for numbers that would otherwise be read two ways.
+
+**The `retryable` source, and the deterministic guard.** Task 2 Step 3 pins
+`retryable` as "evaluated at write time from Task 1's `retryable_transient`".
+That predicate cannot stay the source: it answers *may this WRITE be retried at
+THIS layer now*, and it returns False for the replaced-graph / write-lock
+`ResponseError` family on purpose (the SDK write seam retries those), so it wrote
+`retryable: false` on a question the resume exists to recover — the silent skip
+the smoke recorded. `retryable` is now derived from the entry's `error_class`
+AND an infra predicate (`tools/longmem_eval/errors.py::failure_is_recoverable`),
+where infra means this repo's own named families: `retryable_transient`,
+`graph_abort_family`, `retryable_aborted_write`.
+
+The PROPERTY this plan pins is preserved, not reversed: "deterministic extractor
+bugs (`retryable=False`) remain excluded — that is the guard against re-burning
+~25 min on deterministic failures that also widen to `retries_exhausted`". It
+had to be re-expressed because the class cannot express it —
+`eval_failure_class` widens every `unknown`-class exception at ingest to
+`ingest:retries_exhausted`, so a `RuntimeError` in our own extractor and a
+replaced graph wear the same key. The guard is now the infra predicate, and it
+refuses the deterministic redis refusals too (`WRONGTYPE`, `NOPERM`, `ERR
+unknown command`, and redis-py's client-side `DataError`), which a coarser
+`isinstance(exc, RedisError)` reading would have re-admitted. P2-2 (provider
+transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
+re-attemptable) both still hold, and both are pinned by tests.
