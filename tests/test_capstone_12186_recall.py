@@ -1949,6 +1949,37 @@ def test_the_readme_quotes_the_leg_degradation_the_artifact_holds(artifact):
             f"README degradation row {arm!r} = {row[1:4]}, artifact holds {expected}")
 
 
+def test_every_window_lands_in_exactly_one_mode(artifact):
+    """`window_modes` must add up to the windows it was measured over.
+
+    ⛔ MEASURED GAP (the review's open P2 on the peer lane's commits; still open at
+    `0aea9b36b3`). The ledger block reconciles `shipped.minted`, `retrieval_in_window`
+    and the per-class `norm_only_attached` cells, but `window_modes` was read only on
+    its `keyword_only` half, so at that head — suite GREEN at 58 passed —
+    `arms.mint_rate.window_modes.hybrid` 400 -> 999 mutated. A block measured over 411
+    pairs then published 1 399 hybrid windows: more windows than it has, and the split
+    a reader uses to ask "was this arm fused or lexical?" describing no population.
+
+    The identity is the tool's own construction, never a copy of the numbers: the
+    runner increments exactly ONE of the two modes per traced window
+    (`tools/capstone_12186_recall.py:479-482` — `keyword_only` when
+    `require_hybrid_read` raises, `hybrid` otherwise), so the split must sum to the
+    windows the block was measured over — `n` for a per-query arm, `pairs` for the
+    `mint_rate` write-path block, which carries no `n` because it carries no
+    `per_query`.
+    """
+    for name, arm in artifact["arms"].items():
+        modes = arm.get("window_modes")
+        if modes is None:
+            continue
+        windows = arm["n"] if "n" in arm else arm["pairs"]
+        assert sum(modes.values()) == windows, (
+            f"`arms[{name}].window_modes` splits {windows} windows into {modes} — "
+            f"{sum(modes.values())} in total. Exactly one mode is counted per window, "
+            f"so a split that does not sum to its own population describes no "
+            f"population, and the leg a reader infers from it is not a measurement")
+
+
 def test_the_two_restated_prose_figures_are_pinned_and_not_only_the_tables(artifact):
     """The rows were pinned; the PROSE beside them was not — and it had regressed.
 
