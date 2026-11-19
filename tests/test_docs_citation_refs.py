@@ -1318,6 +1318,75 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         " (#13489 review, P1; #13746 review, finding 7; #13728 review, finding 4; #13807"
         " review, findings 2 and F4)")
 
+    # ⛔ AND THE DOCUMENT'S OWN SHORTHAND IS SCANNED TOO (#13807 review round 16, F1 —
+    # MEASURED, and this pass was LOST ONCE by this PR's own conflict resolution against
+    # `8bdd34c631`). The document shortens the command to `` `-- tortoise/` `` in several
+    # places, and a short-form occurrence never matches the full-command pass above — the
+    # full string is not a substring of the abbreviation — so without a second call the
+    # whole abbreviated class is read by NEITHER arm. Measured at `4301ac1e81`, with
+    # `git diff --name-only origin/main...HEAD -- tortoise/` printing TWO paths:
+    #
+    #   doc + "… and the earlier cut said `-- tortoise/` is empty about this bundle …"
+    #     ledger (c-i)  -> []      full-command pass -> []      THIS PASS -> [(…, True)]
+    #
+    # i.e. a FALSE emptiness verdict in the document's own house style was GREEN under both
+    # surviving arms. `main`'s `#13845` ran this second call for exactly this reason; the
+    # merge that resolved this branch onto `main` dropped it, which is a FAIL-OPEN regression
+    # against `main` rather than a hole this branch inherited (#13728 review, finding 4).
+    _typed_short = _typed_answers_to_tortoise_cmd(doc, "-- tortoise/")
+    assert not _typed_short, (
+        f"05-verify.md types {[' '.join(_a.split()) for _a, _e in _typed_short]!r} as the "
+        "answer to the ABBREVIATED command `-- tortoise/` "
+        f"({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed_short]} at this "
+        "head). The abbreviation is how this document spells the same head-bound command in "
+        "its own prose, and it is not a substring of the full form, so the full-command "
+        "pass above cannot see it — the same half-closure one layer down (#13845 review, "
+        "cycle 2; #13807 review round 16, F1)")
+
+    # ⛔ AND THIS PASS BRINGS A SKIP THAT MUST BE WITNESSED (#13807 review round 16, F2 —
+    # MEASURED). `"-- tortoise/"` is a SUFFIX of every longer `git diff … -- tortoise/`
+    # invocation, so the matcher skips an occurrence that is the pathspec of a longer
+    # invocation: the writer named the revs, which is the head-pinned spelling this document
+    # asks for, and this arm cannot fetch that head. Both halves are pinned, because the two
+    # ways this rule fails are opposite and both silent — a skip that WIDENS to every
+    # occurrence looks green while grading nothing, and a skip that no witness reaches is dead
+    # code nothing reads (measured: with the skip disabled, `main`'s arm test reds and this
+    # file's arm test was GREEN before this block existed).
+    assert _typed_answers_to_tortoise_cmd(
+        "(`git diff --name-only origin/main...2a7f24e241 -- tortoise/` names exactly "
+        "`tortoise/activation_scorecard.py`)", "-- tortoise/") == [], (
+        "the short-form pass grades the pathspec of a command pinned to ANOTHER rev against "
+        "this head's tree, so true, head-named history is refused (#13845 review, cycle 3, "
+        "P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        "(`git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints FIVE paths "
+        "there)", "-- tortoise/") == [], (
+        "the same skip must cover a SECOND rev range — the shape is 'the pathspec of a "
+        "longer invocation', never that one particular range (#13845 review, cycle 3, P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        "and `-- tortoise/` prints NOTHING at this head", "-- tortoise/") == [
+            ("prints NOTHING at this head", True)], (
+        "the skip widened to a STANDALONE short-form claim — the control this witness exists "
+        "for: a rule that silences the live question hides every refuted claim "
+        "(#13845 review, cycle 3, P1)")
+    # ⛔ READ OFF THE DOCUMENT, so the witness tracks its spelling instead of quoting one
+    # sentence and rotting (#13845 review, cycle 3, P1). Measured before the boundary:
+    # `_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")` returned FOUR answers on this
+    # document, two of them true history about other revs refused on a differently-shaped
+    # head and one its own head had already falsified.
+    _live_invocations = re.findall(r"\(`git diff [^`]*-- tortoise/`", doc)
+    assert _live_invocations, (
+        "the live document no longer spells a `git diff … -- tortoise/` invocation, so this "
+        "witness reads nothing — restore the shape or retire the witness, do not leave it "
+        "vacuous (#13845 review, cycle 3, P1)")
+    for _invocation in _live_invocations:
+        assert _typed_answers_to_tortoise_cmd(
+            _invocation + " names exactly `tortoise/activation_scorecard.py`",
+            "-- tortoise/") == [], (
+            f"the short-form pass grades {_invocation!r} — a command pinned to something "
+            "other than a bare `-- tortoise/` — against this head, so the document's "
+            "correctly head-pinned history is refused (#13845 review, cycle 3, P1)")
+
 
 def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
     """Arm (c-i) is a TEXT ban, so it fires in every clone — pinned, not reasoned about.
