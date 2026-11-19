@@ -1558,8 +1558,9 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
     happens on the thread the recorder was scoped to — a synchronous reaper path,
     a fixture, a `gc`-driven finalizer — thread scoping excludes nothing, the
     path is recorded as `_label_hits`'s own, and the required `test` job reds with
-    no defect behind it. The file is `core`-registered
-    (`config/ci-surfaces.yml:8825`) and in `tier1` (`:10984`), and is in NEITHER
+    no defect behind it. The file is `core`-registered — the `- test_substrate_map.py`
+    row, `config/ci-surfaces.yml:8832` at this head — and in `tier1` (that file's
+    `- test_substrate_map.py` row, `:10991`), and is in NEITHER
     `slow_files` nor `carve_out`, so it belongs to the FAST pool: it is packed
     into ONE of the `test (x)` shards (11 bins, `config/ci-surfaces.yml:63`) —
     `test (e)` in the run above — never the `slow`/`carve-out` legs. That red
