@@ -112,16 +112,28 @@ kill_timeout = 30
   # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
   # headroom, so a hung probe consumed its whole period). A kernel accept is
   # effectively instant (Fly's tcp_checks default timeout is 2s); 5s is
-  # generous headroom, not a latency budget. grace_period = 180s is a
-  # deliberately generous carry-over from the HTTP era, NOT a requirement of the
-  # TCP check: the app binds 0.0.0.0:8000 IMMEDIATELY on start (entrypoint.sh;
-  # hosted_api._lifespan spawns the ~85s torch/model pre-warm as a daemon=True
-  # thread that never blocks bind), so the listener exists within seconds and the
-  # model load does not gate a TCP connect. See docs/infra-runbook.md §6.4.
+  # generous headroom, not a latency budget. grace_period = 420s (#13674).
+  #
+  # ⛔ WHY 420s AND NOT 180s — MEASURED, not padded. entrypoint.sh now pays the
+  # embedder's COLD IMPORT before `exec` (#13674), because that cost is 156.5 s
+  # of imports alone on this box (`import torch` 24.1 s + `from
+  # sentence_transformers import SentenceTransformer` 132.4 s, measured
+  # 2026-11-19 on tortoise-y4mjjq, cpu_kind=shared, 2 cpus) and nothing inside
+  # the app's runtime budget could make it cheap. A full cold boot is therefore
+  # ≈ 156.5 s imports + 39.3 s warm construct ≈ 196 s of embedder work before
+  # uvicorn binds, plus the app's own startup. 180s would put a healthy boot
+  # PAST its grace period — a restart loop, i.e. the outage wearing a different
+  # hat. 420s = 196 s measured + the app's start + ~200 s headroom, and it stays
+  # above the pre-warm's own 300 s bound
+  # (`TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S`), so a boot that hits that bound
+  # still has ~120 s to bind and pass a check. Do not shorten it below the boot
+  # time; if the pre-warm gets faster, re-measure before touching this. The app
+  # still binds as early as it can — this is a ceiling for a slow boot, not a
+  # schedule. See docs/infra-runbook.md §6.4.
   [[services.tcp_checks]]
     interval = "15s"
     timeout = "5s"
-    grace_period = "180s"
+    grace_period = "420s"
 
 # ── REINSTATED 2026-09-17: non-routing loop-liveness check (#3447, #2850) ────
 # DECIDED here — this is a deployment-configuration judgement, NOT an owner
@@ -229,10 +241,12 @@ kill_timeout = 30
 # informational/readiness filter) and .github/workflows/deploy-hosted.yml
 # auto-deploys whenever fly.toml changes. If the 9090 listener ever fails to
 # bind, EVERY deploy fails and the sole production machine is rolled repeatedly
-# until it is fixed. grace_period = 180s is the documented mitigation (Fly:
-# "give your app enough time to start up") and covers the ~85s boot with
-# headroom — the same value the routing check above uses. Do not shorten it
-# below the boot time. Top-level checks REQUIRE `port`, and the port must be
+# until it is fixed. grace_period = 420s is the documented mitigation (Fly:
+# "give your app enough time to start up") and covers the #13674 boot — the
+# embedder's cold import is 156.5 s measured on this box and is paid BEFORE
+# `exec` (196 s with the warm construct) — with headroom. Same value as the
+# routing check above; the derivation is stated there. Do not shorten it below
+# the boot time. Top-level checks REQUIRE `port`, and the port must be
 # bound on 0.0.0.0 — a loopback-only listener makes the check fail permanently.
 # See docs/infra-runbook.md §6.0 (merge order) and §6.4 (this check).
 [checks]
@@ -243,7 +257,7 @@ kill_timeout = 30
     port = 9090
     interval = "15s"
     timeout = "5s"
-    grace_period = "180s"
+    grace_period = "420s"
 
 [[vm]]
   cpu_kind = "shared"
