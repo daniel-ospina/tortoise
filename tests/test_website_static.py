@@ -99,8 +99,11 @@ PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
 #: The hosts this site serves itself from. An asset referenced through one of
 #: these is SAME-ORIGIN — the browser loads the same file a relative path would —
 #: so the absolute spelling must not be read as a foreign asset and skipped
-#: (#13696 round 9, P3).
-SITE_HOSTS = frozenset({"premiselabs.co", "www.premiselabs.co"})
+#: (#13696 round 9, P3). `tortoise.premiselabs.co` is the PRODUCT host and serves
+#: this same `website/` tree (`TestOgImages.SITE_ORIGINS` pins the same pair), so
+#: leaving it out read `https://tortoise.premiselabs.co/assets/x.js` as foreign
+#: and left a `$25/mo` in it green — measured, #13696 round 10.
+SITE_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 # The shared consent module (#658/#736). It GAINED a behaviour for #13645 — the
 # `tortoise:consent` event — and the niche page's whole funnel reads it, so the
 # seam is pinned here: see `TestConsentSeam`.
@@ -7390,7 +7393,9 @@ def _style_bodies(html: str) -> list[str]:
                                   re.S | re.I)]
 
 
-def _same_origin_asset(name: str, ref: str) -> tuple[Path | None, str]:
+def _same_origin_asset(
+    name: str, ref: str, base: Path | None = None, site: Path | None = None,
+) -> tuple[Path | None, str]:
     """`(path, label)` for a same-origin asset reference, or `(None, label)`.
 
     SAME-ORIGIN means the site's own host as well as a path: the page may write
@@ -7400,16 +7405,43 @@ def _same_origin_asset(name: str, ref: str) -> tuple[Path | None, str]:
     green). A cache-busting `?v=…` is stripped before the file is resolved — the
     site already serves `/favicon.ico?v=…`, so refusing a query would false-red
     a legitimate tag.
+
+    `base` is the directory a BARE relative reference resolves against; it
+    defaults to the site root (`website/`), which is right for a tag on a page.
+    A CSS `@import` resolves against the SHEET THAT CARRIES IT instead, so the
+    style helper passes the importing file's directory — without that,
+    `@import "more.css"` inside `/assets/x.css` was looked for at
+    `website/more.css`, missed, and SKIPPED, which is a fail-OPEN, not a gap
+    (measured, #13696 round 10).
+
+    `data:`/`blob:` are REFUSED rather than skipped: the bytes are inline, so
+    the reader does receive them and no static channel here can read what they
+    say. Both pages carry none, so the assertion is a closed door, not a
+    restriction on real markup.
     """
     url = urlsplit(ref)
-    if url.scheme or url.netloc:
-        if url.netloc.lower() not in SITE_HOSTS:
+    if url.scheme in ("data", "blob"):
+        raise AssertionError(
+            f"{name} delivers bytes inline through a `{url.scheme}:` URI "
+            f"(`{ref[:60]}…`), which no channel here can read — vendor it under "
+            "`website/` or extend the channel deliberately")
+    site = site or (REPO_ROOT / "website")
+    if url.scheme or url.netloc or ref.startswith("//"):
+        if url.netloc.lower().removeprefix("www.") not in SITE_HOSTS:
             return None, ref  # a genuinely foreign asset: not this site's code
-    path = REPO_ROOT / "website" / url.path.lstrip("/")
+        base = site
+    if url.path.startswith("/"):
+        # Root-relative is a PAGE url: it resolves against the site root even
+        # when the reference came from a sheet in a subdirectory.
+        path = site / url.path.lstrip("/")
+    else:
+        path = (site if base is None else base) / url.path
     return path, url.path
 
 
-def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
+def _same_origin_script_bodies(
+    name: str, html: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
     """`(src, text)` for every SAME-ORIGIN script a page loads, except the source.
 
     A `<script src>` tag has an EMPTY body, so `_inline_scripts` skips it and
@@ -7419,11 +7451,16 @@ def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
     `document.title = 'Builder from $25/mo';` plus its tag left 139 rows green).
     `/assets/tortoise-pricing.js` is EXCLUDED because it IS the source: it
     legitimately holds the figures the other rows derive from.
+
+    `root` defaults to `website/` and exists so the channel can be exercised
+    against a fixture tree (see `TestStylesheetChannelIsRead`); every caller in
+    this file leaves it at the default.
     """
     out: list[tuple[str, str]] = []
+    site = root or (REPO_ROOT / "website")
     for src in _pricing_source_includes(html):
-        path, label = _same_origin_asset(name, src)
-        if path is None:
+        path, _label = _same_origin_asset(name, src, None, site)
+        if path is None:      # a genuinely foreign asset (GSAP on cdnjs)
             continue
         if path.resolve() == PRICING_SOURCE.resolve():
             continue
@@ -7438,43 +7475,144 @@ def _same_origin_script_bodies(name: str, html: str) -> list[tuple[str, str]]:
     return out
 
 
-def _same_origin_style_bodies(name: str, html: str) -> list[tuple[str, str]]:
-    """`(href, text)` for every LINKED stylesheet a page loads.
+def _stylesheet_imports(css: str) -> list[str]:
+    """Every `@import` target in a stylesheet body, in source order.
+
+    `@import` is the fourth documented way CSS reaches a document (`<link>`,
+    `<style>`, `@import`, the `style` attribute — W3C CSS1 §"Linking Style
+    Sheets to HTML"), so a `<style>` block or a linked FILE can pull in a second
+    file that no tag in the page names. Every legal spelling is read:
+    `@import "x.css"`, `@import url("x.css")`, `@import url(x.css)`.
+
+    The text is comment-stripped FIRST, so a commented-out `@import` is not a
+    channel and a `/* … */` note may name a sheet without being one.
+    """
+    found = re.findall(
+        r"""@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^\s"')]+))""",
+        _strip_comment_lines(css), re.I)
+    return [next(g for groups in found for g in groups if g) for groups in found]
+
+
+def _pricing_stylesheet_hrefs(html: str) -> list[str]:
+    """The `href` of every `<link>` whose `rel` is a STYLESHEET, in source order.
+
+    Tolerant for the reason `_pricing_source_includes` is: the QUOTING of an
+    attribute must never select whether a channel is read. `rel` is a TOKEN
+    LIST, so `rel="alternate stylesheet"` counts (a reader can activate it);
+    `rel="preload" as="style"` does not (a preload applies no rule alone).
+    Commented-out tags are excluded — a disabled tag is not in the page.
+    """
+    href_re = re.compile(
+        r"""\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""", re.I)
+    refs: list[str] = []
+    for tag in re.findall(r"<link\b[^>]*>", _without_html_comments(html), re.I):
+        rel = re.search(
+            r"""\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""", tag, re.I)
+        if not rel or "stylesheet" not in next(g for g in rel.groups() if g is not None).lower().split():
+            continue
+        m = href_re.search(tag)
+        if m:
+            refs.append(next(g for g in m.groups() if g))
+    return refs
+
+
+def _same_origin_style_bodies(
+    name: str, html: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """`(href, text)` for every SAME-ORIGIN stylesheet a page loads — transitively.
 
     `<style>` is not the only channel that renders CSS text: a
     `<link rel="stylesheet">` file (or an `@import` inside one) carries a
     `content:` rule just as effectively, and `_served` never sees it — so a
     price there was in no channel at all (measured, #13696 round 9, P1: 145 rows
     green with `$25/mo` in a linked stylesheet, while the same rule inside the
-    page's own `<style>` red). The enumeration is the defect, so this row reads
-    the linked files too rather than waiting for the next species.
+    page's own `<style>` red).
+
+    ⛔ Round 9 read ONE level of `@import`, only from a LINKED sheet, and
+    resolved every reference against the site root. All three of those bounds
+    were measured leaving the sheet unread at this head (#13696 round 10):
+
+    - an `@import` inside a `<style>` BODY (`<style>@import url("/assets/x.css")`)
+      — a second door into the same file, and no row looked;
+    - a RELATIVE `@import "more.css"` inside `/assets/x.css` — resolved against
+      the site root, so it looked for `website/more.css`, was not a file, and was
+      silently SKIPPED: a fail-OPEN, not a gap;
+    - a TWO-hop chain (`a.css → b.css → c.css`) — the price one hop past the
+      first import;
+
+    so the walk starts at both doors and runs to a FIXPOINT over a visited set
+    (an import CYCLE terminates), with each reference resolved against the sheet
+    that carries it, and a reference that names no file ASSERTS instead of being
+    skipped: a stylesheet the page loads but this gate cannot read is exactly
+    the state the row exists to refuse.
+
+    Only a genuinely FOREIGN host (`cdnjs.cloudflare.com`) is skipped — a static
+    reader has no bytes there — and that skip is itself pinned closed below.
     """
-    refs: list[str] = []
-    href_re = re.compile(
-        r"""\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))""", re.I)
-    for tag in re.findall(r"<link\b[^>]*>", html, re.I):
-        if not re.search(r"\brel\s*=\s*['\"]?stylesheet", tag, re.I):
-            continue
-        m = href_re.search(tag)
-        if m:
-            refs.append(next(g for g in m.groups() if g))
+    site = root or (REPO_ROOT / "website")
+    # `(ref, base)` — `@import` resolves against the IMPORTING SHEET's own
+    # directory; a tag or a `<style>` body resolves against the site root,
+    # exactly as the page URL does.
+    queue: list[tuple[str, Path | None]] = [
+        (href, None) for href in _pricing_stylesheet_hrefs(html)]
+    for body in _style_bodies(html):
+        queue += [(ref, None) for ref in _stylesheet_imports(body)]
+    seen: set[Path] = set()
     out: list[tuple[str, str]] = []
-    for ref in refs:
-        path, _label = _same_origin_asset(name, ref)
-        if path is None or not path.is_file():
+    while queue:
+        ref, base = queue.pop(0)
+        path, _label = _same_origin_asset(name, ref, base, site)
+        if path is None:            # foreign host: no bytes a static reader can read
             continue
-        text = path.read_text(encoding="utf-8")
-        out.append((ref, _strip_comment_lines(text)))
-        # ONE level of `@import`: a stylesheet may pull in another file, and the
-        # price would be one hop deeper than any row looks.
-        for imported in re.findall(
-                r"@import\s+(?:url\()?\s*['\"]?([^'\")]+)", text, re.I):
-            ipath, _ = _same_origin_asset(name, imported)
-            if ipath is None or not ipath.is_file():
-                continue
-            out.append((imported, _strip_comment_lines(
-                ipath.read_text(encoding="utf-8"))))
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        assert path.is_file(), (
+            f"{name} loads the stylesheet `{ref}` but no such file exists under "
+            "`website/`, so this gate cannot read the CSS the page actually "
+            "renders — the file moved and the row must move with it")
+        text = _strip_comment_lines(path.read_text(encoding="utf-8"))
+        try:
+            label = "/" + str(resolved.relative_to(site.resolve()))
+        except ValueError:          # a sheet outside `website/`: name it as written
+            label = ref
+        out.append((label, text))
+        queue += [(ref2, path.parent) for ref2 in _stylesheet_imports(text)]
     return out
+
+
+def _price_channels(
+    name: str, markup: str, root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Every delivery that can put a PRICE in front of a reader, labelled.
+
+    ONE definition, because the list of deliveries IS the invariant: five review
+    rounds each closed one remembered member of an open-ended set, so the list
+    now lives here and the row plus the pin class both read it — a helper that
+    stops reading a spelling reds the pin instead of quietly widening a gap.
+
+    CLOSED against the documented ways style and script reach a document:
+
+    1. inline `<script>` bodies
+    2. `<style>` bodies
+    3. same-origin `<script src>` FILES
+    4. same-origin `<link rel="stylesheet">` FILES and their `@import`s
+
+    The `style` ATTRIBUTE is deliberately NOT a channel, and not by omission: it
+    is served MARKUP, so the no-price-outside-the-section row already scans it,
+    and `content:` has no effect in a `style` attribute — a figure there can
+    reach a reader only through a rule held in one of the channels above.
+    """
+    channels: list[tuple[str, str]] = [
+        ("inline `<script>`", body) for body in _inline_scripts(markup)]
+    channels += [("`<style>`", body) for body in _style_bodies(markup)]
+    channels += [(f"`{src}`", body)
+                 for src, body in _same_origin_script_bodies(name, markup, root)]
+    channels += [(f"`{href}` (stylesheet)", body)
+                 for href, body in _same_origin_style_bodies(name, markup, root)]
+    return channels
+
 
 
 class TestCommentStrippingKeepsCode:
@@ -7515,6 +7653,202 @@ class TestCommentStrippingKeepsCode:
         # sentence onto its own line, never to widen the row.
         assert PRICE_FIGURE_RE.search(_strip_comment_lines(
             "run(); // pinned at $25"))
+
+
+class TestStylesheetChannelIsRead:
+    """The CSS delivery list, pinned independently of the two live pages.
+
+    ⛔ A CLASS, not a row inside
+    `test_no_page_quotes_a_price_inside_its_own_script`, because both product
+    pages carry **zero** linked stylesheets and `website/assets/` holds **no**
+    `.css` file: that row is green as written, so nothing inside it can tell
+    whether this channel is read or invisible. Round 9 added the channel and
+    left FOUR ways through it open, each measured green on its head (#13696
+    round 10): an `@import` inside a `<style>` body, a RELATIVE `@import`
+    (resolved against the site root, missed, silently skipped), a two-hop import
+    chain, and a `<link>` to a stylesheet that does not exist.
+
+    These rows drive the SAME helpers the real row uses — `_pricing_stylesheet_hrefs`,
+    `_stylesheet_imports`, `_same_origin_style_bodies` and the `_price_channels`
+    assembly — against a fixture tree, so a helper that stops reading a spelling
+    reds here instead of quietly widening the gap on the live pages.
+
+    The `style` ATTRIBUTE is not covered on purpose (see `_price_channels`): it
+    is served markup, and `content:` cannot be declared there.
+    """
+
+    @staticmethod
+    def _site(tmp_path):
+        site = tmp_path / "website"
+        (site / "assets").mkdir(parents=True)
+        return site
+
+    def test_every_href_and_rel_spelling_is_read(self):
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="stylesheet" href="/a.css">') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            "<link rel='stylesheet' href='/a.css'>") == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="stylesheet" href=/a.css>') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<link href="/a.css" rel="stylesheet">') == ["/a.css"]
+        assert _pricing_stylesheet_hrefs(
+            '<LINK REL="STYLESHEET" HREF="/a.css">') == ["/a.css"]
+
+    def test_rel_is_a_token_list_so_alternate_counts(self):
+        # A reader can ACTIVATE an alternate sheet, so it renders text too.
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="alternate stylesheet" href="/a.css">') == ["/a.css"]
+        # …but a preload applies no rule by itself: not a delivery.
+        assert _pricing_stylesheet_hrefs(
+            '<link rel="preload" as="style" href="/a.css">') == []
+
+    def test_a_commented_out_link_is_not_read(self):
+        assert _pricing_stylesheet_hrefs(
+            '<!-- <link rel="stylesheet" href="/a.css"> -->') == []
+
+    def test_every_import_spelling_is_read(self):
+        assert _stylesheet_imports('@import "a.css";') == ["a.css"]
+        assert _stylesheet_imports('@import url("a.css");') == ["a.css"]
+        assert _stylesheet_imports("@import url(a.css);") == ["a.css"]
+        assert _stylesheet_imports("@import url( 'a.css' ) screen;") == ["a.css"]
+
+    def test_a_commented_out_import_is_not_read(self):
+        assert _stylesheet_imports('/* @import "a.css"; */') == []
+
+    def test_a_linked_sheet_its_relative_import_and_a_chain_are_channels(
+            self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "a.css").write_text(
+            '@import "b.css";\n.a::after { content: " \u2014 from $25/mo"; }\n',
+            encoding="utf-8")
+        # RELATIVE, and one hop past the first import — the two bounds round 9
+        # had, each measured leaving the figure unread.
+        (site / "assets" / "b.css").write_text(
+            '@import "/assets/c.css";\n.b::after { content: "$999"; }\n',
+            encoding="utf-8")
+        (site / "assets" / "c.css").write_text('.c::after { content: "$42"; }\n',
+                                            encoding="utf-8")
+        markup = ('<html><head><link rel="stylesheet" href="/assets/a.css">'
+                  '</head><body></body></html>')
+        channels = _price_channels("synthetic.html", markup, root=site)
+        bodies = {where: body for where, body in channels}
+        for expected in ("`/assets/a.css` (stylesheet)",
+                         "`/assets/b.css` (stylesheet)",
+                         "`/assets/c.css` (stylesheet)"):
+            assert expected in bodies, (
+                f"{expected} is in NO channel, so a figure one import away is "
+                f"unread: {sorted(bodies)}")
+        hits = [line for _, body in channels for line in body.splitlines()
+                if PRICE_FIGURE_RE.search(line)]
+        assert len(hits) == 3, (
+            "the channel is read but does not reach the detector — the row "
+            f"above would be vacuous over a linked sheet: {hits!r}")
+
+    def test_an_import_inside_a_style_block_is_a_channel(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "from-style.css").write_text(
+            '.x::after { content: "$42"; }\n', encoding="utf-8")
+        markup = ('<html><head><style>@import url("/assets/from-style.css");'
+                  '</style></head><body></body></html>')
+        bodies = dict(_price_channels("synthetic.html", markup, root=site))
+        assert "`/assets/from-style.css` (stylesheet)" in bodies, (
+            "an `@import` inside a `<style>` body is a fourth door to a "
+            f"stylesheet and it is unread: {sorted(bodies)}")
+
+    def test_an_import_cycle_terminates(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "a.css").write_text(
+            '@import "b.css";\n.a::after { content: "$1"; }\n', encoding="utf-8")
+        (site / "assets" / "b.css").write_text(
+            '@import "a.css";\n.b::after { content: "$2"; }\n', encoding="utf-8")
+        markup = ('<html><head><link rel="stylesheet" href="/assets/a.css">'
+                  '</head><body></body></html>')
+        bodies = [w for w, _ in _price_channels(
+            "synthetic.html", markup, root=site)]
+        assert bodies == ["`/assets/a.css` (stylesheet)",
+                          "`/assets/b.css` (stylesheet)"], (
+            "a cycle must terminate and still read every file once, not "
+            f"loop or silently stop: {bodies}")
+
+    def test_a_missing_stylesheet_fails_closed(self, tmp_path):
+        # Round 9 SKIPPED it, so a `<link>` whose file had moved read nothing
+        # and said nothing — the fail-OPEN this row exists to refuse.
+        site = self._site(tmp_path)
+        markup = ('<html><head><link rel="stylesheet" href="/assets/gone.css">'
+                  '</head><body></body></html>')
+        try:
+            _price_channels("synthetic.html", markup, root=site)
+        except AssertionError as exc:
+            assert "gone.css" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a `<link>` to a stylesheet that does not exist was skipped "
+                "silently — the page renders CSS this gate never read, and "
+                "every row stays green")
+
+    def test_an_absolute_url_on_either_site_host_is_read(self, tmp_path):
+        site = self._site(tmp_path)
+        (site / "assets" / "abs.css").write_text('.x { content: "$7"; }\n')
+        for spelling in ("https://premiselabs.co/assets/abs.css",
+                         "https://tortoise.premiselabs.co/assets/abs.css",
+                         "//www.premiselabs.co/assets/abs.css",
+                         "/assets/abs.css"):
+            markup = (f'<html><head><link rel="stylesheet" href="{spelling}">'
+                      '</head><body></body></html>')
+            assert "`/assets/abs.css` (stylesheet)" in dict(
+                _price_channels("synthetic.html", markup, root=site)), (
+                f"{spelling} was not resolved to the file it names")
+
+    def test_a_cache_busted_reference_still_resolves(self, tmp_path):
+        # `/favicon.ico?v=…` is this site's own convention; keeping the query in
+        # the path made `is_file()` false and the row RED with a message that
+        # was not true ("the file moved").
+        site = self._site(tmp_path)
+        (site / "assets" / "busted.css").write_text('.x { content: "$7"; }\n')
+        (site / "assets" / "busted.js").write_text("run();\n")
+        markup = ('<html><head>'
+                  '<link rel="stylesheet" href="/assets/busted.css?v=abc">'
+                  '<script src="/assets/busted.js?v=abc"></script>'
+                  '</head><body></body></html>')
+        bodies = dict(_price_channels("synthetic.html", markup, root=site))
+        assert "`/assets/busted.css` (stylesheet)" in bodies
+        assert "`/assets/busted.js?v=abc`" in bodies
+
+    def test_a_data_uri_delivery_is_refused_not_skipped(self, tmp_path):
+        site = self._site(tmp_path)
+        markup = ('<html><head><link rel="stylesheet" '
+                  'href="data:text/css,.x{content:\'$7\'}"></head>'
+                  '<body></body></html>')
+        try:
+            _price_channels("synthetic.html", markup, root=site)
+        except AssertionError as exc:
+            assert "data:" in str(exc), exc
+        else:
+            raise AssertionError(
+                "a `data:` URI delivers bytes inline and was skipped as if it "
+                "were a foreign host — the figure in it is unread")
+
+    def test_the_only_off_host_delivery_is_the_known_cdn(self):
+        # `_same_origin_asset` returns `None` for a foreign host and the row
+        # then reads NOTHING from it — legitimate only because that set is the
+        # CDN both pages load GSAP from. A new external delivery is a channel
+        # no row reads, so it must red HERE rather than slip past.
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            markup = path.read_text(encoding="utf-8")
+            refs = (_pricing_source_includes(markup)
+                    + _pricing_stylesheet_hrefs(markup)
+                    + [ref for body in _style_bodies(markup)
+                       for ref in _stylesheet_imports(body)])
+            foreign = [ref for ref in refs
+                       if _same_origin_asset(name, ref)[0] is None]
+            assert foreign == [r for r in foreign
+                              if urlsplit(r).netloc.lower()
+                              == "cdnjs.cloudflare.com"], (
+                f"{name} loads script/style from a host this gate cannot read "
+                f"and does not know about: {foreign!r}. A price there is "
+                "ungraded — vendor the file under `website/` or extend the "
+                "channel deliberately")
 
 
 class TestPricingSourceIsShared:
@@ -7753,13 +8087,7 @@ class TestPricingSourceIsShared:
                 f"{name} carries no inline `<script>` body, so this row would "
                 "pass without reading anything — the channel it exists to read "
                 "has moved and the row must move with it")
-            channels: list[tuple[str, str]] = [
-                ("inline `<script>`", body) for body in scripts]
-            channels += [("`<style>`", body) for body in _style_bodies(markup)]
-            channels += [(f"`{src}`", body)
-                         for src, body in _same_origin_script_bodies(name, markup)]
-            channels += [(f"`{href}` (stylesheet)", body)
-                         for href, body in _same_origin_style_bodies(name, markup)]
+            channels = _price_channels(name, markup)
             hits = [
                 f"{where}: {line.strip()}"
                 for where, body in channels
