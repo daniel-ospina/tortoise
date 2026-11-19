@@ -482,6 +482,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # embedded-green), and neither the probe's `finally` nor the fixture's restore
     # lets the lane leak into a later docker-lane test.
     "test_12184_ranker_entity_signals.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13722: the projection OPEN's round-trip count. `test_13722_projection_open_round_trips.py`
+    # is the same 8933/12360/12184 shape a fourth time — a module-level live probe
+    # (set to `_DB_URI`, restore the previous value in a `finally`, pop when it was
+    # unset: 3 sites) plus a per-test `_live_uri` fixture that re-points the lane at
+    # THIS module's own graph and restores it (3 more). DELIBERATE_URI is the point:
+    # the claims under test are wire-level (`send_command` counts on a REAL
+    # connection: one read is ONE round trip, a steady-state open is bounded) and
+    # round-trip cost, which no pure-function test can observe — an embedded or
+    # URI-less run would measure nothing and prove nothing. An unreachable lane
+    # degrades to `FALKORDB_AVAILABLE = False` (the live arms `skipif`, they never
+    # run embedded-green), and neither the probe's `finally` nor the fixture's
+    # restore lets the lane leak into a later docker-lane test.
+    "test_13722_projection_open_round_trips.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
     # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
     # unanchored declaration for this file here, and this branch had already
     # landed a narrowed one at the tail of this dict under the same KEY — an

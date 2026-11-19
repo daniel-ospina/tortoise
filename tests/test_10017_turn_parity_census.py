@@ -1384,9 +1384,10 @@ def test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone(
 
     # (a) the HALF rule still writes: `ensure_indexes=False` ALONE, health probe
     # at its default. The DDL is skipped and the graph is created anyway — by
-    # `_auto_health_recover`'s `_probe_ok()` (`MATCH (n) RETURN count(n) LIMIT 1`),
-    # the first `GRAPH.QUERY` on the new graph. Measured on a spy: exactly ONE
-    # graph-level query, and `GRAPH.LIST` gains the name.
+    # `_auto_health_recover`'s `_probe_ok()` (`MATCH (n) RETURN 1 LIMIT 1`
+    # since #13722 — it must not aggregate), the first `GRAPH.QUERY` on the new
+    # graph. Measured on a spy: exactly ONE graph-level query, and `GRAPH.LIST`
+    # gains the name.
     half = FalkorProjection(db_path, graph_name="half_rule",
                             ensure_indexes=False)
     try:
