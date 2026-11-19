@@ -443,6 +443,29 @@ def test_a_draft_is_current_but_is_not_a_commitment(sdk):
                                limit=50))
 
 
+def test_an_empty_commitment_kind_set_is_refused_rather_than_answered_empty():
+    """``[]`` is the factual claim "nothing is committed" — so it is refused.
+
+    The refusal is a CONTRACT check that runs before any statement is issued, so
+    ``graph`` is deliberately ``None`` here: reaching the store would be the bug
+    (a bounded read needs a real kind set to narrow on, and there is none).
+
+    ⛔ Hermetic on purpose — no ``sdk`` fixture, no docker. The SDK arm guards
+    this with ``if _commit_kinds:`` and so never reaches it, which means nothing in
+    the suite reddened when the refusal was deleted: the docstring argued for it
+    and no assertion held it. It is a PUBLIC refusal on a public function, so it is
+    pinned where it lives.
+    """
+    from tortoise.commitments import enumerate_live_commitments
+
+    with pytest.raises(ValueError) as err:
+        enumerate_live_commitments(None, kinds=[])
+    assert "empty kind set" in str(err.value), (
+        "an empty kind set was answered rather than refused — `[]` would read as "
+        "'nothing is currently committed', which is a factual claim this call "
+        "cannot make from an empty QUESTION")
+
+
 @_docker_only
 def test_the_commitment_question_honours_the_callers_kind_filter(sdk):
     """A narrowing the caller asked for is honoured, not overridden."""
@@ -478,6 +501,49 @@ def test_a_point_scoped_commitment_question_is_not_answered_with_objects(sdk):
 # ══════════════════════════════════════════════════════════════════════════════
 # #13558 — Q6: the withdrawal question, answered by the ended population
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+@_docker_only
+def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
+        sdk, monkeypatch):
+    """A family with no lifecycle is not GIVEN an ended population it cannot have.
+
+    ``ended.enumerate_ended`` REFUSES a family it does not serve rather than
+    answering it empty (an Event has no lifecycle — design §8, `ended.py`'s family
+    table), and the two must not read the same. So the route must not derive a
+    scope the population cannot serve: an Event-scoped ending question keeps the
+    relevance read it had.
+
+    Pinned by intercepting the population's own enumerator, not by inspecting rows
+    — with the family guard deleted the arm IS reached, and it would raise the
+    family refusal rather than serve anything, so a rows-only assertion would pass
+    for the wrong reason. The `point` half is the POSITIVE CONTROL that keeps this
+    from passing because the route is off altogether.
+    """
+    import tortoise.ended as ended_mod
+
+    reached: list[str] = []
+
+    def record(graph, *, entity_type, kind=None, kinds=None, limit=50,
+               timeout_ms=None):
+        reached.append(entity_type)
+        return []
+
+    monkeypatch.setattr(ended_mod, "enumerate_ended", record)
+
+    sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+                           entity_type="event", limit=5)
+    assert reached == [], (
+        "an Event-scoped ending question was served the ended population, which "
+        "`ended.py` refuses to have — the guard keeping the route off a family "
+        "with no lifecycle is gone")
+
+    # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle.
+    sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+                           entity_type="point", limit=5)
+    assert reached == ["point"], (
+        "the control did not reach the population, so the assertion above proves "
+        "nothing about the guard")
 
 
 @_docker_only
