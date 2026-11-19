@@ -888,7 +888,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
                 #        → no direction (a range with an empty end);
                 #   `at most N` negated, i.e. `not at most N` → MORE than N → MEMBERSHIP.
                 # A bare `not two paths` keeps the ordinary inversion (see below).
-                elif negated and (_lower_bound or _tautology or _exactly):
+                elif negated and not _not_only and (
+                        _lower_bound or _tautology or _exactly):
+                    # (`not _not_only` for the same reason as the `at most` skip above: `not
+                    # only exactly two paths` asserts the head is EXCEEDED, a direction —
+                    # without this the idiom went inert over every bound on a positive head,
+                    # MEASURED: `not only exactly|more than|at least|no fewer than two` all
+                    # typed no direction, a refuted membership claim green.)
                     continue
                 else:
                     claims_empty = False
@@ -1225,12 +1231,14 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "REFUSES a true emptiness claim at an empty head — the round-2 hedge harm in "
             "the other direction (#13795 review, round-4 P2)")
     # ⛔ AND THE `no …` ARM IS PINNED ON ITS OWN ALTERNATIVES (#13831 review, P1): the arm
-    # matches `no path` / `no paths` / `no tortoise/`, and every witness touching it is the
-    # `tortoise/` one (`carries no `tortoise/` path at all`). MEASURED: narrowing the arm to
-    # `no\b\s*tortoise/` left this file at 14 passed while ALL FOUR of `05-verify.md`'s own
-    # emptiness answers (`prints NO path at all`) silently left the detector — so a refuted
-    # one would walk through green with the suite still declaring the arm covered. The first
-    # row is the document's own spelling; the second pins the plural alternative.
+    # matches `no path` / `no tortoise/`, and every witness touching it was the `tortoise/`
+    # one (`carries no `tortoise/` path at all`). MEASURED: narrowing it to `no\b\s*tortoise/`
+    # left this file at 14 passed while FOUR of `05-verify.md`'s answers silently left the
+    # detector — three spelling `prints NO path at all` and one `prints NO path at this head`
+    # (its fifth emptiness answer there, `prints NOTHING**`, is caught by `nothing` and is not
+    # affected by that narrowing) — so a refuted one would walk through green with the suite
+    # still declaring the arm covered. The first row is the document's own spelling; the
+    # second pins the PLURAL against `path`'s prefix match.
     for _no_spelling in ("prints NO path at all", "prints no paths"):
         assert _typed_answers_to_tortoise_cmd(
             f"`{_tortoise_cmd}` {_no_spelling}", _tortoise_cmd
@@ -1467,6 +1475,22 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     ) == [("prints not at most two paths", False)], (
         "`not at most two paths` is MORE than two — a real lower bound, so it is MEMBERSHIP, "
         "not a skip (#13831 review, P2)")
+    # ⛔ AND THE `not only` IDIOM SURVIVES THE BOUND SKIP (#13831 review, P1): `not only
+    # exactly two paths` asserts the head is EXCEEDED, a direction — without the exemption
+    # every negated bound behind the idiom typed NO direction on a positive head (measured)
+    # while the same idiom over a zero head or over `at most` classified, i.e. one sentence
+    # read two ways depending on its filler.
+    for _idiom_bound in (
+            "prints not only exactly two paths",
+            "prints not only more than two paths",
+            "prints not only at least two paths",
+            "prints not only no fewer than two paths"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_idiom_bound}", _tortoise_cmd
+        ) == [(_idiom_bound, False)], (
+            f"the shape detector types {_idiom_bound!r} as NO direction; `not only` asserts "
+            "that the bound is EXCEEDED, so it is MEMBERSHIP and a refuted one would pass "
+            "green (#13831 review, P1)")
     # ⛔ AND ITS THREE SIBLINGS (#13795 review, finding 4): a CONTRACTION, the HYPHENLESS
     # spelling, and an emptiness word doing membership duty behind `but`. Each carried the
     # inversion or the skip past the fix above, so each is pinned.
