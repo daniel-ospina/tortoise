@@ -6590,10 +6590,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `return OrgInfoResponse(` — is 15279 (the call itself is `:15280`). The three offsets
         # (+29 `nodes_used`, +39 `max_nodes`, +77 END) still hold EXACTLY at the new START, which
         # is how the figures below were re-derived rather than nudged: `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15225`,
-        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15254` (inside the span),
-        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15264` (still inside it). The END was re-derived
-        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15303`, so END = `:15302` (+77 at this START).
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` -> `:15261`,
+        # `grep -n 'nodes_used = await asyncio.to_thread('` -> `:15290` (inside the span),
+        # `grep -n 'max_nodes = org.get("max_points")'` -> `:15300` (still inside it). The END was re-derived
+        # at the `#13486` head -- `return OrgInfoResponse(` -> `:15339`, so END = `:15338` (+77 at this START).
         #
         # The `#13102` merge of `origin/main` `b8f56fdec4` (13 main
         # commits past `97fd713ffb`, which had already moved the span to 14896-14973): the span

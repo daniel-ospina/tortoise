@@ -104,9 +104,11 @@ _POINTER = re.compile(
 #: Python module because the then-extension-list did not name `mjs` — and such a
 #: list is only ever as complete as today's citations (`tests/` also carries
 #: `.json` (159), `.mjs` (15), `.txt` (11), `.md` (10), `.jsonl` (8), `.ts` (2),
-#: `.yaml` (2), `.yml` (1), `.sh` (1), `.c` (1) — measured with
+#: `.yaml` (2), `.yml` (1), `.sh` (1), `.c` (1) — measured at THIS head with
 #: `git ls-files tests | sed 's/.*\.//' | sort | uniq -c`, and `.yaml`/`.yml` are
-#: the SAME family spelled two ways, which is exactly the point). A JS harness is
+#: the SAME family spelled two ways, which is exactly the point). A count without
+#: a head is indistinguishable from a current one, so re-read it, never quote it.
+#: A JS harness is
 #: not a module in any Python sense, so that assertion had no ground. The token is now
 #: classified as a FILE pointer and is LISTED, not asserted — see `_classify`.
 #: ⛔ AND THE FIX MUST NOT FAIL OPEN. A first cut of this split classified a token
@@ -126,7 +128,7 @@ _POINTER = re.compile(
 #: filed as #13765, whose title is about exactly this shape.
 #:
 #: Two `.py` pointers exist in production prose and are NOT citations, so neither
-#: population should carry them: `tortoise/referentiality.py` illustrates an
+#: should be ASSERTED: `tortoise/referentiality.py` illustrates an
 #: identifier-only surface with `tests/x.py` (beside `#4118` and `feat/branch` —
 #: there is no `x` module and no rename for this guard to catch), and
 #: `tortoise/sdk.py` names `tests/test_backfill_sources.py` as a file #4282
