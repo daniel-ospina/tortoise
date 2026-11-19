@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-V2c-1795125557-p615064-8768fb93",
+  "_sha": "efa9ef9d7e7fedc26b9c0cb921ed89f37c9549f7",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/V2c.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/13036-capstone-v2c"
+    },
+    {
+      "kind": "sha",
+      "value": "ebf05657a88f1b70a2813e7c197a0642524c4b55"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/V2c"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 22200,
+  "duration_s": 2146,
+  "ended_at": 1795127703,
+  "exit_code": 0,
+  "heartbeat_at": 1795127703,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-V2c-1795125557-p615064-8768fb93",
+  "lease_until": 1795149903,
+  "pid": 615064,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795125557,
+  "state": "DONE",
+  "tag": "V2c",
+  "worktree": "/home/cmux/.worktrees/V2c"
+}
