@@ -6584,20 +6584,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # than assumed from one bumped number — and ⛔ RE-DERIVED ONCE MORE at the rebase onto
         # `main` @ `b8f56fdec4`, where the three offsets STILL hold at the new START, so the
         # START is again confirmed by structure rather than by a bumped number:
-        # ⛔ RE-DERIVED ONCE MORE at the rebase onto `origin/main` `09f5c99afd` (`#13824`):
+        # ⛔ RE-DERIVED at the rebase onto `origin/main` `09f5c99afd` (`#13824`), where the
+        # sentence cited `hosted_api.py:15328-15405`:
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moves by a uniform +66 and is
-        # `:15328-15405` at THIS head — the START is the `grep -n 'point_count = await
-        # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`, measured), and the END is
-        # the blank line before `return OrgInfoResponse(` (`:15405`, with the call at `:15406`).
-        # The three offsets (+29 `nodes_used` -> `:15357`, +39 `max_nodes` -> `:15367`, +77 END)
-        # hold EXACTLY from that START, which is how the figures below were re-derived rather
-        # than nudged — a uniform +66 on both ends, and the offsets re-measured rather than
-        # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
-        # `nodes_used` read at all (`grep -c 'nodes_used = await asyncio.to_thread'` over those
-        # lines -> 0), which is why carrying it would have been a false pin.
+        # further down), so the span moved by a uniform +66 — the START was the `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`,
+        # measured at THAT head), and the END was the blank line before `return OrgInfoResponse(`
+        # (`:15405`, with the call at `:15406`). ⛔ THOSE FIGURES ARE HISTORY AT `09f5c99afd`, NOT
+        # THIS HEAD'S; presenting them as this head's is the exact rot this file exists to refuse
+        # (#13900 review, finding 4).
+        # The three offsets (+29 `nodes_used`, +39 `max_nodes`, +77 END) held EXACTLY from that
+        # START, which is how the figures were re-derived rather than nudged. The span at the
+        # PREVIOUS head, `:15262-15339`, no longer contains the `nodes_used` read at all
+        # (`grep -c 'nodes_used = await asyncio.to_thread'` over those lines -> 0), which is why
+        # carrying it would have been a false pin.
+        # ⛔ AND RE-DERIVED ONCE MORE AT THIS HEAD, by the branch that repaired `main` after it
+        # moved `hosted_api.py` by +18 under five anchors and re-derived none of them (#13844):
+        # the span is `:15346-15423` — the START is the `grep -n 'point_count = await
+        # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
+        # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
+        # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
+        # hold EXACTLY from that START, which is again how the numbers below were re-derived
+        # rather than nudged — a uniform +18, and the offsets re-measured rather than assumed.
         # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`
         # `0774035055`, where `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split)
         # inserted 22 lines above `org_info` and the span was `:15262-15339` at THAT head, with
@@ -6839,17 +6849,18 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         "cannot grade this half on its own: D5 is one markdown line and every `:N` on it "
         "satisfies a row scoped to the line, so this sentence is asserted whole.")
 
-    # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cites
-    # `hosted_api.py:15328-15405`, and the END of that range is a BLANK line — so the row
+    # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cited
+    # `hosted_api.py:15328-15405` at `09f5c99afd` and cites `hosted_api.py:15346-15423` at this
+    # head (#13844). The END of that range is a BLANK line — so the row
     # above can only anchor the start, and a range that drifts by a line still "contains"
     # the number the doc names (the reason this file pins ranges at both endpoints where it
     # can). ⛔ THE SPAN LOOP BELOW DOES NOT PIN THE END, and an earlier version of this
     # comment claimed it did: it asserts each needle occurs once INSIDE the window, which is
-    # true for any end at or beyond `:15367` (both needles are the file's only occurrences —
-    # `:15357` and `:15367` — so a later end cannot change the sum). Ends below `:15367` fail
+    # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
+    # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15328`-`:15367` gives a non-empty window that lacks at least the second needle,
-    # and an end below `:15328` gives an EMPTY window. The end is therefore pinned by the
+    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
     _i7 = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")

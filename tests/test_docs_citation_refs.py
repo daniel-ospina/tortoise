@@ -623,10 +623,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # not try. The property the skip reached for is kept by the DOCUMENT instead: a claim
         # about another head is written so it is not an answer to the command — PAST TENSE
         # (`returned`, `named`, `printed`, which are not in the verb list), or the named head
-        # first and the command after it. That convention is stated in this module's
-        # docstring and pinned by the witnesses below, which assert the OPPOSITE of a skip:
-        # a claim that is an answer is graded wherever it sits on the line, whatever
-        # surrounds it.
+        # first and the command after it. That convention is stated in the RESIDUAL note at
+        # THIS function's head (`_typed_answers_to_tortoise_cmd`, immediately above the
+        # matcher) — NOT in the module docstring, which states the NAME-vs-line rule and says
+        # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
+        # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
+        # graded wherever it sits on the line, whatever surrounds it.
         #
         # RESIDUAL, stated: a PRESENT-TENSE answer about another head is now refused here.
         # That is the deliberate trade — re-word a sentence, in exchange for a class of
@@ -1372,21 +1374,32 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the abbreviated subject does not read an EMPTINESS verdict as emptiness, so the "
         "fragment pass is inert in the direction the retired rows cover "
         "(#13807 review round 16)")
-    # …and the two FALSE-RED directions the POINTER RULE still exists for. (The pathspec
-    # skip that used to be named here is deleted — #13900 review, finding 3 — so a pointer is
-    # the only false-red shape left to pin. Its witness at `:1370` names the deletion in its
-    # own failure message, which is why it can stay as it is.)
-    assert _typed_answers_to_the_census_command(
-        "See `git diff origin/main...HEAD -- tortoise/` for it.") == [], (
-        "the abbreviated subject read the TAIL OF A LONGER INVOCATION as a typed answer, so "
-        "the document's own pointer to the command would be refused — an answer-FREE "
-        "pointer is not a claim, and the rule that reads pointers must not be confused with "
-        "the deleted skip (#13900 review, finding 3)")
+    # …and the FALSE-RED direction the POINTER RULE exists for. (The pathspec skip that used
+    # to be named here is deleted — #13900 review, finding 3 — so a pointer is the only
+    # false-red shape left to pin.)
     assert _typed_answers_to_the_census_command(
         "`-- tortoise/` is the command that answers it") == [], (
         "the abbreviated subject treats the document's POINTER as a typed answer, the "
-        "over-block direction (#13795 review, note 5 — the skip must survive the second "
-        "subject)")
+        "over-block direction (#13795 review, note 5)")
+    # ⛔ AND THE DELETED SKIP'S OWN WITNESS IS REPLACED, NOT KEPT (#13900 review, finding 3).
+    # The row that stood here asserted `== []` on
+    #   "See `git diff origin/main...HEAD -- tortoise/` for it."
+    # and COULD NOT FAIL: `for` is not in the verb list, so `re.finditer` yields no match and
+    # the value is `[]` with the skip PRESENT or ABSENT — MEASURED by extracting this function
+    # from `origin/main` and from here and running both (old -> [], new -> []). On `main` it
+    # returned `[]` *via* the skip, so it never distinguished the two states. It was presented
+    # as the guard that the skip could not widen into silence and guarded nothing
+    # (agent-infra#3442 rule 3) — and a comment explaining its failure message cannot make it
+    # fail. The row that DOES vary pins the contract the deletion creates: a claim whose
+    # subject is the TAIL OF A LONGER `git diff …` invocation is GRADED. Measured, old -> `[]`,
+    # new -> one emptiness answer, so reintroducing the skip reds it.
+    assert _typed_answers_to_the_census_command(
+        "See `git diff origin/main...HEAD -- tortoise/` prints NOTHING for it.") == [
+            ("prints NOTHING for it", True)], (
+        "the abbreviated subject did not read a claim whose SUBJECT is the TAIL OF A LONGER "
+        "INVOCATION as a typed answer — reintroducing a pathspec skip reverses exactly this. "
+        "The row this replaced asserted `[]` on the same shape WITHOUT an answer token and "
+        "could not red under any mutation (#13900 review, finding 3)")
 
     # (c-ii) THE DOCUMENT ASSERTIONS — no measurement, so both directions, always.
     # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1, and the
@@ -1488,10 +1501,12 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the arm stopped reading a STANDALONE short-form answer — the live question would go "
         "ungraded (#13845 review, cycle 3, P1)")
     # …and an ANSWER-FREE pointer is still not an answer (the arm must not over-block the
-    # document's own pointer to the command).
-    assert _typed_answers_to_tortoise_cmd(
-        f"`{_tortoise_cmd}` is the command that prints the paths", _tortoise_cmd) == [], (
-        "the arm read the document's own POINTER as a typed answer (#13795 review, note 5)")
+    # document's own pointer to the command). ⛔ THAT ROW ALREADY EXISTS TWICE ABOVE, at the
+    # `is the command that prints the paths` assertions in the (c-i) block, with the same
+    # input and the same expectation; the third copy this PR's first cut added here was
+    # DELETED rather than kept as apparent new coverage (#13900 review, finding 3). A
+    # duplicate cannot add discriminating power, and a comment claiming it does is the kind
+    # of claim this file exists to refuse.
 
 
 def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
