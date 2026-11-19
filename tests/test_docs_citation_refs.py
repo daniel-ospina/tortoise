@@ -603,11 +603,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             _heads = _census_verdict_row_heads(_row)
             assert _heads, (
                 f"05-verify.md states a census verdict ({green!r}) in a row that names no "
-                "head. `tools/hosted_api_cite_census.py --check` is RED on `origin/main` "
-                "(`STALE  census DEFAULT_PIVOT: states [25193], the tree measures [25422]`)"
-                " and green only at the head whose figures were re-taken, so a verdict "
-                "without its head is unreadable in both directions. State the COMMAND and "
-                "the head it must be read at (#13489 review, P0; #13550 review, P1)")
+                "head. `tools/hosted_api_cite_census.py --check` is NOT green at every "
+                "head — read its exit status at the head you merge, never a row quoted "
+                "from here (this message used to quote one, and the merge base has since "
+                "moved on under it) — so a verdict without its head is unreadable in both "
+                "directions. State the COMMAND and the head it must be read at "
+                "(#13489 review, P0; #13550 review, P1; #13746 review P1: a MESSAGE is "
+                "only read when it fires, so no leg catches a stale one)")
     assert "tools/hosted_api_cite_census.py --check" in doc, (
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing the false green must send the reader to the verb, not delete the "
