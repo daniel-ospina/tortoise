@@ -280,6 +280,14 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     instantiation of a SUBCLASS, and a `from … import *` (lint-blocked in this tree: `F403`
     is not ignored). A regex cannot see those either, and at least the AST cannot be fooled
     by prose.
+
+    ⛔ AND one hole in the MODEL itself, not just in what it can see: a `for` / `async for` /
+    `with` / `async with` target is recorded as a BINDING (`_note_binding`) but its VALUE is
+    never replayed, so the block owns the name and holds no value for it. `A = object` then
+    `for A in [FastAPIRouterAdapter]: pass` then `A(app)` reads `[]`, while the loop really does
+    rebind `A` to the adapter before the call — a false PASS, identical on `main`, filed as
+    **#13656** rather than left silent. (`except … as A` cannot occur for this alias: the adapter
+    is not an exception class, so no live shape exists for it.)
     """
     tree = ast.parse(source)
 
@@ -301,13 +309,18 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # site for `object(x)`: a FALSE BLOCK the pin did not previously emit.
     chains: dict[int, tuple[ast.AST, ...]] = {}
     #: Whether a node runs on only SOME executions of its block — inside an `if`/`try`/`match`/
-    #: loop/`with` arm. A binding there is a JOIN, not an overwrite (`_bind`).
+    #: loop/`with` arm, or inside a SHORT-CIRCUIT expression (`a and b`, `x if c else y`), which
+    #: runs its right/selected arm on only some executions too. A binding there is a JOIN, not an
+    #: overwrite (`_bind`).
     conditional: dict[int, bool] = {}
     #: The statements that make their subtree conditional. `Try` marks its body, handlers and
     #: `orelse` alike: over-approximating an arm that cannot be attributed costs a re-read of
     #: the pin, while under-approximating one is the false PASS this reader exists to prevent.
     branches = (ast.If, ast.Try, ast.TryStar, ast.While, ast.For, ast.AsyncFor,
-                ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case)
+                ast.With, ast.AsyncWith, ast.ExceptHandler, ast.Match, ast.match_case,
+                # `and`/`or` and `a if c else b` are SHORT-CIRCUIT: a binding inside one runs on
+                # only SOME executions, exactly as an `if` STATEMENT does (#13639 review P1).
+                ast.IfExp, ast.BoolOp)
 
     def _chain(node: ast.AST) -> tuple[ast.AST, ...]:
         return chains.get(id(node), ())
@@ -448,10 +461,21 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         if name in declared_global.get(_key(chain), ()):
             return MODULE
         if name in declared_nonlocal.get(_key(chain), ()):
-            for block in reversed(chain[:-1]):
-                if isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # ⛔ `nonlocal` BINDS TO THE FUNCTION THAT OWNS THE NAME, not the nearest one
+            # (`#13585 review e9867da8` P2). At depth 3 the two differ, and filing the value in
+            # the nearest function left the owner — the block CPython actually rebinds — reading
+            # `{shadowed}`, so a real wiring after the nested call answered `[]` while the
+            # SUBSTRING reader this PR replaced reported it. ⛔ Not "while `main` reported it":
+            # `main`'s AST reader answers `[]` too (measured), because it files the value in the
+            # NEAREST function — the corner this branch fixes; the substring scan was the only
+            # reader that caught this snippet. `binds` is the same owner test CPython applies;
+            # the fallback keeps the previous answer for an owner that has not been replayed yet.
+            functions = [block for block in reversed(chain[:-1])
+                         if isinstance(block, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))]
+            for block in functions:
+                if name in binds.get(id(block), ()):
                     return id(block)
-            return MODULE
+            return id(functions[0]) if functions else MODULE
         return _key(chain)
 
     #: The names each block binds ANYWHERE (so a same-block shadow shadows the module name for
@@ -616,9 +640,21 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         chain = _chain(node)
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            # ⛔ PEP 572: an ASSIGNMENT EXPRESSION inside a comprehension binds in the
+            # CONTAINING scope, not in the comprehension's own (`#13585 review e9867da8` P3).
+            # Filing it in the comprehension made the containing block keep the module class, so
+            # a call after `[(FastAPIRouterAdapter := x) for x in _c()]` was reported as a site
+            # while at runtime it is a `TypeError` — a false BLOCK, and a regression against the
+            # head that preceded the comprehension-as-block change.
+            binding_chain = chain
+            if isinstance(node, ast.NamedExpr):
+                binding_chain = tuple(
+                    block for block in chain
+                    if not isinstance(block, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                              ast.GeneratorExp)))
             for target in targets:
                 for name in _target_names(target):
-                    _note_binding(name, chain)
+                    _note_binding(name, binding_chain)
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             for name in _target_names(node.target):
                 _note_binding(name, chain)
@@ -630,6 +666,20 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
         elif isinstance(node, ast.ExceptHandler):
             if node.name:
                 _note_binding(node.name, chain)
+        elif isinstance(node, ast.Delete):
+            # ⛔ `del` MAKES A NAME LOCAL (`#13639` review round 2, Execution model §4.2.1: "If a
+            # name is bound in a block, it is a local variable of that block"). CPython counts a
+            # deleted-anywhere name as local to its block, so it is a BINDING for scope purposes
+            # even though it yields no value — and `binds` is exactly what `_env_key`'s
+            # `nonlocal` arm asks to find the OWNER of a name. Without this arm, `nonlocal tr` in
+            # an inner function reached PAST a `mid` that `del`s `tr` and filed the value in
+            # `outer`, reporting a call that at runtime raises `AttributeError` — a false BLOCK
+            # (a re-read, not a lost wiring) and a regression the `binds`-based owner search
+            # introduced. No value is recorded because a delete has none: the name stays
+            # `{SHADOWED}` in its block, which is what a delete leaves behind.
+            for target in node.targets:
+                for name in _target_names(target):
+                    _note_binding(name, chain)
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             for generator in node.generators:
                 # ⛔ the target belongs to the COMPREHENSION's block, not the enclosing one
@@ -725,8 +775,35 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                       MODULE_BINDING if _is_module_name(alias.name) else SHADOWED,
                       node, join=key != _key(chain))
 
-    def _apply_assignment(node: ast.Assign | ast.AnnAssign, chain: tuple[ast.AST, ...]) -> None:
+    def _apply_assignment(
+        node: ast.Assign | ast.AnnAssign | ast.NamedExpr, chain: tuple[ast.AST, ...]
+    ) -> None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        # ⛔ A WALRUS INSIDE A COMPREHENSION BINDS IN THE CONTAINING SCOPE (PEP 572), so its
+        # value must be applied THERE (`#13585 review 94361b8f` P2). `_note_binding` was already
+        # redirected, but the VALUE side never accepted a `NamedExpr` at all, so the containing
+        # block owned the name and held no value for it: `_resolve` answered `{SHADOWED}` and
+        # `[(tr := tool_registry) for x in _c()]` followed by a call dropped a real wiring the
+        # SUBSTRING reader this PR replaced reported — a false PASS. ⛔ Not "that `main`
+        # reported": `main`'s AST reader answers `[]` here too (measured), for this very reason.
+        target_chain = chain
+        if isinstance(node, ast.NamedExpr):
+            target_chain = tuple(
+                block for block in chain
+                if not isinstance(block, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                          ast.GeneratorExp)))
+        # …and the write is a JOIN: a comprehension may execute zero times, so the arm where it
+        # never ran keeps the binding that was there before. Over-reporting is the sanctioned
+        # direction (A/B: a false PASS is the one that must never ship).
+        # ⛔ BUT ONLY WHEN IT ACTUALLY CROSSED A BLOCK (`#13639 review F2`). A walrus in
+        # STRAIGHT-LINE code always runs, so there is nothing to join and the write must REPLACE —
+        # that is the rule this file already pins for `=` ("the join must replace on a path that
+        # always runs, not accumulate forever", the row in
+        # `test_the_adapter_reading_is_not_spelling_blind`). Making it
+        # unconditional reported a site for `A = FastAPIRouterAdapter; (A := object); A(app)`,
+        # where `=` alone reports nothing: a false BLOCK in the one direction that is a re-read,
+        # and a disagreement between two spellings of the same rebinding.
+        walrus = isinstance(node, ast.NamedExpr) and target_chain != chain
         for target in targets:
             for name, bound in _binding_pairs(target, node.value):
                 bound_value = _dotted(bound) if bound is not None else None
@@ -738,9 +815,9 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
                 # whether this function runs. Over-reporting there is the declared direction (a
                 # re-read of the pin answers it); under-reporting would be the false PASS this
                 # reader exists to prevent.
-                key = _env_key(name, chain)
+                key = _env_key(name, target_chain)
                 env = envs.setdefault(key, {})
-                join = key != _key(chain)
+                join = walrus or key != _key(target_chain)
                 if class_bound:
                     _bind(env, name, CLASS_BINDING, node, join=join)
                 elif module_bound:
@@ -786,7 +863,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # elsewhere in its own block.
     assignments = sorted(
         (node for node in ast.walk(tree)
-         if isinstance(node, (ast.Assign, ast.AnnAssign))),
+         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))),
         key=lambda node: (node.lineno, node.col_offset),
     )
     definitions = sorted(
@@ -839,7 +916,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     # STANDS, so a later `A = object` cannot erase an earlier `A(app)` and an earlier one
     # cannot lend its meaning to a later call.
     events: list[tuple[int, int, int, ast.AST]] = []
-    binders = (ast.Assign, ast.AnnAssign, ast.Import, ast.ImportFrom, ast.ClassDef,
+    binders = (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Import, ast.ImportFrom, ast.ClassDef,
                ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
     for node in ast.walk(tree):
         if isinstance(node, (*binders, ast.Call)):
@@ -856,7 +933,7 @@ def _adapter_instantiation_sites(source: str) -> list[int]:
     sites: list[int] = []
     for _lineno, _col, _rank, node in events:
         chain = _chain(node)
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             _apply_assignment(node, chain)
         elif isinstance(node, (ast.ClassDef, ast.ImportFrom, ast.Import)):
             _apply_import_or_definition(node, chain)
@@ -998,7 +1075,14 @@ def test_the_container_still_advertises_no_envelope(name):
 
 
 def test_every_envelope_door_destination_is_one_of_the_six_containers():
-    """S1's SUFFICIENCY: annotating S1's doors unblocks exactly the no-arm doors.
+    """S1's SUFFICIENCY: annotating S1's doors unblocks exactly the doors §4 assigns to S1.
+
+    ⛔ NOT "the no-arm doors" (`#13585 review`): that class is EMPTY —
+    `tests/test_11609_door_retirement.py` records `0 "no arm on the recorded container" doors —
+    the category is EMPTY` in its class docstring (`:737`), after `#13556` and `#13550` retired
+    all four. Naming it as this edge's population made the headline describe a set with no
+    members while the body pins the nine `S1_DOORS`, so the two halves of the file disagreed
+    about what is being proven.
 
     Without this edge, the two populations are pinned independently and nothing notices a
     door re-pointed at a container outside S1 — the door would keep its `list[dict]`,
@@ -1855,6 +1939,200 @@ def test_the_adapter_reading_is_not_spelling_blind():
         "A(app)\n"
     ), ("TWO stars were paired element-wise — `*b, A, *c = 1, object, 2` is compiler-invalid, "
         "so no claim may be made and `A`'s import binding must stand (pairing loses the site)")
+    # ⛔ …AND `nonlocal` BINDS TO THE FUNCTION THAT OWNS THE NAME, not the nearest one
+    # (`#13585 review e9867da8` P2). At depth 3 the two differ and the value was filed in `mid`
+    # while CPython rebinds `outer` — so `outer` kept reading `{shadowed}` and a real wiring after
+    # the nested call was lost. The SUBSTRING reader this PR replaced reported it; `main`'s AST
+    # reader answers `[]` here too (measured), filing the value in `mid`.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal tr\n"
+        "            tr = tool_registry\n"
+        "        inner()\n"
+        "    mid()\n"
+        "    return tr.FastAPIRouterAdapter(x)\n"
+    ), ("a `nonlocal` at DEPTH 3 filed its value in the nearest function instead of the one "
+        "that OWNS the name — the owner kept reading `{shadowed}` and the wiring was lost")
+    # ⛔ BOTH LIMBS OF THE REDIRECT ARE PINNED (`#13585 review e9867da8` P3#2). The value side
+    # lives in TWO functions, and reverting the second one reded NOTHING: an import binding
+    # written through `global`/`nonlocal` lost its value and the call it creates dropped out of
+    # the report with the whole 45-test suite green — the "call site reverted, every row green"
+    # class this file exists to remove.
+    assert _adapter_instantiation_sites(
+        "def install():\n"
+        "    global A\n"
+        "    from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "install()\n"
+        "A(x)\n"
+    ), ("a `global` IMPORT binding did not reach the module env — the module-level call it "
+        "creates was dropped")
+    assert _adapter_instantiation_sites(
+        "import tortoise.tool_registry as tr\n"
+        "def outer():\n"
+        "    seen = None\n"
+        "    def inner():\n"
+        "        nonlocal seen\n"
+        "        import tortoise.tool_registry as seen\n"
+        "    inner()\n"
+        "    return seen.FastAPIRouterAdapter(x)\n"
+    ), "the `nonlocal` spelling of the import-binding redirect"
+    # ⛔ PEP 572: an ASSIGNMENT EXPRESSION inside a comprehension binds in the CONTAINING scope
+    # (`#13585 review e9867da8` P3). Filed in the comprehension, the containing block kept the
+    # module class and reported a call that at runtime is a `TypeError` — a false BLOCK, and a
+    # regression against the head that preceded the comprehension-as-block change.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def wire(app):\n"
+        "    rows = [(FastAPIRouterAdapter := x) for x in _c()]\n"
+        "    return FastAPIRouterAdapter(app)\n"
+    ) == [], ("a WALRUS target inside a comprehension was filed in the comprehension's own "
+              "block, so the containing block kept the module class and reported a call that "
+              "derives nothing (PEP 572 binds in the CONTAINING scope)")
+    # ⛔ …AND THE WALRUS *VALUE* IS APPLIED, not only its TARGET (`#13585 review 94361b8f` P2).
+    # `_note_binding` was redirected to the containing block while the value side accepted no
+    # `NamedExpr` at all — so the block OWNED the name and held no value for it, `_resolve`
+    # answered `{SHADOWED}`, and a real wiring made through the walrus was lost. Measured: the
+    # other two spellings (dict comprehension, generator) behave the same.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def go(app):\n"
+        "    rows = [(tr := tool_registry) for x in _c()]\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), ("a WALRUS binding a MODULE alias never reached the containing block's env — the call "
+        "it makes after the comprehension was dropped")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter\n"
+        "def go(app):\n"
+        "    rows = [(cls := FastAPIRouterAdapter) for x in _c()]\n"
+        "    return cls(app)\n"
+    ), "a WALRUS binding the CLASS under a new name was dropped the same way"
+    # ⛔ THE WALRUS WRITE IS A JOIN, AND THE JOIN HAS ITS OWN ROW (`#13639 review F1`). The two
+    # rows above prove the VALUE reaches the containing block; neither reds if the write stops
+    # being a JOIN, because in both the walrus is the only thing that ever bound the name. Here
+    # the name was ALREADY bound — so a JOIN keeps that arm alive (the comprehension may execute
+    # zero times) and the call stays REPORTED, while a plain REPLACE drops it. Measured: head
+    # `[5]`; with `join = key != _key(target_chain)` (the JOIN clause removed) `[]` — a false
+    # PASS, the direction that must never ship.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def go(app):\n"
+        "    tr = tool_registry\n"
+        "    rows = [(tr := x) for x in _c()]\n"
+        "    return tr.FastAPIRouterAdapter(app)\n"
+    ), ("a WALRUS write was not treated as a JOIN — a comprehension may execute zero times, so "
+        "the arm where it never ran is still live and the call it wires must stay REPORTED")
+    # …and the OTHER direction: a walrus in STRAIGHT-LINE code always runs, so it must REPLACE,
+    # exactly as `=` does (the rule the `=` row above pins). An
+    # unconditional JOIN reported a site here while the `=` spelling of the same rebinding
+    # reported none (`#13639 review F2`) — a false BLOCK, and two spellings of one rebinding
+    # disagreeing. ⛔ MEASURED SHAPES: this row (a bare walrus over an IMPORT binding) is `[3]`
+    # at the pre-fix head and `[]` now; the `=` control below is `[]` in both, and is what makes
+    # the pair a discrimination rather than two absences. (An intervening plain assignment,
+    # `A = FastAPIRouterAdapter` before the walrus, reads `[]` under BOTH — it does not
+    # discriminate, so it is not the row.)
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "(A := object)\n"
+        "A(app)\n"
+    ) == [], ("a straight-line WALRUS accumulated instead of replacing — it has crossed no block, "
+              "so there is nothing to join and the adapter binding it shadows must be dropped")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "A = object\n"
+        "A(app)\n"
+    ) == [], ("the `=` CONTROL for the row above — if this ever reports, the pair is no longer a "
+              "discrimination and the walrus row proves nothing")
+    # ⛔ …AND "STRAIGHT-LINE" IS NOT "ALWAYS RUNS" (`#13639` review P1). A walrus inside a
+    # SHORT-CIRCUIT expression crosses no block, so the `target_chain != chain` test called it
+    # straight-line and let it REPLACE the import binding. With a falsy `cond` the walrus never
+    # runs, so `A(app)` still instantiates the adapter and the site is REAL — `main` and the
+    # pre-rebase head both reported it, and this rule lost it: a false PASS, the one direction
+    # that must never ship. Short-circuit forms therefore JOIN, like an `if` STATEMENT. The three
+    # rows below are the two spellings plus the `if`-statement control, so the pair is a
+    # discrimination rather than two absences (the control is what shows the site is expected).
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "cond and (A := object)\n"
+        "A(app)\n"
+    ), ("a walrus in a short-circuit `and` was treated as straight-line and REPLACED the import "
+        "binding — with a falsy `cond` it never runs, so `A(app)` still instantiates the adapter")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "x = (A := object) if cond else None\n"
+        "A(app)\n"
+    ), ("a walrus in a conditional EXPRESSION was treated as straight-line — it runs on only one "
+        "arm, so the other arm keeps the adapter binding and the call is a real site")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "cond = False\n"
+        "if cond:\n"
+        "    A = object\n"
+        "A(app)\n"
+    ), ("the `if`-STATEMENT control for the rows above — the `=` spelling of the same conditional "
+        "rebinding must report the site too, or the pair is two absences, not a discrimination")
+    # ⛔ `del` MAKES A NAME LOCAL AND HAS NO VALUE (`#13639` review round 2). The `nonlocal` owner
+    # search asks `binds`, and `binds` did not know `del` — so `nonlocal tr` in `inner` reached
+    # PAST a `mid` that deletes `tr` and filed the value in `outer`, reporting a call that at
+    # runtime raises `AttributeError`. `origin/main` answers `[]`. Direction: false BLOCK
+    # (over-block — a re-read), and a regression the `binds`-based owner search introduced.
+    # Measured: `[]` here, `[11]` without the `ast.Delete` arm.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal tr\n"
+        "            tr = tool_registry\n"
+        "        inner()\n"
+        "        del tr\n"
+        "    mid()\n"
+        "    return tr.FastAPIRouterAdapter(1)\n"
+    ) == [], ("a `del` in an intermediate function did not make the name LOCAL to it, so "
+              "`nonlocal` reached past it and `outer` was reported as wired — at runtime the "
+              "call raises `AttributeError` and `main` reports nothing")
+    # …and the POSITIVE control: the same depth-3 shape WITHOUT the `del` must still report, so the
+    # row above is a discrimination and not a blanket silence on `nonlocal` at depth.
+    assert _adapter_instantiation_sites(
+        "from tortoise import tool_registry\n"
+        "def outer():\n"
+        "    tr = None\n"
+        "    def mid():\n"
+        "        def inner():\n"
+        "            nonlocal tr\n"
+        "            tr = tool_registry\n"
+        "        inner()\n"
+        "    mid()\n"
+        "    return tr.FastAPIRouterAdapter(1)\n"
+    ), ("the CONTROL for the `del` row: the same depth-3 `nonlocal` without a `del` must still "
+        "resolve to the owner and report the site")
+    # ⛔ THE UNREADABLE-DESTRUCTURING BRANCH IS PINNED BY A TARGET IT CAN ACTUALLY SEE
+    # (`#13585 review 94361b8f` P3#2). The existing row for it uses `b, c = build_pair()`, whose
+    # NAMES are `b` and `c` — so reverting the branch to a blanket `SHADOWED` claim reded nothing
+    # while the name that matters changed meaning. This row puts the alias IN the target.
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "def build_pair():\n"
+        "    return A, object()\n"
+        "A, b = build_pair()\n"
+        "A(x)\n"
+    ), ("an UNREADABLE destructuring value dropped the alias — making no claim must leave the "
+        "earlier binding in force, and a blanket `SHADOWED` claim loses this wiring")
+    assert _adapter_instantiation_sites(
+        "from tortoise.tool_registry import FastAPIRouterAdapter as A\n"
+        "def build_pair():\n"
+        "    return object(), object()\n"
+        "A = object\n"
+        "A, b = build_pair()\n"
+        "A(x)\n"
+    ) == [], ("an UNREADABLE destructuring value RESURRECTED an alias an unconditional "
+              "`A = object` had already dropped — making no claim means the shadow still wins")
     # and the forward-reference half must survive the per-position read: Python resolves a name
     # at CALL time, so a chain declared below its use still instantiates the adapter.
     assert _adapter_instantiation_sites(
@@ -1946,6 +2224,18 @@ def test_the_rest_spec_read_is_an_attribute_not_a_substring(tmp_path):
     assert reads("spec = entry.__dict__.get('rest_spec')\n"), (
         "`entry.__dict__.get('rest_spec')` is a constant-key read and is not caught")
     assert reads("spec = row.pop('rest_spec')\n"), "`row.pop('rest_spec')` is not caught"
+    # ⛔ `setdefault` IS A READ SPELLING, and the only rows that prove it are these (`#13639
+    # review F1`). The admission was argued in the predicate's own comment and restored in
+    # `efce5e2d49` — but NO row reded without it, so the arm had been removed once already
+    # (`235b001a5b`) and put back with prose instead of coverage. Prose cannot red: the mutant
+    # `{"get", "pop", "setdefault"} -> {"get", "pop"}` left all 45 rows green. These two pin
+    # the arm the comment claims, in both spellings the substring scan this replaced could see.
+    assert reads("spec = vars(entry).setdefault('rest_spec', None)\n"), (
+        "`vars(entry).setdefault('rest_spec', None)` is not caught — it RETURNS the value exactly "
+        "as `.get` does, so a route derived from it is invisible; dropping the arm is the false "
+        "PASS it was restored to prevent")
+    assert reads("spec = row.setdefault('rest_spec', None).path\n"), (
+        "`row.setdefault('rest_spec', None)` is not caught — the dotted spelling of the row above")
     assert reads("spec = d.get(field)\n") == [], (
         "a COMPUTED key (`d.get(field)`) counts as a read — no static pass can answer it, so it "
         "belongs in the residual list rather than in an over-blocking arm")
@@ -2011,7 +2301,7 @@ def test_the_product_assertion_is_reachable_from_a_stub_root(tmp_path):
     a stub root. That is what makes the CALLER falsifiable. Reverting the call inside it to the
     pre-PR inline `"rest_spec" in source.read_text(...)` comprehension now reports the
     comment-only module and reds the first row here; while the assertion was inlined in the
-    test that only ever sees the product tree, the same revert reded 0 of 46 rows, because the
+    test that only ever sees the product tree, the same revert reded nothing, because the
     real population's only mention of the field sits in the module the comprehension excludes
     by name.
 
@@ -2036,11 +2326,11 @@ def test_the_product_assertion_is_reachable_from_a_stub_root(tmp_path):
 def test_the_excluded_module_is_graded_by_the_same_predicate(tmp_path):
     """The exemption's replacement reader covers the SAME spellings (#13585 review P3).
 
-    `_rest_spec_readers` exempts `tool_registry.py` by name on the claim that
+    `_rest_spec_readers` exempts `tortoise/tool_registry.py` BY PATH on the claim that
     `_rest_spec_use_outside_the_adapter` reads it "stricter". While that arm held its own
     `ast.Attribute`-only predicate the claim was FALSE: an out-of-adapter read spelled
     `getattr(e, "rest_spec")` or `vars(e)["rest_spec"]` was caught by NEITHER reader — the module
-    is excluded by name from one and invisible to the other — in the one module where §1.5's
+    is excluded BY PATH from one and invisible to the other — in the one module where §1.5's
     route-deriving loop would live. Both readers now share `_is_rest_spec_read`, so an exemption
     cannot be weaker than the scan it stands in for, and the two cannot drift apart again.
     """
@@ -2081,7 +2371,9 @@ def test_the_excluded_module_is_graded_by_the_same_predicate(tmp_path):
 
 def _is_rest_spec_read(node: ast.AST) -> bool:
     """The ONE predicate for a static `rest_spec` read: attribute, `getattr`, constant subscript,
-    and a constant-key `.get`/`.pop`/`.setdefault`.
+    and a constant-key `.get`/`.pop`/`.setdefault` — all three RETURN the value, so all three are
+    read spellings; `setdefault` can also create the key, and is admitted anyway because dropping
+    it loses a route-deriving read (measured — see the arm's own comment).
 
     ⛔ Shared by BOTH readers on purpose (`#13585 review` P3 — the EXCLUDED module was graded
     by a weaker spelling reader). `_rest_spec_readers` exempts the DEFINING module's path
@@ -2120,6 +2412,14 @@ def _is_rest_spec_read(node: ast.AST) -> bool:
     # and an incoherent one: `vars(e)["rest_spec"]` is matched by the subscript arm, so the same
     # read spelled as a method call was invisible. The KEY must be a literal; a computed key
     # (`d.get(field)`) stays in the residual list, because no static pass can answer it.
+    # ⛔ `setdefault` IS admitted, deliberately (`#13585 review`). It RETURNS the value exactly as
+    # `.get` does, so it is a read spelling; it also CREATES the key when absent, which is why the
+    # first instinct was to drop it. Dropping it was MEASURED to be the wrong trade: a module doing
+    # `app.add_api_route(vars(e).setdefault('rest_spec', None).path, handler)` derives routes from
+    # the registry and was reported by the substring scan this replaced, by `setdefault`-admitting
+    # predicate, and by NEITHER arm once it was dropped — a false PASS, the direction that matters.
+    # The false BLOCK it supposedly avoids is hypothetical: no module under `tortoise/` calls
+    # `setdefault` on this field at all.
     if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -2164,7 +2464,7 @@ def _assert_no_product_rest_spec_reads(root: Path) -> None:
 
     ⛔ #13585 review P2#1 landed on exactly this call. The pin used to invoke the scan inline
     (`readers = _rest_spec_readers(scanned, repo)`) and no falsifier could reach it: reverting
-    it to the pre-PR `"rest_spec" in source.read_text(...)` comprehension reded 0 of 46 rows,
+    it to the pre-PR `"rest_spec" in source.read_text(...)` comprehension reded nothing,
     because the real population's only mention of the field sits in the module that
     comprehension excludes by name. Keeping the ASSERTION and its call in a function that
     takes the ROOT — instead of leaving them as the tail of a test that only ever sees the
@@ -2212,7 +2512,8 @@ def _rest_spec_attribute_reads(source: Path) -> list[int]:
     Three shapes count as a read, and prose counts as none: an attribute access
     (`e.rest_spec`), a `getattr(e, "rest_spec")` call, and a constant subscript
     (`e["rest_spec"]`). A fourth is a constant-KEY method call (`d.get("rest_spec")`,
-    `d.pop("rest_spec")` — see the arm below). A comment or a docstring is not an
+    `d.pop("rest_spec")`, `d.setdefault("rest_spec", x)` — see the arm below: all three RETURN
+    the value, so all three are read spellings). A comment or a docstring is not an
     `ast.Attribute`, so it cannot red
     the pin — which is the whole point (#13537 review F2; the sibling reader's docstring above
     records the identical false BLOCK for the literal `FastAPIRouterAdapter(`).
@@ -2252,7 +2553,7 @@ def _rest_spec_use_outside_the_adapter(source: Path) -> list[int]:
     coverage: an `e.rest_spec`, a `getattr(e, "rest_spec")` and a `vars(e)["rest_spec"]`
     outside the adapter are all flagged here (`#13585 review` P3: while this arm held its own
     Attribute-only predicate, the two spellings were caught by NEITHER reader, because this
-    module is excluded by name from the other one).
+    module is excluded BY PATH from the other one).
     """
     tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
     inside_adapter: set[int] = set()
