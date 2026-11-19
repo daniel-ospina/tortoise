@@ -121,11 +121,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (it is `scored.append({`), nor on `origin/main`, where the statement is `:57423` (the `#13550` / `#13584`
-    # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
+    # head (it is `scored.append({`), nor on `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, later merges 147 more, and `#13833` 194 more — 527 in all). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
-    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
-    # NOT that head's), and `57276 + 147 = 57423` is `origin/main`'s and this head's. Measured per
+    # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57617` is
+    # NOT that head's); `57276 + 147 = 57423` was `origin/main`'s before `#13833`, whose 194 further
+    # insertions make `57423 + 194 = 57617` `origin/main`'s and this head's. Measured per
     # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
     # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
@@ -136,18 +137,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57423`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57423` passes `"event"`', _SDK, 57423, 'entity_type="event"'),
+    (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5137`", _MCP, 5137, "entity_type=entity_type"),
-    (_AUDIT, "`:5577`", _MCP, 5577, "entity_type=entity_type"),
-    (_AUDIT, "`:8129`", _MCP, 8129, "entity_type=entity_type"),
+    (_AUDIT, "`:5607`", _MCP, 5607, "entity_type=entity_type"),
+    (_AUDIT, "`:8159`", _MCP, 8159, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -293,13 +294,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37503` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37503`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37480` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57423` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57617` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5137`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5577`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8129`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5607`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8159`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -883,7 +884,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
     # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
-    # and 333 by this head (`:57423`).
+    # and 527 by this head (`:57617`, the last +194 is `#13833`).
     # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
     # names (`:37144` / `:37186`) had NO pin at all — both shipped one line high (on the `:Source`
     # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
@@ -1158,7 +1159,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "HNSW\n`:4123`",
         "label derivation `:3003`",
         "`:3098`,",
-        # ⛔ ADDED after the `#13345` main-merge re-pointed THIS entry to the merged tree's `:5577`
+        # ⛔ ADDED after the `#13345` main-merge re-pointed THIS entry to the merged tree's `:5607`
         # while the list it sits in opens at `ae54df166d` (review round 8): the arm had no `mcp_server`
         # bound at all, so that single re-point went green — the same class the entry counts above
         # exist to stop, one file over. The value here is the declared head's; this tree's is disclosed

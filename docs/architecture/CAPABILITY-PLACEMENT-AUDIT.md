@@ -87,7 +87,7 @@ naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files 
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **327** as-written spellings to 214 — **113**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text; **211 of the 214 are comparable at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the three that are not are this branch's own**: `sdk.py:57423`, whose
+exists at `ccb49741b2ec` — and **the three that are not are this branch's own**: `sdk.py:57617`, whose
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
 (7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — all three re-derived at
@@ -122,7 +122,7 @@ file — `search_engine.py` FTS
 `subject_binding_available()` at `:7031-7044`), label scan `:4708-4710`, HNSW
 `:4123`, label derivation `:3003`, index note `:3070`; `projection/__init__.py` `("Object", ["name"])`
 `:6869`; `sdk.py`'s second `capture_redactions` writer `:2876` (on this tree `:2914`); `audit.py`'s carrier probe `:2452`/`:2463`;
-and `mcp_server.py`'s `entity_type` passthrough `:5529` (on this tree `:5577`) — and the drift figure
+and `mcp_server.py`'s `entity_type` passthrough `:5529` (on this tree `:5607`) — and the drift figure
 above was re-measured afterwards. ⛔ **That enumeration is NOT the whole of the `main` set, and an earlier
 form of this header was false for saying it was.** The `#13124` review found a group it did not name —
 `cache_projection.py` `:2485`, `:2542`, `:2714`, `:2714-2715`, `:2724-2726`, `:2776`, `:3841` and
@@ -150,7 +150,7 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37480`/`:37503` (the whole-node pair, still 23 apart);
-`audit.py:817`; `mcp_server.py:5137`/`:8129`; `goal_judgement.py:1128`; and §2.1's own table, which carries
+`audit.py:817`; `mcp_server.py:5137`/`:8159`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:24223` and `search_engine.py:6891`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
@@ -376,7 +376,7 @@ mechanism, not a citation nicety.
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
 | `tortoise/search_engine.py:7198` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2632` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:57423` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
+| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:57617` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
 
 **Verdict: `graph`.** ⚠️ **Whole-node reads are absent from the table above and belong to it by §2's own rule —
 and this is a LOWER BOUND of eight, not a census of two.** The two the earlier draft found are
@@ -524,7 +524,7 @@ counter's: the read is
 | `tortoise/definite_description_backfill.py:434` | `MATCH (o:Object) OPTIONAL MATCH (o)<-[r]-() WITH o, count(r) …` — degree census | **adjacency** |
 | `tortoise/sdk.py:37503` | `MATCH (s:Subject {id:$sid})-[r]->(n)` | **adjacency** |
 | **the whole-node accessor family** — `tortoise/sdk.py:37480` (`_provenance`: `MATCH (s:Subject {id:$sid}) RETURN properties(s)`, and the walk it pairs with is **23 lines below** at `:37503`, not beside it — the subject-chain composition sits between them), `tortoise/onboarding/seed.py:259` (the same read, from the seeder) and the label-generic `tortoise/record_reconcile.py:533` (`MATCH (n:{label}) RETURN properties(n)`, which reads `:Object`/`:Subject` too) | the **whole node**, handed back as a dict — the class §2.1 gives its own row, and §2's rule (stated in §2.3 for `:Event`) makes it this table's obligation too | **none** |
-| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5137`, `:5577`, `:8129`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6985` and `("Object", ["name"])` at `:6989` | **fulltext index** |
+| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('<Object or Subject>', $query)` — the same label-parametric leg (`entity_type="object"` at `assembly.py:2118`, `aggregate.py:547`, `coverage_loop.py:345`; no **product** caller passes the literal `'subject'` (test modules do — `tests/test_search_engine_gaps.py:1395`, `:1559`, `tests/test_integration_search.py`) — `mcp_server.py:4368` is a tool DOCSTRING, and the leg rides the caller-supplied value through the passthroughs at `mcp_server.py:5137`, `:5607`, `:8159`); the index declares `("Subject", ["name"])` at `projection/__init__.py:6985` and `("Object", ["name"])` at `:6989` | **fulltext index** |
 
 `:Tag` belongs on this row too, and an earlier draft got it **wrong** by calling it bookkeeping: every tag
 read resolves the node **through the edge** — `sdk.py:28069`
