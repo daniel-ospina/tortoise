@@ -3290,6 +3290,18 @@ def _fly_only_removal_red_states() -> dict[str, str]:
     return emitted
 
 
+#: The IDENTIFIERS each half's runbook quote must carry, on top of the leader.
+#: A leader alone IS a prefix of the emitted message, so a prefix assertion on its
+#: own accepts a quote reduced to the bare leader — after which both gate bodies can
+#: be reworded with the suite still green (#13814 review round 6, reproduced). These
+#: are the three things the operator needs in order to act on the message: WHICH
+#: variable, WHICH issue ref it is declared against, and WHICH file to edit.
+_FLY_ONLY_REMOVAL_QUOTE_TOKENS = {
+    "STALE DECLARATION —": ("TORTOISE_EMBEDDER_WARMUP", "fly-only:#13674"),
+    "UNDECLARED —": ("TORTOISE_EMBEDDER_WARMUP", "fly-managed-secrets.txt"),
+}
+
+
 def _runbook_quoted_red_states(section: str) -> dict[str, str]:
     """The verbatim violation text the runbook quotes, per half of the revert."""
     quotes: dict[str, str] = {}
@@ -3314,8 +3326,11 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
     failure read as "the revert broke something" (#13674, measured on the issue).
 
     The runbook's quotes are bound to the gate's ACTUAL output, end-to-end, so this
-    cannot stay green while it quotes a sentence the gate no longer prints: the
-    quoted text must be a prefix of the message that run emits for that order.
+    cannot stay green while it quotes a sentence the gate no longer prints. TWO
+    relations, because either alone has a hole: the quote must carry the IDENTIFIERS
+    an operator acts on (the variable, and the issue ref or the file), AND it must be
+    a prefix of the message that run emits for that order. A prefix alone is satisfied
+    by the bare leader; identifiers alone would not notice a reworded clause.
     (`#13814` review P2-2: the previous version read only the two LEADERS out of
     the source, and both leaders occur many times there, so renaming the leader of
     the exact quoted message — or rewording its body — left this guard green.)
@@ -3334,6 +3349,18 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
 
     emitted = _fly_only_removal_red_states()
     for leader in _FLY_ONLY_REMOVAL_REDS:
+        # ⛔ A prefix is satisfied by the LEADER ALONE, so the prefix relation cannot
+        # be the whole binding: the quote must still name the variable, and the
+        # issue ref / the file an operator has to act on. Without this, an edit that
+        # reduces both quotes to the bare leader lets every gate body be reworded
+        # with the suite green (#13814 review round 6).
+        absent = [tok for tok in _FLY_ONLY_REMOVAL_QUOTE_TOKENS[leader] if tok not in quoted[leader]]
+        assert not absent, (
+            f"the runbook's {leader!r} quote no longer identifies what the operator has to "
+            f"act on: {absent} missing. A quote reduced to the leader still PREFIXES the "
+            f"emitted message, so the prefix check below cannot catch this on its own.\n"
+            f"  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
+        )
         assert emitted[leader].startswith(quoted[leader]), (
             f"the runbook quotes a {leader!r} state the gate no longer prints. The runbook "
             "is read by an operator mid-revert, so it must quote the message they will "
