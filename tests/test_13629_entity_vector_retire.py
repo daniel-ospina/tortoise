@@ -1801,6 +1801,64 @@ def test_build_plan_refuses_an_ambiguous_target_before_it_prints_anything(stores
     assert "pa/ss" not in str(excinfo.value)
 
 
+def test_main_turns_a_build_plan_refusal_into_exit_2_with_its_token(monkeypatch, capsys):
+    """⛔ THE WIRING FALSIFIER for the arm, not just for the raise.
+
+    `build_plan` raising a `Refusal` used to escape `main` as a traceback and be read as
+    exit 1 ("usage") when nothing about the invocation was wrong. Deleting the arm must
+    redden THIS test — which is what the direct-call test above cannot do, because it
+    never enters `main`. Measured: with the arm deleted the suite stayed green, so the
+    arm was correct but unprotected.
+    """
+    import tortoise.projection as projection
+
+    class _Proj:
+        g = "GRAPH"
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        type("P", (), {"from_uri": staticmethod(lambda *a, **k: _Proj()),
+                                       "__init__": lambda self, *a, **k: None}))
+    monkeypatch.setattr(strip.census_mod, "resolve_graph_name", lambda *a, **k: "g")
+    monkeypatch.setattr(strip.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x")
+
+    def _refuse(**kwargs):
+        raise strip.Refusal(strip.REFUSE_TARGET_UNPARSEABLE,
+                            "the target cannot be fingerprinted (test double)")
+
+    monkeypatch.setattr(strip, "build_plan", _refuse)
+
+    argv = ["--uri", "docker://:pa/ss@prod:6379/g", "--graph-name", "g",
+            "--org-id", "o", "--graph-id", "g"]
+    assert strip.main(argv) == 2
+    err = capsys.readouterr().err
+    assert strip.REFUSE_TARGET_UNPARSEABLE in err
+    # The token, not a usage traceback, and nothing was written.
+    assert "Traceback" not in err
+
+
+def test_the_unresolvable_target_error_does_not_print_the_credential(monkeypatch, capsys):
+    """⛔ `urlparse` names the userinfo tail in its own ValueError, so interpolating the
+    exception would print a fragment of the graph password on an error line (#720's
+    premise). Pinned by driving the real `main` with the shape that produces it.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x")
+
+    def _raise(*a, **k):
+        raise ValueError(
+            "Port could not be cast to integer value as 's3cret'")
+
+    monkeypatch.setattr(strip.census_mod, "resolve_graph_name", _raise)
+
+    argv = ["--uri", "docker://:s3cret#x@host:6379/tortoise",
+            "--org-id", "o", "--graph-id", "g"]
+    assert strip.main(argv) == 3
+    err = capsys.readouterr().err
+    assert "s3cret" not in err, err
+    assert "ValueError" in err                      # the type name is safe and kept
+
+
 def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
     """The plan approves a TARGET, and it must not circulate the password to name one.
 
@@ -1837,10 +1895,21 @@ def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
             strip.uri_fingerprint(target)
     # A query/fragment is not target identity and may carry a credential — it is dropped
     # rather than re-emitted in the path.
-    assert strip.uri_fingerprint("docker://prod:6379/g?api_key=x@y") == \
-        "docker://prod:6379/g"
     assert strip.uri_fingerprint("docker://prod:6379/g?api_key=s3cret") == \
         "docker://prod:6379/g"
+    # ⛔ A `?`/`#` INSIDE THE PASSWORD sits between the scheme and the `@`, so it belongs to
+    # the userinfo and is removed WITH it. Cutting the query first — the tidier-looking
+    # order — truncated the credential at that character and emitted the remainder as the
+    # HOST (`docker://:s3cret`), re-creating the exact #2983 leak this function cites.
+    assert strip.uri_fingerprint("docker://:s3cret#frag@host:6379/tortoise") == \
+        "docker://host:6379/tortoise"
+    assert strip.uri_fingerprint("docker://:s3cret?q@host:6379/tortoise") == \
+        "docker://host:6379/tortoise"
+    assert strip.uri_fingerprint("docker://:rot?ated@prod:6379/g") != \
+        strip.uri_fingerprint("docker://:rot?ated@staging:6379/g")
+    # …and an `@` inside the QUERY is the ambiguous shape, refused rather than folded.
+    with pytest.raises(strip.Refusal):
+        strip.uri_fingerprint("docker://prod:6379/g?api_key=x@y")
     # …and the ordinary host-distinguishing property survives, so the refusal did not buy
     # safety by collapsing credentialed URIs to a constant.
     assert strip.uri_fingerprint("docker://:pa%2Fss@prod:6379/tortoise") == \

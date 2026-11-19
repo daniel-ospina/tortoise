@@ -2012,17 +2012,21 @@ def uri_fingerprint(uri: str) -> str:
 
     Both properties are therefore held by REFUSING the one shape that cannot satisfy both:
 
-    1. The query and the fragment are dropped first. Neither is part of the target
-       identity, and both can carry a credential (`?api_key=…`) that the path-preserving
-       return below would otherwise re-emit.
-    2. If an ``@`` appears AFTER the first ``/`` of what is left, the userinfo boundary is
-       genuinely ambiguous — that text is either a password containing ``/`` or an ``@``
-       inside the graph name, and nothing in the URI distinguishes them. Cut at the last
-       ``@`` and the credential is hidden but the host is lost (false equality); cut at the
-       first ``/`` and the host survives but the credential leaks. So it raises
-       `REFUSE_TARGET_UNPARSEABLE` and the operator percent-encodes the password.
-    3. Otherwise the userinfo is stripped from the authority window and host/port/name are
-       preserved, which is both halves of the job.
+    1. The AMBIGUITY CHECK runs on the RAW remainder, before anything is cut. If an ``@``
+       appears AFTER the first ``/``, the userinfo boundary is genuinely undeterminable —
+       that text is either a password containing ``/`` or an ``@`` inside the graph name or
+       the query, and nothing in the URI distinguishes them. Cut at the last ``@`` and the
+       credential is hidden but the host is lost (false equality); cut at the first ``/``
+       and the host survives but the credential leaks. So it raises
+       `REFUSE_TARGET_UNPARSEABLE` and the operator percent-encodes the credential.
+    2. The userinfo is then stripped from the AUTHORITY WINDOW, so a password carrying
+       ``?``, ``#`` or ``@`` is removed WITH it. Cutting the query first — the tidier
+       order, and the first cut of this fix — truncated the credential at that character
+       and emitted the remainder as the HOST (``docker://:s3cret``), re-creating the
+       ``#2983`` leak this paragraph cites.
+    3. The query and the fragment are dropped LAST, from the path, once the host is known.
+       Neither is part of the target identity, and both can carry a credential
+       (`?api_key=…`) that the path-preserving return below would otherwise re-emit.
 
     The boundary rule itself is already recorded repo-wide (#720 P2 conf 68,
     `tortoise/__main__.py::_mask_uri_userinfo`, hardened by #2983/#2987): a password may
@@ -2032,26 +2036,37 @@ def uri_fingerprint(uri: str) -> str:
     scheme, sep, rest = uri.partition("://")
     if not sep:
         return uri
-    # 1. Query and fragment are not identity, and `?api_key=…` is a credential.
-    cut = min(
-        (i for i in (rest.find("?"), rest.find("#")) if i >= 0),
-        default=len(rest),
-    )
-    rest = rest[:cut]
-    # 2. An `@` past the first `/` is the ambiguous shape — refuse it instead of picking
-    #    which of the two properties to break.
+    # ⛔ 1. THE AMBIGUITY CHECK RUNS ON THE RAW REMAINDER, BEFORE ANYTHING IS CUT. An `@`
+    #    past the first `/` is the one shape whose userinfo boundary cannot be determined
+    #    — a password containing `/`, or an `@` inside the graph name or the query — and
+    #    the two readings are indistinguishable. Refuse it rather than pick which property
+    #    to break. Doing this AFTER dropping the query looked tidier and was WRONG: cutting
+    #    `?`/`#` first left `docker://:s3cret` when the password itself contained one, i.e.
+    #    the credential emitted AS THE HOST — exactly the truncation this function's own
+    #    docstring cites from #2983 as the historical leak.
     if rest.rfind("@") > rest.find("/") >= 0:
         raise Refusal(
             REFUSE_TARGET_UNPARSEABLE,
             f"the graph target {scheme}://… cannot be fingerprinted: an '@' appears after "
-            "the first '/', which is either a password containing '/' or an '@' inside "
-            "the graph name, and the two are indistinguishable. Guessing would either "
-            "print the credential or fold two different hosts onto one fingerprint (and "
-            "a folded fingerprint is what stops REFUSE_TARGET_DRIFT from seeing a "
-            "production→staging swap). Percent-encode the credential ('/' → '%2F') so "
-            "the target becomes parseable.")
+            "the first '/', which is either a password containing '/'/a delimiter or an "
+            "'@' inside the graph name or query, and the readings are indistinguishable. "
+            "Guessing would either print the credential or fold two different hosts onto "
+            "one fingerprint (and a folded fingerprint is what stops REFUSE_TARGET_DRIFT "
+            "from seeing a production→staging swap). Percent-encode the credential "
+            "('/' → '%2F', '?' → '%3F', '#' → '%23') so the target becomes parseable.")
+    # 2. A well-formed URI has its userinfo INSIDE the authority window, so the boundary
+    #    is the last `@` and what follows it is the host. A password carrying `?`, `#` or
+    #    `@` is still inside that window and is removed with the rest of the userinfo —
+    #    never truncated, which is why the userinfo strip precedes the query cut.
     authority, _, path = rest.partition("/")
     host = authority.rpartition("@")[2]      # drop `user:password@`
+    # 3. The query and the fragment are not target identity, and `?api_key=…` is a
+    #    credential — drop them from the PATH, after the host is known.
+    cut = min(
+        (i for i in (path.find("?"), path.find("#")) if i >= 0),
+        default=len(path),
+    )
+    path = path[:cut]
     return f"{scheme}://{host}/{path.lstrip('/')}" if path else f"{scheme}://{host}"
 
 
