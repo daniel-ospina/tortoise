@@ -762,7 +762,10 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # does NOT re-measure to decide which direction is refuted: it refuses the whole class,
     # because a direction claim about that command is head-bound by construction.
     # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
-    # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
+    # `-- tortoise/` set. `main`'s own `#13790` then re-took the same census figures,
+    # ⛔ and `#13786` is NOT in that chain (#13802 review, round 5, P3 — MEASURED): its file
+    # list is `tests/test_github_indexer.py` and `tortoise/indexer/github_indexer.py`, so it
+    # re-derived four `sdk.py` cites on the TEST side and touched no census figure.
     # so at this head the command prints NOTHING and every one of those five spellings became
     # the TRUE statement — the same class of error as the frozen sign this arm replaced
     # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
@@ -1256,7 +1259,9 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
     # defensible; standing THIS requirement down is not. Executed only while the cite
     # sets are EQUAL, it asserted nothing on the normal state of a branch that has not
     # been re-based after `main` re-derived a row (measured at least four times:
-    # #13617/#13675, #13724, #13750/#13786, #13790) — i.e. exactly the heads where the
+    # #13617/#13675, #13724, #13750, #13790 — and NOT #13786, which re-derived four
+    # `sdk.py` cites on the TEST side and moved no `docs/00_index.md` row, #13802 review
+    # round 5 P3) — i.e. exactly the heads where the
     # reader most needs the command to be there. It is unconditional now.
     assert ("git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md"
             in doc), (
@@ -1370,25 +1375,39 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
 #: for") is past tense and deliberately allowed — that is the same line the numstat arm
 #: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
 _TORTOISE_SET_DIRECTION_CLAIM = re.compile(
+    # ANCHOR — the command (long spelling or the `-- tortoise/` shorthand), the
+    # `tortoise/` SET, or the DEICTIC reference that names no command at all.
     r"(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
-    # ⛔ THE SHORTHAND TOO (#13802 review, round 4, P2): the document writes
-    # "`-- tortoise/` returns NOTHING" as well as the full command, and a pattern that
-    # knows only the long spelling walks past a false claim in the shorthand — measured,
-    # `and \`-- tortoise/\` returns exactly those two modules at this head` came back
-    # green while the same claim in the long spelling redded.
     r"|`-- tortoise/`"
-    r"|`tortoise/` set[^`]{0,40}?)"
-    # ⛔ ` there -> ` IS THE DOCUMENT'S OWN SPELLING (#13802 merge round P1). Without
-    # this the answer sits one word further from the command and BOTH detectors miss
-    # it — measured in a real `--depth 1` clone: `… -- tortoise/` there ->
-    # `tortoise/x.py`` stayed green while the same answer with no `there` red. The
-    # document's own historical instance of that shape is de-typed in the same change,
-    # so this catches a claim and never the pointer.
-    r"(?:\s+there)?\s*(?:prints?|->|returns?|is)\s*`?"
+    r"|`tortoise/` set[^`]{0,40}?"
+    # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
+    # document states the answer WITHOUT repeating the command: "at THIS head the command
+    # this clause prescribes returns NOTHING AT ALL (the diff carries no `tortoise/`
+    # path)". Neither anchor above sees it — measured in-process at that head, both
+    # detectors returned `[]` — so the ban declared a class closed while the document it
+    # guards still carried an instance of it. A POINTER that names the command is still
+    # allowed; this anchor matches only the deictic form, which carries no pointer.
+    r"|the command this clause prescribes)"
+    # ` there -> ` IS THE DOCUMENT'S OWN SPELLING, and a BOUNDED filler follows it so the
+    # verb one word further out ("`-- tortoise/` command returns NOTHING AT ALL") cannot
+    # slip through — measured green without this. Three words is the bound on purpose: the
+    # POINTER form ("… is the command that answers it at the head you merge") and the
+    # PAST-TENSE form must still reach no answer, and the witness test below pins both as
+    # MUST-NOT-REFUSE.
+    r"(?:\s+there)?(?:\s+[\w-]+){0,3}\s*"
+    # ⛔ THE VERB CLASS (#13802 review, round 5, P2): `reports exactly two paths` and
+    # `yields `tortoise/x.py`` were both green here — `_typed_answers_to_tortoise_cmd`
+    # knows them, but that arm SKIPS once the base is unreadable, which is every job that
+    # gates a merge, so the wider verb list is what carries the class on the rail.
+    r"(?:prints?|->|returns?|reports?|lists?|yields|carries|gives|is)\s*`?"
     r"(?:(?:NOT|not)\s+)?"
-    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|ONE module|TWO modules"
-    # ⛔ A `tortoise/` PATH NAMED AS THE ANSWER (#13802 merge round P1): the membership
-    # direction, in the spelling the document itself used to carry.
+    # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
+    # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
+    # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
+    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two|exactly (?:one|two)"
+    r"|ONE module|TWO modules|one module|two modules|both modules"
+    r"|ONE path|TWO paths|one path|two paths|no module"
+    r"|(?:the\s+)?(?:one|two|three|four|five)\s+[\w-]+\s+modules"
     r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?)"
     r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`")
 
@@ -1538,8 +1557,16 @@ def _measured_index_word_diff(
 
 #: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
 #: measured FALSE at the head the arm below was written for (#13746 review, round 3,
-#: finding 4): the file's one changed line is the `#12296` row's DESCRIPTION of its own
-#: `:27861` clause, and no `sdk.py:<n>` token moves.
+#: finding 4): at THAT head the file's one changed line was the `#12296` row's
+#: DESCRIPTION of its own `:27861` clause, and no `sdk.py:<n>` token moved.
+#:
+#: ⛔ PAST TENSE ON PURPOSE, AND THE READING CARRIES ITS HEAD (#13802 review, round 5,
+#: P3 — MEASURED): this paragraph used to state that clause in the PRESENT tense, and at
+#: this head `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING —
+#: the file has no changed line at all, because `main` absorbed both re-points before this
+#: branch was re-cut. The same file retracts the attribution a hundred lines below, so the
+#: two statements contradicted each other inside one file and this comment was the one
+#: rendered as truth beside the arm.
 #:
 #: ⛔ THIS SIDE IS A FINITE LITERAL LIST, AND IT SAYS SO (#13795 review, round 2,
 #: finding 3). Only the MEASUREMENT half of the arm reads the live diff; a re-worded
