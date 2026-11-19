@@ -238,4 +238,12 @@ uv run python tools/test_lane.py run -- tests/test_capstone_12186_recall.py -q
 `run` took **21 m 04 s** on this box at load ≈90: 366 s of writes (1 000 objects embedded), 676 s
 over 5 arms × 300 queries, 145 s for the 411 variant reads.
 
+⛔ **The committed [`measurement.json`](./measurement.json) is not byte-identical to a run at its
+`code_head`** — one block was inserted by hand afterwards, and the record declares it in
+`post_run_edits`: the `cleanup` block was added by hand, because the tool at `code_head` has no
+`cleanup` builder at all (`git show 31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup`
+→ `0`). **Every figure in the record is run output**; a reproduction at `code_head` yields the same
+numbers without that one declaration block, and any later run writes the block itself and records
+`post_run_edits: []`.
+
 Refs `#11901` (harness) · `#12368` (composite terms) · `#12304` (fold + multi-key) · `#12343`/`#12297` (rerank) · `#12348` (verdict) · `#12349` (M3, closed) · `docs/architecture/SEARCH-ARCHITECTURE.md`

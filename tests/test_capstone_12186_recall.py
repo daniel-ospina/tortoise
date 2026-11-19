@@ -370,6 +370,53 @@ def test_the_artifact_declares_the_graph_residue(artifact):
         built["left_in_place"])
 
 
+def test_the_artifact_declares_the_edits_made_after_its_run(artifact):
+    """`code_head` is the record's reproduction anchor, so a hand edit is DECLARED.
+
+    The committed record is not entirely the output of the run it names: the
+    `cleanup` block was inserted by hand, and the tool AT `code_head` has no
+    `cleanup` builder at all —
+
+        $ git show 31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup
+        0
+
+    — so a reader following `code_head` + README §6 reproduces an artifact WITHOUT
+    that block, while `test_the_artifact_declares_the_graph_residue` pins the
+    committed block as if it were run output. No figure is affected (every figure is
+    run output), which is why this is provenance and not a measurement defect; but a
+    record that cannot say which of its blocks its own head emits is not re-derivable.
+
+    Declaring it is the fix that needs no re-run: the run's own builder writes
+    `post_run_edits: []`, so a later run states "none" instead of omitting the
+    question, and an edit is bound to the head it edits rather than to a free-text
+    note somewhere else.
+    """
+    edits = artifact["post_run_edits"]
+    assert isinstance(edits, list), (
+        f"`post_run_edits` is {edits!r}, not a list: the field must be present on "
+        f"every record, `[]` included, so an omitted field never reads as 'no edits'")
+    assert edits, (
+        "no post-run edits are declared, but this record carries a `cleanup` block "
+        "its `code_head` cannot emit (`git show "
+        "31bce52ddb:tools/capstone_12186_recall.py | grep -c cleanup` = 0). If you "
+        "re-ran the measurement and YOUR run emitted the block, then — like every "
+        "other pin in this file — this is a claim about the committed record: re-cut "
+        "it against the new artifact")
+    for edit in edits:
+        assert edit["field"] in artifact, (
+            f"a declared post-run edit names {edit['field']!r}, which the record "
+            f"does not carry: {edit!r}")
+        assert edit["run_head"] == artifact["code_head"], (
+            f"the edit's `run_head` {edit['run_head']!r} is not the `code_head` "
+            f"{artifact['code_head']!r} it modifies — a declaration that is not "
+            f"pinned to the run it edits records nothing about the head it claims")
+        assert edit["why"].strip(), f"a declared edit states no reason: {edit!r}"
+    assert "cleanup" in {e["field"] for e in edits}, (
+        f"the `cleanup` block is the hand-inserted one (see this docstring's "
+        f"`git show`: the tool at `code_head` has no such builder), so it must be "
+        f"declared here; declared edits are {[e['field'] for e in edits]}")
+
+
 def test_the_artifact_states_the_shipped_state_of_the_rerank_lever(artifact):
     """`user_search` must be the DEFAULT door, and the default is OFF.
 
@@ -634,13 +681,111 @@ def _clause(paragraph: str, marker: str) -> str:
     sentences = [s for s in re.split(r"(?<!\b[A-Za-z])\.\s+", paragraph)
                  if marker in s]
     others = [m for m in ("#12368", "#12343", "#12304") if m != marker]
-    assert len(sentences) == 1, (
-        f"expected exactly one sentence mentioning {marker!r}, got "
-        f"{len(sentences)} in {paragraph!r}")
     assert not any(m in sentences[0] for m in others), (
         f"the sentence for {marker!r} also mentions another lever, so one sentence "
         f"is satisfying two markers: {sentences[0]!r}")
-    return _flat(sentences[0])
+    return _flat(_clause_raw(paragraph, marker))
+
+
+def _clause_raw(paragraph: str, marker: str) -> str:
+    """The RAW sentence of `paragraph` that mentions `marker` — `_clause` unflattened.
+
+    Kept beside the flattened form because a WORD-shaped pin cannot use a flattened
+    one: `_flat` strips the spaces, so `noneofthemergedleversisvisibletoauser`
+    CONTAINS `oneofthemergedleversisvisibletoauser` and `one` -> `none` — a full
+    inversion of the headline's claim — stays green through any `_mentions` check.
+    Sentence selection is `_clause`'s (abbreviation-safe split, one marker per
+    sentence), reused rather than re-implemented.
+    """
+    sentences = [s for s in re.split(r"(?<!\b[A-Za-z])\.\s+", paragraph)
+                 if marker in s]
+    assert len(sentences) == 1, (
+        f"expected exactly one sentence mentioning {marker!r}, got "
+        f"{len(sentences)} in {paragraph!r}")
+    return sentences[0]
+
+
+#: The headline sentence's three visibility CLASSES, each with the shape in which it
+#: states its count. Matched on the RAW sentence, where `\b` survives and the counted
+#: word cannot be swallowed by a longer one.
+_HEADLINE_CLAUSES: dict[str, str] = {
+    "visible to a user": r"\b(\w+) of the merged levers (?:is|are) visible to a user\b",
+    "not visible to a user": r"\b(\w+) (?:is|are) not\b",
+    "only visible on the write path":
+        r"\b(\w+) (?:is|are) only visible on the write path\b",
+}
+
+#: The count words the headline may spell a class count with. Digits are absent on
+#: purpose: the sentence states small counts in words, and accepting either would make
+#: "which spelling does this pin accept" a second, unpinned question.
+_COUNT_WORDS: dict[str, int] = {"none": 0, "one": 1, "two": 2, "three": 3,
+                                "four": 4, "five": 5}
+
+
+def _door_verdict_counts(artifact) -> dict[str, int]:
+    """How many measured levers the artifact puts in each visibility class.
+
+    Derived, never typed: the three classes are the artifact's own three blocks —
+    `#12368` measured at the USER's door, `#12343` measured only with the rerank
+    `_if_armed` (an ARMED figure, so it is a user-visible lever only if it also SHIPS
+    on AND the run saw it in user search), and `#12304` measured only on the WRITE
+    path (`arms.mint_rate`, `§3b`). A field that disappears fails the assertion rather
+    than silently reclassifying a lever.
+    """
+    visibility = artifact["merged_lever_visibility"]
+    mint = artifact["arms"]["mint_rate"]
+    assert set((visibility["underscore_terms_shipped_default"],
+                visibility["fused_rerank_shipped_default"])) <= {"ON", "OFF"}, (
+        f"`merged_lever_visibility` no longer holds ON/OFF shipped defaults: "
+        f"{visibility}")
+    ran_rerank = visibility["fused_rerank_ran_in_user_search"]
+    assert ran_rerank in (True, False), (
+        f"`fused_rerank_ran_in_user_search` is {ran_rerank!r}, not a boolean, so the "
+        f"rerank's class cannot be derived from it")
+    assert mint["shipped"]["attached"] > mint["norm_only"]["attached"], (
+        f"the artifact no longer records the shipped matcher attaching write-path "
+        f"variants the frozen norm-only matcher mints "
+        f"({mint['shipped']['attached']} vs {mint['norm_only']['attached']}), so the "
+        f"headline's write-path class has no premise")
+    classes = {
+        "#12368": ("visible to a user"
+                   if visibility["underscore_terms_shipped_default"] == "ON"
+                   else "not visible to a user"),
+        "#12343": ("visible to a user"
+                   if (visibility["fused_rerank_shipped_default"] == "ON"
+                       and ran_rerank is True)
+                   else "not visible to a user"),
+        "#12304": "only visible on the write path",
+    }
+    counts = {name: 0 for name in _HEADLINE_CLAUSES}
+    for verdict in classes.values():
+        counts[verdict] += 1
+    assert sum(counts.values()) == len(classes), (
+        f"a lever was classified into no headline class: {classes}")
+    return counts
+
+
+def _assert_headline_states(sentence: str, counts: dict[str, int]) -> None:
+    """The headline sentence states the class COUNTS the artifact supports.
+
+    ⛔ Its BOUNDARY, stated so the claim is not wider than what it enforces: this pins
+    the three COUNTS and the class each is stated for. The wording around them is
+    free — a reworded clause that keeps the counts passes, deliberately, because the
+    counts are the claim and the phrasing is not evidence.
+    """
+    for name, pattern in _HEADLINE_CLAUSES.items():
+        match = re.search(pattern, sentence)
+        assert match, (
+            f"the abstract's headline no longer states the {name!r} count "
+            f"({counts[name]} lever(s)) — a visibility class cannot be dropped or "
+            f"merged into another: {sentence!r}")
+        word = match.group(1).lower()
+        assert word in _COUNT_WORDS, (
+            f"the headline's {name!r} count reads {word!r}, which is not a count the "
+            f"artifact can support (it holds {counts[name]}): {sentence!r}")
+        assert _COUNT_WORDS[word] == counts[name], (
+            f"the headline says {word!r} lever(s) are {name!r}; the artifact holds "
+            f"{counts[name]}: {sentence!r}")
 
 
 def _paragraph(text: str, marker: str) -> str:
@@ -969,9 +1114,20 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
             f"§4 `{key}` shipped state {row[1]!r} does not start with "
             f"{want_shipped!r}")
         assert want_verdict, f"§4 `{key}` has no verdict expectation"
+        #: ⛔ PREFIX-SCOPED, and the claim is now no wider than that. A `startswith`
+        #: bounds the row's LEADING PHRASE only — text appended AFTER it is not
+        #: constrained, and no `startswith` can pretend otherwise (measured:
+        #: `**YES on the write path** —` -> `**YES on the write path, but only for
+        #: admins** —` stayed green, and so did `ON (capture, LLM)` ->
+        #: `ON (capture)`). The row whose wording IS the artifact's is pinned WHOLE
+        #: below, which is where a qualifier inserted into a live verdict reds; the
+        #: rows whose wording the artifact does not hold are bounded by this prefix
+        #: and by the phrase check, and are not claimed to be more than that.
         assert verdict.startswith(want_verdict), (
             f"§4 `{key}` verdict {row[2]!r} does not start with {want_verdict!r} "
-            "— a lever's verdict cannot be qualified or reversed by a prose edit")
+            "— this bounds the row's LEADING PHRASE only (the phrase ends where "
+            "the row's first figure begins); wording appended after it is pinned "
+            "where the artifact derives the whole cell")
         if key in LEVER_DECLARATION_ROWS:
             #: Reject only an UN-NEGATED visibility claim. `"visible" not in verdict`
             #: reds a strictly more correct negation (`… so it is not visible to a
@@ -980,6 +1136,30 @@ def test_the_readme_quotes_the_lever_verdicts_the_artifact_holds(artifact):
             assert not re.search(r"(?<!not )(?<!no )\bvisible\b", verdict), (
                 f"§4 `{key}` is a DECLARATION row but its verdict now claims "
                 f"visibility: {row[2]!r}")
+
+    #: ⛔ WHOLE-CELL, because this row's wording IS a fact the artifact holds: the
+    #: write-path surface (the mint-rate arm, `§3b`) plus the two rates the shipped
+    #: and norm-only matchers produce, and nothing else is claimed in the cell. A
+    #: `startswith` cannot see a qualification inserted after the phrase — measured:
+    #: `**YES on the write path** — mint rate 1.0000 → 0.5328` with
+    #: `, but only for admins` spliced in stayed GREEN — so the cell is pinned whole
+    #: here, and the prefix loop above is left to the rows whose wording is prose.
+    fold = _one_row(rows, LEVER_ROW_MARKERS["fold"], "fold")
+    fold_mint = artifact["arms"]["mint_rate"]
+    assert _flat(fold[1]) == "ON(writepath)", (
+        f"§4 `#12304` shipped state {fold[1]!r} is not `ON (write path)`. Both halves "
+        f"are derived: the shipped matcher attaches variant pairs the frozen "
+        f"norm-only matcher mints (`arms.mint_rate`, {fold_mint['shipped']['attached']} "
+        f"vs {fold_mint['norm_only']['attached']}), and the write path is the ONLY "
+        f"surface the artifact measures it on — a cell that drops the surface reads "
+        f"as a user-door lever")
+    assert _flat(fold[2]) == (
+        f"YESonthewritepath\u2014mintrate{fold_mint['norm_only']['rate']:.4f}"
+        f"\u2192{fold_mint['shipped']['rate']:.4f}"), (
+        f"§4 `#12304` verdict {fold[2]!r} is not the derived write-path verdict "
+        f"(leading phrase + the two mint rates the artifact holds). This row is "
+        f"pinned WHOLE because the artifact derives all of it, so ANY inserted "
+        f"qualification is a changed claim, not a rewording")
 
     underscore = visibility["underscore_terms_visible_on_user_door"]
     row = _flat(_one_row(rows, LEVER_ROW_MARKERS["underscore"], "#12368")[2])
@@ -1065,6 +1245,18 @@ def test_the_plain_language_summary_states_the_figures_the_artifact_holds(artifa
         assert LEVER_COLUMNS[key][1].startswith(want), (
             f"the abstract's three-lever sentence no longer matches §4's `{key}` "
             f"verdict {LEVER_COLUMNS[key][1]!r}")
+    #: ⛔ The COUNTS are derived from the artifact and matched on the RAW sentence.
+    #: The literal tokens below are necessary but not sufficient: `_flat` deletes the
+    #: spaces, so `noneofthemergedleversisvisibletoauser` CONTAINS
+    #: `oneofthemergedleversisvisibletoauser` — the whole claim inverted through the
+    #: flattening — while a word-boundary match on the raw sentence cannot be fooled.
+    #: Each class's count is read from the artifact (`_door_verdict_counts`), so the
+    #: pin cannot drift with the document: `one … is visible, one is not, and one is
+    #: only visible on the write path` is what the record holds, not what the last cut
+    #: of this test typed.
+    _assert_headline_states(_clause_raw(paragraph, "Plain language"),
+                            _door_verdict_counts(artifact))
+
     _assert_mentions(
         _flat(paragraph),
         ("oneofthemergedleversisvisibletoauser",

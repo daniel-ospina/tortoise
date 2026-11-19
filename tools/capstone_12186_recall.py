@@ -935,6 +935,14 @@ def run(args: argparse.Namespace) -> int:
             "capstone": True,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "code_head": _git_head(),
+            #: The edits made to THIS record AFTER the run — `[]` when the record
+            #: is exactly what the run wrote. It exists because `code_head` is the
+            #: record's reproduction anchor: a block inserted by hand (`§4`'s
+            #: committed `cleanup`, whose tool at that head has no such builder)
+            #: makes the record NOT reproducible from the head it names, and a
+            #: reader has no other way to learn that. The block is a declaration,
+            #: not a fig leaf: every figure named here must still be run output.
+            "post_run_edits": [],
             "embedder_at_write": embedder_at_write,
             "pin": {
                 "path": _repo_relative(pin_path),
