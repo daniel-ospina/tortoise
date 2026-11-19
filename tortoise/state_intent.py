@@ -63,6 +63,17 @@ ending word — which is exactly the shape a customer uses when they do not know
 which record they are asking about. A query that names a record ("onboarding
 flow retired") keeps the text read it always had.
 
+⛔ AND THE WORD MUST BE THE ENDED-STATE FORM: ``ended``, not ``end``;
+``withdrawn``, not ``withdraw``. The first cut matched the bare verbs and the bare
+noun, and review measured what that costs: ``what is the end date of the
+contract``, ``what front end framework do we use`` and ``what happens if I
+withdraw consent`` all returned the whole ended population instead of matching
+rows, and ``commitments due this week`` returned every live commitment with the
+caller's own constraint dropped. A cue is therefore (a) a shape that ASKS FOR A
+SET and (b) a word that names a state already reached. Both halves are pinned in
+``tests/test_13557_13558_reachable_reads.py`` — the negative controls are the
+measured misroutes, not invented ones.
+
 DELIBERATE BOUNDARY — "what was planned and never happened?"
 -----------------------------------------------------------
 That is a plan-versus-occurrence question, and it is NOT routed here. The ended
@@ -97,53 +108,95 @@ POPULATIONS: dict[str, str] = {
 }
 
 # ── the cue table ───────────────────────────────────────────────────────────
-#: The ENDING words of the model, as a spelling family — the same words
-#: ``live.TERMINAL_EXCLUDED_STATUSES`` renders readers-side, plus the verbs a
-#: customer uses for an ending that has no single status word ("withdrawn",
-#: "cancelled", "retired", "abandoned"). ⛔ It is a *detector* vocabulary, never
-#: a state vocabulary: nothing here is written to a row or compared with one —
-#: the population itself is selected by the predicate (``ended.py``).
+#: The ENDING words of the model, as a spelling family.
+#:
+#: ⛔ EVERY MEMBER IS THE **ENDED-STATE** FORM (a past participle), never the bare
+#: verb — and that is the whole guard, measured in review. The bare forms turned
+#: ordinary content questions into the ended population, because "end",
+#: "withdraw", "retract", "cancel" and "retire" are how English talks about
+#: dates, boundaries and actions, not only about records: `what is the end date
+#: of the contract`, `what front end framework do we use`,
+#: `what happens if I withdraw consent` and `show me the retired onboarding flow`
+#: all reached the ended read. A past participle describes a state the record HAS
+#: REACHED (withdrawn, retired, cancelled, archived) — which is exactly the
+#: question this population answers — while a bare verb asks about an ACTION, so
+#: it is not this read. That is why `ended` is a cue and `end` is not.
+#:
+#: The set is ``live.TERMINAL_EXCLUDED_STATUSES`` rendered the way a customer says
+#: it (``retracted``, ``superseded``, ``archived``, ``deprecated``) plus the
+#: plain-English endings for one with no single status word (``withdrawn``,
+#: ``retired``, ``abandoned``, ``cancelled``, ``ended``). ⛔ It is a *detector*
+#: vocabulary, never a state vocabulary: nothing here is written to a row or
+#: compared with one — the population itself is selected by the predicate
+#: (``ended.py``). ``tests/test_13557_13558_reachable_reads.py`` holds it to
+#: ``live.TERMINAL_EXCLUDED_STATUSES`` so the two cannot drift.
 _ENDING_WORDS = (
-    r"withdrawn?|withdraw"
-    r"|retracted?|retract"
-    r"|superseded?|supersede"
-    r"|deprecated?"
-    r"|retired?|retire"
-    r"|abandoned?"
+    r"withdrawn"
+    r"|retracted"
+    r"|superseded"
+    r"|deprecated"
+    r"|retired"
+    r"|abandoned"
+    r"|archived"
     r"|cancell?ed"
-    r"|ended|end"
+    r"|ended"
 )
 
-#: ENDING-question shapes, ordered. Each is the shape a customer uses when they
-#: do NOT know which record they are asking about; a query that names a record
+#: ENDING-question shapes, ordered. Each is the shape a customer uses when they do
+#: NOT know which record they are asking about; a query that names a record
 #: keeps the text read. ``[^?]`` bounds the scan inside one question so a
 #: multi-clause string cannot join an ending word to an unrelated "what".
+#:
+#: ⛔ THERE IS DELIBERATELY NO `list`/`show` SHAPE. It was measured in review as a
+#: hijack — `show me the retired onboarding flow` is a lookup for ONE record, and
+#: routing it returned the whole ended population instead. An imperative that
+#: asks for a SET still reaches this read through the `what`/`which` shapes
+#: ("list what we retired"), so dropping the shape costs no real question.
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # "has anything we relied on been withdrawn?" / "did something get retired?"
     ("anything", re.compile(
         rf"\b(?:anything|something|everything)\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
-    # "list what we retired" / "show the withdrawn claims" — an explicit
-    # enumerate-verb, checked BEFORE the wh-shapes so the shape reported is the
-    # one that actually selected (the customer asked for a list).
-    ("imperative", re.compile(
-        rf"\b(?:list|show)\b[^?]{{0,40}}?\b(?:{_ENDING_WORDS})\b")),
     # "what has been withdrawn?" / "what was retracted?" / "what ended?"
     ("what", re.compile(
         rf"\bwhat\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
     # "which commitments were withdrawn?" / "which of these ended?"
     ("which", re.compile(
         rf"\bwhich\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
+    # "what did we archive?" — a bare VERB after "what did we", from a CLOSED list
+    # and deliberately WITHOUT `end` (which would match "what did we end up
+    # doing"). The base form is needed only here: an enumerate-question about the
+    # ACT of ending, in the first person, is unambiguous in a way that
+    # "what is the end date" is not.
+    ("did_we", re.compile(
+        r"\bwhat\s+did\s+we\s+(?:archive|retire|withdraw|retract|cancel"
+        r"|supersede|deprecate|abandon)\b")),
 )
 
-#: COMMITMENT-question shapes. The noun is the one the customer uses
-#: ("commitments"), and the verb is the one they use ("what are we committed
-#: to") — the issue's own wording: *a commitment is a KIND, not a phrase*. The
-#: shot is at the QUESTION, so the population can be read by kind; if a customer
-#: names a commitment's own noun instead ("launch event") the text read is still
-#: what answers, and it already does.
+#: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
+#: not a phrase* — so the cue is the shape that ASKS FOR THE SET, and the
+#: population is then read by kind. The verb phrase is the one a customer uses
+#: ("what are we committed to"); the noun needs a determiner that asks for the
+#: set ("current commitments", "our commitments", "which commitments").
+#:
+#: ⛔ NOT THE BARE NOUN. ``\bcommitments?\b`` was measured in review as a hijack:
+#: `commitments due this week` and `commitment letter template` are content
+#: lookups, and routing them returned every live commitment with the caller's own
+#: constraint silently dropped — the failure #13558 is about, inverted. A question
+#: that names a FACT about a commitment keeps the relevance read.
 _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("commitment_noun", re.compile(r"\bcommitments?\b")),
+    # "what are we currently committed to" / "what have we committed to"
     ("committed_to", re.compile(r"\bcommitt(?:ed|ing)\s+to\b")),
+    # "current commitments" / "live commitments" / "outstanding commitments".
+    # PLURAL on purpose: "our commitment to privacy" and "the current commitment
+    # level" are fact lookups, and the set-question is the plural one.
+    ("scoped_noun", re.compile(
+        r"\b(?:current|live|active|open|outstanding)\s+commitments\b")),
+    # "our commitments" / "all the commitments" / "which commitments" /
+    # "what are our commitments" — a determiner that asks for the SET, and PLURAL
+    # for the same reason as `scoped_noun` ("our commitment to privacy" is a
+    # fact lookup, not a request for the population).
+    ("determined_noun", re.compile(
+        r"\b(?:our|all|which|what)\b[^?]{0,20}?\bcommitments\b")),
 )
 
 
@@ -166,7 +219,7 @@ class StateQuestion:
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus a scan of seven compiled
+    Deterministic and bounded — one normalisation plus a scan of six compiled
     patterns, no model call and no IO, so the hot read path pays microseconds
     and the mapping is unit-testable offline. A ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.

@@ -27,13 +27,16 @@ WHAT IT DOES *NOT* DO
 ---------------------
 - **It does not decide what is current.** The currency predicate is
   ``live._terminal_excluded`` — the SAME expression every reader filters on, in
-  the keep direction, with the family's own vocabulary from
-  ``search_engine._status_vocab_for`` (the one home for that seam). A word or a
-  slot the predicate stops treating as current stops being served here, and
+  the keep direction, taken with ITS OWN defaults so it is the exact dual of the
+  ``live._terminal_expression`` the ended read selects by. A word or a slot those
+  predicates stop treating as an ending stops dividing these two reads, and
   nothing in this module needs editing. ⛔ The position axis is part of it
   (#13034): a plan sitting in a ``terminal`` slot, or carrying ``isClosed``, has
   ended and is NOT a live commitment — which is what keeps a cancelled plan out
-  of this read while the plain text read may still serve it.
+  of this read while the plain text read may still serve it. ⛔ And the two reads
+  are DUAL BY CONSTRUCTION, not by a per-family seam: the ended read uses no
+  family vocabulary, so neither may this one (a record in both populations is the
+  defect that assertion exists to exclude).
 - **It does not name the kinds' spellings.** ``COMMITMENT_OBJECT_KINDS`` is the
   UNPREFIXED family name (ONTOLOGY §5); the caller expands each through
   ``sdk._read_filter_kinds`` so a ``core:plan`` row, a pack-subclassed plan kind
@@ -67,7 +70,6 @@ and the ordinary birth state), and a legacy commitment is still a commitment.
 from __future__ import annotations
 
 from .live import DRAFT_STATUS, _terminal_excluded
-from .search_engine import _status_vocab_for
 
 #: The commitment-state family of ONTOLOGY §5 — the Object kinds a commitment
 #: is. ONE declaration: the read narrows on these, and the kind EXPANSION of
@@ -101,15 +103,29 @@ COMMITMENTS_SCAN_BUDGET_MS = 10_000
 def _keep_expression(alias: str) -> str:
     """Cypher predicate: the node is CURRENT on either axis (design §6).
 
-    Composed from ``live._terminal_excluded`` with the OBJECT family's
-    vocabulary — resolved through ``search_engine._status_vocab_for`` so the
-    family seam is not re-stated here — and narrowed to exclude a DRAFT, which
-    the design calls *"not yet a commitment"* (§4). Both facts come from their
-    declared owners; neither is a hand-written status list.
+    ⛔ IT IS THE **EXACT DE MORGAN DUAL** OF THE ENDED READ'S SELECTOR, and that is
+    the property this read needs — not "the Object family's vocabulary".
+    ``tortoise/ended.py`` selects ``live._terminal_expression("n")``, which is the
+    status set ``live.TERMINAL_EXCLUDED_STATUSES`` (``retracted``, ``superseded``,
+    ``outdated``, ``archived``, ``deprecated``) **plus** the legacy
+    ``outdated=true`` flag **plus** the position axis — for EVERY family, with no
+    per-family vocabulary. So the keep side must be
+    ``live._terminal_excluded(...)`` with its DEFAULT vocabulary and flag, which a
+    parity test in ``tests/test_terminal_status_vocabulary.py`` already holds to
+    ``_terminal_expression``. Passing the Object read-leg vocabulary here
+    (``OBJECT_TERMINAL_STATUSES``, no ``outdated``) was WRONG and was caught in
+    review: a legacy ``status='outdated'`` Object — a shape ``assembly.py``
+    records as present in the canonical instance — was then CURRENT to this read
+    and ENDED to the ended read, i.e. the same record in both populations. The
+    two reads are one determinant read from both sides, or they are two lists.
+
+    The DRAFT exclusion is the ONE thing added on top, and it is not part of the
+    duality: §4 says a draft is *"created, not yet a commitment … not counted as
+    in force"*, so a draft is in NEITHER population (it is current, so not ended;
+    not in force, so not a commitment). Its literal comes from
+    ``live.DRAFT_STATUS``, the declared constant, not from a list minted here.
     """
-    excluded, include_flag = _status_vocab_for("Object")
-    return (_terminal_excluded(f"{alias}.status", excluded,
-                               include_outdated_flag=include_flag)
+    return (_terminal_excluded(f"{alias}.status")
             + f" AND coalesce({alias}.status, '') <> '{DRAFT_STATUS}'")
 
 

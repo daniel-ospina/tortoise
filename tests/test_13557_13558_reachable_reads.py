@@ -152,17 +152,20 @@ def _ids(rows) -> set[str]:
 #: The questions the two issues are about, and the population each must select.
 #: The cue is a QUESTION SHAPE, never a noun-to-state assignment.
 SELECTED = [
-    # #13557 — Q1, in both of the words a customer uses for it.
-    ("current commitments", "commitments", "commitment_noun"),
+    # #13557 — Q1, in the words a customer uses for it.
+    ("current commitments", "commitments", "scoped_noun"),
     ("what are we currently committed to — pricing, onboarding, launch and uptime",
      "commitments", "committed_to"),
+    ("our commitments", "commitments", "determined_noun"),
     # #13558 — Q6, and the other shapes a customer uses for it.
     ("has anything we relied on been withdrawn", "ended", "anything"),
     ("has anything been retired", "ended", "anything"),
+    ("has anything been archived", "ended", "anything"),
     ("what has been withdrawn", "ended", "what"),
     ("what ended", "ended", "what"),
     ("which commitments were withdrawn", "ended", "which"),
-    ("list what we retired", "ended", "imperative"),
+    ("list what we retired", "ended", "what"),
+    ("what did we archive last quarter", "ended", "did_we"),
 ]
 
 
@@ -185,6 +188,15 @@ def test_a_state_question_selects_its_population(query, population, shape):
 #: question that the ended population CANNOT answer (a `held` plan ended AND
 #: happened, so serving the ended set as "never happened" would be a wrong answer
 #: that looks right — see the module docstring's boundary).
+#:
+#: ⛔ THE SECOND HALF OF THIS LIST IS A REVIEW FINDING, NOT A THOUGHT
+#: EXPERIMENT (#13557/#13558 review, P0/P1). The first cut of the cue table
+#: matched the BARE verb ("end", "withdraw", "retract") and the BARE noun
+#: ("commitment"), and every query below then returned a whole state population
+#: instead of matching rows — `what is the end date of the contract` came back as
+#: the ended population of the family, `commitments due this week` as every live
+#: commitment with "due this week" dropped. Each one is pinned here so that
+#: regression cannot come back quietly.
 NOT_SELECTED = [
     "launch event",
     "onboarding flow",
@@ -194,6 +206,18 @@ NOT_SELECTED = [
     "the meeting was cancelled",
     "what was planned and never happened",
     "onboarding flow retired",
+    # the bare-verb class the review measured
+    "what is the end date of the contract",
+    "what front end framework do we use",
+    "what is the back end stack",
+    "what happens if I withdraw consent",
+    "show me the retired onboarding flow",
+    "what did we end up doing",
+    # the bare-noun class the review measured
+    "commitments due this week",
+    "commitment letter template",
+    "our commitment to privacy",
+    "sponsorship commitment review",
     "",
     "   ",
 ]
@@ -225,6 +249,41 @@ def test_an_ending_question_outranks_a_commitment_noun():
     from tortoise.state_intent import ENDED, detect_state_question
 
     assert detect_state_question("which commitments were withdrawn").population == ENDED
+
+
+def test_every_lifecycle_word_the_readers_hide_has_an_ended_cue():
+    """The cue words and `live.TERMINAL_EXCLUDED_STATUSES` cannot drift apart.
+
+    A review finding (#13557/#13558 review, P2): the first cut's docstring claimed
+    the cue set was "the same words ``live.TERMINAL_EXCLUDED_STATUSES`` renders"
+    while ``archived`` was missing from it — so "which claims were archived" never
+    reached the ended read, which is #13558's whole shape for one of the model's
+    own words. This pins the direction that matters: a word that HIDES a record
+    from the current reads must be a word a customer can ask about. (The reverse
+    does not hold — "withdrawn"/"retired"/"ended" need no status word, because the
+    model spells those endings `deprecated`/`superseded`.)
+
+    ``outdated`` is the one deliberate exception and it is asserted as such: the
+    write door REFUSES it (`#11824` S0), so no customer can reach a row by asking
+    about it, and the rows carrying it are answered by `deprecated`, its recorded
+    meaning. If that changes, this test says so instead of quietly missing a word.
+    """
+    import re
+
+    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
+    from tortoise.state_intent import _ENDING_WORDS
+
+    cue = re.compile(rf"^(?:{_ENDING_WORDS})$")
+    uncued = sorted(w for w in TERMINAL_EXCLUDED_STATUSES if not cue.match(w))
+    assert uncued == ["outdated"], (
+        f"lifecycle words the readers HIDE with no cue of their own: {uncued} — "
+        f"'which claims were <word>' would reach nothing, which is #13558's "
+        f"failure for one of the model's own words")
+    # …and the cue set is used, not merely declared: one query per word.
+    from tortoise.state_intent import ENDED, detect_state_question
+
+    for word in sorted(TERMINAL_EXCLUDED_STATUSES - {"outdated"}):
+        assert detect_state_question(f"which claims were {word}").population == ENDED, word
 
 
 def test_the_population_register_names_a_module_for_every_member():
@@ -497,6 +556,45 @@ def test_the_two_populations_are_disjoint_in_both_directions(sdk):
         "directions of one determinant")
 
 
+@_docker_only
+def test_a_LEGACY_outdated_row_is_in_the_ended_read_and_not_a_commitment(sdk):
+    """The duality holds on the row shape that broke it (#13557/#13558 review P1).
+
+    The first cut composed the commitments read with the OBJECT read-leg
+    vocabulary (`OBJECT_TERMINAL_STATUSES`, which has no `outdated`) while the
+    ended read selects `live._terminal_expression` (which HAS `outdated`, as a
+    status and as a flag). A commitment-kind Object carrying `status='outdated'`
+    was therefore CURRENT to one read and ENDED to the other — the same record in
+    both populations, in one session.
+
+    The write door REFUSES `outdated` now (#11824 S0), so the row is written RAW:
+    the population being modelled is the pre-S0 one, measured as present in the
+    canonical instance (`assembly.py`'s `_RECALL_OBJECT_EXCLUDED_STATUSES` keeps
+    the word for exactly this shape). Same precedent as
+    `tests/test_11926_derived_invalidation.py`.
+    """
+    from tortoise import pipeline
+
+    pipeline.seed_pipeline(sdk._get_proj().g, "core:plan", PLAN_PIPELINE)
+    legacy = sdk.create_object("Legacy outdated plan", objectKind="core:plan")
+    pipeline.advance_stage(sdk, legacy["id"], "core:plan", "scheduled")
+    sdk._get_proj().g.query(
+        "MATCH (n {id:$id}) SET n.status = 'outdated'",
+        params={"id": legacy["id"]})
+
+    commitments = _ids(sdk.tortoise_fts_query(
+        "current commitments", entity_type="object", limit=50))
+    ended = _ids(sdk.tortoise_fts_query(
+        None, entity_type="object", ended_scope=True, limit=50))
+
+    assert legacy["id"] in ended, (
+        "the ended read selects by live._terminal_expression, which treats "
+        "`outdated` as an ending")
+    assert legacy["id"] not in commitments, (
+        "a legacy `outdated` commitment was served as CURRENT — the keep side is "
+        "not the dual of the selector the ended read uses")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # The answer is BOUNDED, and a scan that could not answer says so
 # ══════════════════════════════════════════════════════════════════════════════
@@ -562,19 +660,41 @@ def test_a_commitments_scan_that_could_not_answer_is_carried_not_swallowed(
 
 
 @_docker_only
-def test_no_retrieval_knob_is_served_beside_a_state_question(sdk):
+def test_no_retrieval_knob_is_served_beside_a_state_question(sdk, monkeypatch):
     """A knob is a relevance-read request: the call keeps the text read.
 
     ``min_confidence`` cannot be applied to a population that carries no belief,
     and silently dropping it would serve rows the caller asked to filter. So the
-    state route is only taken for a PLAIN question — and this pins that the knob
-    is not refused, only honoured as the relevance read the caller asked for.
+    state route is taken only for a PLAIN question — and this pins the DECISION by
+    intercepting the population's own enumerator, not by inspecting rows: with a
+    knob set the arm must never be reached, and without one it must be.
+
+    ⛔ The first cut asserted `isinstance(rows, list)` and was caught in review as
+    a test that cannot fail — deleting the guard would have left it green. A
+    sentinel is what makes the property observable.
     """
-    # No store access is needed: the routing decision is made before retrieval,
-    # and this asserts the DECISION, not the rows.
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="object",
-                                  min_confidence=0.99, limit=5)
-    assert isinstance(rows, list)
+    import tortoise.commitments as commitments_mod
+
+    reached: list[list[str]] = []
+
+    def record(graph, *, kinds, limit=50, timeout_ms=None):
+        reached.append(list(kinds))
+        return []
+
+    monkeypatch.setattr(commitments_mod, "enumerate_live_commitments", record)
+
+    # A KNOB → the relevance read (which cannot report a belief above 0.99 here,
+    # so the rows are empty either way: the ASSERTION is on `reached`).
+    sdk.tortoise_fts_query("current commitments", entity_type="object",
+                           min_confidence=0.99, limit=5)
+    assert reached == [], (
+        "the commitment population was served to a caller who asked for a "
+        "relevance read with `min_confidence` — the floor would be silently "
+        "dropped")
+
+    # NO KNOB → the population, with no scope argument from the caller.
+    sdk.tortoise_fts_query("current commitments", entity_type="object", limit=5)
+    assert reached, "the plain commitment question did not reach the population"
 
 
 def test_the_ended_scope_still_refuses_an_explicit_query(sdk):
