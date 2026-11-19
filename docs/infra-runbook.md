@@ -4391,11 +4391,26 @@ fly secrets set TORTOISE_EMBEDDER_WARMUP=0 -a tortoise-y4mjjq     # stop paying 
 fly secrets unset TORTOISE_EMBEDDER_WARMUP -a tortoise-y4mjjq     # back to the shipped default (ON)
 ```
 
-⚠️ **An unset does not finish the job.** The provenance gate REFUSES a `fly-only:` name that no longer
-exists on Fly, so `fly secrets unset` must delete this name's declaration from
-`.github/scripts/fly-managed-secrets.txt` in the same change — or move it to the version-controlled
-route (`fly-toml-env`) once the secret is gone. That is fail-closed and intended: the exception exists
-for a REAL out-of-band secret, so its removal is a visible revert rather than a silent staleness.
+⚠️ **An unset does not finish the job, and NO two-step order is green.** The provenance gate holds
+*both* halves of a `fly-only:` exception, so a revert split across two changes is RED in the window
+between them — **whichever step comes first**:
+
+| order | the state in between | what the gate prints |
+|---|---|---|
+| `fly secrets unset` first, declaration deleted later | the declaration stands, no Fly secret | `STALE DECLARATION — 'TORTOISE_EMBEDDER_WARMUP' is declared fly-only:#13674 but exists neither on Fly nor in the deploy payload` |
+| declaration deleted first, `fly secrets unset` later | the Fly secret is still live, no declaration | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
+
+So both steps must land **in one window, with no deploy and no drift-gate run between them**: `fly
+secrets unset TORTOISE_EMBEDDER_WARMUP` on Fly, and this name's declaration deleted from
+`.github/scripts/fly-managed-secrets.txt`, in the same change. Do **not** read either red as "the
+revert broke something", and do not "unset now, file the revert change later" — the interval is red
+and it reads like a regression. (The other end-state is the version-controlled route, `fly-toml-env`,
+and it is only reachable once the secret is **gone**: a Fly secret SHADOWS a `fly.toml [env]` value of
+the same name, so the versioned value would be dead until the secret is unset — fly.io's `[env]`
+reference states the precedence explicitly.)
+
+That is fail-closed and intended: the exception exists for a REAL out-of-band secret, so its removal
+is a visible revert rather than a silent staleness.
 
 ⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
 carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-54`,

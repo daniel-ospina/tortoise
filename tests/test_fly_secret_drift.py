@@ -2818,6 +2818,65 @@ def test_the_reviewer_entry_point_names_every_fly_only_member():
     )
 
 
+#: The two violation LEADERS a `fly-only:` revert can meet, read from the
+#: CHECKER in the test below rather than trusted here: a renamed message must not
+#: leave the runbook quoting a state the gate no longer prints.
+_FLY_ONLY_REMOVAL_REDS = ("UNDECLARED —", "STALE DECLARATION —")
+
+
+def _embedder_warmup_runbook_section() -> str:
+    """The runbook's `### The embedder warm-up switch` section, as one string.
+
+    Sliced by HEADINGS, not by a line range: the runbook is appended to by other
+    changes, so a numeric range here would be stale on the next merge — the exact
+    defect class `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
+    exists to catch.
+    """
+    lines = REAL_RUNBOOK.read_text().splitlines()
+    heading = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("### The embedder warm-up switch")),
+        None,
+    )
+    if heading is None:
+        raise AssertionError(
+            "docs/infra-runbook.md has no '### The embedder warm-up switch' section — "
+            "the operator surface this test guards is gone"
+        )
+    end = next((i for i in range(heading + 1, len(lines)) if lines[i].startswith("### ")), len(lines))
+    return "\n".join(lines[heading:end])
+
+
+def test_the_fly_only_removal_guidance_names_both_red_states():
+    """Removing a `fly-only:` lever is RED in EITHER order, so the runbook must name both.
+
+    The gate holds both halves of the exception: the declaration goes stale once
+    the secret is gone (`STALE DECLARATION`), and the secret is undeclared once
+    the declaration is (`UNDECLARED`). An operator who splits the revert across
+    two changes is therefore red in the window between them WHICHEVER step comes
+    first — and the previous text named only the first, so the second order's
+    failure read as "the revert broke something" (#13674, measured on the issue).
+
+    Both leaders are read from the CHECKER, so this cannot stay green while the
+    runbook quotes a state the gate no longer emits.
+    """
+    checker = (REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py").read_text()
+    for leader in _FLY_ONLY_REMOVAL_REDS:
+        assert leader in checker, (
+            f"{leader!r} is no longer a violation check-fly-secret-drift.py emits — update "
+            "this test and the runbook's removal guidance together"
+        )
+
+    section = _embedder_warmup_runbook_section()
+    # Non-vacuity: a section read that picked up the wrong region must not pass.
+    assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
+    missing = [leader for leader in _FLY_ONLY_REMOVAL_REDS if leader not in section]
+    assert not missing, (
+        "the runbook's `fly-only:` removal guidance names only some of the red states a "
+        "revert can meet. A two-step revert is red in EITHER order, so naming one leaves "
+        f"the other reading as a regression rather than as the expected interval: missing {missing}"
+    )
+
+
 def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):
     """The Fly-column guard must red on every equivalent "not here" spelling.
 
