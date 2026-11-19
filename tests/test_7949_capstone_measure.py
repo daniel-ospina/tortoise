@@ -16656,12 +16656,14 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
 #: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6729`-`:6733` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: `:6779`-`:6782` asserts each of the four against `_honours_line`, and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. Only the `dedup_reviewed IS NULL` clause below, and the
-#: three-anchor sentence in `_D5_TRIPLE_RE` (whose distinct failure mode is a number
-#: swapped onto ANOTHER anchor's slot, which no per-line row can see), are new coverage.
+#: that clause ever had a reader. THREE things here are new coverage: the
+#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
+#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
+#: per-line row can see), and the quota-guard row added for #13845 (whose failure mode is
+#: a number that IS on D5's line but belongs to a clause about a different file).
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
@@ -16671,7 +16673,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries ~50 numbers — so `:20311` was "read" from an unrelated clause denotating a
+    # carries 262 cite-shaped `:N` tokens (measured: `len(re.findall(r":\\d{2,}", d5))`
+    # over the `| **D5**` line at this head — the `~50` this comment used to say was an
+    # order of magnitude low, which is the same rot one layer up) — so `:20311` was "read"
+    # from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
     # regex binds the number to the sentence that gives the number its meaning, so a future
