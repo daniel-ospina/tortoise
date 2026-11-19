@@ -558,13 +558,26 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
     # closure claim above is read as "closed under formatting ON ONE LINE".
+    # ⛔ AND MARKUP ON THE FORM OR THE ADVERB (#13831 review, P2): the run between the
+    # command and the answer FORM was widened to accept the markers that OPEN the form
+    # (`_prints_`, `` `prints` ``), but the ADVERB slot between them still took whitespace
+    # only — so `**now** prints two paths` and `_now_ prints two paths` fell out of the
+    # detector entirely, and a refuted membership claim stayed green in exactly the class
+    # this comment declares closed. The same marker run is accepted on both sides of the
+    # adverb, because a formatting-only difference is not a different answer.
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
+            + r"[`_\s*]*(?:(?:still|now|actually|also)[`_\s*]+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
+        # The emphasis that CLOSED around the form (`**prints** x` → `** x`, `_prints_ x` →
+        # `_ x`) is formatting, not answer text, and it used to leak into the QUOTED window —
+        # which is what a refusal prints back to the reader (`05-verify.md types {answer!r}`).
+        # Dropped here, but only when the run is followed by whitespace, so the document's own
+        # ``prints `two` path`` (a backtick hugging a word) is still quoted exactly.
+        rest = re.sub(r"^[*_`]+\s+", "", rest)
         window = f"{match.group(1)} {rest}".strip()
         low = rest.lower()
         # ⛔ NORMALISE THE HEAD ONCE (#13795 review, rounds 5-7): markdown emphasis and
@@ -1020,6 +1033,20 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the shape detector reads {_zero_spelling!r} as a MEMBERSHIP claim, so it "
             "REFUSES a true emptiness claim at an empty head — the round-2 hedge harm in "
             "the other direction (#13795 review, round-4 P2)")
+    # ⛔ AND THE `no …` ARM IS PINNED ON ITS OWN ALTERNATIVES (#13831 review, P1): the arm
+    # matches `no path` / `no paths` / `no tortoise/`, and every witness touching it is the
+    # `tortoise/` one (`carries no `tortoise/` path at all`). MEASURED: narrowing the arm to
+    # `no\b\s*tortoise/` left this file at 14 passed while ALL FOUR of `05-verify.md`'s own
+    # emptiness answers (`prints NO path at all`) silently left the detector — so a refuted
+    # one would walk through green with the suite still declaring the arm covered. The first
+    # row is the document's own spelling; the second pins the plural alternative.
+    for _no_spelling in ("prints NO path at all", "prints no paths"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_no_spelling}", _tortoise_cmd
+        ) == [(_no_spelling, True)], (
+            f"the shape detector does not read {_no_spelling!r} as EMPTINESS, so this "
+            "document's own `no … path` answers are never seen and a refuted one passes "
+            "green — the vacuity the `tortoise/`-only witness hid (#13831 review, P1)")
     # ⛔ AND THE ZERO RULE'S OWN EDGES (#13831 review, P1/P2), one per direction. `more
     # than` is the only listed filler that REVERSES a zero, so stripping it and reading the
     # bare `zero` inverted the claim — a refuted membership claim read as emptiness, green
@@ -1047,32 +1074,43 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # ⛔ AND FORMATTING IS NOT CONTENT (#13795 review, round 5): the head is normalised once
     # (markdown emphasis and backticks stripped, fillers stripped to a fixpoint, the form
     # matched case-insensitively), because the class this guard declares is "a listed form +
-    # a member/emptiness head token", not "one spelling of it". Each variant is pinned.
+    # a member/emptiness head token", not "one spelling of it". Each variant is pinned to
+    # the tuple the detector REPORTS — direction AND quoted answer — so a row cannot pass on
+    # a corrupted window: that window is what a refusal prints back to a reader.
     # ⛔ AND A FILLER IN FRONT OF A FILLER (#13728 review, P1): the last five spellings put a
     # DETERMINER between the quantifier and the numeral, which is where the fixpoint used to
     # stop — restoring the one-shot determiner strip reds exactly those rows.
-    for _formatted_spelling in (
-            "prints `two` paths",
-            "**prints** the two COMMENT-ONLY modules",
-            "_prints_ the two comment-only modules",
-            "__prints__ the two comment-only modules",
-            "`prints` the two comment-only modules",
-            "prints _two_ paths",
-            "Prints two paths",
-            "prints now only one path",
-            "prints only the two COMMENT-ONLY modules",
-            "prints only a single path",
-            "prints just the two comment-only modules",
-            "prints at least the two comment-only modules",
-            "prints exactly the two comment-only modules"):
-        _seen = _typed_answers_to_tortoise_cmd(
-            f"`{_tortoise_cmd}` {_formatted_spelling}", _tortoise_cmd)
-        assert _seen and _seen[0][1] is False, (
+    # ⛔ AND THE FORM AND ITS ADVERB CAN THEMSELVES BE MARKED (#13831 review, P2): the last
+    # two rows were SKIPPED entirely before the gap accepted markers on both sides of the
+    # adverb, so the refuted claim passed green in that spelling.
+    for _formatted_spelling, _reported in (
+            ("prints `two` paths", "prints `two` paths"),
+            ("**prints** the two COMMENT-ONLY modules", "prints the two COMMENT-ONLY modules"),
+            ("_prints_ the two comment-only modules", "prints the two comment-only modules"),
+            ("__prints__ the two comment-only modules", "prints the two comment-only modules"),
+            ("`prints` the two comment-only modules", "prints the two comment-only modules"),
+            ("**now** prints two paths", "prints two paths"),
+            ("_now_ prints two paths", "prints two paths"),
+            ("prints _two_ paths", "prints _two_ paths"),
+            ("Prints two paths", "Prints two paths"),
+            ("prints now only one path", "prints now only one path"),
+            ("prints only the two COMMENT-ONLY modules",
+             "prints only the two COMMENT-ONLY modules"),
+            ("prints only a single path", "prints only a single path"),
+            ("prints just the two comment-only modules",
+             "prints just the two comment-only modules"),
+            ("prints at least the two comment-only modules",
+             "prints at least the two comment-only modules"),
+            ("prints exactly the two comment-only modules",
+             "prints exactly the two comment-only modules")):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_tortoise_cmd}` {_formatted_spelling}", _tortoise_cmd
+        ) == [(_reported, False)], (
             f"the shape detector skips or mis-reads {_formatted_spelling!r} — a "
             "MEMBERSHIP answer whose only difference is emphasis, backticks, casing, a "
             "second quantifier or a determiner between the quantifier and the numeral, so "
             "a refuted claim in that format passes green (#13795 review, round-5 P1; "
-            "#13728 review, P1)")
+            "#13728 review, P1; #13831 review, P2)")
     # ⛔ AND THE QUALIFIED NEGATION (#13795 review, finding 3): `non-empty` CONTAINS the
     # word `empty`, and reading it as an emptiness claim inverts the direction — it passes
     # a false membership claim at THIS (empty) head and would refuse the true sentence at a
