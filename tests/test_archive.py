@@ -737,6 +737,28 @@ def test_a_block_the_anchored_commit_does_not_hold_is_reported(tree: Path) -> No
     assert "does NOT hold" in problems[0]
 
 
+def _clone_can_answer_ancestry(root: Path) -> bool:
+    """Can this clone walk history to a default-branch ref at all?
+
+    ⛔ A SHALLOW CHECKOUT CANNOT, and `_git_has_commit` does NOT reveal it. Measured on
+    this repo's own self-hosted runner (`pi-runner-c5-x64-4`, `actions/checkout` at
+    `fetch-depth: 1`, checked out at `refs/remotes/pull/13728/merge`): the object store
+    still held ANCIENT anchored commits from an earlier job on the same box, so all 45
+    entries were `cat-file -e` READABLE, while `merge-base --is-ancestor <anchor>
+    origin/main` answered non-zero for every one of them — a shallow graft is a history
+    boundary, so nothing older than it is reachable. The strict verb's answer there is
+    UNKNOWN, not UNPROVEN, and demanding a quiet answer is demanding a falsehood (the
+    same class as the `git diff` arm repaired at `5f935f3b69`).
+
+    So the test asserts the real archive is quiet only where the clone can actually
+    answer the question. A full clone still reds on a genuinely orphaned anchor.
+    """
+    code, out = arch._git(root, "rev-parse", "--is-shallow-repository")
+    if code != 0:
+        return False        # cannot even ask: assert nothing rather than something false
+    return out.strip() != "true"
+
+
 def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None:
     """A clone that cannot answer must say so — the strict verb's whole purpose."""
     entry = arch.archive_symbol(
@@ -747,13 +769,77 @@ def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None
     assert arch.anchor_unverified(tree), "an anchor this clone cannot read must be reported"
     # ⛔ NOT `assert anchor_unverified(ROOT) == []`: `actions/checkout` defaults to fetch-depth 1,
     # and the anchor is an ANCESTOR of the head, so on CI the object is legitimately absent. The
-    # real archive must be quiet only where the commit is actually readable (finding from review
-    # cycle 4: the unconditional form reds the required `test` job on a correct archive).
+    # real archive must be quiet only where the clip can actually answer — the commit readable
+    # AND the ancestry walkable (see `_clone_can_answer_ancestry`: a shallow graft makes every
+    # anchor look orphaned while `cat-file -e` still finds the object; measured, 45/45, on the
+    # required `test (b)` shard at `decb96fe8a`).
     real = arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]
-    if all(arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in real):
+    if _clone_can_answer_ancestry(arch.ROOT) and all(
+            arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in real):
         assert arch.anchor_unverified(arch.ROOT) == [], (
-            "every anchor IS readable here, so the strict verb must be quiet"
+            "every anchor IS readable here and this clone can walk the ancestry, so the "
+            "strict verb must be quiet"
         )
+
+
+def test_the_shallow_clone_discriminator_answers_both_ways(tmp_path: Path) -> None:
+    """The skip above is only honest if it can TELL a shallow clone from a full one.
+
+    NON-VACUITY: a discriminator stuck on `True` would re-red the required `test` job on
+    every shallow checkout (the measured failure), and one stuck on `False` would silently
+    retire this arm on every box. Both directions are asserted against real clones of a
+    two-commit repo, so neither polarity can pass by accident.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=origin, check=True)
+    for n in (1, 2):
+        (origin / f"f{n}.txt").write_text(f"{n}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "--", f"f{n}.txt"], cwd=origin, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=r@example.com", "-c", "user.name=reviewer",
+             "commit", "-q", "-m", f"c{n}"],
+            cwd=origin,
+            check=True,
+        )
+
+    full = tmp_path / "full"
+    shallow = tmp_path / "shallow"
+    # `file://` on purpose: `git clone --depth` ignores the flag for a plain local path.
+    subprocess.run(["git", "clone", "-q", f"file://{origin}", str(full)], check=True)
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(shallow)],
+        check=True,
+    )
+
+    assert _clone_can_answer_ancestry(full) is True
+    assert _clone_can_answer_ancestry(shallow) is False
+
+    # ⛔ THE MEASURED CI SHAPE, REPRODUCED: an object present in a shallow clone. The old
+    # gate asked only "is the commit readable", so it answered YES here and then demanded
+    # `anchor_unverified == []` — a falsehood, because the ancestry walk cannot cross the
+    # graft. `git fetch <sha>` puts the object in the store without unshallowing.
+    first = subprocess.run(
+        ["git", "rev-list", "--max-parents=0", "HEAD"],
+        cwd=origin, capture_output=True, text=True, check=True,
+    ).stdout.strip().splitlines()[0]
+    subprocess.run(
+        ["git", "fetch", "-q", "--depth", "1", f"file://{origin}", first],
+        cwd=shallow, check=True,
+    )
+    assert arch._git_has_commit(shallow, first) is True
+    manifest = {"entries": [{
+        "kind": arch.MCP_TOOL, "symbol": "tortoise_search", "batch": "batch-a",
+        "reason": "fixture", "file": "archive/mcp_tools/batch-a/tortoise_search.py",
+        "archived_from": arch.SOURCE_OF[arch.MCP_TOOL], "archived_at": first,
+        "blocks": [],
+    }]}
+    arch.save_manifest(manifest, shallow / "archive" / "MANIFEST.json")
+    reported = arch.anchor_unverified(shallow)
+    assert reported and "is not an ancestor of" in reported[0], (
+        "the shallow-clone red must reproduce as an ANCESTRY complaint, not a readability "
+        f"one — got {reported!r}"
+    )
 
 
 def test_the_restore_anchor_is_a_commit_on_the_default_branch(tree: Path) -> None:
