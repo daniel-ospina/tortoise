@@ -667,7 +667,11 @@ def test_the_census_exemption_is_path_and_receiver_scoped():
        pins above) exempts nothing, so their strength is unchanged.
     """
     (rel, receiver, retired), reason = next(
-        ((k[0], k[1], k[2]), v) for k, v in NON_SDK_RECEIVERS.items())
+        (((k[0], k[1], k[2]), v) for k, v in NON_SDK_RECEIVERS.items()),
+        (None, None))
+    assert rel is not None, (
+        "no declared receivers — this pin would measure nothing (vacuity is a "
+        "red, not a StopIteration)")
     assert reason and reason.strip(), "a declared exemption needs its reason"
     source = f"def f():\n    return {receiver}.{retired}()\n"
 
@@ -685,18 +689,111 @@ def test_the_census_exemption_is_path_and_receiver_scoped():
         "same file must still be caught")
 
 
+def _receiver_binding_violations(source: str, receiver: str) -> list[str]:
+    """Every binding of ``receiver`` that could carry a NON-imported object.
+
+    ⛔ WHY NOT `ast.Name`-Store ALONE (#13863 review, P1 — a REAL fail-open).
+    The first cut collected only ``ast.Name`` nodes in Store context, so a
+    **parameter**, a **lambda parameter**, an ``except … as``, an ``import x as``
+    or a star import could each bind the exempted NAME to a live ``TortoiseSDK``
+    handle while every pin stayed green. Reproduced in a scratch tree:
+    ``def _probe(EmbeddingModel): return EmbeddingModel.status()`` called with
+    ``_org_sdk(org_id)`` → **5 passed**, i.e. the gate certified a live
+    retired-name call site as clean. A row exempts a NAME, so every way that
+    name can come to mean something else has to be visible here.
+
+    Returns human-readable violations; empty means every binding of the name is
+    a ``from … import`` (checked separately against the class it names).
+    """
+    out: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.arg) and node.arg == receiver:
+            out.append(f"parameter at line {node.lineno}")
+        elif isinstance(node, ast.ExceptHandler) and node.name == receiver:
+            out.append(f"`except … as {receiver}` at line {node.lineno}")
+        elif isinstance(node, ast.Name) and node.id == receiver and \
+                isinstance(node.ctx, (ast.Store, ast.Del)):
+            # assignment / for target / with-as / comprehension / walrus / del
+            out.append(f"assignment or `del` at line {node.lineno}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if (alias.asname or alias.name.split(".")[0]) == receiver:
+                    out.append(f"`import … as {receiver}` at line {node.lineno}")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and receiver in node.names:
+            kind = "global" if isinstance(node, ast.Global) else "nonlocal"
+            out.append(f"`{kind} {receiver}` at line {node.lineno}")
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == receiver:
+            out.append(f"match capture at line {node.lineno}")
+        elif isinstance(node, ast.MatchMapping) and node.rest == receiver:
+            out.append(f"mapping-pattern `**{receiver}` at line {node.lineno}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) \
+                and node.name == receiver:
+            # `def NAME` / `class NAME` bind the name too, and their `.name` is a
+            # plain `str` — no `ast.Name` exists for the AST to walk, so a
+            # class named after the exempted receiver shadows the real one and
+            # the row would certify ITS `status()` as clean.
+            out.append(f"`def`/`class` named {receiver} at line {node.lineno}")
+        elif type(node).__name__ in ("TypeVar", "TypeVarTuple", "ParamSpec") \
+                and getattr(node, "name", None) == receiver:
+            # PEP 695 type parameters bind in their own scope (cannot carry an
+            # object, but the enumeration has to be honest about them).
+            out.append(f"type parameter named {receiver} at line {node.lineno}")
+        elif isinstance(node, ast.ImportFrom) and any(a.name == "*" for a in node.names):
+            out.append(f"`from … import *` at line {node.lineno} may bind {receiver}")
+    return out
+
+
+def test_the_binding_audit_catches_every_way_the_name_can_be_rebound():
+    """The audit must see EVERY binding form, not just an assignment.
+
+    This is the pin for the P1 the review found on #13863: an exemption row is
+    keyed on a NAME, so the only thing standing between it and a live SDK call
+    site is that the name cannot be bound to anything but the declared class.
+    """
+    receiver = "EmbeddingModel"
+    must_catch = {
+        "parameter": f"def f({receiver}):\n    return {receiver}.status()\n",
+        "lambda parameter": f"g = lambda {receiver}: {receiver}.status()\n",
+        "except as": (f"try:\n    pass\nexcept Exception as {receiver}:\n"
+                      f"    {receiver}.status()\n"),
+        "assignment": f"{receiver} = get_sdk()\n{receiver}.status()\n",
+        "with-as": f"with open('x') as {receiver}:\n    {receiver}.status()\n",
+        "for target": f"for {receiver} in sdk_list:\n    {receiver}.status()\n",
+        "import as": f"import tortoise.sdk as {receiver}\n{receiver}.status()\n",
+        "del": f"del {receiver}\n",
+        "global": f"def f():\n    global {receiver}\n    {receiver}.status()\n",
+        "star import": "from tortoise.sdk import *\n",
+        "mapping-pattern rest": (
+            f"match {{}}:\n    case {{**{receiver}}}:\n        {receiver}.status()\n"),
+        "class shadow": f"class {receiver}:\n    pass\n",
+        "def shadow": f"def {receiver}():\n    pass\n",
+        "async def shadow": f"async def {receiver}():\n    pass\n",
+    }
+    for label, source in must_catch.items():
+        assert _receiver_binding_violations(source, receiver), (
+            f"a {label} binding of the exempted name was NOT caught — that is the "
+            "#13863 P1 fail-open: an SDK handle can arrive under the exempted "
+            "name and the gate certifies a live retired-name call site as clean")
+
+    legit = (f"def f():\n    from tortoise.embeddings import {receiver}\n"
+             f"    return {receiver}.status()\n")
+    assert _receiver_binding_violations(legit, receiver) == [], (
+        "a lazy `from … import` of the declared class is the LEGITIMATE shape "
+        "(#2850 imports it inside the handler) and must not be flagged")
+
+
 def test_every_declared_non_sdk_receiver_is_a_real_one():
     """A table row is a CLAIM about a class, so check the class.
 
     The census cannot verify a receiver (that is why the table is declared), so
     this pin does it instead, and it is the pin that makes the table
-    un-mutable into a bypass: a row is accepted only when the receiver name is
-    bound **only by `from … import` — every such binding naming the SAME class —
-    and never re-bound to a runtime handle** (an `Assign`/`for`/`with`/
-    comprehension target) — and the class those imports name is provably not a
-    ``TortoiseSDK`` subclass and really has the named attribute as a callable.
-    Re-point an import at the SDK (or shadow the name) and this reds instead of
-    the gate silently losing a real call site.
+    un-mutable into a bypass: every binding of the receiver name must be a
+    ``from … import`` of the SAME class (`_receiver_binding_violations` refuses
+    parameters, `except … as`, ``import … as``, assignments, `del`, match
+    captures and star imports) — and the class those imports name is provably
+    not a ``TortoiseSDK`` subclass and really has the named attribute as a
+    callable. Re-point an import at the SDK (or bind the name any other way) and
+    this reds instead of the gate silently losing a real call site.
 
     ⛔ The binding may be **function-local**, and may happen **more than once**:
     `_embedder_health` and its siblings each import ``EmbeddingModel`` inside
@@ -704,7 +801,7 @@ def test_every_declared_non_sdk_receiver_is_a_real_one():
     not pay a module import), so requiring a single module-level import in
     ``tree.body`` rejects a legitimate row. The requirement is about
     AMBIGUITY, not about scope or count: every binding of the name must resolve
-    to the SAME class, and the name must never be re-bound to a runtime handle.
+    to the SAME class, and the name must never be bound any other way.
     """
     import importlib
     import inspect
@@ -714,12 +811,19 @@ def test_every_declared_non_sdk_receiver_is_a_real_one():
     assert NON_SDK_RECEIVERS, "no declared receivers — this pin is vacuous"
     for (rel, receiver, retired), reason in NON_SDK_RECEIVERS.items():
         assert reason.strip(), f"{rel}:{receiver}.{retired} has no reason"
-        tree = ast.parse((REPO / rel).read_text())
+        source = (REPO / rel).read_text()
+        tree = ast.parse(source)
+
+        # Every OTHER way the name can be bound is a bypass (#13863 P1).
+        violations = _receiver_binding_violations(source, receiver)
+        assert not violations, (
+            f"{rel}: `{receiver}` is bound by something other than `from … "
+            f"import` — {violations} — so an SDK handle can arrive under the "
+            "exempted name and the row would hide a REAL retired-name call "
+            "site (except in #13863)")
 
         bound = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
                  and any(a.asname == receiver or a.name == receiver for a in n.names)]
-        rebound = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
-                   and n.id == receiver and isinstance(n.ctx, ast.Store)]
         assert bound, (
             f"{rel}: `{receiver}` is never imported — the exemption names a "
             "class, so a callable/variable binding is not enough")
@@ -727,20 +831,17 @@ def test_every_declared_non_sdk_receiver_is_a_real_one():
         # common here (`_embedder_health` and its siblings each import lazily so
         # the path collects no I/O, #2850). Ambiguity is the danger, not the
         # count: every binding of the name must name the SAME class.
-        targets = {(n.module, a.name) for n in bound for a in n.names
+        targets = {(n.module, n.level, a.name) for n in bound for a in n.names
                    if a.asname == receiver or a.name == receiver}
         assert len(targets) == 1, (
             f"{rel}: `{receiver}` is bound to {sorted(targets)} — the exemption "
             "names ONE class, so every import of that name must be the same one")
-        assert not rebound, (
-            f"{rel}: `{receiver}` is re-bound at line "
-            f"{rebound[0].lineno} — the exemption is scoped to the imported "
-            "CLASS, so a local handle under the same name would make the row a "
-            "guess (and could hide a real SDK call site)")
         target = bound[0]
-        assert target.module, (
-            f"{rel}: `from . import {receiver}` names no module path, so the class "
-            "cannot be checked — import it by its full module path")
+        assert target.module and target.level == 0, (
+            f"{rel}: `{receiver}` is imported RELATIVELY (`from .{'':<1}import …`, "
+            f"level={target.level}) — `importlib` would resolve it as a "
+            "TOP-LEVEL module and this pin would then check the WRONG class "
+            "(or the wrong one on `sys.path`). Import it by its full module path")
         # The alias that MATCHES the receiver, not names[0]: an import line may
         # carry several names and this row is about exactly one of them.
         alias = next(a for a in target.names
