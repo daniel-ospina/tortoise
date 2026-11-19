@@ -3100,10 +3100,25 @@ async def _lifespan(app):
     # SENTRY_DSN). Initialize before the app starts serving so captures are
     # armed from the first request. Hosted-only concern: local SDK/self-host
     # never sets the DSN, so this is inert there.
+    #
+    # ⛔ #13665: this call is SLOW AND SYNCHRONOUS — it must NOT run on the loop.
+    # Measured on the deployed box: `/health` → `loop_blocks` captured
+    # `max_age_s: 5.212` with `sentry_sdk/integrations/mcp.py:36 in <module>` →
+    # `package_version` → `_generate_installed_modules` → `importlib.metadata.
+    # metadata` → `read_text` on the stack, i.e. Sentry's `init()` building its
+    # whole installed-distribution index (because `auto_enabling_integrations`
+    # defaults to True) while the event loop was held. A held loop cannot run a
+    # timer callback or send a byte, so the caller sees `HTTP 000` — no answer,
+    # and no legible refusal, because `WaitBoundMiddleware`'s deadline is itself
+    # a loop callback. `init_off_loop` keeps the ordering guarantee (this is
+    # still AWAITED before the app serves, so captures are armed from the first
+    # request) and moves only the THREAD. See `tortoise/sentry.py` for the
+    # measured breakdown and for why the shared executor is acceptable here when
+    # #10602 refused it for the read path.
     try:
-        from tortoise.sentry import init as _sentry_init
+        from tortoise.sentry import init_off_loop as _sentry_init
 
-        _sentry_init()
+        await _sentry_init()
     except Exception:  # noqa: BLE001, RUF100 — init is guarded internally; belt-and-suspenders
         pass
 

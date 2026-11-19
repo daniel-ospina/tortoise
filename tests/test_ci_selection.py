@@ -10303,6 +10303,14 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #13665 — the Sentry STARTUP seam. A file this fold ADDED, registered on `api`
+    # because the behaviour it pins is a call made from `_lifespan` in
+    # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES the
+    # `core` fallback — so a `core`-only registration leaves the pin asleep on the one
+    # diff class that can reintroduce the defect. Listed here for the reason #13629's
+    # row states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and nothing reds.
+    "test_13665_sentry_init_off_loop.py",
 )
 
 

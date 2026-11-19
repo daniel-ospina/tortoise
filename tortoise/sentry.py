@@ -11,6 +11,7 @@ ever import this module.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -91,11 +92,83 @@ REQUEST_LAYER_DISCONNECT_NAMES = BENIGN_EXCEPTION_NAMES | frozenset(
 )
 
 
+async def init_off_loop() -> bool:
+    """``init()``, but on a WORKER THREAD instead of the caller's event loop.
+
+    #13665: ``init()`` is SYNCHRONOUS and costs seconds, and the hosted API calls
+    it from the startup half of ``_lifespan`` — i.e. ON the asyncio event loop.
+    The cost is not ours to shrink (see the note below); what is ours is WHERE
+    it runs.
+
+    ⛔ MEASURED, NOT ESTIMATED. On the deployed box (head ``18d406258f7b``, the
+    exact head #13665 measured) ``/health`` → ``loop_blocks`` captured
+    ``max_age_s: 5.212`` with these frames, and persisted them to
+    ``/data/loop-blocks.jsonl``::
+
+        <frozen importlib._bootstrap>:1360 in _find_and_load
+        ...
+        mcp.py:36 in <module>
+        utils.py:1812 in package_version
+        utils.py:1801 in _get_installed_modules
+        utils.py:1767 in _generate_installed_modules
+        __init__.py:444 in metadata
+        __init__.py:819 in read_text
+        pathlib.py:1028 in read_text
+
+    ``mcp.py`` there is ``sentry_sdk/integrations/mcp.py``, and its line 36 is
+    ``MCP_PACKAGE_VERSION = package_version("mcp")`` — a MODULE-LEVEL call that
+    builds Sentry's whole installed-distribution index by reading every
+    ``*.dist-info/METADATA`` on the image. It runs because the SDK's
+    ``auto_enabling_integrations`` defaults to True, so one ``init()`` imports
+    every installed framework's integration module. Measured in this repo's
+    canonical dev env: ``init()`` 2 770 ms total, of which 1 414 ms is the
+    auto-enabling imports — ``sentry_sdk.integrations.mcp`` 920 ms (it imports
+    ``mcp`` + ``fastmcp``), ``fastapi`` 213 ms, ``huggingface_hub`` 211 ms.
+
+    ⛔ WHY A BLOCKED LOOP IS THE DEFECT #13665 IS ABOUT, AND NOT A COSMETIC
+    CONCERN. ``asyncio`` needs the loop to run a timer callback, to send one
+    byte of a response, and to start ANY handler. A loop held for 5.2 s is
+    therefore not a slow answer — it is NO answer: the caller sees ``HTTP 000``
+    (the issue's second failure shape, and the one no refusal can describe,
+    because ``WaitBoundMiddleware``'s own deadline is a loop callback and cannot
+    fire). Measured on the same box: the refusal channel is structurally blind
+    to it — ``wait_bound_breaches.total`` stays 0 through a block, which is
+    exactly the false-zero ``WaitBoundMiddleware``'s ``on_starved`` arm was
+    added to expose.
+
+    ⛔ WHY THE DEFAULT EXECUTOR IS ACCEPTABLE HERE, WHEN #10602 SPENT A WHOLE
+    READ LANE REFUSING IT. ``asyncio.to_thread`` submits to the loop's shared
+    pool, and #10602 moved the READ path off it because a 40–80 ms store behind
+    other tenants' stalls became a 3.7–14.6 s answer. That argument is about a
+    POOL UNDER CONCURRENT DEMAND. This call is ONE-SHOT, at STARTUP, before the
+    app serves: nothing else is submitted to that executor yet, so there is no
+    tenant to queue behind, and the occupancy is one worker for one call. A
+    dedicated single-use pool would be machinery with no tenant of its own.
+
+    ⛔ WHAT THIS DOES NOT DO: it does not shrink the cost, and it does not
+    change WHEN init runs. The caller still AWAITS it before the app serves, so
+    the guarantee ``init()``'s docstring makes — captures armed from the first
+    request — is preserved exactly; only the thread it occupies changes. Making
+    the cost itself small is a separate change (``auto_enabling_integrations``
+    is a deliberate SDK default, and turning it off would silently drop
+    integration coverage), and it is NOT taken here.
+    """
+    if _enabled:
+        return True
+    return await asyncio.to_thread(init)
+
+
 def init() -> bool:
     """Initialize Sentry iff SENTRY_DSN is set. Returns whether enabled.
 
     Idempotent: a second call while already enabled returns True without
     re-initializing the SDK.
+
+    ⛔ SYNCHRONOUS AND SLOW — ``_lifespan`` must call :func:`init_off_loop`
+    instead (#13665, measured 5.212 s of blocked event loop / 2 770 ms in the
+    dev env; the frames are recorded in that function's docstring). Calling
+    THIS from a coroutine blocks the loop for the whole of it, which is how a
+    request ends in ``HTTP 000`` rather than in a refusal.
     """
     global _enabled
     if _enabled:
