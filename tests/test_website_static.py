@@ -253,12 +253,6 @@ def _fmt_price(price, mode: str, discount_pct: int) -> tuple[str, str]:
 FMT_PRICE_HEAD_RE = re.compile(
     r"window\.tortoiseFmtPrice\s*=\s*function\s*\([^)]*\)\s*\{")
 
-#: The three bindings the formatter's math is MADE OF.
-FMT_PRICE_BINDING_RE = {
-    name: re.compile(rf"\bvar\s+{name}\s*=\s*([^;]+);")
-    for name in ("disc", "perMonth", "total")
-}
-
 
 def _fmt_price_js_body() -> str:
     """The body of the shared formatter — the code BOTH pages actually execute.
@@ -279,60 +273,375 @@ def _js_round(value: float) -> int:
     return math.floor(value + 0.5)
 
 
+# ── a reader for the ONE formatter: statements and expressions EXECUTED ─────
+#
+# ⛔ The reason this exists at all (#13696 round 16, P1, measured): the previous
+# reader took `mode` as its OWN Python argument and returned HARDCODED strings.
+# It evaluated only the three `var` bindings and compared two return templates
+# as TEXT — so the source's own `if (mode === 'annual')` guard and its two
+# `return { big: …, total: … }` templates were never read. Both mutants left
+# all 167 rows GREEN:
+#
+#   * `if (mode === 'annual') {` → `if (true) {` — a MONTHLY visitor then sees
+#     `$20` / `$240 billed annually` on both pages, identically, so the
+#     page-vs-page compare and the static-card compare (annual default) agree;
+#   * `total: '$' + total + ' billed annually'` → `… ' billed yearly'`.
+#
+# Restating the dispatch or the output strings in Python cannot disagree with
+# itself, which is why a row built that way verifies its re-implementation. So
+# the guard, the statements and both templates are now READ OUT of
+# `website/assets/tortoise-pricing.js` and EXECUTED. Anything this reader does
+# not model is REFUSED with the construct named — never skimmed past — so a
+# rewrite reds with a message a human can act on instead of passing blind.
+
+#: The only CALLS the formatter may contain. `Math` is the only JS-ism its
+#: arithmetic needs; a call this table does not name is refused.
+JS_FMT_CALLS = {"Math.round": _js_round, "Math.max": max}
+
+#: JS tokens the formatter's own statements are written in.
+JS_FMT_TOKEN_RE = re.compile(
+    r"\s*(?:"
+    r"(?P<str>'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")"
+    r"|(?P<num>\d+(?:\.\d+)?)"
+    r"|(?P<op>===|!==|==|!=|\+|\*|/|\(|\)|,|\{|\}|:|-)"
+    r"|(?P<ident>[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)"
+    r")")
+
+#: `text`'s bracket group starting at `text[i]` — the opener included, the
+#: closer matched by depth — and the index just past it. Quote-aware.
+_JS_OPENERS = {"(": ")", "[": "]", "{": "}"}
+
+
+def _js_unmodelled(construct: str) -> str:
+    return (
+        "the shared formatter contains "
+        f"`{construct.strip()[:80]}`, which this reader does not model — teach "
+        "it here rather than letting the agreement row pass blind over code it "
+        "cannot execute (#13696 round 16)")
+
+
+def _js_bracket_group(text: str, i: int) -> tuple[str, int]:
+    """`(inner, index_after)` for the bracket group opening at `text[i]`."""
+    if i >= len(text) or text[i] not in _JS_OPENERS:
+        raise AssertionError(_js_unmodelled(text[i:i + 40]))
+    close = _JS_OPENERS[text[i]]
+    depth = 0
+    quote = ""
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if quote:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in _JS_OPENERS:
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                if ch != close:
+                    raise AssertionError(_js_unmodelled(text[i:j + 1]))
+                return text[i + 1:j], j + 1
+        j += 1
+    raise AssertionError(
+        f"unbalanced `{text[i]}` in the shared formatter: {text[i:i + 80]!r}")
+
+
+def _js_statement_end(text: str, i: int) -> int:
+    """Index of the `;` that terminates the statement starting at `text[i]`
+    (bracket- and quote-aware, so a `;` inside `(…)` or a string is not it)."""
+    depth = 0
+    quote = ""
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in _JS_OPENERS:
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return i
+        i += 1
+    raise AssertionError(
+        "the shared formatter has an unterminated statement: "
+        f"{text.strip()[:120]!r}")
+
+
+def _js_statements(inner: str) -> list[tuple]:
+    """Parse the formatter's statement block into `if` / `var` / `return` nodes.
+
+    Only the three shapes the formatter is written in are modelled: a
+    `var NAME = EXPR;`, a `return EXPR;`, and an `if (COND)` whose body is a
+    `{ … }` block or a single statement. Anything else is refused by name.
+    """
+    statements: list[tuple] = []
+    i, n = 0, len(inner)
+    while True:
+        while i < n and (inner[i].isspace() or inner[i] == ";"):
+            i += 1
+        if i >= n:
+            return statements
+        rest = inner[i:]
+        if re.match(r"if\s*\(", rest):
+            cond, j = _js_bracket_group(inner, i + rest.index("("))
+            while j < n and inner[j].isspace():
+                j += 1
+            if j < n and inner[j] == "{":
+                block, j = _js_bracket_group(inner, j)
+                statements.append(("if", cond, _js_statements(block)))
+            else:
+                end = _js_statement_end(inner, j)
+                statements.append(("if", cond, _js_statements(inner[j:end + 1])))
+                j = end + 1
+            i = j
+            continue
+        m = re.match(r"var\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=", rest)
+        if m:
+            j = i + m.end()
+            end = _js_statement_end(inner, j)
+            statements.append(("var", m.group(1), inner[j:end]))
+            i = end + 1
+            continue
+        if re.match(r"return\b", rest):
+            j = i + len("return")
+            end = _js_statement_end(inner, j)
+            statements.append(("return", inner[j:end]))
+            i = end + 1
+            continue
+        raise AssertionError(_js_unmodelled(rest[:60]))
+
+
+def _js_str(value: object) -> str:
+    """How JS renders a value inside `'…' + value` (`20`, not `20.0`)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else repr(value)
+    raise AssertionError(
+        f"the shared formatter concatenates {value!r} into a price string — "
+        "this reader does not model that value")
+
+
+def _js_add(left: object, right: object) -> object:
+    """JS `+`: concatenation when EITHER side is a string, numeric otherwise."""
+    if isinstance(left, str) or isinstance(right, str):
+        return _js_str(left) + _js_str(right)
+    if isinstance(left, bool) or isinstance(right, bool):  # pragma: no cover
+        raise AssertionError(_js_unmodelled(f"{left!r} + {right!r}"))
+    return left + right  # type: ignore[operator]
+
+
+class _JsExpression:
+    """A recursive-descent evaluator for the formatter's own expressions.
+
+    It EVALUATES the source text — `'$' + perMonth` becomes the string a browser
+    would print — so a changed literal or a changed operator is measured, not
+    pattern-matched. Precedence and semantics are the JS ones this contract
+    uses: `+` concatenates when a side is a string, `/` is float division,
+    `===`/`!==` compare values.
+    """
+
+    def __init__(self, expr: str, scope: dict[str, object]) -> None:
+        self.text = expr
+        self.scope = scope
+        self.tokens: list[tuple[str, str]] = []
+        i = 0
+        while expr[i:].strip():
+            m = JS_FMT_TOKEN_RE.match(expr, i)
+            if m is None:
+                raise AssertionError(_js_unmodelled(expr[i:i + 40]))
+            kind = m.lastgroup
+            assert kind is not None
+            self.tokens.append((kind, m.group(kind)))
+            i = m.end()
+        self.i = 0
+
+    def _peek(self, ahead: int = 0) -> tuple[str | None, str | None]:
+        j = self.i + ahead
+        return self.tokens[j] if j < len(self.tokens) else (None, None)
+
+    def _take(self, kind: str, value: str | None = None) -> str:
+        got_kind, got = self._peek()
+        if got_kind != kind or (value is not None and got != value):
+            raise AssertionError(_js_unmodelled(self.text))
+        self.i += 1
+        assert got is not None
+        return got
+
+    def parse(self) -> object:
+        value = self._comparison()
+        if self.i != len(self.tokens):
+            raise AssertionError(_js_unmodelled(self.text))
+        return value
+
+    def _comparison(self) -> object:
+        left = self._additive()
+        while self._peek()[0] == "op" and self._peek()[1] in (
+                "===", "!==", "==", "!="):
+            op = self._take("op")
+            right = self._additive()
+            left = (left == right) if op in ("===", "==") else (left != right)
+        return left
+
+    def _additive(self) -> object:
+        left = self._multiplicative()
+        while self._peek()[0] == "op" and self._peek()[1] in ("+", "-"):
+            op = self._take("op")
+            right = self._multiplicative()
+            if op == "+":
+                left = _js_add(left, right)
+                continue
+            if isinstance(left, bool) or isinstance(right, bool) or not isinstance(
+                    left, (int, float)) or not isinstance(right, (int, float)):
+                raise AssertionError(_js_unmodelled(self.text))
+            left = left - right
+        return left
+
+    def _multiplicative(self) -> object:
+        left = self._primary()
+        while self._peek()[0] == "op" and self._peek()[1] in ("*", "/"):
+            op = self._take("op")
+            right = self._primary()
+            if not isinstance(left, (int, float)) or isinstance(left, bool) \
+                    or not isinstance(right, (int, float)) \
+                    or isinstance(right, bool):
+                raise AssertionError(_js_unmodelled(self.text))
+            left = left * right if op == "*" else left / right
+        return left
+
+    def _primary(self) -> object:
+        kind, value = self._peek()
+        if kind == "num":
+            self._take("num")
+            assert value is not None
+            return int(value) if "." not in value else float(value)
+        if kind == "str":
+            self._take("str")
+            assert value is not None
+            if "\\" in value:
+                raise AssertionError(_js_unmodelled(value))
+            return value[1:-1]
+        if (kind, value) == ("op", "("):
+            self._take("op", "(")
+            inner = self._comparison()
+            self._take("op", ")")
+            return inner
+        if (kind, value) == ("op", "{"):
+            return self._object_literal()
+        if kind == "ident":
+            self._take("ident")
+            assert value is not None
+            if value in ("true", "false"):
+                return value == "true"
+            if self._peek() == ("op", "("):
+                return self._call(value)
+            if value not in self.scope:
+                raise AssertionError(_js_unmodelled(value))
+            return self.scope[value]
+        raise AssertionError(_js_unmodelled(self.text))
+
+    def _call(self, name: str) -> object:
+        fn = JS_FMT_CALLS.get(name)
+        if fn is None:
+            raise AssertionError(_js_unmodelled(f"{name}(…)"))
+        self._take("op", "(")
+        args: list[object] = []
+        if self._peek() != ("op", ")"):
+            args.append(self._comparison())
+            while self._peek() == ("op", ","):
+                self._take("op", ",")
+                args.append(self._comparison())
+        self._take("op", ")")
+        assert callable(fn)
+        return fn(*args)
+
+    def _object_literal(self) -> dict[str, object]:
+        self._take("op", "{")
+        obj: dict[str, object] = {}
+        while self._peek() != ("op", "}"):
+            key = self._take("ident")
+            self._take("op", ":")
+            obj[key] = self._comparison()
+            if self._peek() == ("op", ","):
+                self._take("op", ",")
+        self._take("op", "}")
+        return obj
+
+
+#: The value `_js_run` returns when a branch reaches no `return`.
+JS_FMT_FELL_THROUGH = object()
+
+
+def _js_run(statements: list[tuple], scope: dict[str, object]) -> object:
+    """Run the parsed formatter; the value of the FIRST `return` reached."""
+    for stmt in statements:
+        kind = stmt[0]
+        if kind == "if":
+            _, cond_src, block = stmt
+            if _JsExpression(cond_src, scope).parse():
+                value = _js_run(block, scope)
+                if value is not JS_FMT_FELL_THROUGH:
+                    return value
+        elif kind == "var":
+            _, name, expr_src = stmt
+            scope[name] = _JsExpression(expr_src, scope).parse()
+        elif kind == "return":
+            return _JsExpression(stmt[1], scope).parse()
+        else:  # pragma: no cover — `_js_statements` only produces those three
+            raise AssertionError(f"unexpected statement {kind!r}")
+    return JS_FMT_FELL_THROUGH
+
+
 def _js_fmt_price(price: int, mode: str, discount_pct: int) -> tuple[str, str]:
-    """Run the SHARED formatter's arithmetic — the source both pages load — and
-    return the same `(big, total)` pair `_fmt_price` returns.
+    """EXECUTE the shared formatter — the code BOTH pages run — and return the
+    `(big, total)` pair it produces for a visitor in `mode`.
 
-    ⛔ A TRANSLATION of the three bindings the contract is made of, not a text
-    match and not a JS engine: the row that uses it therefore measures
-    AGREEMENT between the code the browser runs and the Python mirror, so a
-    rewritten formula reds even when a substring check would still find a
-    plausible-looking line. `Math.max` / `Math.round` are the only JS-isms in
-    those bindings; anything else is REFUSED rather than guessed at, so a
-    rewrite this cannot execute is a red that says so instead of a silent pass.
+    The dispatch is the SOURCE's: `if (mode === 'annual') { … }` is evaluated
+    against `mode`, and the pair comes from the source's own `return { big: …,
+    total: … }` templates. Nothing here restates the guard, the branch chosen,
+    or either output string — so a mutated guard, a swapped branch or an edited
+    template all disagree with the Python mirror and red the rows that use this.
 
-    Measured at `59bc263091` (#13696 round 11, P2): `var disc = discountPct / 100;`
-    → `var disc = 0 / 100;` left all 158 rows GREEN while both pages rendered
-    annual $9/$25/$149 against the static cards' $7/$20/$119, and
-    `var total = perMonth * 12;` → `Math.round(price * 12 * (1 - disc))` printed
-    `$15/mo` beside `$182 billed annually`.
+    Measured at `3e381c6194` (#13696 round 16, P1): with the previous reader
+    (which took `mode` as its own argument and returned hardcoded strings)
+    `if (mode === 'annual')` → `if (true)` and `' billed annually'` →
+    `' billed yearly'` each left **all 167 rows GREEN**.
     """
     body = _fmt_price_js_body()
-    one_line = " ".join(body.split())
-    if mode != "annual":
-        assert ("return { big: '$' + price, total: 'Billed monthly' };"
-                in one_line), (
-            "the shared formatter no longer returns the monthly pair verbatim, "
-            f"so a monthly visitor's price is unread (#13645):\n{body}")
-        return f"${price}", "Billed monthly"
-    assert "if (price === 0) return { big: '$0', total: 'Free forever' };" in one_line, (
-        "the shared formatter no longer short-circuits the free tier before its "
-        f"math, so $0 would be quoted with a billed total (#13645):\n{body}")
-    if price == 0:
-        return "$0", "Free forever"
-
-    def evaluate(name: str, names: dict[str, object]) -> float:
-        m = FMT_PRICE_BINDING_RE[name].search(body)
-        assert m, (
-            f"the shared formatter no longer binds `var {name} = …`, so its "
-            f"math cannot be executed against the Python mirror (#13696 round "
-            f"11):\n{body}")
-        expr = m.group(1).strip()
-        js = expr.replace("===", "==").replace("!==", "!=")
-        js = js.replace("Math.max", "max").replace("Math.round", "_js_round")
-        for unsupported in ("?", "||", "&&", "=>", "function", "[", "{", "%"):
-            assert unsupported not in js, (
-                f"the shared formatter's `{name}` uses `{unsupported}`, which "
-                "this translation does not model — teach it here rather than "
-                f"letting the row pass blind: {expr!r}")
-        return eval(js, {"__builtins__": {}},
-                    {"max": max, "_js_round": _js_round, **names})
-
-    disc = evaluate("disc", {"discountPct": discount_pct})
-    per_month = evaluate("perMonth", {"price": price, "disc": disc})
-    total = evaluate("total", {"price": price, "disc": disc,
-                               "perMonth": per_month})
-    return f"${per_month}", f"${total} billed annually"
+    inner, _ = _js_bracket_group(body, body.index("{"))
+    program = _js_statements(inner)
+    assert program, (
+        "the shared formatter's body is empty — the display contract has no "
+        f"implementation (#13645):\n{body}")
+    out = _js_run(program, {"price": price, "mode": mode,
+                            "discountPct": discount_pct})
+    assert out is not JS_FMT_FELL_THROUGH, (
+        f"the shared formatter returned nothing for mode={mode!r}, ${price} — "
+        "a visitor in that mode would render `undefined` (#13645). Its own "
+        f"statements decide this, so the guard must branch on `mode`:\n{body}")
+    assert isinstance(out, dict), (
+        f"the shared formatter returns {out!r} instead of a `{{ big, total }}` "
+        f"pair (#13645):\n{body}")
+    missing = {"big", "total"} - set(out)
+    assert not missing, (
+        f"the shared formatter's return object lost {sorted(missing)!r}, so a "
+        f"page would render `undefined` (#13645):\n{body}")
+    return _js_str(out["big"]), _js_str(out["total"])
 
 
 def _render_pricing_fn(html: str) -> str:
@@ -929,9 +1238,27 @@ class TestSharedFormatterMathIsExecuted:
       * `var total = perMonth * 12;` → `Math.round(price * 12 * (1 - disc))` —
         `$15/mo` printed beside `$182 billed annually`.
 
-    The rows below run the source's own bindings (`_js_fmt_price`) against the
-    mirror's cases and a range, so the two implementations are held to EACH
-    OTHER. A formula rewrite reds even where the text still looks right.
+    The rows below EXECUTE the source — its `if (mode === 'annual')` guard, its
+    `var` statements and its two `return { big: …, total: … }` templates — so
+    the two implementations are held to EACH OTHER. A formula rewrite, a
+    swapped branch or an edited template reds even where the text still looks
+    right.
+
+    ⛔ #13696 round 16, P1 (measured at `3e381c6194`): the previous reader took
+    `mode` as its OWN Python argument and returned HARDCODED strings, so the
+    guard and the return templates were never read and three mutants left all
+    **167 rows GREEN** — a monthly visitor was mis-priced with the suite green:
+
+      * `if (mode === 'annual')` → `if (true)` — Monthly then rendered
+        `$20` / `$240 billed annually` on both pages, identically;
+      * `total: '$' + total + ' billed annually'` → `'… billed yearly'`;
+      * `big: '$' + perMonth` → `big: '~$' + perMonth`.
+
+    Restating the dispatch or an output string in Python cannot disagree with
+    itself, so those rows verified their own re-implementation. Everything the
+    rows now measure comes out of the source, and a construct the reader does
+    not model is REFUSED by name (`test_the_reader_refuses_code_it_cannot
+    _execute`) rather than skimmed past.
     """
 
     def test_the_shared_math_agrees_with_the_python_mirror(self):
@@ -971,10 +1298,53 @@ class TestSharedFormatterMathIsExecuted:
             "the shared formatter's math and the Python mirror disagree "
             f"({len(offenders)} of 0..499): {offenders[:5]}")
 
-    def test_monthly_is_left_to_the_verbatim_branch(self):
+    def test_monthly_comes_from_the_sources_own_final_return(self):
+        """The MONTHLY pair is the source's last statement, executed.
+
+        This is the row that would have caught the round-16 P1 on its own: when
+        the reader took `mode` as its own argument, `if (mode === 'annual')` →
+        `if (true)` left this row GREEN while every monthly visitor was quoted
+        the annual price. It now reds because the SOURCE picks the branch and
+        the source's own template prints the pair.
+        """
+        assert _js_fmt_price(25, "monthly", 20) == ("$25", "Billed monthly")
         for price in (0, 9, 25, 149):
             assert _js_fmt_price(price, "monthly", 20) == \
                 _fmt_price(price, "monthly", 20)
+
+    def test_the_reader_refuses_code_it_cannot_execute(self):
+        """Fail CLOSED: a construct the reader does not model is named, not
+        skimmed past.
+
+        `_js_fmt_price` is only honest while an unreadable statement is an
+        ERROR. If the reader ever guessed instead, a rewritten formatter would
+        be graded by whatever residue happened to parse — the exact shape that
+        let three mutants through at `3e381c6194`.
+        """
+        for construct in (
+                "'$' + String(perMonth)",     # a call outside JS_FMT_CALLS
+                "perMonth ?? 0",              # an operator not modelled
+                "tier[0]",                    # a member expression
+        ):
+            try:
+                _JsExpression(construct, {"price": 25}).parse()
+            except AssertionError as exc:
+                assert "does not model" in str(exc), (construct, str(exc))
+            else:  # pragma: no cover - this is the failure
+                raise AssertionError(
+                    f"the reader accepted `{construct}`, which it does not "
+                    "execute — an unreadable formatter would then be graded "
+                    "by whatever residue parses (#13696 round 16)")
+        for statement in ("for (var i = 0; i < 2; i++) {}",
+                          "while (true) {}"):
+            try:
+                _js_statements(statement)
+            except AssertionError as exc:
+                assert "does not model" in str(exc), (statement, str(exc))
+            else:  # pragma: no cover - this is the failure
+                raise AssertionError(
+                    f"the reader accepted the statement `{statement}` — an "
+                    "unmodelled statement must red, not be skipped")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -8473,6 +8843,13 @@ class TestPricingSourceIsShared:
         directly, so a drift where BOTH pages are edited together (and so stay
         identical) still reds here rather than needing the mirror test to
         notice a page it does not read.
+
+        ⛔ #13696 round 16, P1: the pair is derived from `_js_fmt_price`, which
+        EXECUTES `website/assets/tortoise-pricing.js` — the code both pages
+        load — rather than from the Python mirror. That makes this row the
+        "page's rendered pair vs. the formatter's own templates" binding: an
+        edited `return { big: …, total: … }` in the source now reds HERE, on the
+        numbers a visitor reads, and not only in the mirror-agreement rows.
         """
         pricing = _extract_pricing_object()
         disc = pricing["display"]["annual_discount_pct"]
@@ -8485,7 +8862,13 @@ class TestPricingSourceIsShared:
                 f"{name} renders {len(cards)} static cards for {len(order)} tiers")
             for tier_name, card in zip(order, cards, strict=True):
                 tier = pricing["tiers"][tier_name]
-                big, total = _fmt_price(tier["price"], mode, disc)
+                big, total = _js_fmt_price(tier["price"], mode, disc)
+                assert (big, total) == _fmt_price(tier["price"], mode, disc), (
+                    f"the formatter the pages LOAD and the Python mirror disagree "
+                    f"for {tier_name} at ${tier['price']} ({mode}): "
+                    f"source={ (big, total)!r} mirror="
+                    f"{_fmt_price(tier['price'], mode, disc)!r} — one of them now "
+                    "quotes a different number than the other (#13645)")
                 assert card["big"] == big, (
                     f"{name} / {tier_name}: static price {card['big']!r} != "
                     f"{big!r} from the shared source ({mode})")
