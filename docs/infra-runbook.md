@@ -1189,13 +1189,18 @@ while that thread lives, so the leg stays keyword-only. ⛔ **Do not key this of
 reads `cooldown` only for the 60 s after the last refusal and `unavailable` thereafter (nothing
 refreshes `_last_failed_at` on an idle process, and `get()` is the only refresher) — which is also the
 shape of a live FIRST attempt, i.e. the opposite diagnosis. The discriminator is `load_in_progress_s`
-EXCEEDING the bound. The reading resolves by itself when the thread exits (the guard clears, and the
-next `get()` retries once the cooldown has passed). ⛔ This block cannot tell PROGRESS from a WEDGE:
-the elapsed time is wall-clock since the attempt started, so a starved loader may legitimately run
-past its bound (this PR's own bound exists because the same import measured 156.5 s under load).
-Before restarting a machine on this reading, look for other evidence — no further `embedder:` line, a
-stack dump — because a restart throws away an import that may be about to finish and re-pays the whole
-cold cost.
+EXCEEDING the bound — on the SHIPPED path, where the attempt runs under the process default the block
+publishes. An attempt a caller started with `get(load_timeout=…)` runs under ITS OWN bound (see
+`status()`'s note), so compare it against that, not against `load_timeout_s`: a 5 s-bounded attempt
+reading 10 s is abandoned while still reading *below* the published 300 s. The reading resolves by
+itself when the thread exits (the guard clears, and the next `get()` retries once the cooldown has
+passed). ⛔ This block cannot tell PROGRESS from a WEDGE: the elapsed time is wall-clock since the
+attempt started, so a starved loader may legitimately run past its bound (this PR's own bound exists
+because the same import measured 156.5 s under load). Before restarting a machine on this reading,
+get independent evidence — a stack (`py-spy dump --pid`, faulthandler) showing where the import sits;
+an ABSENCE of further `embedder:` lines is NOT that evidence, because the loader logs nothing between
+the timeout line and the load finishing or its overrun ending. A restart throws away an import that
+may be about to finish and re-pays the whole cold cost.
 - **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
 `failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
 `load_failed` (the common one: an import/construct failure in an installed dependency chain),

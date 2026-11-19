@@ -1126,10 +1126,15 @@ class EmbeddingModel:
     def load_attempt_in_flight(cls) -> bool:
         """True while a load ATTEMPT's loader thread is still running (#13674).
 
-        This is the reclaim guard's read. It is deliberately about the THREAD,
-        not about ``_instance``: the whole defect is that the two disagree —
-        ``get()`` clears ``_instance`` on a timeout while the abandoned loader
-        keeps importing, so a retry saw "no instance" and allocated again.
+        The BOOLEAN view of :meth:`load_attempt_snapshot`, for a reader that
+        only needs the verdict. It is deliberately about the THREAD, not about
+        ``_instance``: the whole defect is that the two disagree — ``get()``
+        clears ``_instance`` on a timeout while the abandoned loader keeps
+        importing, so a retry saw "no instance" and allocated again.
+
+        ⛔ The reclaim guard does NOT call this: it takes one snapshot and uses
+        that for both its condition and the line it logs, so the two cannot
+        disagree about whether the attempt was alive.
         """
         return cls.load_attempt_snapshot()[0]
 

@@ -100,6 +100,24 @@ class _Sentinel:
         self.mb = mb
 
 
+class _RecordingLock:
+    """A lock wrapper that records how many times it is currently held."""
+
+    def __init__(self, real):
+        self.real = real
+        self.held = 0
+
+    def __enter__(self):
+        self.real.acquire()
+        self.held += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.held -= 1
+        self.real.release()
+        return False
+
+
 class _Frame:
     """Mutable box so the fake factory can hand state to the test."""
 
@@ -478,9 +496,9 @@ class TestTheBoundAndElapsedAreObservable:
             self, monkeypatch, clean_embedder):
         """ONE snapshot, so the pair cannot tear (#13819 review F1).
 
-        The bug: `status()` called `load_attempt_in_flight()` and then
-        `load_attempt_elapsed_s()`, which reads the thread a SECOND time. A
-        loader that dies between the two reads published
+        The bug: `status()` read the thread once for `load_in_progress` and
+        then AGAIN (through a helper) for `load_in_progress_s`. A loader that
+        dies between the two reads published
         `load_in_progress: true` beside `load_in_progress_s: null` — a pair no
         state of the machine produces, on the surface #13674 exists to make
         readable.
@@ -740,6 +758,42 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "read as 'a previous attempt is still running' (#13674 F5)"
         )
         assert EmbeddingModel.load_attempt_in_flight() is False
+
+    def test_the_attempt_clear_happens_under_the_publish_lock(
+            self, monkeypatch, clean_embedder):
+        """The clear must contend on the lock the PUBLISHER holds (#13841).
+
+        `get()` publishes the attempt record while holding `cls._lock` (it holds
+        it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
+        write). Clearing outside that lock left a window in which a reset could
+        read a published-but-not-yet-started thread (`is_alive()` False), drop
+        the record, and leave a LIVE loader unreferenced: the reclaim guard
+        disarmed, and `load_attempt_snapshot()` publishing
+        `load_in_progress: true` beside `load_in_progress_s: null`.
+
+        Nothing pinned it — re-indenting the block out of `with cls._lock:` left
+        every row green. This row records whether the lock was HELD at the
+        moment `is_alive()` is consulted.
+        """
+        proxy = _RecordingLock(EmbeddingModel._lock)
+        seen = {}
+
+        class _DeadStub:
+            def is_alive(self):
+                seen["held"] = proxy.held
+                return False
+
+        monkeypatch.setattr(EmbeddingModel, "_lock", proxy)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", _DeadStub())
+
+        EmbeddingModel._reset()
+
+        assert seen.get("held") == 1, (
+            "the attempt record was cleared with `_lock` NOT held — a reset can "
+            "race the publisher (`get()` holds it across `__init__`'s write) and "
+            "leave a live loader unreferenced, disarming the reclaim guard "
+            f"(held={seen.get('held')!r})"
+        )
 
     def test_a_reset_drops_the_dead_attempts_bound_too(
             self, monkeypatch, clean_embedder):

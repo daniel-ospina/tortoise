@@ -8557,7 +8557,10 @@ async def health():
     ``available``, ``state`` (``ready``/``cooldown``/``unavailable``),
     ``failure_kind``, the intra-op ``threads`` pin, the load bound
     ``load_timeout_s`` and, for the attempt in flight, ``load_in_progress`` plus
-    ``load_in_progress_s``. It exists because the dense leg being OFF —
+    ``load_in_progress_s`` — plus ``model``, ``last_error``,
+    ``cooldown_remaining_s`` and ``load_elapsed_s``. The authoritative full set is
+    ``_EMBEDDER_HEALTH_KEYS``, which the DEGRADED arm publishes exactly. It exists
+    because the dense leg being OFF —
     keyword-only reads for every query, with every published surface saying
     ``ok`` — was invisible except in a ``fly logs`` line nobody watched. It does
     NOT fold into ``status``: a loading or cooling-down embedder means
