@@ -28,8 +28,11 @@ for them:
 * a healthy wrap tool's envelope is byte-identical (the schema is NOT relaxed);
 * an object-annotated tool's `_safe` error dict is UNCHANGED (the established
   contract, which works);
-* an `anyOf` envelope (`tortoise_query`, `tortoise_delete_entity`) is untouched
-  — a dict `result` is VALID there;
+* an `anyOf` envelope is untouched — a dict `result` is VALID there. The only
+  ADVERTISED union door left is `tortoise_query`; `tortoise_delete_entity` was the
+  second one until #11609 lane P6 retired it (#11609), and its retired name keeps the
+  union schema on the #3883 shim, which the advertised registry the sweep walks does
+  not carry;
 * the second trigger of the same class — the wait-bound refusal, whose payload
   has no `result` key at all — is repaired too;
 * the raw tool FUNCTION still returns the `_safe` error dict: the repair lives
@@ -243,8 +246,10 @@ async def test_an_object_tool_keeps_its_structured_error(quiet):
 
 @pytest.mark.asyncio
 async def test_an_anyof_envelope_is_left_alone(quiet):
-    """`tortoise_query` / `tortoise_delete_entity` advertise `anyOf`, where a
-    dict `result` is VALID — repairing them would break a working surface."""
+    """`tortoise_query` advertises `anyOf`, where a dict `result` is VALID — repairing
+    it would break a working surface. It is the only advertised union door at this head:
+    `tortoise_delete_entity`, the other one when this probe was written, retired in
+    #11609 lane P6 and now lives on the #3883 shim, outside the swept population."""
     def _union() -> list[dict] | dict:
         return {"error": "page must be >= 1 (1-based), got 0"}
 
@@ -619,13 +624,18 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # number because its job is NON-VACUITY: with 1 union the `_SAFE_FAILURE`-admitted
     # branch above still runs, and the moment that door went the branch would be skipped
     # silently if this were 0.
-    assert typed >= 10 and unions >= 1, (
-        f"sweep found {typed} typed + {unions} union envelopes; measured at "
-        "10 + 1 at this head — 10 + 2 after #11609 batch 1 archived "
-        "`tortoise_packs_list` (11 + 2 when this guard was written), and the second "
-        "union door went with #11609 P6's `tortoise_delete_entity` retirement. "
-        "Shrinkage is what this floor guards, so it "
-        "follows a deliberate removal; growth is covered by the loop itself.")
+    # The floors are NAMED and interpolated so the failure text cannot drift away
+    # from them. Restating them as literals in the message is a second copy of the
+    # floor, and the copy is what goes stale — this message still claimed "10 + 2"
+    # long after P6 took `unions` to 1, which steered the next operator to a
+    # population that no longer existed (review finding, #13648).
+    floor_typed, floor_unions = 10, 1
+    assert typed >= floor_typed and unions >= floor_unions, (
+        f"sweep found {typed} typed + {unions} union envelopes; the floors are "
+        f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
+        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1). "
+        "Shrinkage is what this floor guards, so it follows a deliberate "
+        "removal; growth is covered by the loop itself.")
 
 
 @pytest.mark.asyncio
