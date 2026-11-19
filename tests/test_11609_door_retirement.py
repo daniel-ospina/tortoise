@@ -78,9 +78,11 @@ THAT UNBLOCKS IT, not silently:
     leave the held list only in the batch that makes its stated reason untrue, with a
     test behind it, not silently and not in two steps.
 
-  8 (envelope) + 1 (rest_spec: `search` — `issue_insight`/`session_context` retired in lane P6)
-  + 1 (paged destination) + 0 (no arm) + 7 (destination not an MCP door yet — the DELETE pair
-  retired in the same lane) = 17, and
+  9 (envelope: the six READ doors, `check_structure`, `calibrate_summary`, and `search` — whose
+  `rest_spec` cell is a RECORD, not a retention reason, and whose own annotation is
+  `-> list[dict]`) + 0 (rest_spec as a retention reason: measured FALSE, §1.5) + 1 (paged
+  destination) + 0 (no arm) + 7 (destination not an MCP door yet — the DELETE pair retired in
+  lane P6) = 17, and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
@@ -291,7 +293,7 @@ PROTECTED = {
     # `list[dict]` ENVELOPE, not by the route; its `rest_spec` cell is a recorded fact about
     # a route that exists independently, never a retention reason. `issue_insight` /
     # `tortoise_session_context` sat here on the false reason and left in #11609 lane P6.
-    "tortoise_search": "list envelope + rest_spec GET /v1/search",
+    "tortoise_search": "list envelope (#8482); its rest_spec cell (GET /v1/search) is a RECORD, not a reason",
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
     # No arm on the recorded container.
@@ -830,8 +832,10 @@ class TestProtectedDoorsStayLive:
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
     review F3):
 
-      · 8 envelope doors — the `-> list[dict]` annotation, from `inspect.signature`;
-      · 1 `rest_spec` door (`search`) — the registry entry's own `rest_spec`;
+      · 9 envelope doors — the `-> list[dict]` annotation, from `inspect.signature` (this is
+        also `search`'s real reason: its `rest_spec` cell is a record, never a gate — §1.5);
+      · 0 `rest_spec` doors — the category is EMPTY on this tree, because the coupling is
+        measured FALSE for every door that ever claimed it;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
         and the paging parameters those pointers and the live door agree on;
       · 0 "no arm on the recorded container" doors — the category is EMPTY, and that is
@@ -889,7 +893,7 @@ class TestProtectedDoorsStayLive:
         "tortoise_search_sessions", "tortoise_suggest_entry_points",
         "tortoise_list_batches", "tortoise_list_namespaces", "tortoise_diary_read",
         "tortoise_expand_relationships", "tortoise_check_structure",
-        "tortoise_calibrate_summary",
+        "tortoise_calibrate_summary", "tortoise_search",
     ])
     def test_the_list_envelope_is_still_what_keeps_it_live(self, name):
         annotation = inspect.signature(
@@ -909,7 +913,8 @@ class TestProtectedDoorsStayLive:
         the message must not teach the measured-false mechanism. ⛔ The coupling is FALSE
         (the route is a hand-written decorator; no product module derives one from a row),
         so removing this cell is NOT a retirement gate: what keeps `search` live is its
-        `list[dict]` envelope, pinned by the arm above and by
+        `list[dict]` envelope, pinned by `test_the_list_envelope_is_still_what_keeps_it_live`
+        (this file, which now covers `search`) and by
         `tests/test_11609_structural_blockers.py::test_the_search_door_is_held_by_the_envelope_not_the_route`.
         """
         entry = _live()[name]

@@ -2980,9 +2980,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     # `·` bullets above already enumerate every name that stays live, and a retired name is
     # not one of them. The HELD names above are 17 of the 17 live names off the 27-target —
     # if you find a live name that is not on the target and not in that list, the list is
-    # incomplete and that name is NOT safe to retire. (The earlier form of this sentence
-    # added the RETIRED seven to the held seventeen and printed that sum as the population;
-    # the summands totalled 24, a review of #13687 measured it, and the clause was dropped.)
+    # incomplete and that name is NOT safe to retire. (The earlier form of this sentence read
+    # "the names above PLUS these seven are 17 of the 17 live names" — it printed 17, but it
+    # folded the seven RETIRED rows INTO that 17, implying the held bullets above add up to 10
+    # when they add up to 17. The summands were 17 + 7 = 24 against a stated total of 17; a
+    # review of #13687 measured it and the clause was dropped.)
     # (It was 25 before the #11609 P1, P2 and P6 waves left it there, with their arms:
     # `create_point`/`diary_write` in P1, `compute_confidence`/`recall` in P2, the
     # `rest_spec` pair and the DELETE pair in P6 — 25 -> 23 -> 21 -> 19 -> 17, one pair per

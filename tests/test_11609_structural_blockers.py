@@ -1283,7 +1283,7 @@ def test_a_dict_annotation_cannot_be_the_answer():
         _probe(dict)
 
 
-# ── the REST route dies with its registry row ────────────────────────────────
+# ── the REST route SURVIVES its registry row — the recorded coupling is FALSE ──
 
 class _RecordingRouter:
     """The one method `FastAPIRouterAdapter` calls."""
@@ -1327,7 +1327,10 @@ def test_the_served_route_is_hand_written_and_nothing_reads_the_row(door, spec):
     entry = _any_entry(door)
     assert entry is not None, f"{door} is not advertised — re-derive this pin"
     assert entry.rest_spec is not None, (
-        f"{door} lost its `rest_spec`, which is the only thing `PROTECTED` cites for it")
+        f"{door} lost its `rest_spec` CELL. That cell is a record of a route that exists "
+        "independently — it is NOT what retains the door and not what `PROTECTED` cites "
+        "(§1.5: the coupling is measured false). Re-derive why the cell moved before "
+        "retiring anything")
     assert (entry.rest_spec.method, entry.rest_spec.path) == (method, path), (
         f"{door}'s `rest_spec` moved to {entry.rest_spec.method} {entry.rest_spec.path}, "
         f"not {method} {path}")
