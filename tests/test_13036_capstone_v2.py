@@ -148,9 +148,12 @@ row's to decide, and are recorded instead of absorbed:
   (see ``HTTP_POLICY_DISAGREEMENTS``). A new
   ``test_every_http_excluded_tool_is_accounted_for`` binds the file to
   ``http_policy`` so the registry is the authority and this cannot drift silently.
-* ``approve_merge``'s success arm, ``manage_sources(enable)`` and
-  ``check_confidence(topic=)`` cannot be driven on this lane — see ``ARM_GAPS``.
-  They are recorded as gaps, never as passes.
+* ``approve_merge``'s success arm and ``manage_sources(enable)`` cannot be driven
+  on this lane — see ``ARM_GAPS``. They are recorded as gaps, never as passes.
+  (``check_confidence(topic=)`` was in that list and is NOT a gap: the arm resolves
+  the topic as an ENTITY and reads the ``decision`` Points ``aboutObject``-linked to
+  it, so the seed now carries that shape and the payload is asserted as that chain
+  — the earlier entry measured a seed defect, not the arm.)
 """
 
 from __future__ import annotations
@@ -204,10 +207,6 @@ ARM_GAPS: dict[str, str] = {
         "ARM GAP — the `enable` arm requires a connected GitHub account and refuses "
         "by naming that (`GitHub not connected`). The `list` and `disable` arms are "
         "driven, and `disable` is read back through `list`.",
-    "tortoise_check_confidence(topic)":
-        "ARM GAP — MEASURED: `topic='capstone-topic'` returns an EMPTY list even "
-        "for a claim seeded with that topic verbatim, so the arm is asserted as the "
-        "collection it returns rather than as content it does not return.",
 }
 
 #: Live tools whose DECLARED `http_policy` and OBSERVED tenant-HTTP behaviour
@@ -327,10 +326,19 @@ def seeded(tmp_path, monkeypatch):
         credibility="high")["id"]
     s["claim2"] = sdk.create_point(
         "statement", "A second seeded claim, the operator's target.")["id"]
-    # A TOPIC-TAGGED claim, for the `check_confidence(topic=…)` arm.
-    s["topical"] = sdk.create_point(
-        "statement", "A topic-tagged claim about capstone retrieval.",
-        topic="capstone-topic")["id"]
+    # ── the `check_confidence(topic=…)` seed ───────────────────────────────
+    # That arm dispatches to `belief_timeline`, which RESOLVES the topic as an
+    # ENTITY and returns the `decision` Points `aboutObject`-linked to it. A Point
+    # carrying a `topic=` PROPERTY is a different shape altogether: it is not an
+    # Object and owns no edge, so that seed answers `[]` STRUCTURALLY. The earlier
+    # draft seeded the property and recorded the empty answer as a measured
+    # "arm gap", i.e. it read as "this tool is broken" when it was the seed.
+    s["topic"] = "capstone-topic"
+    s["topic_object"] = sdk.create_object(
+        "capstone-topic", objectKind="core:thing")["id"]
+    s["topic_decision"] = sdk.create_point(
+        "decision", "The capstone retrieval window ships in Q3.")["id"]
+    sdk.create_edge("aboutObject", s["topic_decision"], s["topic_object"])
     s["object"] = sdk.create_object("Widget", objectKind="core:thing")["id"]
     s["subject"] = sdk.create_subject("Alice")["id"]
     s["source"] = sdk.register_source("https://example.test/a", "web")["id"]
@@ -996,11 +1004,26 @@ class TestWritesAreReadableBack:
 # 5 — GRAPH OVERVIEW: one case per `section=` arm
 # ══════════════════════════════════════════════════════════════════════════
 
-_OVERVIEW_SECTIONS = (
-    "taxonomy", "structure", "structure_check", "pointkinds", "tags", "sources",
-    "namespaces", "graphs", "topics", "health", "status", "stale",
-    "validate_domain", "audit",
-)
+#: The `section=` table: every absorbed source, with the SHAPE its own door
+#: returns. It is the parametrize TABLE itself, not a second copy beside it — the
+#: previous cut carried a parallel 14-name tuple that nothing read, so it could
+#: not fail under any mutant while reading as if the section set were bound.
+_OVERVIEW_SECTIONS: dict[str, type] = {
+    "taxonomy": dict,
+    "structure": dict,
+    "structure_check": list,
+    "pointkinds": list,
+    "tags": list,
+    "sources": list,
+    "namespaces": list,
+    "graphs": list,
+    "topics": dict,
+    "health": dict,
+    "status": dict,
+    "stale": dict,
+    "validate_domain": dict,
+    "audit": dict,
+}
 
 
 class TestGraphOverviewSections:
@@ -1012,22 +1035,7 @@ class TestGraphOverviewSections:
     drifted to another door's shape (a dict where a list belongs) fails.
     """
 
-    @pytest.mark.parametrize("section,expected", [
-        ("taxonomy", dict),
-        ("structure", dict),
-        ("structure_check", list),
-        ("pointkinds", list),
-        ("tags", list),
-        ("sources", list),
-        ("namespaces", list),
-        ("graphs", list),
-        ("topics", dict),
-        ("health", dict),
-        ("status", dict),
-        ("stale", dict),
-        ("validate_domain", dict),
-        ("audit", dict),
-    ])
+    @pytest.mark.parametrize("section,expected", sorted(_OVERVIEW_SECTIONS.items()))
     def test_each_section_answers_its_own_type(self, seeded, section, expected):
         door, s, _ = seeded
         args = {"section": section}
@@ -1246,27 +1254,59 @@ class TestConfidenceArms:
         assert out.get("no_prior_sessions") is False, out
         assert s["claim"] in _ids(out.get("recent_points")), out
 
-    def test_topic_arm_answers_a_collection(self, seeded):
-        """`topic=` is dispatched per topic. MEASURED on this head: it answers an
-        empty list for the seeded topic-tagged claim, so the correct payload is
-        the collection it returns — asserted as a list, and NOT reported as
-        returning the seeded claim, which it does not."""
+    def test_topic_arm_returns_the_decision_chain_for_the_topic(self, seeded):
+        """`topic=` dispatches to `belief_timeline`, whose contract is the `decision`
+        Points `aboutObject`-linked to the topic ENTITY — so the seed carries an
+        Object plus a decision Point wired to it, and the payload is asserted as
+        that chain. (A Point carrying a `topic=` property is not an entity and
+        owns no edge: asserting its empty answer would have been a seed defect
+        recorded as a measurement.)"""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence",
-                                {"topic": "capstone-topic"})
+                               {"topic": s["topic"]})
         assert status == 200
-        assert isinstance(out, list), out
-        assert not (isinstance(out, dict) and out.get("error")), out
+        assert isinstance(out, list) and out, out
+        assert all(r.get("pointKind") == "decision" for r in out), out
+        contents = [r.get("content") or "" for r in out]
+        assert any("capstone retrieval window" in c for c in contents), (
+            "the chain must carry the seeded decision Point, not just any "
+            f"decision Points: {out}")
 
     def test_recompute_arm_returns_confidence_numbers(self, seeded):
-        """`recompute=True` refuses to be combined with `claim_id` — it selects
-        its own arm — so it is driven alone."""
+        """`recompute=True` refuses to be combined with `claim_id` — it selects its
+        own arm — so it is driven alone, ANCHORED on the calibrated seed.
+
+        The anchor is load-bearing: over HTTP with neither `factors` nor `anchors`
+        the retired door short-circuits a clean request-scoped SDK to
+        `diagnostic: "no_dirty_state_http"`, so an unanchored call would assert the
+        short-circuit instead of the arm. The payload is what the arm EXISTS for:
+        a per-point posterior, so a refusal envelope or an empty `confidences` map
+        must fail this row."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_check_confidence", {"recompute": True})
+        status, out = door.call("tortoise_check_confidence", {
+            "recompute": True,
+            # anchor the seeded CLAIM: it is the target of the seeded IMPL
+            # operator, so the BFS selection from it reaches a real factor set.
+            # An isolated anchor (one that reaches no factor) answers the
+            # `no_factors` early return, which is a different arm.
+            "anchors": [s["claim"]],
+            # explicit opt-out: the arm's fail-closed default (True, #344) refuses
+            # a subgraph containing an uncalibrated point, which would test the
+            # calibration gate rather than the posterior this row is about.
+            "require_calibration": False,
+        })
         assert status == 200
-        assert not (isinstance(out, dict) and "cannot be combined" in str(
-            out.get("error", ""))), out
-        assert out is not None, out
+        assert isinstance(out, dict), out
+        assert "error" not in out, out
+        assert "no_dirty_state_http" != out.get("diagnostic"), out
+        assert "no_factors" != out.get("diagnostic"), out
+        confidences = out.get("confidences")
+        assert isinstance(confidences, dict) and confidences, out
+        assert s["claim"] in confidences, out
+        posterior = confidences[s["claim"]]
+        assert isinstance(posterior, dict), posterior
+        assert 0.0 <= float(posterior["mean"]) <= 1.0, posterior
+        assert float(posterior["variance"]) >= 0.0, posterior
 
     def test_calibrate_arm_answers_the_calibration_view(self, seeded):
         door, s, _ = seeded
