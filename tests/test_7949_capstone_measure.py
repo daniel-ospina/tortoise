@@ -16507,7 +16507,14 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
         "tracked file, so one would join the population it measures",
     ),
     (
-        "`:45728`, a DIFFERENT call site",
+        # ⛔ No frame: the CONNECTIVE is not part of the reading, which is the rule entry
+        # 3 states below, applied here after it was measured to be missing (#13809
+        # review, cycle 2, P2 — MEASURED: with ``, a `` welded to this literal, the
+        # `is`, `—` and `,` spellings of the SAME refuted claim all read GREEN, i.e. the
+        # pin only caught the one head it was written at). The predicate alone is
+        # specific here: the corrected row says `a name in a DIFFERENT import list — ⛔
+        # **not a call site**`, which does not contain it.
+        "a DIFFERENT call site",
         "measured at this head: `:45728` is a NAME in an import list "
         "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
@@ -16535,6 +16542,11 @@ _D5_REFUTED_READINGS: tuple[tuple[str, str], ...] = (
 
 #: A double-quoted span, stripped before the absence test: in this document family that
 #: is how a RETRACTION marks the wording it deletes, so a quotation is never an assertion.
+#: ⛔ Code formatting is stripped too, and for the same reason: the BACKTICKS are not part
+#: of the reading. With them kept on a literal, a restatement without them read GREEN —
+#: `and :14471 is a bare # comment marker` escaped a literal that pinned a bare `#`
+#: (#13809 review, cycle 2, P2 — MEASURED). A guard that only catches the exact typography
+#: of one head is the false pass this pin exists to prevent.
 _D5_QUOTED_SPAN = re.compile(r'"[^"]*"')
 
 
@@ -16559,9 +16571,9 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
         if line.lstrip().startswith("| **D5** |")
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
-    asserted = _D5_QUOTED_SPAN.sub("", d5[0]).casefold()
+    asserted = _D5_QUOTED_SPAN.sub("", d5[0]).replace("`", "").casefold()
     restated = [f"  {claim!r} — {why}" for claim, why in _D5_REFUTED_READINGS
-                if claim.casefold() in asserted]
+                if claim.replace("`", "").casefold() in asserted]
     assert not restated, (
         "the D5 row restates a reading a measurement refuted:\n" + "\n".join(restated))
 
