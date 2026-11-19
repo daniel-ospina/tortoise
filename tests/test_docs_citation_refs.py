@@ -888,6 +888,12 @@ _INDEX_REPOINT_CLAIMS = (
     # which is the fail-open Finding 2 names in its second form. Both are absent here.
     "re-points it once more, to",
     "re-pointed that cite once more",
+    # ⛔ The THIRD spelling with no counterpart (#13802 review, finding 2, residual — one
+    # instance over from the two above): on a head whose cite sets DIFFER the
+    # `_attributions` arm stands down, and without this entry the live-diff arm below
+    # does not know this phrasing either, so the attribution is covered by NEITHER arm.
+    # Absent here, measured.
+    "re-pointing that row's `sdk.py` cite from",
 )
 
 
