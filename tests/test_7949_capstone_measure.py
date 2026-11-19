@@ -6156,7 +6156,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
-        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — and `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`, which is what the rows below carry) — each re-read by content at the head that moved it.
+        # stayed wrong in both. ⛔ RE-DERIVED at `#13486`, whose own `sdk.py` insert is +36 above it: `12074`/`12127` -> `12110`/`12163`, measured, never nudged; then `#13535` added +2 above the definition (`7031` -> `7033`), `#13466` a further +15 (`7033` -> `7048`) and +5 above the `sdk.py` pair (`12111`/`12164` -> `12116`/`12169`) — and `#13556` then added a further `+20` (`12116`/`12169` -> `12136`/`12189`) and `#12894`'s 32 comment lines above the `_registry_cache` anchor carry the pair to `12168`/`12221`, which is what the rows below carry — each re-read by content at the head that moved it.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
             ("7201", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
@@ -6169,7 +6169,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
-        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12136`/`12189` pair the rows now carry (`#13556` then added a further `+20`).
+        # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12136`/`12189` pair the rows now carry at `12168`/`12221` (`#13556` then added a further `+20`, and `#12894`'s 32 comment lines above the `_registry_cache` anchor a further `+32`).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("12168", "subject_binding_available,"),
             ("12221", "and not subject_binding_available(graph):"),
@@ -16516,7 +16516,7 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
     `r[key] = st[key]` — neither line carries the symbol, so a reader
     following the second pair landed on unrelated code. It was green because the two
     `_pin_row_failures` rows scoped to that line carry ONLY the opening pair's numbers
-    (`:6167`-`:6176` name `7048`, `12136`, `12189`) and NO row anywhere names `12110` or
+    (`:6161`/`:6168` name `7201`, `:6164`/`:6165`/`:6174`/`:6175` name `12168`/`12221` at this head) and NO row anywhere names `12110` or
     `12163` (`grep -nE '12110|12163'` finds comment lines and this docstring only) — so
     the trailing pair was read by nothing at all, which is why it could sit there
     contradicting the opening pair indefinitely. A row proves ITS OWN number is somewhere
