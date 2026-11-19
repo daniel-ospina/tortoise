@@ -566,7 +566,7 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "measures sends the next reader to repair drift that does not exist "
             "(#13750 review, cycle 1)")
     else:
-        for green in _green_claims + ("exits 0", _green_witness):
+        for green in (*_green_claims, "exits 0", _green_witness):
             assert green not in doc, (
                 f"05-verify.md asserts {green!r} while `--check` exits {verdict} here "
                 "(measured in-process with the module's own `_sweep`). A merge would put "
