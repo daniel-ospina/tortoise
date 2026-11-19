@@ -1111,14 +1111,16 @@ class EmbeddingModel:
         the very instrument #13674 exists to make readable. This snapshot is the
         ONLY reader, so the published fields are one reading, not two.
 
-        ⛔ It reads THREE class attributes and takes no lock (it must not:
-        ``get()`` holds ``cls._lock`` for the whole load, so a locked read here
-        would park ``/health`` up to the bound). The reads are therefore
-        consistent only because the PUBLISHER writes them in the reverse order —
-        ``_load_started_at`` before ``_load_attempt_thread`` (see
-        ``__init__``), so a thread this function can see always already has its
-        own start time. Reading the fields in the other order, or reordering
-        either side, restores the torn pair.
+        ⛔ It reads THREE class attributes (thread, start clock, bound) and takes
+        no lock (it must not: ``get()`` holds ``cls._lock`` for the whole load,
+        so a locked read here would park ``/health`` up to the bound). The reads
+        are therefore consistent only because the PUBLISHER writes them in the
+        FULL REVERSE order — ``_load_attempt_timeout_s``, then
+        ``_load_started_at``, then ``_load_attempt_thread`` (see ``__init__``) —
+        so a thread this function can see always already has its own start time
+        and its own bound. Reading the fields in the other order, dropping one
+        field from the writer's sequence, or reordering either side restores a
+        torn pair (a live thread beside the PREVIOUS attempt's clock or bound).
         """
         thread = cls._load_attempt_thread
         started = cls._load_started_at
@@ -1942,12 +1944,15 @@ class EmbeddingModel:
         # ``load_in_progress_s: null``, the pair the snapshot exists to make
         # impossible. Do not reorder these two lines without also reordering the
         # reader; `test_the_attempts_clock_is_published_before_its_thread` reds.
+        # #13819 review F3: the bound THIS attempt runs under, so the reclaim
+        # warning quotes it rather than the class default. ⛔ Written FIRST —
+        # `load_attempt_snapshot()` reads thread → clock → bound with no lock, so
+        # the writer has to be a full reverse of that or a lock-free reader can
+        # pair a live NEW thread with the PREVIOUS attempt's bound (#13841).
+        type(self)._load_attempt_timeout_s = timeout
         type(self)._load_started_at = _attempt_started_at
         type(self)._load_attempt_thread = t
         type(self)._load_attempt_abandoned = abandoned
-        # #13819 review F3: record the bound THIS attempt runs under, so the
-        # reclaim warning quotes it rather than the class default.
-        type(self)._load_attempt_timeout_s = timeout
         # #4055: stamp the attempt BEFORE the join so a wait-bound seam on the
         # event loop can see it while this thread blocks here, and clear it in
         # a ``finally`` so the stamp cannot outlive the join timeout. A

@@ -1211,16 +1211,18 @@ which needs runtime egress to PyPI (the same sandbox that could hang a runtime H
 nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER` unset in
 `fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
 (`tools/embedder_provision.py`) is a CI tool that is not in the image. A fatal signal dumps nothing
-either — without `enable()` the default handler prints no Python traceback — so `kill -ABRT` only
-ends the load and proves nothing. (2) **An in-process `sys._current_frames()` dump from a fresh
+either — without `enable()` the default handler prints no Python traceback — so `kill -ABRT` kills
+the PROCESS (on Fly: a machine exit and a fresh cold start), not just the load, and still proves
+nothing. It is the restart the passage above tells you not to take. (2) **An in-process `sys._current_frames()` dump from a fresh
 interpreter** sees its OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
 `LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread — so the
 loop keeps ticking, the sampler never fires, and it could not show the loader's frames anyway. It is
-the same trap the counter rule under *Arming the Postgres record — `TORTOISE_RECORD_DSN`* names: a
-fresh interpreter reads a fresh process (`0` there, its own frames here). (3) **Absence of further
-`embedder:` lines** — the
+the same trap the counter rule under *Arming the Postgres record — `TORTOISE_RECORD_DSN`* (#9548)
+names: a fresh interpreter reads a fresh process (`0` there, its own frames here). (3) **Absence of
+further `embedder:` lines** — the
 LOADER logs nothing between the timeout line and the load finishing or its overrun ending. The one
-`embedder:` line an overrun CAN produce comes from the READ path, not the loader: `embedder: a
+`embedder:` line an overrun produces WHILE IT IS STILL RUNNING comes from the READ path, not the
+loader: `embedder: a
 previous load attempt is STILL RUNNING (<elapsed>) — refusing to start a second one`, at most once
 per 60 s cooldown while traffic asks for an embedding. Its growing `elapsed` is the same wall-clock
 since the attempt started that `load_in_progress_s` publishes — the datum this section says cannot

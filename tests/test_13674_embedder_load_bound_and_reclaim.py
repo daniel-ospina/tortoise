@@ -859,12 +859,20 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         source = inspect.getsource(EmbeddingModel.__init__)
         clock = source.index("_load_started_at = _attempt_started_at")
         thread = source.index("_load_attempt_thread = t")
+        bound = source.index("_load_attempt_timeout_s = timeout")
         assert clock < thread, (
             "the attempt's THREAD is published before its CLOCK — "
             "`load_attempt_snapshot()` takes no lock and reads the thread "
             "FIRST, so it can pair a live thread with the PREVIOUS attempt's "
             "start time (a huge elapsed) or with None: `load_in_progress: "
             "true` beside `load_in_progress_s: null` (#13841 review)"
+        )
+        assert bound < thread, (
+            "the attempt's BOUND is published AFTER its thread — the reader "
+            "reads thread then clock then bound, so a lock-free read can pair a "
+            "live NEW thread with the PREVIOUS attempt's bound (or with None → "
+            "the 300 s default, which is the #13819 F3 misdirection back on the "
+            "warning path). Write the bound FIRST (#13841 review)"
         )
 
         reader = inspect.getsource(EmbeddingModel.load_attempt_snapshot)
