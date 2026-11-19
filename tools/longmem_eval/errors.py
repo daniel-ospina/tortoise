@@ -184,9 +184,20 @@ def infra_failure(exc: BaseException) -> bool:
     Everything else — a ``TypeError``/``KeyError``/``RuntimeError`` from our
     own code, and the deterministic redis refusals above — is excluded.
 
-    ⚠️ Deliberately NOT in scope: a bare ``ResponseError('Query timed out')``
-    matches none of the three families, so it stays excluded — which is what
-    it did before this change. Adding it would be a new decision, not a fix.
+    ⚠️ Deliberately NOT in scope, and it IS a change: a bare
+    ``ResponseError('Query timed out')`` (also ``LOADING``, ``READONLY``,
+    ``OOM command not allowed``) matches none of the three families, so it is
+    excluded here. The ``isinstance(exc, RedisError)`` arm this replaced
+    ADMITTED every one of them — base-class membership says nothing about
+    recoverability — so their persisted flag flips ``true`` → ``false`` on this
+    release. That is the intended direction (a persisted ``retryable: true`` is
+    what spends ~25 min per attempt) and the SAFE one: a false ``False`` leaves
+    a retained entry an operator can see and hand-recover, where a false
+    ``True`` silently burns the budget. It is NOT free — a server query timeout
+    at ingest is genuinely transient, and a resume now skips it until someone
+    admits the family explicitly. Naming those families is a separate decision
+    with its own budget question, so it is recorded in the plan (§12) rather
+    than taken here.
     """
     return (retryable_transient(exc)
             or graph_abort_family(exc)

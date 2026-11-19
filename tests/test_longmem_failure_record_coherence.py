@@ -11,9 +11,12 @@ persisted this entry for question ``c5e8278d``::
 
 Three separate defects, pinned here as one invariant each:
 
-1. ``retryable`` is derived from the entry's ``error_class`` — a recoverable
-   class can never be written ``retryable: false`` (the resume gate keys on the
-   flag, so the contradiction is a silent skip, not a visible error).
+1. ``retryable`` is derived from the entry's ``error_class`` **AND** an infra
+   predicate (``errors.py::failure_is_recoverable``) — a recoverable class is
+   NOT on its own enough, so a deterministic FAILURE inside a recoverable class
+   is written ``retryable: false`` legitimately (the resume gate keys on the
+   flag, so what must never happen is a *recoverable, infra* failure graded
+   ``false``: that is the silent skip, not a visible error).
 2. ``attempts`` counts pipeline attempts made, so ``retries_exhausted`` can
    never be paired with ``attempts: 0``.
 3. ``error_detail`` carries ``str(exc)`` — the ONLY place a redis/FalkorDB
@@ -374,9 +377,17 @@ def test_the_persisted_repr_is_scrubbed_too():
 
 
 def test_the_legacy_rescue_still_matches_after_scrubbing():
-    """``_legacy_repr_match`` greps the persisted ``error`` for a transport
-    class name; redaction must not remove it, or a pre-feature checkpoint stops
-    being recoverable."""
+    """Redaction must not remove the transport CLASS NAME from ``error``.
+
+    This is an over-redaction guard, not a rescue-path guard: ``_legacy_repr_match``
+    is consulted only when ``retryable is None`` (``run.py:1367``), and every
+    entry ``_failure_entry`` writes carries a bool, so no entry this version
+    scrubs can reach that branch. What it pins is the weaker property that makes
+    the legacy path safe to keep: ``redact_secrets`` rewrites credential-SHAPED
+    spans only, so the substring ``TimeoutError`` survives byte-identical. A
+    redactor that rewrote whole tokens would break the legacy read of an
+    on-disk checkpoint, which is the failure this guards against.
+    """
     exc = TimeoutError("connect failed for redis://u:pw@db.internal:6379/0")
     err = _entry(exc)["error"]
     assert "TimeoutError" in err

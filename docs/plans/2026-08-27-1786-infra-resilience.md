@@ -368,3 +368,20 @@ unknown command`, and redis-py's client-side `DataError`), which a coarser
 `isinstance(exc, RedisError)` reading would have re-admitted. P2-2 (provider
 transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
 re-attemptable) both still hold, and both are pinned by tests.
+
+**The one narrowing this makes, stated rather than implied — a bare
+`ResponseError` leaves the recoverable set.** Base-class membership admitted
+every redis exception, including a server query timeout. The three named
+families do not, so `ResponseError('Query timed out')` — and `LOADING`,
+`READONLY`, `OOM command not allowed` with it — now persists `retryable: false`
+where the previous head wrote `true`. The direction is deliberate (a persisted
+`true` is what spends ~25 min per attempt, and `false` leaves a retained entry
+an operator can see and hand-recover), and it is NOT a claim of equivalence: a
+query timeout at ingest is genuinely transient, and a `--retry-failed` resume
+skips it until someone admits that family explicitly. That admission is a
+separate decision with its own budget question (`READONLY` is a replica
+configuration and re-attempting it is pointless; `OOM` and `LOADING` usually
+clear on their own), so this amendment records the narrowing instead of
+settling it. Pinned by the REFUSE table in
+`tests/test_longmem_failure_record_coherence.py` (the four deterministic rows
+fail if the base-class arm returns) and by the ADMIT table beside it.
