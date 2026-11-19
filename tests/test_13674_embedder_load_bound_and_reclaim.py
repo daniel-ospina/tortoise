@@ -768,8 +768,8 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
         write). Clearing outside that lock left a window in which a reset could
         read a published-but-not-yet-started thread (`is_alive()` False), drop
         the record, and leave a LIVE loader unreferenced: the reclaim guard
-        disarmed, and `load_attempt_snapshot()` publishing
-        `load_in_progress: true` beside `load_in_progress_s: null`.
+        disarmed, and the block reporting `load_in_progress: false` while a
+        loader runs (a silent false negative).
 
         Nothing pinned it — re-indenting the block out of `with cls._lock:` left
         every row green. This row records whether the lock was HELD at the

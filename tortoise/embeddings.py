@@ -1126,11 +1126,13 @@ class EmbeddingModel:
     def load_attempt_in_flight(cls) -> bool:
         """True while a load ATTEMPT's loader thread is still running (#13674).
 
-        The BOOLEAN view of :meth:`load_attempt_snapshot`, for a reader that
-        only needs the verdict. It is deliberately about the THREAD, not about
-        ``_instance``: the whole defect is that the two disagree — ``get()``
-        clears ``_instance`` on a timeout while the abandoned loader keeps
-        importing, so a retry saw "no instance" and allocated again.
+        The BOOLEAN view of :meth:`load_attempt_snapshot`. ⛔ NO production
+        caller: ``get()`` reads the snapshot itself, so this exists for the
+        suite's assertions and to keep the guard's predicate nameable — it is
+        about the THREAD, not about ``_instance``: the whole defect is that the
+        two disagree — ``get()`` clears ``_instance`` on a timeout while the
+        abandoned loader keeps importing, so a retry saw "no instance" and
+        allocated again.
 
         ⛔ The reclaim guard does NOT call this: it takes one snapshot and uses
         that for both its condition and the line it logs, so the two cannot
@@ -1812,10 +1814,12 @@ class EmbeddingModel:
         # it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
         # write). Clearing outside it left a window in which a reset could read
         # a thread published-but-not-yet-started (`is_alive()` False), drop the
-        # record, and leave a LIVE loader with no reference — the reclaim guard
-        # disarmed, and `load_attempt_snapshot()` publishing
-        # `load_in_progress: true` beside `load_in_progress_s: null`, the very
-        # torn pair it exists to prevent (#13819 review).
+        # record, and leave a LIVE loader with no reference: the reclaim guard
+        # disarmed, and the block reporting `load_in_progress: false` while a
+        # loader runs — a silent FALSE NEGATIVE on the instrument #13674 exists
+        # to make truthful. (The torn `true`/`null` pair this snapshot also
+        # prevents is a different mechanism: the thread DYING between two
+        # separate reads, one for each published field.)
         with cls._lock:
             attempt = cls._load_attempt_thread
             if attempt is None or not attempt.is_alive():
