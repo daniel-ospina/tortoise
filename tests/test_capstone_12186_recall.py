@@ -309,16 +309,26 @@ def test_the_record_states_the_near_duplicate_rule_the_tool_ran(artifact):
     #: `**` only was a literalism trap: a content-identical backticked copy REDded
     #: (`drop a `leading` article`, `fold `case``) — measured.
     block_plain = block_raw.replace("**", "").replace("`", "")
-    #: The connector between the fold's inputs is PROSE, not code: `+`, `,`, `and` and
-    #: `;` all state the same rule, so a copy-edit that swaps them must not red. The
-    #: first cut pinned the literal `+` and REDded `fold case, whitespace and the
-    #: separator class` — a false red, which `_phrase_re`'s docstring calls "as bad as a
-    #: false pass".
-    fold_connector = r"\s*(?:\+|,|;|and)\s*"
+    #: The connector between the fold's inputs is PROSE, not code: `+`, `,`, `;` and
+    #: `and` — including the **Oxford comma** (`, and`, this README's own house style)
+    #: — all state the same rule, so a copy-edit that swaps them must not red. Two cuts
+    #: were wrong here before this one, both measured: the literal `+` REDded
+    #: `fold case, whitespace and the separator class`, and a `\s*` on BOTH sides of the
+    #: `and` alternative let `fold caseandwhitespaceandthe separator class` MATCH — a
+    #: mangled clause passing. So the connector must be a real separator, and `and`
+    #: carries its own trailing whitespace.
+    fold_connector = r"\s*(?:[+,;]\s*(?:and\s+)?|and\s+)"
     fold_clause = fold_connector.join(_phrase_re(part) for part in (
         "fold case", "whitespace", "the separator class"))
     assert re.search(fold_clause, block_plain), (
         f"§3a no longer states the fold's inputs as a clause: {block_raw!r}")
+    #: ⛔ THIS POLARITY NET IS BEHIND-ONLY, which is `_negates`' documented contract:
+    #: it looks for a privative BEFORE its phrase. So a FORWARD negation of the same
+    #: clause — `fold case + whitespace + the separator class, which the tool never
+    #: does` — is GREEN, as is the identical shape on the article clause below. Named
+    #: here rather than left to a later reviewer to re-file: the clause cannot say
+    #: "never" and mean the rule; it CAN say the rule and then disclaim it in a
+    #: trailing clause, and no pin in this file reads that.
     assert not _negates(block_plain, "fold case"), (
         f"§3a NEGATES its own fold clause behind a privative, which states the "
         f"opposite of the artifact's key ({rule['key']!r}): {block_raw!r}")
@@ -2416,12 +2426,16 @@ def _negates(text: str, phrase: str) -> bool:
     """
     phrase_re = _phrase_re(phrase)
     #: The gap is PUNCTUATION-TOLERANT (#13680 round-30 review). The first cut required
-    #: `\s+` straight after the privative, so a comma, an em-dash or a parenthesis —
-    #: `never, ever drop a leading article`, `never — under any circumstances — drop …`,
-    #: `(we do not, as a rule, drop …)` — put the word INSIDE the documented three-word
-    #: window and still read as un-negated (measured GREEN). A false pass on the only
-    #: polarity net the rerank and write-path clauses have, so the separator class now
-    #: admits punctuation on both sides of each intervening word.
+    #: `\s+` straight after the privative, so a COMMA — including the commas around a
+    #: parenthetical such as `, as a rule,` — or an em-dash put the word INSIDE the
+    #: documented three-word window and still read as un-negated (measured GREEN):
+    #: `we do not, as a rule, drop a leading article` and
+    #: `never — under any circumstances — drop …`. (The parenthesis is NOT the axis —
+    #: `(we do not as a rule drop …)`, with parentheses and no commas, HIT the old
+    #: pattern too; the commas were the obstruction, and an earlier draft of this
+    #: comment misattributed it.) A false pass on the only polarity net the rerank and
+    #: write-path clauses have, so the separator class now admits punctuation on both
+    #: sides of each intervening word.
     sep = r"[\s,;:\u2014\u2013-]+"
     for privative in _PRIVATIVES:
         if re.search(rf"{privative}{sep}(?:\w+{sep}){{0,3}}{phrase_re}", text):
