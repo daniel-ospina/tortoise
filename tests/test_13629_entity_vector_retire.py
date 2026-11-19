@@ -4011,6 +4011,63 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …and the two halves the constructor arm did not reach: its operand may be a
+        # MAPPING LITERAL rather than a pairs sequence, and the constructor family is not
+        # "suffix `Dict`" — `defaultdict`/`ChainMap`/`Counter` are mappings whose names say
+        # nothing, and the mapping operand need be neither first nor alone. Each of these was
+        # CERTIFIED while the bare literal was refused (measured by the review of this branch,
+        # which also runtime-checked that they merge).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.defaultdict(list, [("embedding", _encode(ev))])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.OrderedDict([("embedding", _encode(ev))], extra=1)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= _collections.ChainMap({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # ⛔ …and a ``**`` MAPPING KEYWORD on a constructor, which merges exactly as
+        # `dict(**{"embedding": vec})` does. This row is answered by the MUTATOR arm on the
+        # nested `dict(...)` call, not by the constructor scan (whose keyword half was
+        # therefore removed as inert — the mutant survived until this row was checked against
+        # the other arm); it stays because the spelling must keep its refusal.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(**{"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # ⛔ …and the DICT COMPREHENSION, which is a comprehension whose fields are
+        # `key`/`value` rather than `elt` — omitting it left
+        # `{k: v for k, v in [("embedding", vec)]}` CERTIFIED, and adding the type to the
+        # `elt`-shaped tuple instead of its own branch raises rather than refuses.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
         # ⛔ …and the DUNDER ALIAS of the same function (`operator.__or__ is operator.or_`),
         # in all three spellings the review of this branch measured CERTIFIED: the functional,
         # the METHOD form on the mapping, and the unbound `dict.__or__(props, …)`. A tuple that
