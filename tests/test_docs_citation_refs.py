@@ -743,19 +743,14 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # is head-bound by construction (the set moves whenever `main` lands the same
     # re-derivation), which is this row's own thesis one table up. Naming the command and
     # refusing the direction claim therefore holds in EVERY checkout, and needs no base.
-    for _negation in (
-        f"neither is `{_tortoise_cmd}`",
-        f"{_tortoise_cmd}` is NOT empty",
-        f"{_tortoise_cmd}` returns exactly those two",
-        f"{_tortoise_cmd}` -> empty",
-        f"{_tortoise_cmd}` prints NOTHING",
-    ):
-        assert _negation not in doc, (
-            f"05-verify.md asserts {_negation!r} — a DIRECTION claim about the "
-            f"`-- tortoise/` set is a head-bound figure: read it with `{_tortoise_cmd}` "
-            "at the head you merge. State the command and let the reader run it; a set "
-            "named here rots the moment `main` lands the same re-derivation "
-            "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
+    _direction = [
+        m.group(0) for m in _TORTOISE_SET_DIRECTION_CLAIM.finditer(doc)]
+    assert not _direction, (
+        f"05-verify.md states the `-- tortoise/` set's DIRECTION ({_direction[0]!r}) — a "
+        "direction claim about that command is a head-bound figure: read it with "
+        f"`{_tortoise_cmd}` at the head you merge. State the command and let the reader "
+        "run it; a set named here rots the moment `main` lands the same re-derivation "
+        "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
     # (c) TYPED ANSWERS live in `test_the_bundles_tortoise_set_answers_are_not_typed_against
     # _the_tree`, deliberately NOT here. Their direction is read from `git diff
     # origin/main...HEAD`, which a depth-1 `test` job cannot answer at all (rc=128, empty
@@ -1253,6 +1248,27 @@ def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed(
                 "the reader re-derive it (#13746 review, round 3, finding 4; the "
                 "depth-1 fallback is the unconditional direction, #13802 review P1)")
 
+
+#: ⛔ A DIRECTION CLAIM ABOUT THE `-- tortoise/` SET IS THE SAME HEAD-BOUND FIGURE
+#: (#13802 review, findings 2 and 3 — P2, and the reason the arm is a TEXT ban). The
+#: earlier cut of that leg carried FIVE literal spellings of the claim and refused only
+#: where the diff measured non-empty, which made it inert on the depth-1 rail and a
+#: false red elsewhere; a five-string blacklist is also one synonym away from the defect
+#: — the document itself already carried FOUR spellings the list never saw
+#: (`prints NO path at all`, `prints NO path at this head`, `prints no path at all`,
+#: `the \`tortoise/\` set above is EMPTY`), measured by the reviewer as
+#: `1 passed, 13 deselected` on an injected claim. So the class is a PATTERN, not a
+#: list: the command (or `tortoise/` set) followed by a present-tense direction verb and
+#: an emptiness word. The HISTORICAL form ("printed no path at the head this was written
+#: for") is past tense and deliberately allowed — that is the same line the numstat arm
+#: draws between `printing `1 1` at a head of its own` and `both print `1 1``.
+_TORTOISE_SET_DIRECTION_CLAIM = re.compile(
+    r"(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    r"|`tortoise/` set[^`]{0,40}?)"
+    r"\s*(?:prints?|->|returns?|is)\s*`?"
+    r"(?:(?:NOT|not)\s+)?"
+    r"(?:NOTHING|NO paths?|no paths?|empty|EMPTY|exactly those two)"
+    r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`")
 
 #: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
 #: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
