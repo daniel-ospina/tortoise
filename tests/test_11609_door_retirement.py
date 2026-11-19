@@ -58,12 +58,14 @@ THAT UNBLOCKS IT, not silently:
   · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `search` carries a `rest_spec` (and a list envelope as well), so retiring the registry
-    entry deletes a public REST route with it. `issue_insight` and `session_context` carried
-    one too and left on the same terms in lane P6 — lane P4 MEASURED that coupling FALSE (no
-    product module derives a route from a registry row; both routes are hand-written
-    decorators in `hosted_api.py`), so the reason stopped holding and the doors retired in
-    the batch that acted on the measurement;
+  · `search` carries a `rest_spec` (`GET /v1/search`) AND a list envelope — but lane P4
+    MEASURED the coupling FALSE, for `search` as much as for the pairs (no product module
+    derives a route from a registry row; the route is a hand-written decorator in
+    `hosted_api.py`, and `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5 records the
+    `rest_spec` cell as aspirational, not real). ⛔ So what ACTUALLY holds `search` is the
+    `list[dict]` envelope, not the route — do not restore "retiring the entry deletes a REST
+    route" as a live reason. `issue_insight` and `session_context` carried a `rest_spec` too
+    and left in lane P6, the batch that acted on that measurement;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;

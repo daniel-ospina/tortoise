@@ -2936,9 +2936,14 @@ def test_this_table_names_exactly_the_no_container_yet_population():
     lane reading the table concludes those two doors are still held, "restores" them, and
     reds `tests/test_11609_door_retirement.py` in the file it is editing.
 
-    Mutation attribution (#3442): restoring the retired pair to the table's first column (or
-    to its heading count) reds one of the two assertions below; changing nothing but prose
-    elsewhere in §1.4 keeps both green, because the reader is table-scoped.
+    Mutation attribution (#3442): restoring the retired pair to the table's first column reds
+    the population comparison; writing the count in the heading as "seventeen" (a substring
+    match) reds the heading arm, which is why that arm is word-anchored. ⛔ The LAST arm is
+    deliberately prose-sensitive and NOT table-scoped: it requires §1.4 to still MENTION the
+    retired `delete_point` while NOT counting it, so deleting that sentence reds it. That is
+    the point — a section that stops naming the doors it is explaining away is a section this
+    row's premise no longer describes — but it means a prose rewrite of §1.4 can red this test
+    on purpose.
     """
     repo = Path(__file__).resolve().parent.parent
     section = _no_container_section(

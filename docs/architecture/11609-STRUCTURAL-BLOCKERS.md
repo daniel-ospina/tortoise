@@ -205,9 +205,11 @@ door, per `TestEveryPointerResolvesInOneHop`):
 
 ⛔ **THIS TABLE HELD NINE DOORS WHEN IT WAS WRITTEN, AND TWO OF THEM LEFT IN #11609 LANE P6.**
 `tortoise_delete_point` / `tortoise_delete_entity` shared the `delete_knowledge` row here; the
-owner's **#9660** ruling executes that row by KEEPING `tortoise_delete` and WIDENING it
-(`TortoiseSDK.delete` dispatches by label), so their destination became a live door — the kept
-entry — and both retired FORWARD into it. `tortoise_delete` stays: it IS the kept entry. The
+owner's **#9660** ruling executes that row by KEEPING `tortoise_delete` — which was ALREADY
+live — and WIDENING it (`TortoiseSDK.delete` dispatches by label), so both doors retired FORWARD
+into that kept entry. ⛔ Their recorded destination was and is `delete_knowledge`, which is still
+NOT an MCP door: that is why `tortoise_delete` itself stays in the table above and in
+`NO_CONTAINER_YET`, and why this row count moving 9 → 7 does not falsify the verdict below. The
 population is now 7, pinned by `NO_CONTAINER_YET` in `tests/test_11609_door_retirement.py`
 (10 `PROTECTED` + 7 = the 17 live names off the 27-target) and by `NO_CONTAINER_DESTINATIONS`
 in `tests/test_11609_structural_blockers.py`.
