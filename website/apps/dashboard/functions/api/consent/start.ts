@@ -27,6 +27,12 @@
  *    (#3485/#3503) instead of looping. The carrier is `consent_retry=1` on the return target
  *    (`CONSENT_RETRY_PARAM`), deliberately NOT `stale=1`.
  *  - **A store fault is a 503, never a redirect** (property 3).
+ *  - **Every hard failure is a PAGE, not a JSON blob** (#10884, #10865 arm B). All five refusal
+ *    arms below answer `consentRefusalPage(...)`: the status is unchanged (`403` stays `403`, `503`
+ *    stays `503`, which is what the deliberate 403 exemption is carried by), the machine reason
+ *    moves to the `x-consent-refusal` header, and the body is prose a visitor can act on. The
+ *    reader of this file should NOT "restore" the `json(...)` bodies — they are the defect those
+ *    issues were filed for.
  *
  * RE-VALIDATION IS NOT SKIPPED ON THE RETURN LEG, even though the params arrive from our own
  * redirect: they arrive from a BROWSER, so they are untrusted input every time. `validate()`
@@ -53,6 +59,7 @@ import {
   recordConsentAttempt,
   redirectUriProblem,
 } from "../../_shared/auth/consent-bridge";
+import { consentRefusalPage } from "../../_shared/auth/consent-refusal";
 
 /** The authorize params this route accepts. `response_type` is implied (`code`). */
 export interface ValidatedParams {
@@ -197,7 +204,9 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     // log line is the one place the operator can learn WHICH binding is wrong — the same reasoning
     // as the store-fault log below, and the reason this must not be a bare 500.
     console.error("CONSENT_AS_ORIGIN is not an absolute http(s) origin", env.CONSENT_AS_ORIGIN);
-    return json({ error: "unavailable", reason: "as_origin_misconfigured" }, { status: 503 });
+    // A console.error line names the binding; the VISITOR gets a page (#10884). Before this, the
+    // public consent entry answered a browser with `{"error":"unavailable",…}` on a blank page.
+    return consentRefusalPage("as_origin_misconfigured", 503);
   }
   const attempted = params.get(CONSENT_RETRY_PARAM) === "1";
 
@@ -278,10 +287,13 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
       // retry or restart fixes it — so without this log line a half-evolved schema leaves the
       // consent arm dark with every route answering the same 503 and nothing anywhere to act on.
       console.error("consent attempt write failed", e);
-      return json({ error: "unavailable", reason: "consent_store_unavailable" }, { status: 503 });
+      // ⛔ A store fault is still a TYPED 503 and still never a redirect (property 3) — only its
+      // BODY changed, from JSON to the page a person can act on (#10884). The machine reason is not
+      // lost: it is the `x-consent-refusal` response header.
+      return consentRefusalPage("consent_store_unavailable", 503);
     }
   } else {
-    return json({ error: "unavailable", reason: "session_store_unavailable" }, { status: 503 });
+    return consentRefusalPage("session_store_unavailable", 503);
   }
 
   // ⛔ This route DOES tell a caller whether a `state` exists: a signed-in visitor who does not hold
@@ -290,7 +302,10 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   // from §2.3's no-oracle rule, which is scoped to the MINT: refusing before consent is the right
   // behaviour, and `state` is client-chosen and already in the visitor's own URL.
   if (!ownsFlow && userId !== null) {
-    return json({ error: "no_authorize_attempt", reason: "flow_not_yours" }, { status: 403 });
+    // ⛔ STILL 403, still before consent, still a refusal — the exemption from §2.3's no-oracle rule
+    // is carried by this status, and a page that answered 200 would retire it. Only the BODY is a
+    // page now instead of `{"error":"no_authorize_attempt",…}` (#10865 arm B).
+    return consentRefusalPage("flow_not_yours", 403);
   }
 
   // ── the decision (property 4) ───────────────────────────────────────────────────────
@@ -321,7 +336,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   if (decision.action === "unavailable") {
     // NEVER a redirect: answering one on a store blip is what made an infrastructure fault
     // look like a sign-out (#3485).
-    return json({ error: "unavailable", reason: "session_store_unavailable" }, { status: 503 });
+    return consentRefusalPage("session_store_unavailable", 503);
   }
   if (decision.action === "terminal") {
     // Terminal and actionable: the page renders the refusal copy + retry affordance (#5734),
