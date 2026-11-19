@@ -417,6 +417,20 @@ def edits_for(path: Path, rmap: dict[str, str]) -> FileEdits:
         # ── string-shaped references ──────────────────────────────────────────
         if isinstance(node, ast.Call):
             fn = _call_name(node)
+            # A DECLARED BINDING: `sdk_method="create_point"` in `tool_registry.py` is
+            # documented as "Attribute name on TortoiseSDK", so it moves with the
+            # attribute. It is not an attribute access and no parenthesis search sees it.
+            for kw in node.keywords:
+                if kw.arg != "sdk_method":
+                    continue
+                lit = kw.value
+                if isinstance(lit, ast.Constant) and isinstance(lit.value, str):
+                    m = _STRING_PLAIN.match(lit.value)
+                    if m and m.group(1) in rmap:
+                        strings.append(
+                            (lit.lineno, lit.col_offset + 1,
+                             lit.col_offset + 1 + len(lit.value), rmap[m.group(1)])
+                        )
             if fn in {"getattr", "setattr", "delattr", "hasattr"} and len(node.args) >= 2:
                 target, literal = node.args[0], node.args[1]
                 if isinstance(literal, ast.Constant) and isinstance(literal.value, str):

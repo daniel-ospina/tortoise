@@ -289,7 +289,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         risk="write",
         idempotent=True,
         http_policy=True,
-        sdk_method="create_point",
+        sdk_method="_create_point",
         # #11609: NO `rest_spec` — `POST /v1/points` moved onto
         # `tortoise_create_entity` (the container whose `type='point'` arm
         # absorbs this door). `tortoise_dream` → `tortoise_refresh_confidence`
@@ -326,7 +326,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # limit; `sdk.query` is no longer on this tool's path. No tool was
         # added, removed or renamed — this is the declared binding corrected to
         # match the handler the AST guard reads.
-        sdk_method="paginated_query",
+        sdk_method="_paginated_query",
     ),
     ToolDefinition(
         name="tortoise_paginated_query",
@@ -335,7 +335,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,
-        sdk_method="paginated_query",
+        sdk_method="_paginated_query",
     ),
     ToolDefinition(
         name="tortoise_check_structure",
@@ -343,7 +343,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Check Gate 0→4 chain integrity (orphans, dangling refs).",
         risk="read",
         http_policy=True,
-        sdk_method="check_structure",
+        sdk_method="_check_structure",
     ),
     ToolDefinition(
         name="tortoise_validate_domain",
@@ -368,7 +368,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "gate-kind breakdown, gate_total is the gate subtotal.",
         risk="read",
         http_policy=True,
-        sdk_method="summarize_structure",
+        sdk_method="_summarize_structure",
     ),
     ToolDefinition(
         name="tortoise_audit",
@@ -387,7 +387,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "point_kinds: optional pointKind list to scope the audit.",
         risk="read",
         http_policy=True,
-        sdk_method="audit",
+        sdk_method="_audit__svc",
     ),
     ToolDefinition(
         name="tortoise_list_pointkinds",
@@ -424,7 +424,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Completeness holds across rebuild_all.",
         risk="read",
         http_policy=True,
-        sdk_method="list_batch",
+        sdk_method="_list_batch",
     ),
     ToolDefinition(
         name="tortoise_list_batches",
@@ -434,7 +434,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "stamp, capped at limit, default 20).",
         risk="read",
         http_policy=True,
-        sdk_method="list_batches",
+        sdk_method="_list_batches",
     ),
     # ⛔ TWO pack tools are REMOVED from the MCP surface (#11609 batch 1, owner ruling
     # comment 6831894340): `tortoise_packs_list` and `tortoise_pack_install` have NO
@@ -464,7 +464,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,
-        sdk_method="query_points_by_tag",
+        sdk_method="_query_points_by_tag",
     ),
     # ── Point accessors ───────────────────────────────────────────
     ToolDefinition(
@@ -495,7 +495,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                      "see carries residency=\"not-hot\" instead of being empty)."),
         risk="read",
         http_policy=True,
-        sdk_method="get_point",
+        sdk_method="_get_point",
     ),
     ToolDefinition(
         name="tortoise_suggest_entry_points",
@@ -517,7 +517,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Full-scan mode: omit query, set kind → all Points of kind.",
         risk="read",
         http_policy=True,
-        sdk_method="tortoise_fts_query",
+        sdk_method="_tortoise_fts_query",
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
     ToolDefinition(
@@ -556,7 +556,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "mode='custom': raw params, full control.",
         risk="read",
         http_policy=True,
-        sdk_method="recall_state",
+        sdk_method="_recall_state",
     ),
     # ── Phase-4 mining/promotion/dedup/timeline (#787) ────────────
     ToolDefinition(
@@ -613,7 +613,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "WRITES status + wires edges.",
         risk="destructive",
         http_policy=True,
-        sdk_method="promote_point",
+        sdk_method="_promote_point",
     ),
     ToolDefinition(
         name="tortoise_belief_timeline",
@@ -624,7 +624,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "holds the rows — see the wrapper's note (#12364).",
         risk="read",
         http_policy=True,
-        sdk_method="belief_timeline",
+        sdk_method="_belief_timeline",
     ),
     # ── EP Belief Propagation (#6908) ─────────────────────────────
     ToolDefinition(
@@ -648,7 +648,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # (0.693315 -> 0.693320), so repeated calls DO have an additional effect
         idempotent=False,
         http_policy=True,
-        sdk_method="compute_confidence",
+        sdk_method="_compute_confidence",
     ),
     ToolDefinition(
         name="tortoise_set_point_baseline",
@@ -656,7 +656,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Set Beta prior evidence for a claim.",
         risk="destructive",
         http_policy=True,
-        sdk_method="set_point_baseline",
+        sdk_method="_set_point_baseline",
     ),
     ToolDefinition(
         name="tortoise_get_confidence",
@@ -667,7 +667,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # re-derived score, so it is NOT a no-op (#4122 review)
         idempotent=False,
         http_policy=True,
-        sdk_method="get_confidence",
+        sdk_method="_get_confidence",
     ),
     ToolDefinition(
         name="tortoise_calibrate_summary",
@@ -675,7 +675,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Audit graph calibration state. Returns per-point guidance.",
         risk="read",
         http_policy=True,
-        sdk_method="calibrate_summary",
+        sdk_method="_calibrate_summary",
     ),
     ToolDefinition(
         name="tortoise_dream",
@@ -690,7 +690,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # separately budgeted at MAX_DREAM_FULL_PER_HOUR (hosted_api).
         risk="destructive",
         http_policy=False,
-        sdk_method="dream",
+        sdk_method="_dream",
         rest_spec=RestSpec(method="POST", path="/v1/dream"),
     ),
     ToolDefinition(
@@ -702,7 +702,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "savings). Embedded call-triggered evaluator.",
         risk="read",
         http_policy=False,
-        sdk_method="dream_health_check",
+        sdk_method="_dream_health_check",
         rest_spec=RestSpec(method="GET", path="/v1/dream/health"),
     ),
     # ── Updates ───────────────────────────────────────────────────
@@ -744,7 +744,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # `idempotentHint`, and is the exact hint that turns the wait-bound
         # refusal's "retry" into a duplicated edge.
         http_policy=True,
-        sdk_method="create_operator",
+        sdk_method="_create_operator",
     ),
     ToolDefinition(
         name="tortoise_annotate_operator",
@@ -753,7 +753,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(bias, precision, consistency, directness).",
         risk="destructive",
         http_policy=True,
-        sdk_method="annotate_operator",
+        sdk_method="_annotate_operator",
     ),
     ToolDefinition(
         name="tortoise_get_operator",
@@ -762,7 +762,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                      "annotation dimensions. TORTOISE_RECORD_SERVE armed: a found answer names the store; residency=not-hot when unseeable."),
         risk="read",
         http_policy=True,
-        sdk_method="get_point",  # get_operator uses get_point + is_operator check
+        sdk_method="_get_point",  # get_operator uses get_point + is_operator check
     ),
     ToolDefinition(
         name="tortoise_mitigate_operator",
@@ -781,7 +781,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # edge strength, applies it twice) — #10849 review.
         idempotent=False,
         http_policy=True,
-        sdk_method="mitigate_operator",
+        sdk_method="_mitigate_operator",
     ),
     # ── Decisions ─────────────────────────────────────────────────
     ToolDefinition(
@@ -813,7 +813,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "would be removed) and changes nothing.",
         risk="destructive",
         http_policy=True,
-        sdk_method="delete_point_wrapped",
+        sdk_method="_delete_point_wrapped",
     ),
     ToolDefinition(
         name="tortoise_invalidate",
@@ -822,7 +822,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "dry_run=True previews the one-point transition + one edge and changes nothing.",
         risk="destructive",
         http_policy=True,
-        sdk_method="invalidate_point",
+        sdk_method="_invalidate_point",
     ),
     ToolDefinition(
         name="tortoise_supersede",
@@ -905,7 +905,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "dry_run=True previews the status transition and changes nothing.",
         risk="destructive",
         http_policy=True,
-        sdk_method="retract_point",
+        sdk_method="_retract_point",
     ),
     # ── Navigation (#6962, #6963, #6964) ──────────────────────────
     ToolDefinition(
@@ -951,7 +951,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Creates a Point with pointKind=diary, authoredBy=agent.",
         risk="write",
         http_policy=True,
-        sdk_method="diary_write",
+        sdk_method="_diary_write",
     ),
     ToolDefinition(
         name="tortoise_diary_read",
@@ -967,7 +967,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="List all graph names in the database. Useful for namespace discovery.",
         risk="read",
         http_policy=True,
-        sdk_method="list_graphs",
+        sdk_method="_list_graphs",
     ),
     ToolDefinition(
         name="tortoise_status",
@@ -993,7 +993,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "Events, confidence changes.",
         risk="read",
         http_policy=True,
-        sdk_method="session_context",
+        sdk_method="_session_context",
         rest_spec=RestSpec(method="GET", path="/v1/context"),
     ),
     ToolDefinition(
@@ -1053,7 +1053,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "populated graph + unindexed repo -> repo_not_indexed.",
         risk="read",
         http_policy=True,
-        sdk_method="issue_insight",
+        sdk_method="_issue_insight",
         rest_spec=RestSpec(method="GET", path="/v1/issue-insight"),
     ),
     # ── Excluded from HTTP ────────────────────────────────────────
@@ -1068,7 +1068,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
         risk="destructive",
         http_policy=False,
-        sdk_method="ingest_corpus",
+        sdk_method="_ingest_corpus",
     ),
     ToolDefinition(
         name="tortoise_ingest",
@@ -1108,7 +1108,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # — a repeat is not safe to advertise.
         idempotent=False,
         http_policy=True,
-        sdk_method="ingest",
+        sdk_method="_ingest",
     ),
     # ── Taxonomy ──────────────────────────────────────────────────
     ToolDefinition(
@@ -1177,7 +1177,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "similarity_threshold; mode=prune has no similarity bar).",
         risk="read",
         http_policy=True,
-        sdk_method="review_connections",
+        sdk_method="_review_connections",
     ),
     ToolDefinition(
         name="tortoise_find_cross_lens_candidates",
@@ -1195,7 +1195,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "(not errors) when there is nothing to see (D8).",
         risk="read",
         http_policy=True,
-        sdk_method="get_cross_lens_candidates",
+        sdk_method="_get_cross_lens_candidates",
     ),
     ToolDefinition(
         name="tortoise_provenance",
@@ -1227,7 +1227,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "/internal/provision behind FASTAPI_INTERNAL_KEY.",
         risk="admin",
         http_policy=False,
-        sdk_method="org_create",
+        sdk_method="_org_create",
     ),
     # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
     ToolDefinition(
@@ -1241,7 +1241,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
             "advisories.kind_layer_routed."),
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
-        sdk_method="create_subject",
+        sdk_method="_create_subject",
     ),
     ToolDefinition(
         name="tortoise_create_object",
@@ -1253,7 +1253,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
             "as advisories.kind_layer_routed."),
         risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
-        sdk_method="create_object",
+        sdk_method="_create_object",
     ),
     ToolDefinition(
         name="tortoise_create_event",
@@ -1261,7 +1261,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Create an Event node (meeting, decision, deployment, etc.).",
         risk="write",
         http_policy=True,
-        sdk_method="create_event",
+        sdk_method="_create_event",
     ),
     ToolDefinition(
         name="tortoise_get_events",
@@ -1269,7 +1269,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').",
         risk="read",
         http_policy=True,
-        sdk_method="get_events",
+        sdk_method="_get_events",
     ),
     ToolDefinition(
         name="tortoise_get_session",
@@ -1277,7 +1277,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Get a single agent session Event by session_id.",
         risk="read",
         http_policy=True,
-        sdk_method="get_session",
+        sdk_method="_get_session",
     ),
     ToolDefinition(
         name="tortoise_index_sessions",
@@ -1335,7 +1335,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # `DocumentCreated` (the SDK's own note on `_create_entity`, #2296).
         # `write` tier already defaults to `idempotentHint: false`.
         http_policy=True,
-        sdk_method="create_document",
+        sdk_method="_create_document",
     ),
     ToolDefinition(
         name="tortoise_create_source",
@@ -1370,7 +1370,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # real write.
         idempotent=False,
         http_policy=True,
-        sdk_method="get_source_reliability",
+        sdk_method="_get_source_reliability",
     ),
     ToolDefinition(
         name="tortoise_assess_source",
@@ -1418,7 +1418,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "removed and changes nothing.",
         risk="destructive",
         http_policy=True,
-        sdk_method="delete_entity",
+        sdk_method="_delete_entity__svc",
     ),
     ToolDefinition(
         name="tortoise_create_entity",
@@ -1501,7 +1501,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "instead.",
         risk="destructive",
         http_policy=True,
-        sdk_method="delete",
+        sdk_method="_delete",
     ),
     ToolDefinition(
         name="tortoise_operator_action",
@@ -1524,7 +1524,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "is needed. Returns {edge, created, nudges}.",
         risk="write",
         http_policy=True,
-        sdk_method="create_edge",
+        sdk_method="_create_edge",
     ),
     ToolDefinition(
         name="tortoise_get_governance",
@@ -1532,7 +1532,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="Get all entities owned by a Subject.",
         risk="read",
         http_policy=True,
-        sdk_method="get_owned_entities",
+        sdk_method="_get_owned_entities",
     ),
     # ── Orient / Direct consolidation (epic #888 W3) ────────────────
     ToolDefinition(
