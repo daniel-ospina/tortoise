@@ -202,13 +202,15 @@ def _ready(monkeypatch):
 def _plan(graph, *, labels=None, batch=strip.DEFAULT_BATCH):
     return strip.build_plan(
         g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
-        graph_name="g", graph_uri="docker://x", labels=labels, batch=batch)
+        graph_name="g", graph_uri="docker://x/g", labels=labels, batch=batch)
 
 
 def _execute(graph, plan, **over):
     kwargs = {
         "g": graph, "plan": plan, "record_dsn": "postgresql://x", "org_id": "org",
-        "graph_id": "graph", "graph_name": "g", "confirmed": plan["digest"],
+        "graph_id": "graph", "graph_name": "g",
+        "graph_uri": strip.uri_fingerprint("docker://x/g"),
+        "confirmed": plan["digest"],
         "batch": strip.DEFAULT_BATCH, "expect_empty": False,
     }
     kwargs.update(over)
@@ -270,7 +272,9 @@ def test_the_census_prints_the_unmatched_count_including_zero(stores):
     # …and the human render says so on the row rather than omitting it.
     text = parity.render({"labels": [row], "at": "now", "ready": True}, "g")
     assert "graph_only" in text
-    assert re.search(r"Object\s+1\s+1\s+0\s+0\s+0\s+0\s+PARITY", text)
+    # every column, zeros included: graph, record, graph_only, unkeyed, rec_unread,
+    # rec_only, rec_total, verdict
+    assert re.search(r"Object\s+1\s+1\s+0\s+0\s+0\s+0\s+1\s+PARITY", text)
 
 
 def test_a_graph_only_vector_blocks_the_label_and_names_it(stores):
@@ -460,66 +464,168 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(monkeypatch):
     # "emits" — the record's coverage does not stop a write nobody gated.
     emits, reason = strip.write_gate("object")
     assert emits is True
-    assert "writes `embedding` without consulting" in reason
-    # …and the reason NAMES the fold, so an operator can read which code to fix.
+    assert "writes `embedding` without CALLING" in reason
+    # …and the reason NAMES the writers, so an operator can read which code to fix.
     assert "_upsert_object" in reason
+    # ⛔ AND IT NAMES THE WRITERS THE FOLD MAP ALONE MISSED. `tortoise.sdk::_update_entity`
+    # re-adds a caller-supplied `embedding` on Subject/Object/Source/Event through
+    # `SET n += $props`, so a gate that cleared the `entities.py` folds alone would license
+    # a strip its own refusal claims to prevent. Mutation: drop `_register_writers` from
+    # `_writers_for` and this assertion (plus four other tests) reds.
+    assert "_update_entity" in reason
 
 
-def _fake_fold_module(tmp_path, monkeypatch, body):
-    source = body
-    path = tmp_path / "fake_fold_13629.py"
-    path.write_text(source)
-    module = types.ModuleType("fake_fold_13629")
+def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
+    path = tmp_path / f"{name}.py"
+    path.write_text(body)
+    module = types.ModuleType(name)
     module.__file__ = str(path)
-    sys.modules["fake_fold_13629"] = module
-    monkeypatch.setattr(strip, "FOLD_MODULE", "fake_fold_13629")
-    return module
+    sys.modules[name] = module
+    strip._writer_sources().pop(name, None)     # a fresh read per case
+    return name
 
 
-def test_fold_consults_gate_flips_in_BOTH_directions(tmp_path, monkeypatch):
-    """The AST check is the witness, so it must be able to say YES as well as NO.
+WRITER_PROSE_ONLY = """
+def _upsert_object(ev):
+    # TODO: consult mirror_required once the record covers this label
+    return _write(ev)
+"""
 
-    A one-directional guard (always "not gated") would be an inert enforcer: it would
-    refuse for ever after the write-stop lands, which reads as a working gate right up
-    until someone removes it. So the positive direction is driven with a real module on
-    disk, not with a monkeypatched boolean.
-    """
-    _fake_fold_module(tmp_path, monkeypatch, """
+WRITER_DEAD_BRANCH = """
+def _upsert_object(ev):
+    if False:
+        mirror_required("object")
+    return _write(ev)
+"""
+
+WRITER_UNCALLED = """
+def _upsert_object(ev):
+    mirror_required("object")
+    return _write(ev)
+"""
+
+WRITER_GATED = """
 def _upsert_object(ev):
     if _derived_mirror_required("object"):
-        return
-    return 1
-""")
-    monkeypatch.setattr(strip, "FOLD_WRITERS", {"Object": ("_upsert_object",)})
-    assert strip._fold_consults_gate("Object")[0] is True
-
-    _fake_fold_module(tmp_path, monkeypatch, """
-def _upsert_object(ev):
-    return 1
-""")
-    gated, why = strip._fold_consults_gate("Object")
-    assert gated is False
-    assert "_upsert_object" in why
+        return None
+    return _write(ev)
+"""
 
 
-def test_fold_consults_gate_is_fail_closed_on_an_unreadable_or_renamed_fold(
+def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
         tmp_path, monkeypatch):
-    """An unparseable module, a missing function and a `SyntaxError` are all "emits"."""
-    path = tmp_path / "broken_fold_13629.py"
-    path.write_text("def (:\n")
-    module = types.ModuleType("broken_fold_13629")
-    module.__file__ = str(path)
-    sys.modules["broken_fold_13629"] = module
-    monkeypatch.setattr(strip, "FOLD_MODULE", "broken_fold_13629")
+    """⛔ THE P1 FALSIFIER: a MENTION is not a gate, and neither is a dying call.
+
+    The first version of this check was a substring search over the function's source
+    lines. Three shapes cleared it while the write went ungated, and all three are
+    realistic:
+
+    * a COMMENT saying `# TODO: consult mirror_required` — precisely what a WIP write-stop
+      leaves behind, in the fold that never asks;
+    * a DEAD `if False:` branch;
+    * a bare `mirror_required(...)` expression statement whose answer nothing reads.
+
+    Mutation: revert `_asks_the_gate` to `any(name in body)` and the first three cases
+    below go green-to-red (i.e. this test fails), while the fourth must stay gated.
+    """
+    for source in (WRITER_PROSE_ONLY, WRITER_DEAD_BRANCH, WRITER_UNCALLED):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object")
+        assert gated is False, f"{source!r} was accepted as a gate"
+        assert "without CALLING" in why
+
+    module = _fake_writer_module(tmp_path, monkeypatch, WRITER_GATED)
+    assert strip._writer_consults_gate(module, "_upsert_object")[0] is True
+    # The positive direction must survive reformatting that a substring check would miss.
+    module = _fake_writer_module(
+        tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    gate = mirror_required
+    if not gate("object"):
+        return _write(ev)
+""")
+    # ⛔ A LOCAL ALIAS IS *NOT* ACCEPTED, and that is deliberate: `gate = mirror_required`
+    # then `gate(...)` cannot be resolved without data flow, and accepting any call would
+    # accept `f(...)`. Failing closed costs a refactor; failing open costs the data.
+    assert strip._writer_consults_gate(module, "_upsert_object")[0] is False
+
+
+def test_the_gate_check_is_fail_closed_on_an_unreadable_or_renamed_writer(
+        tmp_path, monkeypatch):
+    """An unparseable module, a missing function and a redefinition all refuse."""
+    module = _fake_writer_module(tmp_path, monkeypatch, "def (:\n", name="broken_13629")
+    gated, why = strip._writer_consults_gate(module, "_upsert_object")
+    assert gated is False
+    assert "could not be parsed" in why and "STILL EMITTING" in why
+
+    module = _fake_writer_module(tmp_path, monkeypatch, "def something_else():\n    return 1\n")
+    gated, why = strip._writer_consults_gate(module, "_upsert_object")
+    assert gated is False
+    assert "ABSENT" in why
+
+    # ⛔ A SHADOWED FIRST DEFINITION is a writer too. `ast` sees BOTH, and one ungated
+    # definition must not be hidden by a gated one below it — the original substring check
+    # kept only the first body (`setdefault`), which is the arm this pins.
+    module = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(ev):
+    return _write(ev)
+
+
+def _upsert_object(ev):
+    if mirror_required("object"):
+        return None
+    return _write(ev)
+""")
+    gated, why = strip._writer_consults_gate(module, "_upsert_object")
+    assert gated is False
+    # The UNGATED definition is named by its own line, not hidden behind the gated one.
+    assert "line(s) 2" in why
+
+
+def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
+        monkeypatch):
+    """⛔ THE COMPLETENESS WITNESS. `FOLD_WRITERS` covers `entities.py` and nothing else.
+
+    `tortoise.sdk::_update_entity` keeps a caller-supplied `embedding` through
+    `SET n += $props` on Subject/Object/Source/Event, `hosted_backup::restore_graph`
+    writes all five labels, and five `sdk`/`session_indexer` writers store `:Event`. Each
+    re-adds a vector on the next call exactly as a fold does — so a gate that cleared the
+    folds alone would license the strip its own refusal claims to prevent.
+
+    Mutation: drop `_register_writers` from `_writers_for` and this test reds.
+    """
+    writers, refusal = strip._writers_for("Event")
+    assert refusal is None
+    assert "tortoise.sdk::_update_entity" in writers
+    assert "tortoise.hosted_backup::restore_graph" in writers
+    assert "tortoise.projection.entities::_upsert_event" in writers
+
+    gated, why = strip._fold_consults_gate("Event")
+    assert gated is False
+    assert "do not ask the gate" in why
+
+
+def test_an_unreadable_or_empty_writer_population_is_not_evidence(monkeypatch):
+    """A register that cannot be read, or declares nothing, refuses — `all([])` is True."""
+    monkeypatch.setattr(strip, "_register_writers",
+                        lambda label: (_ for _ in ()).throw(RuntimeError("boom")))
     gated, why = strip._fold_consults_gate("Object")
     assert gated is False
     assert "could not be read" in why
 
-    # A renamed fold cannot be proven stopped.
-    _fake_fold_module(tmp_path, monkeypatch, "def something_else():\n    return 1\n")
+    monkeypatch.setattr(strip, "_register_writers", lambda label: ())
+    monkeypatch.setattr(strip, "FOLD_WRITERS", {})
     gated, why = strip._fold_consults_gate("Object")
     assert gated is False
-    assert "ABSENT" in why
+    assert "empty population is not" in why
+
+
+def test_a_label_no_entity_type_addresses_is_not_write_stopped(monkeypatch):
+    """`all([])` is True — so the vacuous label is refused, not declared stopped."""
+    monkeypatch.setattr(strip.parity, "affected_entity_types", lambda label: [])
+    still, why = strip.label_write_gate("Object")
+    assert still is True
+    assert "zero evidence" in why
 
 
 def test_label_write_gate_requires_every_entity_type_addressing_the_label(monkeypatch):
@@ -592,8 +698,109 @@ def test_the_two_token_refusals_are_raised_by_main_before_any_write(monkeypatch,
         assert token in capsys.readouterr().err
 
 
+def test_uri_fingerprint_drops_the_credential_and_keeps_the_target():
+    """The plan approves a TARGET, and it must not circulate the password to name one.
+
+    ⛔ Both halves are load-bearing. Dropping the credential is why the plan (which a
+    human pastes and approves) is safe to share; KEEPING host/port/name is why a clone
+    of the same graph on another box still reads as a different target.
+    """
+    assert strip.uri_fingerprint(
+        "docker://:s3cret@falkordb.internal:6379/tortoise") == \
+        "docker://falkordb.internal:6379/tortoise"
+    assert strip.uri_fingerprint("docker://:s3cret@host:6379/tortoise") != \
+        strip.uri_fingerprint("docker://:s3cret@other-host:6379/tortoise")
+    assert "s3cret" not in strip.uri_fingerprint("docker://:s3cret@host:6379/g")
+    # A bare db-path carries no credential and is passed through unchanged, so the
+    # embedded lane's fingerprint is its path and the plan stays readable.
+    assert strip.uri_fingerprint("/tmp/x.db") == "/tmp/x.db"
+
+
+def test_main_gives_execute_the_FINGERPRINT_of_the_live_target(tmp_path, monkeypatch,
+                                                             stores):
+    """⛔ THE WIRING FALSIFIER: `execute` compares the plan's fingerprint against what
+    `main` hands it, so a live RAW uri would drift on every credentialed deployment —
+    and an OMITTED `graph_uri` would not refuse at all, it would raise `TypeError` out
+    of the destructive path with no token and no "nothing was removed" message.
+
+    Both arms are pinned here because the refusal tests above return *before* `execute`
+    is reached, so the one call that writes was never executed by a test at all.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://x")
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://x", org_id="org", graph_id="graph",
+        graph_name="g", graph_uri="docker://:s3cret@host:6379/g",
+        labels=None, batch=strip.DEFAULT_BATCH)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan))
+
+    import tortoise.projection as projection
+
+    seen: dict = {}
+
+    class _Proj:
+        g = "GRAPH"
+
+    class _FakeProjection:
+        def __init__(self, *a, **k):
+            pass
+
+        @staticmethod
+        def from_uri(*a, **k):
+            return _Proj()
+
+    monkeypatch.setattr(projection, "FalkorProjection", _FakeProjection)
+    monkeypatch.setattr(strip.census_mod, "resolve_graph_name",
+                        lambda *a, **k: "g")
+    monkeypatch.setattr(strip.census_mod, "_refuse_unless_graph_present",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(strip.census_mod, "empty_graph_target_flag",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(strip, "_load_plan", lambda *a, **k: plan)
+
+    def _execute(**kwargs):
+        seen.update(kwargs)
+        return {"removed": 0}
+
+    monkeypatch.setattr(strip, "execute", _execute)
+
+    argv = ["--uri", "docker://:s3cret@host:6379/g", "--graph-name", "g",
+            "--org-id", "org", "--graph-id", "graph",
+            "--execute", "--plan", str(plan_path),
+            "--confirm-plan-digest", plan["digest"]]
+    assert strip.main(argv) == 0
+    # The credential never reaches the comparison, and the target is still named.
+    assert seen["graph_uri"] == "docker://host:6379/g"
+    assert "s3cret" not in seen["graph_uri"]
+    # …and the live value MATCHES the plan's, i.e. this run cannot drift on its own URI
+    # even though the plan was built from a CREDENTIALED uri and this run passes one too.
+    assert seen["graph_uri"] == plan["graph_uri"] == "docker://host:6379/g"
+
+
 def test_execute_refuses_a_plan_edited_after_it_was_printed(tmp_path):
     """The plan's OWN digest is checked, not only the caller's claim."""
+    #: The RECOMPUTATION arm: the `digest` FIELD can match while the key LISTS do not,
+    #: which is the edit that would otherwise smuggle an unapproved (or empty) set past
+    #: `--confirm-plan-digest`. Falsified by removing the `plan_entries` re-derivation.
+    doctored = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "labels": [{"label": "Object", "keys": ["obj-1"]}],
+        "total_nodes": 1,
+    }
+    doctored["digest"] = strip.digest(strip.plan_entries(doctored))
+    empty = json.loads(json.dumps(doctored))
+    empty["labels"] = [{"label": "Object", "keys": []}]   # field left untouched
+    path = tmp_path / "doctored.json"
+    path.write_text(json.dumps(empty))
+    with pytest.raises(strip.Refusal) as excinfo:
+        strip._load_plan(str(path), doctored["digest"])
+    assert excinfo.value.token == strip.REFUSE_DIGEST_MISMATCH
+    # The clean plan loads, so the refusal above is about the edit and not about parsing.
+    path.write_text(json.dumps(doctored))
+    assert strip._load_plan(str(path), doctored["digest"])["total_nodes"] == 1
     plan = {"tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION, "digest": "sha256:a"}
     path = tmp_path / "plan.json"
     path.write_text(json.dumps(plan))
@@ -1001,7 +1208,140 @@ def test_an_unmeasurable_residual_is_not_exit_zero():
     assert strip.result_exit_code({"residual_by_label": {}, "empty": True}) == 0
 
 
+# ── the plan file is a JSON document, so its LISTS must match its DIGEST ────
+
+
+def test_a_plan_whose_key_lists_were_edited_is_refused_even_with_the_digest_field(
+        stores, monkeypatch):
+    """⛔ THE RECOMPUTATION, which is not redundant with the `digest` FIELD check.
+
+    `execute` strips `plan["labels"][*]["keys"]`. The `digest` field is a separate string
+    in the same JSON file, so editing a key list leaves it untouched — and a field-only
+    check would then approve and strip a set the human never saw, while `plan_entries`
+    calls itself "the approved node set". Re-deriving the digest FROM the lists is what
+    makes that claim true.
+
+    Mutation: drop the `digest(plan_entries(plan))` recomputation in `_load_plan` and this
+    test reds (the run would strip `obj-2` and report success).
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    for key in ("obj-1", "obj-2"):
+        graph.add("Object", key)
+        record.holds("object", key)
+    plan = _plan(graph, labels=["Object"])
+    plan["labels"][0]["keys"] = ["obj-2"]          # the set a human did NOT approve
+    plan["total_nodes"] = 1
+    # …and the recorded digest is left exactly as printed.
+    assert plan["digest"] == _plan(graph, labels=["Object"])["digest"]
+
+    # The FIELD check alone would have passed: `_load_plan` is what refuses.
+    with pytest.raises(strip.Refusal) as excinfo:
+        strip._load_plan(_write_plan_file(plan), plan["digest"])
+    assert excinfo.value.token == strip.REFUSE_DIGEST_MISMATCH
+    assert graph.vector_keys("Object") == {"obj-1", "obj-2"}
+
+
+def test_the_target_drift_check_covers_the_URI_not_just_its_name(stores, monkeypatch):
+    """⛔ THE FOURTH AXIS. A clone of the same graph has the same NAME, the same tenant
+    and the same node set — only the host says which deployment it is.
+
+    Mutation: drop the `graph_uri` row from `execute`'s drift list and this test reds
+    while every other drift test stays green.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    with pytest.raises(strip.Refusal) as excinfo:
+        _execute(graph, plan, graph_uri=strip.uri_fingerprint("docker://staging:6379/g"))
+    assert excinfo.value.token == strip.REFUSE_TARGET_DRIFT
+    assert "graph_uri" in str(excinfo.value)
+    assert graph.vector_keys("Object") == {"obj-1"}
+
+
+def test_the_plan_never_circulates_the_graph_password():
+    """The plan is what a human approves and pastes — it must not carry a credential."""
+    assert strip.uri_fingerprint("docker://:s3cr3t@prod:6379/tortoise") == \
+        "docker://prod:6379/tortoise"
+    # A URI with no graph path still strips the credential, and a bare path is untouched.
+    assert strip.uri_fingerprint("redis://user:pw@h:1") == "redis://h:1"
+    assert strip.uri_fingerprint("/tmp/embedded.db") == "/tmp/embedded.db"
+
+
+def test_a_narrowed_execution_records_the_labels_it_did_not_touch(stores, monkeypatch):
+    """⛔ `residual_by_label` is over the plan's labels, so a narrowed strip's zeros are
+    about THOSE labels only. Without `unmeasured_by_label` the result reads as a clean
+    retirement of a population three quarters of which nobody looked at.
+    """
+    _ready(monkeypatch)
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    plan = _plan(graph, labels=["Object"])
+    result = _execute(graph, plan)
+    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["removed"] == 1
+
+
+def test_a_census_over_no_label_refuses_instead_of_certifying_nothing(stores):
+    """`all([])` is True: an empty measured population would report parity on zero evidence."""
+    graph, _record = stores
+    with pytest.raises(parity.CensusError, match="measured NO label"):
+        _census(graph, labels=[])
+
+
+def test_the_census_reports_the_tenant_wide_total_separately(stores):
+    """`record_vectors` is narrowed to the graph's keys; the tenant total is its own field.
+
+    Two numbers, because they answer different questions and the docstring's table names
+    both: `record_vectors` is "can the record answer for THESE nodes",
+    `record_readable_total` is "how many readable rows does this tenant hold at all".
+    """
+    graph, record = stores
+    graph.add("Object", "obj-1")
+    record.holds("object", "obj-1")
+    record.holds("object", "obj-not-in-this-graph")
+    row = _row(_census(graph, labels=["Object"]), "Object")
+    assert row["record_vectors"] == 1
+    assert row["record_readable_total"] == 2
+    assert row["record_only"] == 1
+
+
+def test_an_unimportable_stripper_is_not_read_as_a_caller_opt_out(monkeypatch):
+    """A broken import and an explicit `None` are different states with different fixes.
+
+    Both fold to "not ready", but a census that reported the opt-out message for a broken
+    import would send an operator to fix their own call instead of the module.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _explode(name, *args, **kwargs):
+        if name == "strip_graph_entity_vectors":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _explode)
+    gate = parity._write_gate()
+    ready, reason = gate("Object")
+    assert ready is False
+    assert "not importable" in reason and "ImportError" in reason
+
+
 # ── the refusals are a closed, published set ────────────────────────────────
+
+
+def _write_plan_file(plan: dict) -> str:
+    """A plan on disk whose FORM is whatever the test built — `_load_plan` polices it."""
+    import json as _json
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        _json.dump(plan, handle)
+        return handle.name
 
 
 def test_the_refusal_set_is_closed():
