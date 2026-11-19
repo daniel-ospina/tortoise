@@ -176,8 +176,8 @@ The delivered rule is that **the flow belongs to a browser, not to whoever knows
 the attempt key is 32 random bytes, minted by the **AS on the `GET /oauth/authorize` bounce leg**
 (`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert. Adoption is the normal
 path, not a guarantee: **the entry leg still mints one when it is handed none** — a request presented
-STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts:255-256`, `presentedKey ||
-newAttemptKey()`; tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
+STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts::presentedKey || newAttemptKey()`;
+tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
 on the bounce, never constrain what a direct caller invents. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
 target**; the owner fill and the mint both require it. The key is INSERT-ONLY — written only when the
 row is created, never on a re-entry, so a later caller can never rotate it, because rotation *is* the
@@ -198,6 +198,32 @@ reusing a per-attempt value, which an OAuth client does not do (it mints a fresh
 request). Reloading the SAME url does NOT recover: it is refused (`403 flow_not_yours` once signed in,
 `302` then the same `403` when cold) until that row expires. Recovery is a NEW authorize request — a new
 `state` from the caller.
+
+### How a hard failure is PRESENTED (not decided) — #10884 / #10865 arm B
+
+The refusal above, and every `503` this route can answer, is a **page**, not a JSON body
+(`functions/_shared/auth/consent-refusal.ts`). Presentation only, and the difference matters to a
+reader of the security rule:
+
+- **the status is unchanged** — `403` stays `403`, `503` stays `503`. The oracle exemption this
+  section describes is carried by the code, so no page may answer `200`; a page is a FACE for a
+  decision already made, never a softening of it.
+- **the machine reason survives in `x-consent-refusal`** (`flow_not_yours`,
+  `consent_store_unavailable`, `session_store_unavailable`, `as_origin_misconfigured`) and appears
+  NOWHERE in the copy. Two bodies exist, not four: the `503`s are one state — a fault on our side
+  that the visitor should try again past — and the `403` says plainly that reloading will not help
+  (the paragraph above is why). What the shared `503` copy must NOT do is PROMISE that a reload
+  fixes it, because not all three reasons are transient: `as_origin_misconfigured` is a deployment
+  binding only an operator can fix, and the consent-store arm also propagates a genuine DDL failure
+  (`start.ts` records that no retry or restart fixes a failed `ALTER TABLE`). The reload is offered
+  as a try, and a fresh attempt from the client as the next step.
+- **the page decides nothing and fetches nothing** — no script, no link, no external asset, nothing
+  echoed from the query string, `default-src 'none'`, `no-referrer`, `no-store`. Its URL carries
+  `attempt_key` and `state` on the legs that reach it.
+
+The store fault ITSELF is still unfixed and still tracked OPEN on #10884: which store call raises is
+not determinable from outside, and naming it needs the Pages Function logs
+(`wrangler pages deployment tail`). Do not read the page as evidence that the fault was diagnosed.
 
 ⚠️ **Where the raw key goes** (stated, because the row's SHA-256 is the narrow claim and is easy to
 misread as the whole one): the key rides the `selfPath` return target **and** `authorizeUrl` (the page is
