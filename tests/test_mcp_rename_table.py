@@ -223,6 +223,31 @@ RETIRED_LITERAL: dict[str, str] = {
         'tortoise_check_confidence(recall=True, query=..., mode="state", '
         'min_confidence=..., limit=...)'
     ),
+    # #11609 P6 — TWO units, four more doors, and again NO container row arrives, so the
+    # map grows by exactly the retired names: 64 + 2 + 2 = 68, which is
+    # `RETIRED_TOOL_REGISTRY`'s size and the row count the doc renders.
+    #   · the `rest_spec` pair — `issue_insight` / `session_context` retire into arms
+    #     (`search_knowledge(mode="issue_insight")`, `check_confidence(session=True)`) that
+    #     their containers already had, once lane P4 had MEASURED that no route is derived
+    #     from a registry row;
+    #   · the DELETE pair — `delete_point` / `delete_entity` retire into `tortoise_delete`,
+    #     the entry the owner's #9660 ruling KEEPS and widens. Its pointer NAMES the
+    #     preview/confirm protocol because that entry's DEFAULT is a preview: a pointer at a
+    #     bare `tortoise_delete(id)` would leave a migrating caller believing it had deleted
+    #     something.
+    "tortoise_issue_insight": (
+        'tortoise_search_knowledge(title=..., body=..., repo=..., '
+        'mode="issue_insight")'
+    ),
+    "tortoise_session_context": 'tortoise_check_confidence(session=True)',
+    "tortoise_delete_point": (
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)'
+    ),
+    "tortoise_delete_entity": (
+        'tortoise_delete(id, dry_run=True) for the preview, then '
+        'tortoise_delete(id, confirmation=<token>)'
+    ),
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -640,12 +665,16 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # `diary_write`) retire into `create_entity`'s new `type="point"` / `type="diary"`
     # ARMS — again no container row, because the arms are built on a tool that was
     # already advertised. 60 + 2 = 62.
-    # 64 at THIS head: #11609 P2's CONFIDENCE-ARMS wave adds two more the same way,
-    # into `tortoise_check_confidence`'s `recompute=`/`recall=` PARAMETERS rather than a
-    # row, so again only retired names arrive: 62 + 2 = 64, which is exactly
+    # 64 after #11609 P2's CONFIDENCE-ARMS wave, which adds two more the same way, into
+    # `tortoise_check_confidence`'s `recompute=`/`recall=` PARAMETERS rather than a row:
+    # 62 + 2 = 64.
+    # 68 at THIS head: #11609 lane P6 retires FOUR more in two units, and neither arrives
+    # with a container row — the `rest_spec` pair into arms `search_knowledge` /
+    # `check_confidence` already had, and the DELETE pair into `tortoise_delete`, the entry
+    # the owner's #9660 ruling KEEPS and widens. 64 + 2 + 2 = 68, which is exactly
     # `counts.retired` in `config/surface-manifest.yml` at this merge.
-    assert len(RETIRED_LITERAL) == 64, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 64"
+    assert len(RETIRED_LITERAL) == 68, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 68"
     )
 
 
