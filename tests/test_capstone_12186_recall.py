@@ -646,10 +646,27 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
     door_para = " ".join(readme[
         readme.index("**First, the boundary on the door itself"):
         readme.index("**Not a production census.**")].split())
-    assert "entity_type='object'" in door_para, (
-        f"README §5 must state the `entity_type` the arms pass: {door_para!r}")
-    assert _phrase_mentions(door_para, f"limit={cap.KMAX}"), (
-        f"README §5 must state the `limit` the arms pass ({cap.KMAX}): {door_para!r}")
+    # ⛔ BOTH copies of each figure, not EITHER (round 22, F1). The paragraph states the
+    # arms' `entity_type` and `limit` TWICE — once as "the arms call it with …" and once
+    # as the reason ("… is required", "… widens the window"). A presence check is
+    # satisfied by the FIRST copy, so the second was unpinned: measured at this head,
+    # `limit=15` -> `limit=25` in "widens the window" and
+    # `entity_type='object'` -> `entity_type='point'` in "is required" BOTH stayed GREEN
+    # at 51 passed — publishing the inverted caveat as a checked fact. Digit-bounding the
+    # needle (round 21) closes `limit=150`, and does NOT close this: two legitimate
+    # copies of the same value mean a mutation of one is satisfied by the other. Each
+    # copy is therefore pinned by the CLAUSE it appears in.
+    arms_clause = (f"the arms call it with `entity_type='object'` "
+                   f"and `limit={cap.KMAX}`")
+    assert arms_clause in door_para, (
+        f"README §5 must state the arguments the arms pass ({arms_clause!r}): "
+        f"{door_para!r}")
+    assert "`entity_type='object'` is required" in door_para, (
+        f"README §5 must state WHY the arms pass `entity_type='object'` — this SECOND "
+        f"copy of that figure was unpinned: {door_para!r}")
+    assert f"`limit={cap.KMAX}` widens the window" in door_para, (
+        f"README §5 must state WHY the arms pass `limit={cap.KMAX}` — this SECOND copy "
+        f"of that figure was unpinned: {door_para!r}")
     assert f"default to `entity_type='{door_entity}'`" in door_para, (
         f"README §5 must name the doors' real `entity_type` default "
         f"({door_entity!r}) so the divergence is visible: {door_para!r}")
@@ -1518,14 +1535,20 @@ def test_every_declared_post_run_edit_is_named_in_the_readme(artifact):
     # written out in §6's lead sentence; a rewording that drops it is fine as long as
     # no OTHER number is claimed, so only the digit-word for a WRONG count is refused
     # — CASE-INSENSITIVELY, because `**Four**` reds nothing otherwise (measured).
-    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+    # ⛔ EVERY claimed count, not a fixed five-word vocabulary (round 22, F2). The
+    # guard enumerated `{1..5}` and skipped the correct one, so a wrong count the
+    # vocabulary could not spell went unreported: measured at this head, `**four**` ->
+    # `**six**` (and -> `**7**`) stayed GREEN at 51 passed while the ledger declares 4.
+    # The claim's shape is fixed by the sentence, so the count is read out of whatever
+    # was written and compared to `n`, rather than matched against a closed word list.
+    count_words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+                   6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
     n = len(edits)
     low = flat.lower()
-    for wrong_n, word in words.items():
-        if wrong_n == n:
-            continue
-        assert f"**{word}** things were done by hand" not in low, (
-            f"README §6 claims **{word}** hand edits; the artifact declares {n} "
+    accepted = {count_words.get(n, str(n)), str(n)}
+    for claimed in re.findall(r"\*\*([^*]+)\*\* things were done by hand", low):
+        assert claimed.strip() in accepted, (
+            f"README §6 claims **{claimed}** hand edits; the artifact declares {n} "
             f"({[e['field'] for e in edits]})")
 
     # ⛔ AND THE LEDGER ITSELF IS A DIVERGENCE A REPRODUCTION SHOWS (round 18, F3).

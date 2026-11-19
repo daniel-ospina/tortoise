@@ -3329,9 +3329,16 @@ surfaces:
   # (`neardup-v1`), the window arithmetic and the pin's refusals, and every figure in the
   # README's plain-language summary and in its §1 provenance, §2 recall / per-class / paired /
   # leg-degradation, §3a duplicate-rate, §3b mint and §4 lever tables re-derived from
-  # `docs/evidence/12186-capstone/measurement.json` — CELL-scoped for the tabular ones,
-  # ROW-scoped AND digit-bounded for the prose ones, never a whole-document substring and never
-  # an unbounded token (the three shapes that each let a figure drift while every pin stayed
+  # `docs/evidence/12186-capstone/measurement.json` — CELL-scoped for the tabular ones; the
+  # prose ones are CLAUSE/PARAGRAPH-scoped wherever a figure has more than one home, and
+  # WHOLE-DOCUMENT-WITH-A-UNIQUENESS-ASSERTION where the token occurs exactly once (that
+  # assertion is what closes the masking a substring allows — the §2/§3 narrative
+  # restatements are this shape, so do not read them as row-scoped), digit-bounded
+  # throughout, and never an unbounded token. A pin that is merely PRESENT in a paragraph
+  # holding TWO copies of the same figure pins only one of them — that shape was measured
+  # here too (§5's DOOR paragraph, both copies, green under a mutation of either), and is
+  # why that paragraph's two restatements are pinned by CLAUSE. The three shapes that each
+  # let a figure drift while every pin stayed
   # green: §3a's count columns had no assertion, §4 held an unpinned SECOND quotation of the mint
   # rate, and §4's `OFF by default` / `NO` verdict WORDS were never read — all three measured).
   # ⛔ The claim stops at that boundary, and the boundary is broader than §5/§6: NARRATIVE
