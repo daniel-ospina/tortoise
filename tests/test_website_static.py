@@ -118,10 +118,15 @@ CONSENT_JS = REPO_ROOT / "website" / "consent.js"
 #: line's own code cannot be satisfied by prose, a string, or a fragment of a
 #: larger expression.
 OPT_IN_STMT = re.compile(
-    r"^[ \t]*window\.posthog\.opt_in_capturing\(\)[ \t]*;", re.M)
-LOADERS_STMT = re.compile(r"^[ \t]*loadConsentedAnalytics\(\)[ \t]*;", re.M)
+    r"^[ \t]*window\.posthog\.opt_in_capturing\(\)[ \t]*;?", re.M)
+LOADERS_STMT = re.compile(r"^[ \t]*loadConsentedAnalytics\(\)[ \t]*;?", re.M)
 GRANTED_STMT = re.compile(
-    r"""^[ \t]*announceConsent\((["'])granted\1\)[ \t]*;""", re.M)
+    r"""^[ \t]*announceConsent\((["'])granted\1\)[ \t]*;?""", re.M)
+#: `;?` — the terminator is OPTIONAL on purpose. A statement's identity here is
+#: the `^[ \t]*` anchor plus the full call text; requiring `;` red a call that is
+#: present and ASI-terminated with "no longer calls `opt_in_capturing()`", which
+#: is false and misleads the next reader (#13696 round 10, measured: dropping
+#: only the semicolon failed this row while every other row was green).
 #: The page's consent gate, as the statement it is: `if (!consented()) return;`.
 NOT_CONSENTED_STMT = re.compile(
     r"^[ \t]*if \(!consented\(\)\)[ \t]*return\b", re.M)
@@ -393,11 +398,15 @@ def _render_code(html: str, fn_name: str, page: str = "product.html") -> str:
     opposite things, so they use opposite strippers.
     """
     return "\n".join(
-        ln.rstrip()
+        # Each line STRIPPED, blanks dropped. Both normalise something that is
+        # not a difference in code: a cut comment leaves a blank line behind,
+        # and cutting a LEADING `/* … */` leaves its indent behind
+        # (`      /* c */ run();` → `       run();`) — which made a comment-only
+        # edit to ONE page red this row while the render was byte-identical
+        # (#13696 round 10, measured: the two bodies differed by one space).
+        # Indentation is not code; the comparison is over the statements.
+        ln.strip()
         for ln in _code_only(_function_refs(html, fn_name, page)).splitlines()
-        # Blank lines dropped: a cut comment leaves one behind, and a blank line
-        # is not a difference in CODE — keeping them made one page's extra
-        # comment red the equality row (#13696 round 9, P2).
         if ln.strip()
     )
 
