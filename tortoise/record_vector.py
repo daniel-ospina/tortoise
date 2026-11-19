@@ -588,7 +588,9 @@ class Coverage:
     reported the SAME ``verified`` as a fully backfilled one — and *"the record
     caught up"* became a finding the count never established
     (`tools/claim_dense_leg_13732.py` hit it first: an unseeded population PASSES
-    the gate and is then served as ``mechanism=pgvector, reason=ok``). So the
+    the gate and is then served as ``mechanism=pgvector, reason=empty_results`` —
+    the SAME token a backfilled label answering an empty read records, so nothing
+    in the trace said WHICH of the two states the read was in). So the
     two-zero case is reported **``verified=True, trivial=True``** — the RELATION
     holds, the EVIDENCE does not — while every other satisfied count is
     ``verified=True, trivial=False``. A gate that compares two things needs a
@@ -2265,8 +2267,9 @@ def searcher(
                 # The branch above logs its `reason` only when it DECLINES, which a
                 # verified verdict never reaches — so a label holding nothing in
                 # either store served an EMPTY cohort as `mechanism=pgvector,
-                # reason=ok`, indistinguishable in the trace from a backfilled label
-                # answering the same read. This line is the difference, and it
+                # reason=empty_results`, the same token a backfilled label answering
+                # an empty read records, so nothing in the trace said WHICH state the
+                # read was in. This line is the difference, and it
                 # DECIDES NOTHING: the read proceeds exactly as before, because with
                 # both sides empty the two stores answer identically (which is why
                 # the two-zero case is marked rather than refused).

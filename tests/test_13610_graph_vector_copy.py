@@ -689,7 +689,8 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     fully backfilled one, so *"the record caught up"* was a finding the count never
     established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
     population PASSES this gate and is then served as `mechanism=pgvector,
-    reason=ok`.
+    reason=empty_results`, the same token a backfilled label answering an empty read
+    records (so the trace did not say WHICH of the two states the read was in).
 
     ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
     stores answer identically, so refusing would change deployment behaviour for a
@@ -934,8 +935,8 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
         f"is not evidence that anything was served: {trace}")
     assert "TRIVIALLY" in caplog.text, (
         "a trivially-verified label served an empty cohort with nothing in the trace "
-        "saying why — `mechanism=pgvector, reason=ok` is then indistinguishable from "
-        f"a catch-up: {caplog.text!r}")
+        "saying why — `mechanism=pgvector, reason=empty_results` is then "
+        f"indistinguishable from a catch-up: {caplog.text!r}")
     assert "BOTH SIDES ARE EMPTY" in caplog.text, (
         f"the trace names the state but not its evidence: {caplog.text!r}")
 
