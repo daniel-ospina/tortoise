@@ -1153,7 +1153,7 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
         "§2.5's row); putting it here re-points a history cite to a working-tree address, the "
         "`⚠️ CORRECTED` failure this file exists to stop. Restore `:6869` directly above a `;`. To ALSO "
         "disclose this tree's figure, keep the declaration where it is, append the disclosure AFTER the "
-        "semicolon, and bump `_TOKEN_OCCURRENCES[':6989']` to 2 in the same change — otherwise "
+        "semicolon, and bump `_TOKEN_OCCURRENCES[':6989']` (currently 2) in the same change — otherwise "
         "`test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` reds. Do not loosen either arm."
     )
 
