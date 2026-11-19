@@ -644,9 +644,17 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 #     be satisfied.
 #
 # Both are the SAME open question — which node kinds must carry a prior? —
-# which #9063 reserves to the owner (belief model). WIDENING EITHER TUPLE IS
-# THAT DECISION; they are single constants because the query is already
-# id-anchored and EP-predicated.
+# which #9063 raised and reserved to the owner (belief model), then closed
+# COMPLETED on 2026-10-20 WITHOUT deciding it. No open issue tracked it at the
+# time of writing (that is a tracker state, not a fact this comment can keep
+# true — filing one is a legitimate future), so silence here must not be read
+# as a decision. ⛔ `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction quotes the
+# PRE-#13675 wording of this sentence ("…which #9063 reserves to the owner…",
+# present tense, pinned to `sdk.py:646-647`); that text is no longer here, and
+# the changelog is owner-gated, so the quote stays historical rather than
+# silently disagreeing with this file.
+# WIDENING EITHER TUPLE IS THAT DECISION; they are single constants because
+# the query is already id-anchored and EP-predicated.
 _CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
 _CALIBRATION_GATED_LABELS = ("Point",)
 
@@ -41587,12 +41595,25 @@ class TortoiseSDK:
                 labels = []
             if labels:
                 self._evidence.pop(claim_id, None)
+                # ⛔ This refusal used to tell the caller that non-Point priors "are the open
+                # belief-model decision in #9063". That pointer does not resolve: #9063 RAISED the
+                # question — which node kinds must carry a prior? — reserved it to the owner, and
+                # closed COMPLETED on 2026-10-20 WITHOUT deciding it (the same reading is recorded in
+                # `docs/ONTOLOGY-CHANGELOG.md`'s v3.38 correction, #13641, and stated in the code at
+                # `_CALIBRATION_EVIDENCE_KINDS`). So a caller who followed it found a closed issue and
+                # no answer, and the question was tracked by no open issue at the time of
+                # writing (a tracker state is not a fact this comment can keep true).
+                # ⛔ The correction is recorded HERE and deliberately NOT in the message: a tracker
+                # state is not something a shipped string can keep true (the issue may be filed
+                # tomorrow), and the archaeology of what an earlier wording said is not a fact a
+                # caller can act on. The message states the design fact only. Pinned by
+                # `tests/test_13634_9063_pointer_resolves.py`.
                 raise ValueError(
                     f"set_point_baseline: {claim_id!r} is a :{labels[0]}, not a "
                     f":Point — nothing was written. Baselines are writable on "
-                    f":Point only (epistemic-entity priors are the open "
-                    f"belief-model decision in #9063), so the belief you "
-                    f"intended was never stored."
+                    f":Point only: there is no writer for a declared prior on a "
+                    f"non-Point, and whether one should exist is unsettled, so "
+                    f"the belief you intended was never stored."
                 )
             if not _unbindable:
                 # #9262: the probes found NOTHING by this id — a typo'd or
