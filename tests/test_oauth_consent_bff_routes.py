@@ -2251,12 +2251,14 @@ def _false_absolute_in(text: str) -> str | None:
 
 def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSIFY() -> None:
     """The two counts above leave TWO `json(...)` returns, so "every hard failure is a page" is a
-    claim the route FALSIFIES — and pinning that PHRASE, in any spacing or markup, is what keeps it
-    corrected.
+    claim the route FALSIFIES — and pinning that PHRASE, wherever only non-word characters separate
+    its three words (a line wrap, emphasis, a hyphen, a tab), is what keeps it corrected.
 
     Why a prose claim earns a guard here rather than a comment: this is not untidiness. #10865's
     owner comment records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the
-    absolute would "finish" the job by converting an arm the owner ruled out — the false summary
+    absolute would "finish" the job by converting an arm whose retirement is the OWNER'S DECISION
+    (that comment offers it as an option and calls it "an owner-visible API decision, not a review
+    fix" — it does not rule it out, and this guard must not claim it does) — the false summary
     actively steers a future lane to reverse a recorded decision, which no arm-level test can see.
 
     The files scanned are the ones a reader takes the CONTRACT from: the route, the page builder
@@ -2273,7 +2275,9 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
     the edit takes: wrapped inside the phrase (`every hard` / `   * failure`), emphasised
     (`every **hard** failure`), or hyphenated (`hard-failure`). Pinning the literal
     `"every hard failure"` passed all three, so a guard for a false absolute was defeatable by a
-    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE in any markup.
+    line break (review of #13712, F3). `_FALSE_ABSOLUTE_RE` pins the PHRASE wherever only NON-WORD
+    characters separate the three words — not "in any markup", which is FALSE of `every <b>hard</b>
+    failure` (the `</b>` carries letters); the limit is stated on the regex itself.
 
     ⛔ AND THE PHRASE ALONE IS **NOT** A PHRASE-ONLY MATCH THAT NEEDS AN EXEMPTION — that was tried
     four times and every exemption leaked or went vacuous (the argument is on `_FALSE_ABSOLUTE_RE`
@@ -2334,64 +2338,70 @@ def test_NO_summary_claims_the_every_hard_failure_PHRASE_the_two_JSON_arms_FALSI
 # a clause-scoped `\w+ed` whose verdict turned on a comma (F6), and an anchored historical shape that
 # did not fail open but made the guard VACUOUS against `origin/main`. Every RED row below was GREEN
 # under one of those; the comment names which.
-_SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
+_SUMMARY_ABSOLUTE_ROWS: list[str] = [
     # the denial itself, however it is dressed
-    ("Every hard failure is a page, not a JSON blob.", "RED"),
+    ("Every hard failure is a page, not a JSON blob."),
     # ⛔ AND HOWEVER IT IS SPELLED — the shape tolerance `_FALSE_ABSOLUTE_RE` exists for, which the
     # rows below this one would NOT pin on their own: every other row carries the contiguous literal,
     # so a table without these stayed all-green when the pattern was swapped back to the bare
     # literal and the tie to F3's fix was lost (measured — review of #13712, F8). The assertion
     # compares by ORDERED CONTAINMENT of the three words, not by equality, so a span carrying `**`
     # or a line wrap is accepted here.
-    ("Every hard failure is a page, wrapped over a line:\n * every hard\n * failure is a page.", "RED"),
-    ("Every **hard** failure is a page, not a JSON blob.", "RED"),
-    ("Every hard-failure is a page, not a JSON blob.", "RED"),
-    ("Every\thard\tfailure is a page, not a JSON blob.", "RED"),
-    ("EVERY HARD FAILURE IS A PAGE, not a JSON blob.", "RED"),
+    # ⛔ WRAP-ONLY, and that is load-bearing (review of #13712, F11). The earlier text opened with a
+    # CONTIGUOUS copy ("Every hard failure is a page, …") before the wrapped one, so the FIRST match
+    # was the contiguous span and this row stayed GREEN under a newline-hostile pattern — measured:
+    # `re.compile(r"every(?:(?!\n)\W)+hard(?:(?!\n)\W)+failure", re.I)` matches the old row and does
+    # NOT match this one. The row exists to pin the wrap tolerance, so it must carry nothing but the
+    # wrapped copy.
+    ("Wrapped over a line:\n * every hard\n * failure is a page."),
+    ("Every **hard** failure is a page, not a JSON blob."),
+    ("Every hard-failure is a page, not a JSON blob."),
+    ("Every\thard\tfailure is a page, not a JSON blob."),
+    ("EVERY HARD FAILURE IS A PAGE, not a JSON blob."),
     # ordinary-English clauses: a word list (`still` / `remains` / `survives`) exempted all three
-    ("Every hard failure is a page; the consent cookie is still set before the flow starts.", "RED"),
-    ("Every hard failure of the route is a page, and the store remains the source of truth.", "RED"),
-    ("Every hard failure is a page, which still leaves the graph as the source of truth.", "RED"),
-    ("Every hard failure is a page, and the status is still unchanged.", "RED"),
+    ("Every hard failure is a page; the consent cookie is still set before the flow starts."),
+    ("Every hard failure of the route is a page, and the store remains the source of truth."),
+    ("Every hard failure is a page, which still leaves the graph as the source of truth."),
+    ("Every hard failure is a page, and the status is still unchanged."),
     # a survivor in the NEXT sentence is a different sentence
-    ("Every hard failure is a page. Two arms still answer JSON.", "RED"),
+    ("Every hard failure is a page. Two arms still answer JSON."),
     # counted survivors alone are not enough
-    ("Every hard failure is a page, because two arms still answer JSON.", "RED"),
+    ("Every hard failure is a page, because two arms still answer JSON."),
     # …and a retro frame alone is not enough
-    ("Before #13671, every hard failure is a page, and the store remains the source of truth.", "RED"),
+    ("Before #13671, every hard failure is a page, and the store remains the source of truth."),
     # LATER CLAUSE (F5): the retro word is about another subject and comes AFTER the universal
-    ("Every hard failure is a page, as noted before, and two arms still return JSON.", "RED"),
-    ("Every hard failure is a page, and the two arms still return JSON, as we said before.", "RED"),
+    ("Every hard failure is a page, as noted before, and two arms still return JSON."),
+    ("Every hard failure is a page, and the two arms still return JSON, as we said before."),
     # `before` / `until` as present-tense conjunctions name nothing that used to be true
-    ("Until the cookie is set, every hard failure is a page; two arms still return JSON.", "RED"),
-    ("Before the cookie is set, every hard failure is a page; two arms still return JSON.", "RED"),
+    ("Until the cookie is set, every hard failure is a page; two arms still return JSON."),
+    ("Before the cookie is set, every hard failure is a page; two arms still return JSON."),
     # a past PARTICIPLE is not a past tense: "is answered" is present
-    ("Every hard failure is answered with a page; two arms still return JSON.", "RED"),
+    ("Every hard failure is answered with a page; two arms still return JSON."),
     # `used to` in a LATER clause is another subject's verb
-    ("Every hard failure is a page, used to work; two arms still return JSON.", "RED"),
-    ("Every hard failure is a page, which used to be documented; two arms still return JSON.", "RED"),
+    ("Every hard failure is a page, used to work; two arms still return JSON."),
+    ("Every hard failure is a page, which used to be documented; two arms still return JSON."),
     # an anchored `before` cannot lend its frame to a present-tense universal
-    ("Before #13671, every hard failure is a page; two arms still write JSON.", "RED"),
+    ("Before #13671, every hard failure is a page; two arms still write JSON."),
     # ⛔ F6 — THE COMMA. These two are the SAME sentence; deleting one comma flipped the first from
     # RED to GREEN under the clause-scoped `\w+ed` rule, because the neighbouring clause's `-ed` verb
     # landed inside the denial's own clause. Both are RED now, and they are kept as a PAIR so the
     # scoping cannot come back as a punctuation dependency.
     ("Before #13671, every hard failure answered raw JSON; two arms converted, so now every hard "
-     "failure is a page.", "RED"),
+     "failure is a page."),
     ("Before #13671, every hard failure answered raw JSON; two arms converted so now every hard "
-     "failure is a page.", "RED"),
+     "failure is a page."),
     ("Before #13671, every hard failure of that route answered raw JSON; we have since converted "
-     "two places, so every hard failure is a page.", "RED"),
+     "two places, so every hard failure is a page."),
     ("Before #13671 every hard failure was JSON; two arms of the route still answer JSON, and "
-     "every hard failure is a page.", "RED"),
+     "every hard failure is a page."),
     ("Every hard failure is a page, and before #13671 every hard failure was JSON; two arms "
-     "still do.", "RED"),
+     "still do."),
     # ⛔ F6, the other half: an `-ed` word is not a tense. `documented` and `were` both exempted the
     # bare denial under the clause-scoped `\w+ed` rule; nothing but the phrase is read now.
-    ("Two arms remain, and every hard failure is a page as documented.", "RED"),
-    ("Two arms were converted and every hard failure is a page now.", "RED"),
+    ("Two arms remain, and every hard failure is a page as documented."),
+    ("Two arms were converted and every hard failure is a page now."),
     # a true past prefix does not excuse the SAME sentence asserting the present
-    ("Every hard failure answered raw JSON, and is a page now.", "RED"),
+    ("Every hard failure answered raw JSON, and is a page now."),
     # ⛔ AND SO IS THE HISTORICAL FORM — this is the row that decides whether the guard pins the fix.
     # main's own pre-fix sentence is grammatically true ("used to answer") and still false of the
     # route, because "hard failure" is the wrong noun: two arms answer JSON TODAY. When an anchored
@@ -2399,22 +2409,18 @@ _SUMMARY_ABSOLUTE_ROWS: list[tuple[str, str]] = [
     # stopped reddening the guard, and the guard stopped pinning anything (measured through
     # `_absolute_violations` against `origin/main`). It REDS, and the fix's own wording —
     # "every REFUSAL … used to answer" — is what the corpus writes instead.
-    ("Before #13671, every hard failure of that route answered raw JSON; two arms still do.",
-     "RED"),
-    ("Every hard failure of that route used to answer `json({error, reason})`; two arms still do.",
-     "RED"),
-    ("Previously every hard failure of that route answered raw JSON; both arms return one.", "RED"),
-    ("Every hard failure used to answer raw JSON; two arms still do.", "RED"),
-    ("Before this change, every hard failure returned raw JSON; both returns remain.", "RED"),
+    ("Before #13671, every hard failure of that route answered raw JSON; two arms still do."),
+    ("Every hard failure of that route used to answer `json({error, reason})`; two arms still do."),
+    ("Previously every hard failure of that route answered raw JSON; both arms return one."),
+    ("Every hard failure used to answer raw JSON; two arms still do."),
+    ("Before this change, every hard failure returned raw JSON; both returns remain."),
     # a ` * ` line is layout, not a clause boundary, so wrapping the sentence must not change it
-    ("Before #13671, every hard failure of that route\n * answered raw JSON; two arms still do.",
-     "RED"),
+    ("Before #13671, every hard failure of that route\n * answered raw JSON; two arms still do."),
 ]
 
 
-@pytest.mark.parametrize("sentence,expected", _SUMMARY_ABSOLUTE_ROWS)
-def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(
-        sentence: str, expected: str) -> None:
+@pytest.mark.parametrize("sentence", _SUMMARY_ABSOLUTE_ROWS)
+def test_the_summary_guard_REDS_the_phrase_in_EVERY_shape(sentence: str) -> None:
     r"""A guard that fails OPEN on one word is worse than no guard: it reads as coverage.
 
     ⛔ WHY A COMMITTED TABLE, when the exemption had already been measured by hand twice: a

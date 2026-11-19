@@ -15,7 +15,9 @@
  * caller error and the terminal `200` flow state — and both reach a browser. A summary that claimed
  * otherwise would be FALSE, and it is the more dangerous kind of false: #10865's owner comment
  * records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the absolute would
- * "finish" the job by converting an arm the owner ruled out. The two survivors are counted and
+ * "finish" the job by converting an arm whose retirement is the OWNER'S DECISION (that comment
+ * offers it as an option and calls it "an owner-visible API decision, not a review fix" — it does
+ * not rule it out, and this comment must not say it does). The two survivors are counted and
  * classified in `tests/test_oauth_consent_bff_routes.py`.
  *
  * WHAT THIS PAGE DELIBERATELY DOES
