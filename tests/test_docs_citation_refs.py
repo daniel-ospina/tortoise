@@ -599,29 +599,43 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # pattern deliberately excludes. An earlier wording said "every one of these
     # spellings was present" and cited one member as evidence for five.
     #
-    # ⛔ AND THE DIRECTION IS MEASURED AT TEST TIME, not typed (#13728 delta review, P2).
-    # On a tree whose three-dot diff against `origin/main` IS empty — the merged tree, where
-    # HEAD is `origin/main` — those spellings are TRUE, and refusing them unconditionally
-    # would false-block the one sentence a merger most needs. So the arm runs the command:
-    # non-empty output => the empty claims are false here and are refused; empty output =>
-    # this leg has nothing to refuse and says so (a skip, never a silent pass).
+    # ⛔ AND THE DIRECTION IS MEASURED — BUT ONLY AN EMPTY MEASUREMENT MAY RELAX THE LEG, which
+    # is the asymmetry that keeps this arm ENFORCING in the lane that runs it (#13728 delta
+    # review, P1). A first cut of this repair read the command and `pytest.skip`ped whenever it
+    # could not: the `test` job checks out at `fetch-depth: 1` with no `refs/remotes/origin/*`
+    # (`python-ci.yml`), so `origin/main` is unresolvable there, the leg skipped on EVERY pull
+    # request, and a `pytest.skip` is not counted by the fast lane's skip budget — a silent
+    # green in the exact check this arm exists to be. So:
+    #
+    #   * a SUCCESSFUL read with EMPTY output proves the empty spelling is TRUE here (the
+    #     merged tree, where HEAD is `origin/main`) => the refusals are skipped, and the
+    #     message says the measurement is why;
+    #   * EMPTY-BUT-UNREADABLE (git failed, e.g. the depth-1 checkout) is NOT an empty set
+    #     (#784/#3690) => the refusals STILL APPLY. That is what makes the CI lane red.
+    #   * non-empty output => the refusal applies with the measured paths in the message.
+    #
+    # The residual is stated rather than hidden: on a depth-1 checkout the leg enforces the
+    # UNCONDITIONAL direction (the document must not claim the diff is empty), and the
+    # measured refinement only ever relaxes it where the tree is provably the merged one.
     _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
     _measured = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD", "--", "tortoise/"],
         cwd=REPO, capture_output=True, text=True)
-    if _measured.returncode != 0:
-        pytest.skip(
-            "`origin/main` is not resolvable in this clone, so the measured set this leg "
-            f"compares against cannot be read (git said: {_measured.stderr.strip()[:200]}). "
-            "A FAILED READ IS NOT AN EMPTY SET — the same rule as #784/#3690.")
+    _measured_ok = _measured.returncode == 0
     _measured_paths = [ln for ln in _measured.stdout.splitlines() if ln.strip()]
-    assert not (_measured_paths and _measured.returncode), "unreachable"
-    if not _measured_paths:
+    if _measured_ok and not _measured_paths:
         pytest.skip(
-            "`git diff --name-only origin/main...HEAD -- tortoise/` is EMPTY at this head "
-            "(HEAD is `origin/main` or identical to it), so the empty spelling is TRUE here "
-            "and this leg has no claim to refuse. It is not a pass: the command's output is "
-            "what makes the empty claim right or wrong, and it is read at the head under test.")
+            "`git diff --name-only origin/main...HEAD -- tortoise/` MEASURED EMPTY at this "
+            "head (it succeeded and printed nothing — HEAD is `origin/main` or identical to "
+            "it), so the empty spelling is TRUE here and this leg has no claim to refuse. "
+            "The skip is DERIVED from a successful read, never from a failed one: an "
+            "unreadable `origin/main` keeps the refusals below armed (#784/#3690).")
+    _measured_note = (
+        f"measured at this head: {len(_measured_paths)} ({', '.join(_measured_paths)})"
+        if _measured_ok else
+        "and this clone cannot resolve `origin/main` (the CI `test` job checks out at "
+        "depth 1), so the set is unread — which is NOT an empty set (#784/#3690), which is "
+        "why this leg still refuses the claim")
     for _negation in (
         f"neither is `{_tortoise_cmd}`",
         f"{_tortoise_cmd}` is empty",
@@ -631,9 +645,8 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     ):
         assert _negation not in doc, (
             f"05-verify.md asserts {_negation!r}. `{_tortoise_cmd}` prints the PR's OWN "
-            f"`tortoise/` paths — measured at this head: {len(_measured_paths)} "
-            f"({', '.join(_measured_paths)}) — so the empty claim is refuted by the very "
-            "command it quotes, and it satisfied the presence-only leg above while "
+            f"`tortoise/` paths — {_measured_note} — so the empty claim is refuted by the "
+            "very command it quotes, and it satisfied the presence-only leg above while "
             "contradicting the empty claims beside it (#13489 review, P1)")
     # ⛔ …AND THE MODULE STATEMENTS MUST NAME THE HEAD THEY WERE MEASURED AT (#13489 review,
     # P1 — MEASURED). The review's fix was "re-word the two module statements to name the
@@ -671,10 +684,12 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
     file-table section, so nothing read it.
 
-    The arm is deliberately GIT-FREE (no other leg in the suite shells out): a
-    re-point's NEW side must resolve in the file at the head being merged, and its OLD
-    side must NOT — which is exactly what "re-pointed" means, and it is checkable
-    from the working tree alone.
+    THIS arm is deliberately GIT-FREE: a re-point's NEW side must resolve in the file at
+    the head being merged, and its OLD side must NOT — which is exactly what "re-pointed"
+    means, and it is checkable from the working tree alone. (⛔ THE FILE is no longer
+    git-free: the census arm above shells out to `git diff` for the direction it measures,
+    and that is the one leg whose reading depends on the clone's depth — stated here so
+    "no leg in this file shells out" cannot be inferred from this sentence.)
 
     NON-VACUITY, MEASURED: on the pre-fix document the regex does not match at all
     (it stated ``re-pointing that row's `sdk.py:19449` → `:19485` at the merge head``,
