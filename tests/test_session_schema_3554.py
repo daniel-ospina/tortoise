@@ -3019,6 +3019,31 @@ _PREFIX_APPROVAL_RECORD_IN_TITLE_CASE = (
 _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS = (
     "> **OWNER APPROVAL of the exact changes:** 2026-11-18, given in-session, after the\n"
     "> audit measured the behaviour. The artifact is the text itself.")
+# ⛔ THE POSSESSIVE LABELS, INCLUDING THE TYPOGRAPHIC APOSTROPHE (measured on `dfb26ad7`,
+# the head this fix lands on: all three ACCEPTED with no home). Each RENDERS as the approval
+# label, so each is a record that owes a citation; the two apostrophe codepoints are both
+# driven because a copy-edit from a word processor produces U+2019, not U+0027.
+_PREFIX_APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE = (
+    "> **Owner's approval of the exact changes** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE = (
+    "> **Owners' approval of the exact changes** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
+_PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE = (
+    "> **Owner\u2019s approval of the exact changes** — given in-session on 2026-11-18.\n"
+    "> The artifact is the text itself.")
+# ⛔ AND THE MIRROR DIRECTION: the same possessive label carrying its citation is GREEN, so
+# the widening cannot be satisfied by refusing every possessive.
+_APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME = (
+    "> **Owner's approval of the exact changes:** comment `6993778525`.")
+# ⛔ AND THE FALSE BLOCK THE POSSESSIVE PATTERN MUST NOT MAKE (measured on `dfb26ad7`): the
+# landed v3.32 block opens a paragraph with a BOLD RUN that CONTAINS ``the owner's
+# approval`` without being a label — an unanchored possessive pattern reads it as a record
+# and refuses a landed entry. The possessive alternative is therefore anchored to the run's
+# start, and this fixture is the direction that pins the anchor.
+_A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL = (
+    "> **Build record for v3.31 (2026-11-02 — #9974 R1 / PR #10524 — two texts are PARKED\n"
+    "> awaiting the owner's approval):** the edits are not landed.")
 # ⛔ AND THE MIRROR DIRECTION (review @ 95a8df2f): an id that follows an ABBREVIATION in
 # the label sentence is still in that sentence to a reader, so it must resolve. Before
 # the splitter stopped treating `e.g.`'s final dot as a terminator the arm refused it.
@@ -3405,11 +3430,27 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         f"is the form the owner rejected; the paragraph reads: {record!r}")
 
 
-_OWNER_APPROVAL_LABEL_RE = re.compile(r"\bowner\s+approval\b", re.IGNORECASE)
+_OWNER_APPROVAL_LABEL_RE = re.compile(
+    r"\bowner\s+approval\b"
+    r"|^(?:the\s+)?owners?['\u2019]?s?\s+approval\b", re.IGNORECASE)
+# ⛔ THE POSSESSIVE AND BOTH APOSTROPHES ARE PART OF THE RENDERED LABEL (measured on
+# `dfb26ad7`, the head this fix lands on): `**Owner's approval …**`, `**Owners'
+# approval …**` and `**Owner\u2019s approval …**` (a TYPOGRAPHIC apostrophe, U+2019) all
+# render as the approval label a reader sees, and each was **ACCEPTED** with no citation —
+# the one artifact this arm exists to refuse. The first cut's `\bowner\s+approval\b`
+# matched only the two-word form, so every possessive form escaped, and the typographic
+# form escapes even a possessive-aware ASCII pattern because it is a different codepoint.
+# ⛔ THE POSSESSIVE ALTERNATIVE IS ANCHORED TO THE RUN'S START, and that is measured, not
+# stylistic: the landed v3.32 block opens a paragraph with
+# ``**Build record for v3.31 (… two texts are PARKED awaiting the owner's approval):**``,
+# which CONTAINS the phrase without being a label — an unanchored possessive pattern
+# refuses it (a false block on landed text, measured), while the two-word form keeps the
+# unanchored `search` the arm already had, because THAT pattern cannot match
+# ``the owner's approval``.
+_EMPHASIS_RUN_RE = re.compile(r"(\*\*|__)(.+?)\1", re.S)
 # ⛔ AN EMPHASIS RUN, ``**…**`` or ``__…__``. BOLD is this file's own label convention (all
 # 7 landed approval records open with one), so it is the detector's boundary — see the
 # arm's docstring for what that puts out of scope and why.
-_EMPHASIS_RUN_RE = re.compile(r"(\*\*|__)(.+?)\1", re.S)
 # ⛔ THE PHRASE IN EITHER WORD ORDER (review @ 9d34e510, finding 2): ``its own issue`` was
 # the only order the regex knew, so ``an issue of its own`` and ``a tracking issue of its
 # own`` — the same pointer, the same defect — were ACCEPTED (measured). The window between
@@ -3603,11 +3644,22 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
                       _PREFIX_APPROVAL_RECORD_WITH_EMPHASIS_IN_THE_LABEL,
                       _PREFIX_APPROVAL_RECORD_IN_UNDERSCORE_EMPHASIS,
                       _PREFIX_APPROVAL_RECORD_IN_TITLE_CASE,
-                      _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS):
+                      _PREFIX_APPROVAL_RECORD_IN_ALL_CAPS,
+                      _PREFIX_APPROVAL_RECORD_WITH_A_SINGULAR_POSSESSIVE,
+                      _PREFIX_APPROVAL_RECORD_WITH_A_PLURAL_POSSESSIVE,
+                      _PREFIX_APPROVAL_RECORD_WITH_A_TYPOGRAPHIC_APOSTROPHE):
         with pytest.raises(AssertionError) as rendered:
             _refuse_an_approval_record_with_no_resolvable_home(copy_edit)
         _assert_refused_by(
             rendered, "_refuse_an_approval_record_with_no_resolvable_home")
+    # …and the possessive label CARRYING its id is green, so the widening above cannot be
+    # satisfied by refusing every possessive form.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_WITH_A_POSSESSIVE_AND_ITS_HOME)
+    # …and a bold run that merely MENTIONS the owner's approval is not a label, so a landed
+    # build record of that shape stays green — the anchor's direction.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _A_BUILD_RECORD_MENTIONING_THE_OWNERS_APPROVAL)
     # …and the BOLDED LABEL WITH NO COLON — the em-dash form, the ``is on record`` form,
     # and the LANDED v3.32 shape with its id deleted. Each was measured GREEN while the
     # detector required ``…changes:``, so the arm was vacuous on five of its own seven
