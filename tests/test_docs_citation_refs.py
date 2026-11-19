@@ -800,9 +800,20 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # they cover different spellings (this regex knows the `-- tortoise/` shorthand the
     # detector's full-command anchor does not; the detector knows the answer forms this
     # regex's verb list does not).
+    # ⛔ AND IN BOTH SPELLINGS OF THE COMMAND (#13802 review, round 5, P2 — MEASURED). The
+    # detector anchors on the FULL command, so the document's own shorthand —
+    # "`-- tortoise/` reports exactly two paths" — was seen by NEITHER arm: the regex above
+    # does not list `reports`, and the detector was asked only about the long form.
+    # MEASURED on the rail's topology (no `origin/main`): that injected shorthand left
+    # `15 passed, 1 skipped` — green over a refuted claim — while the same claim in the long
+    # spelling reds. The second element carries its backticks ON PURPOSE: a bare
+    # "-- tortoise/" would also match inside the document's head-pinned historical command
+    # (`git diff --name-only origin/main...2a7f24e241 -- tortoise/`), and over-block the
+    # real document (measured). With them, only the shorthand spelling matches.
     _typed_direction = [
-        _answer for _answer, _claims_empty
-        in _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd)]
+        _answer for _cmd in (_tortoise_cmd, "`-- tortoise/`")
+        for _answer, _claims_empty
+        in _typed_answers_to_tortoise_cmd(doc, _cmd)]
     assert not _typed_direction, (
         f"05-verify.md TYPES {_typed_direction[0]!r} as the answer to `{_tortoise_cmd}` — "
         "a typed present-tense ANSWER to a head-bound measurement is the defect class this "
