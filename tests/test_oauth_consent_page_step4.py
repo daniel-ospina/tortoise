@@ -1333,7 +1333,7 @@ def test_the_bounce_does_not_append_a_SECOND_key_when_the_flow_already_has_one()
     # value it adopts. The page's `attemptKey()` reads the CALLER's query, not the emitted URL —
     # `new URLSearchParams(window.location.search).get(...)` (`tortoise/oauth.py:2361-2362`) — and
     # `mint()` POSTs exactly that to `/api/consent/token` (`:2478`). Nothing on the TS side strips:
-    # `start.ts:255` is `url.searchParams.get(ATTEMPT_KEY_PARAM) ?? ""` and `token.ts` hashes what
+    # `start.ts::presentedKey` is `url.searchParams.get(ATTEMPT_KEY_PARAM) ?? ""` and `token.ts` hashes what
     # it is handed (`attemptKeyHash(attemptKey)`). So for `attempt_key=%20K%20` the page carries
     # `" K "`, and an emitter that strips puts its sign-in link on `"K"`: `recordConsentAttempt`
     # writes `attempt_key_hash` ONLY on INSERT (`_shared/auth/consent-bridge.ts:362-397`), so

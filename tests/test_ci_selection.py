@@ -10294,6 +10294,11 @@ ROWED_BY_THIS_FOLD = (
     # reported it — the same defect `#13110`'s own comment records surviving a round, which is
     # the reason this ENTRY-RULE tuple is explicit rather than derived.
     "test_13422_object_subject_dense_leg.py",
+    # #13610 — the fold that retires the graph-stored `:Object`/`:Subject` copy per deployment,
+    # once the record's coverage count proves it. A file this fold ADDED and registered on
+    # `core` for the same reason as the row above: `tortoise/record_vector.py`,
+    # `tortoise/search_engine.py` and `tortoise/projection/` collect on no other surface.
+    "test_13610_graph_vector_copy.py",
     # #13629 — the entity-vector retirement pair's falsifiers (the parity census and the
     # preview-by-default stripper, `tools/entity_vector_parity_census.py` +
     # `tools/strip_graph_entity_vectors.py`). A file this fold ADDED, registered on
@@ -10303,6 +10308,14 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #13665 — the Sentry STARTUP seam. A file this fold ADDED, registered on `api`
+    # because the behaviour it pins is a call made from `_lifespan` in
+    # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES the
+    # `core` fallback — so a `core`-only registration leaves the pin asleep on the one
+    # diff class that can reintroduce the defect. Listed here for the reason #13629's
+    # row states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and nothing reds.
+    "test_13665_sentry_init_off_loop.py",
 )
 
 
@@ -23478,5 +23491,93 @@ def test_the_13034_terminal_currency_census_runs_on_the_hosted_door_it_guards():
         "the `core` arm regressed — `tortoise/live.py` is where the shared "
         "predicate itself is DEFINED (`_terminal_excluded`, `is_terminal_status`) "
         "and no longer selects the census that holds it constant"
+    )
+
+
+def test_a_sentry_only_diff_runs_the_startup_init_guard():
+    """#13665 review round 1 (finding 1): the guard's OWN module must select it.
+
+    `init_off_loop()` lives in `tortoise/sentry.py`, which matches NO
+    `SOURCE_PATTERNS` row, so a `sentry.py`-only diff resolves `['core']` — and a
+    matched surface REPLACES the `core` fallback rather than unioning with it. The
+    guard was registered on `api` only, so that diff class ran none of its arms.
+
+    The revert it must catch is one line and compiles clean:
+    `tortoise/sentry.py` `return await asyncio.to_thread(_init_once)` -> `return
+    init()`. Both halves keep the coroutine signature, so `_lifespan` still awaits
+    happily and the loop is blocked again — and, on the pre-fix registration,
+    **no selected test measures it** (#1349/#2938 silent-drop class, in the
+    direction where the guard is asleep on its own subject).
+
+    MEASURED both ways with the shipped selector, at the head this pin lands on:
+    pre-fix `select(['tortoise/sentry.py'], 'pull_request', m)` -> surfaces
+    `['core']`, 911 files, guard ABSENT; with the `core` row -> 912 files, guard
+    present. `integrity()` cannot stand in for this — it answers "is every test file
+    classified SOMEWHERE", which is green either way (#11092's note in
+    `config/ci-surfaces.yml` states the same hole in the same shape).
+
+    ⛔ The NON-VACUITY arm below is the reason this is a pin and not a restatement of
+    the row: it reconstructs the pre-fix map by dropping the row and asserts the
+    guard leaves the selection, so the assertion is about THIS row and not about
+    some other surface happening to carry the file.
+    """
+    pin = "test_13665_sentry_init_off_loop.py"
+    manifest = load_manifest()
+
+    # The rows, by NAME — a lost arm is a lost ROW, and a selection assert alone
+    # would pass the day a second surface also lists the file.
+    assert pin in manifest["surfaces"]["api"], (
+        "`surfaces.api` must list the startup-init guard — it is what covers a "
+        "`tortoise/hosted_api.py`-only diff (an exact `api` SOURCE_PATTERN that "
+        "REPLACES the `core` fallback), i.e. the `_lifespan` call site"
+    )
+    assert pin in manifest["surfaces"]["core"], (
+        "`surfaces.core` must list the startup-init guard — `init_off_loop()` "
+        "itself lives in `tortoise/sentry.py`, which resolves `core`, so without "
+        "this row a one-line revert of the fix runs no arm that measures it"
+    )
+
+    # No subtractive key may silently drop it from the fast leg either: `select()`
+    # applies `-= carve`, `-= uri_requiring`, `-= on_demand` to `files`.
+    assert pin not in set(manifest.get("carve_out", ())), pin
+    assert pin not in uri_requiring_files(manifest), pin
+    assert pin not in on_demand_files(manifest), pin
+
+    # THE DIFF CLASS THAT REINTRODUCES THE DEFECT.
+    sentry_arm = _sel(["tortoise/sentry.py"])
+    assert sentry_arm["full"] is False, "a sentry.py-only diff must not run the FULL matrix"
+    assert sentry_arm["surfaces"] == ["core"], (
+        f"a `tortoise/sentry.py`-only diff selects {sentry_arm['surfaces']} — expected "
+        "['core']. If sentry.py ever GAINS a named surface, this pin stops covering "
+        "its own diff and the row must move with it"
+    )
+    assert pin in sentry_arm["test_files"], (
+        "a `tortoise/sentry.py`-only diff does not run the startup-init guard, so "
+        "`init_off_loop` can be put back on the loop with every arm green (#13665)"
+    )
+
+    # NON-VACUITY: drop the `core` row from the live map and the arm must go dark,
+    # which is the state this PR's round 1 found.
+    stripped = copy.deepcopy(manifest)
+    stripped["surfaces"]["core"] = [
+        name for name in stripped["surfaces"]["core"] if name != pin
+    ]
+    assert select(["tortoise/sentry.py"], "pull_request", stripped)["test_files"], (
+        "the stripped map selects nothing at all — this reconstruction is broken, "
+        "not the row"
+    )
+    pre_fix = select(["tortoise/sentry.py"], "pull_request", stripped)
+    assert pin not in pre_fix["test_files"], (
+        "dropping the `core` row left the guard selected anyway, so SOMETHING ELSE "
+        "already reaches it on this diff class and the row is not what this pin is "
+        "measuring — re-derive the pin before trusting it"
+    )
+
+    # …and the OTHER half of the dual registration still covers the call site.
+    hosted_arm = _sel(["tortoise/hosted_api.py"])
+    assert "api" in hosted_arm["surfaces"], hosted_arm["surfaces"]
+    assert pin in hosted_arm["test_files"], (
+        "a `tortoise/hosted_api.py`-only diff dropped the guard — the `api` row is "
+        "what covers the `_lifespan` call site"
     )
 

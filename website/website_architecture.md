@@ -67,7 +67,7 @@ Host routing lives in `website/functions/_middleware.ts`:
     differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
     the middleware 301s them to the app origin with the code in its `Location` (the recorded
     residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
-    through to the **backstop** at `_middleware.ts:514` and is refused with the same 400
+    through to the **backstop** at `_middleware.ts:538` and is refused with the same 400
     (`/signup?code=…` on the tortoise host — pinned by the suite).
   - `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*` (302) are
     **host-independent**: those branches run on every host, so an exempt-shaped request carrying a
@@ -79,7 +79,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:416-421`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:440-445`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
@@ -89,7 +89,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
-    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:514`
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:538`
     returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
     refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
     own comment forbids reversing the exemption that way
@@ -381,13 +381,32 @@ Rules:
   the retired host — they are root ASSETS, so no page branch matched them and the retired host served
   its own 200 copy of the index until #11766; pinned by
   `tests/test_middleware_host_consolidation.mjs`, which drives the real `onRequest`.
-  **Residual (measured 2026-11-12):** the retired host still answers **200** for `/contact` —
-  a company page no branch here owns. `/index` and `/index.html` are 301'd on the retired host
-  (they are the company homepage's raw duplicates); `/contact` is not, deliberately: adding company pages
-  to this map one at a time is the hand-kept-list decay #11766 exists to undo, and the page
-  carries `<link rel="canonical" href="https://premiselabs.co/contact">`, so the duplicate is
-  consolidated rather than competing. If a second company page starts answering there, the
-  fix is a PRINCIPLE (every non-product root asset hands off), not another member.
+  **Residual (measured 2026-11-12):** the retired host still answers **200** for `/404` (the 404
+  document; `/404.html` is a 308 to it) and for the static assets BOTH hosts share. `/index` and
+  `/index.html` are 301'd on the retired host (they are the company homepage's raw duplicates).
+  **`/contact` is no longer one of these (#13636).** It is a company page at the company ROOT and
+  now 301s there like `/privacy`: it was the LAST **marketing** document served from two hosts
+  (the 200 still served for `/404` above is not a page), because the
+  company-root rows above hold the legal three and the `/contact` rules lived only in
+  `website/_redirects` — which is **host-agnostic**: `/contact.html` and `/contact/` there collapse
+  SPELLINGS of one page, they never move a page between hosts — so with no branch in the
+  middleware `/contact` fell through to `context.next()` and Pages served `website/contact.html`
+  with a 200 on both hosts. `CONTACT_AT_ROOT` (exact paths `/contact` and `/contact.html`) hands it
+  to the one marketing host in one hop; the exact-path key is load-bearing, because `/contact/submit`
+  is a POST endpoint (`functions/contact/submit.ts`) and a prefix row would turn it into a GET and
+  drop the body.
+  ⛔ **This paragraph used to argue the opposite** — "`/contact` is not [redirected] deliberately:
+  adding company pages to this map one at a time is the hand-kept-list decay #11766 exists to undo,
+  and the page carries `rel=canonical` to `premiselabs.co/contact`, so the duplicate is consolidated
+  rather than competing". #13636 reversed that on the measured outcome: a canonical tag is a hint,
+  and the duplicate was still live — Google reports it as "Alternate page with proper canonical
+  tag", the exact class #11762 exists to remove — so "consolidated" described the intent, not the
+  state. And the clean alternative is not available at this layer: `_redirects` cannot express a
+  host-conditional rule, and a blanket "every non-product root path hands off" would 301 the shared
+  static assets and the POST endpoints both hosts must still reach. So a set member IS the mechanism;
+  a second company page is another member **with a row in
+  `tests/test_middleware_host_consolidation.mjs`**, which is the part that keeps the list from
+  decaying silently.
   **The company host's own `/index` is the same duplicate and is ALSO still 200** — the surviving
   twin of the paragraph above (measured: `_redirects` carries only `/index.html`). It is left as a
   recorded residual rather than fixed here, because the one-line fix is not one line: adding
