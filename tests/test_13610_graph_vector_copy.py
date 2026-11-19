@@ -893,12 +893,22 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     file already reads it that way for the non-trivial case
     (`test_a_contracted_empty_answer_is_the_answer`, `:445-449`).
 
-    ⛔ THE FOUR ASSERTIONS ARE COMPLEMENTARY, NOT REDUNDANT — measured, and the
-    distinction matters to whoever reproduces the mutation. `graph.queries == []`
-    catches the decline that ESCAPES the leg (the graph is then asked to answer,
-    which is the forbidden outcome); an in-leg decline does not ask the graph at
-    all, and is caught instead by `degraded is False` / `reason == "empty_results"`,
-    which read the `query_failed` trace. Neither pair alone catches both shapes.
+    ⛔ WHAT EACH ASSERTION ACTUALLY HOLDS — measured BOTH ways, because the
+    intuitive reading of this pin is wrong and whoever reproduces the mutation will
+    otherwise infer grip it does not have. Two decline shapes were injected after the
+    marker's debug line, each run once with the graph assertion suppressed and once
+    with the trace trio suppressed:
+
+      * `graph.queries == []` catches ONLY the ESCAPING decline — a raise that
+        leaves the leg, so the graph IS asked (`mechanism=scan_fallback`,
+        `degraded=True`, `reason=no_embeddings`). It stays GREEN over an in-leg
+        decline, which never asks the graph at all.
+      * the trace trio catches BOTH shapes: the escaped one above, and the in-leg one
+        (`mechanism=pgvector`, `degraded=True`, `reason=query_failed`).
+
+    So the trio is the load-bearing pair, and `graph.queries == []` is still not
+    redundant with it: it pins a property the trace cannot report at all — that no
+    work was spent on the graph for a cohort known empty on both sides.
     """
     import logging
 
