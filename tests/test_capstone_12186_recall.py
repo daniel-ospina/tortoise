@@ -388,12 +388,39 @@ def test_the_mint_arm_is_measured_inside_the_environment_guard():
         "`TORTOISE_UNDERSCORE_TERMS=0` turns the arm published as the SHIPPED matcher "
         "into a second pre-lever arm without the record saying so — measure it inside "
         "the `try`, with the shipped state set explicitly")
-    env_keys = {n.slice.value for n in ast.walk(fn)
+    # ⛔ SCOPED TO THE MINT ARM'S OWN STATEMENT (round 21, measured). The first cut built
+    # `env_keys` from `ast.walk(fn)`, so the ARMS loop's `arms[arm]["env"] = dict(env)`
+    # satisfied it on its own: deleting the mint arm's `env` assignment stayed GREEN.
+    # A key set over the whole function cannot say anything about one statement in it.
+    mint_env = [n for n in ast.walk(fn)
                 if isinstance(n, ast.Subscript) and isinstance(n.ctx, ast.Store)
-                and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)}
-    assert "env" in env_keys, (
-        "every arm records the `env` it ran under, and the mint arm must not be the "
-        "exception: without it a reader cannot tell which retrieval path §3b came from")
+                and isinstance(n.slice, ast.Constant) and n.slice.value == "env"
+                and isinstance(n.value, ast.Subscript)
+                and isinstance(n.value.slice, ast.Constant)
+                and n.value.slice.value == "mint_rate"]
+    assert mint_env, (
+        "the mint arm must record the `env` it ran under, like every other arm, and "
+        "not only through the ARMS loop's write: without it a reader cannot tell which "
+        "retrieval path §3b came from")
+    # ⛔ AND THE SHIPPED STATE IS SET EXPLICITLY, NOT INHERITED FROM THE LOOP (round 21).
+    # "inside the `try`" is not the fix on its own: the loop's LAST arm leaves its own
+    # `env` overrides in place, so a mint arm measured immediately after it would carry
+    # them. The pops enumerated here are the TRY BODY's only — a `max()` over the whole
+    # `guards[0]` subtree picks up the `finally`'s restores, which run AFTER the call and
+    # made the first cut of this assertion red on correct code.
+    pops = [n.lineno for stmt in guards[0].body for n in ast.walk(stmt)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "pop" and isinstance(n.func.value, ast.Attribute)
+            and n.func.value.attr == "environ"]
+    arm_loops = [n for n in guards[0].body if isinstance(n, ast.For)]
+    assert arm_loops, "the ARMS loop is no longer a `for` in the env guard's `try` body"
+    after_loop = [n for n in pops if n > arm_loops[0].end_lineno]
+    assert after_loop and max(after_loop) < calls[0], (
+        "`run()` must pop the ambient `TORTOISE_UNDERSCORE_TERMS`/`TORTOISE_FUSED_RERANK` "
+        "AFTER the ARMS loop and BEFORE measuring the mint arm (the SHIPPED matcher), "
+        "rather than inheriting whatever the loop's last iteration left set — the "
+        "loop's own pop does not satisfy this, which is what made the first cut of "
+        "this assertion green on a mint arm measured under the last arm's overrides")
 
 
 def test_recall_is_monotone_in_k_on_every_arm(artifact):
@@ -590,12 +617,12 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
         readme.index("**Not a production census.**")].split())
     assert "entity_type='object'" in door_para, (
         f"README §5 must state the `entity_type` the arms pass: {door_para!r}")
-    assert f"limit={cap.KMAX}" in door_para, (
+    assert _phrase_mentions(door_para, f"limit={cap.KMAX}"), (
         f"README §5 must state the `limit` the arms pass ({cap.KMAX}): {door_para!r}")
     assert f"default to `entity_type='{door_entity}'`" in door_para, (
         f"README §5 must name the doors' real `entity_type` default "
         f"({door_entity!r}) so the divergence is visible: {door_para!r}")
-    assert f"limit={door_limit}" in door_para, (
+    assert _phrase_mentions(door_para, f"limit={door_limit}"), (
         f"README §5 must name the doors' real `limit` default ({door_limit!r}) — "
         f"the shipped window is that value, and a wrong one here re-publishes the "
         f"falsehood as a checked fact: {door_para!r}")
