@@ -333,10 +333,33 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     measurement that said "no node has that name" about a node the write door
     reaches. ⛔ The space that comes from
     `entity_identity.name_key_space_same_entity` is the **SPELLING** space only:
-    unlike `resolve_or_mint`, this site is status-blind and does not collapse
-    merged carriers (capture's recorded attach-to-every-carrier disposition), so a
-    terminal-only holder IS linked and `unresolved` is about spelling, not about
-    the writer's whole resolution (the collapse half is #12244).
+    unlike `resolve_or_mint`, this site is status-blind, so a terminal-only holder
+    IS linked and `unresolved` is about spelling, not about the writer's whole
+    resolution.
+
+    ⛔ **The MERGE COLLAPSE is applied on top of the spelling space (#12244).**
+    `apply_entity_merge` is non-destructive: a merged pair is ONE entity with TWO
+    live rows under one folded key (the retired carrier keeps its name and gains
+    `resolved_from`; the survivor records the candidate's folded key in
+    `aliases`). The spelling space therefore matches BOTH, and attaching to every
+    row wrote the second edge onto the node the writer would never resolve to —
+    measured after `apply_entity_merge("the team" -> "Acme Holdings")`: a record
+    naming `"team"` reported `linked=2` with edges to the survivor AND the
+    carrier. The matched holders are now mapped through
+    `entity_identity.attachment_target_ids` (one definition of the hop, shared
+    with capture's own anchor), so ONE edge lands, on the survivor, and `linked`
+    — documented as what actually LANDED — counts one.
+
+    ⛔ **The recorded dispositions are preserved, on purpose:**
+    * attach-to-every-carrier is UNCHANGED for every DISTINCT entity — the
+      collapse dedupes only rows the merge's own pointer says are one entity, so
+      the dispose that keeps a resolver call out of this site still holds;
+    * the id-less stub arm below is untouched (an id-less row carries no
+      `resolved_from` evidence and no id to attach by), and it still reads the
+      same widened space;
+    * the site remains STATUS-BLIND: a terminal-only holder is still linked. The
+      collapse's live filter is the CREATE path's (`_collapse_resolved_holders`,
+      `drop_retired_survivors`) and this site passes `False`.
 
     `unresolved` therefore means what it says: *no Object holds that name in the
     key space the write resolves on* (raw, folded, `canonical_name`, or a merge's
@@ -432,7 +455,8 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     # the same import-cost reason as `link_entity` above (`entity_identity`
     # pulls `entity_resolver`, and this module is on every extractor import).
     try:
-        from .entity_identity import name_key_space_same_entity
+        from .entity_identity import (
+            attachment_target_ids, name_key_space_same_entity)
     except Exception as e:  # noqa: BLE001, RUF100
         out["warnings"].append(
             f"merge attachment skipped, name key space unavailable "
@@ -491,18 +515,40 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
                 f"({type(e).__name__}: {e})")
             continue
         idless = False
-        for row in rows:
-            oid = row[0] if row else None
-            if isinstance(oid, str) and oid:
-                try:
-                    out["linked"] += link_entity(proj, "Point", point_id, oid,
-                                                 sdk=sdk)
-                except Exception as e:  # noqa: BLE001, RUF100
-                    out["warnings"].append(
-                        f"merge attachment failed for {_n!r} "
-                        f"({type(e).__name__}: {e})")
-            else:
+        # #12244: the MERGE-COLLAPSE half. The space above is the writer's
+        # SPELLING space, and `apply_entity_merge` leaves a merged pair as ONE
+        # entity with TWO live rows under one folded key, so it matches both the
+        # survivor and the carrier the merge retired. Attaching to every row
+        # therefore wrote a second edge onto a node the writer would never
+        # resolve to (measured: `linked=2` for one entity). Collapse per ENTITY
+        # — the hop is `entity_identity`'s, never a second implementation — and
+        # keep the id-less arm below, which is the other recorded disposition.
+        # ⚠️ The collapse is status-blind on purpose (this site links a
+        # terminal-only holder); `attachment_target_ids` is the only caller that
+        # asks for that, and it says so. A collapse that cannot be computed must
+        # not sink capture, so it degrades to the pre-#12244 attachment set with
+        # a warning — never to silence.
+        _holder_ids = [(row[0] if row else None) for row in rows]
+        for _holder in _holder_ids:
+            if not (isinstance(_holder, str) and _holder):
                 idless = True
+        try:
+            _targets = attachment_target_ids(proj.g, "Object", _holder_ids)
+        except Exception as e:  # noqa: BLE001, RUF100
+            out["warnings"].append(
+                f"merge attachment collapse failed for {_n!r} "
+                f"({type(e).__name__}: {e}) — attaching to every matched "
+                "carrier, so a merged-away carrier may keep its edge")
+            _targets = [h for h in _holder_ids
+                        if isinstance(h, str) and h]
+        for _tid in _targets:
+            try:
+                out["linked"] += link_entity(proj, "Point", point_id, _tid,
+                                             sdk=sdk)
+            except Exception as e:  # noqa: BLE001, RUF100
+                out["warnings"].append(
+                    f"merge attachment failed for {_n!r} "
+                    f"({type(e).__name__}: {e})")
         if idless:
             # An id-less name stub cannot be addressed by `link_entity` (it
             # MERGEs on {id:...} and would mint a DIFFERENT node). Same

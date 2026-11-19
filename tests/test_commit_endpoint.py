@@ -5689,6 +5689,78 @@ def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
         "— flip this row (and the comment on the leg) with it")
 
 
+class TestThe12244TheHostedAnchorCollapsesAMergedPair:
+    """#12244 — the hosted `aboutObject` anchor widened its SPELLING space
+    (#12203) but not its MERGE COLLAPSE.
+
+    The disposition recorded for this site (`TestThe12120HostedAboutObjectAnchor`'s
+    docstring, and `tests/test_entity_identity.py::_ALLOWED_KEYED`) is
+    ATTACH-TO-EVERY-CARRIER: the anchor picks no identity, so a resolver call
+    would refuse where capture writes. `apply_entity_merge` is NON-destructive,
+    so a merged pair is ONE entity with TWO live rows under one folded key — the
+    collapse answers THAT question and leaves the disposition alone.
+    """
+
+    def test_a_merged_variant_links_the_survivor_not_the_retired_carrier(
+            self, client):
+        """#12244: the anchor's SPELLING space was widened, its MERGE COLLAPSE was not.
+
+        `apply_entity_merge` is NON-destructive — a merged pair is ONE entity with
+        TWO live rows under one folded key (the retired carrier keeps its
+        `name`/`canonical_name` and gains `resolved_from`; the survivor records
+        the candidate's folded key in `aliases`). One `MERGE` over the widened
+        space therefore wrote the `aboutObject` edge onto BOTH, including the
+        carrier the merge retired, while the writer's own answer for that name is
+        the SURVIVOR only (`resolve_or_mint` hops the pointer).
+
+        The recorded dispositions survive the fix and are pinned beside it: every
+        DISTINCT carrier still takes its edge (the collapse dedupes per ENTITY
+        and picks no identity), and the id-less arm — this site's single-MERGE
+        shape — still attaches an id-less stub
+        (`TestThe12120HostedAboutObjectAnchor`'s siblings and the local twin in
+        `tests/test_12047_entity_resolution.py`).
+        """
+        from tortoise.entity_resolver import apply_entity_merge
+
+        _seed_objects(client, "s12244-h-1", ["Acme Holdings", "The Team"])
+        sdk = _team_sdk()
+        try:
+            ids = {str(r[1]): str(r[0]) for r in sdk._get_proj().g.query(
+                "MATCH (o:Object) WHERE o.name IN $names RETURN o.id, o.name",
+                params={"names": ["Acme Holdings", "The Team"]},
+            ).result_set}
+            assert set(ids) == {"Acme Holdings", "The Team"}, (
+                f"fixture drift: the seed wrote {ids}")
+            apply_entity_merge(sdk, ids["The Team"], ids["Acme Holdings"],
+                               method="exact", similarity=1.0)
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-2",
+            entities=[{"name": "team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["team"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        carrier_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:$cid}) "
+            "RETURN count(o)",
+            params={"cid": ids["The Team"]}).result_set[0][0]
+        assert carrier_edges == 0, (
+            "the hosted anchor attached to the carrier the merge retired — the "
+            "writer resolves that name onto the survivor")
+        survivor_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:$sid}) "
+            "RETURN count(o)",
+            params={"sid": ids["Acme Holdings"]}).result_set[0][0]
+        assert survivor_edges == 1, (
+            "expected ONE edge, on the survivor: "
+            f"{survivor_edges} (carrier got {carrier_edges})")
+
+
 class TestThe12120HostedAboutObjectAnchor:
     """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).
 

@@ -2833,6 +2833,73 @@ class TestThe12120Finding1TheAboutAnchorAsksTheWritersKeySpace:
             sdk.close()
 
 
+class TestThe12244TheCaptureAnchorCollapsesAMergedPair:
+    """#12244 — the SPELLING space was widened, the MERGE COLLAPSE was not.
+
+    The loop above took its holders from `entity_identity.name_key_space_same_entity`
+    (#12203) and attached to EVERY row it returned. `apply_entity_merge` is
+    NON-DESTRUCTIVE: a merged pair is ONE entity with TWO live rows under one
+    folded key (the retired carrier keeps its `name`/`canonical_name` and gains
+    `resolved_from`; the survivor records the candidate's folded key in
+    `aliases`). The widened space therefore matched both, so a captured claim
+    naming the variant attached to the carrier the merge retired as well — while
+    the writer's own answer for that name is the SURVIVOR only
+    (`resolve_or_mint` hops the pointer).
+
+    The recorded dispositions are untouched by the fix and pinned here: every
+    DISTINCT carrier still takes its edge (the collapse dedupes per ENTITY and
+    never picks an identity), and the id-less arm still reads the same space.
+    """
+
+    def test_a_captured_claim_naming_a_merged_variant_links_the_survivor_only(
+            self, tmp_path, monkeypatch):
+        import tortoise.extractor_v2 as ev2
+        from tortoise.entity_resolver import apply_entity_merge
+        from tortoise.sdk import TortoiseSDK
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        embed = {
+            "entities": [{"name": "team", "kind": "core:thing",
+                          "lifecycle": "created", "supersedes": None,
+                          "note": None}],
+            "events": [],
+            "points": [{"content": "the team ships in Q3",
+                        "pointKind": "statement",
+                        "about_entities": ["team"]}],
+            "operators": [], "chain_notes": [], "link_before_create": [],
+        }
+        payload = ev2.execute_embed(embed, {}, session_id="s-12244")["payload"]
+        monkeypatch.setattr(
+            ev2, "extract_session_v2",
+            lambda *a, **k: {"payload": payload, "errors": [], "warnings": []})
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            survivor = sdk.create_object("Acme Holdings")
+            carrier = sdk.create_object("The Team")
+            apply_entity_merge(sdk, carrier["id"], survivor["id"],
+                               method="exact", similarity=1.0)
+            sdk._extract_session_v2(
+                [{"role": "user", "content": "the team ships in Q3"}],
+                "s-12244", "2026-01-01T00:00:00Z")
+            g = sdk._get_proj().g
+            linked = {r[0] for r in g.query(
+                "MATCH (:Point)-[:aboutObject]->(o:Object) RETURN o.id"
+            ).result_set}
+            assert carrier["id"] not in linked, (
+                "the captured claim attached to the carrier the merge retired "
+                f"({carrier['id']}) — the writer resolves that name onto the "
+                "survivor")
+            assert linked == {survivor["id"]}, (
+                f"expected one edge, on the survivor only: {linked}")
+        finally:
+            sdk.close()
+
+
 _PIPELINE_DECL = {
     "defaultStage": "stg_contact",
     "stages": [

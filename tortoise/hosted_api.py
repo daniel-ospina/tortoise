@@ -98,6 +98,7 @@ from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
 )
 from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
     AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    attachment_target_ids,  # #12244: the merge collapse, for the about-anchor
     name_key_space_same_entity,  # #12120: the writer's key space, for node-returning reads
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
@@ -23821,7 +23822,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # `resolve_entity_id_same_entity` would make an attribution edge
             # REFUSE where capture writes — two live same-name carriers — silently
             # losing an attachment on the hosted path only. Widening the spelling
-            # set picks no identity, so that objection does not apply.
+            # set picks no identity, so that objection does not apply. ⛔ #12244:
+            # "one entity, two rows" is a DIFFERENT question from "two carriers",
+            # and the collapse below answers only that one (see the note at the
+            # read).
             _space, _space_params = name_key_space_same_entity("o", str(name))
             if not _space:
                 continue
@@ -23833,12 +23837,59 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if _fold(str(name)) in subject_entity_names_folded:
                 _space = f"({_space}) AND o.name = $exact"
                 _space_params = {**_space_params, "exact": str(name).strip()}
-            proj.g.query(
-                f"MATCH (p:Point {{id:$pid}}), (o:Object) "
-                f"WHERE {_space} "
-                f"MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, **_space_params},
-            )
+            # ⛔ #12244: the MERGE-COLLAPSE half. The space above is the writer's
+            # SPELLING space, and `apply_entity_merge` is non-destructive — a
+            # merged pair is ONE entity with TWO live rows under one folded key
+            # (the retired carrier keeps its name and gains `resolved_from`; the
+            # survivor records the candidate's folded key in `aliases`). A single
+            # MERGE over that space therefore wrote the edge onto BOTH, including
+            # the node the writer would never resolve to. Read the holders, map
+            # them through `entity_identity.attachment_target_ids` (the hop has
+            # ONE definition), then attach per ENTITY.
+            #
+            # ⛔ The recorded dispositions still hold: attach-to-every-carrier is
+            # unchanged for every DISTINCT entity (the collapse dedupes only rows
+            # the merge's own pointer joins, so no identity is picked and a second
+            # live same-name carrier keeps its edge); the anchor stays
+            # STATUS-BLIND (a terminal-only holder is still linked —
+            # `attachment_target_ids` applies no live filter); and the id-less
+            # arm below is kept because the recorded shape of this site is ONE
+            # `Object` MERGE that attaches id-less rows too, and `link_entity`
+            # cannot address them (it MERGEs on `{id:…}`).
+            _holders = [(_r[0] if _r else None) for _r in proj.g.query(
+                f"MATCH (o:Object) WHERE {_space} RETURN o.id",
+                params=_space_params).result_set]
+            _idless = any(
+                not (isinstance(_h, str) and _h) for _h in _holders)
+            try:
+                _targets = attachment_target_ids(proj.g, "Object", _holders)
+            except Exception as _col_exc:  # noqa: BLE001, RUF100
+                # Never sink the commit on a collapse that cannot be computed:
+                # fall back to the pre-#12244 attachment set and say so.
+                _targets = [_h for _h in _holders
+                            if isinstance(_h, str) and _h]
+                _logger.warning(
+                    "about-anchor collapse failed for %r: %s: %s — attached "
+                    "to every matched carrier",
+                    name, type(_col_exc).__name__, _col_exc)
+            if _targets:
+                proj.g.query(
+                    "MATCH (p:Point {id:$pid}), (o:Object) "
+                    "WHERE o.id IN $ids "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, "ids": _targets},
+                )
+            if _idless:
+                # An id-less name stub (minted by the capture wiring
+                # `MERGE (o:Object {name:$name})`) has no id to attach by, so it
+                # keeps main's name-based MERGE over the SAME widened space.
+                proj.g.query(
+                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                    f"WHERE {_space} "
+                    "AND (o.id IS NULL OR o.id = '') "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, **_space_params},
+                )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a
         # point this commit actually WROTE, and only against the id the write

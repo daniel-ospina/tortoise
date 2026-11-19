@@ -384,7 +384,8 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
-def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
+def _collapse_resolved_holders(g, label: str, holder_ids, *,
+                               drop_retired_survivors: bool = True) -> list:
     """Collapse MERGED-AWAY carriers onto their survivor — one definition.
 
     #12047 round-4 finding 1, extracted by review F2. ``apply_entity_merge`` is
@@ -403,6 +404,18 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     Each carrier maps to its survivor and counts once; an id-less legacy row
     carries no ``resolved_from`` evidence and stays a holder in its own right,
     per-row (F-B's node-exactness).
+
+    ``drop_retired_survivors`` (#12244) — whether the LIVE filter below runs.
+    It exists for the WRITE path: a create must not MERGE onto a retired
+    incarnation (round 9). An ATTACHMENT site is STATUS-BLIND by its own
+    recorded disposition (``near_dup_merge.apply_merge_union``: "a terminal-only
+    holder IS linked"), so it passes ``False`` and takes the hop without the
+    filter — via :func:`attachment_target_ids`, which is the only sanctioned
+    caller. ⛔ The filter is ALL-OR-NOTHING for the call and not per entity: it
+    drops every collapsed id that is not live once ANY holder hopped, so a
+    status-blind caller that used it would silently lose an unrelated terminal
+    holder it is supposed to link. That is why the flag exists rather than the
+    callers re-deriving the hop.
     """
     # ⛔ #12047 review round 9: the hop DROPS a terminal survivor. The holders
     # were live-only BEFORE the hop, but a merged-away carrier stays live while
@@ -426,7 +439,7 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
             continue
         seen.add(key)
         collapsed.append(resolved)
-    if hopped:
+    if hopped and drop_retired_survivors:
         ids = [str(c) for c in collapsed if c]
         if ids:
             # Entity labels use the entity vocabulary (no `outdated` flag).
@@ -442,6 +455,54 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
             collapsed = [c for c in collapsed
                          if not (c and str(c) not in live)]
     return collapsed
+
+
+def attachment_target_ids(g, label: str, holder_ids) -> list[str]:
+    """The ENTITY ids an ATTACHMENT site writes its ``aboutObject`` edge to.
+
+    #12244: the three ``aboutObject`` attachment sites
+    (``near_dup_merge.apply_merge_union``, ``sdk._extract_session_v2``'s
+    ``about_entities`` loop and ``hosted_api``'s Point about-anchor) take their
+    holder set from :func:`name_key_space_same_entity` — the writer's SPELLING
+    space — and then attached to EVERY row it returned. ``apply_entity_merge`` is
+    NON-DESTRUCTIVE, so a merged pair is ONE entity with TWO live rows under one
+    folded key: the retired carrier keeps its ``name``/``canonical_name`` and
+    gains ``resolved_from``, the survivor records the candidate's folded key in
+    ``aliases``. So the spelling space matches BOTH and each site wrote TWO edges
+    for one entity — one of them onto the node :func:`resolve_or_mint` would
+    never return. Measured (lane graph): after
+    ``apply_entity_merge(candidate="the team" -> survivor="Acme Holdings")`` a
+    merge record naming ``"team"`` reported ``linked=2`` and the Point carried
+    edges to BOTH the survivor and ``obj-carrier``.
+
+    ⛔ WHAT THIS DOES NOT DO — the recorded dispositions survive:
+
+    * it does NOT pick an identity among DISTINCT carriers. Every distinct
+      entity the spelling space matched is returned, so the sites keep
+      attach-to-every-carrier (the disposition recorded in
+      ``tests/test_entity_identity.py::_ALLOWED_KEYED`` and in
+      ``apply_merge_union``'s docstring), and the objection that made a resolver
+      call wrong there — it would REFUSE where capture writes — still does not
+      apply. Only rows that are the SAME entity, joined by the merge's own
+      ``resolved_from`` pointer, are deduped.
+    * it does NOT speak for id-less stubs. An id-less row carries no
+      ``resolved_from`` evidence and no id to attach by, so it stays a holder in
+      its own right and the CALLER keeps its own id-less arm over the same space
+      (``link_entity`` MERGEs on ``{id:…}``; the hosted anchor's single MERGE
+      attaches id-less rows). They are simply not represented in this answer.
+    * it is STATUS-BLIND, like the sites that use it: a terminal-only holder is
+      still linked, which is what ``apply_merge_union`` documents. See
+      :func:`_collapse_resolved_holders`'s ``drop_retired_survivors`` — the live
+      filter is the CREATE path's, not this one's.
+
+    The survivor is returned even when it is NOT among ``holder_ids``: the
+    spelling space reaches a survivor through ``aliases`` only for the fold the
+    merge recorded, and the ENTITY is the survivor regardless. Both writers match
+    on ``id``, so an id that names no node attaches nothing — never a minted node
+    (``link_entity`` returns 0 when an endpoint is absent).
+    """
+    return [str(holder) for holder in _collapse_resolved_holders(
+        g, label, holder_ids, drop_retired_survivors=False) if holder]
 
 
 def _name_holder_ids_same_entity(g, label: str, name: str, *,

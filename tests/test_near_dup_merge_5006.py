@@ -1317,3 +1317,134 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
             "a name no Object holds in any spelling was reported as a "
             f"subject-channel skip: {res}")
         assert res["skipped_subject"] == [], res
+
+
+class TestThe12244TheAttachmentCollapsesAMergedPair:
+    """#12244 — the MERGE COLLAPSE half, at the merge-attachment site.
+
+    #12203 widened these sites to the writer's **spelling** space
+    (`entity_identity.name_key_space_same_entity`) but not to its **entity**
+    resolution. `apply_entity_merge` is NON-DESTRUCTIVE, so a merged pair is ONE
+    entity with TWO live rows under one folded key — the retired carrier keeps its
+    `name`/`canonical_name` and gains `resolved_from`, while the survivor records
+    the candidate's folded key in `aliases`. The widened space therefore matched
+    BOTH and this site attached to each, including the carrier the merge retired;
+    the writer's own answer for the same name is the SURVIVOR only.
+
+    ⛔ The recorded dispositions are pinned here in the OTHER direction too: the
+    fix must not become an identity pick. Two DISTINCT carriers still both get
+    their edge (attach-to-every-carrier), and an id-less stub is still covered —
+    it has no `id` to attach by, so its arm is name-based and unchanged.
+    """
+
+    @pytest.fixture
+    def sdk(self, tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        s = TortoiseSDK(str(tmp_path / "merge_collapse.db"))
+        yield s
+        s.close()
+
+    @staticmethod
+    def _edges(sdk, point_id):
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN o.id ORDER BY o.id",
+            params={"pid": point_id}).result_set
+        return [r[0] for r in rows]
+
+    def _merged_pair(self, sdk):
+        """The measured pair: `"The Team"` merged INTO `"Acme Holdings"`."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        survivor = sdk.create_object("Acme Holdings")
+        carrier = sdk.create_object("The Team")
+        apply_entity_merge(sdk, carrier["id"], survivor["id"],
+                           method="exact", similarity=1.0)
+        return survivor, carrier
+
+    def test_a_record_naming_the_variant_links_the_SURVIVOR_only(self, sdk):
+        """THE measured case (lane graph, review round 15).
+
+        Before the collapse this reported `linked=2` and the Point carried edges
+        to BOTH the survivor and `obj-carrier`, while the writer's answer for the
+        same name is the survivor only. `linked` is documented as "what actually
+        landed", so the over-attachment was counted as work as well.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        pt = sdk.create_point("statement", "the team meets weekly")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_a"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_a", sdk=sdk)
+
+        assert res["unresolved"] == [], res["unresolved"]
+        assert res["linked"] == 1, (
+            "one entity took two attachment edges — `linked` counts what "
+            f"landed: {res}")
+        assert self._edges(sdk, pt["id"]) == [survivor["id"]], (
+            "the merge record attached to the carrier the merge retired "
+            f"instead of the survivor (carrier={carrier['id']})")
+
+    def test_two_DISTINCT_carriers_still_both_get_their_edge(self, sdk):
+        """The recorded attach-to-every-carrier disposition SURVIVES.
+
+        Two live Objects of one folded key that NO merge joins are two distinct
+        entities — the site picks no identity, so both keep their edge. A fix
+        that routed this through the resolver (or that collapsed by NAME rather
+        than by the merge pointer) would drop one of them here.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        g = sdk._get_proj().g
+        # Two spellings of one FOLDED key, both addressable the way the writer
+        # makes them addressable (the fold arm matches a stored `canonical_name`
+        # value — it never lowercases the stored spelling, #12242's neighbour).
+        g.query("CREATE (o:Object {id:'obj-12244-twin-a', name:'Twin', "
+                "canonical_name:'twin', objectKind:'other', status:'live'})")
+        g.query("CREATE (o:Object {id:'obj-12244-twin-b', name:'the twin', "
+                "canonical_name:'twin', objectKind:'other', status:'live'})")
+        pt = sdk.create_point("statement", "a claim about the twin")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_b"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["twin"]},
+            session_id="s_12244_b", sdk=sdk)
+
+        assert res["linked"] == 2, (
+            "two DISTINCT carriers of one folded key must both keep their "
+            f"edge — the collapse dedupes per ENTITY, it picks no identity: {res}")
+        assert self._edges(sdk, pt["id"]) == [
+            "obj-12244-twin-a", "obj-12244-twin-b"]
+
+    def test_an_idless_stub_beside_a_merged_pair_still_gets_its_edge(self, sdk):
+        """The id-less arm is load-bearing and is NOT collapsed away.
+
+        An id-less row carries no `resolved_from` evidence and no id to attach
+        by (`link_entity` MERGEs on `{id:…}`), so it stays a holder in its own
+        right and this site keeps coverage for it. The merged carrier in the
+        SAME space must still take no edge, which is what makes this a collapse
+        and not a wider attach.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        g = sdk._get_proj().g
+        g.query("CREATE (o:Object {name:'team', status:'live'})")
+        pt = sdk.create_point("statement", "the team meets weekly")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_c"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_c", sdk=sdk)
+
+        assert res["linked"] == 2, res
+        assert self._edges(sdk, pt["id"]) == [survivor["id"], None], (
+            "the id-less stub lost its edge, or the merged-away carrier kept "
+            f"one (carrier={carrier['id']})")
