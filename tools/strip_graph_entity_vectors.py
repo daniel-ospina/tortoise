@@ -1120,9 +1120,12 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                        for target in targets):
                     return True           # `q = "SET n.embedding = $e"; session.run(q)`
                 continue                  # text nothing runs
-            if isinstance(sub, ast.AugAssign) and isinstance(sub.value, ast.Dict) \
-                    and _dict_stores_the_vector(sub.value):
-                # `props |= {"embedding": vec}` — a merge that places the vector.
+            if isinstance(sub, ast.AugAssign) and (
+                    (isinstance(sub.value, ast.Dict) and _dict_stores_the_vector(sub.value))
+                    or (anywhere and _mapping_argument_stores_the_vector(sub.value))):
+                # `props |= {"embedding": vec}` — a merge that places the vector. ⛔ THE
+                # CONSTRUCTOR SPELLING IS THE SAME MERGE (`props |= dict(embedding=vec)`),
+                # recognised STOP-ARM ONLY: on the mirror arm it would WIDEN acceptance.
                 return True
             if not all(_names_embedding(target) for target in targets):
                 continue
@@ -1192,6 +1195,28 @@ def _mutator_stores_the_vector(call) -> bool:
     import ast
 
     name = _callee_name(call)
+    if name in ("setitem", "ior"):
+        # ⛔ THE `operator` FUNCTIONAL SPELLINGS ARE THE SAME STORES. `operator.setitem(props,
+        # "embedding", vec)` is literally what `props["embedding"] = vec` compiles to, and
+        # `operator.ior(props, {"embedding": vec})` is what `props |= {…}` does; both placed
+        # the vector on the stop arm and still certified the writer at `8637df0f` (measured).
+        # A METHOD that happens to be named `setitem` matches too — stop-arm only, so the
+        # cost is a refactor and never a strip.
+        arguments = list(call.args)
+        if name == "setitem":
+            return (len(arguments) >= 3
+                    and isinstance(arguments[1], ast.Constant)
+                    and arguments[1].value == EMBEDDING_PROPERTY
+                    and not isinstance(arguments[2], ast.Constant))
+        return (len(arguments) >= 2
+                and _mapping_argument_stores_the_vector(arguments[1]))
+    if name == "update":
+        # ⛔ `props.update(dict(embedding=vec))` — the CONSTRUCTOR spelling of the mapping the
+        # shared `update` arm already refuses as a literal. Stop-arm only, for the same
+        # reason as the branch below: a fix may add refusals, never acceptances.
+        return (any(_mapping_argument_stores_the_vector(argument) for argument in call.args)
+                or any(_mapping_argument_stores_the_vector(keyword.value)
+                       for keyword in call.keywords))
     if name == "setattr":
         # `setattr(props, "embedding", vec)` — (receiver, PROPERTY, value)
         arguments = list(call.args)
@@ -1207,13 +1232,39 @@ def _mutator_stores_the_vector(call) -> bool:
         arguments = arguments[1:]    # `dict.__setitem__(props, KEY, value)` — one arg more
     if name == "__ior__":
         # `props.__ior__({"embedding": vec})` — the method spelling of `props |= {…}`
-        return any(isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument)
+        return any(_mapping_argument_stores_the_vector(argument)
                    for argument in arguments)
     # `props.__setitem__("embedding", vec)` / `props.setdefault("embedding", vec)`
     return (len(arguments) >= 2
             and isinstance(arguments[0], ast.Constant)
             and arguments[0].value == EMBEDDING_PROPERTY
             and not isinstance(arguments[1], ast.Constant))
+
+
+def _mapping_argument_stores_the_vector(node) -> bool:
+    """Does this VALUE place the vector — a dict LITERAL, or a `dict(...)` CONSTRUCTOR?
+
+    ⛔ THE CONSTRUCTOR SPELLING IS THE SAME MAPPING (`#13647`, measured at `8637df0f`).
+    `props.update(dict(embedding=vec))` and `props |= dict(embedding=vec)` place exactly the
+    key the literal forms (`props.update({"embedding": vec})`, `props |= {…}`) already
+    refuse, through the same methods — only the literal spelling was recognised, so the
+    constructor form certified a STOP arm that stored the vector, lifting
+    `REFUSE_WRITE_STILL_EMITS`. Recognised by EVERY caller here only when the caller is the
+    stop arm (`anywhere=True`): on the mirror arm the same recognition would WIDEN what the
+    destructive gate accepts, and a fix may add refusals, never acceptances.
+    """
+    import ast
+
+    if isinstance(node, ast.Dict):
+        return _dict_stores_the_vector(node)
+    if isinstance(node, ast.Call) and _callee_name(node) == "dict":
+        for keyword in node.keywords:
+            if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):
+                return True
+            if keyword.arg is None and _mapping_argument_stores_the_vector(keyword.value):
+                return True          # `dict(**{"embedding": vec})`
+        return any(_mapping_argument_stores_the_vector(argument) for argument in node.args)
+    return False
 
 
 def _dict_stores_the_vector(node) -> bool:

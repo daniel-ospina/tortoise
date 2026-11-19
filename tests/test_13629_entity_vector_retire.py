@@ -3084,6 +3084,13 @@ def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
     shapes above, one verb over. The recognition is stop-arm-only on purpose: on the mirror
     arm it would WIDEN what the destructive gate accepts, and a fix may add refusals, never
     acceptances (`_mutator_stores_the_vector`).
+
+    ⛔ AND THE *FUNCTIONAL* AND *CONSTRUCTOR* SPELLINGS ARE THE SAME STORES (`8637df0f`).
+    `operator.setitem(props, "embedding", vec)` is literally what `props["embedding"] =
+    vec` compiles to, `operator.ior(props, {…})` is `props |= {…}`, and
+    `props.update(dict(embedding=vec))` / `props |= dict(embedding=vec)` / `update(**{…})`
+    place exactly the mapping the literal forms already refuse. Measured fail-OPEN at
+    `8637df0f`: all of them certified the writer. Same rule, one spelling over.
     """
     refused = (
         # the arm places the vector, THEN leaves
@@ -3178,6 +3185,45 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ the FUNCTIONAL `operator` spellings of the same stores, measured fail-OPEN at
+        # `8637df0f`: `setitem` is what `props["embedding"] = vec` compiles to, `ior` what
+        # `props |= {…}` does.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        operator.setitem(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        operator.ior(props, {"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        # ⛔ …and the CONSTRUCTOR spelling of the mapping the literal forms already refuse.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict(embedding=_encode(ev)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(embedding=_encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**{"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -3230,6 +3276,47 @@ def _upsert_object(props):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is True, f"an honest write-stop was refused: {source!r} ({why})"
+
+
+def test_the_mutator_vocabulary_does_not_widen_the_mirror_arm(tmp_path, monkeypatch):
+    """⛔ A FIX MAY ADD REFUSALS, NEVER ACCEPTANCES (`#13647`, at `8637df0f`).
+
+    The functional/constructor store recognition added for the STOP arm is consulted only
+    with `anywhere=True`. If it leaked into the mirror arm (`if gate(l): …`), the destructive
+    gate would ACCEPT writers it refused before — the opposite of what a repair may do: a
+    false refusal costs a refactor, a false acceptance deletes the only readable copy of a
+    fingerprint. So the LITERAL forms must keep certifying the mirror arm…
+    """
+    literal = _fake_writer_module(tmp_path, monkeypatch, """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev)}
+    props["embedding"] = _encode(ev)
+""")
+    gated, why = strip._writer_consults_gate(literal, "_upsert_object", ("object",))
+    assert gated is True, f"the literal merge arm stopped certifying: {why}"
+
+    # …while the CONSTRUCTOR spelling of the same mapping must NOT, and neither may the
+    # constructor form of `update` — the widening the stop-arm fix would cause if it were
+    # consulted on both arms.
+    for source in (
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props |= dict(embedding=_encode(ev))
+    props["embedding"] = _encode(ev)
+""",
+        """
+def _upsert_object(props, ev):
+    if _derived_mirror_required("object"):
+        props.update(dict(embedding=_encode(ev)))
+    props["embedding"] = _encode(ev)
+""",
+    ):
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
+        assert gated is False, (
+            f"a CONSTRUCTOR store widened what the mirror arm accepts: {source!r} ({why})")
 
 
 def test_the_digest_does_not_dedupe_two_typed_identities_by_VALUE():
