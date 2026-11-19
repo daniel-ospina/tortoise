@@ -659,6 +659,22 @@ def check_arm(arm: str, trace: list[dict] | None) -> dict:
                 f"this instrument knows how to attribute",
                 exit_code=3,
             )
+        # ⛔ `ran=True` WITH NO MECHANISM IS NOT A CONTROL. The whole point of this
+        # arm is to prove WHERE the leg came from; an empty mechanism set passed
+        # the checks above vacuously (nothing unknown, nothing from the record) and
+        # published `trace_verdict: {"ran": true, "mechanisms": []}` — a control
+        # arm certified with no evidence of its source, the one thing it exists to
+        # establish (`search_engine.py` states a vector entry "carries a
+        # `mechanism` key naming the path taken"). Same fail-open shape this file
+        # already closed for `degraded`, one level up.
+        if not mechanisms:
+            raise Refused(
+                "graph_arm_no_mechanism",
+                f"the `{arm}` arm's dense leg reported `ran=True` but named no "
+                f"mechanism — a control that cannot say which path it took is "
+                f"not a control",
+                exit_code=3,
+            )
         return {"arm": arm, "ran": True, "mechanisms": sorted(set(mechanisms))}
     raise ValueError(f"unknown arm {arm!r}")
 
@@ -1447,6 +1463,11 @@ def main(argv: list[str] | None = None) -> int:
         if value < 1:
             print(f"REFUSED: {flag} must be >= 1 (got {value})", file=sys.stderr)
             return 4
+    #    ⚠️ And in the MEASUREMENT path a zero did not even crash: it made
+    #    `preregistered_n = 0`, so `paired` answered
+    #    `detectable_pp_preregistered: None` and `gated_bar_pp` fell back to the
+    #    observed bar alone — the pre-registration bound NOTHING while the
+    #    emitted note still claimed both bars bind. The floor closes that too.
     if args.preregister:
         print(json.dumps(preregistration(args.population), indent=2, sort_keys=True))
         return 0

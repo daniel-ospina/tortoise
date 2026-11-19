@@ -519,6 +519,23 @@ class TestArmAssertions:
             "scan_fallback"
         ]
 
+    def test_graph_arm_refuses_a_dense_leg_that_names_NO_mechanism(self, tool_mod):
+        """⛔ `ran=True` with no mechanism certified the control with no evidence.
+
+        The arm exists to prove WHERE the leg came from. An empty mechanism set
+        passed the other checks VACUOUSLY — nothing unknown, nothing from the
+        record — and published `trace_verdict: {"ran": true, "mechanisms": []}`.
+        Measured pre-fix: `check_arm("graph_dense", [{"leg": "vector", "ran":
+        True, ...}])` returned `{"arm": "graph_dense", "ran": True,
+        "mechanisms": []}` while `record_dense` refused the same entry.
+        """
+        with pytest.raises(tool_mod.Refused) as exc:
+            tool_mod.check_arm(
+                "graph_dense",
+                [{"leg": "vector", "ran": True, "degraded": False, "reason": "ok", "count": 3}],
+            )
+        assert exc.value.code == "graph_arm_no_mechanism"
+
     def test_a_trace_with_no_vector_entry_is_refused_not_passed(self, tool_mod):
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.check_arm("record_dense", [{"leg": "fts", "ran": True}])
@@ -664,6 +681,26 @@ class TestRefusals:
         with pytest.raises(tool_mod.Refused) as ei:
             tool_mod.require_coverage(V())
         assert ei.value.code == "coverage_unverified"
+
+    def test_main_refuses_a_non_positive_population_without_a_traceback(self):
+        """⛔ `--population 0` was the one input never validated.
+
+        It raised `ValueError: n must be positive` out of `detectable_effect_pp`
+        — an uncaught traceback with exit 1 in the ONLY mode this box can run —
+        and in the measurement path it silently made the pre-registered bar
+        `None`, so the pre-registration bound nothing while the emitted note
+        still claimed both bars bind.
+        """
+        for bad in ("0", "-5"):
+            proc = subprocess.run(
+                [sys.executable, str(TOOL), "--preregister", "--population", bad],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            assert proc.returncode == 4, (bad, proc.returncode, proc.stderr[-200:])
+            assert "must be >= 1" in proc.stderr, proc.stderr[-200:]
+            assert "Traceback" not in proc.stderr, proc.stderr[-400:]
 
     def test_main_refuses_a_k_set_without_the_primary_width(self):
         proc = subprocess.run(
