@@ -30,8 +30,13 @@ measurement says otherwise — `Point graph=31,610 record=36,942 fillable=0
 unmatched=16,982 existing=14,628`, and the intersection it would fill is EMPTY. ⚠️ That
 run was made BEFORE `#13647` narrowed the census's `record_vectors` to the label's graph
 keys, so `record=36,942` there is the TENANT-WIDE readable count and is NOT what this
-tool prints now: the population-scoped figure is the `existing=14,628` one, while the
-~22.3k difference is `record_only` (readable rows this graph holds no `:Point` for). The
+tool prints now: the population-scoped figure is that run's `existing=14,628` less its
+`unread` column, and ⛔ `existing` ALONE is not it — `existing` is `skipped_existing`,
+an `embedding IS NOT NULL` count (`_buckets`, `matched − missing`), so a matched row
+whose generated `embedding_vec` the converter refused is inside `existing` and OUTSIDE
+`record_vectors`. The summary line quoted above omits `unread`, so no narrowed figure is
+quotable from it; the ~22.3k difference between the two READINGS of `record=` is
+`record_only` (readable rows this graph holds no `:Point` for). The
 paragraph's refutation does not depend on either reading of `record=` — `fillable=0` and
 `unmatched=16,982` are what refute the "~9,106 graph-only" inference, and neither moved.
 `:Point` is still in this tool's DEFAULT population, because the
@@ -306,8 +311,9 @@ PLAN_VERSION = 3
 #: here and `#13685`'s scope comment asks for it. ⚠️ Its measured `fillable` on
 #: production was **0** (`Point graph=31,610 record=36,942 unmatched=16,982 existing=
 #: 14,628`, the `record=` figure being the TENANT-WIDE readable count as the tool
-#: reported it before `#13647` narrowed that field to the label's graph keys — the
-#: population-scoped value in that run is `existing=14,628`): the graph-only Points have
+#: reported it before `#13647` narrowed that field to the label's graph keys; the
+#: population-scoped value is that line's `existing` MINUS its `unread` column, which the
+#: line does not print — so none is quotable here): the graph-only Points have
 #: NO RECORD ROW AT ALL, so this label is additive
 #: and harmless rather than a fix for a copyable gap — see the module docstring. One
 #: population, derived once, and
@@ -909,7 +915,7 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     `embedding IS NOT NULL` is NOT the parity test either way, because a payload the
     converter refuses answers no dense query.
 
-    ⚠️ THAT DEFINITION IS NOT CURRENTLY THE CENSUS'S, AND THE DIFFERENCE IS MEASURED
+    ⚠️ THE JOIN IS NOT CURRENTLY THE CENSUS'S, AND THE DIFFERENCE IS MEASURED
     (`#13647` moved it under this tool). The census now joins on the RENDERED identity
     (`graph["text"]`) plus a `render_collision` term, because the record's identity
     column is TEXT; this tool joins on the RAW key, because the raw value is what the
