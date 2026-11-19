@@ -3508,11 +3508,33 @@ _NOT_A_HEADING_WITHOUT_A_SPACE = (
 _NO_APPROVAL_RECORD_AFTER_A_HEADING_LINE = (
     "> ### v3.41 — a wording fix\n"
     "> The §4.5 sentence was corrected; no approval is recorded here.")
-# ⛔ AND A TABLE ROW, which is the one block kind `_PARAGRAPH_START_RE` does not know
+# ⛔ AND A TABLE ROW, which is ONE OF THE BLOCK KINDS `_PARAGRAPH_START_RE` does not know
 # (review: measured PASS where `main` refused). Declared in the residual list; pinned green
 # so the gap is measured. `docs/ONTOLOGY-CHANGELOG.md` writes no tables.
 _APPROVAL_RECORD_IN_A_TABLE_ROW = (
     "> | **Owner approval of the exact changes** | given in-session, no comment cited |")
+# ⛔ "ONE OF", NOT "THE ONE" (review P3): a THEMATIC BREAK and a FENCED BLOCK are two more
+# block kinds this paragraph model does not name, and the label after either DOES open a
+# paragraph — measured against `markdown_it(commonmark)`: `> ---` renders
+# `hr, paragraph_open`, a fence renders `fence, paragraph_open`, and the row renders
+# `paragraph_open`. So both are the SAME fail-OPEN as the row above, and the completeness
+# word sent a fixer at the row's remedy, which does not reach them.
+# ⛔ AND THE REMEDY IS NOT THE ROW'S, MEASURED: the row closes through the STRIPPER
+# (`_LEADING_LIST_MARKER_RE` taught `|\s+` → REFUSED), while these two close only through
+# the SPLITTER — an END-of-paragraph boundary in `_quoted_paragraphs` (the
+# `_HEADING_START_RE` shape, because a break is a whole block, CommonMark §4.4). Teaching
+# `_PARAGRAPH_START_RE` their STARTS alone moves nothing (measured: both still PASS — that
+# pattern is consulted on the NEXT line, which is the label), and no stripper can reach
+# them either: there is no delimiter in front of the run to strip. `docs/ONTOLOGY-CHANGELOG.md`
+# writes neither shape.
+_APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK = (
+    "> ---\n"
+    "> **Owner approval of the exact changes** — given in-session, no comment cited.")
+_APPROVAL_RECORD_AFTER_A_FENCED_BLOCK = (
+    "> ```\n"
+    "> x\n"
+    "> ```\n"
+    "> **Owner approval of the exact changes** — given in-session, no comment cited.")
 
 
 # ⛔ THE BLOCK-LEVEL MARKERS THAT START A PARAGRAPH (review round 5):
@@ -3703,10 +3725,11 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
     true prose, stated rather than glossed: the test reads the NEWEST block alone, which
     passes, and a lane sweeping the corpus should expect these two.
     ⛔ THE RESIDUALS OF THE STRUCTURAL CONTRACT — the shapes MEASURED at this head, NOT an
-    enumeration of every way a label can render. Seven are fail-OPEN, which is the direction
+    enumeration of every way a label can render. Nine are fail-OPEN, which is the direction
     that matters: an unread record, an unread HTML label, a label split across runs, a label
-    in a table row, an entity-encoded space, a lead-in this arm's bounded rule does not spell
-    and an id borrowed from a contrastive parenthetical all PASS, so this arm reduces the
+    behind a table row, a label behind a thematic break, a label behind a fenced block, an
+    entity-encoded space, a lead-in this arm's bounded rule does not spell and an id borrowed
+    from a contrastive parenthetical all PASS, so this arm reduces the
     vacuity #13669 measured rather than ending it, and a reading this list does not name
     should be treated as fail-OPEN until a fixture says otherwise:
       - an UNBOLDED, or MID-PARAGRAPH, record is OUT OF SCOPE and therefore **PASSES**:
@@ -3740,21 +3763,36 @@ def _refuse_an_approval_record_with_no_resolvable_home(block: str) -> None:
         it is ``_reader_text`` that strips no HTML tags and no link syntax, so the run's
         rendered text carries ``<b>``/``</b>`` or ``[...](url)`` and does not begin with
         the phrase. Closing either needs the MARKUP stripped first, not the run unsplit;
-      - a label in a TABLE ROW (``| **Owner approval …** | given in-session |``) is
-        **PASSES** (fail-OPEN, out of scope): the row's opening run is not read because the
-        table's leading ``|`` sits BEFORE it — the same reason a mid-sentence bold run
-        passes — not because ``_PARAGRAPH_START_RE`` lacks a table kind. Measured, that
-        distinction is load-bearing in the OTHER direction from the obvious guess: teaching
-        ``_PARAGRAPH_START_RE`` a `|` row start changes nothing (0 of the fixtures move),
-        while the STRIPPER is where the fix lives — ``_LEADING_LIST_MARKER_RE`` taught
-        `|\\s+` does consume the cell delimiter and closes the shape
-        (``_APPROVAL_RECORD_IN_A_TABLE_ROW`` PASS → REFUSED, measured), so the shape stays
-        green only while the delimiter sits in front of the run. The bare-`|` form that
-        consumes no space changes nothing either, and is not a row start. Measured PASS
-        where `main` refused; the corpus writes no tables
-        (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0), and the shape is driven green
-        by ``_APPROVAL_RECORD_IN_A_TABLE_ROW`` so removing it or handling it is a visible
-        decision rather than a silent one;
+      - a label behind one of the THREE BLOCK KINDS this paragraph model does not name — the
+        table ROW (``| **Owner approval …** | given in-session |``), a THEMATIC BREAK
+        (``> ---``, then the label) or a FENCED BLOCK (a ``` fence, then the label) —
+        **PASSES** (fail-open, out of scope). ⛔ THEY ARE ONE CLASS WITH TWO DIFFERENT FIXES,
+        which is why they are named separately instead of as "the one block kind" (review
+        P3: the completeness word pointed the next fix at the wrong half). Every one is
+        measured against ``markdown_it(commonmark)``, which reads the label in all three as
+        its own paragraph; what differs is what has to learn about it:
+        · the ROW's opening run is not read because the table's leading ``|`` sits BEFORE it
+          — the same reason a mid-sentence bold run passes — so the fix lives in the
+          STRIPPER, not in ``_PARAGRAPH_START_RE``: teaching that pattern a `|` row start
+          changes nothing (0 of the fixtures move), while ``_LEADING_LIST_MARKER_RE``
+          taught `|\\s+` consumes the cell delimiter and closes the shape
+          (``_APPROVAL_RECORD_IN_A_TABLE_ROW`` PASS → REFUSED, measured). The bare-`|` form
+          that consumes no space changes nothing either, and is not a row start. Measured
+          PASS where `main` refused; the corpus writes no tables
+          (``grep -c '^> *|' docs/ONTOLOGY-CHANGELOG.md`` = 0);
+        · the BREAK and the FENCE close through the SPLITTER only, and no stripper can reach
+          them — there is no delimiter in front of the run, the block IS the delimiter.
+          They need an END-of-paragraph boundary in ``_quoted_paragraphs`` (the
+          ``_HEADING_START_RE`` shape, a break being a whole block, CommonMark §4.4).
+          Measured, and it is why the guess costs a cycle: adding their STARTS to
+          ``_PARAGRAPH_START_RE`` alone leaves BOTH still PASS (that pattern is consulted on
+          the NEXT line, which is the label), while an end-boundary split turns both
+          PASS → REFUSED and moves the row not at all. The corpus writes neither shape
+          (``grep -c '^> *\\(---\\|```\\)' docs/ONTOLOGY-CHANGELOG.md`` = 0);
+        and all three are driven green — by ``_APPROVAL_RECORD_IN_A_TABLE_ROW``,
+        ``_APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK`` and
+        ``_APPROVAL_RECORD_AFTER_A_FENCED_BLOCK`` — so removing one, or handling it, is a
+        visible decision rather than a silent one;
       - an ENTITY-ENCODED space (``**Owner&#32;approval …**``, ``**Owner&nbsp;approval
         …**``) renders as the label but ``_reader_text`` decodes no entities, so it
         **PASSES** (fail-OPEN); driven by ``_ENTITY_ENCODED_LABEL_IS_NOT_A_RECORD``;
@@ -4071,6 +4109,18 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     # ⛔ AND THE TABLE ROW IS THE DECLARED FAIL-OPEN (review): green, so a later lane that
     # teaches the paragraph model table blocks has to re-decide this row, not discover it.
     _refuse_an_approval_record_with_no_resolvable_home(_APPROVAL_RECORD_IN_A_TABLE_ROW)
+    # ⛔ …AND ITS TWO SIBLING BLOCK KINDS, MEASURED (review P3: this file said the row was
+    # "the one block kind" the paragraph model does not know, which was false, and it sent
+    # the next fix at the STRIPPER — the half that cannot reach either of these). Both are
+    # green here for the same reason: the block's own line fuses with the label's, so the
+    # paragraph does not open with the run. Pinned so the shapes are measured, not assumed,
+    # and so a lane that closes them (via an END-of-paragraph boundary in
+    # `_quoted_paragraphs`, NOT via `_PARAGRAPH_START_RE`'s starts, measured) has to
+    # re-decide these two rows rather than discover them by accident.
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK)
+    _refuse_an_approval_record_with_no_resolvable_home(
+        _APPROVAL_RECORD_AFTER_A_FENCED_BLOCK)
     _refuse_an_approval_record_with_no_resolvable_home(_NO_APPROVAL_RECORD_IN_BOLD_PROSE)
     # …and the negative sentence that DOES carry a colon, kept from the sibling lane's round
     # (@ 9d34e510, finding 5): the colon-requiring cut claimed the colon was what excluded
@@ -4386,6 +4436,56 @@ def test_a_release_recording_an_owner_approval_names_where_it_lives() -> None:
     with pytest.raises(AssertionError) as next_item_pointer:
         _refuse_an_unresolvable_pointer(_POINTER_RESOLVED_IN_THE_NEXT_LIST_ITEM)
     _assert_refused_by(next_item_pointer, "_refuse_an_unresolvable_pointer")
+
+
+def test_the_block_kind_residuals_are_fail_open_by_a_commonmark_reading() -> None:
+    """The block kinds the paragraph model does not name — MEASURED, not read off prose.
+
+    Review P3 at ``3b62664120``: this file called the table row "the one block kind
+    ``_PARAGRAPH_START_RE`` does not know", which is false — a thematic break and a fenced
+    block are two more, and the label after either DOES open a paragraph to a reader (the
+    same fail-OPEN as the row). The completeness word mattered because it points the next
+    fix at the wrong half: the row closes through the STRIPPER, while these two close only
+    through an END-of-paragraph boundary in ``_quoted_paragraphs``.
+
+    Two facts are derived here, and neither is asserted in prose alone:
+
+    * a real CommonMark parser opens a paragraph for the label in all three shapes — which
+      is what makes the green pin above an honest DECLARED gap rather than the right answer
+      stated as a residual;
+    * the arm does NOT read any of the three — so the day one is closed, this test reds and
+      says to move that shape to the refused set, instead of leaving a pin that is now a
+      false claim.
+    """
+    from markdown_it import MarkdownIt
+
+    parser = MarkdownIt("commonmark")
+    shapes = {
+        "table row": _APPROVAL_RECORD_IN_A_TABLE_ROW,
+        "thematic break": _APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK,
+        "fenced block": _APPROVAL_RECORD_AFTER_A_FENCED_BLOCK,
+    }
+    for kind, block in shapes.items():
+        tokens = parser.parse(block)
+        label_paragraphs = [tokens[index + 1].content
+                            for index, token in enumerate(tokens[:-1])
+                            if token.type == "paragraph_open"]
+        assert any("Owner approval" in paragraph for paragraph in label_paragraphs), (
+            f"a reader opens a paragraph for the label after a {kind}, which is what makes "
+            f"the green pin a DECLARED gap; measured rendered paragraphs: {label_paragraphs!r}")
+        assert not [paragraph for paragraph in _quoted_paragraphs(block)
+                    if _opening_approval_label(paragraph)], (
+            f"the {kind} shape is READ as a record now — that is an improvement, but it is "
+            f"no longer a residual: move it to the refused set and out of the residual "
+            f"list instead of leaving it pinned green")
+    residual_list = _refuse_an_approval_record_with_no_resolvable_home.__doc__ or ""
+    for constant in ("_APPROVAL_RECORD_IN_A_TABLE_ROW",
+                     "_APPROVAL_RECORD_AFTER_A_THEMATIC_BREAK",
+                     "_APPROVAL_RECORD_AFTER_A_FENCED_BLOCK"):
+        assert constant in residual_list, (
+            f"the residual list must name {constant}: it is what a lane reads before "
+            f"choosing a fix for this shape, so a shape pinned green while unnamed is the "
+            f"silent gap the list exists to prevent")
 
 
 def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
