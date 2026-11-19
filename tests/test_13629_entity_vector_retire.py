@@ -538,6 +538,43 @@ def _upsert_object(ev):
     return _write(ev)
 """
 
+#: A gate call that is RETURNED while the write has already happened — the "dying
+#: declaration" one line further along. None of these may count as gated.
+WRITER_RETURNED_NOT_DECIDING = (
+    """
+def _upsert_object(ev):
+    self._write(ev)
+    return mirror_required("object")
+""",
+    """
+def _upsert_object(ev):
+    return (self._write(ev), mirror_required("object"))
+""",
+    """
+def _upsert_object(ev):
+    return self._write(ev) or mirror_required("object")
+""",
+)
+
+#: …while these DO decide, and refusing them would make the gate unsatisfiable. They are
+#: the shapes the REAL write-stop uses (`#13617`'s `if _derived_mirror_required(...)`
+#: around the encode), so the gate is not an inert enforcer that no correct implementation
+#: could satisfy.
+WRITER_RETURNED_AND_DECIDING = (
+    """
+def _upsert_object(ev):
+    if not mirror_required("object"):
+        return self._write(ev)
+    return None
+""",
+    """
+def _upsert_object(ev):
+    if ev and mirror_required("object"):
+        return None
+    return self._write(ev)
+""",
+)
+
 
 def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
         tmp_path, monkeypatch):
@@ -560,6 +597,15 @@ def test_the_gate_check_asks_whether_the_writer_CALLS_it_into_control_flow(
         gated, why = strip._writer_consults_gate(module, "_upsert_object")
         assert gated is False, f"{source!r} was accepted as a gate"
         assert "without CALLING" in why
+
+    for source in WRITER_RETURNED_NOT_DECIDING:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        gated, why = strip._writer_consults_gate(module, "_upsert_object")
+        assert gated is False, f"a RETURNED-but-dying gate was accepted: {source!r}"
+
+    for source in WRITER_RETURNED_AND_DECIDING:
+        module = _fake_writer_module(tmp_path, monkeypatch, source)
+        assert strip._writer_consults_gate(module, "_upsert_object")[0] is True, source
 
     module = _fake_writer_module(tmp_path, monkeypatch, WRITER_GATED)
     assert strip._writer_consults_gate(module, "_upsert_object")[0] is True
@@ -630,6 +676,74 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     gated, why = strip._fold_consults_gate("Event")
     assert gated is False
     assert "do not ask the gate" in why
+
+
+def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
+    """⛔ THE ANTI-INERT-ENFORCER TEST, and it needed a real verdict to be possible.
+
+    The gate refuses every label today, and once the writer population became the UNION of
+    the fold map and `embed_writer_register`, a reviewer reasonably asked whether its firing
+    condition can hold at ALL — an enforcer that can never open is a defect, not a guard.
+    It can: one label, a population whose every writer asks the gate, and the coverage
+    predicate answering False. This drives `write_gate` itself (not a stub: every execute
+    test replaces it), so the False verdict is observed rather than assumed.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    gated = _fake_writer_module(tmp_path, monkeypatch, """
+def _only_writer(ev):
+    if _derived_mirror_required("object"):
+        return None
+    return _write(ev)
+""")
+    monkeypatch.setattr(strip, "_writers_for", lambda label: (
+        (f"{gated}::_only_writer",), None))
+
+    emits, reason = strip.write_gate("object")
+    assert emits is False, reason
+    assert "calls the gate" in reason
+    # …and a single un-gated writer closes it again, so the positive arm is not a bypass.
+    monkeypatch.setattr(strip, "_writers_for", lambda label: (
+        (f"{gated}::_only_writer", f"{gated}::_missing"), None))
+    emits, reason = strip.write_gate("object")
+    assert emits is True
+    assert "_missing" in reason
+
+
+def test_a_plan_that_lists_a_label_twice_is_refused(tmp_path):
+    """A digest is a SET, so a duplicated label row verifies — and would strip twice."""
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "labels": [{"label": "Object", "keys": ["obj-1"]},
+                   {"label": "Object", "keys": ["obj-2"]}],
+        "total_nodes": 2,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    path = tmp_path / "duplicated.json"
+    path.write_text(json.dumps(plan))
+    with pytest.raises(strip.Refusal) as excinfo:
+        strip._load_plan(str(path), plan["digest"])
+    assert excinfo.value.token == strip.REFUSE_PLAN_UNREADABLE
+    assert "more than once" in str(excinfo.value)
+
+
+def test_execute_honours_the_plans_recorded_batch(tmp_path):
+    """A recorded value must not be silently ignored at the moment it is used."""
+    plan = {
+        "tool": strip.PLAN_TOOL, "version": strip.PLAN_VERSION,
+        "graph": "g", "graph_uri": "docker://x/g", "org_id": "o", "graph_id": "g",
+        "batch": 7,
+        "labels": [{"label": "Object", "keys": ["obj-1"], "nodes": 1,
+                    "unkeyed_nodes_blocking": 0, "strip_ready": True,
+                    "blocked_reason": None}],
+        "total_nodes": 1,
+    }
+    plan["digest"] = strip.digest(strip.plan_entries(plan))
+    assert strip.plan_entries(plan) == [("Object", "obj-1")]
+    # The CLI resolves `--batch` OR the plan's value; the plan's is the fallback.
+    assert int(plan.get("batch") or strip.DEFAULT_BATCH) == 7
 
 
 def test_an_unreadable_or_empty_writer_population_is_not_evidence(monkeypatch):
