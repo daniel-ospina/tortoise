@@ -1088,43 +1088,25 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "(#13795 review, finding 1)")
     _measured = " ".join(_tortoise_set) if _tortoise_set else "NOTHING"
 
-    def _head_labelled_at(needle: str) -> bool:
-        """True when a HEAD LABEL sits within 120 characters of `needle` (#13845 review, P2).
-
-        ⛔ The literal arm below is a substring test, so without this it pins the SIGN of a
-        head-bound measurement: a TRUE claim that names its head (`... was EMPTY at
-        `2584a86ec1``) was refused because THIS head's set is non-empty, which is the exact
-        false block the docstring says the class does not commit. A claim carrying a head
-        label is a claim about THAT head and this head's measurement cannot refute it —
-        measured: the live document's own head-labelled sentence was refused before this
-        guard and passes after it; the same sentence with its head label removed still
-        reds. RESIDUAL, stated: a claim labelled with THE VERY HEAD under test would also
-        be skipped, because reading "is this label this head" would make the arm a git
-        client — the live document labels history with other heads, and a present-tense
-        claim carries no label at all, which is the shape this arm exists to catch.
-        """
-        for _m in re.finditer(re.escape(needle), doc):
-            # ⛔ THE LABEL MUST BELONG TO THE CLAIM, not merely sit nearby — measured twice:
-            # a 120-character window found SOME sha in the surrounding prose and let an
-            # UNLABELLED claim through (the mutation below stayed green, a bypass), and a
-            # wider clause window leaked the preceding clause's `NOT at this head:` into the
-            # pre-position (same bypass, one layer in). The rule is now positional: a label
-            # AFTER the claim, in the rest of its sentence, or a label BEFORE it that nothing
-            # asserts over (no `:`, `**` or em dash between the label and the claim).
-            _label = r"\b[0-9a-f]{7,40}\b|at (?:that|this|the) head\b"
-            _post = re.split(r"[.;|)]", doc[_m.end():_m.end() + 60])[0]
-            if re.search(_label, _post):
-                return True
-            _pre = doc[max(0, _m.start() - 30):_m.start()]
-            # ⛔ ANY clean label counts, not the FIRST one — measured: `re.search` took the
-            # earliest match, which was the PREVIOUS clause's `NOT at this head:`, and its
-            # tail was an assertion boundary, so a genuinely head-labelled claim was refused
-            # (a false block, the one direction this guard must never take).
-            for _hit in re.finditer(_label, _pre):
-                if not re.search(r"[:*\u2014]", _pre[_hit.end():]):
-                    return True
-        return False
-
+    # ⛔ THE HEAD-LABEL EXEMPTION IS GONE, AND THAT IS THE FIX (#13845 review, cycle 4,
+    # MEASURED BOTH WAYS). It existed so a TRUE claim that names its head would not be
+    # refused by THIS head's measurement — and it failed on both edges:
+    #
+    #   FAIL-OPEN  `[0-9a-f]{7,40}` matches a plain NUMBER and hex-shaped WORDS, so
+    #              `The repair landed 1234567 commits ago and the `tortoise/` set above is
+    #              EMPTY.` was GREEN — any nearby number exempted a refuted claim. The word
+    #              `defaced` did the same.
+    #   FALSE BLOCK  the positional rule took `re.search`'s EARLIEST match, which was the
+    #              preceding clause's `NOT at this head:`, and refused a claim the document
+    #              had genuinely labelled.
+    #
+    # Refining it a third time would be the same bet twice more. The convention that makes it
+    # unnecessary is the one the live document already follows: history is spelled so the arm
+    # cannot read it as a live answer — a PAST-TENSE verb (`returned`, `named`, `printed`),
+    # which is not in the verb list, or a restructure that puts the named head first and the
+    # command after it (46f3e9ff5b, and the pathspec skip in the short-form arm). The COST is
+    # declared rather than hidden: a head-labelled PRESENT-tense emptiness claim is still
+    # refused, and the live document carries none.
     for _claim, _claim_is_empty in (
             *((_c, True) for _c in (
                 f"neither is `{_tortoise_cmd}`",
@@ -1164,7 +1146,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         # AND a claim carrying a HEAD LABEL is not refuted by THIS head, which the sign-only
         # test cannot see (#13845 review, P2).
         _consistent = _claim_is_empty != bool(_tortoise_set)
-        assert _consistent or _claim not in doc or _head_labelled_at(_claim), (
+        assert _consistent or _claim not in doc, (
             f"05-verify.md asserts {_claim!r} — an answer to `{_tortoise_cmd}` in the "
             f"direction the tree refutes at this head, where that command prints "
             f"{_measured}. A guard that pins a MEASUREMENT must not pin its SIGN either "
