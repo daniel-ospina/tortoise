@@ -689,16 +689,17 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
                _tree`: it reads the set from `git diff origin/main...HEAD` and refuses only
                the direction the measurement REFUTES, so a TRUE answer is allowed there. Its
                direction comes from a subprocess a depth-1 checkout cannot answer (rc=128,
-               empty stdout), so it SKIPS there — measured in a real `--depth 1` clone as
-               `15 passed, 1 skipped`, which is exactly why (c1) exists.
+               empty stdout), so it SKIPS there — which is exactly why (c1) exists. ⛔ No
+               count is typed here: it moves whenever this file gains a test, which is this
+               document's own subject.
           The spellings measured FALSE are refused by name AND by SHAPE (the command
           followed by one of the LISTED answer forms, then an answer), so neither a frozen
           sign nor a re-wording of the ANSWER — a different listed verb, or a different
           membership word (`one` as readily as `two`) — can quietly restore a claim the
           tree refutes (#13728 review, findings 1 and 4; #13795 review, finding 3). The
           class stays FINITE and the docstring above says so: a verb outside the list, or
-          an answer carrying none of the listed words, is not detected. ⛔ It lives in its
-          OWN test —
+          an answer carrying none of the listed words, is not detected. ⛔ The MEASURED half
+          lives in its OWN test —
           `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree` — because
           its direction comes from a subprocess this file cannot run in every checkout, and
           an UNMEASURABLE set now SKIPS that test instead of being read as "empty"
@@ -757,8 +758,9 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "`tortoise/` modules the verdict is about; the empty-list reading that stood "
             "here before was FALSE at this head (#13750 review, cycle 1)")
 
-    # (c) RETIRED SPELLINGS — measured FALSE against the tree, so the arm READS the tree
-    # instead of freezing which direction the answer points.
+    # (c) RETIRED SPELLINGS — the spellings measured FALSE against the tree. The arm below
+    # does NOT re-measure to decide which direction is refuted: it refuses the whole class,
+    # because a direction claim about that command is head-bound by construction.
     # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
     # `-- tortoise/` set. `main`'s own `#13790`/`#13786` then re-took the same census figures,
     # so at this head the command prints NOTHING and every one of those five spellings became
@@ -794,8 +796,8 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # `carries no paths`, `lists one path`, …) was seen by NEITHER arm where it matters:
     # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
     # merge), and this regex did not match the verb. Measured on the depth-1 topology with
-    # `` `…-- tortoise/` reports exactly two paths `` injected: `15 passed, 1 skipped` —
-    # green over a refuted membership claim. Both checks are TEXT-ONLY, so neither needs a
+    # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
+    # membership claim. Both checks are TEXT-ONLY, so neither needs a
     # base ref and neither can be skipped away; they are kept BESIDE each other because
     # they cover different spellings (this regex knows the `-- tortoise/` shorthand the
     # detector's full-command anchor does not; the detector knows the answer forms this
@@ -804,8 +806,8 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     # detector anchors on the FULL command, so the document's own shorthand —
     # "`-- tortoise/` reports exactly two paths" — was seen by NEITHER arm: the regex above
     # does not list `reports`, and the detector was asked only about the long form.
-    # MEASURED on the rail's topology (no `origin/main`): that injected shorthand left
-    # `15 passed, 1 skipped` — green over a refuted claim — while the same claim in the long
+    # MEASURED on the rail's topology (no `origin/main`): that injected shorthand stayed
+    # GREEN over a refuted claim, while the same claim in the long
     # spelling reds. The second element carries its backticks ON PURPOSE: a bare
     # "-- tortoise/" would also match inside the document's head-pinned historical command
     # (`git diff --name-only origin/main...2a7f24e241 -- tortoise/`), and over-block the
@@ -1396,8 +1398,9 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
 
     The five-literal ban this replaced was measured leaking FOUR spellings the document had
     actually used; the first cut of the PATTERN then leaked the whole MEMBERSHIP direction —
-    measured in a real `--depth 1` clone as `15 passed, 1 skipped` over an injected
-    membership claim, while the emptiness form red. On that checkout the measured sibling
+    measured in a real `--depth 1` clone over an injected membership claim (the counts are
+    not typed here — they move whenever this file gains a test), while the emptiness form
+    red. On that checkout the measured sibling
     SKIPS, so nothing else covered it. Every spelling below is pinned, in BOTH directions,
     including the ` there -> ` form the document itself used to carry; the pointer and
     past-tense forms are pinned as MUST-NOT-REFUSE, because refusing the document's own
@@ -1448,14 +1451,19 @@ _TYPED_INDEX_NUMSTAT = re.compile(
     # clause is "…and its `--numstat` form both print NOTHING", and a regex that knows
     # only the long form walks straight past the figure that replaces `NOTHING` there —
     # measured: `both print `1 1`` left both arms green.
-    r"|`--numstat`\s+form\s*(?:both\s+print|->|prints?)\s*`\d+\s+\d+`"
+    r"|`--numstat`\s+form\s*(?:both\s+)?(?:prints?|print|returns?|reports?|shows?|"
+    r"gives?|lists?|names?|->|\u2192)\s*`\d+\s+\d+`"
     # ⛔ AND A BARE PRESENT-TENSE VERB ON THE `numstat` NOUN (#13802 merge round P2).
     # `the numstat prints `3 3` here` is the same head-bound class and no alternative above
     # saw it — measured: injected into the head document it left this arm GREEN, while the
     # long form, the `--numstat` form and `both print` each red. The participle ("printing
     # `1 1` at a head of its own") is HISTORY and stays allowed, which is why the verb here
     # is present-tense only.
-    r"|numstat[^`]{0,160}?\b(?:prints?|returns?|reports?)\s*`\d+\s+\d+`"
+    # the whole verb class, not three verbs: `and the numstat shows `1 1` here`,
+    # `and its `--numstat` form gives `1 1` here` and `and the numstat -> `1 1` here` were
+    # each measured GREEN at depth 1 (#13802 review, round 6)
+    r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
+    r"names?|->|\u2192)\s*`\d+\s+\d+`"
     # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
     # document's `both print NOTHING` clauses state the CURRENT reading without repeating
     # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
