@@ -1459,6 +1459,36 @@ def _mapping_stores_the_vector(call) -> bool:
         for keyword in call.keywords)
 
 
+def _transparent_copy_operand(node):
+    """The operand of a TRANSPARENT COPY — `.copy()`, `copy.copy(x)`, `copy.deepcopy(x)`.
+
+    ⛔ THE FUNCTIONAL SPELLING IS THE SAME WRAPPER, and it CERTIFIED every operand position
+    at `716991951e` while the `.copy()` spelling was refused (measured end-to-end through
+    `_writer_consults_gate`: `|= copy.copy({…})`, `update(copy.copy({…}))`,
+    `update(**copy.copy({…}))` and `= copy.deepcopy({…})` all CERTIFIED, each runtime-checked
+    to place a top-level `embedding`). `copy.copy` returns a new dict holding the same keys,
+    so PEP 584's `|=` merges it exactly as it merges the `.copy()` result — a wrapper family
+    named by ONE method is not the family, it is one spelling of it, which is the shape this
+    file has paid for at every seam (`.copy()`, `list(...)`, whole-slice, `if…else`).
+
+    Returns the inner operand, or None when `node` is not one of the family, so a caller can
+    tell "not a wrapper" from "a wrapper around something that places nothing".
+    """
+    import ast
+
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    if isinstance(node.func, ast.Attribute) and node.func.attr in ("copy", "deepcopy"):
+        if not node.args:
+            # `{...}.copy()` — the RECEIVER is the operand. `x.deepcopy()` is not a thing.
+            return node.func.value if node.func.attr == "copy" else None
+        if (len(node.args) == 1 and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "copy"):
+            # `copy.copy({...})` / `copy.deepcopy({...})` — the ARGUMENT is the operand.
+            return node.args[0]
+    return None
+
+
 def _mapping_literal_stores_the_vector(node) -> bool:
     """Is this expression a MAPPING LITERAL that sets the vector — `copy()`/`if` included?
 
@@ -1481,9 +1511,13 @@ def _mapping_literal_stores_the_vector(node) -> bool:
         # the stop arm (see `_mapping_operand_stores_the_vector` and the assignment arm), and
         # a fix may add refusals, never acceptances.
         return _dict_stores_the_vector(node, stop_arm=True)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-            and node.func.attr == "copy" and not node.args and not node.keywords:
-        return _mapping_literal_stores_the_vector(node.func.value)
+    copied = _transparent_copy_operand(node)
+    if copied is not None:
+        # ⛔ BOTH SPELLINGS OF THE WRAPPER (`#13788`, measured at `716991951e`): `.copy()` and
+        # the functional `copy.copy(…)` are the same new mapping. Recursing into THIS rule
+        # (mapping shapes only) keeps the narrowing: `props = [{"embedding": vec}]` builds a
+        # LIST and still places nothing, so it must keep certifying.
+        return _mapping_literal_stores_the_vector(copied)
     if isinstance(node, ast.IfExp):
         return (_mapping_literal_stores_the_vector(node.body)
                 or _mapping_literal_stores_the_vector(node.orelse))
@@ -1603,7 +1637,11 @@ def _pairs_operand_stores_the_vector(node) -> bool:
     with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
     (`zip(("embedding",), (vec,))`, `map(...)`, a generator expression) is the stated residual
     — extracting a pair out of a call result is data flow this module does not do, and it is
-    disclosed here rather than left to be rediscovered.
+    disclosed here rather than left to be rediscovered. ⛔ THE SAME RESIDUAL COVERS A MAPPING
+    BUILT BY A CALL THAT IS NOT A CONSTRUCTOR: `dict.fromkeys(["embedding"], vec)` and
+    `dict(zip(keys, values))` place the vector and are CERTIFIED (measured at `716991951e`),
+    because answering them needs the call's RESULT — a key list read through a literal match,
+    or a zip of names — which is the data flow stated above, not a wrapper or an operand.
 
     ⛔ AND IT IS NOT THE MAPPING RULE — `{"embedding": vec}` has no pair in it, so this
     helper answers False for the mapping spelling BY DESIGN. Every caller that can be handed
@@ -1659,11 +1697,16 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         name = _callee_name(node)
         if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
             return _operand_stores_the_vector(node.args[0])
-        if (name == "copy" and isinstance(node.func, ast.Attribute)
-                and not node.args and not node.keywords):
+        copied = _transparent_copy_operand(node)
+        if copied is not None:
             # ⛔ BOTH SPELLINGS: the value under `.copy()` may be the PAIRS literal or the
             # MAPPING one, and this arm used to answer only the pairs form (`#13788` F1).
-            return _operand_stores_the_vector(node.func.value)
+            # ⛔ AND THE WRAPPER ITSELF HAS TWO SPELLINGS (`#13788`, measured at
+            # `716991951e`): `copy.copy({…})` / `copy.deepcopy({…})` return the same new
+            # mapping, and naming only the METHOD certified every one of them here, in
+            # `update(…)`, in the `**` operand and in the rebuild assignment while the
+            # `.copy()` spelling was refused. `_transparent_copy_operand` answers the family.
+            return _operand_stores_the_vector(copied)
         # ⛔ A MAPPING CONSTRUCTOR IS **NOT** ANSWERED HERE, and that is measured rather
         # than assumed: `_constructor_stores_the_vector` answers it at the three sites that
         # can be handed one (the `|=` arm through the rebuild walk, `update(…)`, and the

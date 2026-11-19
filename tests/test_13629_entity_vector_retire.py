@@ -4125,6 +4125,41 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE WRAPPER FAMILY HAS A SECOND SPELLING (`#13788`, measured at
+        # `716991951e`). `copy.copy(x)` and `copy.deepcopy(x)` return the same new mapping as
+        # `x.copy()`, so naming the METHOD instead of the SHAPE left every position open: at
+        # that head all four rows below CERTIFIED while their `.copy()` twins were refused
+        # (each runtime-checked to place a top-level `embedding`). Attribution is one arm:
+        # `_transparent_copy_operand` is the single place that answers the family, and a
+        # mutant that drops its functional branch reddens exactly these four rows.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= copy.copy({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(copy.copy({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**copy.deepcopy({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = copy.deepcopy({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
         # ⛔ THE ``**`` KEYWORD OPERAND IS AN OPERAND (`#13788` F2, measured at `45b5f88a`).
         # Both ``**`` arms narrowed the operand to `isinstance(value, ast.Dict)`, so the one
         # transparent wrapper this branch's OWN pairs rule already follows re-opened the hole
@@ -5226,6 +5261,25 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update({"embedding_model": _m()}.copy())
+        return None
+    _write(props)
+""",
+        # ⛔ THE HONEST-STOP CONTROLS FOR THE FUNCTIONAL-COPY ARM (`#13788`, measured at
+        # `716991951e`): the widened wrapper arm must keep the two narrowings, so the identity
+        # triple and the pre-guard reset behind `copy.copy(…)` stay CERTIFIED. Without these
+        # rows an over-broad `return True` in `_transparent_copy_operand`'s callers would cost
+        # an honest writer its gate — the exact failure the pairs rule's controls pin.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(copy.copy({"embedding_model": _m()}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(**copy.deepcopy({"embedding": None}))
         return None
     _write(props)
 """,
