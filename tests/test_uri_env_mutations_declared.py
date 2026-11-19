@@ -161,11 +161,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # red (`1 failed, 2 passed` over the uri-selected cases).
     # Every site uses `monkeypatch`, so no lane state leaks, and none of them
     # constructs anything: the ports are stubbed above the driver.
-    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored, like every row above: `_is_declared`
-    # matches each censused line on its own, so these three spellings are all the row
-    # authorizes and any FUTURE site in the same file reds until it is triaged (#11083 —
-    # a looser, unanchored arm would ride along silently, which is exactly the #942
-    # vacuity vector this census exists to catch).
+    # ⛔ ONE ARM PER STRIPPED LINE, `^`…`$`-anchored to THIS row's three spellings:
+    # `_is_declared` matches each censused line on its own, so these three spellings are
+    # all the row authorizes and any FUTURE site in the same file reds until it is
+    # triaged (#11083 — a looser, unanchored arm would ride along silently, which is
+    # exactly the #942 vacuity vector this census exists to catch). ⚠️ This is a
+    # deliberate narrowing of THIS row, not a description of the table: the dict
+    # header's norm is site-CLASS patterns "robust to line drift", most rows (and the
+    # row above) are unanchored, and only a handful are anchored — so do not read this
+    # row as evidence that another row already reds on a new spelling; check that row.
     "test_capstone_12186_recall.py": [
         r'^monkeypatch\.delenv\("TORTOISE_DB_URI", raising=False\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", "rediss://:pw@falkordb\.example:6379/g"\)$',
