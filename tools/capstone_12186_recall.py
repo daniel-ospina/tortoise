@@ -1024,7 +1024,14 @@ def run(args: argparse.Namespace) -> int:
         }
         # Warm the leg, then wait for the BACKGROUND index cycle: a query issued
         # straight after the writes books a present name as a miss.
-        sdk.tortoise_fts_query("warm", entity_type="object", limit=1)
+        # ⛔ OPTS OUT of the rerank: this read exists to prime the index, and its
+        # ROW SET is discarded — a lever that re-picks which rows survive `limit=1`
+        # would put an armed composition inside a warm-up whose output nothing reads
+        # (`tests/test_rerank_pool.py`'s census refuses an undisclosed re-pick at every
+        # site; the ARMS below run the lever ON on purpose and are on its
+        # intentional-keep list, with the reason recorded there).
+        sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
+                              _rerank_candidates=False)
         indexed, waited = wait_indexed(proj, len(rows))
         timings["index_wait_s"] = round(time.time() - t_mark, 1)
         t_mark = time.time()

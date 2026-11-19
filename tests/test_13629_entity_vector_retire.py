@@ -5352,6 +5352,21 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE SAME NARROWING IN THE *OPERAND* POSITION, not only the rebuild one
+        # (`#13788` F3). The `**`-merge arm's identity control above is the REBUILD spelling
+        # (`props = {**{…}.copy()}`); the operand spelling of the identical merge reaches the
+        # arm through `update(…)` instead, and a control that only pins one position leaves
+        # the other free to become an over-broad `return True`. `{**{"embedding_model": …}}`
+        # merges the identity triple into a mapping that keeps the vector, so it places no
+        # vector and must stay CERTIFIED — the strip must not refuse a writer for naming the
+        # property's SIBLINGS.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({**{"embedding_model": _m()}.copy()})
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
