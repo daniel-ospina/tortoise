@@ -7698,7 +7698,7 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props._set(props, *[copy.copy(["embedding", _encode(ev))])
+        props._set(props, *[copy.copy(["embedding", _encode(ev)])])
         return None
     _write(props)
 """,
