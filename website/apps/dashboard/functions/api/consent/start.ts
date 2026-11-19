@@ -34,9 +34,16 @@
  *    reader of this file should NOT "restore" the `json(...)` bodies — they are the defect those
  *    issues were filed for.
  *    TWO `json(...)` returns deliberately survive, and "refusal" is the word that keeps this
- *    sentence true of them: the `400 invalid_request` at the top (a CALLER error whose message the
- *    client, not the visitor, is the reader of) and the terminal `200` flow state (a decided
- *    outcome, not a refusal — #10865's owner comment records it as a different contract).
+ *    sentence true of them: the `400 invalid_request` at the top and the terminal `200` flow state
+ *    (a decided outcome, not a refusal — #10865's owner comment records it as a different contract).
+ *    ⛔ Neither body is "for a program only", and saying so would be false: this route is
+ *    NAVIGATION-only (`src/authBounce.js` admits it to `APP_RETURN_ROUTES`, and nothing fetches it),
+ *    so the person in the browser is a reader of both. The `400`'s message is worded for the caller
+ *    that BUILT the URL, but a browser can land on it — `state` over the 512-char bound below is
+ *    refused with it, and the AS does not bound `state` at all (`tortoise/oauth.py` validates its
+ *    presence, never its length). Both arms therefore stay OPEN residuals on #10884/#10865 rather
+ *    than changed here: retiring a body a caller may read is a contract change (an owner decision),
+ *    not a presentation fix.
  *
  * RE-VALIDATION IS NOT SKIPPED ON THE RETURN LEG, even though the params arrive from our own
  * redirect: they arrive from a BROWSER, so they are untrusted input every time. `validate()`
@@ -343,8 +350,13 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
     return consentRefusalPage("session_store_unavailable", 503);
   }
   if (decision.action === "terminal") {
-    // Terminal and actionable: the page renders the refusal copy + retry affordance (#5734),
-    // rather than the browser bouncing between two origins.
+    // ⛔ A BROWSER RECEIVES JSON HERE. There is NO page on this path.
+    // This comment used to claim "the page renders the refusal copy + retry affordance (#5734)" and
+    // that page was never built, so it told the next reader a face existed. #10865's owner comment
+    // rules the false comment must not survive as-is, so it says what the code does instead.
+    // Giving this arm a page is NOT a review fix: the `200 terminal` is a DECIDED flow state, not a
+    // refusal, so `{action, reason}` is a contract some caller may read — retiring it is an owner
+    // decision (#10865 records both options). The retry affordance #5734 intended is unbuilt here.
     return json({ action: "terminal", reason: decision.reason }, { status: 200 });
   }
   // `advance` and `sign_in` are both navigations, and both are 302s to a rebuilt target.

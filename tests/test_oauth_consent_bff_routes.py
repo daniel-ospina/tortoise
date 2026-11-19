@@ -1970,10 +1970,14 @@ def test_the_route_has_NO_JSON_FAILURE_ARM_LEFT() -> None:
       * every refusal returns `consentRefusalPage(...)` — five of them (four `503` reasons and the
         `403`), and the count is asserted so deleting one is a failure rather than a quiet drop;
       * `return json(` survives in exactly TWO places, and they are named: the `400` for an
-        unparseable authorize request (a caller error, not a carriage failure — it carries a
-        message the CLIENT shows) and the terminal `200` flow state, which is a decided outcome
-        rather than a refusal. The terminal arm still answers JSON to a browser and its comment
-        claims a page; that residual is recorded on the issues rather than changed here.
+        unparseable authorize request (a CALLER error — its message is worded for the caller that
+        built the URL) and the terminal `200` flow state, which is a decided outcome rather than a
+        refusal. BOTH bodies reach a BROWSER, and claiming otherwise would be false: this route is
+        navigation-only (`src/authBounce.js` admits it to `APP_RETURN_ROUTES`) and the AS never
+        bounds `state`, so a `state` past this route's 512-char bound gets the `400` on a blank
+        page. Neither is changed here — a caller-visible JSON body is a contract, so retiring one
+        is an owner decision — and both are recorded OPEN on #10884/#10865. The terminal arm's
+        comment no longer claims a page exists (#10865's owner ruling).
     """
     src = (CONSENT_DIR / "start.ts").read_text(encoding="utf-8")
     pages = re.findall(r"return consentRefusalPage\(", src)

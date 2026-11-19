@@ -210,8 +210,10 @@ reader of the security rule:
   decision already made, never a softening of it.
 - **the machine reason survives in `x-consent-refusal`** (`flow_not_yours`,
   `consent_store_unavailable`, `session_store_unavailable`, `as_origin_misconfigured`) and appears
-  NOWHERE in the copy. Two bodies exist, not four: the `503`s are one retryable state and the `403`
-  says plainly that reloading will not help (the paragraph above is why).
+  NOWHERE in the copy. Two bodies exist, not four: the `503`s are one state — a fault on our side,
+  which the visitor should try again past (and `as_origin_misconfigured` is the one of the three a
+  reload can NEVER clear, so the copy offers the reload as a try rather than promising it) — and the
+  `403` says plainly that reloading will not help (the paragraph above is why).
 - **the page decides nothing and fetches nothing** — no script, no link, no external asset, nothing
   echoed from the query string, `default-src 'none'`, `no-referrer`, `no-store`. Its URL carries
   `attempt_key` and `state` on the legs that reach it.

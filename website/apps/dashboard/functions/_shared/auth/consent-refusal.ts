@@ -81,8 +81,15 @@ interface Copy {
  *
  *  - the three `503` reasons (`consent_store_unavailable`, `session_store_unavailable`,
  *    `as_origin_misconfigured`) are the same thing to a person: an infrastructure or deployment
- *    fault on our side, retryable, and not their doing. Rendering them distinctly would leak our
- *    topology into copy that cannot help anyone act differently.
+ *    fault on our side, not their doing. Rendering them distinctly would leak our topology into
+ *    copy that cannot help anyone act differently.
+ *    ⛔ "retryable" was the word here and it is FALSE of one of the three:
+ *    `as_origin_misconfigured` means the `CONSENT_AS_ORIGIN` binding itself does not parse
+ *    (`start.ts::parseAsOrigin` returns null only for a SET-but-unusable value — the default is
+ *    valid), so no reload can clear it and only an operator can. The copy below therefore does not
+ *    PROMISE that a reload fixes it: the reload is offered as a try, and a fresh attempt from the
+ *    client is the next step. That is the same care the `403` gets for the same reason — copy must
+ *    not sell a retry that cannot work.
  *  - `403 flow_not_yours` is NOT retryable by reload: the row belongs to another attempt, so
  *    reloading the same URL is refused again (the bridge doc §"a DEAD row" states it). The only way
  *    forward is a new authorize request from the client, and saying "reload to retry" here would be
@@ -95,8 +102,8 @@ const RETRYABLE: Copy = {
     "Something on our side was temporarily unavailable, so your AI client's connection wasn't " +
     "set up. Nothing was approved, and no access was granted.",
   next:
-    "Reload this page in a moment to try again. If it keeps happening, wait a few minutes and start " +
-    "the connection again from your MCP client.",
+    "Reload this page to try again. If it keeps happening, start the connection again from your " +
+    "MCP client — that opens a fresh attempt rather than repeating this one.",
 };
 
 const FLOW_NOT_YOURS: Copy = {
