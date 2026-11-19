@@ -529,6 +529,20 @@ def check_arm(arm: str, trace: list[dict] | None) -> dict:
     ``mechanism: pgvector`` — from the RECORD, not ``scan_fallback`` — and the
     lexical arm must show a dense leg that did not run. Without this, "the
     record lifted recall" could be a graph answer wearing a record's name.
+
+    ⛔ ``ran`` ALONE IS NOT ENOUGH — ``degraded`` DECIDES TOO. The engine's shape
+    for a FAILED dense leg is ``ran=True, degraded=True, reason="query_failed"``
+    *with the mechanism still set* (``search_engine.py:4153`` record leg,
+    ``:4742`` graph scan leg), which is precisely how ``require_hybrid_read``
+    reads a degraded leg: *"a ``degraded=True`` vector leg contributed no semantic
+    results, so the read is keyword-only"* — and that gate is deliberately
+    STRICTER than the ``ran``-only capability gate (``:2749-2757``). A ``ran``-only
+    check here accepts a run in which every record read declined, and
+    ``paired()`` then scores those queries as guaranteed misses — the arm
+    publishes *"the record's dense leg collapses claim recall"* with a valid
+    McNemar p, when the truth is *"the leg failed"*. The same applies to a MIXED
+    trace (some queries healthy, some failed): its mechanics are all
+    ``pgvector``, so the mechanism gate cannot see it.
     """
     entries = vector_entries(trace)
     mechanisms = [e.get("mechanism") for e in entries if e.get("mechanism")]
@@ -554,6 +568,24 @@ def check_arm(arm: str, trace: list[dict] | None) -> dict:
             "dense_arm_did_not_run",
             f"the `{arm}` arm's dense leg did not run — a degraded read is not "
             f"an arm (see `require_hybrid_read`)",
+            exit_code=3,
+        )
+    # ⛔ AND A LEG THAT RAN *AND DEGRADED* DID NOT RUN FOR THIS PURPOSE. Every
+    # entry reaching here carries `ran=True`; a failed dense read carries
+    # `degraded=True` beside it (`search_engine.py:4153`/`:4742`), so the
+    # `all(ran)` test above passes over exactly the state this arm must refuse.
+    degraded_entries = [e for e in entries if e.get("degraded")]
+    if degraded_entries:
+        reasons = sorted({str(e.get("reason") or "unstated") for e in degraded_entries})
+        raise Refused(
+            "dense_arm_degraded_read",
+            f"the `{arm}` arm's dense leg RAN but DEGRADED on "
+            f"{len(degraded_entries)} of {len(entries)} vector entries "
+            f"(reason(s): {', '.join(reasons)}) — a degraded leg contributes no "
+            f"semantic results, so every query it touched would enter the "
+            f"paired counts as a guaranteed miss; that is a figure about the "
+            f"failure, not about the record. `require_hybrid_read` is "
+            f"deliberately stricter than a `ran`-only gate for this reason",
             exit_code=3,
         )
     if arm == ARM_RECORD_DENSE:
@@ -914,7 +946,7 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
         embeddings.EmbeddingModel.get = saved  # type: ignore[assignment]
 
 
-def _seed_graph(proj, population: list[dict], model) -> int:
+def _seed_graph(proj, population: list[dict], encode_many=None) -> int:
     """Write the claim population to the GRAPH with an explicit vector.
 
     ⛔ THE VECTOR IS THE POINT OF THIS STEP, but NOT for the reason the first cut
@@ -930,12 +962,51 @@ def _seed_graph(proj, population: list[dict], model) -> int:
     (``_upsert_point_props``), so the property shape is the production one and
     the full-text index the lexical arm reads is the production index.
 
+    ⛔ THE COMPOSITION IS THE WRITE PATH'S, NOT THIS FILE'S (#13734 review,
+    finding 3). Every write-side embedder in this tree goes through
+    :func:`tortoise.embeddings.compute_embeddings`, which (a) TRUNCATES the text
+    to ``EMBED_WORD_BUDGET`` (512) words via ``_truncate_for_embedding`` before
+    encoding and (b) returns ``vec.tolist()`` — Python floats, which is the value
+    type production hands to Cypher. Seeding with a bare ``model.encode(content)``
+    wrote neither: an UNTRUNCATED text's vector (a composition production never
+    makes — and ``POINT_TEXT_LIMIT`` is 1200 chars, so 512 words is reachable on
+    real turn text) as ``list(numpy_row)``, i.e. a list of ``numpy.float32``
+    scalars. Both are fidelity gaps in the one step whose whole purpose is that
+    the seeded vector IS the production one, so this delegates to the shipped
+    composition instead of re-deriving it.
+
+    ``encode_many`` is the injection seam the tests patch; production never
+    passes it. A ``None`` vector (the composition's answer where the encode did
+    not happen) is a NAMED refusal, never a written row: seeding a hole would
+    make the arm's recall a figure about the hole.
+
     ⚠️ A GRAPH WRITE ONLY. This is a direct projection write and emits NO journal
     record, so it cannot put this population's ids in the record — see
     :func:`record_population_vectors` and the README's runbook for the step that
     must, and is absent.
     """
-    vectors = model.encode([row["content"] for row in population])
+    from tortoise.embeddings import compute_embeddings
+
+    encode_many = encode_many or compute_embeddings
+    vectors = encode_many([row["content"] for row in population])
+    if len(vectors) != len(population):
+        raise Refused(
+            "seed_vectors_missing",
+            f"the embedder answered {len(vectors)} vector(s) for "
+            f"{len(population)} rows — the seed would write a population whose "
+            f"width is not the one it measured",
+            exit_code=2,
+        )
+    missing = [row["id"] for row, vec in zip(population, vectors, strict=True) if vec is None]
+    if missing:
+        raise Refused(
+            "seed_vectors_missing",
+            f"{len(missing)} of {len(population)} claims could not be embedded "
+            f"(`compute_embeddings` answers None where the encode did not "
+            f"happen) — the first is {missing[0]}; a seeded hole would make the "
+            f"`record_dense` arm's recall a figure about the hole",
+            exit_code=2,
+        )
     for row, vec in zip(population, vectors, strict=True):
         proj._upsert_point_props(
             {"id": row["id"], "content": row["content"], "embedding": list(vec)}
@@ -951,7 +1022,10 @@ def run_measurement(args: argparse.Namespace) -> int:
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
     files = require_corpus(sessions)
-    model = require_embedder()
+    # The named precondition (`no_embedder` / `embedder_required_unavailable`)
+    # still belongs HERE, before the corpus is built; the vector itself is
+    # composed by the write path's own seam inside `_seed_graph`.
+    require_embedder()
 
     # ⛔ THE RECORD'S PRECONDITIONS BELONG TO THE `record_dense` ARM, NOT TO THE
     # RUN — the scoping principle the population guard carries one level down,
@@ -1013,7 +1087,7 @@ def run_measurement(args: argparse.Namespace) -> int:
     graph_name = args.graph or f"claimdense_{os.getpid()}"
     sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
     proj = sdk._get_proj()
-    written = _seed_graph(proj, population, model)
+    written = _seed_graph(proj, population)
 
     graph_vectors = len(
         [

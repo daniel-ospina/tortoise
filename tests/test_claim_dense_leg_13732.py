@@ -416,6 +416,47 @@ class TestArmAssertions:
             )
         assert ei.value.code == "dense_arm_did_not_run"
 
+    def test_record_arm_refuses_a_dense_leg_that_ran_and_DEGRADED(self, tool_mod):
+        """⛔ THE ENGINE'S REAL FAILURE SHAPE — `ran=True, degraded=True`.
+
+        `search_engine.py:4153` (record leg) and `:4742` (graph scan) both record
+        `ran=True, degraded=True, reason="query_failed"` **with the mechanism
+        still set**, and `:3491-3496` forbids a mechanism on a `ran=False`
+        entry — so the fixture above (`ran=False` + `mechanism`) is a shape
+        `_trace_entry` cannot emit. Pre-fix, `check_arm` decided from `ran`
+        alone and ACCEPTED this entry: 786 guaranteed misses would be scored as
+        the arm's recall, and the gate that exists to stop exactly that passed
+        it. `require_hybrid_read` (`:2749-2757`) is the shipped predicate this
+        now matches: a `degraded=True` vector leg contributed no semantic
+        results.
+        """
+        for arm, mechanism in (("record_dense", "pgvector"), ("graph_dense", "scan")):
+            with pytest.raises(tool_mod.Refused) as ei:
+                tool_mod.check_arm(
+                    arm, _trace(mechanism, ran=True, degraded=True, reason="query_failed")
+                )
+            assert ei.value.code == "dense_arm_degraded_read", arm
+            assert ei.value.exit_code == 3
+            assert "query_failed" in ei.value.message, ei.value.message
+
+    def test_record_arm_refuses_a_MIXED_healthy_and_degraded_run(self, tool_mod):
+        """Some queries healthy, some failed — all `pgvector`, so the mechanism
+        gate cannot see it, and the failed queries would score as misses."""
+        mixed = _trace("pgvector") + _trace(
+            "pgvector", ran=True, degraded=True, reason="query_failed"
+        )
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod.check_arm("record_dense", mixed)
+        assert ei.value.code == "dense_arm_degraded_read"
+        assert "1 of 2" in ei.value.message, ei.value.message
+
+    def test_a_healthy_dense_trace_is_still_accepted(self, tool_mod):
+        """The strictness must not refuse the read it is measuring."""
+        got = tool_mod.check_arm(
+            "record_dense", _trace("pgvector") + _trace("pgvector", reason="ok")
+        )
+        assert got == {"arm": "record_dense", "ran": True, "mechanisms": ["pgvector"]}
+
     def test_lexical_arm_accepts_a_dense_leg_that_did_not_run(self, tool_mod):
         got = tool_mod.check_arm(
             "lexical", _trace(None, ran=False, degraded=True, reason="no_embedder")
@@ -778,30 +819,78 @@ class TestTheArmsConstruction:
     same arm", so the two assertions whose absence mattered most were missing.
     """
 
-    def test_seed_graph_writes_an_explicit_vector_per_row(self, tool_mod):
+    def test_seed_graph_writes_the_write_paths_own_vector(self, tool_mod, monkeypatch):
+        """⛔ THE SEEDED VECTOR MUST BE THE ONE PRODUCTION WRITES.
+
+        Every write-side embedder in this tree goes through
+        `embeddings.compute_embeddings`: it truncates to `EMBED_WORD_BUDGET`
+        (512) words before encoding and returns `vec.tolist()`. Pre-fix,
+        `_seed_graph` called `model.encode(content)` and handed Cypher
+        `list(vec)` — untruncated text, and a list of `numpy.float32` scalars,
+        a value type no production write produces. Both are pinned here through
+        the REAL composition (only the model is doubled), so a revert reds on
+        either half: 600 words must reach the encoder as 512, and the props
+        value must be the encoder's `tolist()` (Python floats).
+        """
+        import numpy as np
+
+        from tortoise import embeddings
+
+        seen = {}
+
+        class _Model:
+            def encode(self, texts):
+                seen["texts"] = list(texts)
+                return np.array([[0.1, 0.2, 0.3] for _ in texts], dtype=np.float32)
+
+        monkeypatch.setattr(
+            embeddings.EmbeddingModel, "get", classmethod(lambda cls, *a, **k: _Model())
+        )
+
         written = []
 
         class _Proj:
             def _upsert_point_props(self, props):
                 written.append(props)
 
-        class _Model:
-            def encode(self, texts):
-                return [[0.1, 0.2, 0.3] for _ in texts]
+        long_content = " ".join(f"w{i}" for i in range(600))
+        population = [{"id": "pt-12186000000", "content": long_content}]
+        seeded = tool_mod._seed_graph(_Proj(), population)
+
+        assert seeded == 1
+        assert len(seen["texts"][0].split()) == embeddings.EMBED_WORD_BUDGET, (
+            "the seed encoded the UNTRUNCATED text — a composition no production write makes"
+        )
+        embedding = written[0]["embedding"]
+        assert embedding == pytest.approx([0.1, 0.2, 0.3]), embedding
+        assert all(type(v) is float for v in embedding), (
+            f"the props value carries {[type(v).__name__ for v in embedding]} — `list(numpy_row)` "
+            "is not the value type `compute_embeddings` returns"
+        )
+        assert written[0]["content"] == long_content
+
+    def test_seed_graph_refuses_a_row_it_could_not_embed(self, tool_mod):
+        """A `None` vector is a NAMED refusal, never a written hole."""
+        written = []
+
+        class _Proj:
+            def _upsert_point_props(self, props):
+                written.append(props)
 
         population = [
-            {"id": "pt-12186000000", "content": "alpha beta gamma"},
-            {"id": "pt-12186000001", "content": "delta epsilon zeta"},
+            {"id": "pt-12186000000", "content": "alpha"},
+            {"id": "pt-12186000001", "content": "beta"},
         ]
-        seeded = tool_mod._seed_graph(_Proj(), population, _Model())
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod._seed_graph(_Proj(), population, encode_many=lambda texts: [[0.1], None])
+        assert ei.value.code == "seed_vectors_missing"
+        assert "pt-12186000001" in ei.value.message, ei.value.message
+        assert written == [], "a partially-embedded population must not be seeded"
 
-        assert seeded == len(population)
-        assert [p["id"] for p in written] == [r["id"] for r in population]
-        for props in written:
-            # ⛔ the point of the step: the vector is EXPLICIT, not left to the
-            # fold's best-effort derive branch (projection/entities.py:2968).
-            assert props["embedding"] == [0.1, 0.2, 0.3], props
-            assert props["content"], props
+        with pytest.raises(tool_mod.Refused) as ei:
+            tool_mod._seed_graph(_Proj(), population, encode_many=lambda texts: [[0.1]])
+        assert ei.value.code == "seed_vectors_missing"
+        assert written == []
 
     def test_the_lexical_arm_does_not_submit_the_dense_leg(self, tool_mod, monkeypatch):
         """`lexical` must read with NO embedder; the other arms must not patch."""

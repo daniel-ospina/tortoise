@@ -72,8 +72,11 @@ Every query is asked in **all three** arms, in one run, over one graph, on one p
 ⛔ **A fallback is not a figure.** A `record_dense` arm reporting `scan_fallback` is REFUSED
 (exit 3) rather than published: that is the graph answering wearing the record's name, and it
 would make any delta a statement about *having* a dense leg rather than about the record. The same
-refusal covers a MIXED arm, a dense arm whose leg did not run, and a `lexical` arm in which the
-dense leg actually ran.
+refusal covers a MIXED arm, a dense arm whose leg did not run, a **dense arm whose leg ran and
+DEGRADED** (`dense_arm_degraded_read` — the engine's own shape for a failed query is
+`ran=True, degraded=True, reason="query_failed"` *with its mechanism still set*,
+`search_engine.py:4153`/`:4742`, so `ran` alone cannot see it and the queries would score as
+guaranteed misses), and a `lexical` arm in which the dense leg actually ran.
 
 **`found@deep` rides beside every delta.** A gain at k=3 that lowers the depth-50 read is labelled
 `TRADE`, never `GAIN`: that is a better order bought with coverage, and the two must not be
@@ -100,7 +103,10 @@ measured, and this instrument's seeding step is that prerequisite — not becaus
 "wrong" (it wrote the production one), but because the seeding step buys a vector written
 **unconditionally, by this run, under this run's embedder**, rather than inherited from a
 best-effort branch whose behaviour depends on the EMBED gate, the adapter, and the node's prior
-state. Consequence 1 of M2's box: with no embedder there is no `query_vec`, so the vector strategy
+state. ⛔ And the seed composes its text through the write path's OWN seam
+(`embeddings.compute_embeddings` — 512-word truncation, then `vec.tolist()`), not through a bare
+`model.encode(content)`: an untruncated text's vector, or a list of `numpy.float32` scalars, is a
+value production never writes, and this step exists to make the seeded vector the production one. Consequence 1 of M2's box: with no embedder there is no `query_vec`, so the vector strategy
 is never submitted (the declared `keyword_only`). Consequence 2, the quiet one: no node carries an
 `embedding` to be near — a fact about the box.
 
@@ -157,7 +163,7 @@ created through the journaled SDK door and folded with `record_runner`.
 | falsifier the brief names | status |
 |---|---|
 | paired Δ on recall@3 **and** `found@deep` before/after | **not measured** — no corpus/embedder/record driver on this box; the instrument computes both and labels `TRADE` |
-| `leg_trace` showing `mechanism: pgvector` from the record | **not measured**; asserted structurally (`check_arm`) so a run that cannot show it refuses |
+| `leg_trace` showing `mechanism: pgvector` from the record | **not measured**; asserted structurally (`check_arm`) so a run that cannot show it refuses — including a leg that RAN and **DEGRADED** (`ran=True, degraded=True`, the engine's shape for a failed query), which `ran` alone cannot see |
 | detectable effect for n = 786 stated before the verdict | ✅ **done** — §1, committed and pinned |
 | a signal's own isolated delta, never bundled | ✅ by construction — the three arms are the isolation; the pre-registration forbids adding a signal to an arm |
 | `object`/`subject` still withheld (run the pinning test) | ⛔ **the named test does not exist in this tree.** `test_object_and_subject_still_have_no_record_served_dense_leg` was not found by `grep -rn` anywhere under `tests/`. The posture it names was **reversed by landed work**: `record_vector.LABEL_SERVED` carries `object` and `subject` since `#13422`/PR #13466, and `MIRROR_RETIRED_LABELS = {"object", "subject"}` is the set whose graph copy is retired. That is the owner's 2026-11-17 answer on `#13220` — *"if indexing improves search for Object/Subject/Event of course we want that … in Postgres and the search aligned with that"*. The brief's instruction is stale, and following it would have reversed a landed decision inside a measurement tool. What holds instead: **no graph vector index is created on any label** (V1, PR #11481), pinned structurally by `TestContradictionTest` |
