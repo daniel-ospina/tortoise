@@ -728,12 +728,14 @@ def _record_conditional(repo: Path, prereg_sha: str | None,
     # network fetch of the blob, not a local lookup (#13800).
     blob = _git(repo, "show", f"{prereg_sha}:{normalised}", timeout=BLOB_TIMEOUT)
     if blob.returncode == 124:
-        # A clock that ran out is NOT evidence that the object is missing — and
-        # the caller turns this string into a V5 refusal, so naming the wrong
-        # cause would charge the record with a defect the checkout caused.
+        # A clock that ran out is NOT evidence of anything about the object —
+        # and the caller turns this string into a V5 refusal, so naming a cause
+        # the clock cannot establish would charge the record with a defect the
+        # checkout caused.
         return None, (f"{prereg_sha}:{artifact} could not be read here: `git show` "
-                      f"exceeded {BLOB_TIMEOUT:g}s, which is a slow blob fetch in a "
-                      "partial clone rather than a missing object")
+                      f"exceeded {BLOB_TIMEOUT:g}s before git answered — a slow blob "
+                      "fetch in a partial clone is the usual cause, and this is NOT "
+                      "evidence the object is missing")
     if blob.returncode != 0:
         return None, f"{prereg_sha}:{artifact} does not resolve in this checkout"
     try:
@@ -893,8 +895,10 @@ def _step_accounting(repo: Path, run: dict, observed: tuple,
 # Every git invocation here is BOUNDED (#13800). A probe that cannot answer is a
 # verdict, but a probe that never returns is a hung gate — and this tool gates a
 # merge. `GIT_TIMEOUT` is generous for the operations bounded by it (a commit or
-# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that a wedged
-# `git` cannot outlive a `pytest-timeout` budget; the ONE network read (a
+# ref lookup is ~8 ms even on a 2.4 M-file repo) and small enough that one wedged
+# probe cannot outlive a `pytest-timeout` budget; `check()` makes ONE such probe
+# per row (and `_resolves` is memoised), so a completely wedged git costs five
+# probes ≈ 75 s, inside the 300 s budget. The ONE network read (a
 # `show <sha>:<path>` blob fetch in a partial clone) passes its own wider bound.
 GIT_TIMEOUT = 15.0
 BLOB_TIMEOUT = 60.0
@@ -945,16 +949,18 @@ def _is_git_repo(repo: Path) -> bool:
     return _git(repo, "rev-parse", "--is-inside-work-tree").returncode == 0
 
 
-def _repo_refusal(repo: Path) -> str:
-    """Why ``repo`` is not a usable work tree, or "" when it is one.
+def _repo_refusal(proc: subprocess.CompletedProcess) -> str:
+    """Why ``proc`` says this ``repo`` is not a usable work tree.
 
-    Two causes, two sentences (#13800 review): a bounded probe that ran out of
-    clock must not be reported as "not a git work tree", which is a claim about
-    the checkout rather than about the clock.
+    Takes the COMPLETED PROBE, not the path (#13800 review, P2): re-running it
+    here would double the one cost the bound exists to cap, and could answer 0
+    on the second try and leave V11 printing an EMPTY reason for a row it had
+    just reported.
+
+    Two causes, two sentences: a bounded probe that ran out of clock must not be
+    reported as "not a git work tree", which is a claim about the checkout rather
+    than about the clock.
     """
-    proc = _git(repo, "rev-parse", "--is-inside-work-tree")
-    if proc.returncode == 0:
-        return ""
     if proc.returncode == 124:
         return (f"git could not answer within {GIT_TIMEOUT:g}s whether this is a "
                 "work tree (a wedged git, not a missing checkout)")
@@ -1123,8 +1129,11 @@ def check(record: dict, *, repo: Path,
         if not (isinstance(sha, str) and _SHA_RE.match(sha)):
             f.add("V3", where, f"sha {sha!r} is not a commit sha — every row "
                                "is measured AT a sha")
-        elif not _is_git_repo(repo):
-            f.unresolved.append(("row", sha, _repo_refusal(repo)))
+        elif (repo_proc := _git(repo, "rev-parse",
+                               "--is-inside-work-tree")).returncode != 0:
+            # ONE probe, read twice: the reason comes out of the rc this branch
+            # already has (`_repo_refusal` on a completed probe).
+            f.unresolved.append(("row", sha, _repo_refusal(repo_proc)))
         elif not _resolves(repo, sha):
             # ⛔ EVERY row, not only the green ones (#9089 review). The resolve
             # check used to sit inside the GREEN branch, and the shipped table

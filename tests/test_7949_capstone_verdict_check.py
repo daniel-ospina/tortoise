@@ -24,6 +24,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -4797,13 +4798,19 @@ def test_an_expiry_never_names_a_cause_it_cannot_establish(monkeypatch):
         raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
 
     monkeypatch.setattr(cvc.subprocess, "run", _expire)
-    why = cvc._repo_refusal(_REPO)
+    probe = cvc._git(_REPO, "rev-parse", "--is-inside-work-tree")
+    assert probe.returncode == 124, probe
+    why = cvc._repo_refusal(probe)
     assert "could not answer" in why and "work tree (a wedged git" in why, why
     assert why != "not a git work tree", why
     declared, reason = cvc._record_conditional(
         _REPO, "4" * 40, cvc.RECORD_ARTIFACT)
     assert declared is None
-    assert "exceeded" in reason and "missing object" in reason, reason
+    assert "exceeded" in reason, reason
+    # The message may name the usual cause as a POSSIBILITY, never as a finding:
+    # proving ABSENCE is the slow case in this same clone (85 s measured), so
+    # "slow fetch, not a missing object" would be a claim the clock cannot make.
+    assert "is NOT evidence the object is missing" in reason, reason
     assert "does not resolve" not in reason, reason
 
 
@@ -4815,10 +4822,14 @@ def test_the_bounds_fit_inside_the_configured_pytest_budget():
     `Failed: Timeout (>300s)` with every other pin in this section green, so the
     relationship is pinned rather than left to a comment.
     """
-    pyproject = (_REPO / "pyproject.toml").read_text()
-    m = re.search(r"^\[tool\.pytest\.ini_options\][^\[]*?^timeout\s*=\s*(\d+)",
-                  pyproject, re.MULTILINE | re.DOTALL)
-    assert m is not None, "the pytest per-test budget is no longer configured"
-    budget = int(m.group(1))
+    # Parsed as TOML, not matched as text (#13800 review, P2): a stanza that
+    # gains a `[` above `timeout` (a `filterwarnings` list, say) made the first
+    # regex fail closed and report "no longer configured" about a config it had
+    # simply not read.
+    ini = tomllib.loads((_REPO / "pyproject.toml").read_text())
+    ini = ini.get("tool", {}).get("pytest", {}).get("ini_options", {})
+    assert "timeout" in ini, "the pytest per-test budget is no longer configured"
+    budget = ini["timeout"]
+    assert isinstance(budget, int), budget
     assert budget > cvc.GIT_TIMEOUT, (cvc.GIT_TIMEOUT, budget)
     assert budget > cvc.BLOB_TIMEOUT, (cvc.BLOB_TIMEOUT, budget)
