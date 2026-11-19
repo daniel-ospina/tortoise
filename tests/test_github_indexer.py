@@ -3277,7 +3277,7 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     ("sdk.py", 55537, 55546): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22651, 22826): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 56011, 56011): (
+    ("sdk.py", 56031, 56031): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
