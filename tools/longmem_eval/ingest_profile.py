@@ -282,8 +282,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-profile", action="store_true",
                    help="times only; skip the cProfile attribution (faster)")
     args = p.parse_args(argv)
+    # ``--db ""`` must not silently fall back to the embedded arm: it is the
+    # ordinary shape of an unset-variable mistake (``--db "$TORTOISE_DB_URI"``),
+    # and ``run_main`` refuses it rather than measuring something else. Same
+    # check, same message.
+    if args.db is not None and "://" not in args.db:
+        p.error(
+            f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
+            f"bolt://), got {args.db!r} — the per-question isolated graphs "
+            f"derive from the URI's server")
 
-    report: dict[str, Any] = {"db": bool(args.db), "shapes": [],
+    # The arm actually SELECTED, not merely the flag that was passed: with an
+    # ambient TORTOISE_DB_URI and no --db the profiler takes the server arm
+    # (``_sdk`` promotes it, as ``run_main`` does), so reporting
+    # ``bool(args.db)`` would print ``db: false`` about a server run — the
+    # record disagreeing with the run, which is the defect class #8486 is about.
+    selected_db = args.db if args.db is not None else os.environ.get(
+        "TORTOISE_DB_URI")
+    report: dict[str, Any] = {"db": bool(selected_db), "shapes": [],
                               "embedder": None, "encode": {}}
     # A PID-scoped tag: every measurement below writes a FRESH graph, and the
     # ingest is idempotent — a reused namespace measures a no-op re-ingest.

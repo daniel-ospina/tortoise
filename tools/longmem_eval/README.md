@@ -857,8 +857,12 @@ Measured (private lane, idle box, CPU embedder = the pinned bge-small):
   flat **0.211–0.214 s per point** from 150 points up, so the cost is
   proportional to (turns + chunks). ⚠️ Not flat at EVERY size: the 6-point
   rung measures **0.374 s/point**, 77 % above the plateau — at that size the
-  fixed setup is still a third of the run, which is the point of the row
-  (extrapolating from the smallest rung would over-state the real cost).
+  size-independent excess is a large share of the row: `0.374 − 0.211` =
+  0.163 s/point × 6 = **0.98 s**, i.e. **44 %** of that rung's 2.24 s ingest
+  (the fixed-setup column itself is only 0.11 s, ~5 %). That is the point of
+  the row: extrapolating from the smallest rung would over-state the real cost,
+  and the cause is the per-run overhead around a tiny graph, not the setup
+  probe measured in the first column.
   The calibration target is **742** points/question (371,095 encode units /
   500 questions = 742.19); the headline rung builds **750** (500 turns + 250
   chunks), 1.1 % over it, and the table reports the shape actually built.

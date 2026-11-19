@@ -603,6 +603,20 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # lane leaks into a later docker-lane test.
     "test_bounded_raw_clients_3065.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8486: the ingest-cost profiler's arm tests. FOUR sites, two intents.
+    # The two `setenv` sites (DELIBERATE_URI) are the test INPUT: one pins that
+    # an explicit `--db` outranks an ambient URI, the other that an ambient
+    # `TORTOISE_DB_URI` selects the SERVER arm exactly as `run_main` does — the
+    # parity claim the module exists to make, so the ambient state must be
+    # reproduced. The two `delenv` sites (DELIBERATE_EMBEDDED_LANE) force the
+    # embedded arm so its start-budget floor and its constructor shape can be
+    # asserted without a server. No server is contacted on any of them (the SDK
+    # is a stub), every site takes the fixture-param `monkeypatch`, which
+    # auto-restores at teardown — no lane state leaks into a later test.
+    "test_longmem_ingest_profile.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
+    ],
     # #3892: the read-path status test points the endpoint at a DECLARED but
     # UNREACHABLE docker URI (127.0.0.1:1) to drive the `degraded` composite
     # without mocking `_get_proj` — the setenv IS the test input.
