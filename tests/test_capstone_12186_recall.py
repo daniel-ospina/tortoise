@@ -79,6 +79,7 @@ import ast
 import hashlib
 import inspect
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -1115,14 +1116,28 @@ def test_the_record_says_code_head_is_a_label_and_names_a_runnable_anchor(artifa
     # is in `post_run_edits[0].why` today. Appending
     # ``Reproduce with `git show 31bce52ddbb3:tools/capstone_12186_recall.py` `` to that
     # `why` left the suite GREEN at 54 passed, so the `code_head`-prefixed command the
-    # note was corrected for could be re-introduced through the ledger instead. The
-    # scan reads all three now — README, note, ledger — under the same derivation and
-    # the same case-folding, so no surface is a spelling the guard does not see.
-    edits = " ".join(str(edit.get("why", ""))
-                     for edit in artifact.get("post_run_edits") or [])
+    # note was corrected for could be re-introduced through the ledger instead.
+    #
+    # ⛔ AND AN ENUMERATION OF SURFACES FAILS BY OMISSION (round 30, measured). "Three
+    # surfaces" was still a list, and the next command-bearing field was not on it:
+    # appending `To inspect: `git show 31bce52ddbb3:tools/capstone_12186_recall.py`.`
+    # to `cleanup.note` left the suite GREEN at 58 passed — a fourth surface nobody
+    # named. The scan now walks EVERY STRING in the artifact, so a new field cannot be
+    # born outside it, and the README is scanned with the same derivation.
+    def _artifact_strings(node):
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from _artifact_strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from _artifact_strings(value)
+
+    artifact_text = " ".join(_artifact_strings(artifact))
     shown = {tok.lower() for tok in
              re.findall(r"git show ([0-9a-fA-F]{4,40}):",
-                        flat + " " + note + " " + edits)}
+                        flat + " " + artifact_text)}
     code_head = artifact["code_head"]
     for token in sorted(shown):
         # A sha abbreviation is a prefix; comparing with a common prefix of any length
@@ -1535,6 +1550,22 @@ def test_the_paired_block_in_the_artifact_accounts_for_every_query(artifact):
         assert cell["queries_compared"] + cell[
             "excluded_degraded_on_either_side"] == artifact["pin"]["queries"], (where, name)
         assert cell["gains"] + cell["losses"] <= cell["queries_compared"], (where, name)
+
+        # ⛔ `p` AND `p_display` MUST AGREE (round 30, measured). Both serialisations
+        # carry the pair, but only the `paired[...]` copy's `p` was re-derived (by
+        # `test_the_artifact_reconciles_its_own_raw_evidence`); the merged copy's raw
+        # `p` was read by nothing, so setting
+        # `merged_lever_visibility.underscore_terms_visible_on_user_door["p"]` to 0.5
+        # — leaving `p_display: "<1e-12"` beside it — left the suite GREEN at 58
+        # passed, publishing `p = 0.5` and `p < 1e-12` for the same comparison.
+        # `p_display` is RENDERED from `p` by `paired()`'s own formula, so the pair is
+        # checkable with no second source of truth.
+        expected_p_display = (f"<1e-{int(-math.log10(cell['p']))}"
+                              if 0 < cell["p"] < 1e-12 else f"{cell['p']:.4g}")
+        assert cell["p_display"] == expected_p_display, (
+            where, name, "`p` and `p_display` disagree — the published display is not "
+            f"re-rendered from the published p: p={cell['p']!r}, "
+            f"p_display={cell['p_display']!r}, expected {expected_p_display!r}")
 
         # ⛔ A capped id list beside an uncapped COUNT is a silent subset. Measured:
         # `capture_prior_pre_lever -> capture_prior` publishes `gains: 43` beside 20
@@ -2651,7 +2682,15 @@ def test_the_readme_quotes_the_provenance_the_artifact_records(artifact):
     _assert_mentions(
         masthead,
         (f"sha256{pin['sha256'][:8]}…",
-         f"codehead:{artifact['code_head'][:10]}"),
+         f"codehead:{artifact['code_head'][:10]}",
+         # ⛔ AND THE MEASUREMENT DATE (round 30, measured), which sat on the same
+         # masthead line as the `Code head:` value that IS pinned and was read by
+         # nothing: `**Measured:** 2026-11-19` -> `2026-11-20` left the suite GREEN at
+         # 58 passed, and `grep -n 'measured_at\|Measured:'` found no test at all. The
+         # masthead is not §6, so the declared "§6's run metadata" exclusion does not
+         # reach it — a reader dating the record off this line was reading an
+         # unpinned number.
+         f"measured:{artifact['measured_at'][:10]}"),
         "the README masthead")
 
 
@@ -3104,6 +3143,27 @@ def test_the_readme_narrative_cannot_contradict_its_own_tables(artifact):
             f"expected exactly one occurrence of {token!r} in the README, found "
             f"{text.count(token)} — a second occurrence can mask a drifted first")
     _assert_mentions(text, tokens, "the README's §2/§3 narrative")
+
+    # ⛔ AND THE `+53.3` RESTATEMENT'S SIGN (round 30, measured). `tokens[0]` is a
+    # MAGNITUDE — `53.3points` — and `-53.3points` CONTAINS it, so replacing
+    # `**+53.3 points**` with `**−53.3 points**` (U+2212) left the suite GREEN at 58
+    # passed and published that the lever DEGRADES identifier recall by 53.3 points,
+    # while §2's per-class table two lines above prints `0.4111 -> 0.9444`. The
+    # sibling restatement `192 of 411` got exactly this polarity fix (rounds 18/20)
+    # with `_negates`; this one never did, yet the manifest row names `+53.3 points`
+    # WITH its sign as pinned. A text search is the right instrument here (not
+    # `_negates`): the harm is a sign CHARACTER, not a privative word.
+    magnitude = f"{(ident['3'] - pre['3']) * 100:.1f}"
+    assert text.count(f"+{magnitude}points") == 1, (
+        f"the §2 narrative must state `+{magnitude} points` with an EXPLICIT plus, "
+        f"exactly once; found {text.count(f'+{magnitude}points')} — a bare "
+        f"`{magnitude}` token would also match a MINUS-prefixed one")
+    for minus in ("-", "\u2212", "\u2013", "\u2014"):
+        assert f"{minus}{magnitude}points" not in text, (
+            f"the §2 narrative states `{minus}{magnitude} points`, i.e. that the "
+            f"`_`-preserving OR terms DEGRADE identifier recall by {magnitude} "
+            f"points — §2's own per-class table gives "
+            f"{pre['3']} -> {ident['3']}")
 
     # ⛔ AND THE SENTENCE'S DIRECTION, NOT ONLY ITS TWO NUMBERS (round 18, F4,
     # measured). `192 of 411` is the ATTACH bucket — `mint_rate.shipped.attached` —
