@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1320** | **101** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,097** | **833** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,110** | **836** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 here, none of which but the last reproduces at this tree; the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -423,8 +423,10 @@ halves:
 instead of colliding with them) — re-derived by RUNNING the tool on this tree, never by arithmetic on
 the markers. The change adds **one** Cypher statement site and **no** non-Cypher door call:
 `tortoise/commitments.py::build_cypher` is the live-commitment enumeration `#13557` needed, and it is
-built by concatenation (the WHERE comes from `live._terminal_excluded`, the family vocabulary from
-`search_engine._status_vocab_for`), so it lands as `unresolved` rather than `plain`. And it adds a
+built by concatenation (the WHERE comes from `live._terminal_excluded` taken with ITS OWN defaults — the
+exact De Morgan dual of the `live._terminal_expression` the ended read selects by; review round 1
+removed a per-family vocabulary here, because a family seam on one side of a duality is how one record
+ends up in both populations), so it lands as `unresolved` rather than `plain`. And it adds a
 second scanned file that carries NO site (`tortoise/state_intent.py`, the question→population
 detector), which is why `files_scanned` moves by two while `files` moves by one. So `sites`
 1319→**1320**, `unresolved` 108→**109** (the `shape_unresolved` and
@@ -433,11 +435,13 @@ detector), which is why `files_scanned` moves by two while `files` moves by one.
 `non_cypher_door_calls` **261** and `partial` **315** are all unchanged — nothing here is a candidate
 for the record store, which is the metric §0 is about. §1's `rg` reconciliation is re-measured at this
 tree (door **1,635 / 110** whole-text, verb **2,353 / 146**, bare **1,641 / 111**), and the
-`--all-surface` row is re-derived rather than carried: **9,097 / 833**, of which **2** sites and **1**
-carrying file are this lane's (the module's statement and the availability probe's `.query(` in the new
-test module) — the rest of the move from the row's previous **9,082 / 827** is the base's own drift,
-measured as **9,095 / 831** with this lane's three files untracked. Appendix A is regenerated with
-`--markdown` here, so ⛔ **it moved far more than one row**.
+`--all-surface` row is re-derived rather than carried: **9,110 / 836** (2,425 files scanned), of which
+exactly **3** sites and **2** carrying files are this lane's — enumerated, not inferred:
+`tortoise/commitments.py` (the concatenated statement, `unresolved`),
+`tests/test_13557_13558_reachable_reads.py` (the availability probe's `RETURN 1` read and the raw
+legacy-row write the duality test needs). The rest of the move from the row's previous **9,082 / 827**
+is drift this lane did not cause; the base with its three files absent is **9,107 / 834** (2,422
+scanned). Appendix A is regenerated with `--markdown` here, so ⛔ **it moved far more than one row**.
 
 **And the re-cut at this branch's merge with `origin/main` `9d25456544`:** the base this lane was
 deliberately built on (`fix/13128-occurrence-kind-spellings`) landed as `#13604`'s squash commit
@@ -951,7 +955,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/commit_ops.py:1965` | `apply_supersessions` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status, coalesce(n…` |
 | `tortoise/commit_ops.py:2128` | `apply_supersessions` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE o.id = $ref RETURN ID(o), o.id, o.name, o.sta…` |
 | `tortoise/commit_ops.py:2134` | `apply_supersessions` | plain | read | candidate:SQL-shaped | `MATCH (o:Object) WHERE {} RETURN ID(o), o.id, o.name, o.status, o.su…` |
-| `tortoise/commitments.py:219` | `enumerate_live_commitments` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/commitments.py:235` | `enumerate_live_commitments` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/connectors/github.py:326` | `GitHubConnector.ingest` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (o:Object {id: $id}) SET o.routed_team = $team, o.routed_role …` |
 | `tortoise/connectors/github.py:352` | `GitHubConnector.ingest` | adjacency | write | stays:graph-maintenance | `MATCH (o:Object {id: $oid}) MATCH (s:Subject {id: $sid}) MERGE (o)-[…` |
 | `tortoise/consistency.py:2712` | `_graph_view` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |

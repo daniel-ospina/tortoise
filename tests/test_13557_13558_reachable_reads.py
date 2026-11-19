@@ -156,16 +156,20 @@ SELECTED = [
     ("current commitments", "commitments", "scoped_noun"),
     ("what are we currently committed to — pricing, onboarding, launch and uptime",
      "commitments", "committed_to"),
+    ("what are our commitments", "commitments", "determined_noun"),
     ("our commitments", "commitments", "determined_noun"),
     # #13558 — Q6, and the other shapes a customer uses for it.
-    ("has anything we relied on been withdrawn", "ended", "anything"),
-    ("has anything been retired", "ended", "anything"),
-    ("has anything been archived", "ended", "anything"),
-    ("what has been withdrawn", "ended", "what"),
-    ("what ended", "ended", "what"),
-    ("which commitments were withdrawn", "ended", "which"),
-    ("list what we retired", "ended", "what"),
-    ("what did we archive last quarter", "ended", "did_we"),
+    ("has anything we relied on been withdrawn", "ended", "aux_participle"),
+    ("has anything been retired", "ended", "aux_participle"),
+    ("has anything been archived", "ended", "aux_participle"),
+    ("what has been withdrawn", "ended", "aux_participle"),
+    ("which commitments were withdrawn", "ended", "aux_participle"),
+    ("which claims were superseded", "ended", "aux_participle"),
+    ("what ended", "ended", "predicate_tail"),
+    ("what ended?", "ended", "predicate_tail"),
+    ("list what we retired", "ended", "predicate_tail"),
+    ("what did we archive last quarter", "ended", "do_support"),
+    ("did we retire the onboarding flow", "ended", "do_support"),
 ]
 
 
@@ -206,18 +210,40 @@ NOT_SELECTED = [
     "the meeting was cancelled",
     "what was planned and never happened",
     "onboarding flow retired",
-    # the bare-verb class the review measured
+    # ── the bare-VERB class (round-1 review, measured) ──────────────────────
     "what is the end date of the contract",
     "what front end framework do we use",
     "what is the back end stack",
     "what happens if I withdraw consent",
     "show me the retired onboarding flow",
     "what did we end up doing",
-    # the bare-noun class the review measured
+    # ── the bare-NOUN class (round-1 review, measured) ─────────────────────
     "commitments due this week",
     "commitment letter template",
     "our commitment to privacy",
     "sponsorship commitment review",
+    # ── the ATTRIBUTIVE-participle class (round-2 review, measured) ────────
+    # A participle before a noun names a TOPIC; a wh-word is not by itself a
+    # request for a set. Every one of these was answered with the whole ended
+    # population by the cut that only required "an ending word within N chars of
+    # a wh-word".
+    "what is our abandoned cart recovery rate",
+    "what's our refund policy for cancelled orders",
+    "what did the customer say when we cancelled their order",
+    "what is the definition of an abandoned cart",
+    "which archived report has the Q3 numbers",
+    "what is the archived pricing document",
+    "what did we learn from the cancelled launch",
+    # ── the SUBORDINATE-clause class (round-2 review, measured) ────────────
+    # An ending asserted in a clause the caller mentioned is not the question.
+    "what is the payment terms clause, given the contract was archived",
+    # ── the fact-question class about commitments (round-2 review) ─────────
+    "what commitments did the vendor make in the SLA",
+    "which commitments are in the contract",
+    "how much have we committed to the SOC2 audit",
+    "current commitments in EMEA",
+    # ── a statement, and a third-party action ──────────────────────────────
+    "did the customer cancel their order",
     "",
     "   ",
 ]

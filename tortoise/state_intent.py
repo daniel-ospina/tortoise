@@ -108,22 +108,13 @@ POPULATIONS: dict[str, str] = {
 }
 
 # ── the cue table ───────────────────────────────────────────────────────────
-#: The ENDING words of the model, as a spelling family.
+#: The ENDING words of the model, as a spelling family — every member in its
+#: **ENDED-STATE** form (a past participle). The bare verbs ("end", "withdraw",
+#: "retract", "cancel") are how English talks about dates, boundaries and
+#: actions, and matching them was the first cut's measured P0.
 #:
-#: ⛔ EVERY MEMBER IS THE **ENDED-STATE** FORM (a past participle), never the bare
-#: verb — and that is the whole guard, measured in review. The bare forms turned
-#: ordinary content questions into the ended population, because "end",
-#: "withdraw", "retract", "cancel" and "retire" are how English talks about
-#: dates, boundaries and actions, not only about records: `what is the end date
-#: of the contract`, `what front end framework do we use`,
-#: `what happens if I withdraw consent` and `show me the retired onboarding flow`
-#: all reached the ended read. A past participle describes a state the record HAS
-#: REACHED (withdrawn, retired, cancelled, archived) — which is exactly the
-#: question this population answers — while a bare verb asks about an ACTION, so
-#: it is not this read. That is why `ended` is a cue and `end` is not.
-#:
-#: The set is ``live.TERMINAL_EXCLUDED_STATUSES`` rendered the way a customer says
-#: it (``retracted``, ``superseded``, ``archived``, ``deprecated``) plus the
+#: The set is ``live.TERMINAL_EXCLUDED_STATUSES`` as a customer says it
+#: (``retracted``, ``superseded``, ``archived``, ``deprecated``) plus the
 #: plain-English endings for one with no single status word (``withdrawn``,
 #: ``retired``, ``abandoned``, ``cancelled``, ``ended``). ⛔ It is a *detector*
 #: vocabulary, never a state vocabulary: nothing here is written to a row or
@@ -142,61 +133,104 @@ _ENDING_WORDS = (
     r"|ended"
 )
 
-#: ENDING-question shapes, ordered. Each is the shape a customer uses when they do
-#: NOT know which record they are asking about; a query that names a record
-#: keeps the text read. ``[^?]`` bounds the scan inside one question so a
-#: multi-clause string cannot join an ending word to an unrelated "what".
+#: …and the BASE forms of the same words, which is what do-support selects
+#: ("what did we retire"). A closed list with NO ``end``: "what did we end up
+#: doing" is not an ending question.
+_ENDING_BASE = (
+    r"withdraw"
+    r"|retract"
+    r"|supersede"
+    r"|deprecate"
+    r"|retire"
+    r"|abandon"
+    r"|archive"
+    r"|cancel"
+)
+
+#: The copulas and auxiliaries that put a participle in PREDICATE position. The
+#: participle must follow one of these IMMEDIATELY (allowing "not"/"already"/"ever"
+#: and the like to sit between), because that adjacency — not the word itself — is
+#: what makes the word a predicate rather than a modifier.
+_AUX = r"(?:been|being|be|is|are|was|were|got|gets|gotten)"
+
+#: ENDING-question shapes. ⛔ THE SHAPE IS SYNTACTIC, NOT LEXICAL, and this is the
+#: lesson of review round 2. A past participle in ATTRIBUTIVE position names a
+#: content TOPIC, and a wh-word is not by itself a request for a set — so an
+#: earlier cut that only required "a wh-word within N characters of an ending
+#: word" routed `what is our abandoned cart recovery rate`,
+#: `what's our refund policy for cancelled orders`,
+#: `which archived report has the Q3 numbers` and
+#: `what is the archived pricing document` into the ended population. The three
+#: shapes below all require the ending word to be PREDICATED of something:
+#:
+#: * ``aux_participle`` — an auxiliary, then the participle. This is the shape of
+#:   "has anything we relied on BEEN withdrawn", "which claims WERE archived",
+#:   "what has BEEN superseded". It is also the commonest hijack-free form
+#:   because a modifier can never be preceded by a copula — AND it carries a
+#:   wh-word/quantifier, because a bare statement is not a question:
+#:   `the meeting was cancelled` is a note lookup and must not be routed.
+#: * ``predicate_tail`` — the participle ENDS the question, within 30 characters
+#:   of a "what": "what ended", "what has been withdrawn", "list what we retired".
+#:   A trailing constraint kills it ("what is the archived pricing document" does
+#:   not end on the participle), which also bounds the window the earlier cut
+#:   claimed to have bounded and had not.
+#:
+#: ⛔ AND THE SHAPES ARE MATCHED ON THE FIRST CLAUSE (split on a comma or a
+#: semicolon), because an ending asserted in a SUBORDINATE clause is a fact the
+#: caller mentioned, not the question they asked: `what is the payment terms
+#: clause, given the contract was archived` is a lookup for the terms.
+#: * ``do_support`` — "did/do/does WE|I … <base verb>": "what did we archive",
+#:   "did we retire the onboarding flow". Base forms only (from
+#:   :data:`_ENDING_BASE`) and FIRST PERSON only — "did the customer cancel their
+#:   order" asks about someone else's action, which this population cannot answer.
 #:
 #: ⛔ THERE IS DELIBERATELY NO `list`/`show` SHAPE. It was measured in review as a
 #: hijack — `show me the retired onboarding flow` is a lookup for ONE record, and
-#: routing it returned the whole ended population instead. An imperative that
-#: asks for a SET still reaches this read through the `what`/`which` shapes
-#: ("list what we retired"), so dropping the shape costs no real question.
+#: routing it returned the whole ended population. A set-asking imperative still
+#: reaches this read through ``predicate_tail`` ("list what we retired").
 _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # "has anything we relied on been withdrawn?" / "did something get retired?"
-    ("anything", re.compile(
-        rf"\b(?:anything|something|everything)\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
-    # "what has been withdrawn?" / "what was retracted?" / "what ended?"
-    ("what", re.compile(
-        rf"\bwhat\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
-    # "which commitments were withdrawn?" / "which of these ended?"
-    ("which", re.compile(
-        rf"\bwhich\b[^?]{{0,60}}?\b(?:{_ENDING_WORDS})\b")),
-    # "what did we archive?" — a bare VERB after "what did we", from a CLOSED list
-    # and deliberately WITHOUT `end` (which would match "what did we end up
-    # doing"). The base form is needed only here: an enumerate-question about the
-    # ACT of ending, in the first person, is unambiguous in a way that
-    # "what is the end date" is not.
-    ("did_we", re.compile(
-        r"\bwhat\s+did\s+we\s+(?:archive|retire|withdraw|retract|cancel"
-        r"|supersede|deprecate|abandon)\b")),
+    # "has anything we relied on been withdrawn?" / "which claims were archived?"
+    ("aux_participle", re.compile(
+        rf"\b(?:anything|something|everything|what|which)\b[^?]{{0,60}}?\b{_AUX}"
+        rf"\s+(?:not\s+|already\s+|ever\s+|also\s+|just\s+|still\s+"
+        rf"|never\s+)?(?:{_ENDING_WORDS})\b")),
+    # "what ended" / "what has been withdrawn" / "list what we retired"
+    ("predicate_tail", re.compile(
+        rf"\bwhat\b[^?]{{0,30}}?\b(?:{_ENDING_WORDS})\s*[?.!]*$")),
+    # "what did we archive last quarter" / "did we retire the flow"
+    ("do_support", re.compile(
+        rf"\b(?:did|do|does)\s+(?:we|i)\b[^?]{{0,30}}?\b(?:{_ENDING_BASE})\b")),
 )
 
 #: COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
-#: not a phrase* — so the cue is the shape that ASKS FOR THE SET, and the
-#: population is then read by kind. The verb phrase is the one a customer uses
-#: ("what are we committed to"); the noun needs a determiner that asks for the
-#: set ("current commitments", "our commitments", "which commitments").
+#: not a phrase* — so the cue is a shape that ASKS FOR THE SET, and the population
+#: is then read by kind. Two rules make that a syntactic claim rather than a
+#: lexical one (review round 2 measured the difference):
 #:
-#: ⛔ NOT THE BARE NOUN. ``\bcommitments?\b`` was measured in review as a hijack:
-#: `commitments due this week` and `commitment letter template` are content
-#: lookups, and routing them returned every live commitment with the caller's own
-#: constraint silently dropped — the failure #13558 is about, inverted. A question
-#: that names a FACT about a commitment keeps the relevance read.
+#: * the noun is PLURAL — "our commitment to privacy" and "the current commitment
+#:   level" are fact lookups, and the set-question is the plural one;
+#: * the noun ENDS the question (or is followed only by punctuation), so a caller
+#:   who added a CONSTRAINT ("commitments due this week", "current commitments in
+#:   EMEA") keeps the relevance read instead of having that constraint silently
+#:   dropped by a population it cannot apply.
+#:
+#: ⛔ NOT THE BARE NOUN, and not "what … commitments": `commitments due this week`,
+#: `commitment letter template` and `what commitments did the vendor make in the
+#: SLA` were all measured as hijacks (the last one answered with OUR commitments,
+#: a wrong answer that looks right). The verb phrase is anchored to "what
+#: are/have we|our …" for the same reason — `how much have we committed to the
+#: SOC2 audit` is a scalar question, not a request for the population.
 _COMMITMENT_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # "what are we currently committed to" / "what have we committed to"
-    ("committed_to", re.compile(r"\bcommitt(?:ed|ing)\s+to\b")),
-    # "current commitments" / "live commitments" / "outstanding commitments".
-    # PLURAL on purpose: "our commitment to privacy" and "the current commitment
-    # level" are fact lookups, and the set-question is the plural one.
+    # "what are we (currently) committed to" / "what have we committed to"
+    ("committed_to", re.compile(
+        r"\bwhat\b[^?]{0,16}?\b(?:are|have|had)\s+(?:we|our)\b[^?]{0,16}?"
+        r"\bcommitt(?:ed|ing)\b")),
+    # "current commitments" / "live commitments" / "outstanding commitments"
     ("scoped_noun", re.compile(
-        r"\b(?:current|live|active|open|outstanding)\s+commitments\b")),
-    # "our commitments" / "all the commitments" / "which commitments" /
-    # "what are our commitments" — a determiner that asks for the SET, and PLURAL
-    # for the same reason as `scoped_noun` ("our commitment to privacy" is a
-    # fact lookup, not a request for the population).
+        r"\b(?:current|live|active|open|outstanding)\s+commitments\s*[?.!]*$")),
+    # "our commitments" / "all the commitments" / "what are our commitments"
     ("determined_noun", re.compile(
-        r"\b(?:our|all|which|what)\b[^?]{0,20}?\bcommitments\b")),
+        r"\b(?:our|all)\b(?:\s+the)?\s+commitments\s*[?.!]*$")),
 )
 
 
@@ -229,16 +263,21 @@ def detect_state_question(text: str | None) -> StateQuestion:
     the ended population is the one that states how each record ended. The
     reverse precedence would answer a withdrawal question with everything still
     standing — the exact failure #13558 was filed for.
+
+    Both tables are matched against the FIRST CLAUSE of the query (see
+    ``_ENDING_SHAPES``): a subordinate clause is a fact the caller mentioned, not
+    the question they asked.
     """
     if not text or not str(text).strip():
         return StateQuestion()
     t = " ".join(str(text).lower().split())
+    clause = t.split(",", 1)[0].split(";", 1)[0].strip()
     for shape, pattern in _ENDING_SHAPES:
-        m = pattern.search(t)
+        m = pattern.search(clause)
         if m:
             return StateQuestion(ENDED, shape, m.group(0))
     for shape, pattern in _COMMITMENT_SHAPES:
-        m = pattern.search(t)
+        m = pattern.search(clause)
         if m:
             return StateQuestion(COMMITMENTS, shape, m.group(0))
     return StateQuestion()
