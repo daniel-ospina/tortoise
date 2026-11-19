@@ -66,9 +66,10 @@ import {
 } from "../../_shared/auth/consent-flow";
 import {
   ATTEMPT_KEY_PARAM,
-  newAttemptKey,
+  mintedAttemptKey,
   recordConsentAttempt,
   redirectUriProblem,
+  verifyAttemptKey,
 } from "../../_shared/auth/consent-bridge";
 import { consentRefusalPage } from "../../_shared/auth/consent-refusal";
 
@@ -272,8 +273,24 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   // second cookie. Without it, an ownerless cold-browser row was claimable by any signed-in
   // identity that named the `state`: it became the "first known owner", the legitimate visitor's
   // return leg could no longer fill the row, and the intruder could mint for it.
+  //
+  // ⛔ AND THE KEY IS ADOPTED ONLY IF THE AS MINTED IT (#10794). This route is NAVIGABLE — it is the
+  // one API path `/auth`'s return allowlist admits — so before this it adopted whatever it was
+  // handed, and a caller could choose the key of a flow it did not create, which is exactly the
+  // value the row's insert-only hash exists to protect. RFC 9126 §2 makes the flow reference the
+  // SERVER's to choose ("must not be client-chosen") and RFC 9700 asks for detection of REUSED
+  // values rather than well-formed ones, so the gate is a MAC and not a shape check: a perfectly
+  // well-formed 43-character CHOSEN key verifies nowhere.
+  //
+  // An unverifiable key is ABSENT, never fatal — the entry leg must still work for a caller that
+  // holds nothing, and for a value minted by a sibling deployment whose key set this one lacks.
+  // The replacement is SIGNED (`mintedAttemptKey`), because an unsigned one would be refused by
+  // this very check on the next leg of the same flow — the #10487 dead end, rebuilt.
   const presentedKey = url.searchParams.get(ATTEMPT_KEY_PARAM) ?? "";
-  const attemptKey = presentedKey || newAttemptKey();
+  const verifiedPresented = await verifyAttemptKey(env, presentedKey);
+  const attemptKey = verifiedPresented === null
+    ? await mintedAttemptKey(env)
+    : presentedKey;
   let ownsFlow = false;
   if (env.SESSIONS) {
     try {

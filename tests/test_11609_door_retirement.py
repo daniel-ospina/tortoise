@@ -58,10 +58,15 @@ THAT UNBLOCKS IT, not silently:
   · six READ doors + `check_structure` + `calibrate_summary` declare `-> list[dict]`,
     the array envelope that carries the #8482 `_safe` failure repair
     (`tests/test_11609_read_containers.py::TestWrapEnvelopeDoorsStayLive`, #10914);
-  · `search` carries a `rest_spec` (and a list envelope as well). `issue_insight` and
-    `session_context` were held on the `rest_spec` reason until #11609 lane P4 MEASURED
-    it FALSE — the row is not the route — and lane P6, the batch that ACTED on that
-    measurement, retired both; see below;
+  · `search` carries a `rest_spec` (`GET /v1/search`) AND a list envelope — but lane P4
+    MEASURED the coupling FALSE, for `search` as much as for the pairs (no product module
+    derives a route from a registry row; the route is a hand-written decorator in
+    `hosted_api.py`, and `docs/architecture/11609-STRUCTURAL-BLOCKERS.md` §1.5 records the
+    COUPLING as "aspirational, not real" — the CELL is a recorded fact about a route that
+    exists independently). ⛔ So what ACTUALLY holds `search` is the
+    `list[dict]` envelope, not the route — do not restore "retiring the entry deletes a REST
+    route" as a live reason. `issue_insight` and `session_context` carried a `rest_spec` too
+    and left in lane P6, the batch that acted on that measurement;
   · `query` is the PAGED destination two ALREADY-retired pointers name
     (`paginated_query`, `query_points_by_tag`), so retiring it is a re-pointing decision,
     not a door removal;
@@ -74,13 +79,17 @@ THAT UNBLOCKS IT, not silently:
     leave the held list only in the batch that makes its stated reason untrue, with a
     test behind it, not silently and not in two steps.
 
-  8 (envelope) + 1 (rest_spec: `search` — the other two retired in lane P6) + 1 (paged
-  destination) + 0 (no arm) + 7 (destination not an MCP door yet) = 17, and
+  9 (envelope: the six READ doors, `check_structure`, `calibrate_summary`, and `search` — whose
+  `rest_spec` cell is a RECORD, not a retention reason, and whose own annotation is
+  `-> list[dict]`) + 0 (rest_spec as a retention reason: measured FALSE, §1.5) + 1 (paged
+  destination) + 0 (no arm) + 7 (destination not an MCP door yet — the DELETE pair retired in
+  lane P6) = 17, and
   `TestProtectedDoorsStayLive` reads EVERY protected name back from the code — a name that
   lands in this list without an assertion behind it is the shape the #13052 review caught.
 
 ⛔ THE COUNT WAS 25 UNTIL #11609 LANE P1, 23 UNTIL LANE P2, 21 UNTIL LANE P6, 19 AFTER THAT
-LANE'S `rest_spec` PAIR, AND 17 AFTER ITS DELETE PAIR — the count at this head. `create_point` and
+LANE'S `rest_spec` PAIR, AND 17 AFTER ITS DELETE PAIR — the count at this head (P6 retired TWO
+pairs: the `rest_spec` pair, then the DELETE pair). `create_point` and
 `diary_write` were two of those twenty-five, held by ONE reason each — "create_entity has
 no point arm" / "…no diary arm". That is the reason this file's own contract is written
 around: a door may leave `PROTECTED` only in the batch that makes its stated reason FALSE,
@@ -91,11 +100,16 @@ their arms (`check_confidence(recompute=True)` / `check_confidence(recall=True)`
 retired both. `issue_insight` and `session_context` were two of the remaining twenty-one
 and left on the same terms in lane P6: their recorded reason (`rest_spec` — *the row IS the
 REST route*) was MEASURED FALSE by lane P4, and P6 is the batch that acts on that
-measurement; `delete_point` and `delete_entity` were two of the remaining nineteen, and
-left on the #9660 ruling that KEEPS `tortoise_delete` and widens it. The arithmetic moved
-with each wave: 4 (no arm) became 2 became 0, and the population 25 became 23 became 21
-became 19 became 17 — a count left at 19 would have been a table claiming two names that
-are no longer live, which is the rot the population check exists to red.
+measurement. `delete_point` and `delete_entity` were two of the remaining nineteen and left
+in the same lane, on the owner's #9660 ruling: the canonical row is executed by KEEPING the
+single `tortoise_delete` entry and widening what it deletes, so `delete_knowledge` — the
+destination both were held against — was never going to arrive as its own row. The
+arithmetic moved with each wave: 4 (no arm) became 2 became 0, and the population 25 became
+23 became 21 became 19 became 17 — a count left at 19 would have been a table claiming two
+names that are no longer live, which is the rot the population check exists to red. ⛔ THIS
+PROSE SAID 19/`NINE` WHILE THE ASSERTIONS BELOW READ 17/`SEVEN` after #13626 merged — the
+assertions were right and the prose was pre-DELETE-pair, which is the shape a lane
+"restores" to a red (#13626 review ISSUE 4).
 
 NO ARCHIVE ROW IS EXPECTED HERE. `archive/mcp-tools/` holds doors with NO destination
 (owner ruling 2026-11-12, `archive/README.md`); a forwarded name is STILL SERVED, so the
@@ -271,14 +285,16 @@ PROTECTED = {
     "tortoise_expand_relationships": "list envelope (#8482)",
     "tortoise_check_structure": "list envelope (#8482, #10914)",
     "tortoise_calibrate_summary": "list envelope (#8482, #12951)",
-    # `rest_spec`: retiring the registry entry deletes the REST route with it.
-    # ⛔ `tortoise_issue_insight` / `tortoise_session_context` USED to sit here on that
-    # basis and left in #11609 lane P6 — lane P4 measured the coupling FALSE (§1.5 of
+    # `rest_spec`: the CELL is still recorded, but the coupling it used to stand for —
+    # "retiring the registry entry deletes the REST route with it" — is MEASURED FALSE for
+    # every door that ever claimed it, `search` included (§1.5 of
     # `docs/architecture/11609-STRUCTURAL-BLOCKERS.md`): no product module derives a route
-    # from a registry row, and both routes are hand-written decorators that reach the SDK
-    # directly, so the row going deletes nothing. The reason stays REAL for `search`,
-    # which is held by the envelope as well.
-    "tortoise_search": "list envelope + rest_spec GET /v1/search",
+    # from a registry row, and the routes are hand-written decorators that reach the SDK
+    # directly, so the row going deletes nothing on the wire. ⛔ So `search` is held by its
+    # `list[dict]` ENVELOPE, not by the route; its `rest_spec` cell is a recorded fact about
+    # a route that exists independently, never a retention reason. `issue_insight` /
+    # `tortoise_session_context` sat here on the false reason and left in #11609 lane P6.
+    "tortoise_search": "list envelope (#8482); its rest_spec cell (GET /v1/search) is a RECORD, not a reason",
     # The paged destination of two already-retired pointers.
     "tortoise_query": "paged destination of paginated_query/query_points_by_tag",
     # No arm on the recorded container.
@@ -495,7 +511,7 @@ class TestEveryPointerResolvesInOneHop:
             f"lands on another shim (aliases are not transitive): {strays}")
 
     def test_the_live_count_moved_strictly_lower(self):
-        """#11609's arithmetic: 55 → 48 → 46 → 44 → 40 advertised, no row arriving.
+        """#11609's arithmetic: 55 → 48 → 46 → 44 → 40 advertised, no container row arriving.
 
         Each retiring wave removes doors into arms its container had to grow for them
         (#11609 P1: `create_entity`'s `point`/`diary`; P2: `check_confidence`'s
@@ -803,21 +819,24 @@ class TestProtectedDoorsStayLive:
     """A recorded decision, asserted against the code that makes it true.
 
     ⛔ WHAT IS PINNED, AND WHAT IS ONLY ENUMERATED. The registry's `#11609 lane E` block
-    named 25 live doors off the 27-target; TWO of them (`create_point`, `diary_write`) were
-    retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO more
-    (`compute_confidence`, `recall`) by #11609 lane P2 (#13550) in the change that gave
-    `check_confidence` its `recompute=True` / `recall=True` arms, TWO more
-    (`issue_insight`, `session_context`) by lane P6 in the change that acted on P4's
-    measurement that their `rest_spec` reason was false, and the last TWO (`delete_point`,
-    `delete_entity`) by that same lane on the #9660 ruling that KEEPS `tortoise_delete`
-    and widens it: 25 − 2 − 2 − 2 − 2 = 17, so the population is 17 and TEN
+    named 25 live doors off the 27-target and four PAIRS have left it since — the chain
+    `25 -> 23 -> 21 -> 19 -> 17` the block itself states. TWO (`create_point`, `diary_write`)
+    were retired by #11609 lane P1 in the change that gave `create_entity` their arms, TWO
+    (`compute_confidence`, `recall`) by lane P2 (#13550) in the change that gave
+    `check_confidence` its `recompute=True` / `recall=True` arms, and TWO more
+    (`issue_insight`, `session_context`) plus the LAST TWO (`delete_point`, `delete_entity`)
+    by lane P6 — the first pair on lane P4's measurement that the `rest_spec` reason was
+    false, the second on the #9660 ruling that keeps `tortoise_delete` and widens it — so
+    25 − 2 − 2 − 2 − 2 = 17, and the population is 17 and TEN
     of them carry a retaining PROPERTY, and EVERY ONE is read back from the code below —
     none is a name that only appears in the `PROTECTED` dict,
     which is the weaker treatment this class reserves for `NO_CONTAINER_YET` (#13052
     review F3):
 
-      · 8 envelope doors — the `-> list[dict]` annotation, from `inspect.signature`;
-      · 1 `rest_spec` door (`search`) — the registry entry's own `rest_spec`;
+      · 9 envelope doors — the `-> list[dict]` annotation, from `inspect.signature` (this is
+        also `search`'s real reason: its `rest_spec` cell is a record, never a gate — §1.5);
+      · 0 `rest_spec` doors — the category is EMPTY on this tree, because the coupling is
+        measured FALSE for every door that ever claimed it;
       · 1 paged destination (`tortoise_query`) — the two retired pointers that name it,
         and the paging parameters those pointers and the live door agree on;
       · 0 "no arm on the recorded container" doors — the category is EMPTY, and that is
@@ -875,7 +894,7 @@ class TestProtectedDoorsStayLive:
         "tortoise_search_sessions", "tortoise_suggest_entry_points",
         "tortoise_list_batches", "tortoise_list_namespaces", "tortoise_diary_read",
         "tortoise_expand_relationships", "tortoise_check_structure",
-        "tortoise_calibrate_summary",
+        "tortoise_calibrate_summary", "tortoise_search",
     ])
     def test_the_list_envelope_is_still_what_keeps_it_live(self, name):
         annotation = inspect.signature(
@@ -888,11 +907,22 @@ class TestProtectedDoorsStayLive:
     @pytest.mark.parametrize("name", [
         "tortoise_search",
     ])
-    def test_the_rest_route_is_still_what_keeps_it_live(self, name):
+    def test_the_rest_spec_cell_is_still_recorded_though_the_route_holds_nothing(self, name):
+        """The CELL persists; the ROUTE is not what retains the door (§1.5).
+
+        The assertion is unchanged — `search` still carries `rest_spec` — but the name and
+        the message must not teach the measured-false mechanism. ⛔ The coupling is FALSE
+        (the route is a hand-written decorator; no product module derives one from a row),
+        so removing this cell is NOT a retirement gate: what keeps `search` live is its
+        `list[dict]` envelope, pinned by `test_the_list_envelope_is_still_what_keeps_it_live`
+        (this file, which now covers `search`) and by
+        `tests/test_11609_structural_blockers.py::test_the_search_door_is_held_by_the_envelope_not_the_route`.
+        """
         entry = _live()[name]
         assert getattr(entry, "rest_spec", None) is not None, (
-            f"{name} no longer carries a `rest_spec`, so retiring the entry no longer "
-            "deletes a REST route — it may be retirable in that batch")
+            f"{name} no longer carries a `rest_spec` cell. That is a RECORD change, not a "
+            "retirement gate — the route does not hold the door; its `list[dict]` envelope "
+            "does (see §1.5). Re-derive why the cell moved before retiring anything")
 
     # ⛔ THE `no arm` CATEGORY IS EMPTY, AND BOTH HALVES OF ITS DEPARTURE ARE ASSERTED
     # FROM THE CODE ABOVE, not from this table's silence:

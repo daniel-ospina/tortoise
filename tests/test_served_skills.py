@@ -118,6 +118,19 @@ KNOWN_STALE_TOOL_NAMES = {
         # `recompute=True` arm now. Upstream-authored mirror, still resolves via the
         # #3883 shim (see the note at the top of the map).
         "tortoise_compute_confidence",  # → tortoise_check_confidence(recompute=True, ...)
+        # `#11609`'s delete arm: the mirror's invocation map still prints a bare
+        # `tortoise_delete_point` row, which retired FORWARD into `tortoise_delete`
+        # (`docs/product/canonical-mcp-tools.md:423` — a preview, then the confirmation
+        # token). RATCHETED, not re-pointed, for the reason stated at the top of this
+        # map: `how-to-use-tortoise` is sha-pinned in
+        # `config/served-skills-upstream.yml`, so an edit here DRIFTS the mirror
+        # (`tools/served_skills_parity.py --check-local` -> DRIFT) and the next
+        # `--sync` reverts it, and it also stales the shipped `.skill` archive. The
+        # name still resolves through the #3883 warning shim, whose warning names
+        # `tortoise_delete`; re-cutting the mirror upstream SHRINKS this row out —
+        # tracked in #13764 (which carries the three steps and names this row as
+        # the expiry), rather than fixed in a red-clearing change.
+        "tortoise_delete_point",  # → tortoise_delete(dry_run=True) then tortoise_delete(confirmation=...)
     },
     "research-domain": {
         # #4282 → tortoise_graph_overview(section=...) — see the note above.

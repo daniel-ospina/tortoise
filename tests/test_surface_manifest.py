@@ -3044,6 +3044,88 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
     )
 
 
+#: The per-row PROVENANCE record, by the three facts a later lane cannot cheaply re-derive: that the
+#: block IS a record rather than a value, the measured `recorded/derived` pair behind the `#13075`
+#: staleness, and the `OVERRIDES:` departure from the generated-artifact practice. Pinned as
+#: fragments rather than as the whole block so rewrapping the prose is not a red, and so losing a
+#: FACT is one.
+_PROVENANCE_RECORD_MARKERS = (
+    "⛔ PROVENANCE OF THE PER-ROW CELLS",
+    "recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8",
+    "OVERRIDES: the generated-artifact practice",
+)
+
+#: The per-row block #13626's `cut` deleted — as the three lines that IDENTIFY it, verbatim from
+#: `73c26022db^:config/surface-manifest.yml`. Its title was `⛔ PROVENANCE, not a value: …`, NOT
+#: the record's current one, which is exactly why the below-header arm below is keyed on every
+#: marker rather than on the new title (#13626 review ISSUE 2): a lane that `git show`s this block
+#: back and pastes it below the first key carries no new title at all, and a title-keyed arm read
+#: that restore as green.
+_RESTORED_PER_ROW_BLOCK = (
+    "  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this\n"
+    "  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`\n"
+    "  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the\n"
+)
+
+
+def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
+    """A `cut` re-emits `MANIFEST_HEADER` alone, so the record must live there (#13626 ISSUE 3).
+
+    The block this pins was a per-row comment above the `tortoise_query` row. `yaml.safe_dump`
+    carries no comments and `cut` re-emits only the header, so #13626's re-cut deleted all 53 of
+    its lines — including the file's copy of the generated-artifact `OVERRIDES:` departure, ONE
+    OF THE FOUR the merge base `0d5bb6506` carried (that cut left three) — and NOTHING reded,
+    because no gate parses a comment. ⛔ It was NOT "the file's only copy" (#13687 review, cycle
+    2): a correction that overstates the loss is the same defect as the loss, one review later,
+    so the count is stated and the record beside the rows says the same thing. The
+    header/committed equality test above cannot see that: it is green for any header, including a
+    header that has lost the record.
+
+    Mutation attribution (measured, #3442): deleting `_PROVENANCE_RECORD` from `MANIFEST_HEADER`
+    (and from the committed file) reds this test on the first marker; deleting only the
+    `OVERRIDES:` line of the record reds it on the third; restoring either is green. Editing the
+    generator's `served_from` and re-running `cut` keeps it green — the header is re-emitted, so
+    this arm is red for LOSS, never for a legitimate re-cut.
+    """
+    sm = _load_manifest_tool()
+    committed_doc = MANIFEST.read_text(encoding="utf-8")
+    committed_header = committed_doc.split("manifest_version:")[0]
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker in sm._PROVENANCE_RECORD, (
+            f"`_PROVENANCE_RECORD` in tools/surface_manifest.py no longer carries {marker!r} — "
+            "the record a re-cut re-emits lost a fact only it holds")
+        assert marker in sm.MANIFEST_HEADER, (
+            f"`MANIFEST_HEADER` no longer carries {marker!r}, so the next `cut` deletes it from "
+            "the artifact — a comment nothing reads cannot be missed, which is how #13626 lost it")
+        assert marker in committed_header, (
+            f"config/surface-manifest.yml's header no longer carries {marker!r} — the artifact a "
+            "lane actually reads is missing a recorded fact (and the header equality test above "
+            "should already have reded: the two copies disagree)")
+    # …and it must not ALSO sit in a per-row block below the first key: a re-cut deletes that
+    # copy, so a second one would be the drift this guard exists to stop. ⛔ KEYED ON EVERY MARKER,
+    # not on the record's new title (#13626 review ISSUE 2): the block #13626 deleted opened
+    # `⛔ PROVENANCE, not a value: …`, so the most likely regression — a lane restoring that block
+    # from git history, which this test's own docstring documents as the loss — carries NONE of
+    # the new wording, and a title-keyed arm stayed green on it. Two of the markers DO fire on it
+    # (asserted below), which is what makes this arm read LOSS rather than a change of wording.
+    below_header = committed_doc.split("manifest_version:", 1)[1]
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker not in below_header, (
+            f"the provenance record is duplicated as a per-row comment below the header "
+            f"({marker!r} appears there); a re-cut deletes per-row comments, so the copy that "
+            "survives is the header's and the other is a drift waiting to happen — the same "
+            "#13626 loss this guard exists to stop, re-introduced by hand")
+    # …and this arm reads LOSS, so it must fire on the restore it names. The probe is the deleted
+    # block's own wording, and the two assertions are its non-vacuity proof: without them a later
+    # re-keying of this arm could go green on the regression again (which is precisely ISSUE 2).
+    assert _PROVENANCE_RECORD_MARKERS[0] not in _RESTORED_PER_ROW_BLOCK, (
+        "the probe carries the record's NEW title, so it does not reproduce the gap review "
+        "ISSUE 2 names — keep it to the wording the deleted block actually used")
+    assert any(m in _RESTORED_PER_ROW_BLOCK for m in _PROVENANCE_RECORD_MARKERS), (
+        "no marker fires on the restored per-row block, so the arm above would be green on the "
+        "exact regression it names")
+
+
 #: The fragment of the line that went stale under `#13052` (`4a5ffa0a14`, the seven-door
 #: retirement): on the tree it was written on it spanned two lines and continued
 #: `…, so this is a fingerprint refresh, not a surface change.`; the rejoined fragment below
@@ -4405,6 +4487,100 @@ def test_a_shallow_clone_that_cannot_answer_is_UNPROVABLE_and_NEVER_SILENT(
     rc, out = _check(checker, doc, tmp_path)
     assert rc == 0, f"a shallow checkout red the check on a provenance it cannot see:\n{out}"
     assert "NOT VERIFIED" in out and FABRICATED_SHA in out, out
+
+
+def test_a_git_call_that_never_answers_is_ABANDONED_on_the_clock(monkeypatch):
+    """The gate must never HANG a required check: a stuck `git` is bounded, not waited on.
+
+    Measured on the `cmux` cell 2026-11-19: this checkout's object store had grown to
+    27,394 packfiles, so `git cat-file -e <an absent sha>` walked every pack (115 s of CPU
+    and still running) AFTER the promisor remote refused it. `_git` had no bound, so
+    `surface-guard` did not refuse — it never answered, and only pytest's own 300 s
+    timeout ended the run. A bound turns "cannot answer" into the verdict this module
+    already has for it.
+    """
+    sm = _load_manifest_tool()
+    seen: list[float | None] = []
+
+    def fake_run(*_a, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd="git cat-file -e", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(sm.subprocess, "run", fake_run)
+    rc, out, err = sm._git("cat-file", "-e", f"{FABRICATED_SHA}^{{commit}}")
+    assert seen and seen[0] == sm._GIT_TIMEOUT_S, (
+        f"the git call was not bounded (timeout={seen}), so a wedged promisor lookup can block "
+        "the required `surface-guard` job with no upper limit")
+    assert rc == sm._GIT_TIMED_OUT_RC, (rc, out, err)
+    assert out == ""
+    assert "did not answer within" in err and str(sm._GIT_TIMEOUT_S) in err, err
+
+
+def test_an_ABANDONED_git_call_is_UNPROVABLE_and_never_a_fabrication(monkeypatch):
+    """A timed-out probe answered NOTHING, so it can neither prove nor disprove the object.
+
+    Non-vacuity: the stub sets `shallow="false"`, i.e. the arm that WOULD refuse
+    (`fabricated`) if the timeout were not handled first. Deleting the sentinel arm reds
+    this row with `fabricated`, which on a merely SLOW checkout is a false refusal of a
+    healthy record.
+    """
+    sm = _load_manifest_tool()
+    _stub_git(
+        monkeypatch, sm, rc=sm._GIT_TIMED_OUT_RC,
+        stderr="git cat-file -e … did not answer within 30s and was abandoned",
+        shallow="false")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned probe read as {verdict!r} ({why}): a bounded call must not be graded as "
+        "a proven absence")
+    assert "did not answer within" in why, why
+    # The lint's three-valued probe reads the SAME verdict function, so it must be None
+    # (red an unresolvable record, stay silent where the clone cannot answer).
+    assert sm.cut_commit_resolves(FABRICATED_SHA) is None, (
+        "the lint probe did not follow the verdict for an abandoned call")
+
+
+def test_a_TIMED_OUT_shallow_probe_is_UNPROVABLE_and_never_a_proven_absence(monkeypatch):
+    """The SECOND `_git` probe is bounded too, and its timeout is not an answer either.
+
+    `cut_commit_verdict` bounds two calls: `cat-file -e` (does this clone hold the object)
+    and `rev-parse --is-shallow-repository` (may a missing object be merely unfetched).
+    Handling the sentinel on the FIRST only leaves the mixed case — object absent, shallow
+    probe abandoned — falling through to `fabricated`: a PROVEN ABSENCE from a probe that
+    never ran, i.e. a false refusal of a healthy record on a merely slow checkout.
+
+    Non-vacuity: with the arm removed (or `_GIT_TIMED_OUT_RC` re-keyed) the same stub yields
+    `fabricated`; measured by monkeypatching the sentinel away below.
+    """
+    sm = _load_manifest_tool()
+    # Captured ONCE: the mutant below re-keys `_GIT_TIMED_OUT_RC`, and a stub that read it
+    # lazily would move with the mutant and prove nothing.
+    sentinel = sm._GIT_TIMED_OUT_RC
+
+    def fake_git(*args, **_kwargs):
+        if args[:2] == ("cat-file", "-e"):
+            return 128, "", "fatal: Not a valid object name"
+        if args[:2] == ("rev-parse", "--is-shallow-repository"):
+            return (
+                sentinel,
+                "",
+                f"git rev-parse --is-shallow-repository did not answer within "
+                f"{sm._GIT_TIMEOUT_S}s and was abandoned",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(sm, "_git", fake_git)
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned SHALLOW probe read as {verdict!r} ({why}) — the object probe answered "
+        "nothing, so this clone cannot say whether the object is merely unfetched")
+    assert "did not answer within" in why, why
+
+    # …and the arm is what makes it so: re-key the sentinel and the same stub is a refusal.
+    monkeypatch.setattr(sm, "_GIT_TIMED_OUT_RC", -1)
+    without_arm, _ = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert without_arm == sm.CUT_FABRICATED, (
+        "removing the sentinel arm did not change the verdict, so this test does not pin it")
 
 
 def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
