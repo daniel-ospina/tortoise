@@ -536,7 +536,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     ⛔ THE NEGATION CLASS IS ENUMERATED, AND THIS IS THE WHOLE LIST (#13795 review, finding
     5). A negated or qualified emptiness is a MEMBERSHIP claim even though it carries an
     emptiness word, and the recognised spellings are EXACTLY: `not`, `never`, `n't`,
-    `non-empty` / `nonempty`, `no longer`, `anything but`, `far from`, `nowhere near`,
+    `non-empty` / `non empty` / `nonempty`, `no longer`, `anything but`, `far from`,
+    `nowhere near`,
     `nothing but` / `except` / `other than` / `besides` / `apart from`, `none other than` /
     `none but`, and `no <path|tortoise/> … other than|besides|apart from|except`. A negation
     spelled otherwise is NOT detected — it falls to the emptiness branch below — so do not
