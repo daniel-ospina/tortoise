@@ -648,6 +648,12 @@ _TORTOISE_EMPTY_SPELLINGS = (
     f"neither is `{_TORTOISE_CENSUS_CMD}`",
     f"{_TORTOISE_CENSUS_CMD}` -> empty",
     f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+    # ⛔ Retired by #13807 review, F1. This one names no command, so neither arm could reach
+    # it: it sat two sentences after the command's last mention, behind no answer form, and
+    # both docstrings declare paraphrase out of scope — a residue the guard could not see.
+    # It is the mirror of the membership row "the `tortoise/` set above is the two
+    # COMMENT-ONLY modules"; both are retired now, in both directions.
+    "the `tortoise/` set above is EMPTY",
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
 _TORTOISE_RETIRED_SPELLINGS = (
@@ -773,7 +779,13 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
         "05-verify.md no longer names `tools/hosted_api_cite_census.py --check` at all "
         "— removing a false verdict must send the reader to the verb, not delete the "
         "pointer to it (#13489 review, P0)")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    #: One source of truth for the command: the module-level constant the retired-spelling
+    #: arm is built from. A second LITERAL here would let the two drift apart, and a drift is
+    #: silent — measured (#13807 review, F2): 7 of the 14 banned spellings embed this command
+    #: text, so a one-character drift leaves 0 of the 7 matching the document while the tuple
+    #: pin stays green (it compares the constant against itself). Aliasing makes the drift
+    #: impossible and, should the constant ever move, reds THIS assertion on the document.
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
     assert _tortoise_cmd in doc, (
         "05-verify.md no longer states the command that shows which `tortoise/` paths "
         "the census verdict is about. Without it the reader cannot tell whether the two "
@@ -875,7 +887,12 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
-    _tortoise_cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    # ⛔ ALIASED, NOT RE-LITERALLED (#13807 review, F2). This was a second bare literal after
+    # the merge with `main`, so a drift between it and `_TORTOISE_CENSUS_CMD` disabled the
+    # seven command-prefixed rows in arm (c-i) without redding a single test — the constant
+    # is consumed only by the tuples and their pins. One source of truth, and a move in it
+    # now reds the document assertion below.
+    _tortoise_cmd = _TORTOISE_CENSUS_CMD
 
     # NON-VACUITY (#13728 review, finding 4): the detector must SEE an answer in both
     # directions and must read a NEGATION as a membership claim, or the arm below is inert
@@ -1108,6 +1125,7 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"neither is `{_TORTOISE_CENSUS_CMD}`",
         f"{_TORTOISE_CENSUS_CMD}` -> empty",
         f"{_TORTOISE_CENSUS_CMD}` prints NOTHING",
+        "the `tortoise/` set above is EMPTY",
     ), (
         "the emptiness ledger changed — the mirror direction of the same head-bound claim, "
         "retired for the same reason — head-bound in both directions (#13807 review, F1)")
