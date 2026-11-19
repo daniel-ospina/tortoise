@@ -514,7 +514,7 @@ version would have sent a lane to add a timeout that is already there.
 | fact | command / source |
 |---|---|
 | no test-design artifact existed for this epic | `ls docs/epics/2026-11-04-5090-vector-layer/` → `01-align.md`…`05-decompose.md`, no test-design file; the only `#11084` commits at the time of this check were `e91c4e0a5` (the decomposition) and `f2c6f1bce` (its review pass) — `git show --stat --format='%h %s' e91c4e0a5 f2c6f1bce` shows both touch only the epic's prose (01–05 + two storage docs), so neither is a test-design artifact. ⚠️ Deliberately a **dated measurement on named shas**, not a live `--grep`: a `--grep` count moves as commits land (this branch's own commits match, and its squash subject matches after landing), and scoping it `--not <this branch>` cannot work either — `e91c4e0a5` is in this branch's ancestry, so that form excludes the very commit it names |
-| the substrate map's contrary claim | `docs/architecture/SUBSTRATE-REBUILD-MAP.md:84,322,375` |
+| the substrate map's contrary claim | `docs/architecture/SUBSTRATE-REBUILD-MAP.md` — the **E4** row (`:84`), the `tests/test_substrate_map.py` re-derivation sentence (`:324`), and `## 7. The review-artifact debt — re-measured` (`:378`). Named as well as numbered because `#13754`'s §5 hunk inserted two lines above them and every number below it moved `+2` (`:322`→`:324`, §7's `:376`→`:378`) |
 | every `SF` row's anchor resolves at this head | `rg -n` on each cited path at `af864a42a` |
 | the map's own claims parse | `uv run python tools/test_design_map_check.py` |
 | no MCP tool / public SDK method added or removed | this change is one document + one read-only checker; `git diff --stat` |
