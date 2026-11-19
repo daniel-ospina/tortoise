@@ -565,10 +565,20 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
     # reach it; and a command SHORTENED to a fragment is reachable only if the caller passes
     # that fragment as `cmd`. Both are handled by the callers (the two literal tripwires in
-    # the claim list, and the second `_typed_answers_to_tortoise_cmd` call over
-    # `` `-- tortoise/` ``), NOT by this function — so this docstring states the boundary
-    # rather than implying the class is closed over every way a document can point at the
-    # command. The residual is a sentence that refers to the measurement without naming it
+    # the claim list, and `_typed_answers_to_the_census_command`, which grades EVERY subject
+    # in `_TORTOISE_CENSUS_SUBJECTS` rather than the full command alone), NOT by this
+    # function — so this docstring states the boundary rather than implying the class is
+    # closed over every way a document can point at the command.
+    # ⛔ THIS PARAGRAPH NAMED A MECHANISM THAT DID NOT EXIST (#13807 review round 16,
+    # MEASURED at `4301ac1e81`): it said the fragment case was handled by "the second
+    # `_typed_answers_to_tortoise_cmd` call over `` `-- tortoise/` ``", and there was no
+    # second call — the document assertion passed `_TORTOISE_CENSUS_CMD` alone. Two
+    # fragment-shaped membership verdicts therefore appended to `05-verify.md` left the
+    # whole file GREEN (`14 passed`): `-- tortoise/` returns three modules`, and
+    # `-- tortoise/` carries three modules at this head`. The answer words and the verb were
+    # BOTH listed; only the SUBJECT was abbreviated, which is the spelling the document uses
+    # most. Fixed where the prose said it was, so the sentence and the code agree.
+    # The residual is a sentence that refers to the measurement without naming it
     # at all; the live document states those as PAST TENSE with their head named, which is
     # a convention kept by reading, not by an assertion (the label exemption that tried to
     # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
@@ -727,6 +737,50 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
 #: The command whose output the `#7949` bundle's census paragraph quotes. Named here (never
 #: interpolated from a measurement) because the arm below is a TEXT ban.
 _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
+
+#: The ABBREVIATED subject the bundle uses for that same command, and a SUBJECT of arm
+#: `(c-ii)` in its own right (#13807 review round 16, MEASURED at `4301ac1e81`). Ten of the
+#: document's `-- tortoise/` occurrences are this form, and the shape arm graded only the
+#: full command, so a membership verdict stated on the abbreviation was unread by ANY arm:
+#: `_TORTOISE_MEMBERSHIP_SPELLINGS` covers the spellings that were LIVE, one row per incident
+#: (`returns ONE module`, round 5), which is a list that grows after each miss. The matcher
+#: already reads this subject correctly; only the call was missing — so it is called, and
+#: the pathspec SKIP inside the matcher keeps a `git diff … -- tortoise/` invocation (and the
+#: rev-pinned history sentences) out of it, exactly as it does for the full command.
+_TORTOISE_CENSUS_CMD_ABBREV = "-- tortoise/"
+
+#: Every SUBJECT arm `(c-ii)` grades. A tuple, not two calls at the assertion, so that a row
+#: added here is graded without a second edit and a row deleted here reds the witness below.
+_TORTOISE_CENSUS_SUBJECTS = (_TORTOISE_CENSUS_CMD, _TORTOISE_CENSUS_CMD_ABBREV)
+
+
+def _typed_answers_to_the_census_command(doc: str) -> list[tuple[str, bool]]:
+    """Every typed answer to the census command in `doc`, under EVERY subject it is named by.
+
+    ⛔ WHY THIS EXISTS (#13807 review round 16). `_typed_answers_to_tortoise_cmd` reaches only
+    the SUBJECT it is handed, and the claim in its docstring — that a fragment subject was
+    "handled by the callers" — was not implemented: MEASURED at `4301ac1e81`, appending
+    either of these to `05-verify.md` left the suite GREEN at `14 passed`:
+
+        "`-- tortoise/` returns three modules"
+        "`-- tortoise/` carries three modules at this head"
+
+    while the SAME answer under the full command reds. A verdict in either direction is
+    retired by this PR's policy anyway (a membership is HEAD-BOUND), so the subject the
+    verdict is stated on cannot be the thing that decides whether it is read.
+
+    ⛔ ONE SUBJECT IS DELIBERATELY STILL UNREACHED, stated rather than implied: an answer
+    whose SUBJECT is the set named in the PREVIOUS clause — "the `-- tortoise/` set carries
+    three modules" — is not detected, because no listed verb follows the token (the same
+    finiteness the module docstring declares for verbs and answer words). That form is
+    refused by ``_TORTOISE_MEMBERSHIP_SPELLINGS`` when it names a retired spelling; a new
+    paraphrase of it is a reading duty, not an assertion, and this docstring is where a
+    reviewer should find that said.
+    """
+    answers: list[tuple[str, bool]] = []
+    for _subject in _TORTOISE_CENSUS_SUBJECTS:
+        answers.extend(_typed_answers_to_tortoise_cmd(doc, _subject))
+    return answers
 
 #: Spellings the `#7949` bundle used to state a `-- tortoise/` MEMBERSHIP verdict in the
 #: AFFIRMATIVE direction — that the diff carries these modules. Retired by name.
@@ -1297,6 +1351,51 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "typed membership answer, which would refuse the document's own pointer to the "
         "command — the same class of defect in the other direction (#13795 review, note 5)")
 
+    # ⛔ EVERY LISTED SUBJECT IS ACTUALLY GRADED, AND THE ABBREVIATED ONE IS THE SUBJECT THAT
+    # WAS NOT (#13807 review round 16, MEASURED at `4301ac1e81`). This file's own docstring
+    # said a fragment subject was "handled by the callers … the second
+    # `_typed_answers_to_tortoise_cmd` call over `` `-- tortoise/` ``" — and no such call
+    # existed: the document assertion passed `_TORTOISE_CENSUS_CMD` alone, so TWO
+    # membership verdicts in the document's own house spelling appended to `05-verify.md`
+    # left the suite GREEN at `14 passed` while the same answer under the full command red
+    # it. The witnesses below run over `_typed_answers_to_the_census_command` itself, so
+    # dropping a subject from `_TORTOISE_CENSUS_SUBJECTS` — or reverting the document
+    # assertion to the single call — reds here rather than going silent, which is the
+    # defect class this PR exists to remove (an arm that cannot fire).
+    assert _TORTOISE_CENSUS_CMD_ABBREV in _TORTOISE_CENSUS_SUBJECTS, (
+        f"the abbreviated subject `-- tortoise/` is no longer graded by arm (c-ii) "
+        f"({_TORTOISE_CENSUS_SUBJECTS}). Ten of the `#7949` document's occurrences use it, "
+        "and a membership or emptiness verdict stated on it then walks through green "
+        "(#13807 review round 16)")
+    for _fragment_membership in (
+            "`-- tortoise/` returns three modules",
+            "`-- tortoise/` carries three modules at this head",
+            "`-- tortoise/` prints one path at all",
+            "`-- tortoise/` prints the two COMMENT-ONLY modules"):
+        _seen = _typed_answers_to_the_census_command(_fragment_membership)
+        assert _seen and all(_empty is False for _a, _empty in _seen), (
+            f"a MEMBERSHIP verdict on the abbreviated subject walks through green: "
+            f"{_fragment_membership!r} -> {_seen}. The verb and the answer words are both in "
+            "the studied list; only the SUBJECT is abbreviated, which is how the document "
+            "writes it (#13807 review round 16, MEASURED at `4301ac1e81`)")
+    # The mirror direction, and a TRUE emptiness claim, must stay classified as emptiness.
+    assert _typed_answers_to_the_census_command("`-- tortoise/` returns NOTHING") == [
+        ("returns NOTHING", True)], (
+        "the abbreviated subject does not read an EMPTINESS verdict as emptiness, so the "
+        "fragment pass is inert in the direction the retired rows cover "
+        "(#13807 review round 16)")
+    # …and the two FALSE-RED directions the pathspec skip and the pointer rule exist for.
+    assert _typed_answers_to_the_census_command(
+        "See `git diff origin/main...HEAD -- tortoise/` for it.") == [], (
+        "the abbreviated subject read the TAIL OF A LONGER INVOCATION as a typed answer, so "
+        "the document's own pointer to the command would be refused "
+        "(#13845 review, cycle 3 — the skip must survive the second subject)")
+    assert _typed_answers_to_the_census_command(
+        "`-- tortoise/` is the command that answers it") == [], (
+        "the abbreviated subject treats the document's POINTER as a typed answer, the "
+        "over-block direction (#13795 review, note 5 — the skip must survive the second "
+        "subject)")
+
     # (c-ii) THE DOCUMENT ASSERTIONS — no measurement, so both directions, always.
     # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1, and the
     # false-red direction it must not re-create). The set is
@@ -1307,10 +1406,11 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # neither is adjudicated against this tree: the document states the command and types
     # no answer, and this arm enforces exactly that. That is why it needs no merge base and
     # therefore does not SKIP at the depth-1 checkout the gating job uses.
-    _typed = _typed_answers_to_tortoise_cmd(doc, _tortoise_cmd)
+    _typed = _typed_answers_to_the_census_command(doc)
     assert not _typed, (
         f"05-verify.md types {[' '.join(_a.split()) for _a, _e in _typed]!r} as the answer "
-        f"to `{_tortoise_cmd}` ({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed]}"
+        f"to `{_tortoise_cmd}` (or to its `` `-- tortoise/` `` abbreviation) "
+        f"({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed]}"
         " at this head). That command is HEAD-BOUND — its output is a property of the head it"
         " was run at — so a typed verdict is stale one merge later, in EITHER direction, and"
         " `#7949`'s own sentences about it are true of the head they name rather than of this"
@@ -1321,27 +1421,32 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # ⛔ AND THE DOCUMENT'S OWN SHORTHAND IS SCANNED TOO (#13807 review round 16, F1 —
     # MEASURED, and this pass was LOST ONCE by this PR's own conflict resolution against
     # `8bdd34c631`). The document shortens the command to `` `-- tortoise/` `` in several
-    # places, and a short-form occurrence never matches the full-command pass above — the
-    # full string is not a substring of the abbreviation — so without a second call the
-    # whole abbreviated class is read by NEITHER arm. Measured at `4301ac1e81`, with
+    # places, and a short-form occurrence never matches the full-command pass — the full
+    # string is not a substring of the abbreviation — so without a second SUBJECT the whole
+    # abbreviated class is read by NEITHER arm. Measured at `4301ac1e81`, with
     # `git diff --name-only origin/main...HEAD -- tortoise/` printing TWO paths:
     #
     #   doc + "… and the earlier cut said `-- tortoise/` is empty about this bundle …"
-    #     ledger (c-i)  -> []      full-command pass -> []      THIS PASS -> [(…, True)]
+    #     ledger (c-i)  -> []      full-command subject -> []      short-form -> [(…, True)]
     #
     # i.e. a FALSE emptiness verdict in the document's own house style was GREEN under both
     # surviving arms. `main`'s `#13845` ran this second call for exactly this reason; the
     # merge that resolved this branch onto `main` dropped it, which is a FAIL-OPEN regression
     # against `main` rather than a hole this branch inherited (#13728 review, finding 4).
-    _typed_short = _typed_answers_to_tortoise_cmd(doc, "-- tortoise/")
-    assert not _typed_short, (
-        f"05-verify.md types {[' '.join(_a.split()) for _a, _e in _typed_short]!r} as the "
-        "answer to the ABBREVIATED command `-- tortoise/` "
-        f"({['an EMPTINESS' if _e else 'a MEMBERSHIP' for _a, _e in _typed_short]} at this "
-        "head). The abbreviation is how this document spells the same head-bound command in "
-        "its own prose, and it is not a substring of the full form, so the full-command "
-        "pass above cannot see it — the same half-closure one layer down (#13845 review, "
-        "cycle 2; #13807 review round 16, F1)")
+    # ⛔ IT IS EXPRESSED AS A SUBJECT ROW, NOT A SECOND HAND-WRITTEN CALL (#13746 review
+    # round 16 follow-on — the drop happened ONCE and nothing reded, so the shape is what
+    # needs closing, not only the missing line): `_typed` above already carries both
+    # subjects from `_TORTOISE_CENSUS_SUBJECTS`, and deleting the abbreviation from that
+    # tuple — or reverting the scan to a single literal call — reds the witness block at the
+    # top of this arm rather than going silent. `_typed_answers_to_tortoise_cmd` is
+    # unchanged; it always read this subject correctly, and only the call was ever missing.
+    # The emptiness verdict the lost pass was caught on, kept as the measured witness:
+    assert _typed_answers_to_the_census_command(
+        "and the earlier cut said `-- tortoise/` is empty about this bundle at that head") == [
+            ("is empty about this bundle at that head", True)], (
+        "the abbreviated-subject scan does not read the EMPTINESS verdict the lost pass was "
+        "restored for, so the regression this arm was repaired for would go unreported "
+        "(#13807 review round 16, F1)")
 
     # ⛔ AND THIS PASS BRINGS A SKIP THAT MUST BE WITNESSED (#13807 review round 16, F2 —
     # MEASURED). `"-- tortoise/"` is a SUFFIX of every longer `git diff … -- tortoise/`
