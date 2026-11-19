@@ -505,10 +505,11 @@ def require_embedder():
     if model is None:
         raise Refused(
             "no_embedder",
-            "no embedding model on this box (torch error from here — huggingface is "
-            "what a load needs) — the dense leg cannot be submitted, so `graph_dense` "
-            "and `record_dense` would both be the keyword-only arm under another name. "
-            "Install the extras: uv sync --extra embeddings --extra parity",
+            "no embedding model on this box (a load needs huggingface, which this "
+            "box cannot reach) — the dense leg cannot be submitted, so "
+            "`graph_dense` and `record_dense` would both be the keyword-only arm "
+            "under another name. Install the extras: uv sync --extra embeddings "
+            "--extra parity",
         )
     return model
 
@@ -695,7 +696,16 @@ def run_measurement(args: argparse.Namespace) -> int:
     dsn = require_record(args.dsn or record_vector.record_dsn())
 
     sys.path.insert(0, str(REPO_ROOT))
-    from tools.window_quality_m2 import build_point_population, harvest_turn_texts
+    from tools.window_quality_m2 import (
+        ID_PREFIX,
+        build_point_population,
+        harvest_turn_texts,
+    )
+
+    # The population's id namespace, taken from the instrument that builds it —
+    # NOT sliced out of an id: a suffix-width change would silently widen the
+    # prefix and the vector count below would then include a peer population.
+    point_prefix = ID_PREFIX["point"]
 
     texts, corpus_stats = harvest_turn_texts(sessions, args.points * 4)
     funnel: dict = {}
@@ -719,7 +729,7 @@ def run_measurement(args: argparse.Namespace) -> int:
         [
             1
             for r in proj.g.query(
-                f"MATCH (n:Point) WHERE n.id STARTS WITH '{population[0]['id'][:-6]}' "
+                f"MATCH (n:Point) WHERE n.id STARTS WITH '{point_prefix}' "
                 "AND n.embedding IS NOT NULL RETURN n.id"
             ).result_set
         ]
