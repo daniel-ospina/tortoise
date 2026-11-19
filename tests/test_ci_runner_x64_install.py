@@ -6340,8 +6340,13 @@ def test_a_dropin_that_cannot_be_removed_is_an_operation_failure_not_a_clean_uni
     destructive path, against this file's own EXIT contract (`3 OPERATION failed — … a failed
     systemd unit removal`).
 
-    Non-vacuity (measured): delete the `return 3` on the `rm -f` arm and this run exits 0 with the
-    drop-in still on disk and no warning — which is the outcome asserted against here.
+    Non-vacuity (measured, one mutant at a time, guard present throughout): delete the WHOLE
+    `|| { say "could not remove …"; return 3; }` clause on the `rm -f` line and this run still exits 3
+    — the survival re-check below catches the file — but only the survival warning prints, so the
+    `"could not remove"` assertion is the one that reds. Delete BOTH `return 3`s (the `say`s kept) and
+    it falls through to `return 0` with the drop-in still on disk, so the `rc == 3` assertion reds.
+    Deleting only the first `return 3` reds NOTHING — the survival re-check returns 3 anyway — which is
+    exactly why the assertion is on the warning TEXT and not only on the exit code.
     """
     env = _uninstall_env(tmp_path)
     unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
