@@ -272,16 +272,23 @@ _REAL_READ_TEXT = Path.read_text
 #: false-RED class #13699 is. The name is still what `everything` reports, because a
 #: failure message a reader can follow matters more there than the identity does.
 #:
-#: ⛔ THE DECLARED RESIDUAL, named rather than left for a reader to assume away: this
-#: pins the `co_name` spelling (`test_a_same_thread_ambient_read_is_not_attributed_
-#: to_label_hits`) and the `co_filename` one (both exclusion arms red on it). Two
-#: SUPERSETS of the code-object rule are still green, measured, and are NOT pinned
-#: here: `caller.co_qualname == _LABEL_HITS_CODE.co_qualname` (a qualname carries no
-#: module, so a same-named function in another module shares it) and
-#: `caller is _LABEL_HITS_CODE or self.suffix == ".py"` (a widening that re-admits
-#: every `.py` ambient read). Neither is the shipped rule; pinning them needs an arm
-#: whose staged read is a `.py` file OUTSIDE the population, which is a different
-#: fixture — named here so the next reader does not read this pin as total.
+#: ⛔ THREE SPELLINGS ONE REFACTOR APART ARE PINNED, and the imposter arm next door
+#: carries all of them from ONE fixture: `co_name` (`test_a_same_thread_ambient_read_
+#: is_not_attributed_to_label_hits` reds on it), `co_filename` (both exclusion arms
+#: red on it), and `co_qualname` — the imposter rewrites the qualname TOO, so
+#: `caller.co_qualname == _LABEL_HITS_CODE.co_qualname` (a qualname carries no module,
+#: so a same-named function in another module shares it) takes the imposter's read and
+#: reds there. The qualname item needed no new fixture, which is why it is pinned
+#: rather than merely declared: `__code__.replace` sets both attributes in one call.
+#:
+#: ⛔ ONE SUPERSET IS STILL GREEN, MEASURED, AND IS THE DECLARED RESIDUAL: `caller is
+#: _LABEL_HITS_CODE or self.suffix == ".py"` — a widening that re-admits every `.py`
+#: ambient read. Pinning it needs a fixture this file does not have: a `.py` file
+#: OUTSIDE the population, read by an ambient frame. Note the fixture difference, so a
+#: later reader does not reach for the wrong arm — the imposter above is a `.txt` and
+#: the staged stales are `.py`-free, so neither can pin this one, and the qualname arm
+#: that DOES reuse the imposter could not pin it either (`self` is the file read, not
+#: the caller). Named here so the next reader does not read this pin as total.
 _LABEL_HITS_CODE = _label_hits.__code__
 
 
@@ -1557,12 +1564,15 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         "ambient reader that `_label_hits` provably never performs"
     )
     #: The read a NAME-based rule would wrongly take. `_imposter` is a DIFFERENT code
-    #: object that merely shares `_label_hits`'s `co_name`, so `f_code.co_name` — the
-    #: natural spelling this rule is one refactor away from — attributes it to
-    #: `_label_hits` and reds the control on a file `_label_hits` never reads. That is
-    #: the false RED #13699 is, one refactor out, so the comment above `_LABEL_HITS_CODE`
-    #: is pinned here rather than left as prose. `CodeType.replace` keeps it ordinary
-    #: local code, with no `exec` a linter would have to excuse.
+    #: object that merely shares `_label_hits`'s `co_name` AND `co_qualname`, so
+    #: `f_code.co_name` or `f_code.co_qualname` — the two natural spellings this rule is
+    #: one refactor away from — attributes it to `_label_hits` and reds the control on a
+    #: file `_label_hits` never reads. That is the false RED #13699 is, one refactor out,
+    #: so the comment above `_LABEL_HITS_CODE` is pinned here rather than left as prose.
+    #: Both attributes are set in ONE `replace()` call — `co_qualname` needs no second
+    #: fixture, and pinning it is why it is not in that note's residual list.
+    #: `CodeType.replace` keeps it ordinary local code, with no `exec` a linter would
+    #: have to excuse.
     imposter_file = tmp_path / "read-by-a-same-named-imposter.txt"
     imposter_file.write_text("not `_label_hits`\n", encoding="utf-8")
     assert not imposter_file.is_relative_to(REPO), (
@@ -1574,10 +1584,18 @@ def test_a_same_thread_ambient_read_is_not_attributed_to_label_hits(
         path.read_text(encoding="utf-8")
 
     imposter = _imposter
-    imposter.__code__ = imposter.__code__.replace(co_name=_LABEL_HITS_CODE.co_name)
+    imposter.__code__ = imposter.__code__.replace(
+        co_name=_LABEL_HITS_CODE.co_name,
+        co_qualname=_LABEL_HITS_CODE.co_qualname,
+    )
     assert imposter.__code__.co_name == _LABEL_HITS_CODE.co_name, (
         "the imposter does not share `_label_hits`'s code name, so a name-based rule "
         "would not take its read and this arm would pin nothing"
+    )
+    assert imposter.__code__.co_qualname == _LABEL_HITS_CODE.co_qualname, (
+        "the imposter does not share `_label_hits`'s code QUALNAME, so the qualname "
+        "spelling could replace the rule and this arm would stay green — the pin the "
+        "note above `_LABEL_HITS_CODE` claims to carry"
     )
     #: No `is not _LABEL_HITS_CODE` premise assert beside that one: `CodeType.replace`
     #: always constructs a NEW object (`f.__code__.replace() is f.__code__` -> False),
