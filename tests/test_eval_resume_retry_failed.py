@@ -471,11 +471,12 @@ def test_retry_failed_resume_success_removes_entry(tmp_path, monkeypatch):
     entry is removed in one flocked write → report n_failed == 0 and the qid
     grades clean (never double-counted)."""
     # seed the transient failure with a REAL prior failing run (write-stage
-    # exhaustion → R2 fires and fails → entry attempts=1)
+    # exhaustion → R2 fires and fails → entry attempts=2: the initial attempt
+    # plus the in-run R2, #8486 F1)
     _outcomes, _report, cp, _ = _run(tmp_path, monkeypatch, fail_writes=True)
     seeded = json.loads(cp.read_text(encoding="utf-8"))
     assert len(seeded["failures"]) == 1
-    assert seeded["failures"][0]["attempts"] == 1
+    assert seeded["failures"][0]["attempts"] == 2
     assert seeded["failures"][0]["error_class"] == "ingest:retries_exhausted"
 
     outcomes, report, cp, creations = _run(tmp_path, monkeypatch,
@@ -500,7 +501,7 @@ def test_resume_reattempt_r2_suppressed(tmp_path, monkeypatch):
     incremented, class preserved) and exactly ONE pipeline pass."""
     _outcomes, _report, cp, _ = _run(tmp_path, monkeypatch, fail_writes=True)
     seeded = json.loads(cp.read_text(encoding="utf-8"))
-    assert seeded["failures"][0]["attempts"] == 1
+    assert seeded["failures"][0]["attempts"] == 2
 
     outcomes, _report, cp, creations = _run(tmp_path, monkeypatch,
                                            retry_failed=True, fail_writes=True)
@@ -508,7 +509,7 @@ def test_resume_reattempt_r2_suppressed(tmp_path, monkeypatch):
     saved = json.loads(cp.read_text(encoding="utf-8"))
     assert len(saved["failures"]) == 1
     entry = saved["failures"][0]
-    assert entry["attempts"] == 2  # one failed re-attempt increment
+    assert entry["attempts"] == 3  # initial + R2 + one failed re-attempt
     assert entry["error_class"] == "ingest:retries_exhausted"  # preserved
     assert entry["retryable"] is True
     # the resume re-attempt got exactly ONE pipeline pass — a disarm bug
@@ -517,17 +518,18 @@ def test_resume_reattempt_r2_suppressed(tmp_path, monkeypatch):
 
 
 def test_failure_counter_transitions_and_gate_refusal(tmp_path, monkeypatch):
-    """Task 2 test (d) + P1-C: R2-failed entry starts at attempts=1; a failed
-    resume re-attempt increments to 2; the gate then refuses (2 < 2 is False)
-    and the entry is retained at cap with the preserved class + a load-time
-    WARNING (never a silent skip)."""
+    """Task 2 test (d) + P1-C: an R2-failed entry starts at attempts=2 (the
+    initial attempt + the in-run R2, #8486 F1); a failed resume re-attempt
+    increments to 3; the gate then refuses (3 < 3 is False) and the entry is
+    retained at cap with the preserved class + a load-time WARNING (never a
+    silent skip)."""
     _outcomes, _report, cp, _ = _run(tmp_path, monkeypatch, fail_writes=True)
     outcomes, _report2, cp, _creations = _run(tmp_path, monkeypatch,
                                               retry_failed=True, fail_writes=True)
     assert outcomes == []
     saved = json.loads(cp.read_text(encoding="utf-8"))
     entry = saved["failures"][0]
-    assert entry["attempts"] == 2
+    assert entry["attempts"] == 3
     assert entry["error_class"] == "ingest:retries_exhausted"
     # the gate now refuses: a third run skips the qid (attempts at cap)
     outcomes2, report2, _cp2, _c2 = _run(tmp_path, monkeypatch,
@@ -538,16 +540,17 @@ def test_failure_counter_transitions_and_gate_refusal(tmp_path, monkeypatch):
 
 def test_resume_fails_at_judge_class_preserved_at_cap(tmp_path, monkeypatch):
     """Task 2 test (n): a resume re-attempt admitted under the preserved
-    class fails at the JUDGE stage → the counter increments to 2 → the gate
-    refuses the next run; the entry keeps ingest:retries_exhausted (the tier
-    is entered once and held until success or the cap)."""
+    class fails at the JUDGE stage → the counter increments to 3 (initial +
+    R2 + the resume) → the gate refuses the next run; the entry keeps
+    ingest:retries_exhausted (the tier is entered once and held until success
+    or the cap)."""
     _outcomes, _report, cp, _ = _run(tmp_path, monkeypatch, fail_writes=True)
     outcomes, _report2, cp, _creations = _run(tmp_path, monkeypatch,
                                               retry_failed=True, judge_boom=True)
     assert outcomes == []
     saved = json.loads(cp.read_text(encoding="utf-8"))
     entry = saved["failures"][0]
-    assert entry["attempts"] == 2
+    assert entry["attempts"] == 3
     assert entry["error_class"] == "ingest:retries_exhausted"  # preserved
     assert entry["retryable"] is True  # reflects the live judge transient
     # live inner repr (requests.Timeout reprs as Timeout(...) — the class

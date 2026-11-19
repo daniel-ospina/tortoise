@@ -123,6 +123,7 @@ from .errors import (
     INGEST_WRITE_RETRIES,
     RESUME_ATTEMPTS_CAP,
     WriteStageRetriesExhausted,
+    class_is_recoverable,
     eval_failure_class,
     fatal_census,
     retryable_transient,
@@ -229,6 +230,11 @@ RESUME_CLAIM_TTL_S = 90 * 60
 #: Persisted failure-entry ``error`` repr cap (P2-7) — a multi-MB exception
 #: repr must not bloat the checkpoint or break the JSON round-trip.
 ERROR_REPR_CAP = 2000
+#: #8486 F2: cap on the persisted ``error_detail`` (the exception's OWN
+#: message). Sized for a FalkorDB/redis server sentence or a provider error
+#: body — long enough to tell a refused query from a deleted graph, short
+#: enough that a checkpoint carrying 500 failures stays a checkpoint.
+ERROR_DETAIL_CAP = 600
 
 #: #1786 (P2-6/P2-1): the shared resume-tier concurrency limiter — ≤ 2
 #: concurrent ~25-min re-ingests across BOTH tiers (R2 re-attempts inside
@@ -1389,6 +1395,46 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
     return _retry_failed_skip_reason(entry) is None
 
 
+def _error_detail(exc: BaseException) -> str:
+    """The exception's OWN message, secret-scrubbed and bounded (#8486 F2).
+
+    Why it is not just ``str(exc)`` in the record, and why it is not ``repr``:
+
+    * ``redis.exceptions.RedisError.__repr__`` returns
+      ``f"{self.error_type.value}:{type(self).__name__}"`` — measured on the
+      installed driver: ``repr(ResponseError('Query timed out'))`` ==
+      ``'server:ResponseError'``. ``args`` is dropped, so the ONE thing that
+      makes a server failure diagnosable (`Query timed out` vs `graph was
+      deleted or replaced while the query was running, aborting` vs a
+      ``WRONGTYPE``/``maxmemory`` refusal) survives only in ``str(exc)``.
+    * The record is persisted to the checkpoint and republished in the report
+      (``report.py`` passes ``failures`` through verbatim), so the text is
+      scrubbed through the PRODUCT's credential redactor —
+      ``tortoise.security.redact_secrets`` — which replaces credential-shaped
+      spans (connection-URL passwords, bearer/AWS/GitHub/``sk-`` keys) with
+      ``[REDACTED:<kind>]`` and leaves everything else byte-identical. A
+      failure record must never be the thing that leaks a key.
+    * Whitespace is collapsed (a FalkorDB parse error echoes the query with
+      newlines) and the result is capped at ``ERROR_DETAIL_CAP``.
+
+    Returns ``""`` when the exception carries no message — the entry then omits
+    the key entirely rather than writing an empty string.
+    """
+    from tortoise.security import redact_secrets
+
+    try:
+        text = str(exc) or ""
+    except Exception:  # noqa: BLE001, RUF100 — a broken __str__ is not the failure
+        return ""
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    text, _counts = redact_secrets(text)
+    if len(text) > ERROR_DETAIL_CAP:
+        text = text[:ERROR_DETAIL_CAP] + "…<truncated>"
+    return text
+
+
 def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
                    stage: str, attempts: int, prior: dict | None = None,
                    usage: dict | None = None) -> dict:
@@ -1401,11 +1447,34 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     tier (``ingest:retries_exhausted``) stays tier-eligible even when a
     re-attempt fails at a NON-ingest stage (the re-extraction advances
     ``_stage`` to reader/judge — without preservation an LLM-provider
-    transient there would re-classify the entry and silently exclude it)."""
-    retryable = retryable_transient(exc)
+    transient there would re-classify the entry and silently exclude it).
+
+    #8486 F1 — the record must not contradict itself. ``retryable`` answers
+    one question: "may a ``--retry-failed`` resume re-attempt this question?"
+    It is therefore derived from the entry's OWN ``error_class`` via
+    :func:`errors.class_is_recoverable` — never from ``retryable_transient``.
+    That predicate answers a DIFFERENT question ("may this WRITE be retried at
+    THIS layer now") and returns False for families that are recoverable at a
+    higher layer: a ``ResponseError('graph was deleted or replaced…')`` is
+    retried by ``retryable_aborted_write`` at the SDK write seam and must not
+    be retried again out here (``tortoise/retry.py``'s docstring), yet the
+    question it failed on IS recoverable. Borrowing it here wrote
+    ``error_class=ingest:retries_exhausted`` (recoverable) with
+    ``retryable: false`` in the 10-question smoke, and the resume silently
+    skipped the failure it exists to pick up.
+
+    #8486 F2 — ``error`` is ``repr(exc)``, and ``redis.exceptions.RedisError``
+    overrides ``__repr__`` to ``f"{self.error_type.value}:{type(self).__name__}"``
+    (measured: ``repr(ResponseError('Query timed out'))`` ==
+    ``'server:ResponseError'``), DROPPING ``args``. The server's own sentence
+    therefore never reached the record, so a refused query and a deleted graph
+    were indistinguishable. ``error_detail`` carries it (scrubbed, bounded),
+    additively — ``error`` keeps its exact bytes because the legacy resume
+    rescue and every on-disk entry key on it."""
     error_class = eval_failure_class(exc, site=stage)
     if prior and prior.get("error_class") == "ingest:retries_exhausted":
         error_class = "ingest:retries_exhausted"
+    retryable = class_is_recoverable(error_class)
     err = repr(exc)
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
@@ -1419,6 +1488,9 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
         "failed_at_utc": _utc_now().isoformat(),
         "in_progress": None,
     }
+    detail = _error_detail(exc)
+    if detail:
+        entry["error_detail"] = detail
     # #2185: the qid's CUMULATIVE usage envelope rides the failure entry as
     # the kill-9-safe replica — present ONLY when an LLM was actually
     # called (the A4 load fold reads it; mock/failed-early runs stay
@@ -1434,13 +1506,16 @@ def _build_failure_entry(qid: str, question_type: str, exc: BaseException,
                          *, usage_env: dict | None = None) -> dict:
     """The run-loop failure-entry builder (module-level — B023-clean so the
     per-question loop can pass it via ``functools.partial``). Counter
-    semantics (P1-6): the in-run R2 increments the persisted counter (an
-    R2-exhausted entry starts at ``attempts=1``); a provider transient that
-    never entered the write-stage loop starts at ``attempts=0``; each failed
-    ``--retry-failed`` re-attempt increments from the ON-DISK ``prior``
-    (never the stale in-memory copy; never at claim — a kill -9 mid-attempt
-    leaves the counter untouched so the dead-pid re-claim stays admitted)."""
-    attempts = ((1 if r2_attempted else 0)
+    semantics (P1-6, #8486 F1): ``attempts`` counts the PIPELINE ATTEMPTS a
+    question has consumed — the initial attempt is 1 (a question that failed
+    after 12 minutes of ingest has obviously been tried once), the in-run R2
+    makes it 2, and each failed ``--retry-failed`` re-attempt increments from
+    the ON-DISK ``prior`` (never the stale in-memory copy; never at claim — a
+    kill -9 mid-attempt leaves the counter untouched so the dead-pid re-claim
+    stays admitted). A pre-fix entry recorded 0 in the first two cases, so the
+    same record claimed the retry budget was exhausted AND that nothing had
+    been attempted."""
+    attempts = ((1 + (1 if r2_attempted else 0))
                 if not resume_reattempt
                 else (int((prior or {}).get("attempts", 0) or 0) + 1))
     return _failure_entry(qid, question_type, exc, stage=stage,
@@ -6178,14 +6253,16 @@ def run_evaluation(
                     lme_usage.clear_question_key()
 
                     with _lock:
-                        # Counter semantics (P1-6): the in-run R2 DOES
-                        # increment the persisted counter (R2-exhausted
-                        # entry starts at attempts=1); a provider transient
-                        # that never entered the write-stage loop starts at
-                        # attempts=0; each failed --retry-failed re-attempt
-                        # increments from the ON-DISK prior (never the stale
-                        # in-memory copy; never at claim — a kill -9 mid-
-                        # attempt leaves the counter untouched).
+                        # Counter semantics (P1-6, #8486 F1): ``attempts``
+                        # counts PIPELINE ATTEMPTS — the initial attempt is 1,
+                        # the in-run R2 makes it 2, and each failed
+                        # --retry-failed re-attempt increments from the
+                        # ON-DISK prior (never the stale in-memory copy;
+                        # never at claim — a kill -9 mid-attempt leaves the
+                        # counter untouched). A record that says
+                        # ``ingest:retries_exhausted`` can no longer say
+                        # ``attempts: 0``: the class claims the budget burned
+                        # and the count now names how much of it did.
                         entry = _upsert_failure(
                             checkpoint, qid,
                             partial(_build_failure_entry, qid,

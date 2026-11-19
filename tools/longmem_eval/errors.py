@@ -82,6 +82,43 @@ def fatal_census(error_census: dict | None) -> dict:
 
 _SITES = ("reader", "judge", "ingest")
 
+# ── #8486 F1: the recoverable-class set — ONE source of truth ──────────────
+#: The bare classes a persisted failure entry may be RE-ATTEMPTED from.
+#:
+#: ``retryable`` in a failure record answers exactly one question: *may a
+#: ``--retry-failed`` resume re-attempt this question?* It is derived from the
+#: entry's ``error_class`` through :func:`class_is_recoverable`, and from
+#: nothing else. It is deliberately NOT ``retryable_transient`` (the write-path
+#: predicate in ``tortoise/retry.py``), which answers a DIFFERENT question —
+#: *may THIS write be retried at THIS layer right now* — and returns False for
+#: error families that are recoverable at a higher layer (a replaced-graph /
+#: write-lock ``ResponseError`` is retried by ``retryable_aborted_write`` at the
+#: SDK write seam, so the outer layer must not, per retry.py's own docstring).
+#:
+#: Borrowing that predicate for the record is #8486 finding 1: a
+#: ``server:ResponseError`` graded ``ingest:retries_exhausted`` (recoverable)
+#: was written with ``retryable: false``, so the resume meant to pick it up
+#: skipped it — silently, because a skip is not an error.
+#:
+#: ``transient`` / ``unknown`` cannot reach a persisted entry today
+#: (``eval_failure_class`` converts both to ``retries_exhausted``); they are
+#: listed so the set is the VOCABULARY's answer, not a restatement of one
+#: branch — a future class that stops converting still grades coherently.
+RECOVERABLE_EVAL_CLASSES = frozenset({"transient", "unknown", "retries_exhausted"})
+
+
+def class_is_recoverable(error_class: str | None) -> bool:
+    """True iff ``<site>:<class>`` names a RECOVERABLE eval error class.
+
+    Reads the class half of the site-prefixed census key (``ingest:retries_
+    exhausted`` → ``retries_exhausted``); a bare class (``ingest``, the
+    structurally-fatal/parse ingest veto) is read as itself and is NOT
+    recoverable. ``None``/empty → False (an entry with no class is never
+    re-attempted — the resume gate rejects it on its own class check first).
+    """
+    cls = str(error_class or "").rsplit(":", 1)[-1].strip()
+    return cls in RECOVERABLE_EVAL_CLASSES
+
 # ── #1786/#1806 retry budget constants (results-relevant knobs) ────────────
 #: Write-stage retry count (R1): a transient redis TimeoutError/ConnectionError
 #: on an un-timed graph write is retried up to this many times before the
@@ -94,10 +131,27 @@ INGEST_WRITE_RETRIES = 2
 #: DISARMED during ``--retry-failed`` resume re-attempts, so the worst-case
 #: re-burn budget is 2 x ~25 min (1 in-run R2 + 1 resume).
 INGEST_QUESTION_RETRIES = 1
-#: Resume re-attempt cap (R3): the persisted ``attempts`` field bounds
-#: ``--retry-failed`` re-attempts across processes (the in-run R2 counts as
-#: the first attempt).
-RESUME_ATTEMPTS_CAP = 2
+#: Resume re-attempt cap (R3): the persisted ``attempts`` field bounds the
+#: number of PIPELINE ATTEMPTS a question may consume across processes — the
+#: initial attempt is 1, the in-run R2 makes it 2, each failed
+#: ``--retry-failed`` re-attempt adds one. At this value the documented budget
+#: is preserved EXACTLY: a question that exhausted the write-stage retries and
+#: its in-run R2 (2 attempts) still gets its one resume (attempt 3).
+#:
+#: #8486 finding 1 — why the field and this cap moved together. The field used
+#: to count only RE-BURNS (a provider failure that never entered the
+#: write-stage loop started at ``0``), so a persisted record could say
+#: ``error_class=ingest:retries_exhausted`` — "the retry budget burned" — with
+#: ``attempts: 0``, "nothing was tried", next to ``retryable: false``. Two
+#: numbers, three wrong readings. Counting attempts MADE is the honest reading
+#: of a field named ``attempts``, and it is what an operator needs to tell a
+#: 12-minute ingest that failed once from one that failed three times. The cap
+#: is +1 (2 → 3) so the SAME recovery surface is preserved: initial + R2 + ONE
+#: resume, and one resume after a plain initial failure. A resumed checkpoint
+#: written under the old accounting is refused by the fingerprint (the value
+#: rides ``resume_attempts_cap``), which is the correct outcome — its
+#: ``attempts`` numbers would be read two ways.
+RESUME_ATTEMPTS_CAP = 3
 
 # ══ PRODUCT-PARITY NOTE (WIRED — shipped to product in this PR) ══════════
 # The write-stage retry machinery below (``retryable_transient`` /
@@ -164,7 +218,7 @@ def eval_failure_class(exc: BaseException, *, site: str) -> str:
     # (is_transient(parse-class) is True per P2's unknown-safe rule, so the
     # coarse class is checked, not is_transient.)
     if cls.split(":", 1)[1] in ("transient", "unknown"):
-        return f"{site}:retries_exhausted"
+        return f"{site}:retries_exhausted"  # recoverable — see class_is_recoverable
     if site == "ingest":
         return "ingest"
     return cls
