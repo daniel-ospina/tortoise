@@ -173,12 +173,27 @@ both bypassable, which is worth recording because each looked complete:
   gating the fill alone re-opened the hole through the mint.
 
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
-the attempt key is 32 random bytes, minted by the **AS on the `GET /oauth/authorize` bounce leg**
-(`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert. Adoption is the normal
-path, not a guarantee: **the entry leg still mints one when it is handed none** — a request presented
-STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts::presentedKey || newAttemptKey()`;
-tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
-on the bounce, never constrain what a direct caller invents. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
+the attempt key is 32 random bytes **plus a MAC over them under the current consent key, with its
+`kid` carried in the value** (#10794), minted by the **AS on the `GET /oauth/authorize` bounce leg**
+(`consent_bounce_url`, and by `/api/consent/start` when it is handed none) and **ADOPTED** by
+`/api/consent/start` on the insert **only when that MAC verifies** (`start.ts::verifyAttemptKey`).
+
+**Why the MAC is the rule and not a shape check.** RFC 9126 §2 requires a flow reference to be
+unpredictable, single-use, expiring and **not client-chosen**; RFC 9700 asks an AS to detect
+CONSTANT or REUSED values, not well-formed ones. A well-formed 43-character value a caller chose
+passes every shape test and is still the caller's key — measured, adopted, before this change. So an
+unverifiable presented key is treated as **ABSENT, never as fatal**: the caller with nothing still
+gets a flow, and the value it is given is MINTED (`mintedAttemptKey`), which is what makes the
+mid-flow return leg accept it. ⛔ The residual this does NOT close is the **first-mover** dead end —
+a caller can still begin a flow holding a key only it has, and the victim is then refused; that root
+is #10865, and it is unchanged here.
+
+Adoption is the normal path, not a guarantee: **the entry leg still mints one when it is handed none**
+— a request presented STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts` →
+`mintedAttemptKey`; tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed
+out on the bounce (or one this deployment signed), never constrain what a direct caller invents.
+⚠️ A rotation now also has to keep the two halves on the same key set for the length of this
+window — see the rotation cost in §2.3. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
 target**; the owner fill and the mint both require it. The key is INSERT-ONLY — written only when the
 row is created, never on a re-entry, so a later caller can never rotate it, because rotation *is* the
 takeover. A row that predates the column (its hash is `NULL`) is therefore **dead, never adoptable**:

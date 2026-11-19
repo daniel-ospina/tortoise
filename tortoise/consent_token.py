@@ -1185,3 +1185,123 @@ def mint_consent_token(*, user_id: str, email: str | None, bind: dict,
     mac = hmac.new(key.encode(), signing_input.encode(), hashlib.sha256).digest()
     return f"{signing_input}.{_b64url_encode(mac)}"
 
+
+# ── the SIGNED attempt key (§9 step 4, #10794 / #13683) ────────────────────
+#
+# WHY THE ATTEMPT KEY IS SIGNED
+# -----------------------------
+# `consent_attempts.attempt_key_hash` is INSERT-ONLY and is the flow's ownership proof (§2.3,
+# #10208): the browser that CREATED a flow holds the key, and the owner fill, the mid-flow return
+# and the mint all require it. But `/api/consent/start` is directly navigable — it is the one API
+# path `/auth`'s return allowlist admits — so before this it adopted WHATEVER `attempt_key` it was
+# handed. A caller could therefore choose the key of a flow it did not create, which is precisely
+# the value the standard says the SERVER owns:
+#
+#   * RFC 9126 §2 (Pushed Authorization Requests) — the flow reference "must contain unpredictable
+#     cryptographic randomness, should be single-use, must expire, and must not be client-chosen";
+#   * RFC 9700 (OAuth 2.0 Security BCP) — the code is bound to a particular transaction, and an AS
+#     "should detect constant or reused values". That clause is why a SHAPE check is not the fix: a
+#     well-formed 43-character CHOSEN key passes any shape test and is still adopted.
+#
+# So the value carries a MAC only a holder of the signing key can produce, and the adopter treats a
+# key it cannot verify as ABSENT (mint fresh) rather than as fatal — the entry leg must still work.
+#
+# WHAT THIS DOES NOT BOUND, stated rather than implied: the MAC covers the RANDOM PART only, so an
+# AS-minted value is not bound to the flow it was minted for. A caller that reads a bounce for its
+# own authorize request can present that value on another flow and pre-claim it — the "first mover"
+# dead end, whose home is #10865 (open), not this lane. Binding `state`/`client_id` was considered
+# and left out deliberately: those bytes differ between the halves' readers (`start.ts` trims
+# `client_id` and not `state`; `redirect_uri` is forwarded raw), so a MAC over them would dead-end a
+# padded value SILENTLY — the #10487 class — which is a worse failure than the residual it closes.
+# What this DOES close is the stated defect: a key the client chose can no longer become a flow's key.
+
+#: Domain separation (§2.1's `aud` argument, one field along): the attempt key's MAC is computed over
+#: this prefix plus the random part, so a consent-token signature can never be replayed as an attempt
+#: key or the reverse even though both use the same key set and the same HMAC-SHA256. The `v1` is in
+#: the INPUT, not only in the comment: changing the covered bytes later is a new domain string, so an
+#: in-flight value minted under the old rule is refused rather than reinterpreted under the new one.
+ATTEMPT_KEY_DOMAIN = "attempt_key|v1|"
+#: 32 CSPRNG bytes (43 base64url characters) — the same floor `newAttemptKey()` mints on the app
+#: half, and the entropy RFC 9126 §2 asks of a flow reference. Carried verbatim; never derived from
+#: anything a caller supplies (a key derived from the PUBLIC `state` would be forgeable, which is why
+#: that option was rejected in `consent_bounce_url`'s own docstring).
+ATTEMPT_KEY_RANDOM_BYTES = 32
+#: `<kid>.<random>.<mac>`. A DOT, and only a dot, because the kid charset excludes it (`_KID_RE`):
+#: the parse is then unambiguous by construction rather than by a precedence rule.
+ATTEMPT_KEY_SEPARATOR = "."
+
+
+def attempt_key_mac_input(random_part: str) -> bytes:
+    """The EXACT bytes both halves MAC — Python signs, TypeScript verifies (`start.ts`).
+
+    ⛔ THIS FUNCTION IS THE CROSS-HALF CONTRACT. A change here that is not mirrored in
+    `consent-bridge.ts::attemptKeyMacInput` makes every AS-minted key fail verification on the app
+    half, where the failure is SILENT by design (an unverifiable key is treated as absent and
+    replaced) — so the symptom would be the #10487 dead end, `403 flow_not_yours` after sign-in, with
+    nothing anywhere naming a MAC. The cross-half test MACs the same value from both languages and
+    compares, so a one-sided edit reds rather than waits.
+    """
+    return (ATTEMPT_KEY_DOMAIN + random_part).encode("utf-8")
+
+
+def _attempt_key_mac(key: str, random_part: str) -> bytes:
+    return hmac.new(key.encode("utf-8"), attempt_key_mac_input(random_part),
+                    hashlib.sha256).digest()
+
+
+def mint_attempt_key(*, kid: str | None = None, random_part: str | None = None) -> str:
+    """Mint ``<kid>.<random>.<mac>`` with the CURRENT key (§9 step 4, #10794).
+
+    Reference inverse of `verify_attempt_key`, and — like `mint_consent_token` — the Python half of
+    a value the TypeScript half also mints (on the entry leg, when it is handed none). Both halves
+    must agree on the FORMAT and on the MAC input, which is what the cross-half test pins.
+
+    ``random_part`` is for tests only; it defaults to 32 CSPRNG bytes. Raises ``ValueError`` when
+    this deployment has no usable key — the caller decides whether that is fatal (`consent_bounce_url`
+    falls back to an unsigned value so the visitor's flow still completes, and the adopter then
+    treats it as absent, which is the pre-#10794 behaviour rather than a break).
+    """
+    signing_kid = kid if kid is not None else consent_token_current_kid()
+    # ⛔ THE KID SELECTS THE KEY HERE, unlike `mint_consent_token` (where `secret` is explicit and
+    # `kid` is only the label the header carries). An attempt key's whole meaning is "a value signed
+    # by the key this kid names", and the adopter verifies by looking that kid up — so signing `old`
+    # with the CURRENT key would emit a value that verifies NOWHERE, which a rotating operator would
+    # discover as a dead mid-flow return rather than as a failed mint.
+    key = consent_token_keys().get(signing_kid) if signing_kid else None
+    if not key:
+        raise ValueError(f"no usable {_SECRET_ENV}/{_KEYS_ENV} key, so no attempt key can be signed")
+    random_part = random_part or _secrets.token_urlsafe(ATTEMPT_KEY_RANDOM_BYTES)
+    mac = _attempt_key_mac(key, random_part)
+    return ATTEMPT_KEY_SEPARATOR.join((signing_kid, random_part, _b64url_encode(mac)))
+
+
+def verify_attempt_key(value: str) -> str | None:
+    """The random part when `value` is a key THIS deployment minted, else ``None``.
+
+    ``None`` is the adopter's "absent" (the caller mints a fresh one), never a fatal — the entry leg
+    must still complete for a caller handed a key from a deployment that does not share this key set.
+
+    Accepted: any kid in the ACTIVE set (current + previous during a rotation window), which is what
+    makes a rotation invisible to in-flight flows. Refused, all as ``None``: no key set, an unknown
+    kid, a malformed value, a MAC that does not match. ⛔ An unknown kid is never compared against a
+    default key — that would make `kid` decorative and the rotation window never close.
+    """
+    if not isinstance(value, str):
+        return None
+    parts = value.split(ATTEMPT_KEY_SEPARATOR)
+    if len(parts) != 3:
+        return None
+    kid, random_part, mac = parts
+    if not _KID_RE.match(kid) or not random_part or not mac:
+        return None
+    keys = consent_token_keys()
+    key = keys.get(kid)
+    if key is None:
+        return None
+    try:
+        presented = _b64url_decode(mac, "attempt key mac")
+    except OAuthError:
+        return None
+    if not hmac.compare_digest(_attempt_key_mac(key, random_part), presented):
+        return None
+    return random_part

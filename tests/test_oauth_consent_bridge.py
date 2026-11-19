@@ -3374,7 +3374,7 @@ def test_no_TRACKED_file_outside_the_corpus_carries_the_false_premise():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# §2.3 — the `kid`-KEYED key set (#10794)
+# §2.3 — the `kid`-KEYED key set, and the SIGNED attempt key (#10794/#13683)
 #
 # WHY THE SET EXISTS. §2.3 recorded a `kid`-scoped rotation window that was NOT BUILT: one
 # `CONSENT_TOKEN_SECRET` was configured, so "two kids are accepted during a rotation window" was a
@@ -3382,6 +3382,10 @@ def test_no_TRACKED_file_outside_the_corpus_carries_the_false_premise():
 # once (the #10488 incident, with a ≤120 s blast radius). A SET is what turns `kid` from a
 # decorative header into the mechanism: mint with the current key, verify current + previous,
 # retire the old one by removing it.
+#
+# The same set is what makes the attempt key SIGNED worth doing (#10794): the app half can verify
+# a value the AS minted only if both halves hold the same key, and a rotation that silently breaks
+# that is the `403 flow_not_yours` dead end this bridge has already paid for once.
 # ═══════════════════════════════════════════════════════════════════════════
 
 #: Two keys that both clear the module's floor (≥32 UTF-8 bytes, byte-exact, dedicated).
@@ -3616,3 +3620,80 @@ def test_the_fingerprint_is_the_CURRENT_kids_key(monkeypatch) -> None:
     monkeypatch.setenv("CONSENT_TOKEN_CURRENT_KID", "old")
     assert consent_token.consent_key_fingerprint() == hashlib.sha256(
         _KEY_OLD.encode()).hexdigest()[:12]
+
+
+def test_the_attempt_key_round_trips_and_carries_its_kid(monkeypatch) -> None:
+    """The signed flow reference (#10794): three segments, the current kid, a verifiable MAC."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    minted = consent_token.mint_attempt_key()
+    kid, random_part, _mac = minted.split(".")
+    assert kid == "new", minted
+    assert len(random_part) >= 43, (
+        f"the random part is {len(random_part)} characters — RFC 9126 §2 asks a flow reference for "
+        "unpredictable cryptographic randomness, and 32 bytes base64url is 43 characters")
+    assert consent_token.verify_attempt_key(minted) == random_part
+    # A second mint must NOT repeat: the value is per-bounce, and a constant one would be a shared
+    # key across flows (the reason `state`-derived keys were rejected in `consent_bounce_url`).
+    assert consent_token.mint_attempt_key().split(".")[1] != random_part
+
+
+def test_a_CHOSEN_attempt_key_does_NOT_verify(monkeypatch) -> None:
+    """⛔ THE POINT OF THE LANE, at the unit level: a client-chosen value has no valid MAC.
+
+    This is RFC 9700's "detecting a reused value" rather than validating its SHAPE: the value below
+    is a perfectly well-formed 43-character base64url string, exactly what a shape check would
+    accept, and it still verifies nowhere because only the key holder can produce a MAC over it.
+    """
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"new={_KEY_NEW}", current="new")
+    for chosen in ("a" * 43, "ak-as-minted-0123456789abcdef", " " * 4, "", "new." + "a" * 43):
+        assert consent_token.verify_attempt_key(chosen) is None, chosen
+    # …and the module's own mint is the ONLY thing that verifies, which is what makes the assertion
+    # above about the MAC rather than about the string shape.
+    assert consent_token.verify_attempt_key(consent_token.mint_attempt_key()) is not None
+
+
+def test_a_TAMPERED_attempt_key_is_refused(monkeypatch) -> None:
+    """Each of the three segments is covered or selected, so none of them is free to edit."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    minted = consent_token.mint_attempt_key()
+    kid, random_part, mac = minted.split(".")
+    assert consent_token.verify_attempt_key(f"{kid}.{random_part[:-1]}A.{mac}") is None, (
+        "editing the RANDOM part left the MAC valid — the MAC does not cover it")
+    assert consent_token.verify_attempt_key(f"old.{random_part}.{mac}") is None, (
+        "editing the KID left the MAC valid — the kid is not selected before the comparison")
+    flipped = ("A" if mac[0] != "A" else "B") + mac[1:]
+    assert consent_token.verify_attempt_key(f"{kid}.{random_part}.{flipped}") is None
+
+
+def test_a_RETIRED_kids_attempt_key_is_refused_but_the_PREVIOUS_one_still_works(monkeypatch) -> None:
+    """The rotation window, on the attempt key: ≤15 min of in-flight flows, not a cliff."""
+    from tortoise import consent_token
+
+    _key_set(monkeypatch, f"old={_KEY_OLD},new={_KEY_NEW}", current="new")
+    signed_by_old = consent_token.mint_attempt_key(
+        kid="old", random_part="r" * 43)
+    assert consent_token.verify_attempt_key(signed_by_old) is not None, (
+        "a value signed by the PREVIOUS kid was refused — a rotation would kill every in-flight "
+        "consent flow (≤15 min), silently, as `403 flow_not_yours` after sign-in")
+
+    monkeypatch.setenv("CONSENT_TOKEN_KEYS", f"new={_KEY_NEW}")
+    assert consent_token.verify_attempt_key(signed_by_old) is None, (
+        "a RETIRED kid's attempt key still verified — the window never closes")
+
+
+def test_an_unprovisioned_arm_mints_no_attempt_key_and_verifies_none(monkeypatch) -> None:
+    """Fail closed, both directions, and never a raise out of the verifier."""
+    from tortoise import consent_token
+
+    monkeypatch.delenv("CONSENT_TOKEN_KEYS", raising=False)
+    monkeypatch.delenv("CONSENT_TOKEN_SECRET", raising=False)
+    with pytest.raises(ValueError) as refused:
+        consent_token.mint_attempt_key()
+    assert "no usable" in str(refused.value), refused.value
+    assert consent_token.verify_attempt_key(f"consent-1.{'r' * 43}.{'a' * 43}") is None
