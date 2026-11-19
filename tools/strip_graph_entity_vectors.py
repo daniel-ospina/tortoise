@@ -1244,9 +1244,19 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # the operand rule, which carries the stop-mode Dict recursion; the CONTAINER
             # forms are deliberately NOT asked, because `props = [{"embedding": vec}]`
             # raises `ValueError` instead of storing and must keep certifying.
+            # ⛔ …AND THE COMPREHENSION TWIN IS THE SAME STORE: `props = {"embedding":
+            # _encode(ev) for _x in _keys()}` rebuilds the mapping with the vector exactly as
+            # the literal one arm up does, and was CERTIFIED (measured at `45b5f88a`).
+            # Recognised HERE, beside its twin, and NOT inside `_rebuild_stores_the_vector` —
+            # that helper is also handed the OPERANDS of unknown callees, where the same
+            # comprehension is a MENTION (`props = _audit({"embedding": vec for …})` writes
+            # nothing) and refusing it there refused an honest writer (measured).
             if anywhere and (
-                    (isinstance(value, ast.Dict)
-                     and _dict_stores_the_vector(value, stop_arm=True))
+                    (isinstance(value, ast.Dict | ast.DictComp)
+                     and ((isinstance(value, ast.Dict)
+                           and _dict_stores_the_vector(value, stop_arm=True))
+                          or (isinstance(value, ast.DictComp)
+                              and _pairs_operand_stores_the_vector(value))))
                     or (isinstance(value, ast.Call)
                         and _callee_name(value) == "copy"
                         and _mapping_operand_stores_the_vector(value.func.value))):
@@ -1603,6 +1613,14 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # and two more, each runtime-checked to place no top-level key) and deleting the two
         # terms changed no verdict on any fixture — the branch's own row is answered by the
         # generator's `iter`, which is where the pairs literal actually is.
+        # ⛔ AND THE KEY EXPRESSION CAN *BE* THE PROPERTY. `{"embedding": _encode(ev) for _x
+        # in _keys()}` places a real top-level vector — the produced mapping's key is the
+        # constant, not a pair — and scanning only the generators certified it (measured at
+        # `45b5f88a`, and runtime-checked to leave `{"embedding": VEC}` in `props`). Same
+        # narrowing as everywhere else: EXACT name, NON-CONSTANT value.
+        if (isinstance(node.key, ast.Constant) and node.key.value == EMBEDDING_PROPERTY
+                and not isinstance(node.value, ast.Constant)):
+            return True
         return any(_pairs_operand_stores_the_vector(generator.iter)
                    for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
@@ -1939,7 +1957,12 @@ def _rebuild_stores_the_vector(node) -> bool:
         elif isinstance(leaf, ast.BinOp) and isinstance(leaf.op, ast.BitOr):
             # `props | {"embedding": vec}` — the union's literal operand merges by
             # construction, so the `merges` requirement above is met by the operator.
-            if any(isinstance(side, ast.Dict) and _dict_stores_the_vector(side)
+            # ⛔ AND THE UNION'S COMPREHENSION OPERAND IS THE SAME MERGE (measured at
+            # `45b5f88a`): `props = props | {"embedding": vec for …}` places exactly what
+            # `props | {"embedding": vec}` places, and this arm accepted only the literal.
+            if any((isinstance(side, ast.Dict) and _dict_stores_the_vector(side))
+                   or (isinstance(side, ast.DictComp)
+                       and _pairs_operand_stores_the_vector(side))
                    for side in (leaf.left, leaf.right)):
                 return True
         elif isinstance(leaf, ast.Call) and _is_mapping_constructor(_callee_name(leaf)):
@@ -2008,6 +2031,12 @@ def _mapping_argument_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Dict):
         return _dict_stores_the_vector(node)
+    # ⛔ A COMPREHENSION NEEDS NO ARM HERE: the tail of this function asks
+    # `_pairs_operand_stores_the_vector`, which owns the `DictComp` recognition (both the
+    # generator source and the constant-property key). An arm here was written, measured
+    # REDUNDANT — removing it changed no verdict on any fixture, because every comprehension
+    # spelling reaches the pairs rule through that tail — and then removed, rather than kept
+    # looking load-bearing.
     if isinstance(node, ast.Call) and _callee_name(node) == "dict":
         for keyword in node.keywords:
             if keyword.arg == EMBEDDING_PROPERTY and not isinstance(keyword.value, ast.Constant):

@@ -4254,6 +4254,54 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE COMPREHENSION WHOSE **KEY** IS THE CONSTANT — the property need not be
+        # inside a pair: `{"embedding": _encode(ev) for _x in _keys()}` merges a real
+        # top-level vector and was CERTIFIED while the literal was refused (measured at
+        # `45b5f88a`, and runtime-checked to leave `{"embedding": VEC}` in `props`). The same
+        # form was open through `update(…)`, `dict(**…)`, a REBUILD and a UNION, so all five
+        # rows are here; the controls that keep them from over-refusing live in `accepted`.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": _encode(ev) for _x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"embedding": _encode(ev) for _x in _keys()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(**{"embedding": _encode(ev) for _x in _keys()})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = {"embedding": _encode(ev) for _x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = props | {"embedding": _encode(ev) for _x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {**{"embedding": _encode(ev) for _x in _keys()}}
+        return None
+    _write(props)
+""",
         # ⛔ …AND THE SAME COMPREHENSION BEHIND ONE `**` — `_dict_stores_the_vector`'s merge
         # arm accepted only an `ast.Dict` operand, so `{**<dictcomp>}` was CERTIFIED while the
         # literal behind the same `**` was refused (measured, and runtime-checked to place the
@@ -4822,6 +4870,45 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.pop("embedding", None)
+        return None
+    _write(props)
+""",
+        # ⛔ THE THREE CONTROLS FOR THE DICT-COMPREHENSION RULES. A comprehension's `key` and
+        # `value` are the produced mapping's KEY and VALUE expressions, so a pairs literal in
+        # either becomes a container key or a LIST value and never the vector at a top-level
+        # `embedding` key — scanning them refused honest writers (measured, the mutant
+        # surviving until these rows existed). The constant-key rule has the same two
+        # narrowings every other arm has: the key must be the property EXACTLY, and the value
+        # must be NON-CONSTANT (`{"embedding": None for …}` is the pre-guard reset).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {x: [("embedding", _encode(ev))] for x in ("a", "b")}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"a": _encode(ev) for _x in ("m",)}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": None for _x in ("m",)}
+        return None
+    _write(props)
+""",
+        # ⛔ …and a MENTION: a comprehension handed to an UNKNOWN callee writes nothing
+        # (`_audit` reports, it does not store). Recognising it in the REBUILD walk refused
+        # this honest writer (measured), which is why the rebuild recognition is keyed to the
+        # assigned expression rather than to any nested comprehension.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props = _audit({"embedding": _encode(ev) for _x in ("m",)})
         return None
     _write(props)
 """,
