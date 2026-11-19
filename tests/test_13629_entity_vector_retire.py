@@ -4545,6 +4545,64 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ …AND THE PAIR-WITH-EXTRAS TERM REACHES ONLY THE `Name`-KEY PATH, so the two
+        # sub-classes do not compose without a shared source walk: with a COMPUTED key the
+        # fail-closed arm asked the pairs rule alone, which rejects a three-element element by
+        # design — `{f"{k}": v for k, v, *rest in [("embedding", vec, 1)]}` was CERTIFIED and
+        # stores (measured, runtime-checked). The source walk now asks both shapes THROUGH the
+        # wrappers, so `tuple(...)`, `.copy()`, a full slice, an `if`-expression, `+ []`, a
+        # comprehension over the literal and a `Starred` splice are all refused too — each of
+        # those re-opened the same store one wrapper in (measured).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {f"{k}": v for k, v, *rest in [("embedding", _encode(ev), 1)]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {f"{k}": v for k, v, *rest in tuple([("embedding", _encode(ev), 1)])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {f"{k}": v for k, v, *rest in [("embedding", _encode(ev), 1)][:]}
+        return None
+    _write(props)
+""",
+        # ⛔ …AND A SET LITERAL OF PAIRS IS THE SAME ITERABLE (`dict.__ior__`/`update()` take
+        # any iterable of pairs), which the pairs rule excluded while `fromkeys` two rules up
+        # already accepted `List | Tuple | Set` as a key sequence — measured CERTIFIED.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {("embedding", _encode(ev))}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({("embedding", _encode(ev))})
+        return None
+    _write(props)
+""",
+        # ⛔ …AND THE COMPREHENSION TWIN OF `props[alias] = …`, which the subscript arm has
+        # refused since `98eec2ca`: `alias = "embedding"` then `{alias: v for k, v in [("x",
+        # vec)]}` places the property, and neither the pair's constant (`"x"`) nor the target
+        # names the property — the binding lives in the scope (measured CERTIFIED).
+        """
+def _upsert_object(props, ev):
+    alias = "embedding"
+    if not _derived_mirror_required("object"):
+        props |= {alias: v for k, v in [("x", _encode(ev))]}
+        return None
+    _write(props)
+""",
         # ⛔ …AND THE SAME COMPREHENSION BEHIND ONE `**` — `_dict_stores_the_vector`'s merge
         # arm accepted only an `ast.Dict` operand, so `{**<dictcomp>}` was CERTIFIED while the
         # literal behind the same `**` was refused (measured, and runtime-checked to place the
@@ -5499,6 +5557,17 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {v: k for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        # ⛔ …and a comprehension KEYED BY A NAME THE CLAUSE DOES NOT BIND: it keys the mapping
+        # by that name and places nothing (`{"other": vec}`), so refusing it was an
+        # over-refusal — the same reason the arm that did so was removed. The ALIASED twin is
+        # the one that stores, and it has its own refused row.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {other: v for k, v in [("embedding", _encode(ev))]}
         return None
     _write(props)
 """,

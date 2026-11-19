@@ -1251,6 +1251,15 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
             # certifying.
             if anywhere and _mapping_literal_stores_the_vector(value):
                 return True
+            # ⛔ …AND A COMPREHENSION KEYED BY AN ALIAS OF THE PROPERTY (`#13788`, measured):
+            # `alias = "embedding"; props |= {alias: v for k, v in [("x", vec)]}` places the
+            # property, and no rule above can see it — the pair's constant is `"x"`, the key is
+            # a NAME the clause does not bind, and the binding lives in the SCOPE. The subscript
+            # spelling of the same fact (`props[alias] = …`) is already refused through
+            # `_keyed_by_alias`, so this is its comprehension twin. STOP ARM ONLY, with the
+            # alias set itself (`anywhere`), like every recognition in this family.
+            if anywhere and _dict_comp_keyed_by_alias(value, alias_keys):
+                return True
             # ⛔ AN UNPACKED OR CHAINED TARGET IS STILL A STORE (`#13647` round 12). The
             # mirror arm's rule is "EVERY target names the property", which is right where
             # a missed recognition costs a refactor and a false PASS on the STOP arm —
@@ -1732,7 +1741,12 @@ def _pairs_operand_stores_the_vector(node) -> bool:
 
     if isinstance(node, ast.Starred):
         return _pairs_operand_stores_the_vector(node.value)
-    if isinstance(node, ast.List | ast.Tuple):
+    if isinstance(node, ast.List | ast.Tuple | ast.Set):
+        # ⛔ A SET LITERAL OF PAIRS IS THE SAME ITERABLE (`#13788`, measured): `dict.__ior__`
+        # and `update()` take any iterable of pairs, and `{("embedding", vec)}` is one — the
+        # `fromkeys` arm two rules up already accepts `List | Tuple | Set` as a key sequence,
+        # so excluding `Set` HERE was an asymmetry, and `{("embedding", vec)}` was CERTIFIED.
+        # ⛔ Only for the PAIR shapes: a set is unordered, so it cannot be a mapping operand.
         return (_pairs_store_the_vector(node)
                 # …and a `Starred` ELEMENT splices another sequence in (`(*[pairs],)`).
                 or any(_pairs_operand_stores_the_vector(element)
@@ -1776,7 +1790,7 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # a key that transforms it AWAY (`{k.upper(): v …}`), which the doctrine permits and
         # which is cheap beside certifying a stop arm that stores.
         if not isinstance(node.key, ast.Name):
-            return any(_pairs_operand_stores_the_vector(generator.iter)
+            return any(_source_holds_the_store_anywhere(generator.iter)
                        for generator in node.generators)
         # ⛔ AND THE SOURCE IS A STORE ONLY WHEN THE PAIR IS **UNPACKED INTO THE KEY AND THE
         # VALUE**, because a pair used as a whole places nothing:
@@ -1784,14 +1798,16 @@ def _pairs_operand_stores_the_vector(node) -> bool:
         # `{v: k for k, v in [(…)]}` by the vector (both runtime-checked, both refused by an
         # unconditional source scan — an over-refusal, measured). Hence the target test: the
         # clause must unpack and the produced KEY must be its FIRST name.
+        # ⛔ A `Name` KEY THE CLAUSE DOES NOT BIND NEEDS NO ARM HERE, and that is measured
+        # rather than assumed: `{other: v for k, v in [("embedding", vec)]}` keys the mapping by
+        # `other` and places nothing, so an arm refusing it would be an OVER-refusal, while the
+        # case that DOES store — `alias = "embedding"; {alias: v for k, v in [("x", vec)]}` — is
+        # answered by `_dict_comp_keyed_by_alias` in the assignment arm, which has the scope's
+        # alias set. Such an arm was written, measured REDUNDANT and refused-honest-writers at
+        # once, and removed.
         return any(
             _generator_unpacks_the_pair_into_the_key(node.key, generator)
-            and (_pairs_operand_stores_the_vector(generator.iter)
-                 # ⛔ …AND A PAIR WITH EXTRAS IS STILL READ AS `(key, …)` BY AN UNPACKING
-                 # CLAUSE: `{k: v for k, v, *rest in [("embedding", vec, 1)]}` places the
-                 # vector, and the pairs rule rejects a three-element element by design (it
-                 # mirrors what `dict([...])` accepts). Measured CERTIFIED at this head.
-                 or _unpacked_element_stores_the_vector(generator.iter))
+            and _source_holds_the_store_anywhere(generator.iter)
             for generator in node.generators)
     if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
         # `[x for x in [("embedding", vec)]]` — a comprehension over a pairs literal still
@@ -1937,6 +1953,57 @@ def _generator_unpacks_the_pair_into_the_key(key, generator) -> bool:
             and key.id == first.id)
 
 
+def _source_holds_the_store_anywhere(node) -> bool:
+    """Does this iterable hold a store, in either pair shape, through its wrappers?
+
+    ⛔ THE TWO SHAPES ARE ASKED TOGETHER, because an UNREADABLE KEY does not tell us which one
+    the clause reads: a two-element pair (`{f"{k}": v for k, v in [(…)]}`) and a pair WITH
+    EXTRAS (`{f"{k}": v for k, v, *rest in [(…, 1)]}`) are the same store. Asking only the
+    pairs rule here certified the extras spelling with a computed key (measured).
+
+    ⛔ AND THE WRAPPERS ARE FOLLOWED, not just a bare literal: `tuple([(…, 1)])`, `.copy()`,
+    a full slice, an `if`-expression, `+ []`/`* 1`, a comprehension over the literal and a
+    `Starred` splice are all the same sequence, and a bare-literal test certified every one of
+    them (measured). A container bound to a NAME stays the stated data-flow residual.
+    """
+    import ast
+
+    if isinstance(node, ast.List | ast.Tuple | ast.Set):
+        return (_pairs_store_the_vector(node)
+                or _unpacked_element_stores_the_vector(node)
+                or any(_source_holds_the_store_anywhere(element)
+                       for element in node.elts if isinstance(element, ast.Starred)))
+    if isinstance(node, ast.Starred):
+        return _source_holds_the_store_anywhere(node.value)
+    if isinstance(node, ast.Call):
+        name = _callee_name(node)
+        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
+            return _source_holds_the_store_anywhere(node.args[0])
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
+                and not node.args and not node.keywords):
+            return _source_holds_the_store_anywhere(node.func.value)
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
+                and not node.args and not node.keywords):
+            # ⛔ A MAPPING'S `.items()` VIEW *IS* A PAIRS SEQUENCE: `{k: v for k, v in
+            # {"embedding": vec}.items()}` places the property, and a source walk that knew
+            # only sequences certified it (measured by the suite this branch already had).
+            return _mapping_literal_stores_the_vector(node.func.value)
+        return False              # `zip(…)`, `map(…)`: the stated residual
+    if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
+        return _source_holds_the_store_anywhere(node.value)
+    if isinstance(node, ast.IfExp):
+        return (_source_holds_the_store_anywhere(node.body)
+                or _source_holds_the_store_anywhere(node.orelse))
+    if isinstance(node, ast.BinOp):
+        return (_source_holds_the_store_anywhere(node.left)
+                or _source_holds_the_store_anywhere(node.right))
+    if isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp):
+        return (any(_source_holds_the_store_anywhere(generator.iter)
+                    for generator in node.generators)
+                or _source_holds_the_store_anywhere(node.elt))
+    return False
+
+
 def _unpacked_element_stores_the_vector(node) -> bool:
     """Does this iterable literal hold an element whose FIRST TWO items are the store?
 
@@ -1947,7 +2014,7 @@ def _unpacked_element_stores_the_vector(node) -> bool:
     """
     import ast
 
-    if not isinstance(node, ast.List | ast.Tuple):
+    if not isinstance(node, ast.List | ast.Tuple | ast.Set):
         return False
     for element in node.elts:
         if not isinstance(element, ast.Tuple | ast.List) or len(element.elts) < 2:
@@ -2426,6 +2493,21 @@ def _property_alias_names(scope) -> frozenset[str]:
         for target in (sub.targets if isinstance(sub, ast.Assign) else [sub.target])
         if isinstance(target, ast.Name)
     )
+
+
+def _dict_comp_keyed_by_alias(node, alias_keys: frozenset[str]) -> bool:
+    """Is this a DICT COMPREHENSION keyed by a name bound to the property string?
+
+    `alias = "embedding"; props |= {alias: v for k, v in [("x", vec)]}` — the comprehension
+    twin of `props[alias] = …`. The key must be a NAME in the alias set and the value
+    NON-CONSTANT, the same two narrowings every arm here makes.
+    """
+    import ast
+
+    if not isinstance(node, ast.DictComp) or not alias_keys:
+        return False
+    return (isinstance(node.key, ast.Name) and node.key.id in alias_keys
+            and not isinstance(node.value, ast.Constant))
 
 
 def _keyed_by_alias(target, alias_keys: frozenset[str]) -> bool:
