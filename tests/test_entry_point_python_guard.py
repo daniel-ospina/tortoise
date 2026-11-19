@@ -1763,13 +1763,19 @@ REFUSAL_WHY: dict[str, str] = {
         "rewrite cannot drop it again (#11342)"
     ),
     "tools/claim_dense_leg_13732.py": (
-        "the set is CLOSED and stated in the tool's own exit table: 0 complete, "
-        "3 PUBLISHED-BUT-INCOMPLETE, 4 REFUSED, 2 argparse usage. 0 and 3 are "
-        "ANSWERS a reader branches on (3 means the run printed figures it could "
-        "not complete), so an environment refusal must not wear either; 1 is what "
-        "CPython gives an uncaught traceback, which is exactly what an old "
-        "interpreter must NOT look like. 4 is the tool's own 'could not run' — "
-        "the guard reuses it on purpose rather than inventing a code"
+        "the tool's own exit table is 0 ran, 2 precondition refused (NAMED), 3 an "
+        "arm's trace contradicted its declaration OR an arm was blocked, so the run "
+        "is published but not the complete answer, 4 argument "
+        "error for a flag the tool validates itself. 0 and 3 are ANSWERS a reader "
+        "branches on, so an environment refusal must not wear either; 1 is what "
+        "CPython gives an uncaught traceback, which is what an old interpreter "
+        "must NOT look like; 2 belongs to the tool's own named preconditions (and "
+        "argparse takes it too, for a bad flag). 4 therefore wins on the only test "
+        "that matters here — it is NOT an answer, NOT a traceback, and NOT a "
+        "precondition the tool itself reports — and it is verified unreachable "
+        "from a run: `grep -n 'return 4' tools/claim_dense_leg_13732.py` returns "
+        "only the flag-validation paths, and no wrapper in `.github/` branches on "
+        "it. The code chosen is safe; the shape is the guard's, not new"
     ),
 }
 

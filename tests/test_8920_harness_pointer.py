@@ -79,16 +79,27 @@ _POINTER = re.compile(
     r"|tests/(?P<path>[A-Za-z0-9_/]+?)(?:\.py)?\.(?P<psym>[A-Za-z0-9_]+))`"
 )
 
-#: A trailing token that is a file EXTENSION, not a symbol — i.e. the pointer
-#: names a whole file, which is outside this guard's scope (a file pointer
-#: does not break on a rename unless the file itself moves). The JS family is in
-#: the SAME class: `tests/x.mjs` is a harness a Python `importlib` can never
-#: resolve, so without these three the scan asserts an import of a file that is
-#: not a module — measured on `tests/test_middleware_host_consolidation.mjs`,
-#: named by `tortoise/hosted_api.py`'s `#13636` note (#13750-wave).
-_NOT_A_SYMBOL = frozenset(
-    {"py", "mjs", "js", "ts", "json", "yml", "yaml", "md", "txt", "toml"}
-)
+#: A trailing token that is an EXTENSION, not a symbol. It survives only for the
+#: BARE file pointer (`tests/test_x.py`, where `.py` lands in the symbol group);
+#: every other file pointer is classified by `_production_pointers`'s own rule —
+#: a token is a SYMBOL pointer only if `tests/<written>.py` exists and its tail
+#: is not an extension — so this set is ONE short conjunct, not the classifier:
+#: a new extension never has to be added to it for a file pointer to be
+#: recognised (the existence test does that), which is what stops the treadmill.
+#:
+#: ⛔ MEASURED (#13760 review): `tests/test_middleware_host_consolidation.mjs`,
+#: named by `tortoise/hosted_api.py`'s `#13636` note, was being IMPORTED as a
+#: Python module because the then-extension-list did not name `mjs` — and such a
+#: list is only ever as complete as today's citations (`tests/` also carries
+#: `.jsonl`, `.sh`, `.c`, `.html`). A JS harness is not a module in any Python
+#: sense, so that assertion had no ground. The token is now classified as a FILE
+#: pointer and is LISTED, not asserted — see `_production_pointers`.
+#: ⚠️ RESIDUAL, stated rather than hidden: file pointers are not existence-checked
+#: here (a `tests/x.py` placeholder in prose and a genuinely deleted test file
+#: look the same to this guard). That is a separate reach question, filed as
+#: #13765 — with the two lines it would red measured there, which is why it is not
+#: switched on here.
+_NOT_A_SYMBOL = frozenset({"py"})
 
 #: Names the #8920 move renamed away or never existed: the two pre-rename
 #: helpers, and the callee the moved docstring misspelled (`_purge_deleted_orgs`
@@ -156,23 +167,48 @@ CONSUMER_FIXTURES: dict[str, tuple[str, ...]] = {
 CONSUMERS = tuple(CONSUMER_FIXTURES)
 
 
-def _production_pointers() -> list[tuple[Path, str, str, str]]:
-    """Every (file, token, module, symbol) dotted pointer in production source."""
-    found: list[tuple[Path, str, str, str]] = []
+def _production_pointers() -> tuple[
+    list[tuple[Path, str, str, str]], list[tuple[Path, str, str]]
+]:
+    """(symbol pointers, file pointers) written into production source.
+
+    A SYMBOL pointer is (file, token, module, symbol) and is resolved by
+    importing the module and looking the symbol up. A FILE pointer is
+    (file, token, named path) and is OUT OF SCOPE for the import assertion — it
+    is returned so the caller can NAME it (and so the split is testable), not so
+    a claim can be made about it.
+
+    ⛔ The split is decided by whether `tests/<written>.py` exists, with a
+    one-member extension set (`_NOT_A_SYMBOL = {"py"}`) covering the bare
+    `tests/x.py` shape — i.e. by the TARGET, not by an enumeration of
+    extensions, which is only ever as complete as today's citations. `tests/_embedded._projection_host` is a
+    symbol pointer (the module file exists); `tests/x.mjs`, `tests/x.json` and a
+    bare `tests/x.py` are file pointers (no module file to import).
+    """
+    symbols: list[tuple[Path, str, str, str]] = []
+    files: list[tuple[Path, str, str]] = []
     for path in sorted(PRODUCTION_DIR.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         for match in _POINTER.finditer(text):
             dotted = match.group("dotted")
-            module = dotted if dotted else match.group("path").replace("/", ".")
-            symbol = match.group("dsym") or match.group("psym")
-            if symbol in _NOT_A_SYMBOL:
+            if dotted:
+                symbols.append(
+                    (path, match.group(0), f"tests.{dotted}", match.group("dsym"))
+                )
                 continue
-            found.append((path, match.group(0), f"tests.{module}", symbol))
-    return found
+            written = match.group("path")
+            symbol = match.group("psym")
+            if symbol not in _NOT_A_SYMBOL and (TESTS_DIR / f"{written}.py").is_file():
+                symbols.append(
+                    (path, match.group(0), f"tests.{written.replace('/', '.')}", symbol)
+                )
+            else:
+                files.append((path, match.group(0), f"tests/{written}.{symbol}"))
+    return symbols, files
 
 
 def test_production_pointers_into_the_test_tree_resolve():
-    pointers = _production_pointers()
+    pointers, file_pointers = _production_pointers()
     assert pointers, (
         "no `tests.<module>.<symbol>` pointer found under tortoise/ — the "
         "scan itself broke, so this guard would pass vacuously"
@@ -192,6 +228,26 @@ def test_production_pointers_into_the_test_tree_resolve():
     assert not broken, (
         "production source names test symbols that do not resolve:\n  "
         + "\n  ".join(broken)
+        + "\n⛔ file pointers are OUT OF SCOPE here and are listed for the next "
+        "reader rather than asserted: " + ", ".join(sorted(t for _, _, t in file_pointers))
+    )
+
+
+def test_the_file_pointer_split_is_what_makes_the_mjs_pointer_sane():
+    """The `.mjs` pointer that motivated the split is classified as a FILE, not a module.
+
+    A class-complete check cannot be a list of extensions: such a set is only as
+    complete as today's citations (`tests/` carries `.jsonl`, `.sh`, `.c`,
+    `.html`). So this pins the DECISION for the pointer that broke first: it is
+    classified as a FILE pointer, and the import assertion therefore never sees
+    it. (Whether a file pointer's target exists is a different question, and is
+    NOT asserted here.)
+    """
+    _, file_pointers = _production_pointers()
+    targets = {target for _, _, target in file_pointers}
+    assert "tests/test_middleware_host_consolidation.mjs" in targets, (
+        "the `.mjs` harness pointer is no longer classified as a FILE pointer — "
+        f"file pointers now are {sorted(targets)}"
     )
 
 
