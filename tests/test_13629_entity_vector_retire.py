@@ -764,8 +764,8 @@ def test_write_gate_does_not_trust_the_record_predicate_alone(
 
     monkeypatch.setattr(record_vector, "mirror_verdict",
                         lambda entity_type, **_: (
-                            False, "the record holds 3 vector(s) for object, the graph "
-                                   "serves 3"), raising=False)
+                            False, "the count measured 3 vector(s) in the record for object "
+                                   f"against 3 in the graph"), raising=False)
     # The recorded predicate says "not required" for every label; that is a READ fact and
     # the gate must still answer "emits" while a writer exists that nobody stopped.
     ungated = _fake_writer_module(tmp_path, monkeypatch, """
@@ -1665,8 +1665,8 @@ def test_the_gate_OPENS_when_every_declared_writer_asks(monkeypatch, tmp_path):
 
     monkeypatch.setattr(record_vector, "mirror_verdict",
                         lambda entity_type, **_: (
-                            False, "the record holds 2 vector(s) for object, the graph "
-                                   "serves 2"), raising=False)
+                            False, "the count measured 2 vector(s) in the record for object "
+                                   f"against 2 in the graph"), raising=False)
     gated = _fake_writer_module(tmp_path, monkeypatch, """
 def _only_writer(ev):
     if not _derived_mirror_required("object"):
@@ -1682,7 +1682,7 @@ def _only_writer(ev):
     # ⛔ AND THE CERTIFIED REASON NAMES THE MEASUREMENT (`#13796`): a `strip_ready: True`
     # rests on it, so the counts the verdict compared must survive into the sentence the
     # operator reads.
-    assert "2 vector(s)" in reason and "serves 2" in reason
+    assert "2 vector(s)" in reason and "against 2 in the graph" in reason
     # …and a single un-gated writer closes it again, so the positive arm is not a bypass.
     monkeypatch.setattr(strip, "_writers_for", lambda label: (
         (f"{gated}::_only_writer", f"{gated}::_missing"), None))
@@ -1980,7 +1980,7 @@ def test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_suppli
         record_dsn="postgresql://localhost/record")
     assert "answers False" in reason, reason
     assert "has not proved" not in reason, reason
-    assert "the record holds 9200 vector(s) for object, the graph serves 9200" in reason, (
+    assert "the count measured 9200 vector(s) in the record for object against 9200 in the graph" in reason, (
         f"the measured arm did not report the two counts it compared: {reason}")
     # ⛔ AND THE TENANT WAS ASKED FOR IN THE DECLARED ORDER (review round 7). A swapped
     # `scope=(graph_id, org_id)` measures a DIFFERENT tenant — both halves are non-empty
@@ -2011,7 +2011,7 @@ def test_a_short_record_refuses_the_label_with_BOTH_counts_in_the_reason(monkeyp
     # ⛔ THE SENTENCE, NOT THE DIGITS. `"12" in reason` is satisfied by any two digits
     # anywhere in a reason that also embeds the fold's line numbers, so a deficit reported
     # with the wrong counts would still pass it (found in review of this change).
-    assert "the record holds 12 vector(s) for object, the graph serves 9200" in reason, (
+    assert "the count measured 12 vector(s) in the record for object against 9200 in the graph" in reason, (
         f"a short record did not report the deficit it measured: {reason}")
 
 
@@ -2050,12 +2050,12 @@ def test_the_plan_is_STRIP_READY_from_a_fresh_process_when_the_record_covers(
     assert plan["ready"] is True
     # ⛔ THE REASON NAMES BOTH COUNTS, on the READY arm — that is what makes
     # `strip_ready: True` checkable instead of asserted.
-    assert "the record holds 1 vector(s)" in row["readiness_reason"]
-    assert "the graph serves 1" in row["readiness_reason"], row["readiness_reason"]
+    assert "the count measured 1 vector(s) in the record" in row["readiness_reason"]
+    assert "against 1 in the graph" in row["readiness_reason"], row["readiness_reason"]
     # …and the operator reading the PLAN sees them, not the bare word "ready".
     rendered = strip.render_plan(plan)
-    assert "the record holds 1 vector(s)" in rendered
-    assert "the graph serves 1" in rendered
+    assert "the count measured 1 vector(s) in the record" in rendered
+    assert "against 1 in the graph" in rendered
 
 
 def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeypatch):
@@ -2099,7 +2099,7 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
         "a short record certified a strip — the graph holds vectors the record cannot "
         f"answer with ({row})")
     blocked = row["blocked_reason"]
-    assert "the record holds 1 vector(s) for object, the graph serves 3" in blocked, blocked
+    assert "the count measured 1 vector(s) in the record for object against 3 in the graph" in blocked, blocked
     assert "has not proved" not in blocked, blocked
 
 
@@ -2165,7 +2165,7 @@ def test_the_stripper_cli_hands_the_gate_its_own_projection_and_tenant(
                        "--org-id", "o", "--graph-id", "g",
                        "--label", "Object"]) == 0
     out = capsys.readouterr().out
-    assert "the record holds 2 vector(s) for object, the graph serves 2" in out, (
+    assert "the count measured 2 vector(s) in the record for object against 2 in the graph" in out, (
         "the preview plan did not carry the measurement — `main` stopped handing the gate "
         f"its own projection/tenant, and #13796 is back ({out})")
     assert "has not proved" not in out, out
@@ -2215,7 +2215,7 @@ def test_the_census_cli_hands_the_gate_its_own_projection_and_tenant(
                         "--label", "Object"]) == 0
     probe = captured["strip_readiness"]
     _ready, reason = probe("Object")
-    assert "the record holds 2 vector(s) for object, the graph serves 2" in reason, (
+    assert "the count measured 2 vector(s) in the record for object against 2 in the graph" in reason, (
         "the census's gate was not given the run's projection/tenant, so it answers "
         f"\"not proved\" for a covered label (#13796's symptom): {reason}")
     assert "has not proved" not in reason, reason
@@ -2263,7 +2263,7 @@ def test_the_census_gate_takes_its_record_leg_from_the_flag_not_the_ambient_env(
                         "--org-id", "o", "--graph-id", "g",
                         "--label", "Object"]) == 0
     _ready, reason = captured["strip_readiness"]("Object")
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in reason, (
+    assert "the count measured 1 vector(s) in the record for object against 1 in the graph" in reason, (
         "the census's gate did not receive this run's --record-dsn, so the record leg "
         f"came from an absent ambient and nothing was measured ({reason})")
     assert "not proved" not in reason, reason
@@ -2312,7 +2312,7 @@ def test_the_plan_probe_takes_its_record_leg_from_the_flag_not_the_ambient_env(
                        "--org-id", "o", "--graph-id", "g",
                        "--label", "Object"]) == 0
     out = capsys.readouterr().out
-    assert "the record holds 1 vector(s) for object, the graph serves 1" in out, (
+    assert "the count measured 1 vector(s) in the record for object against 1 in the graph" in out, (
         "the plan did not carry the measurement — `build_plan` stopped handing the probe "
         f"this run's --record-dsn, so the record leg came from an absent ambient ({out})")
     assert "has not proved" not in out, out
