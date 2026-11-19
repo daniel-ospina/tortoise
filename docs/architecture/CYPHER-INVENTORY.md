@@ -4,7 +4,7 @@ type: architecture
 domain: platform
 doc_status: draft
 created: 2026-11-17
-updated: 2026-11-19
+updated: 2026-11-17
 issue: "#13098"
 subjects.team: epistemic-team
 aboutSubjects: Cypher surface, FalkorDB, Postgres record, differential testing, Cypher→Postgres migration
@@ -40,7 +40,7 @@ this document classifies **statements**.
 
 > **The finding, with its count: 586 of 1324 product statements (44.3 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
-> and they are served from a store that costs ~586× as much per GB as the record (`#13082`). That is
+> and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
 > not an adjective; it is 586 statements.
 
 ---
@@ -66,9 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1324** | **101** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,170** | **842** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,132 / 9,150 here, and only `9,170` reproduces at this tree — the 2,439 files
-it scanned include this lane's three (`#13557`/`#13558`); the number beside this row names the tree
-it does) |
+| every tracked surface (`--all-surface`) | **9,170** | **842** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 here, and only `9,170` reproduces at this tree — the 2,439 files it scanned include this lane's three (`#13557`/`#13558`); the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -271,7 +269,7 @@ The order a campaign should take, derived from §3 rather than chosen:
 | 2 | `plain` reads by id-list (`WHERE n.id IN $ids`) | same simplicity, one predicate more; needs an IN-list corpus | a large share of the 586 |
 | 3 | `plain` aggregates / counts | no traversal, but a fan-out difference is easy to get wrong → needs a larger corpus and a variance check | a subset of the 586 |
 | 4 | `plain` writes | **not a Cypher→SQL move** — these disappear with the node when `#13083` makes the shape `record_only` | 282 |
-| — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 330 |
+| — | `adjacency` / `traversal` / `ep` / `fulltext` | **do not flip without a reopen on `#4051`** | 329 |
 
 ### The first candidate, measured
 
@@ -420,38 +418,73 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**The cut for `#13557`/`#13558` (the reachable state reads):** `origin/main` **`1603cc7f6b`**, a plain
-merge of `origin/main` into `fix/13557-13558-reachable-reads` — re-derived by RUNNING the tool on the
-MERGED tree, never by arithmetic on the markers and never carried from the branch's own head. The
-change adds **one** Cypher statement site and **no** non-Cypher door call:
-`tortoise/commitments.py::build_cypher` is the live-commitment enumeration `#13557` needed, and it is
-built by concatenation (the WHERE comes from `live._terminal_excluded` taken with ITS OWN defaults —
-the exact De Morgan dual of the `live._terminal_expression` the ended read selects by; a per-family
-vocabulary on one side of that duality is how one record ends up in both populations), so it lands as
-`unresolved` rather than `plain`. It also adds a second scanned file that carries NO site
-(`tortoise/state_intent.py`, the question→population detector), which is why `files_scanned` moves by
-two while `files` moves by one. So `sites` 1323→**1324**, `unresolved` 108→**109** (the
-`shape_unresolved` and `shape_unresolved_unresolved` pins with it), `ast_door_calls` 1585→**1586**,
-`files` 100→**101**, `files_scanned` 300→**302**; `plain` **868** (read **586** / write **282**),
-`adjacency` **293** (read **192** / write **101**), `candidates` **586**, `partial` **318** and
-`non_cypher_door_calls` **262** are all unchanged — nothing here is a candidate for the record store,
-which is the metric §0 is about.
+**The cut at the `origin/main` integration that carries this PR's merge (`#13557`/`#13558` ×
+`#13610` × `#12244`):** re-derived by RUNNING the tool on the merged tree, never by arithmetic on the
+markers — and ⛔ **the merge IS the measurement**, because a `pull_request` job checks out the merge
+commit and a pin green on each parent can be red on their union (§7's own first paragraph). `main`
+brought two cuts this branch never measured, and this paragraph records both rather than losing them
+in the conflict: **`#13610`**'s `FalkorProjection._label_vector_count` (base `0d5bb6506f`) — one
+`plain` read and, separately, one non-Cypher door call — and **`#12244`** (`1b1d108ca423`) — the
+shared collapse behind `hosted_api._execute_commit_writes`, whose holder read and dangling-pointer
+existence read are `plain` reads and whose edge write by entity is an `adjacency` write. With this
+branch's own `commitments.py` site, from the common base `1319`:
+`sites` **1324** = 1319 + 1 (`#13610`) + 3 (`#12244`) + 1 (this PR);
+`plain` **868** (read **586**, write **282**) = 865 + 1 + 2;
+`adjacency` **293** (read **192**, write **101**) = 292 + 1;
+`unresolved` **109** = 108 + 1 — this PR's concatenated statement, the only `unresolved` any of the
+two cuts adds;
+`non_cypher_door_calls` **262** = 261 + 1 (`#13610`'s method is a door call AND a statement site,
+which is why the two operands move together);
+`partial` **318** = 315 + 1 + 2; `ast_door_calls` **1586** = 1324 + 262;
+`files` **101** = 100 + 1 (`commitments.py` is the only new file that CARRIES a site);
+`files_scanned` **302** = 300 + 2 (`commitments.py`, plus `state_intent.py` which carries none).
+§1's `rg` reconciliation is re-quoted from the tool at this tree (door **1,640 / 110** whole-text,
+verb **2,365 / 147**, bare **1,646 / 111**), and the `--all-surface` row re-derived: **9,170 / 842**
+across **2,439** scanned files. Appendix A is regenerated with `--markdown`, and `--check` prints
+**`25 pinned counts match`**. ⚠️ The two paragraphs below describe each parent's cut against ITS OWN
+base, so their numbers are relative and no longer the table's — the tables and pins carry THIS one.
 
-⚠️ **A prose figure in §3 was repaired here rather than carried, and it is the same staleness this
-section keeps finding:** the `partial` sentence read `315` while the pinned `partial` was already
-`318` — an unpinned restatement drifting beside a pinned one. The tool is the authority for both, so
-both now read **318**. §1's `rg` reconciliation is re-measured at this merged tree (door **1,640 /
-110** whole-text, verb **2,365 / 147**, bare `-i` **2,424**, and the 13 cross-line verb matches are
-still 13, in 10 files), and the `--all-surface` row is re-derived rather than carried: **9,170 / 842**
-(2,439 files scanned), of which exactly **3** sites in **2** carrying files are this lane's —
-enumerated, not inferred: `tortoise/commitments.py:235` (the concatenated statement, `unresolved`) and
-`tests/test_13557_13558_reachable_reads.py` (the availability probe's `RETURN 1` read at `:87`, and
-the raw legacy-row write the duality test needs at `:721`). Appendix A is regenerated with
-`--markdown` at this tree — ⛔ **it moved far more than one row**, because `main`'s 47 commits insert
-lines in `tortoise/sdk.py`, `tortoise/mcp_server.py` and `tortoise/tool_registry.py` above existing
-sites, and this branch's own `sdk.py` hunks sit above the rest — that is the `file:line`-versus-SCALAR
-gap, and the reason Appendix A is regenerated rather than edited. `--check` prints **`25 pinned counts
-match`**.
+**The cut for `#13557`/`#13558` (the reachable state reads):** `origin/fix/13128-occurrence-kind-spellings`
+**`5f73f582a0`**, the read-layer PR this lane is deliberately based on (so it inherits that PR's changes
+instead of colliding with them) — re-derived by RUNNING the tool on this tree, never by arithmetic on
+the markers. The change adds **one** Cypher statement site and **no** non-Cypher door call:
+`tortoise/commitments.py::build_cypher` is the live-commitment enumeration `#13557` needed, and it is
+built by concatenation (the WHERE comes from `live._terminal_excluded` taken with ITS OWN defaults — the
+exact De Morgan dual of the `live._terminal_expression` the ended read selects by; review round 1
+removed a per-family vocabulary here, because a family seam on one side of a duality is how one record
+ends up in both populations), so it lands as `unresolved` rather than `plain`. And it adds a
+second scanned file that carries NO site (`tortoise/state_intent.py`, the question→population
+detector), which is why `files_scanned` moves by two while `files` moves by one. So `sites`
+1319→**1320**, `unresolved` 108→**109** (the `shape_unresolved` and
+`shape_unresolved_unresolved` pins with it), `ast_door_calls` 1580→**1581**, `files` 100→**101**,
+`files_scanned` 300→**302**; `plain` **865** (read **583**, write **282**), `candidates` **583**,
+`non_cypher_door_calls` **261** and `partial` **315** are all unchanged — nothing here is a candidate
+for the record store, which is the metric §0 is about. §1's `rg` reconciliation was re-measured at
+that head (door **1,635 / 110** whole-text, verb **2,353 / 146**, bare **1,641 / 111**), and the
+`--all-surface` row was re-derived rather than carried: **9,110 / 836** (2,425 files scanned), of which
+exactly **3** sites and **2** carrying files are this lane's — enumerated, not inferred:
+`tortoise/commitments.py` (the concatenated statement, `unresolved`),
+`tests/test_13557_13558_reachable_reads.py` (the availability probe's `RETURN 1` read and the raw
+legacy-row write the duality test needs). The rest of the move from the row's previous **9,082 / 827**
+is drift this lane did not cause; the base with its three files absent is **9,107 / 834** (2,422
+scanned). Appendix A is regenerated with `--markdown` here, so ⛔ **it moved far more than one row**.
+
+**And the re-cut at this branch's merge with `origin/main` `9d25456544`:** the base this lane was
+deliberately built on (`fix/13128-occurrence-kind-spellings`) landed as `#13604`'s squash commit
+`18d406258f` while the lane ran, so the branch was integrated forward instead of being left to open a
+PR that reverts `main`. **NO pin moved** — `--check` prints `25 pinned counts match` at both heads,
+because `main`'s twenty commits insert no statement site — while **159 Appendix A rows** moved:
+`main` inserts lines into `tortoise/mcp_server.py`, `tortoise/sdk.py` and `tortoise/tool_registry.py`
+above existing sites, which shifts every `file:line` row beneath them while the counts hold. This is
+the `file:line`-versus-SCALAR gap this section names, from yet another side — and Appendix A is
+regenerated at the merged tree, not carried from the branch head.
+
+⚠️ **AND THESE PINS ARE CUT AT A FEATURE BRANCH'S MERGE, NOT AT THE `main` IT WILL LAND ON, WHICH IS
+WHY THE FINAL MERGE MUST RE-CUT THEM AGAIN IF `main` MOVES.** §7's rule above is that the pins are absolute counts of `tortoise/**` and move with the base:
+`origin/main` is ahead of this lane's base, so the merge commit's census is not the one measured here,
+and `--check` on the merge will report the difference. That is the documented procedure's step 1, not a
+defect in this cut — but it is stated here rather than left for the merge to discover, because a pin
+that reads green at a branch head and red at the merge is the failure this section exists to name.
 
 **This PR's cut (#12244):** `origin/main` **`1b1d108ca423`**, forward-merged into
 `fix/12244-merge-collapse` — re-derived by RUNNING the tool on the merged tree, never by arithmetic on
