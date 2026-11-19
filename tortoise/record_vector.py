@@ -889,11 +889,10 @@ def _record_vector_count(label: str, scope: _Scope, *,
     `document` ⊂ `public.source`, and the SERVE applies `LABEL_SERVED[label][2]`
     (`if kind_filter: where.append(kind_filter)` in :func:`vector_search`) — so a
     numerator taken over the whole table would let a record holding only plain
-    points verify `operator` on a SURPLUS of plain points, and the kind-filtered
-    read would then answer with zero rows of that kind while the COUNT called the
-    label covered — and an empty answer from the RECORD cannot carry `reason=ok`
-    (`search_engine.py:4229` needs non-empty rows), so nothing on the record leg
-    reports the shortfall. One-sided on purpose: the graph
+    points verify `operator` on a SURPLUS of plain points, and the record's
+    kind-filtered answer would hold zero rows of that kind while the COUNT called the
+    label covered (the graph answers the read, `search_engine.py:4179`, so nothing on
+    the record leg reports its shortfall). One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
     count), so the comparison for those two labels is not merely HARDER to pass —
     for `document`/`source` it is UNREACHABLE whenever the other kind carries an

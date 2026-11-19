@@ -702,9 +702,12 @@ def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
     label that holds nothing in EITHER store reported the SAME `verified=True` as a
     fully backfilled one, so *"the record caught up"* was a finding the count never
     established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
-    population PASSES this gate and is then served as `mechanism=pgvector,
-    reason=empty_results` — the SAME token a backfilled label answering the same
-    empty read records, which is why the instrument could not tell the two apart.
+    population PASSES this gate and is then served by a leg whose trace does not name
+    the two-zero state: `empty_results` on the record for the two CONTRACTED labels
+    (`object`/`subject`), and for the other five — including `point`, the label this
+    case reads — the empty record answer falls through and the graph records
+    `scan_fallback`/`no_embeddings`/`degraded=True`. Neither token says the count
+    compared two zeroes, which is why the instrument could not tell the states apart.
 
     ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
     stores answer identically, so refusing would change deployment behaviour for a
@@ -1670,10 +1673,10 @@ def test_the_numerator_applies_the_labels_kind_predicate():
     (`vector_search`: `if kind_filter: where.append(kind_filter)`), so a numerator
     taken over the whole table compares a KIND's served rows against the PARENT
     table's total: a record holding only plain points would verify `operator` on a
-    surplus of plain points, and the operator-scoped read would then be answered
-    from the record with zero rows of that kind — an empty answer from the RECORD,
-    which cannot carry `reason=ok` (`search_engine.py:4229` needs non-empty rows), so
-    nothing on the record leg reports the shortfall. `record ≥ graph` is the expected
+    surplus of plain points, and the operator-scoped read's record answer would hold
+    zero rows of that kind — which for a non-contracted label falls through to the
+    graph (`search_engine.py:4179`) — so nothing on the record leg reports the
+    shortfall. `record ≥ graph` is the expected
     steady state once the record (truth)
     is ahead of the graph (cache), so the surplus is not exotic.
     """
