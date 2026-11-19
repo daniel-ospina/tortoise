@@ -635,6 +635,14 @@ def _swallowed_from_outside(function, guard, parents) -> bool:
     `with`/`async with` BODY (its ``__exit__`` sees everything propagating out of it).
     Everything else on the path — `if`, `for`, `while`, `match`, a `finally` — is
     transparent, so the walk continues upward; a nested scope ends it.
+
+    ⚠️ THE `with` ARM'S POSITION TEST IS STRUCTURAL, NOT DEFENDED. `child in parent.body`
+    cannot be mutated into a red test, because a STATEMENT can only ever be a `With`'s
+    body — its `items` are expressions (measured over every registered writer module and
+    this file's fixtures: 32 `with` ancestors, 32 in `body`, 0 elsewhere). It is kept for
+    symmetry with the `try` arm, whose identical conjunct IS pinned (dropping it reddens
+    `test_a_swallowed_exit_does_not_certify_the_arm`). Do not read it as a checked
+    invariant.
     """
     import ast
 
