@@ -127,11 +127,15 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⚠️ This branch's own `#5425` seam wrap sits ABOVE this cite and is written LINE-COUNT NEUTRAL
     # for exactly that reason — a +1 there moved this pin (and every other `sdk.py` pin below
     # `:51496`) by one, measured at the merge resolution.
-    # ⛔ The "comparable" denominator: the pair this branch re-derives (`sdk.py:57276` — the seam above it
-    # is line-neutral, so nothing moved) names a line past the pin's `sdk.py` (56,415 lines), so the header
-    # counts it as drifted rather than compared — measured at this head: 213 comparable, 121 of them
-    # drifted, plus that one = 122 of the 214.
-    (_AUDIT, '`sdk.py:57276` passes `"event"`', _SDK, 57387, 'entity_type="event"'),
+    # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
+    # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
+    # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
+    # those three (`sdk.py:57387`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +111 since
+    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
+    (_AUDIT, '`sdk.py:57387` passes `"event"`', _SDK, 57387, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -275,7 +279,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37467` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37467`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37444` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57276` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57387` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,

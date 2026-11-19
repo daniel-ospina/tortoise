@@ -87,7 +87,7 @@ naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files 
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **327** as-written spellings to 214 — **113**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
 text; **211 of the 214 are comparable at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the three that are not are this branch's own**: `sdk.py:57276`, whose
+exists at `ccb49741b2ec` — and **the three that are not are this branch's own**: `sdk.py:57387`, whose
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
 (7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — all three re-derived at
@@ -374,7 +374,7 @@ mechanism, not a citation nicety.
 | `tortoise/goal_judgement.py:1128` | `MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator` | **adjacency** |
 | `tortoise/search_engine.py:7198` | `(m:Event)-[r2:aboutSubject]->(:Subject)` | **adjacency** |
 | `tortoise/assembly.py:2632` | `MATCH (o:Object {id:$oid})<-[:aboutObject]-(e:Event)` | **adjacency** |
-| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:57276` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
+| `tortoise/search_engine.py:3157` | `CALL db.idx.fulltext.queryNodes('Event', $query)` — the label-parametric FTS leg (`:3062` derives the label from `entity_type`; `sdk.py:57387` passes `"event"`); the index declares `("Event", ["subject","name"])` at `projection/__init__.py:6984` | **fulltext index** |
 
 **Verdict: `graph`.** ⚠️ **Whole-node reads are absent from the table above and belong to it by §2's own rule —
 and this is a LOWER BOUND of eight, not a census of two.** The two the earlier draft found are
