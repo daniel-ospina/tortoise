@@ -6432,6 +6432,57 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+
+        # ⛔ AND THE SPLICE MUST KEEP THE ARGUMENT POSITION (`#13788`, measured at `fbcbf152`).
+        # `_spliced_sequence_elements` unions every option, which is right for "is there a store
+        # in here" and WRONG for the position-sensitive three-argument test: the union put the
+        # non-storing branch first, so `"embedding"` landed at index 2 and the store CERTIFIED
+        # while the bare twin was refused. Each expansion is now tested on its own.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *({"x": 1} and (["embedding", _encode(ev)])))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *({"x": 1} and [["embedding", _encode(ev)]][0]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props._set(props, *([] if _f() else ["embedding", _encode(ev)]))
+        return None
+    _write(props)
+""",
+        # ⛔ AND A `*`-SPLICED ZIPCALL IS THE SAME CALL (`#13788`, measured at `fbcbf152`): the
+        # arm required exactly two positional arguments, and a single `Starred` is ONE, so
+        # `zip(*[("embedding",), (vec,)])` CERTIFIED one spelling from its refused twin.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip(*[("embedding",), (_encode(ev),)])
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(zip(*[("embedding",), (_encode(ev),)]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= zip(*(("embedding",), (_encode(ev),)))
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad

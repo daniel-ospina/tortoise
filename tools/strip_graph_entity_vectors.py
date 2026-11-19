@@ -1566,13 +1566,18 @@ def _mapping_literal_stores_the_vector(node, alias_keys: frozenset[str] = frozen
     # on a stop arm and still lifted `REFUSE_WRITE_STILL_EMITS`.
     # REFUSAL-ONLY: either operand may be the one SELECTED, so a store in ANY of them is a
     # store. A `BoolOp` whose operands place nothing still answers False, exactly as before.
-    # ⛔ STATED OVER-REFUSAL (`#13788`, measured at `6a164ac9`): `and` returns its LEFT operand
-    # when that operand is FALSY, so a statically-TRUTHY left operand makes the right one the
-    # result — `props |= [("embedding", vec)] and []` is `[]` and places nothing, yet it is
-    # refused. Deciding that needs truthiness of an arbitrary literal, and the series' doctrine
-    # permits an over-refusal where a false PASS is the alternative, so the imprecision is
-    # DISCLOSED here rather than left to be rediscovered (the same imprecision already exists
-    # for `if`-expressions, whose branches are both answered too).
+    # ⛔ STATED OVER-REFUSAL — AND IT IS THE WHOLE `BoolOp` FAMILY, NOT JUST `and` (`#13788`,
+    # measured at `6a164ac9`, widened by the cycle-5 review which measured the class at 59 rows):
+    # `a or b` returns `b` only when `a` is FALSY and `a and b` returns `b` only when `a` is
+    # TRUTHY, so a statically-known left operand decides which one is the result. Answering both
+    # operands regardless refuses spellings that place nothing — `props |= [("embedding", vec)]
+    # and []` is `[]`, `props |= [] or [("embedding", vec)]` is the pair list only when it is
+    # reached, and the same holds for the BOTH-branch answer inside an `if`-expression, which has
+    # carried this imprecision since it was written. Deciding any of it needs the truthiness of
+    # an arbitrary literal; the series' doctrine permits an over-refusal where a false PASS is
+    # the alternative, so the imprecision is DISCLOSED here rather than left to be rediscovered
+    # — and the review's control axis (742 rows, non-storing writers) measured ZERO wrong
+    # refusals, so no honest writer is caught by it in practice.
     if isinstance(node, ast.BoolOp):
         return any(_mapping_literal_stores_the_vector(value, alias_keys=alias_keys)
                    for value in node.values)
@@ -1805,14 +1810,27 @@ def _zip_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bo
                         option[index], alias_keys=alias_keys):
                     return True
         return False
-    if _callee_name(call) != "zip" or len(call.args) != 2:
+    if _callee_name(call) != "zip":
         return False
-    keys, values = call.args
+    # ⛔ THE COLUMNS MAY ARRIVE AS A `*` SPLICE (`#13788`, measured at `fbcbf152`). `len(call.args)
+    # != 2` short-circuited `zip(*[("embedding",), (vec,)])` — the same call, one `*` away from
+    # the refused twin — because a single `Starred` is ONE argument. Each expansion is tried as
+    # its own argument list, so a `*` over a conditional cannot hide a storing branch either.
+    return any(_zip_pair_stores_the_vector(expansion, alias_keys=alias_keys)
+               for expansion in _argument_expansions(call.args)
+               if len(expansion) == 2)
+
+
+def _zip_pair_stores_the_vector(columns, alias_keys: frozenset[str] = frozenset()) -> bool:
+    """Does this TWO-COLUMN `zip` pair a literal property key with a live value?"""
+    import ast
+
+    keys, values = columns
     # ⛔ EACH COLUMN IS RESOLVED, NOT TYPE-TESTED (`#13788`, measured at `6504b28f`). The type test
-    # below answered a BARE List/Tuple in each column, so `zip(list(("embedding",)), (vec,))`,
+    # that stood here answered a BARE List/Tuple in each column, so `zip(list(("embedding",)), (vec,))`,
     # `dict(zip(("embedding",), (vec,)[:]))`, `zip(("embedding",) if f else ("x",), …)`,
     # `zip((p := ("embedding",)), …)` and `tuple(["embedding"])` as the key column all CERTIFIED
-    # while the bare twin was refused — 320 of the 451 matrix rows this round measured. The
+    # while the bare twin was refused — 320 of the 451 matrix rows that round measured. The
     # columns are resolved with the SAME sequence resolver every other arm asks, and pairing is
     # per OPTION pair, so a conditional column cannot hide a store behind an unselected branch.
     key_options = _sequence_options(keys)
@@ -2796,6 +2814,48 @@ def _spliced_sequence_elements(node) -> list:
     return [element for option in options for element in option]
 
 
+def _three_argument_store(arguments, alias_keys: frozenset[str] = frozenset()) -> bool:
+    """Is this `(…, EXACT property, non-constant value)`? THE positional three-argument store.
+
+    Extracted so a caller can ask it of EVERY expansion of a `*`-spliced argument list rather
+    than of one flattened list, which is what lost the argument POSITION (`#13788`, measured at
+    `fbcbf152`).
+    """
+    import ast
+
+    return (len(arguments) >= 3
+            and _names_property_key(arguments[1], alias_keys)
+            and not isinstance(arguments[2], ast.Constant))
+
+
+def _argument_expansions(arguments) -> list[list]:
+    """Every ARGUMENT LIST these call arguments can expand to — position preserved.
+
+    ⛔ POSITION IS THE WHOLE POINT (`#13788`, measured at `fbcbf152`). A `Starred` argument is
+    spliced, and a `Starred` over a CONDITIONAL has one expansion per branch. Unioning those
+    branches into one list (which `_spliced_sequence_elements` does, correctly, for the
+    question "is there a store in here") destroys the ARGUMENT POSITION the three-argument
+    test reads: `props._set(props, *({"x": 1} and (["embedding", vec])))` really is
+    `_set(props, "embedding", vec)`, but a union puts the `{"x": 1}` branch first and
+    `"embedding"` lands at index 2 — CERTIFIED. So this returns ONE USER PER BRANCH, and the
+    caller asks its position-sensitive rule of each.
+
+    A `Starred` this check cannot read stays as the `Starred` node, so the caller's raw-form
+    test still sees an opaque argument (refusal-only, as everywhere else).
+    """
+    import ast
+
+    expansions: list[list] = [[]]
+    for argument in arguments:
+        if isinstance(argument, ast.Starred):
+            options = _sequence_options(argument.value)
+            branches = options if options is not None else [[argument]]
+        else:
+            branches = [[argument]]
+        expansions = [prefix + branch for prefix in expansions for branch in branches]
+    return expansions
+
+
 def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this call NAME the property exactly, in a position a writer would name it in?
 
@@ -2818,29 +2878,28 @@ def _third_argument_stores_the_vector(call, alias_keys: frozenset[str] = frozens
     # `_mutator_stores_the_vector`'s `__setitem__` branch, so the HELPER spelling
     # `_set(props, *["embedding", vec])` — a genuine store — certified the stop arm while
     # `_set(props, "embedding", vec)` was refused.
+    #
+    # ⛔ AND EVERY EXPANSION IS TESTED ON ITS OWN, NEVER FLATTENED INTO ONE LIST (`#13788`,
+    # measured at `fbcbf152`). Unioning the options of a conditional loses the ARGUMENT
+    # POSITION: `props._set(props, *({"x": 1} and (["embedding", vec])))` evaluates to
+    # `_set(props, "embedding", vec)` — a store — but the flattened list put the `{"x": 1}`
+    # branch first, so `"embedding"` landed at index 2 and the three-argument test, which reads
+    # `arguments[1]`, CERTIFIED it. Same for a store branch that is not the FIRST branch of an
+    # `or`/`and`/`if…else`. A position-preserving expansion can only add refusals: every
+    # candidate below is a shape the call really can take.
     raw = list(arguments)
-    spliced: list = []
-    for argument in raw:
-        # ⛔ A `Starred` ARGUMENT IS SPLICED THROUGH THE WHOLE WRAPPER FAMILY (`#13788`, measured
-        # at `794eb162`, F1) — see `_spliced_sequence_elements`, which is the ONE flattener.
-        if isinstance(argument, ast.Starred):
-            spliced.extend(_spliced_sequence_elements(argument.value))
-        else:
-            spliced.append(argument)
-    arguments = spliced
-    # ⛔ BOTH FORMS, because SPLICING CAN ALSO REMOVE A REFUSAL. `props.__setitem__(
-    # "embedding", *[])` splices to ONE argument, so the spliced-only test would skip it —
-    # while the parent's flat reading of the raw args counted the `Starred` node as the
-    # non-constant second argument and refused it. A fix may add refusals, never acceptances,
-    # so the raw form is tested too (and the two are not duplicates: each covers a case the
-    # other misses, and dropping either reddens the suite).
-    if _two_argument_store(arguments, alias_keys=alias_keys) or _two_argument_store(
-            raw, alias_keys=alias_keys):
+    expansions = _argument_expansions(raw)
+    if _two_argument_store(raw, alias_keys=alias_keys):
+        # ⛔ THE RAW FORM IS TESTED TOO, because SPLICING CAN REMOVE A REFUSAL (`#13788`):
+        # `props.__setitem__("embedding", *[])` expands to ONE argument, while the raw reading
+        # counts the `Starred` node as the non-constant second argument and refuses it. A fix
+        # may add refusals, never acceptances, so both are asked and neither is redundant.
         return True
-    if (len(arguments) >= 3
-            and _names_property_key(arguments[1], alias_keys)
-            and not isinstance(arguments[2], ast.Constant)):
+    if any(_two_argument_store(candidate, alias_keys=alias_keys)
+           or _three_argument_store(candidate, alias_keys=alias_keys)
+           for candidate in expansions):
         return True
+    arguments = expansions[0] if expansions else raw
     # ⛔ A ``**`` OPERAND IS THE SAME FACTS ONE LEVEL IN. `keyword.arg` is `None` for it, so the
     # two rules below cannot see a `key`/`value` pair it carries — and
     # `_set(props, **{"key": "embedding", "value": vec})` certified the stop arm while its
