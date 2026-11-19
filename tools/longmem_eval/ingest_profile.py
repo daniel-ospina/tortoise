@@ -141,6 +141,16 @@ def _sdk(*, db_uri: str | None, namespace: str) -> tuple[TortoiseSDK, Any]:
 
         return TortoiseSDK(namespace=namespace), _cleanup
     td = tempfile.TemporaryDirectory(prefix="lme-profile-")
+    # #1944 parity, not decoration. ``run.py``'s ``_make_question_sdk`` raises
+    # the vendored redislite start budget to 60 s because the 10 s default
+    # RACES on a contended box (the falkordb.so module load + socket bind can
+    # exceed it), and ``embedded_lifecycle`` reads that budget from the same
+    # class attribute. This profiler exists to be run on exactly that box, so
+    # without this it can die on the first rung with a
+    # ``RedisLiteServerStartError`` that says nothing about ingest cost.
+    import redislite.client as _rc
+    if _rc.Redis.start_timeout < 60:
+        _rc.Redis.start_timeout = 60
     return TortoiseSDK(os.path.join(td.name, "lme.db")), td.cleanup
 
 

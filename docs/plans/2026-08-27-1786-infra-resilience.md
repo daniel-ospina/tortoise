@@ -367,7 +367,14 @@ refuses the deterministic redis refusals too (`WRONGTYPE`, `NOPERM`, `ERR
 unknown command`, and redis-py's client-side `DataError`), which a coarser
 `isinstance(exc, RedisError)` reading would have re-admitted. P2-2 (provider
 transients at the ingest site ARE in scope) and P1-7 (MISCONF stays
-re-attemptable) both still hold, and both are pinned by tests.
+re-attemptable) both still hold. What is PINNED, precisely, so a successor can
+tell an arm from a claim: `retryable_transient` and `graph_abort_family` are
+each covered by a row that reds when the arm is neutralised (measured: 18 and 3
+failures). The THREE-arm shape is pinned by the write-slot literal, whose only
+route to `true` is `retryable_aborted_write` — MISCONF reaches `true` through
+`retryable_transient` as well, so a MISCONF row alone would stay green with
+that arm deleted. Every arm names `tortoise/retry.py`'s own regexes; none is a
+taxonomy invented here.
 
 **The one narrowing this makes, stated rather than implied — a bare
 `ResponseError` leaves the recoverable set.** Base-class membership admitted
