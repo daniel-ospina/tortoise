@@ -3069,9 +3069,21 @@ def test_the_stop_arm_must_not_store_the_vector(tmp_path, monkeypatch):
     right walk on the mirror arm, where an unconditional store is the evidence FOR).
 
     Mutation: delete the `anywhere=True` guard in `_asks_the_gate` and every refused shape
-    here goes `True` again; the accepted controls below stay `True` either way, which is
-    what keeps the rule from becoming an inert enforcer (a writer with no stop arm at all
-    is refused by the polarity arms, not by this one).
+    here goes `True` again; delete only the mutator-vocabulary line (`if anywhere and
+    _mutator_stores_the_vector(sub)`) and the five METHOD-spelling rows red while the rest
+    stay refused. The accepted controls below stay `True` either way, which is what keeps
+    the rule from becoming an inert enforcer (a writer with no stop arm at all is refused
+    by the polarity arms, not by this one).
+
+    ⛔ AND THE STORE'S *METHOD* SPELLING IS THE SAME STORE (`add2e7b89`). The vocabulary
+    recognised the operator form `props |= {"embedding": vec}` and the `update(…)` keyword
+    but not the methods those survive as in real code, so `props.__setitem__("embedding",
+    vec)`, `props.__ior__({…})`, `props.setdefault("embedding", vec)`,
+    `setattr(props, "embedding", vec)` and the unbound `dict.__setitem__(props, …)` placed
+    the vector on the stop arm and still certified the writer — the same defect as the six
+    shapes above, one verb over. The recognition is stop-arm-only on purpose: on the mirror
+    arm it would WIDEN what the destructive gate accepts, and a fix may add refusals, never
+    acceptances (`_mutator_stores_the_vector`).
     """
     refused = (
         # the arm places the vector, THEN leaves
@@ -3127,6 +3139,45 @@ def _upsert_object(ev, flag):
         return None
     props["embedding"] = _encode(ev)
 """,
+        # …places it through a dict MUTATOR rather than an assignment: the operator form
+        # (`props |= {…}`) was already a store, so its methods must be too. Measured
+        # fail-OPEN at `add2e7b89` — each of these five certified the writer.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__("embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.setdefault("embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        # the unbound spelling: one positional argument more than the bound form
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        dict.__setitem__(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__ior__({"embedding": _encode(ev)})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        setattr(props, "embedding", _encode(ev))
+        return None
+    _write(props)
+""",
     )
     for source in refused:
         module = _fake_writer_module(tmp_path, monkeypatch, source)
@@ -3163,6 +3214,16 @@ def _upsert_object(ev):
     if _derived_mirror_required("object"):
         embedding = _encode(ev)
     props["embedding"] = embedding
+""",
+        # ⛔ A READ IS NOT A STORE, and the mutator vocabulary must not swallow one: an
+        # arm that only reads the property and then removes it is an honest write-stop.
+        """
+def _upsert_object(props):
+    if not _derived_mirror_required("object"):
+        _audit(props.get("embedding"), props.setdefault("embedding", None))
+        props.pop("embedding", None)
+        return None
+    _write(props)
 """,
     )
     for source in accepted:

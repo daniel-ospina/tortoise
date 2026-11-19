@@ -1157,7 +1157,63 @@ def _stores_embedding(node, *, anywhere: bool = False, scope=None) -> bool:
                 for argument in sub.args:
                     if isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument):
                         return True
+            # ⛔ AND THE MUTATOR'S METHOD SPELLING IS THE SAME STORE, which the vocabulary
+            # above missed: it recognises the OPERATOR form `props |= {"embedding": vec}`
+            # and `update(…)` but not the methods those survive as
+            # (`props.__setitem__("embedding", vec)`, `props.__ior__({…})`,
+            # `props.setdefault("embedding", vec)`, `setattr(props, "embedding", vec)`,
+            # `dict.__setitem__(props, …)`). Measured fail-OPEN at `add2e7b89`: all five
+            # certified a STOP arm that placed the vector, the same defect as the six
+            # spellings above, re-entering one verb over. Consulted ONLY when `anywhere`
+            # (the stop arm) because that is where a missed store is a false PASS; on the
+            # mirror arm the identical recognition would WIDEN what the destructive gate
+            # accepts, and a fix may add refusals, never acceptances.
+            if anywhere and _mutator_stores_the_vector(sub):
+                return True
     return False
+
+
+def _mutator_stores_the_vector(call) -> bool:
+    """Does this CALL place the vector through a dict/attr MUTATOR, not an assignment?
+
+    ⛔ NARROW IN THE SAME TWO WAYS as the rest of `_stores_embedding`, so this is not the
+    rejected "any call with an embedding-shaped argument" rule: the property must be the
+    EXACT constant `embedding` (`props.setdefault("embedding_model", …)` places the
+    IDENTITY TRIPLE, which this repo writes while keeping the vector), and the VALUE must
+    be non-constant (`…, None` is the placeholder `embedding = None` is, and places
+    nothing).
+
+    ⛔ CALLED FROM THE STOP ARM ONLY. See the call site: a false positive here refuses a
+    writer that does not store, which costs a refactor; a false negative certifies a
+    writer that stores exactly when the gate said stop, which lifts
+    `REFUSE_WRITE_STILL_EMITS` — the boolean that authorises deleting the only readable
+    copy of a fingerprint.
+    """
+    import ast
+
+    name = _callee_name(call)
+    if name == "setattr":
+        # `setattr(props, "embedding", vec)` — (receiver, PROPERTY, value)
+        arguments = list(call.args)
+        return (len(arguments) >= 3
+                and isinstance(arguments[1], ast.Constant)
+                and arguments[1].value == EMBEDDING_PROPERTY
+                and not isinstance(arguments[2], ast.Constant))
+    if name not in ("__setitem__", "setdefault", "__ior__"):
+        return False
+    arguments = list(call.args)
+    if (name == "__setitem__" and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name) and call.func.value.id == "dict"):
+        arguments = arguments[1:]    # `dict.__setitem__(props, KEY, value)` — one arg more
+    if name == "__ior__":
+        # `props.__ior__({"embedding": vec})` — the method spelling of `props |= {…}`
+        return any(isinstance(argument, ast.Dict) and _dict_stores_the_vector(argument)
+                   for argument in arguments)
+    # `props.__setitem__("embedding", vec)` / `props.setdefault("embedding", vec)`
+    return (len(arguments) >= 2
+            and isinstance(arguments[0], ast.Constant)
+            and arguments[0].value == EMBEDDING_PROPERTY
+            and not isinstance(arguments[1], ast.Constant))
 
 
 def _dict_stores_the_vector(node) -> bool:
