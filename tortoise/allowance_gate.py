@@ -1983,6 +1983,39 @@ def enforce_allowances(
         return
     if resource not in ALLOWANCE_GATED_RESOURCES:
         return
+    # ⛔ "PUBLISHED ONLY FOR A SERVED WRITE" IS A PROPERTY, NOT A HOPE (#13829).
+    # A derived-layer dimension can publish a cache-fold denial and a LATER
+    # dimension in this same loop can then refuse the write — the denial would
+    # outlive the write it describes and could be consumed by the next fold in
+    # this context, silently denying a cache write nobody capped. So every exit
+    # that is not a served write clears it. ``_DERIVED_DIMENSION_PUBLISHED``
+    # tracks whether this call published at all, so the ordinary path pays a
+    # boolean and nothing else.
+    # ⚠️ An OUT-PARAM, not a return value: the loop can RAISE after publishing, so
+    # a return value is never delivered on the one path this guarantee exists for.
+    _published: list[bool] = []
+    try:
+        _enforce_each_dimension(
+            limits, org_id=org_id, resource=resource, meters=meters,
+            truth_carried=truth_carried, published=_published)
+    except BaseException:
+        if _published:
+            _CACHE_FOLD_DENIED.set(None)
+        raise
+
+
+def _enforce_each_dimension(
+        limits: dict, *, org_id: str, resource: str,
+        meters: Mapping[str, Callable[[str], MeterReading | None]] | None,
+        truth_carried: bool, published: list[bool],
+) -> None:
+    """The dimension loop of :func:`enforce_allowances`.
+
+    Split out ONLY so the caller can make "a denial never outlives the write it
+    describes" an ``except`` rather than a comment; it records that it published
+    into ``published`` (see the caller for why that is an out-param). The loop
+    body is otherwise exactly the one it has always been.
+    """
     for dim in DIMENSIONS:
         if resource not in dim.resources:
             continue  # this door cannot move THIS dimension's meter
@@ -2144,6 +2177,7 @@ def enforce_allowances(
                     detail=head + note,
                 )
                 _CACHE_FOLD_DENIED.set(denial)
+                published.append(True)
                 _logger.warning(
                     "allowance deferred to the cache fold (#13829): team=%s "
                     "dimension=%s used=%s hard_stop=%s — the write is served "

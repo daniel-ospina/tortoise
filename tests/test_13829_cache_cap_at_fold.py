@@ -300,11 +300,19 @@ def test_postgres_storage_still_gates_the_record_doors():
     """
     from tortoise.quota import QuotaCheckError
 
-    armed = _limits(max_postgres_storage_bytes=1024)
+    armed = _limits(max_graph_storage_mb=77, max_postgres_storage_bytes=1024)
     with pytest.raises((QuotaExceededError, QuotaCheckError)):
-        enforce_allowances(armed, resource="points",
-                           meters={"postgres_storage": _meter(1_000_000.0)},
-                           truth_carried=True)
+        enforce_allowances(
+            armed, resource="points",
+            meters={"graph_storage": _meter(244.0),
+                    "postgres_storage": _meter(1_000_000.0)},
+            truth_carried=True)
+
+    # ⛔ AND NO DENIAL OUTLIVES A REFUSED WRITE. `graph_storage` is the FIRST
+    # dimension in the registry, so it publishes before `postgres_storage`
+    # refuses; a verdict left behind would be consumed by the next fold in this
+    # context and silently deny a cache write nobody capped.
+    assert cache_fold_denial() is None
 
 
 # ── 4. the door opt-in is not free: the consumer must exist and precede ────
