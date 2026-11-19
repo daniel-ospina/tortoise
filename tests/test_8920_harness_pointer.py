@@ -102,29 +102,23 @@ _POINTER = re.compile(
 #: code raised `ModuleNotFoundError`). The classification is therefore
 #: EVIDENCE-POSITIVE: a FILE pointer must name a file that IS THERE. Absence is
 #: not evidence of non-modulehood.
-#: ⚠️ RESIDUAL, stated rather than hidden: the ASSERTION does not existence-check
-#: file pointers (a pointer naming a deleted `.mjs` is listed, not reddened).
-#: That is a separate reach question, filed as #13765.
+#: ⚠️ RESIDUAL, stated rather than hidden — and MEASURED, because the first cut
+#: of this note named the WRONG case. A `.mjs` pointer whose file is renamed or
+#: deleted DOES red: it stops naming a file, so it reclassifies as a SYMBOL
+#: pointer and the import fails. The gap is the `.py`-TAILED bare file pointer,
+#: which `_NOT_A_SYMBOL` fixes to FILE unconditionally with NO existence check —
+#: so a pointer to a deleted `.py` test stays green. That is the reach question
+#: filed as #13765, whose title is about exactly this shape.
+#:
+#: Two `.py` pointers exist in production prose and are NOT citations, so neither
+#: population should carry them: `tortoise/referentiality.py` illustrates an
+#: identifier-only surface with `tests/x.py` (beside `#4118` and `feat/branch` —
+#: there is no `x` module and no rename for this guard to catch), and
+#: `tortoise/sdk.py` names `tests/test_backfill_sources.py` as a file #4282
+#: DELETED, a sentence that exists to record that it is gone. Both are already
+#: handled by `_NOT_A_SYMBOL` alone, so they need no separate escape hatch;
+#: #13765 owns removing the second name from that prose.
 _NOT_A_SYMBOL = frozenset({"py"})
-
-#: Production prose that names a `tests/…` token which is NOT a citation — there
-#: is no module to import and no file to point at, so neither population can
-#: carry it. Each entry states WHY, because an entry without a reason is an
-#: allowlist that outlives the fact that justified it.
-_NOT_POINTERS: dict[str, str] = {
-    "tests/x.py": (
-        "a SHAPE illustration, not a citation: `tortoise/referentiality.py` names "
-        "it as an example of an identifier-only surface (`#4118`, `tests/x.py`, "
-        "`feat/branch`). There is no `x` module and no rename for this guard to "
-        "catch"
-    ),
-    "tests/test_backfill_sources.py": (
-        "named by `tortoise/sdk.py` as a file #4282 DELETED with the SDK; the "
-        "sentence exists to record that it is gone, so it can never import. "
-        "Removing the name from that prose is #13765's question, not a rot to fix "
-        "by rotating it"
-    ),
-}
 
 #: Names the #8920 move renamed away or never existed: the two pre-rename
 #: helpers, and the callee the moved docstring misspelled (`_purge_deleted_orgs`
@@ -199,22 +193,18 @@ def _classify(
 
     EVIDENCE-POSITIVE, and that is the whole point. A token is a FILE pointer
     only when `tests/<written>.<symbol>` IS a file — any extension, so the rule
-    never needs extending — or when it is one of the named `_NOT_POINTERS`.
-    Every other token is a SYMBOL pointer and IS imported and looked up,
-    INCLUDING a token whose module does not exist: that is precisely the
-    renamed-away shape this guard exists to red, so its absence must not be
-    what silences the check.
+    never needs extending — or when its tail is the bare-file extension
+    (`_NOT_A_SYMBOL`, the `tests/x.py` shape). Every other token is a SYMBOL
+    pointer and IS imported and looked up, INCLUDING a token whose module does
+    not exist: that is precisely the renamed-away shape this guard exists to
+    red, so its absence must not be what silences the check.
 
     `tests_dir` is a parameter only so the rule can be pinned on a synthetic
     tree; production callers take the default.
     """
     tests_dir = TESTS_DIR if tests_dir is None else tests_dir
     named = f"tests/{written}.{symbol}"
-    if (
-        symbol in _NOT_A_SYMBOL
-        or named in _NOT_POINTERS
-        or (tests_dir / f"{written}.{symbol}").is_file()
-    ):
+    if symbol in _NOT_A_SYMBOL or (tests_dir / f"{written}.{symbol}").is_file():
         return "file", named
     return "symbol", f"tests.{written.replace('/', '.')}"
 
@@ -337,12 +327,12 @@ def test_the_split_covers_both_branches_at_this_head(tmp_path: Path):
         "file",
         "tests/harness.mjs",
     )
-    # the bare-file shape ⇒ FILE pointer
+    # the bare-file shape ⇒ FILE pointer, by `_NOT_A_SYMBOL` alone (which is why
+    # the `.py`-tailed non-citations need no separate escape hatch)
     assert _classify("test_present", "py", tests_dir=tmp_path) == (
         "file",
         "tests/test_present.py",
     )
-    # a named non-citation ⇒ FILE pointer, and never imported
     assert _classify("x", "py", tests_dir=tmp_path) == ("file", "tests/x.py")
 
 
