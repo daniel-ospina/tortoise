@@ -868,10 +868,13 @@ def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
     data — but every SHIPPED consumer branches on `verdict.verified` alone, and the
     serve gate logged its `reason` only in the DECLINE branch, which a verified
     verdict never reaches. So on the tree before this case, a label holding nothing
-    in either store served an EMPTY cohort as `mechanism=pgvector, reason=ok` and
-    nothing in any trace told it apart from a backfilled label answering the same
-    read — the state #13798 exists to make tellable was tellable only to a reader
-    who already had the object in hand.
+    in either store served an EMPTY cohort as `mechanism=pgvector,
+    reason=empty_results` — the SAME token a backfilled label answering the same
+    read records, so nothing in any trace told the two apart. The sealed-empty arm
+    already recorded `empty_results`/`degraded=False` (`search_engine.py:4176-4178`),
+    so the indistinguishability was never a different token: one token covers both
+    states, and no line said WHICH. The state #13798 exists to make tellable was
+    tellable only to a reader who already had the object in hand.
 
     ⛔ REDS if the marker is dropped (always-False `trivial` -> the line is never
     emitted), i.e. the same mutant as the zero-zero case, measured on the
