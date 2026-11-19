@@ -17,7 +17,10 @@ later run must not be free to choose after it sees the numbers:
    be reported and be about the wrong store;
 3. **the coverage gate's zero trap** — `coverage` compares
    `record_vectors >= graph_vectors`, and **0 >= 0 is verified**, so an unseeded
-   population PASSES it and serves an empty cohort as `pgvector/ok`. ⛔ M2's
+   population PASSES it and is served by a leg whose trace never names the
+   two-zero state (`empty_results` from the record where the contract owns the
+   label, `no_embeddings`/`degraded=True` from the graph elsewhere — this
+   instrument reads `point`, so the second shape is the one it sees). ⛔ M2's
    population had no vectors because **its box had no embedder**, NOT because its
    write payload lacked an `embedding` key — `_upsert_point_props` DERIVES one
    from `content` (`projection/entities.py:2968-2976`, inside an

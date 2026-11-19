@@ -112,8 +112,11 @@ is never submitted (the declared `keyword_only`). Consequence 2, the quiet one: 
 
 ⛔ **And the coverage gate does not catch it.** `record_vector.coverage` decides
 `record_vectors >= graph_vectors`, and **`0 >= 0` is VERIFIED**. An unseeded population therefore
-*passes* the gate and then serves an empty cohort as `mechanism=pgvector, reason=ok` — which would
-have read as "the dense leg has no recall" instead of "the population has no vectors".
+*passes* the gate and is then served by a leg whose trace never names the two-zero state —
+`empty_results` from the record where the contract owns the label, `no_embeddings`/`degraded=True`
+from the graph everywhere else (this instrument reads `point`, so the second shape is the one it
+sees) — which would have read as "the dense leg has no recall" instead of "the population has no
+vectors".
 The zero-zero state is refused from **both** sides — `require_record_measured` for the record,
 `require_graph_population` for the graph — and
 `test_seeded_guard_refuses_the_zero_zero_coverage_trap` pins it. One function asserting both counts
