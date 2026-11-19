@@ -289,12 +289,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
-    # 2: `:6989` is BOTH the §1 label-scan table row's own key (already in this document) and the
-    # §2.5 header enumeration's disclosure of THIS tree's Object declaration, added by `#13489` beside
-    # its three siblings. Two sites, one spelling — a single pin resolves the line, and the count is
-    # what stops a third occurrence appearing unannounced. Measured at THIS head:
-    # `grep -o '\`:6989\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2, and
-    # `grep -o '\`:6990\`' …` -> 1, so `origin/main`'s 1 is the count BEFORE `#13489`'s second site.
+    # 2: `:6989` is BOTH the header region's disclosure of THIS tree's Object declaration (it sits
+    # before `## 1.`) and the §2.5 label-scan table row's own key. Two sites, one spelling — a single
+    # pin resolves the line, and the count is what stops a third occurrence appearing unannounced.
+    # BOTH spellings arrive with this branch's re-derivation (`f9e1bcc66a`), not with `#13489`:
+    # `origin/main` carries ZERO of them, and this head carries two. Measured at THIS head:
+    # `grep -o '\`:6989\`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 2.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6989`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
@@ -1099,14 +1099,14 @@ def test_the_headers_enumeration_is_never_re_pointed_to_the_working_tree() -> No
     ⚠️ The assertion is on the `:6869` ADJACENCY, not on `:6989`'s absence — but it does NOT follow
     that disclosure is free, and an earlier form of this docstring said it was. The declaration must sit
     DIRECTLY above `` :6869`; ``; anything between them breaks the adjacency this arm reads. And
-    disclosing this tree's figure appends a SECOND `:6989` occurrence, which
-    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` counts at 1. So a header that
-    names both heads is a TWO-file edit, not a rewrite of this one: keep the declaration above
-    `` :6869`; ``, put the disclosure AFTER the semicolon, and move `_TOKEN_OCCURRENCES[':6989']` to 2
-    in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
+    disclosing this tree's figure appends a SECOND `:6989` occurrence, and
+    `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence` already declares 2 — which IS
+    the count this document carries, so that disclosure is in place. A further one is a TWO-file
+    edit: keep the declaration above `` :6869`; ``, put it AFTER the semicolon, and bump
+    `_TOKEN_OCCURRENCES[':6989']` in the same change. ⛔ Both arms are correct — do not clear a red by loosening either one; that
     deletes the only protection on the entry that actually suffered the false correction. The document's
-    own shape puts the branch figure FIRST with the head in parens (`:33637` **on this branch**
-    (`:33583` at the head named above)), not the reverse.
+    own shape puts the DECLARED head's figure FIRST with this tree's after it in parens (`:33583`
+    there, `:33637` at this head), not the reverse.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     # ⛔ THE WHOLE ENUMERATION, not one entry (review cycle 3, F1). `#13466` re-pointed FOUR of its
