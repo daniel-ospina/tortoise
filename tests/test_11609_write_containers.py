@@ -507,8 +507,42 @@ def test_a_retired_MCP_tool_still_RESOLVES_and_warns():
 
 PRODUCTION = REPO / "tortoise"
 
+#: (module, RECEIVER name, retired name) → why that call reaches a NON-SDK object.
+#:
+#: ⛔ DECLARED, never inferred. The census below is receiver-BLIND by
+#: construction: it matches the CALL SHAPE ``X.<retired>(…)`` and it has no way
+#: to know what ``X`` is. When a wave retires a name that another class also
+#: uses as a METHOD, every legitimate call to that other class reds the gate —
+#: measured on `test (g)` at main `09f5c99afd` (run 44593727658):
+#: ``tortoise/hosted_api.py:8432: .status``, which is
+#: ``EmbeddingModel.status()`` — the EMBEDDER's own classmethod (#13674
+#: publishes its load bound on ``/health``), not ``TortoiseSDK.status`` (retired
+#: by #11609 in favour of ``graph_overview``). A retired SDK reader is not
+#: evidence about a different class's method.
+#:
+#: Inferring the receiver's class inside the scanner was the alternative and it
+#: is the wrong trade: resolution in the scanner is logic a reviewer has to
+#: reason about, and every inference rule is a bypass shape. A table is DATA a
+#: reviewer can read, and `test_every_declared_non_sdk_receiver_is_a_real_one`
+#: below refuses a row whose receiver is not provably (a) imported by
+#: `from … import` at every binding of that name — function-local imports are
+#: fine, `_embedder_health` imports lazily so the path collects no I/O (#2850) —
+#: with every binding resolving to the SAME class and the name never re-bound,
+#: and (b) a class that is NOT a TortoiseSDK subclass with the named attribute
+#: callable. Re-point that import at the SDK and the pin reds; that is the
+#: bypass this table cannot hide.
+NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
+    ("tortoise/hosted_api.py", "EmbeddingModel", "status"): (
+        "#13674 publishes the embedder's load bound on /health; "
+        "`EmbeddingModel.status()` (tortoise/embeddings.py) is a CLASSMETHOD on "
+        "the embedder. It is not `TortoiseSDK.status`, which #11609 retired in "
+        "favour of `graph_overview`."
+    ),
+}
 
-def _attribute_names(tree: ast.AST) -> list[tuple[int, str]]:
+
+def _attribute_names(tree: ast.AST,
+                     rel_path: str | None = None) -> list[tuple[int, str]]:
     """Every CALL of a retired SDK name: ``<receiver>.<retired>(…)``.
 
     ⛔ CALL, not every attribute read (#12951 CI red). This collected every
@@ -528,11 +562,25 @@ def _attribute_names(tree: ast.AST) -> list[tuple[int, str]]:
     ``test_the_census_still_catches_an_sdk_call_site`` below proves both
     directions on synthetic trees rather than leaving the narrowing as an
     unverified claim.
+
+    ``rel_path`` scopes the ONE kind of false red a shape-only census cannot
+    avoid: a non-SDK class that shares a retired name as a method. Only rows
+    DECLARED in ``NON_SDK_RECEIVERS`` are skipped, only for that module, only
+    for that receiver NAME — and passing no path exempts nothing, so the
+    synthetic-tree pins below keep their full strength.
     """
-    return [(node.func.lineno, node.func.attr) for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in RETIRED_SDK_METHODS]
+    out: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in RETIRED_SDK_METHODS):
+            continue
+        receiver = node.func.value
+        if (rel_path is not None and isinstance(receiver, ast.Name)
+                and (rel_path, receiver.id, node.func.attr) in NON_SDK_RECEIVERS):
+            continue
+        out.append((node.func.lineno, node.func.attr))
+    return out
 
 
 def test_the_census_still_catches_an_sdk_call_site():
@@ -596,12 +644,121 @@ def test_no_production_module_reaches_a_retired_sdk_name():
             tree = ast.parse(path.read_text())
         except SyntaxError:  # pragma: no cover - a broken file is another gate's job
             continue
-        for lineno, attr in _attribute_names(tree):
+        for lineno, attr in _attribute_names(tree, str(path.relative_to(REPO))):
             offenders.append(f"{path.relative_to(REPO)}:{lineno}: .{attr}")
     assert not offenders, (
         "production code reaches RETIRED SDK names — a retired name RAISES at "
         "call time (#4282/#3836(c)), so each of these is a live failure:\n  "
         + "\n  ".join(offenders))
+
+
+def test_the_census_exemption_is_path_and_receiver_scoped():
+    """The NON_SDK_RECEIVERS exemption cannot be widened by accident.
+
+    Three properties, each of which is a bypass shape if it stops holding:
+
+    1. **Path-scoped** — the SAME call shape in any other module is still an
+       offender. A table keyed only on (receiver, name) would exempt
+       ``EmbeddingModel.status()`` everywhere, including in a module where the
+       exemption was never justified.
+    2. **Receiver-scoped** — the same file calling ``sdk.status()`` is still an
+       offender; the row exempts ONE receiver NAME, never the module.
+    3. **Off by default** — the census called with no path (the synthetic-tree
+       pins above) exempts nothing, so their strength is unchanged.
+    """
+    (rel, receiver, retired), reason = next(
+        ((k[0], k[1], k[2]), v) for k, v in NON_SDK_RECEIVERS.items())
+    assert reason and reason.strip(), "a declared exemption needs its reason"
+    source = f"def f():\n    return {receiver}.{retired}()\n"
+
+    assert _attribute_names(ast.parse(source), rel) == [], (
+        "the declared non-SDK receiver must be exempt in ITS module")
+    assert _attribute_names(ast.parse(source), "tortoise/somewhere_else.py") == \
+        [(2, retired)], (
+            "the exemption must NOT travel to another module")
+    assert _attribute_names(ast.parse(source)) == [(2, retired)], (
+        "with no path the census must exempt nothing — the synthetic pins above "
+        "depend on it")
+    assert _attribute_names(
+        ast.parse(f"def f(sdk):\n    return sdk.{retired}()\n"), rel) == [(2, retired)], (
+        "the exemption is keyed on the RECEIVER NAME — an SDK receiver in the "
+        "same file must still be caught")
+
+
+def test_every_declared_non_sdk_receiver_is_a_real_one():
+    """A table row is a CLAIM about a class, so check the class.
+
+    The census cannot verify a receiver (that is why the table is declared), so
+    this pin does it instead, and it is the pin that makes the table
+    un-mutable into a bypass: a row is accepted only when the receiver name is
+    bound **only by `from … import` — every such binding naming the SAME class —
+    and never re-bound to a runtime handle** (an `Assign`/`for`/`with`/
+    comprehension target) — and the class those imports name is provably not a
+    ``TortoiseSDK`` subclass and really has the named attribute as a callable.
+    Re-point an import at the SDK (or shadow the name) and this reds instead of
+    the gate silently losing a real call site.
+
+    ⛔ The binding may be **function-local**, and may happen **more than once**:
+    `_embedder_health` and its siblings each import ``EmbeddingModel`` inside
+    the handler on purpose (#2850 — the health path collects no I/O, so it must
+    not pay a module import), so requiring a single module-level import in
+    ``tree.body`` rejects a legitimate row. The requirement is about
+    AMBIGUITY, not about scope or count: every binding of the name must resolve
+    to the SAME class, and the name must never be re-bound to a runtime handle.
+    """
+    import importlib
+    import inspect
+
+    from tortoise.sdk import TortoiseSDK
+
+    assert NON_SDK_RECEIVERS, "no declared receivers — this pin is vacuous"
+    for (rel, receiver, retired), reason in NON_SDK_RECEIVERS.items():
+        assert reason.strip(), f"{rel}:{receiver}.{retired} has no reason"
+        tree = ast.parse((REPO / rel).read_text())
+
+        bound = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                 and any(a.asname == receiver or a.name == receiver for a in n.names)]
+        rebound = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+                   and n.id == receiver and isinstance(n.ctx, ast.Store)]
+        assert bound, (
+            f"{rel}: `{receiver}` is never imported — the exemption names a "
+            "class, so a callable/variable binding is not enough")
+        # Several function-local imports of the SAME class are legitimate and
+        # common here (`_embedder_health` and its siblings each import lazily so
+        # the path collects no I/O, #2850). Ambiguity is the danger, not the
+        # count: every binding of the name must name the SAME class.
+        targets = {(n.module, a.name) for n in bound for a in n.names
+                   if a.asname == receiver or a.name == receiver}
+        assert len(targets) == 1, (
+            f"{rel}: `{receiver}` is bound to {sorted(targets)} — the exemption "
+            "names ONE class, so every import of that name must be the same one")
+        assert not rebound, (
+            f"{rel}: `{receiver}` is re-bound at line "
+            f"{rebound[0].lineno} — the exemption is scoped to the imported "
+            "CLASS, so a local handle under the same name would make the row a "
+            "guess (and could hide a real SDK call site)")
+        target = bound[0]
+        assert target.module, (
+            f"{rel}: `from . import {receiver}` names no module path, so the class "
+            "cannot be checked — import it by its full module path")
+        # The alias that MATCHES the receiver, not names[0]: an import line may
+        # carry several names and this row is about exactly one of them.
+        alias = next(a for a in target.names
+                     if a.asname == receiver or a.name == receiver)
+
+        module = importlib.import_module(target.module)
+        cls = getattr(module, alias.name)
+        assert inspect.isclass(cls), (
+            f"{rel}: `{receiver}` binds {cls!r}, which is not a class — the "
+            "retired name would belong to no class and the exemption would be a guess")
+        assert not issubclass(cls, TortoiseSDK), (
+            f"{rel}: `{receiver}` resolves to {cls.__module__}.{cls.__qualname__}, "
+            "which IS a TortoiseSDK subclass — this exemption would hide a REAL "
+            "retired-name call site, which is exactly the bypass the table must "
+            "not allow")
+        assert callable(getattr(cls, retired, None)), (
+            f"{cls.__module__}.{cls.__qualname__} has no callable `{retired}` — the "
+            "exemption exempts a call that cannot exist, so it is stale")
 
 
 # ── 6. the SDK container's POINT arm keeps the absorbed door's BEHAVIOUR ──
