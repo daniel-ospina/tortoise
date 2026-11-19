@@ -714,6 +714,103 @@
 
   <!-- ONE pricing source (#13645) — the same file /tortoise loads. -->
   <script src="/assets/tortoise-pricing.js"></script>
+  <!-- ⛔ THE FUNNEL RUNS BEFORE gsap, in its own script. It used to be the
+       tail of the gsap script, whose first statement is
+       `gsap.registerPlugin(ScrollTrigger)` — so a blocked cdnjs (a common
+       corporate-proxy condition, under which this page still renders fine
+       on its static cards) threw BEFORE the consent listener and the click
+       delegate were registered, and all three events went to zero with no
+       signal. The page's own note names "blocked requests read as 'nobody
+       clicked'" as the hazard it guards, so its own analytics must not be
+       behind a third-party CDN (#13696 review cycle 2, P2). -->
+  <script>
+    /* ── Campaign funnel (#13645) ────────────────────────────────────────
+       This page is an EXPERIMENT, so it has to carry its own denominator.
+       Three events, named here so a later reader can see the funnel without
+       opening a dashboard config:
+
+         product_teams_view           once per visit, carrying the utm_*
+                                      parameters (and the referrer) that
+                                      carried the visitor
+         product_teams_cta_primary    a click that enters the sign-up funnel
+                                      (the hero CTA and the pricing /
+                                      self-host CTAs, which all POST a visitor
+                                      to /auth)
+         product_teams_cta_secondary  a click on the hero's docs / GitHub /
+                                      blog row
+
+       CONSENT IS THE GATE, and it is /consent.js's state, not ours: PostHog
+       is loaded opted OUT, so a capture before consent is dropped anyway —
+       but it would also be a beacon, and blocked requests read as "nobody
+       clicked". So track() refuses unless the state is exactly "granted",
+       and the view event waits for /consent.js's `tortoise:consent` event —
+       without it, a visitor who accepts AFTER this script ran would have had
+       their page view dropped, and the funnel would show clicks with no
+       denominator.
+
+       CAMPAIGN TAGS: every link this page controls that points back into our
+       own surfaces (the CTA to /auth, the docs and blog links) carries
+       utm_campaign=tortoise-for-product-teams + utm_source + utm_medium, so
+       this page's traffic is separable from /tortoise's in the same project.
+       The pricing cards' hrefs are NOT tagged in markup: that block is
+       byte-identical to product.html's on purpose (asserted by
+       tests/test_website_static.py::TestPricingSourceIsShared), so their
+       clicks are counted by the event below instead. */
+    (function () {
+      var EVENTS = {
+        view: 'product_teams_view',
+        primary: 'product_teams_cta_primary',
+        secondary: 'product_teams_cta_secondary'
+      };
+      var CAMPAIGN = 'tortoise-for-product-teams';
+      var viewed = false;
+
+      function campaignParams() {
+        var params = new URLSearchParams(window.location.search);
+        var out = { campaign: CAMPAIGN };
+        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+        for (var i = 0; i < keys.length; i++) {
+          var value = params.get(keys[i]);
+          if (value) out[keys[i]] = value;
+        }
+        if (document.referrer) out.referrer = document.referrer;
+        return out;
+      }
+
+      function consented() {
+        return typeof window.consentState === 'function'
+          && window.consentState() === 'granted';
+      }
+
+      function track(event, props) {
+        if (!consented()) return;
+        if (!window.posthog || typeof window.posthog.capture !== 'function') return;
+        window.posthog.capture(event, props || {});
+      }
+
+      function trackView() {
+        if (viewed || !consented()) return;
+        viewed = true;
+        track(EVENTS.view, campaignParams());
+      }
+
+      window.addEventListener('tortoise:consent', trackView);
+
+      document.addEventListener('click', function (ev) {
+        var el = ev.target && ev.target.closest
+          ? ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')
+          : null;
+        if (!el) return;
+        var primary = el.getAttribute('data-cta') === 'primary'
+          || (!el.hasAttribute('data-cta') && el.closest('#pricing-section'));
+        track(primary ? EVENTS.primary : EVENTS.secondary, {
+          campaign: CAMPAIGN,
+          surface: el.hasAttribute('data-cta') ? 'hero' : 'pricing',
+          href: el.getAttribute('href')
+        });
+      });
+    })();
+  </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
   <script>
@@ -1026,6 +1123,13 @@
     }
 
     function setBilling(mode) {
+      // ⛔ THE SAME GUARD AS INIT, on the TOGGLE path. `renderPricing()`
+      // dereferences the shared table, so with /assets/tortoise-pricing.js
+      // blocked this threw AFTER flipping the pill — leaving the Monthly pill
+      // highlighted over the ANNUAL static cards, which is the mislabelling the
+      // static-markup comment above exists to prevent (#13696 review cycle 2).
+      // Returning before the flip keeps the cards and the pill agreeing.
+      if (!PRICING) return;
       currentBilling = mode;
       document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
       document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
@@ -1042,92 +1146,6 @@
       renderSelfHost();
     }
 
-    /* ── Campaign funnel (#13645) ────────────────────────────────────────
-       This page is an EXPERIMENT, so it has to carry its own denominator.
-       Three events, named here so a later reader can see the funnel without
-       opening a dashboard config:
-
-         product_teams_view           once per visit, carrying the utm_*
-                                      parameters (and the referrer) that
-                                      carried the visitor
-         product_teams_cta_primary    a click that enters the sign-up funnel
-                                      (the hero CTA and the pricing /
-                                      self-host CTAs, which all POST a visitor
-                                      to /auth)
-         product_teams_cta_secondary  a click on the hero's docs / GitHub /
-                                      blog row
-
-       CONSENT IS THE GATE, and it is /consent.js's state, not ours: PostHog
-       is loaded opted OUT, so a capture before consent is dropped anyway —
-       but it would also be a beacon, and blocked requests read as "nobody
-       clicked". So track() refuses unless the state is exactly "granted",
-       and the view event waits for /consent.js's `tortoise:consent` event —
-       without it, a visitor who accepts AFTER this script ran would have had
-       their page view dropped, and the funnel would show clicks with no
-       denominator.
-
-       CAMPAIGN TAGS: every link this page controls that points back into our
-       own surfaces (the CTA to /auth, the docs and blog links) carries
-       utm_campaign=tortoise-for-product-teams + utm_source + utm_medium, so
-       this page's traffic is separable from /tortoise's in the same project.
-       The pricing cards' hrefs are NOT tagged in markup: that block is
-       byte-identical to product.html's on purpose (asserted by
-       tests/test_website_static.py::TestPricingSourceIsShared), so their
-       clicks are counted by the event below instead. */
-    (function () {
-      var EVENTS = {
-        view: 'product_teams_view',
-        primary: 'product_teams_cta_primary',
-        secondary: 'product_teams_cta_secondary'
-      };
-      var CAMPAIGN = 'tortoise-for-product-teams';
-      var viewed = false;
-
-      function campaignParams() {
-        var params = new URLSearchParams(window.location.search);
-        var out = { campaign: CAMPAIGN };
-        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
-        for (var i = 0; i < keys.length; i++) {
-          var value = params.get(keys[i]);
-          if (value) out[keys[i]] = value;
-        }
-        if (document.referrer) out.referrer = document.referrer;
-        return out;
-      }
-
-      function consented() {
-        return typeof window.consentState === 'function'
-          && window.consentState() === 'granted';
-      }
-
-      function track(event, props) {
-        if (!consented()) return;
-        if (!window.posthog || typeof window.posthog.capture !== 'function') return;
-        window.posthog.capture(event, props || {});
-      }
-
-      function trackView() {
-        if (viewed || !consented()) return;
-        viewed = true;
-        track(EVENTS.view, campaignParams());
-      }
-
-      window.addEventListener('tortoise:consent', trackView);
-
-      document.addEventListener('click', function (ev) {
-        var el = ev.target && ev.target.closest
-          ? ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')
-          : null;
-        if (!el) return;
-        var primary = el.getAttribute('data-cta') === 'primary'
-          || (!el.hasAttribute('data-cta') && el.closest('#pricing-section'));
-        track(primary ? EVENTS.primary : EVENTS.secondary, {
-          campaign: CAMPAIGN,
-          surface: el.hasAttribute('data-cta') ? 'hero' : 'pricing',
-          href: el.getAttribute('href')
-        });
-      });
-    })();
   </script>
 
   <footer class="legal-footer">

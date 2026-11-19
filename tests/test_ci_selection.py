@@ -1475,6 +1475,24 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
             f"{changed} does not select test_website_static.py")
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
+    # ⛔ AND THE SHARED PRICING SOURCE — the one asset this population cannot
+    # derive. `tortoise-pricing.js` is not an icon and not an `og:image`, so the
+    # derivation above never sees it. #13696 review cycle 2 (P2, measured): its
+    # `SOURCE_PATTERNS['onboarding']` row was unpinned — deleting it left this
+    # file 526 passed, while `select(["website/assets/tortoise-pricing.js"])`
+    # returned `surfaces: []` with `test_website_static.py` absent. That is the
+    # exact silent drop the row's own comment cites as its reason for existing
+    # ("a diff that … changed a price selected NOTHING").
+    for asset in ("website/assets/tortoise-pricing.js",):
+        r = _sel([asset])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{asset} selects {r['surfaces']} — the ONE price table both "
+            "product pages render would change with no surface selected and "
+            "no row run (#13696)")
+        assert "test_website_static.py" in r["test_files"], (
+            f"{asset} does not select test_website_static.py")
+        assert r["slow_run"] is False, f"{asset} must not pull a slow leg"
+
 
 def test_the_crawler_surface_selects_the_guard_that_reads_it():
     """#11615: `robots.txt` and the sitemaps must select the sitemap contract.

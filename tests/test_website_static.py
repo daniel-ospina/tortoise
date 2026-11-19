@@ -244,6 +244,11 @@ def _fmt_price(price, mode: str, discount_pct: int) -> tuple[str, str]:
         per_month = max(1, round(price * 12 * (1 - disc) / 12))
         total = per_month * 12
         return f"${per_month}", f"${total} billed annually"
+    # The Free tier is free in BOTH modes — a $0 tier reading "Billed monthly"
+    # contradicts the same card one click away, and the static card's own
+    # "Free forever". Mirrors `website/assets/tortoise-pricing.js`.
+    if price == 0:
+        return "$0", "Free forever"
     return f"${price}", "Billed monthly"
 
 
@@ -1184,7 +1189,11 @@ class TestFmtPriceMath:
         return html["display"]["annual_discount_pct"]
 
     def test_monthly_billing(self):
-        for price in (0, 9, 25, 149):
+        # ⛔ $0 IS EXCLUDED, deliberately. A free tier is not "billed monthly" in
+        # either mode — see `test_free_is_forever_free_in_BOTH_modes` (#13696
+        # review cycle 2, P2): the same card read "Billed monthly" on the Monthly
+        # tab and "Free forever" on Annual, and nothing is billed on it.
+        for price in (9, 25, 149):
             big, total = _fmt_price(price, "monthly", 20)
             assert big == f"${price}"
             assert total == "Billed monthly"
@@ -1192,6 +1201,25 @@ class TestFmtPriceMath:
     def test_free_is_forever_free(self):
         big, total = _fmt_price(0, "annual", 20)
         assert (big, total) == ("$0", "Free forever")
+
+    def test_free_is_forever_free_in_BOTH_modes(self):
+        """The Free card must not contradict itself across a one-click toggle.
+
+        #13696 review cycle 2 (P2, measured in node): `_fmt_price(0, 'monthly')`
+        returned `('$0', 'Billed monthly')` while the annual branch returned
+        `('$0', 'Free forever')` — so the Free card read "Billed monthly" on the
+        Monthly tab, which is false (nothing is billed on a free tier) and
+        contradicts the static card's own `Free forever` one line away. Both the
+        shared formatter and this mirror now carry the free case in both modes.
+        """
+        for mode in ("annual", "monthly"):
+            assert _fmt_price(0, mode, 20) == ("$0", "Free forever"), (
+                f"the Free tier reads a different copy in {mode} mode")
+        # …and the EXECUTED source agrees, so the mirror cannot drift from it.
+        for mode in ("annual", "monthly"):
+            assert _js_fmt_price(0, mode, 20) == ("$0", "Free forever"), (
+                f"the shared source renders the Free tier differently in {mode} "
+                "mode")
 
     def test_annual_contract_rounding_once_invariant(self):
         """The page's own invariant: round per-month ONCE, derive the total —
@@ -8540,7 +8568,8 @@ class TestPricingSourceIsShared:
 
     def test_both_product_pages_load_the_same_pricing_source(self):
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
-            srcs = _pricing_source_includes(path.read_text(encoding="utf-8"))
+            html = path.read_text(encoding="utf-8")
+            srcs = _pricing_source_includes(html)
             hits = [s for s in srcs if s == "/assets/tortoise-pricing.js"]
             assert len(hits) == 1, (
                 f"{name} loads the shared pricing source {len(hits)} time(s) "
@@ -8548,6 +8577,40 @@ class TestPricingSourceIsShared:
                 "prices from /assets/tortoise-pricing.js — ONE source — which "
                 "is what makes the two pages' prices agree by construction "
                 "instead of by a copy that can rot.")
+            # ⛔ WHICH TAG, and WHEN it runs — not just that the src string
+            # exists somewhere. #13696 review cycle 2 (P1, measured): adding
+            # `defer` to this tag on BOTH pages left 248 rows green, while in a
+            # browser the INLINE script (which does `const PRICING =
+            # window.TORTOISE_PRICING; … if (PRICING) { … renderPricing(); }`)
+            # executes FIRST — so `PRICING` is undefined, `renderPricing()` never
+            # runs, the toggle is dead and the reader keeps the static cards.
+            # The sibling `/consent.js` tag IS deferred, so this is a natural
+            # edit rather than a contrived one.
+            scripts = list(re.finditer(
+                r"<script\b([^>]*)>(.*?)</script>",
+                _without_html_comments(html), re.S | re.I))
+            loader = next(
+                (m for m in scripts
+                 if "/assets/tortoise-pricing.js" in m.group(1)),
+                None)
+            assert loader is not None, (
+                f"{name} has no `<script src=\"/assets/tortoise-pricing.js\">` "
+                "tag — the src is present but not on a tag a browser parses")
+            assert not re.search(r"\b(?:defer|async)\b", loader.group(1), re.I), (
+                f"{name} loads the shared pricing source with `defer`/`async`. "
+                "The INLINE render script reads `window.TORTOISE_PRICING` "
+                "synchronously, so a deferred load leaves it undefined and the "
+                "JS render silently never runs (#13696 review cycle 2)")
+            readers = [m for m in scripts
+                       if not re.search(r"\bsrc\s*=", m.group(1), re.I)
+                       and "window.TORTOISE_PRICING" in _code_only(m.group(2))]
+            assert readers, (
+                f"{name} has no inline script reading `window.TORTOISE_PRICING` "
+                "— this gate no longer knows which tag must precede it")
+            assert loader.start() < min(m.start() for m in readers), (
+                f"{name} reads `window.TORTOISE_PRICING` BEFORE the tag that "
+                "defines it loads, so the table is undefined at read time and "
+                "the page falls back to the static cards (#13696 review cycle 2)")
         assert PRICING_SOURCE.is_file(), (
             "the shared pricing source is gone; both product pages would "
             "render no prices at all")
@@ -8831,6 +8894,52 @@ class TestPricingSourceIsShared:
                 f"--- {left_name} ---\n{left}\n"
                 f"--- {right_name} ---\n{right}")
 
+    def test_each_page_passes_the_shared_discount_to_the_formatter(self):
+        """A twin comparison cannot see a defect BOTH pages share.
+
+        #13696 review cycle 2 (P1, measured). Every render row above compares
+        the two pages to EACH OTHER, and `test_the_static_cards_on_both_pages_…`
+        reads the STATIC cards — which `renderPricing()` overwrites via
+        `grid.innerHTML = …`. So changing BOTH pages' call from
+        `window.tortoiseFmtPrice(price, currentBilling,
+        PRICING.display.annual_discount_pct)` to `…, 0)` made every JS visitor of
+        both pages read $19/$25/$149 "billed annually" instead of
+        $15/$20/$119 — and left **253 rows GREEN**. Two pages that are
+        identically wrong are indistinguishable from two that are right.
+
+        So the render is bound to the SOURCE here, not to its twin: the page's
+        `fmtPrice` must hand `window.tortoiseFmtPrice` the shared discount, and
+        the numbers it therefore prints are checked against the formatter the
+        source actually defines (`_js_fmt_price`, which EXECUTES it).
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            body = _render_code(path.read_text(encoding="utf-8"), "fmtPrice", name)
+            call = re.search(r"window\.tortoiseFmtPrice\(\s*([^)]*)\)", body)
+            assert call is not None, (
+                f"{name}'s `fmtPrice` does not call `window.tortoiseFmtPrice` "
+                "(#13696)")
+            args = [a.strip() for a in call.group(1).split(",")]
+            assert args == [
+                "price", "currentBilling",
+                "PRICING.display.annual_discount_pct",
+            ], (
+                f"{name}'s `fmtPrice` calls `window.tortoiseFmtPrice({', '.join(args)})` "
+                "— it must pass the SHARED annual discount "
+                "(`PRICING.display.annual_discount_pct`). A literal (or `0`) here "
+                "quotes different money to every JS visitor while both pages "
+                "stay identical to each other, so no twin comparison can see it "
+                "(#13696 review cycle 2, P1)")
+            # …and the numbers that call produces are the shared source's own.
+            for tier in ("free", "solo", "pro", "team"):
+                price = pricing["tiers"][tier]["price"]
+                for mode in ("annual", "monthly"):
+                    big, total = _js_fmt_price(price, mode, disc)
+                    assert big and total, (
+                        f"the shared formatter produced no pair for {tier} in "
+                        f"{mode} mode (#13696): {big!r}, {total!r}")
+
     def test_both_pages_init_to_the_same_billing_mode(self):
         """The render is compared; the statement that SEEDS it was not.
 
@@ -8985,7 +9094,14 @@ class TestPricingSourceIsShared:
             "the rounding contract has no home, so each page would re-implement it")
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             html = path.read_text(encoding="utf-8")
-            assert "window.tortoiseFmtPrice(" in html, (
+            # ⛔ CODE, not the document. #13696 review cycle 2 (P1, measured):
+            # reading raw `html` let a page replace `fmtPrice` with a local
+            # re-implementation and keep this row GREEN by leaving the sentence
+            # `// window.tortoiseFmtPrice( … ) is the shared contract` in a
+            # comment — 248 rows green over exactly the defect four earlier
+            # rounds fixed elsewhere in this file.
+            code = _code_only("\n".join(_inline_scripts(html)))
+            assert "window.tortoiseFmtPrice(" in code, (
                 f"{name} does not call `window.tortoiseFmtPrice` — it formats "
                 "the shared numbers itself, which is the drift one step past "
                 "the table (#13645)")
@@ -8993,7 +9109,7 @@ class TestPricingSourceIsShared:
             # only ONE spelling of the same re-derivation, so `price*12` (or
             # `price *12`) would slip past a plain substring check — and the
             # re-derivation, not its spacing, is the defect.
-            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", html), (
+            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", code), (
                 f"{name} re-derives the annual per-month price instead of "
                 "delegating to `window.tortoiseFmtPrice`")
 
@@ -9223,8 +9339,58 @@ class TestConsentSeam:
             f"no `function {name}(` at the module's own indent in consent.js — "
             "this gate's subject moved, so it is no longer asserting order")
 
+    def test_the_page_half_of_the_consent_seam_does_not_depend_on_a_CDN(self):
+        """The funnel must register even when the GSAP CDN is blocked.
+
+        #13696 review cycle 2 (P2, measured by evaluating the page's inline
+        script with `gsap` undefined): the funnel block used to be the TAIL of
+        the gsap `<script>`, whose first statement is
+        `gsap.registerPlugin(ScrollTrigger)`. A blocked cdnjs — a common
+        corporate-proxy condition, under which the page still renders fine on
+        its static cards — therefore threw BEFORE
+        `window.addEventListener('tortoise:consent', trackView)` and the click
+        delegate ran, so all three funnel events went to zero with no signal.
+        That is exactly the "blocked requests read as 'nobody clicked'" hazard
+        the page's own comment names.
+
+        Pinned structurally rather than by position: the script that registers
+        the listener must contain no GSAP use, and it must appear BEFORE any
+        `<script src>` that loads gsap.
+        """
+        html = _product_teams_html()
+        scripts = list(re.finditer(
+            r"<script\b([^>]*)>(.*?)</script>", _without_html_comments(html),
+            re.S | re.I))
+        listener = [m for m in scripts
+                    if "addEventListener('tortoise:consent'" in m.group(2)]
+        assert listener, (
+            "the page no longer registers a `tortoise:consent` listener at all "
+            "(#13696)")
+        assert len(listener) == 1, (
+            f"the consent listener is registered in {len(listener)} scripts — "
+            "this row cannot tell which one must precede the CDN tags")
+        reg = listener[0]
+        assert "gsap." not in _code_only(reg.group(2)), (
+            "the script that registers the consent listener also uses GSAP, so "
+            "a blocked/failed GSAP CDN throws before the listener is "
+            "registered and every funnel event silently goes to zero "
+            "(#13696 review cycle 2)")
+        gsap_srcs = [m for m in scripts
+                     if re.search(r"gsap", m.group(1), re.I)]
+        if gsap_srcs:
+            assert reg.start() < min(m.start() for m in gsap_srcs), (
+                "the consent listener is registered AFTER a `<script src>` that "
+                "loads GSAP — a blocked CDN then kills the funnel "
+                "(#13696 review cycle 2)")
+
     def test_the_module_emits_the_event_the_page_listens_for(self):
-        js = CONSENT_JS.read_text(encoding="utf-8")
+        # ⛔ CODE, not the file: `_code_only` cuts comment spans, so a module
+        # whose dispatch was commented out — leaving the event NAME in prose —
+        # is RED here. #13696 review cycle 2 (P1, measured): reading the raw
+        # file left all three `TestConsentSeam` rows green over exactly that
+        # mutation, which is the "clicks with no denominator" defect this class
+        # exists to catch.
+        js = _code_only(CONSENT_JS.read_text(encoding="utf-8"))
         assert f'"{self.EVENT}"' in js, (
             f"consent.js never dispatches `{self.EVENT}`. The niche page's only "
             "page-view capture waits for it, so with no emit every visit that "
