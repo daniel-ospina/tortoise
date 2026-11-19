@@ -793,9 +793,14 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
                                                           # because this branch's own added rows move the scan
-                                                          # line — so it was RE-DERIVED (`_self_scan_line` in
-                                                          # `tests/test_7949_capstone_measure.py`, measured
-                                                          # at the merge, `:15228` on the resolved tree) rather than side-picked.
+                                                          # line — so it is RE-DERIVED by the TEST (`_self_scan_line` in
+                                                          # `tests/test_7949_capstone_measure.py`) rather than side-picked, at
+                                                          # whatever the head you merge derives. ⛔ **The two figures this
+                                                          # note once typed (`:15228`, then `:15391`) are both refuted by
+                                                          # later commits on this branch (#13802 review, P2)**: no line number
+                                                          # is typed HERE for that figure, and the `(`:15401`)` six lines up is
+                                                          # the derived value the guard reads at this head, not a restatement of
+                                                          # the note's own subject.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the
