@@ -9042,8 +9042,10 @@ def _upsert_object(props, ev):
 """,
         # ⛔ THE SUBSCRIPT RECEIVER'S CONSTANT-VALUE CONTROL (`#13788`, measured at
         # `84d108e8e2`): the same indexed receiver as the refused rows above, with a value
-        # that places nothing — the arm must not refuse it. It replaces a byte-identical
-        # duplicate of the `dict({…}).items()` control (the file's own standard at `:6120`).
+        # that places nothing — the arm must not refuse it. The byte-identical duplicate of
+        # the `dict({…}).items()` control that used to sit beside it was removed by
+        # `bb3a64dae9` (the file's own standard at `:6120`); this row ADDS coverage rather
+        # than replacing it.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
