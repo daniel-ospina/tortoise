@@ -815,7 +815,7 @@ def _strip_comment_lines(code: str) -> str:
     of this helper. Measured (`#13696` review, round 6): with the line-based
     rule, a `$25/mo` literal behind a leading `/* x */` left BOTH
     `test_no_page_quotes_a_price_inside_its_own_script` and
-    `test_the_two_pages_render_the_same_code` green while the page quoted a
+    `test_the_two_pages_render_from_the_same_code` green while the page quoted a
     price `/tortoise` does not. The tail after `*/` is now KEPT as code.
 
     Line-based for the trailing `//` case only, on purpose. A regex `//`-strip
@@ -3807,11 +3807,17 @@ class TestPageHeadingOutline:
     def test_the_niche_product_page_does_not_skip_a_heading_level(self):
         """#13645: same outline contract, one page over.
 
-        The owner's PDF has ONE h1 (the hero) and an h2 per step, plus the
-        heading-less intro and compute beats — so the expected shape is
-        h1, h2, h2, h2, h2, h2, h2 and no level skips. A step rendered as an h3
-        (an easy slip when a beat is pasted in) is an accessibility regression
-        here exactly as it is on the product page.
+        The owner's PDF has ONE h1 (the hero) and an h2 per beat, with the intro
+        and compute beats heading-less — the measured outline is exactly
+        `[1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4]`: one hero h1, five h2 (the three
+        steps, onboarding and pricing), the four tier-card h3s under
+        `#pricing-section`, and one h4 on the self-hosted card. No level skips.
+
+        ⛔ A STEP rendered as an h3 — an easy slip when a beat is pasted in — is
+        an accessibility regression here exactly as it is on the product page,
+        because h3 is only legitimate inside the pricing block (the tier cards).
+        Scope any such reading to ABOVE `#pricing-section`; the h3s below it are
+        correct and must not be "fixed" down to h2.
         """
         levels = _heading_levels(PRODUCT_TEAMS_HTML.read_text(encoding="utf-8"))
         assert levels and levels[0] == 1, (
@@ -4991,10 +4997,11 @@ class TestSiteIconAndSocialPreviewContract:
     # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
     # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
     # best`), so the first cut's 20 KB floor passed the very image it was written to
-    # reject. The floor is enforced on EVERY page's declared card, and the three cards
-    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg) and
-    # 50,393 B (design-partners-intro-og.jpg) — i.e. 2.35x, 1.24x and 1.26x the floor,
-    # not 2.35x each. Re-encoding the SAME pixels is what eats the margin: with
+    # reject. The floor is enforced on EVERY page's declared card, and the four cards
+    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg),
+    # 50,393 B (design-partners-intro-og.jpg) and 61,103 B (product-teams-og.jpg) —
+    # i.e. 2.35x, 1.24x, 1.26x and 1.53x the floor, not 2.35x each. Re-encoding the
+    # SAME pixels is what eats the margin: with
     # `ffmpeg -q:v 4` the two smaller cards measure 37,024 B and 39,818 B, both under
     # the floor. That is the one false red this bound can produce, which is why
     # `_card_floor_violation`'s message tells the reader to LOOK at the card first.
@@ -5562,9 +5569,10 @@ class TestSiteIconAndSocialPreviewContract:
 
     # The population every assertion from here down iterates. Pinned, because a
     # MOVE narrows it silently: `glob("*.html")` is non-recursive, so filing six
-    # pages into a subdirectory left these guards covering 8 of 14 pages and green
-    # (epic #11762 rejected that shape for exactly this reason). Adding or removing
-    # a page is a deliberate act; a page that leaves coverage by moving is not.
+    # pages into a subdirectory left these guards covering 8 of the 14 pages then
+    # served and green (epic #11762 rejected that shape for exactly this reason).
+    # Adding or removing a page is a deliberate act; a page that leaves coverage by
+    # moving is not.
     PAGES_AT_11762 = (
         "404.html", "contact.html", "design-partners-intro.html", "docs.html",
         "dpa.html", "faq.html", "index.html", "investors.html", "license.html",
@@ -5667,7 +5675,7 @@ class TestSiteIconAndSocialPreviewContract:
         The `sizes` attribute is held to the BYTES rather than to a literal, because a
         declared size is a promise a renderer reserves space for: a 512px re-export of
         a 256px file is square, is >= 180, passes every size assertion — and makes all
-        14 pages lie about it. So the tag is checked against the IHDR (PNG) and against
+        15 pages lie about it. So the tag is checked against the IHDR (PNG) and against
         the directory (ICO), which is what the tab will actually draw.
         """
         png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
@@ -7886,8 +7894,8 @@ class TestProductSetIsServedUnderTheOneHost:
         """The decision this child took: a Function rewrites the prefix, the files stay.
 
         Pinned because the other shape is a silent coverage loss: filing the six pages
-        into `website/tortoise/` would leave `glob("*.html")` guarding 8 of 14 pages with
-        no red anywhere (see `_pages`'s pin).
+        into `website/tortoise/` would leave `glob("*.html")` guarding 8 of the 14
+        pages then served, with no red anywhere (see `_pages`'s pin).
         """
         for name in self.MOVED:
             assert (self.WEB / name).is_file(), (
@@ -9359,9 +9367,11 @@ class TestConsentSeam:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 #: The page's stable identity attribute. Pinned rather than trusted because the
-#: repo keys its guards and the served-root contract on `data-page`, and this
-#: page's own deploy/preflight story is the `::warning::` one: a silent loss of
-#: the attribute makes the tortoise-host half of the E2E suite SKIP green.
+#: repo keys guards on `data-page`, and this page must stay distinguishable from
+#: `data-page="product"` (the tortoise-host root marker). ⛔ Nothing else reads
+#: this value at this head — `deploy-pages.yml`'s preflight greps only
+#: `data-page="product"` — so THIS pin is the whole guard for it: a silent loss
+#: reddens here and nowhere else.
 PRODUCT_TEAMS_DATA_PAGE = "product-teams"
 
 #: The URL the owner asked for, and the one the sitemap advertises.
@@ -9412,15 +9422,31 @@ class TestProductTeamsIdentity:
     that is ADDED ALONGSIDE another one rather than replacing it.
     """
 
+    def test_the_hero_is_one_section_element(self):
+        """⛔ `#beat-hero` on this page must not nest a `<section>`.
+
+        The sibling gates in this file slice a beat to the FIRST `</section>`
+        (`_pricing_section`, `_automate_beat_markup`), so a nested section would push
+        most of the hero outside the slice and leave any copy pin over it
+        silently passing on the remainder. `_element_by_id` is tag-balanced, so
+        it sees the whole hero and a nested section is what makes the count 2.
+        """
+        hero = _element_by_id(_product_teams_html(), "beat-hero")
+        assert hero.count("<section") == 1, (
+            "website/tortoise-for-product-teams.html nests a <section> inside "
+            "#beat-hero — the hero must stay ONE section element, because a "
+            "slice that stops at the first </section> would then cover only "
+            "part of it. Re-scope the nested claim instead of nesting it.")
+
     def test_the_identity_attribute_is_pinned(self):
         root = _root_element(_product_teams_html(), "website/tortoise-for-product-teams.html")
         assert f'data-page="{PRODUCT_TEAMS_DATA_PAGE}"' in root, (
             "website/tortoise-for-product-teams.html lost "
             f'data-page="{PRODUCT_TEAMS_DATA_PAGE}" from its <html> tag '
             f"({root!r}). That attribute is how a page is identified without "
-            "reading its copy; losing it is silent (the deploy preflight's miss "
-            "branch is a ::warning::, and the tortoise-host E2E then SKIPS "
-            "green).")
+            "reading its copy. Losing it is caught HERE and nowhere else: the "
+            "deploy preflight greps only `data-page=\"product\"`, and no E2E "
+            "keys on this page's value.")
 
     def test_the_identity_attribute_does_not_collide_with_the_product_root(self):
         """`product-teams` must not satisfy the product ROOT marker's grep.
