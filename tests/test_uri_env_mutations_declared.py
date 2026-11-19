@@ -603,16 +603,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # lane leaks into a later docker-lane test.
     "test_bounded_raw_clients_3065.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                           r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #8486: the ingest-cost profiler's arm tests. FOUR sites, two intents.
-    # The two `setenv` sites (DELIBERATE_URI) are the test INPUT: one pins that
-    # an explicit `--db` outranks an ambient URI, the other that an ambient
-    # `TORTOISE_DB_URI` selects the SERVER arm exactly as `run_main` does — the
-    # parity claim the module exists to make, so the ambient state must be
-    # reproduced. The two `delenv` sites (DELIBERATE_EMBEDDED_LANE) force the
-    # embedded arm so its start-budget floor and its constructor shape can be
-    # asserted without a server. No server is contacted on any of them (the SDK
-    # is a stub), every site takes the fixture-param `monkeypatch`, which
-    # auto-restores at teardown — no lane state leaks into a later test.
+    # #8486: the ingest-cost profiler's arm tests, grouped by INTENT and
+    # deliberately without a site count: this comment has carried one before and
+    # gone stale, because every round that adds a site leaves the number behind.
+    # The regexes below are site-CLASS patterns, so a new site of either kind is
+    # already authorised; the prose's job is the WHY, and a count is a snapshot
+    # of the file, not of the intent.
+    #   * DELIBERATE_URI `setenv`: the ambient URI is the test INPUT. It is what
+    #     selects the server arm (`run_main` promotes it), it is the state an
+    #     explicit `--db` must outrank, and an INVALID value is set there to
+    #     pin that the promotion validates what it promotes.
+    #   * DELIBERATE_EMBEDDED_LANE `setenv("")`: an EMPTY ambient URI is the
+    #     repo's documented way to say "embedded", so such a site pins the
+    #     embedded arm and belongs to this group, not the one above.
+    #   * DELIBERATE_EMBEDDED_LANE `delenv`: forces the embedded arm for its
+    #     start-budget floor, its constructor shape and the no-URI report arm.
+    # No server is contacted on any of them (the SDK is a stub) and every site
+    # takes the fixture-param `monkeypatch`, which auto-restores at teardown —
+    # no lane state leaks into a later test.
     "test_longmem_ingest_profile.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
