@@ -7235,6 +7235,60 @@ class TestPricingSourceIsShared:
                 "one set of prices from the shared source (#13645).\n"
                 f"--- {left_name} ---\n{slice_fn(left)}\n"
                 f"--- {right_name} ---\n{slice_fn(right)}")
+        # ⛔ AND THE WHOLE SECTION, not just the three slices. Named slices leave
+        # everything else in `#pricing-section` unread: a price claim in the
+        # `.pricing-sub` paragraph ABOVE `#pricing-grid` — outside all three —
+        # stayed green while quoting "Team from $12/mo, billed annually" on the
+        # campaign page (measured at `4886f8d097`). The slices above are kept for
+        # a precise failure message; this row is what makes the section as a whole
+        # covered by construction, so a later addition is compared without anyone
+        # remembering to add it to a list.
+        assert _pricing_section(left).strip() == _pricing_section(right).strip(), (
+            f"the `#pricing-section` markup differs between {left_name} and "
+            f"{right_name} — somewhere OUTSIDE the cards, the overage line and "
+            "the self-host block (those are compared separately above, and each "
+            "passes). The whole section is one copied block: a price, a badge or "
+            "a sub-head that lives only on one page is the fork #13645 exists to "
+            "prevent.\n"
+            f"--- {left_name} ---\n{_pricing_section(left)}\n"
+            f"--- {right_name} ---\n{_pricing_section(right)}")
+
+    def test_neither_page_mutates_the_shared_table(self):
+        """The fourth shape of "a price table this page could drift on": a WRITE.
+
+        `test_neither_page_declares_its_own_tier_table` refuses a page that
+        RE-DECLARES the table; it says nothing about a page that MUTATES the
+        shared one at runtime, which produces the same divergent price with one
+        fewer line. Measured at `4886f8d097`: prepending
+        `PRICING.tiers.pro.price = 25; /* experiment drift */` to the campaign
+        page's inline script left all **136 rows GREEN** while that page rendered
+        a different price for the same tier than `/tortoise` (#13696 review 3).
+
+        A READ is untouched: `PRICING.tiers[name].price`,
+        `PRICING.display.annual_discount_pct` and the local alias declaration
+        `const PRICING = window.TORTOISE_PRICING;` all have no assignment after a
+        property chain, and all three are used legitimately on both pages.
+        """
+        write = re.compile(
+            r"\b(?:window\.TORTOISE_PRICING|PRICING)"
+            r"(?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]]*\])+"
+            r"\s*(?:[-+*/%]|&&|\|\||\?\?)?=(?!=)")
+        other = re.compile(
+            r"\bObject\.assign\(\s*(?:window\.TORTOISE_PRICING|PRICING)\b"
+            r"|\bdelete\s+(?:window\.TORTOISE_PRICING|PRICING)\b")
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            hits = [ln.strip()
+                    for ln in path.read_text(encoding="utf-8").splitlines()
+                    if write.search(ln) or other.search(ln)]
+            assert not hits, (
+                f"{name} MUTATES the shared pricing table:\n  " + "\n  ".join(hits)
+                + "\nThe table is ONE object shared by both product pages, so a "
+                "write here changes the price every page renders — the campaign "
+                "page would quote a different number than `/tortoise` with no "
+                "other red (#13645). Change the price in "
+                "`product/pricing.json` (the source of truth) instead, so both "
+                "pages move together — or, if this page genuinely needs its own "
+                "figure, that is a decision, not an edit.")
 
     # The five functions that turn the shared table into the prices a JS
     # visitor actually sees. See `test_the_two_pages_render_from_the_same_code`.
@@ -7706,15 +7760,19 @@ class TestProductTeamsIdentity:
             "prefix look like the place this page belongs, and 301ing it there "
             "is a 404 on the URL the owner asked for.")
         # The recorded decision is a MULTI-LINE bullet: bind to the bullet, not to
-        # the line, so re-wrapping the prose does not red this row while moving
-        # the decision out of the bullet does. Blank lines inside the bullet are
-        # skipped rather than treated as its end, for the same reason.
+        # the line, so re-wrapping the prose does not red this row.
+        # ⛔ A BLANK LINE ENDS THE BULLET. Skipping blanks so that a re-wrap "does
+        # not red" was tried and REVERTED: it lets a fact be moved OUT of the
+        # bullet into an ordinary paragraph below it and still satisfy the
+        # assertions below (measured green at `4886f8d097`). Ending the bullet on a
+        # blank line fails closed — the cost is that an editor who splits the
+        # bullet into two paragraphs of one list item gets a red, which is the
+        # direction this gate should err in.
         bullet = [lines[start]]
         for ln in lines[start + 1:]:
-            if ln.startswith(("- ", "#", "|")):
+            if ln.startswith(("- ", "#", "|")) or not ln.strip():
                 break
-            if ln.strip():
-                bullet.append(ln)
+            bullet.append(ln)
         entry = "\n".join(bullet)
         assert "INDEXED" in entry, (
             f"the architecture doc's {route} entry no longer states the page is "
