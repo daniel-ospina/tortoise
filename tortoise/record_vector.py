@@ -71,6 +71,7 @@ __all__ = [
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
+    "MIRROR_RETIRED_LABELS",
     "READINESS_TTL_SECONDS",
     "RECORD_JOURNAL_ENV",
     "Coverage",
@@ -635,8 +636,11 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: ⛔ THE MEMBERSHIP IS PINNED AGAINST THE FOLDS THEMSELVES rather than restated
 #: here: `tests/test_13610_graph_vector_copy.py::
 #: test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing`
-#: parses `projection/entities.py` for its `_derived_mirror_required(<label>)`
-#: call sites, so wiring a third fold WIDENS this set by test failure rather than
+#: parses `projection/entities.py` for every write-gate call site — the
+#: `_derived_mirror_required(<label>)` folds AND a direct
+#: `record_vector.mirror_required(<label>)` (the helper's own delegation of its
+#: parameter is the one non-literal call, and it is exempted by name) — so wiring
+#: a third fold WIDENS this set by test failure rather than
 #: leaving that label with a fallback it no longer has — or, in the other
 #: direction, silently taking away a fallback it still has.
 MIRROR_RETIRED_LABELS: frozenset[str] = frozenset({"object", "subject"})

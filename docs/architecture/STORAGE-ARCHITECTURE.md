@@ -1737,8 +1737,8 @@ at all, is a ROLLING DEPLOY: instances that have closed the write gate stop writ
 while instances still on pre-#13610 code serve those labels from the graph. Nothing compares versions;
 the graph-side sweep is the repair.
 
-⚠️ **Why the third condition cannot be the request's record TENANT** (a cut `#13610` first shipped, and
-it was wrong twice over — recorded here because this is the paragraph fact 5's cross-reference promises).
+⚠️ **Why the third condition cannot be the request's record TENANT** (recorded here because this is the
+paragraph fact 5's cross-reference promises).
 `vector_index_retired()` is asked at SETUP and its answer is a STORE-scoped, ONE-SHOT act: drop the
 in-graph index, or keep it. A record tenant is REQUEST-scoped, and the hosted REST lane carries it BY
 VALUE (`sdk._record_tenant`) rather than ambiently — so a by-value lane would never satisfy the

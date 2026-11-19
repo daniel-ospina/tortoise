@@ -822,32 +822,61 @@ def test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing():
 
     `record_vector.MIRROR_RETIRED_LABELS` says which labels' graph copy the folds
     really stop writing, and the read's no-fallback arm is narrowed to it. The
-    membership is produced by `_derived_mirror_required(<label>)` call sites in
-    `projection/entities.py`, so it is read off THAT FILE rather than trusted: a
-    third fold wired to the write gate would otherwise leave its label keeping a
+    membership is produced by the write-gate call sites in
+    `projection/entities.py` — `_derived_mirror_required(<label>)`, or a direct
+    `record_vector.mirror_required(<label>)` — so it is read off THAT FILE rather
     fallback to a graph copy nobody maintains (the `#5090` Q2 direction), and a
     fold silently un-wired would leave its label refusing a complete copy (the
     direction this test was written for).
 
     Also asserts the two sets relate correctly: the CONTRACT is never wider than
     the GATE — a label that may not be refused is not a label that may be sealed.
+
+    ⛔ THE PARSE COVERS BOTH SPELLINGS OF THE GATE, because the helper is not the
+    only door: `projection/entities.py` can import `record_vector.mirror_required`
+    and consult it directly. Matching `_derived_mirror_required` alone would leave
+    such a fold INVISIBLE — green over a label whose mirror stopped being written
+    while `contracted` still refused its graph copy. The one non-literal call
+    (`_derived_mirror_required`'s own delegation of its parameter, `entities.py:104`)
+    is exempted by name and shape, so a third fold written that way still reddens.
     """
     tree = ast.parse(_ENTITIES.read_text(encoding="utf-8"))
     wired: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = getattr(func, "id", None) or getattr(func, "attr", None)
-        if name != "_derived_mirror_required":
-            continue
-        assert len(node.args) == 1 and isinstance(node.args[0], ast.Constant), (
-            "a `_derived_mirror_required` call site passes a non-literal argument, "
-            f"so the retired-label set cannot be derived from it: {ast.unparse(node)}")
-        wired.add(node.args[0].value)
+
+    def _walk(node: ast.AST, scope: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = getattr(func, "id", None) or getattr(func, "attr", None)
+                if name in ("_derived_mirror_required", "mirror_required"):
+                    literal = (
+                        len(child.args) == 1
+                        and isinstance(child.args[0], ast.Constant)
+                        and isinstance(child.args[0].value, str)
+                    )
+                    delegating = (
+                        name == "mirror_required"
+                        and inner == "_derived_mirror_required"
+                        and len(child.args) == 1
+                        and isinstance(child.args[0], ast.Name)
+                        and child.args[0].id == "entity_type"
+                    )
+                    assert literal or delegating, (
+                        "a write-gate call site passes a non-literal argument and is "
+                        "not the helper's own delegation, so the retired-label set "
+                        f"cannot be derived from it: {ast.unparse(child)}")
+                    if literal:
+                        wired.add(child.args[0].value)
+            _walk(child, inner)
+
+    _walk(tree, None)
 
     assert wired, (
-        "no `_derived_mirror_required` call site was found in projection/entities.py "
+        "no write-gate call site (`_derived_mirror_required(<label>)` or "
+        "`mirror_required(<label>)`) was found in projection/entities.py "
         "— either the write gate was removed (the graph copy is written for ever) "
         "or it was renamed, and `MIRROR_RETIRED_LABELS` is now unbacked")
     assert wired == set(record_vector.MIRROR_RETIRED_LABELS), (
