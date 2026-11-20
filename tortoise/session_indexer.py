@@ -752,12 +752,23 @@ def main():
                     # #244: compute the session embedding (name + summary + keywords
                     # + topics) and store as vecf32 — degrades to None when the
                     # model is unavailable (session indexing never depends on it).
-                    embedding = compute_session_embedding(
-                        metadata.get("summary", file_path.stem),
-                        metadata.get("summary", ""),
-                        metadata.get("keywords", []),
-                        metadata.get("topics", []),
-                    )
+                    # ⛔ #13626: this is a declared writer of `:Event`
+                    # (`tortoise.embed_writer_register`), so it asks the gate like every
+                    # other one: once the record has proved it holds this label's vectors,
+                    # the CLI still writes the node, the props and the journal record — it
+                    # just stops paying for a vector the graph is not supposed to keep
+                    # (and would have to strip again). ⛔ `mirror_required` is consulted
+                    # through `sdk`'s helper because ONE predicate owns the decision: a
+                    # spelling here would be a second one.
+                    from .sdk import _derived_mirror_required
+                    embedding = None
+                    if _derived_mirror_required("event"):
+                        embedding = compute_session_embedding(
+                            metadata.get("summary", file_path.stem),
+                            metadata.get("summary", ""),
+                            metadata.get("keywords", []),
+                            metadata.get("topics", []),
+                        )
                     props = {
                         "name": metadata.get("summary", file_path.stem),
                         "eventKind": "AgentSession",
