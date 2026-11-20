@@ -2820,13 +2820,20 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
 #: filter drops a line because a CHARACTER is `#`; the true one says the character AFTER the diff
 #: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a`, then
-#: up to eight NON-ALPHANUMERIC marks, then `#` — inside a 400-character window that never names
+#: up to 400 NON-ALPHANUMERIC marks, then `#` — inside a 400-character window that never names
 #: the **marker**. The marks are bounded rather than enumerated on purpose (#13948 review round
 #: 29, MEASURED): enumerating them as "backticked or not" was a FALSE CLAIM — a bold
 #: (`character is **`#`**`) or quoted (`character is '#'`) spelling restored the false property
 #: with the whole file at baseline, because the old tail accepted only whitespace and ONE
 #: backtick. That is the same LAYOUT axis rounds 26-29 closed on the two bans above, and it is
 #: closed here the same way.
+#:
+#: ⛔ AND THE BOUND IS IN THE WINDOW'S UNITS, NOT IN SPACES (#13948 review round 32, P2 —
+#: MEASURED). At `{0,8}` the budget was effectively SEVEN spaces (the needle's own backtick spends
+#: one), so ordinary PADDED MARKDOWN — one aligned table cell, an eight-space list continuation —
+#: put the false property back with the cell green. The bound is now on the same scale as the
+#: window it lives in — the only honest way to say "any amount of layout" without a second number
+#: that can be one space too small.
 #:
 #: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
 #: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
@@ -2854,7 +2861,7 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z]{0,8}#[`*_'\"]{0,3}", re.S | re.I)
+    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z]{0,400}#[`*_'\"]{0,8}", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -3069,7 +3076,16 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             # `#` is a literal codepoint and the haystack was never normalised. `_fold_unicode`
             # makes NFKC the arm's input, so every fullwidth/compatibility spelling is graded.
             ("… whose first non-space character is ＃ — a comment …",
-             "character is #")):
+             "character is #"),
+            # ⛔ AND PADDED LAYOUT, at the size real markdown produces (#13948 review round 32,
+            # P2 — MEASURED). At the old `{0,8}` budget the effective room was SEVEN spaces, so an
+            # aligned table cell or an eight-space list continuation re-inserted the false property
+            # green. Both forms are below; each reds if the bound is narrowed back to single
+            # digits.
+            ("… whose first non-space character is" + " " * 9 + "`#` — a comment …",
+             "character is" + " " * 9 + "`#`"),
+            ("… whose first non-space character is\n\n        `#` — a comment …",
+             "character is\n\n        `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
