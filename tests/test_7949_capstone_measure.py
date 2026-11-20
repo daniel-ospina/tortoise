@@ -16722,8 +16722,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # equally bindable clause unbound: the row states `:45867` as CURRENT
     # ("the same grep also hits `:45867`"), and REVERTING the re-derivation to the
     # pre-fix `:45728` reddened NOTHING — the delta adds no `def test_`, so this selection is
-    # the same at `4747fb570e`: `pytest tests/test_7949_capstone_measure.py -k D5 -q` ->
-    # `3 passed`, plus `pytest tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e.
+    # the same at `4747fb570e`: `pytest tests/test_7949_capstone_measure.py -k 'D5 and not
+    # current_claim' -q` -> `3 passed` (the `current_claim` census arm this branch added is
+    # excluded so the selector keeps its `4747fb570e` size — `-k D5` alone selects 4 at this
+    # head), plus `pytest tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e.
     # `17 passed` and no red. ⛔ The `20 passed` an earlier cut printed is DELETED: it measures 17.
     # Both parts were measured unique at that head: the regex matches the D5 row once,
     # and the needle occurs in `sdk.py` once — so this pins the ADDRESS, not just a
@@ -16895,8 +16897,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
-            "`:15262-15339` -> `:15328-15405`), which the document CARRIES at this head — "
+            "PAIRS instead — `sdk.py:28682` -> `:28718` and `:15346-15423`, which the "
+            "document CARRIES at this head, plus the retired `:15262-15339` -> "
+            "`:15328-15405`, which the row marks HISTORY — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
