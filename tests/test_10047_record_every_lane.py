@@ -450,11 +450,17 @@ _PINNED_CORE_VERBS = frozenset({
     # the seeds themselves, plus the module-level carriers in `sdk.py`
     "write_live_record", "_apply_and_journal", "_emit_event",
     "_journal_entity_event", "_write_session_and_turns", "_write_capture_turns",
-    # public doors a lane plausibly writes through …
-    "create_point", "create_object", "create_subject", "create_operator",
-    "create_direct_edge", "_index_directory", "ingest_corpus", "update_point",
-    "supersede_point", "promote_point", "retract_point", "invalidate_point",
-    "delete_point", "mitigate_operator", "annotate_operator", "_checkpoint",
+    # the doors a lane plausibly writes through …
+    # ⚠️ #12901 FINAL RENAMED the sixteen doors this floor carried: they are the
+    # private carriers now (`_create_point`, `_update_point`, `_supersede_point`, …),
+    # because the batch privatised every off-surface method instead of deleting it.
+    # Repointed to the names the code holds — the derivation is keyed on the `def`
+    # NAME, so a public spelling is not in it while its private body is — which is
+    # the same treatment the #12948 row below records.
+    "_create_point", "_create_object", "_create_subject", "_create_operator",
+    "_create_direct_edge", "_index_directory", "_ingest_corpus", "_update_point",
+    "_supersede_point", "_promote_point", "_retract_point", "_invalidate_point",
+    "_delete_point", "_mitigate_operator", "_annotate_operator", "_checkpoint",
     # ⚠️ #12948 RENAMED two names this floor used to carry — `index_directory` and
     # `checkpoint` are now the private carriers `_index_directory` / `_checkpoint`
     # (their public doors were retired into the SOURCES/MINE/SESSION containers).
@@ -463,7 +469,7 @@ _PINNED_CORE_VERBS = frozenset({
     # would quietly shrink the non-vacuity floor by the two carriers that write
     # the largest record batches. The derivation is keyed on the `def` NAME, so a
     # retired public alias is not in it while its private body is.
-    "set_point_baseline", "compute_confidence",
+    "_set_point_baseline", "_compute_confidence",
     # … and the aliases the hand-picked list missed (#10380 review P1)
     # ⚠️ #4282 DELETED three names this floor used to carry — `record_calibration`,
     # `batch_create_points` and `index_file`. They are removed from the floor because

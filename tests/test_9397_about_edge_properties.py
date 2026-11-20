@@ -726,7 +726,7 @@ MAP_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     #: (`SET nr += $attrs`, whitelisted to the RelationUpsert vocabulary), so an
     #: `about*` edge keeps the binder's `confidence`. It was a declared false
     #: positive until this landed. REBUILD is still bare — traced as #10139.
-    ("tortoise/sdk.py", "supersede_point"): (
+    ("tortoise/sdk.py", "_supersede_point"): (
         "SET nr += $attrs",
     ),
     #: #10139: the REBUILD half of `#9417`. The pass-2b structural repoint used to
@@ -801,7 +801,7 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: creation fold's `SET r += $attrs` is gated ONLY by the fixed key vocabulary —
 #: the fold does NOT filter on `edge_type` — so the gate protects an about edge
 #: only while EVERY attribute-carrying producer provably cannot name one. Before
-#: `#9553` that was a single fact (`create_direct_edge`'s `{IMPL, NAND}`
+#: `#9553` that was a single fact (`_create_direct_edge`'s `{IMPL, NAND}`
 #: allowlist); `#9553` added a SECOND producer, `sdk._record_structural_edge`
 #: (the recorder the projection's edge mints reach through
 #: `_record_structural_edges`), which journals
@@ -811,7 +811,7 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: emission and the mint-level one REPLACED it, so a census naming the door here
 #: describes a producer the tree does not have (`#10200` review: the tree holds
 #: exactly two emitters — `_record_structural_edge`'s
-#: `_emit_event("DirectEdgeCreated", …)` and `create_direct_edge`'s — and
+#: `_emit_event("DirectEdgeCreated", …)` and `_create_direct_edge`'s — and
 #: `create_edge` says so in place, in the note that opens *"ONE PRODUCER, ON
 #: PURPOSE, AND THIS DOOR IS NOT IT"*). ⛔ The emitters are cited by SYMBOL, not
 #: by `sdk.py:<N>`: a bare line number in this paragraph is the same unpinned
@@ -827,7 +827,7 @@ FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
 #: The value is the STATEMENT-level proof for an attribute-carrying producer,
 #: asserted against its own function body — not a claim about intent.
 DIRECT_EDGE_CREATED_ATTR_GUARDS: dict[tuple[str, str], str] = {
-    ("tortoise/sdk.py", "create_direct_edge"): (
+    ("tortoise/sdk.py", "_create_direct_edge"): (
         'op_type not in ("IMPL", "NAND")'
     ),
 }
@@ -901,7 +901,7 @@ EXPECTED_NAMES: dict[tuple[str, str], frozenset[str]] = {
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
         frozenset({MAP_FORM})
     ),
-    ("tortoise/sdk.py", "supersede_point"): frozenset({MAP_FORM}),
+    ("tortoise/sdk.py", "_supersede_point"): frozenset({MAP_FORM}),
 }
 #: A relationship pattern, captured as (variable, relationship-token). The
 #: variable may be EMPTY: `MERGE (s)-[:aboutObject {confidence:$c}]->(t)` is
@@ -2851,7 +2851,9 @@ def test_the_declared_false_positive_premises_hold_at_the_statement():
     The two rows this leg has actually compared, both of which LEFT the table by
     having their CODE fixed — the pattern the exemption exists to force:
 
-      * `supersede_point` (`#9417`) — its `SET r += $attrs` is on the 2a-DIRECT
+      * `_supersede_point` (`#9417`) — its `SET r += $attrs` is on the 2a-DIRECT
+        (⚠️ #12901 FINAL privatised the door; the census keys on the `def` name,
+        so the corrected passage names the key the table holds)
         leg (`rtype` is `type(r)` of the `IMPL|NAND` rows) while its about edge
         was transferred by a BARE `MERGE`, so on an about edge it wrote nothing
         and DROPPED `confidence`;
@@ -5355,7 +5357,7 @@ def test_every_census_writer_carries_its_class_verdict_where_it_is_named():
     # OPPOSITE of it, so it must not count as stated (`#10200` review: this exact
     # sentence was green on leg 1 through its own marker).
     negated = (
-        ("probe", "`sdk.supersede_point` is not a re-materializing writer."),
+        ("probe", "`sdk._supersede_point` is not a re-materializing writer."),
     )
     assert any(
         "supersede_point" in item for item in _unstated_verdicts(list(negated))
@@ -5489,7 +5491,7 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     cycle_3 = (
         (
             "probe",
-            "`sdk.supersede_point` is NOT one of them: it **drops** the "
+            "`sdk._supersede_point` is NOT one of them: it **drops** the "
             "binder's `confidence` on the `about*` edge.",
         ),
     )

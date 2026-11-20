@@ -1290,14 +1290,16 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
 
 
 @pytest.mark.parametrize("method, kwargs", [
-    # sdk.py:24334 — the un-paginated read
-    ("query", {"_record_reads": False}),
+    # sdk.py:24334 — the un-paginated read. ⚠️ #12901 FINAL privatised both arms
+    # (`query` -> `_query`, `paginated_query` -> `_paginated_query`); this pin reads
+    # them with `getattr(sdk, method)`, so it names the `def`s the class holds.
+    ("_query", {"_record_reads": False}),
     # sdk.py:24407 — `paginated_query`, and THIS is the arm the census traversed: the probe
     # asks `tortoise_query(limit, offset)` (probe::_page), `mcp_server` dispatches the offset
     # arm to `paginated_query` (`mcp_server.py:3905`), and the row denominator the artifact
     # publishes IS that WHERE. Measured in review: mutating ONLY this arm left every other
     # pin in this file green.
-    ("paginated_query", {"skip": 0, "limit": 500}),
+    ("_paginated_query", {"skip": 0, "limit": 500}),
 ])
 def test_every_read_arm_that_serves_points_carries_both_conjuncts(method, kwargs):
     """FAILS IF either SDK read arm stops passing the Point WHERE through the composed

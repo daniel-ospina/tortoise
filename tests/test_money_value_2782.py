@@ -650,7 +650,7 @@ class TestWriteBoundary:
             "RETURN count(n)").result_set
         assert rows[0][0] == 0, "a refused money write still reached the graph"
 
-    @pytest.mark.parametrize("door", ["create_object", "create_event"])
+    @pytest.mark.parametrize("door", ["_create_object", "_create_event"])
     def test_every_entity_door_shares_the_one_gate(self, journaled_sdk, door):
         """The gate lives at the shared intake (`_sanitize_props`), not on one
         label's door — so a second label cannot be the way in."""
@@ -693,7 +693,7 @@ class TestWriteBoundary:
 
     @pytest.mark.parametrize("label,update", ONE_SIDED_UPDATES,
                              ids=[s[0] for s in ONE_SIDED_UPDATES])
-    @pytest.mark.parametrize("door", ["update_knowledge", "update_point"])
+    @pytest.mark.parametrize("door", ["update_knowledge", "_update_point"])
     def test_a_one_sided_update_cannot_strip_a_well_formed_value(
             self, journaled_sdk, door, label, update):
         """The gate grades the state the UPDATE LEAVES, never the bag.
@@ -846,12 +846,16 @@ class TestWriteBoundary:
 #: ⛔ #11609 Phase 2 retired `update_entity` into `update_knowledge`; the entity
 #: arm below is that container's, so the ENTITY half of every pin here is
 #: unchanged and the door name is the live one.
-UPDATE_DOORS = ("update_knowledge", "update_point")
+#: ⚠️ #12901 FINAL privatised the Point door: the `def` is `_update_point` now, and these
+#: pins address doors by the name the CODE holds (the `@pytest.mark.parametrize` values are
+#: looked up with `getattr(sdk, door)`), so the Point arm carries the private spelling. The
+#: gate below is the moneyValue intake, which the private body is the same writer behind.
+UPDATE_DOORS = ("update_knowledge", "_update_point")
 
 
 def _create_money_carrier(sdk, door: str, name: str = "Tranche U") -> str:
     """A well-formed money carrier, addressed by the verb ``door`` updates."""
-    if door == "update_point":
+    if door == "_update_point":
         return sdk._create_point(
             "statement", "one tranche is 250000 BRL",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
@@ -993,7 +997,7 @@ class TestUpdateDoorCannotDeleteOrMisScale:
 
     @pytest.mark.parametrize("door,prop", [
         ("update_knowledge", {"title": "Tranche U (renamed)"}),
-        ("update_point", {"namespace": "finance"}),
+        ("_update_point", {"namespace": "finance"}),
     ])
     def test_a_non_money_update_on_a_money_node_is_untouched(
             self, journaled_sdk, door, prop):

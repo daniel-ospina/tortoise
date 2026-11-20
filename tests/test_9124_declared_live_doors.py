@@ -256,10 +256,10 @@ _APPLY_FIRST_DOORS = {
     # function that no longer exists, which reds as a stale entry AND leaves the renamed
     # body reaching the write handle with no lane (measured before this: reds 1 and 2).
     "_assess_source",        # SET reliability, then the assessment record
-    "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
-    "mitigate_operator",     # CREATE the mitigation, then its records
-    "promote_point",         # CAS SET status='live', then PointPromoted
-    "set_point_baseline",    # SET the baseline, then its record
+    "_compute_confidence",   # SET n.confidence per row, then ConfidenceChanged
+    "_mitigate_operator",    # CREATE the mitigation, then its records
+    "_promote_point",        # CAS SET status='live', then PointPromoted
+    "_set_point_baseline",   # SET the baseline, then its record
 }
 
 #: Apply-first INTERNAL helpers — the same ordering as the doors above, reached
@@ -352,7 +352,7 @@ _NO_JOURNAL = {
     # row here would be a STALE census entry — which
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
     # exists has no lane to name.
-    "ingest",
+    "_ingest",
     # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
     # `manage_source_trust` is the door now), so the entry moves with the rename for the
     # same measured reason as `_assess_source` above.
@@ -466,7 +466,9 @@ _UNRESOLVED = {
     # whole assembled `query` for `_uncalibrated_ep_participants`), so
     # "the readable half has no write keyword" would not settle it. Measured,
     # each function's only handle reach is ONE read:
-    #   `calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)
+    #   `_calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)
+    #     ⚠️ #12901 FINAL privatised the door; the citation names the `def` the
+    #     census keys on, which is the spelling this set's row carries.
     #   `_uncalibrated_ep_participants` — `MATCH … RETURN n.id` (a read)
     # with no SET/CREATE/MERGE/DELETE/REMOVE in the assembled query and no CALL
     # to any `sdk.py` function the census proves reaches the write handle
@@ -490,7 +492,7 @@ _UNRESOLVED = {
     # authoritative; `test_the_unresolved_hand_check_cites_symbols_not_line_numbers`
     # and `test_the_calibration_readers_assemble_no_write_clause` keep this note
     # honest instead of trusting it.
-    "calibrate_summary",
+    "_calibrate_summary",
     "_uncalibrated_ep_participants",
     "_cross_lens_pool",
     "_entity_name_holders",
@@ -634,12 +636,12 @@ _UNRESOLVED = {
     "_state_related_objects",
     "_state_related_points",
     "_unsweepable_dirty_roots",
-    "list_batch",
-    "paginated_query",
-    "query",
+    "_list_batch",
+    "_paginated_query",
+    "_query",
     "_search_sessions",
     "_suggest_entry_points",
-    "tortoise_fts_query",
+    "_tortoise_fts_query",
     # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
     # They are declared ONCE, above (the #9063 entry). Both PRs that landed on
     # 2026-10-20 declared them at different offsets, so the merge kept both
@@ -1450,7 +1452,7 @@ def _assembled_write_evidence(assembled: str) -> str | None:
 
 #: The two rows the #9063 note covers, each with the read shape the note states.
 _CALIBRATION_READERS: tuple[tuple[str, str], ...] = (
-    ("calibrate_summary", "OPTIONAL MATCH"),
+    ("_calibrate_summary", "OPTIONAL MATCH"),
     ("_uncalibrated_ep_participants", "RETURN n.id"),
 )
 
@@ -2457,7 +2459,7 @@ def test_the_symbol_pin_reads_the_comment_not_the_rows():
     """
     rows_only = (
         '_UNRESOLVED = {\n'
-        '    "calibrate_summary",\n'
+        '    "_calibrate_summary",\n'
         '    "_uncalibrated_ep_participants",\n'
         '}\n')
     note = _comments_in(rows_only)
@@ -2483,7 +2485,7 @@ def test_the_symbol_pin_reads_the_comment_not_the_rows():
     # reading the block's raw text, which `_comments_in` exists to make.
     shapes_in_rows = (
         '_UNRESOLVED = {\n'
-        '    "calibrate_summary OPTIONAL MATCH",\n'
+        '    "_calibrate_summary OPTIONAL MATCH",\n'
         '    "_uncalibrated_ep_participants RETURN n.id",\n'
         '}\n')
     assert _missing_citations(shapes_in_rows) == [
@@ -2494,7 +2496,7 @@ def test_the_symbol_pin_reads_the_comment_not_the_rows():
     # line carrying the name AND its read shape), satisfies it.
     with_note = rows_only.replace(
         "_UNRESOLVED = {",
-        "#   `calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)\n"
+        "#   `_calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)\n"
         "#   `_uncalibrated_ep_participants` — `MATCH … RETURN n.id` (a read)\n"
         "_UNRESOLVED = {")
     assert _missing_citations(with_note) == [], (
@@ -3696,7 +3698,7 @@ def test_the_census_writer_set_states_its_own_polarity():
     # an `assert not (names & proven)` here: that assertion held by construction
     # and therefore for every input. What is checkable is that the definition is
     # CONFINED to one module and LOAD-BEARING on the real tree — both above/below.
-    assert "invalidate_point" in names, (
+    assert "_invalidate_point" in names, (
         "a name the census genuinely proves writes is missing from the set — "
         "the subtraction above cannot be the whole surface")
 
@@ -3794,7 +3796,7 @@ def test_the_calibration_reader_list_is_bound_to_the_rows_it_guards():
     50` idiom the symbol pin already uses.
     """
     names = {name for name, _ in _CALIBRATION_READERS}
-    assert names == {"calibrate_summary", "_uncalibrated_ep_participants"}, (
+    assert names == {"_calibrate_summary", "_uncalibrated_ep_participants"}, (
         "`_CALIBRATION_READERS` no longer names exactly the two #9063 rows, "
         f"so a row is un-guarded without a red (got {sorted(names)})")
     assert names <= set(_UNRESOLVED), (
@@ -3901,13 +3903,20 @@ def test_the_module_bindings_cache_retains_its_module():
 _APPLY_FIRST_DECLARED_DOORS = {
     # The apply-first, by decision doors: the record's OUTCOME depends on the
     # write, and the decision is recorded where the door lives.
-    "delete_point",          # #9207: cache-first, the destroy is the commit point
-    "update_point",          # #8830: the promote arm's guarded SET, then its record
+    "_delete_point",       # #9207: cache-first, the destroy is the commit point
+    "_update_point",       # #8830: the promote arm's guarded SET, then its record
     # The mechanical apply-first doors (#9206): their record is built from the
     # node they just wrote, so the append cannot precede the write without
     # changing the door's commit contract (#9124 part 2).
-    "create_operator",
-    "create_direct_edge",
+    #
+    # ⚠️ #12901 FINAL: the census keys a door by its `def` NAME, and this batch
+    # privatised four of the doors below (`_delete_point`, `_update_point`,
+    # `_create_operator`, `_create_direct_edge`) — their §17.1 declarations still
+    # carry the PUBLIC spelling, because that is the door's name in the write-lane
+    # record, while the `def` that implements it is private. Re-keyed here, not
+    # dropped: the same four doors, the same four claims.
+    "_create_operator",
+    "_create_direct_edge",
     "_update_entity",
     "_delete_entity",
     "_write_capture_turns",
@@ -4009,7 +4018,7 @@ _APPLY_FIRST_PROVED_ELSEWHERE = {
     # `tests/test_7951_update_point_outbox.py::
     # test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
     # `::test_a_refused_promote_journals_no_revision`.
-    "update_point": "tests/test_7951_update_point_outbox.py",
+    "_update_point": "tests/test_7951_update_point_outbox.py",
 }
 
 
@@ -4217,8 +4226,8 @@ def test_every_live_declared_door_is_journal_first():
     assert not offenders, (
         "a live-lane declaration covers a write that precedes its record:\n  "
         + "\n  ".join(offenders))
-    assert {"invalidate_point", "retract_point",
-            "supersede_point"} <= {_bare_name(n) for n in checked}, (
+    assert {"_invalidate_point", "_retract_point",
+            "_supersede_point"} <= {_bare_name(n) for n in checked}, (
         "the journal-first doors #9124 part 1 declared are not all being "
         f"checked ({sorted(checked)}) — the ordering pin would be vacuous for "
         "them. `delete_point` is deliberately NOT in this set: #9207 reversed "
@@ -4242,9 +4251,9 @@ def test_every_live_declared_door_is_journal_first():
 #: purpose: listing it would claim a coverage that no longer exists.
 _DECLARED_DOOR_NESTED_INVENTORIED = {
     # #9124 part 1 (journal-first doors)
-    "invalidate_point": {"_mark_dirty"},
-    "retract_point": {"_mark_dirty"},
-    "supersede_point": {"_mark_dirty"},
+    "_invalidate_point": {"_mark_dirty"},
+    "_retract_point": {"_mark_dirty"},
+    "_supersede_point": {"_mark_dirty"},
     # #9206 (apply-first doors, + the capture writer whose turn store is the
     # nested apply-first claim). MEASURED, not assumed: every one of these
     # reaches `_mark_dirty`, which is inventoried `_NO_JOURNAL` — so the lane
@@ -4252,10 +4261,10 @@ _DECLARED_DOOR_NESTED_INVENTORIED = {
     # per-function census. Pinning the edge is what forces a reviewed line for
     # it; the write itself is a re-derivable flatten, which is why it is
     # inventoried rather than journaled.
-    "update_point": {"_mark_dirty"},
-    "delete_point": {"_mark_dirty"},
-    "create_operator": {"_mark_dirty"},
-    "create_direct_edge": {"_mark_dirty"},
+    "_update_point": {"_mark_dirty"},
+    "_delete_point": {"_mark_dirty"},
+    "_create_operator": {"_mark_dirty"},
+    "_create_direct_edge": {"_mark_dirty"},
     # Declared doors that reach NO inventoried helper — listed explicitly so a
     # future nested no-journal call reds HERE rather than being absorbed by an
     # unpinned door (a door absent from this dict is not measured at all).
@@ -4890,7 +4899,7 @@ _PROVEN_READS: set[tuple[str, str]] = {
     # SET/CREATE/DELETE/MERGE arm, and `proj.g.query` is a pure read of the
     # graph here — declaring a lane would be a WRITE declaration on a read,
     # which the register's own note calls the wrong remedy.
-    ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"),
+    ("tortoise/sdk.py", "TortoiseSDK._calibrate_summary"),
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"),
     # #12592: both reaches are the SAME shape — an `f"MATCH (n:{label} {{id:$id}})
     # … RETURN …"` whose statement interpolates the caller's loop variable, so the
@@ -4953,7 +4962,7 @@ _PROVEN_READS: set[tuple[str, str]] = {
 #: extent.
 _PROVEN_READ_STATEMENTS: dict[tuple[str, str], tuple[str, ...]] = {
     # one `g.query`, resolving to `MATCH (n:Point) {where} … RETURN …`
-    ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"): ("query",),
+    ("tortoise/sdk.py", "TortoiseSDK._calibrate_summary"): ("query",),
     # one `g.query`, resolving to `MATCH (n:{label}) WHERE … RETURN n.id [LIMIT n]`
     ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"): ("query",),
     # one `g.query`, resolving to `MATCH (n:{label} {id:$id}) RETURN count(n) …`

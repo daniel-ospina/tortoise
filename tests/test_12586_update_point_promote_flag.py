@@ -189,7 +189,7 @@ def test_the_two_point_doors_agree_on_the_flag_dead_row(env):
     pid = sdk._create_point("statement", "a claim to kill", dedup=False)["id"]
     _force(sdk, pid, status=None, outdated=True)
 
-    for door in ("update_point", "update_knowledge"):
+    for door in ("_update_point", "update_knowledge"):
         with pytest.raises(ValueError) as exc:
             getattr(sdk, door)(pid, status="live")
         assert "terminal" in str(exc.value), door
