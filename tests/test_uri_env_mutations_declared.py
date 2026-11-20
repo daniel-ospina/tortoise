@@ -332,12 +332,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # read as triple coverage while one row graded, and BOTH gates reddened — ruff
     # `F601` x2 on `agent-infra-ci / lint`, plus
     # `test_the_declaration_table_carries_no_duplicate_key` in a required `test` shard.
-    # The two shadowed copies were DELETED rather than left to shadow this one: a
-    # TAIL copy that was byte-identical to the arm below, and a BROAD copy
-    # (`setenv(\s*"TORTOISE_DB_URI"` with no value pinned) that #13928's squash landed
-    # — that one's `#13903` triage IS the paragraphs above (same site, same pinned
-    # value: the setenv re-points the lane at the store the module's own probe already
-    # proved), so nothing was lost by deleting it. The
+    # The three arms, MEASURED at `f2e5e3a98f`: a `\s*`-narrowed but UNANCHORED copy at
+    # `:322` (shadowed), #13928's BROAD value-free copy at `:607` (shadowed — the
+    # `#13903` row, whose triage IS the paragraphs above: same site, same pinned value,
+    # the setenv re-points the lane at the store the module's own probe already proved),
+    # and the both-ends-anchored copy at `:1663`, the only one Python graded. The dedupe
+    # keeps THIS block and takes the TAIL's anchored arm, so what this file AUTHORIZES
+    # NARROWS from `\s*`-tolerant to exact-line — called out because that is the one
+    # data change this PR makes to the dict, and because `\s*` tolerance is exactly what
+    # lets a reformatted or commented-out call read as declared. The middle copy's broad
+    # arm is dropped with nothing lost (its triage is above), and the tail is dropped
+    # because its arm now sits here. The
     # same class the #13158-vs-#13176 merge note records a round earlier: an auto-merge
     # that keeps BOTH sides of a row pair is a duplicate key, and the last one wins
     # SILENTLY. **A lane that reads "undeclared mutation" for this file must NOT add a
@@ -629,14 +634,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ⛔ MERGE NOTE (#13158 vs #13176) — a DIFFERENT module, kept here because it is
     # where it was recorded: `main`'s 5fae3f4f6f added the
     # `test_13034_currency_rule_reads_position.py` key with THREE `^…$`-anchored arms,
-    # and that is the one row this dict carries for it today (the #13158 region below —
-    # no line number, which is what let the original citation rot). The two competing
-    # copies on record were both BROADER and neither landed: #13146's "one broad
-    # unanchored arm" (closed, never merged) and the carrier its own correction names,
-    # #13164's "two loose arms". A second row for one key is a duplicate dict literal
-    # (ruff `F601` + the duplicate-key scan), and at runtime the later key shadows the
-    # earlier, so whichever PR lands second drops its copy — never add a third. One
-    # file, one row — the same rule #12631 had to re-apply above.
+    # and that is the one row this dict carries for it today (the #13158 region below
+    # carries that key; no line number is given here ON PURPOSE — the one this note
+    # carried rotted in the commit that shipped it). The two competing copies on record
+    # were both BROADER and neither landed: #13146's "one broad unanchored arm"
+    # (verified CLOSED, never merged) and the carrier its own correction names,
+    # #13164's "two loose arms". Then #13164 landed SECOND (`082213c6a8`, 2026-11-17)
+    # with an EMPTY diff for this file and dropped its copy exactly as the rule below
+    # requires, which is why this dict still carries one row for that key — so the
+    # #13158 region's "(open … must land FIRST)" is a pre-merge statement that has since
+    # been resolved, not a live instruction. A second row for one key is a duplicate
+    # dict literal (ruff `F601` + the duplicate-key scan), and at runtime the later key
+    # shadows the earlier, so whichever PR lands second drops its copy — never add a
+    # third. One file, one row — the same rule #12631 had to re-apply above.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -1525,11 +1535,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   `monkeypatch.delenv`/`del` still red there, the `del` because that
     #   alternative is nested inside `os\.environ(?:…` and so cannot match
     #   `del os.environ[…`.
-    #   The LIVE duplicate carrier is **#13164** (open, `34f80298a2bf`), which
-    #   must land FIRST — it is the only carrier that clears `test (h)`'s
+    #   The LIVE duplicate carrier is **#13164** (merged as `082213c6a8` on
+    #   2026-11-17, AFTER this row landed, and it dropped its own loose copy — so the
+    #   "must land FIRST" below is the pre-merge reasoning, kept as the record; the
+    #   dict carries ONE row for this key today). It cleared `test (h)`'s
     #   `_hydrate_evidence` and `test (i)`'s two raw `FalkorDB(...)` clients,
-    #   neither of which any row here can reach. It carries its OWN row for
-    #   this key at its `:482`, two loose arms
+    #   neither of which any row here can reach. On its branch it carried its OWN row
+    #   for this key (that branch's `:482`) with two loose arms
     #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
     #   `os\.environ\.pop\(\s*"TORTOISE_DB_URI"`). Measured, not inferred,
     #   at `d8790fd364f8` (the figures shift with any edit here, so they are
@@ -1543,6 +1555,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   the narrowing should instead be moved BEFORE that landing — #13164's
     #   `:482` row takes these three `^`…`$` arms and this row is dropped, so
     #   the tightening survives the merge instead of being lost with it.
+    #   ⛔ RESOLVED (measured 2026-11-20): #13164 merged SECOND with an EMPTY diff for
+    #   this file — it dropped its copy — so this row is the one that supplied the
+    #   anchored arms. The order the paragraph above calls "forced" did not happen, and
+    #   the outcome is the same either way: one row, one file.
     "test_13034_currency_rule_reads_position.py": [
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
