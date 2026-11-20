@@ -48,17 +48,15 @@ source order, the control-plane read's filters, both verbs' derived-arm refusals
 (including the whitespace-only flag that used to reach the wipe path), the
 disagreement WARNING, the ``cache_graph``/``cache_graph_source`` fields in the
 ``--json`` payload, and the one line that hands the fact to ``record-restore``'s
-composition (spied). ⚠️ **The two ``_both_stores()`` legs are the residual:** they
-need BOTH a Postgres record and a FalkorDB, and NO CI job provisions both —
-``test-record-postgres`` exports a record DSN and no ``TORTOISE_DB_URI`` (its
-explicit comment says so, and its leg gate FAILS on any skip, #9551), while the
-sharded ``test`` job arms a graph and no record DSN. So the cross-store equality
-(``missing_in_cache: 0`` on the read name) executes on a lane that has both
-stores and nowhere else; the plumbing that would break it is covered above.
-⛔ **Tracked as #14077**, because arming it is a CI-infrastructure change
-(provision both stores in one job + live with #9551's any-skip gate), not a test
-edit — and a claim that reads as covered while nothing executes it is the
-false-confidence direction.
+composition (spied). ⚠️ **The ``_both_stores()`` legs need BOTH a Postgres record
+and a FalkorDB**, and one job now provisions both for them:
+``test-record-postgres`` gained a FalkorDB ``falkordb-provision`` step for exactly
+this file (#13337, which closed #14077), so the arms are REAL and
+``test_the_armed_CI_job_supplies_BOTH_stores`` pins that wiring by reading the
+workflow. The sharded ``test`` matrix has a graph URI and NO record DSN, so those
+legs SKIP there — that shape is the ordinary docker lane, not a misconfiguration,
+which is why ``_both_stores()`` fails only on the arm that would hide a
+MEASUREMENT: a record DSN with no cache to compare against.
 
 ⛔ What is NOT here, named so the absence is visible: the write path does not
 gain a control-plane read (a per-write lookup would put a network call on the hot
@@ -748,36 +746,47 @@ def test_record_reconcile_HANDS_the_declared_name_to_the_CACHE_CONSUMER(
 
 
 def _both_stores():
-    """The two stores these legs need — and a HALF-PROVISIONED job is a FAILURE.
+    """The two stores these legs need — and a RECORD with no CACHE is a FAILURE.
 
     ⛔ The shape refused here is *certifying by absence* (#9551): a leg that needs
     both stores and SKIPS when one is missing cannot tell a job that provisioned
     both from a job that provisioned neither, and the second reads exactly like a
-    pass. That is why PR #14068's review (finding 3) blocked on it: the issue's
-    headline acceptance executed on NO CI job.
+    pass. That is why PR #14068's review blocked on it — the issue's headline
+    acceptance executed on NO CI job.
 
-    The signal is the ENVIRONMENT, never a switch: ``TEST_RECORD_DB_URI`` and
-    ``TORTOISE_DB_URI`` are exported by the same CI step, so *both set* means the
-    leg must run and *neither set* means there is nothing here to test (a laptop,
-    the fast matrix). Exactly one set is a real misconfiguration, and it is
-    reported as a FAILURE — a ``REQUIRE_*`` switch nobody exports would be an
-    inert guard that only ever skips.
+    ⛔ BUT ONLY ONE DIRECTION IS A MISCONFIGURATION, and getting that backwards
+    reds the fleet (measured by the reviewer: 3 failed, 27 passed on the ordinary
+    docker lane, i.e. `test (f)` on every `full` selection). The two variables are
+    NOT symmetric:
+
+    * ``TEST_RECORD_DB_URI`` set with NO ``TORTOISE_DB_URI`` — the record was
+      provisioned and the cache it is compared against was not. This is the arm
+      that protects the arming of `test-record-postgres`'s FalkorDB step: only
+      that job exports a record DSN, so if its provision were deleted the legs
+      would otherwise skip green. **FAILURE.**
+    * ``TORTOISE_DB_URI`` set with NO ``TEST_RECORD_DB_URI`` — the ordinary docker
+      lane (the sharded ``test`` matrix, every ``tools/test_lane.py run``). No job
+      promises a record there, and the sibling file for this same issue
+      (``tests/test_12943_cache_leg.py``) skips in exactly this shape. **SKIP.**
+    * neither — a laptop with no stores. **SKIP.**
+
+    The signal is the ENVIRONMENT, never a switch: a ``REQUIRE_*`` switch nobody
+    exports would be an inert guard that only ever skips.
     """
     dsn = (os.environ.get(RECORD_DB_ENV) or "").strip()
     cache = (os.environ.get("TORTOISE_DB_URI") or "").strip()
-    if not dsn and not cache:
-        pytest.skip(f"neither {RECORD_DB_ENV} nor TORTOISE_DB_URI is set — "
-                    "there is no record and no cache on this lane")
     if not dsn:
-        pytest.fail(
-            f"TORTOISE_DB_URI is set but {RECORD_DB_ENV} is not — a job that "
-            "provisions the cache must provision the record too; this leg cannot "
-            "certify by absence (#9551/#13337).")
+        pytest.skip(
+            f"{RECORD_DB_ENV} is not set — there is no record to compare a cache "
+            "against on this lane (the docker matrix arms a graph and no record "
+            "by design)")
     if not cache:
         pytest.fail(
             f"{RECORD_DB_ENV} is set but TORTOISE_DB_URI is not — the record was "
-            "provisioned without the cache it is compared against; this leg "
-            "cannot certify by absence (#9551/#13337).")
+            "provisioned without the cache it is compared against. That is the "
+            "arming this leg exists to protect: on `test-record-postgres` a "
+            "deleted FalkorDB provision must red here instead of skipping "
+            "(#9551/#13337).")
     try:
         import psycopg2  # noqa: F401 — the record's driver, nothing else
     except ImportError:
@@ -788,13 +797,20 @@ def _both_stores():
     return dsn
 
 
-def test_a_HALF_PROVISIONED_job_FAILS_rather_than_skips(monkeypatch):
-    """Non-vacuity for the arm: each half missing is a RED, not a skip."""
+def test_the_ONE_misconfiguration_that_reds_is_a_RECORD_without_a_CACHE(
+        monkeypatch):
+    """Non-vacuity for the asymmetry, BOTH directions (review P1).
+
+    An earlier cut failed ``TORTOISE_DB_URI``-without-a-record too — which is the
+    ordinary docker lane, so it redded `test (f)` on every ``full`` selection for a
+    shape that is correct. Pinned here so the fix cannot be reverted into that:
+    record-without-cache is a FAILURE (it hides a deleted FalkorDB provision),
+    cache-without-record is a SKIP.
+    """
     monkeypatch.delenv(RECORD_DB_ENV, raising=False)
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://localhost:6379")
-    with pytest.raises(pytest.fail.Exception) as excinfo:
+    with pytest.raises(pytest.skip.Exception):
         _both_stores()
-    assert RECORD_DB_ENV in str(excinfo.value)
 
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv(RECORD_DB_ENV, "postgresql://u:p@localhost:5432/record")

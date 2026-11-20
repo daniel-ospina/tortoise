@@ -1533,13 +1533,13 @@ def _cmd_record_restore(args):
               f"nobody reads (#13337).", file=sys.stderr)
     elif declared.source == SOURCE_DERIVED:
         # ⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB (#9556).
-        # `record-reconcile` may grade an assumed coordinate — it reports the
-        # source, and a wrong verdict is recoverable by re-running. This verb
-        # WIPES the graph it is given and refills it, so an assumption here
-        # destroys a graph the operator never named and reports a restore into
-        # one nobody reads. The refusal therefore STAYS for the derived arm and
-        # is now actionable rather than blind: it names the spelling it would
-        # have used and the two ways to supply the fact.
+        # `record-reconcile` refuses the same arm for consent reasons (an #13337
+        # assumption is never GRADED, so it cannot surface as a divergence a
+        # scheduler acts on). This verb WIPES the graph it is given and refills
+        # it, so an assumption here destroys a graph the operator never named and
+        # reports a restore into one nobody reads. The refusal therefore STAYS for
+        # the derived arm and is now actionable rather than blind: it names the
+        # spelling it would have used and the two ways to supply the fact.
         print(
             "Error: --cache-graph is required — no control-plane namespace could "
             f"be read for {args.graph}, so the name would be DERIVED "

@@ -4180,8 +4180,9 @@ record is unreachable".
    graph —
    so the run would report a restore into a graph nobody reads while the real
    graph stayed destroyed. The resolved coordinate and its source are printed
-   **before** anything is opened or deleted ("note: restoring into cache graph
-   'org_x' (control_plane)"), and the result prints the target's **pre-wipe
+   **before** anything is opened or deleted ("restore target: 'org_x' —
+   control_plane (public.graphs.namespace for <graph_id>)"), and the result
+   prints the target's **pre-wipe
    count of
    RESTORABLE nodes** (the labels the record can put back) for the same reason:
    `target held 0 node(s) before the wipe` beside `wrote 412` is either a

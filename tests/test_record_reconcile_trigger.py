@@ -996,6 +996,18 @@ def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
     """
     from tortoise import __main__ as cli
 
+    # ⛔ PIN THE CONTROL PLANE OFF (review P3). The verb now asks
+    # `namespace_from_control_plane` unconditionally, and that gate is
+    # `SUPABASE_URL` + a service key in the AMBIENT environment
+    # (`supabase_control.py`). On a box configured for hosted work this row would
+    # read a LIVE control plane, take the fact arm if a `graphs` row existed for
+    # (acme, g1), and fail the DERIVED assertions — the exact "a row that inherits
+    # the BOX's ambient control plane" hazard `test_13337_cache_graph_declaration.py`
+    # names. Stated here rather than inherited.
+    from tortoise import supabase_control
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+
     fake = types.ModuleType("psycopg2")
     fake.connect = lambda dsn, **kw: _FakeConn()        # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "psycopg2", fake)
