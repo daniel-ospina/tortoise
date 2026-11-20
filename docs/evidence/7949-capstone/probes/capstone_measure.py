@@ -4120,11 +4120,16 @@ E6_CENSUS = "docs/evidence/11083/pack-relation-census.json"
 #: into a committed log, and an absolute path there is a claim about one operator's machine.
 PACKS_DIR = "packs"
 
-#: The TWO surfaces a declared connection is written on, and the ONLY place the scan's
-#: breadth is stated (#11695 review F4d). Both the population loop and the defect scan read
-#: `_e6_census_rows`, so a later edit cannot narrow one of them to `relations[]` without
-#: moving this tuple — which is what §10.21 means by *"never from the census's `verdicts`
-#: aggregate — that sums `relations[]` only and would silently drop every hierarchy cell"*.
+#: The TWO surfaces a declared connection is written on, and the ONLY place that breadth is
+#: stated (#11695 review F4d). The population loop, the defect scan's enumeration AND the
+#: beside column's cell loader all iterate this tuple, so a later edit cannot narrow one of
+#: them to `relations[]` without moving it — which is §10.21's point, that the census's
+#: `verdicts` aggregate "covers `relations[]` only; the metric spans the ROWS of both
+#: surfaces". ⛔ THAT SENTENCE IS QUOTED FROM §10.21, and the wording matters: an earlier cut
+#: of this comment put quotation marks around a PARAPHRASE of it that no document contains —
+#: an invented quote inside a bundle whose pins enforce that a cite carries the sentence it
+#: quotes (#11695 review round 3, P3). The wording above is the section's own; this note names
+#: the section and NOT a line number, so it cannot rot.
 E6_SURFACES = ("relations", "hierarchies")
 
 #: The open issue that owns a declared row which binds NO write path — `#11484`
