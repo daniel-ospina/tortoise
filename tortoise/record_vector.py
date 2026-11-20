@@ -482,9 +482,10 @@ class RecordVectorWithoutFallback(RecordVectorError):
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
     ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
-    :data:`MIRROR_RETIRED_LABELS` have a fold that stops encoding, so only they
-    raise this. The other five are still mirrored after their count verifies, so
-    a graph answer for them is a complete copy and they keep the named fallback.
+    :data:`MIRROR_RETIRED_LABELS` have writers that stop storing, so only they
+    raise this. `point` and `operator` are still mirrored after their count
+    verifies (a `:Point`'s vector is record TRUTH and no fold derives it), so a
+    graph answer for them is a complete copy and they keep the named fallback.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the
@@ -660,11 +661,18 @@ class Coverage:
 #: is complete precisely because :func:`mirror_required` keeps writing it — so the
 #: wide set is the safe direction, and the narrow one is the silent one.
 #:
-#: The WRITE half is narrower, and deliberately: only `_upsert_subject` /
-#: `_upsert_object` consult :func:`mirror_required` today, so the other five keep
-#: their graph vector even after their coverage verifies. That is option 2's
-#: transitional double-storage, not a gap in the proof: the round trip here is
-#: "the read stops trusting the graph last", never "the write stops first".
+#: ⛔ THE WRITE HALF IS NOW EVERY WRITER OF A COVERAGE-GATED LABEL (#13626). Option
+#: 2's transitional double-storage was produced by the READ gating a label before the
+#: WRITES did, and it is over: the folds (`_upsert_subject`, `_upsert_object`,
+#: `_upsert_event`, `_upsert_document`, `_upsert_source`, `_event_plain_merge`) and the
+#: writers outside them (`sdk::_update_entity`, `sdk::_event_raw_write_door`,
+#: `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`, `sdk::ingest_corpus`,
+#: `session_indexer::main`, `hosted_backup::restore_graph`) each ask this same predicate
+#: before they store `embedding`. A single ungated writer would re-add the vector on its
+#: next call and make :mod:`tools.strip_graph_entity_vectors`'s strip pointless — which
+#: is why that tool's census, not this comment, is the authority on whether a label may be
+#: stripped: it reads every declared writer's own source and refuses a label while one of
+#: them still stores unconditionally.
 #: ⚠️ AND THE CONTRACT IS NARROWER STILL — :data:`MIRROR_RETIRED_LABELS`, the next
 #: declaration. This set answers "may the record decline to the graph"; the
 #: no-fallback arm asks the stronger question and must not be read off this one.
@@ -679,15 +687,21 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: nothing. The CONTRACT claims something stronger — *the graph copy has been
 #: FROZEN since coverage verified, so a graph answer would be a SMALLER cohort
 #: presented as the answer* (:class:`RecordVectorWithoutFallback`) — and that
-#: premise is produced by exactly ONE thing: the fold consulting
-#: :func:`mirror_required` before it encodes. Only `_upsert_subject` and
-#: `_upsert_object` do (`projection/entities.py:4906`, `:5112`);
-#: `_upsert_event` / `_upsert_document` still call `derived_embedding.encode`
-#: unconditionally, and a `:Point`'s vector is RECORD TRUTH (`#5004`), never
-#: gated. So for those five the graph is not stale — it is a complete,
-#: still-maintained copy, and refusing it on a record blip would empty the dense
-#: leg for `point` (the primary retrieval label) on the DEFAULT posture, where
-#: `main` answered from that same copy.
+#: premise is produced by exactly ONE thing: the writer consulting
+#: :func:`mirror_required` before it stores. `#13626` wired that for every writer of
+#: `object`, `subject`, `event`, `document` and `source`, so those five are here; a
+#: `:Point`'s vector is RECORD TRUTH (`#5004`) and is never derived, and `operator`
+#: (a `:Point` subset, `#13630`) has no fold of its own — nothing answers the gate
+#: for either, so their graph copy is still maintained and refusing it on a record
+#: blip would empty the dense leg for `point` (the primary retrieval label) on the
+#: DEFAULT posture, where `main` answered from that same copy.
+#:
+#: ⛔ AND THE SET NOW COVERS BOTH HALVES OF `:Source` (`document` AND `source`), which
+#: is not a re-cut of the union rule: each half is written by its own fold (`_upsert_document`
+#: / `_upsert_source`), and BOTH ask BOTH types — one `:Source` vector serves both
+#: readings, so either KEEP keeps it and only an agreeing stop retires it. ⛔ THAT STOP IS
+#: A PROPERTY OF THE LABEL, not of one `entity_type`, so this set alone does not decide the
+#: read's no-fallback arm — :func:`label_frozen` is the conjunct that does (`#13854` review).
 #:
 #: ⛔ THE MEMBERSHIP IS PINNED AGAINST THE FOLDS THEMSELVES rather than restated
 #: here: `tests/test_13610_graph_vector_copy.py::
@@ -699,7 +713,8 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: a third fold WIDENS this set by test failure rather than
 #: leaving that label with a fallback it no longer has — or, in the other
 #: direction, silently taking away a fallback it still has.
-MIRROR_RETIRED_LABELS: frozenset[str] = frozenset({"object", "subject"})
+MIRROR_RETIRED_LABELS: frozenset[str] = frozenset(
+    {"object", "subject", "event", "document", "source"})
 
 #: How long one tenant's UNVERIFIED coverage verdict is trusted (seconds).
 #:
@@ -1023,6 +1038,55 @@ def coverage_verified(label: str, scope: _Scope | tuple[str, str] | None = None,
         return False
     cached = _cached_coverage(label, resolved, record_dsn)
     return bool(cached is not None and cached.verified)
+
+
+def label_frozen(entity_type: str, scope: _Scope | tuple[str, str] | None = None, *,
+                 graph_population: Callable[[str], int | None] | None = None,
+                 record_dsn: str | None = None,
+                 timeout_ms: int | None = None) -> bool:
+    """Has the GRAPH copy of ``entity_type``'s **LABEL** been frozen? (`#13854` review)
+
+    The no-fallback arm (:class:`RecordVectorWithoutFallback`) claims something the
+    per-type :func:`coverage` verdict cannot establish on its own: *the graph copy
+    has been FROZEN since the contract, so a graph answer would be a SMALLER cohort
+    presented as the answer*. That premise is produced by the WRITERS, and **a writer
+    stops for a LABEL, not for an `entity_type`** — the four writers of `:Source`
+    (`_upsert_document`, `_upsert_source`, `hosted_backup.restore_graph` and
+    `sdk._update_entity`) each ask BOTH halves of the one shared node and store while
+    EITHER answers KEEP, so the graph is only frozen once **every** type addressing
+    the label has verified.
+
+    ⛔ WHAT THIS FUNCTION EXISTS TO STOP. Reading the contract off the current type
+    alone claimed a freeze the writers had not performed. `:Source` is served by two
+    `entity_type`s (`LABEL_SERVED`: `document` is `document_kind IS NOT NULL`,
+    `source` is `IS NULL`) against ONE graph label whose count has no kind predicate,
+    so the two halves verify INDEPENDENTLY — and the ordinary deployment verifies one
+    of them. In that state `contracted("document")` was ``True`` while the `:Source`
+    copy was still being written by the `source`-KEEP arm (and the strip, which asks
+    the same AND, had not run), so a record blip turned a COMPLETE graph answer into
+    `RecordVectorWithoutFallback`: an availability regression on the default posture
+    for the two types that share the label, in the one direction the contract must
+    never take.
+
+    The consequence is deliberately not a hard-coded exclusion. While the graph
+    denominator is label-wide, `record_vectors >= graph_vectors` cannot be satisfied
+    by both halves at once (:func:`_record_vector_count`: one `public.source` table
+    splits into two kind-filtered numerators against the whole-label denominator), so
+    this answers ``False`` for `:Source` — which is CORRECT, because that is exactly
+    the state where a writer is still storing. A kind-aware denominator, should one
+    ever exist, widens the answer without touching this rule.
+
+    Conservative in every unknown: an unmeasurable sibling answers unverified, which
+    keeps the named fallback (the graph is complete while a writer still writes).
+    """
+    served = LABEL_SERVED[entity_type][0]
+    for sibling, (sibling_served, *_rest) in LABEL_SERVED.items():
+        if sibling_served != served:
+            continue
+        if not coverage(sibling, scope, graph_population=graph_population,
+                        record_dsn=record_dsn, timeout_ms=timeout_ms).verified:
+            return False
+    return True
 
 
 def _declared_scope(scope: _Scope | tuple[str, str] | None) -> _Scope | None:
@@ -2409,6 +2473,15 @@ def searcher(
         #     fallback. ⛔ CARRYING THE CONTRACT OVER TO THESE FIVE would empty the
         #     dense leg for `point` on the default posture — a regression against
         #     `main` on the label the product retrieves by (`#13617` review F1).
+        #
+        # ⛔ AND "THE GRAPH HAS BEEN FROZEN" IS A CLAIM ABOUT THE **LABEL**, not about
+        # this `entity_type` (#13854 review). A writer stops for a label: the four
+        # writers of `:Source` ask BOTH halves and store while EITHER answers KEEP, so
+        # `document` verifying while `source` has not proves nothing about the copy a
+        # graph answer would return — it is still complete and still being fed. The
+        # membership test alone read the contract off the type, which is why
+        # `label_frozen` is the conjunct and why the two `:Source` halves cannot both
+        # clear it while the graph denominator is label-wide.
         contracted = False
         if entity_type in COVERAGE_GATED_LABELS:
             verdict = coverage(entity_type, scope,
@@ -2469,8 +2542,14 @@ def searcher(
                     "about this read's population",
                     entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
-            # whose fold actually stops writing has a graph worth refusing.
-            contracted = entity_type in MIRROR_RETIRED_LABELS
+            # whose fold actually stops writing has a graph worth refusing. And the
+            # narrow set is per LABEL — membership here names a fold, not a frozen
+            # graph, so the freeze is measured over every type that shares it.
+            contracted = (entity_type in MIRROR_RETIRED_LABELS
+                          and label_frozen(entity_type, scope,
+                                           graph_population=graph_population,
+                                           record_dsn=record_dsn,
+                                           timeout_ms=timeout_ms))
         try:
             rows = vector_search(scope, entity_type, query_vec, limit,
                                  record_dsn=record_dsn,
