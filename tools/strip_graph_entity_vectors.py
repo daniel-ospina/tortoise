@@ -1106,10 +1106,11 @@ _STATEMENT_RUNNERS = ("run", "query", "execute", "write")
 #: changes WHICH element the check sees — `list`, `tuple`, `set` (re-columned), `sorted` (re-ordered),
 #: `reversed` (re-ordered) and `iter` (the one-shot view of the same elements). ⛔ ONE INCLUDE LIST, ASKED AT EVERY SEAM THAT UNWRAPS A CONTAINER
 #: (`#13788` round 12, measured) — `_source_holds_the_store_anywhere`'s container arm included: it
-#: asks THIS list through `_container_call_operand` and subtracts only
-#: `_CONTAINER_CALLS_ANSWERED_UPSTREAM`, so a name added here reaches that seam too unless it is
-#: excluded there by name, with its measurement beside it. The family used to be spelled out FOUR
-#: times with four different
+#: asks THIS list through `_container_call_operand` and answers ALL of it, with NO subtraction, so
+#: a name added here reaches that seam by construction. `_CONTAINER_CALLS_ANSWERED_UPSTREAM` is a
+#: RECORD of upstream redundancy, never a disposition: subtracting it is the one direction this
+#: file forbids, and it was measured to CERTIFY (see that constant). The family used to be spelled
+#: out FOUR times with four different
 #: member sets, and the two names missing from all four — `sorted`/`reversed` — CERTIFIED a stop arm
 #: that STORES the vector, 21 of 100 generated rows, each runtime-checked:
 #:
@@ -1182,14 +1183,25 @@ def _container_call_operand(node):
 #: x ten inner shapes (literal, `.copy()`, `if`-expression, `Starred` splice, set literal, three
 #: pair-with-extras literals, and the two NESTED extras wrappers) = **60 rows at this seam**. Leg 1
 #: (`_pairs_operand_stores_the_vector`) answers 30/60, leg 3
-#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and the 12 rows
-#: nothing upstream answers are exactly the nested extras spellings, where this arm is the SOLE
-#: decider. `set`/`list`/`tuple` are SAMPLED here — never extrapolated from the
-#: `sorted`/`reversed`/`iter` sweep that named only three of the six.
-#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 stops answering a family name, or
-#: if a family name is added to `_CONTAINER_CALLS` without being asked at this seam,
+#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and **24** rows
+#: are answered by NOTHING upstream, in two disjoint classes of 12: the NESTED extras wrappers,
+#: where this arm is the SOLE decider, and the two extras spellings
+#: (`[("embedding", 1, 1)]`, `[(1, "embedding", _encode(ev))]`) whose produced key is not the
+#: property by any reading these rules make. (The earlier text said "the 12 rows nothing upstream
+#: answers are exactly the nested extras spellings": re-measured at `f2e5e3a98f`, nothing-upstream
+#: is 24, so that sentence counted one class and named it the whole.) `set`/`list`/`tuple` are
+#: SAMPLED here — never extrapolated from the `sorted`/`reversed`/`iter` sweep that named only
+#: three of the six.
+#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR — BUT ONLY BY LEG 3, WHICH IS THE WHOLE REASON THIS
+#: PARAGRAPH NAMES WHICH LEG: if **leg 3** stops answering a family name, or if a family name is
+#: added to `_CONTAINER_CALLS` without being asked at this seam,
 #: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
-#: losing the legs that were doing the work.
+#: losing the legs that were doing the work. **LEG 1 IS NOT WITNESSED BY ANY ROW AND THE ASSERTS
+#: CANNOT SEE IT** (measured at `f2e5e3a98f` over this same 60-row sample: `leg1 AND NOT leg3` is
+#: **0** rows, so deleting leg 1 outright moves `upstream` nowhere and the test stays green). That
+#: is DISCLOSED rather than repaired: deleting a leg is the one direction that can widen
+#: acceptance, so leg 1 stays and this record says plainly that it is a duplicate at this seam —
+#: naming it as a guard would be the inert-enforcer shape this file's doctrine removes.
 #: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
 #: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
 #: DISCLOSED here, never left looking load-bearing — and an arm that IS witnessed stays whole.

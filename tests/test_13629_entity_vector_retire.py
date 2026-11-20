@@ -9919,8 +9919,13 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
       would answer here for two names and skip the other four with nothing reddening;
     * the redundancy the record claims still HOLDS WHERE IT WAS MEASURED, and is asserted NOT to
       hold for the sole-decider class — so a later lane cannot cite the record as cover for those
-      rows. Thin leg 1 or leg 3 and the first half reddens instead of the record quietly
-      describing a set of legs that no longer read those wrappers.
+      rows. Thin leg 3 and the first half reddens instead of the record quietly describing a set
+      of legs that no longer read those wrappers. ⛔ **Leg 1 is NOT witnessed here and no mutant of
+      it can redden this test** (measured at `f2e5e3a98f`: over this 60-row sample `leg1 AND NOT
+      leg3` is 0 rows, so deleting leg 1 outright reddens nothing). The assertions below ask
+      `leg1 OR leg3` on purpose — the record is about the redundancy, not about a leg — and the
+      record says so rather than naming leg 1 as a guard it cannot be. Repairing that would mean
+      deleting leg 1, which is the one direction this file forbids.
 
     ⛔ THE BASELINE IT IS MEASURED AGAINST, stated correctly (the review of `085c815866` caught
     the earlier sentence being false): at the merge base `e3f894b31b` the arm ALREADY asked the
@@ -10000,9 +10005,11 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
             assert upstream is True, (
                 f"`{name}({inner})` is answered by the FOURTH leg and by nothing upstream — the "
                 f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding: "
-                f"leg 1 or leg 3 lost a wrapper it read, or the record is stale and must be "
-                f"corrected before anyone quotes it again. (A real store is still REFUSED here, "
-                f"so nothing certifies — this is the record's guard, not a fail-open.)"
+                f"leg 3 lost a wrapper it read, or the record is stale and must be "
+                f"corrected before anyone quotes it again. (Leg 1 is asked too, but it is a "
+                f"DUPLICATE at this seam — measured 0 rows where leg 1 answers and leg 3 does "
+                f"not — so a red here can only have come from leg 3. A real store is still "
+                f"REFUSED, so nothing certifies: this is the record's guard, not a fail-open.)"
             )
 
 
