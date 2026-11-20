@@ -52,7 +52,7 @@ The horizon is **path-dependent**, and the difference matters:
 |-------------|------------------|------------------------|
 | **Graph** deletion — the undo window | **7 days** | `tortoise/backup_sweep.py` `_GRAPH_PURGE_GRACE_DAYS` → `retention.RESTORE_WINDOW_DAYS` |
 | **Graph** deletion — the graph's own backup pool | erased **at the 7-day purge, best-effort per artifact family** — a residual is **not retried** (see *Accepted gaps the promise carries*) | `tortoise/backup_sweep.py` `_purge_graph_storage` |
-| **User-account** deletion — the account's own backup copies | **not actively erased** — they **age out on the ≈28-day cycle** (**owner ruling 2B**, 2026-09-30; no account-backup purge exists) | `tortoise/backup_config.py` `retention_hourly/daily/weekly`; the age-out prune is `prune_backups` (`tortoise/hosted_backup.py:2952`) |
+| **User-account** deletion — the account's own backup copies | **not actively erased** — they **age out on the ≈28-day cycle** (**owner ruling 2B**, 2026-09-30; no account-backup purge exists) | `tortoise/backup_config.py` `retention_hourly/daily/weekly`; the age-out prune is `prune_backups` (`tortoise/hosted_backup.py:2956`) |
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Session recording** — the recording itself | **no expiry** — retained until deleted by a member of the organization (**owner ruling 2026-10-08**); a snapshot taken before the deletion retains it until it ages out on the ≈28-day cycle, so deletion is complete in the live service immediately and in backups within four weeks | `tortoise/hosted_api.py` `delete_session` |
@@ -181,7 +181,7 @@ end of the 7-day restore window the account's **live** data is erased, but its
 copies in our backup pool are **not** purged by the deletion. They age out on
 the existing ≈**28-day** horizon — the 24-hourly / 7-daily / 4-weekly rotation
 in `tortoise/backup_config.py` (`retention_hourly` / `retention_daily` /
-`retention_weekly`), pruned by `prune_backups` (`tortoise/hosted_backup.py:2952`).
+`retention_weekly`), pruned by `prune_backups` (`tortoise/hosted_backup.py:2956`).
 
 This is **path-dependent**, and the two paths legitimately differ:
 
