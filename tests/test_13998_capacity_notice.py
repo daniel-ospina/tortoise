@@ -17,13 +17,16 @@ Nothing here touches the network: the provider POST is always a fake.
 from __future__ import annotations
 
 import asyncio
+import ast
 import pathlib
 import re
+import threading
 
 import pytest
 
 from tortoise import capacity_notice as cn
 from tortoise import email_notify
+from tortoise import supabase_control as sc
 from tortoise.supabase_control import (
     org_storage_notice_pct,
     set_org_storage_notice_pct,
@@ -31,6 +34,14 @@ from tortoise.supabase_control import (
 from tests.fake_control_plane import FakeControlPlane
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+ROOT = pathlib.Path(__file__).parent.parent
+MIGRATIONS = ROOT / "supabase" / "migrations"
+#: The migration that RENAMED `public.teams` → `public.organizations`
+#: (`ALTER TABLE public.teams RENAME TO organizations`, line 50). Every
+#: migration sorting after this one must speak the post-rename name; a migration
+#: written against `public.teams` fails with `relation "public.teams" does not
+#: exist` and its column never exists.
+RENAME_MIGRATION = "20260915000001_tenancy_team_to_org.sql"
 
 #: The lines an earlier draft of this email carried, and that the destination
 #: rewrite exists to keep out (#13989 records the discarded 80 % wording, which
@@ -189,12 +200,28 @@ def test_the_docs_link_is_the_zero_hop_canonical_origin():
     spelling is the #11767 rule these emails' sibling links already follow — a
     redirect is a hop that can drop a reader, and on a link that carries no
     token it buys nothing.
+
+    ⛔ #13998 review P3 (agent-infra#3442 rule 3): the retired-spelling check
+    used to be `assert not STORAGE_DOCS_URL.startswith(retired)` — UNREACHABLE,
+    because both retired prefixes are non-prefixes of the canonical literal
+    asserted two lines earlier, so no mutation of ``STORAGE_DOCS_URL`` could
+    ever make it fail while the earlier asserts passed. A comment explaining why
+    it cannot fail is not a fix, so the spurious assertion is gone and the pin
+    is now the EXACT url (which every mutation reds), with the retired spellings
+    checked where they CAN appear: in the rendered copy.
     """
-    assert cn.STORAGE_DOCS_URL.startswith("https://premiselabs.co/tortoise/docs")
-    assert cn.STORAGE_DOCS_URL.endswith("#storage")
-    for retired in ("https://premiselabs.co/docs",
-                    "https://tortoise.premiselabs.co/docs"):
-        assert not cn.STORAGE_DOCS_URL.startswith(retired)
+    assert cn.STORAGE_DOCS_URL == "https://premiselabs.co/tortoise/docs#storage"
+    retired_spellings = (
+        "https://premiselabs.co/docs",
+        "https://tortoise.premiselabs.co/docs",
+    )
+    for threshold in cn.THRESHOLDS:
+        copy = cn.render(threshold, "Dana")
+        for retired in retired_spellings:
+            # Reachable: a template hardcoding a one-hop link reds here even when
+            # the module constant stays canonical.
+            assert retired not in copy.html, (threshold, retired)
+            assert retired not in copy.text, (threshold, retired)
 
 
 def test_the_add_capacity_cta_lands_on_the_billing_tab():
@@ -320,9 +347,29 @@ def test_evaluate_reads_the_gate_instruments(monkeypatch):
     assert calls == {"limits": ORG_ID, "read": ("graph_storage", ORG_ID)}
 
 
-def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read():
-    notice, reason = cn.evaluate(ORG_ID, limits=_limits(102), reading=None)
-    assert notice is None and reason == "no-reading"
+def test_evaluate_sends_nothing_when_the_gauge_cannot_be_read(monkeypatch):
+    """A METER FAULT resolves to no email — injected at the INSTRUMENT.
+
+    ⛔ #13998 review ("also worth a line"): this row used to pass
+    ``reading=None``, but in ``evaluate`` ``None`` means *read it yourself*, not
+    *unreadable* — so it exercised the REAL ``allowance_gate.read_dimension``
+    against the ambient environment and stayed green because that call returns
+    ``None`` for an unknown org, not because a fault was injected. A caller that
+    DID attempt the read and got nothing could not express that through that
+    seam. Patching the instrument controls the fault; the call assertion keeps
+    it from going vacuous.
+    """
+    calls: list[tuple[str, str]] = []
+
+    def unreadable(dimension, org_id):
+        calls.append((dimension, org_id))
+        return None
+
+    monkeypatch.setattr("tortoise.allowance_gate.read_dimension", unreadable)
+    notice, reason = cn.evaluate(ORG_ID, limits=_limits(102))
+    assert (notice, reason) == (None, "no-reading")
+    assert calls == [(cn.DIMENSION, ORG_ID)], (
+        "the gauge was never consulted — this row would be vacuous")
 
 
 def test_evaluate_sends_nothing_without_an_armed_allowance():
@@ -596,3 +643,212 @@ def test_greeting_reuses_the_onboarding_heuristic():
     assert email_notify.recipient_first_name(None, "info@acme.example",
                                              "Acme") == "Acme"
     assert email_notify.recipient_first_name("Dana Lopez", None, None) == "Dana"
+
+
+# ── 5. The decision runs OFF the event loop ────────────────────────────────────
+
+def test_the_decision_runs_off_the_event_loop():
+    """⛔ #13998 review 4 (P1): `evaluate` is sync and does TWO blocking reads.
+
+    `notify_account` already offloaded the reads BESIDE the decision
+    (`read_account`, `claim_notice`) but called `evaluate` inline. `evaluate`
+    performs two control-plane round-trips (`quota.resolve_org_limits` →
+    `_orgs_row_fail_soft` → `cp.query`, and `allowance_gate.read_dimension` →
+    `metering.get_graph_storage_reading` → `cp.query`), and this module's pass
+    runs as an asyncio task INSIDE the API process
+    (`hosted_api._capacity_notice_sweep_loop`, armed by default) — so every
+    account stalled the whole event loop for the length of a fleet pass, the very
+    thing `_cp_offload` exists for (#3498).
+
+    The assertion is the THREAD the instrument runs on, measured: pre-fix it is
+    the loop's own thread, post-fix a worker's.
+    """
+    cp = _fake_cp()
+    loop_thread = threading.get_ident()
+    instrument_threads: list[int] = []
+
+    def observed_limits(org_id):
+        instrument_threads.append(threading.get_ident())
+        return _limits(102)
+
+    from unittest.mock import patch
+    with patch("tortoise.quota.resolve_org_limits", observed_limits), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)):
+        out = asyncio.run(cn.notify_account(ORG_ID, cp=cp, send=_Sender()))
+    assert out["status"] == "sent"
+    assert instrument_threads, (
+        "the allowance was never resolved — this row would be vacuous")
+    assert instrument_threads[0] != loop_thread, (
+        "the decision ran ON the event loop: `evaluate` issues two blocking "
+        "control-plane reads, so a fleet pass freezes the API process")
+
+
+# ── 6. The migration, and the #1096 ladder it depends on ────────────────────
+#
+# Both of these are the #13998 review's BLOCKING findings, and both were
+# invisible to the behavioural tests above because neither finding is about the
+# copy or the ledger — they are about whether the column the ledger lives in can
+# exist at all, and whether every reader of it can DEGRADE when it does not.
+
+def _ddl_only(sql: str) -> str:
+    """The statement text, with `--` comment lines removed.
+
+    The pins below are about what the migration DOES. The header deliberately
+    NAMES the pre-rename table to explain why it is not used, so scanning raw
+    text would red on the prose that prevents the bug.
+    """
+    return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+
+def test_the_mark_migration_targets_the_post_rename_table():
+    """⛔ #13998 review 1 (BLOCKING): `public.teams` was RENAMED.
+
+    `20260915000001_tenancy_team_to_org.sql:50` runs `ALTER TABLE public.teams
+    RENAME TO organizations`, and no compatibility view named `teams` is created
+    anywhere (`grep 'CREATE VIEW' supabase/migrations/*.sql` finds none). So the
+    original `ALTER TABLE public.teams ADD COLUMN storage_notice_pct` failed
+    with `relation "public.teams" does not exist`, the column never existed, and
+    the whole ledger was inert — `read_account` selects it directly, so the
+    sweep raised per account and sent nothing, ever. The migration was copied
+    from 20260907000001, which predates the rename, and that is where the
+    `teams` spelling came from.
+    """
+    migration = MIGRATIONS / "20261120000001_storage_notice_pct.sql"
+    ddl = _ddl_only(migration.read_text())
+    assert "ALTER TABLE public.organizations" in ddl
+    assert "ADD COLUMN IF NOT EXISTS storage_notice_pct integer" in ddl
+    assert "public.teams" not in ddl
+
+
+def test_no_migration_after_the_tenancy_rename_writes_to_public_teams():
+    """The same class, for every future additive migration.
+
+    `schema-drill` (the REQUIRED leg running `supabase/tests/pglite/validate.mjs`,
+    which enumerates the directory from disk) is what actually applies these; this
+    pin is the cheap local arm that names the offending file instead of leaving a
+    first-failure abort.
+    """
+    after_rename = sorted(
+        p for p in MIGRATIONS.glob("*.sql") if p.name > RENAME_MIGRATION)
+    assert after_rename, "the pin is vacuous — no migration sorts after the rename"
+    offenders = [p.name for p in after_rename if "public.teams" in _ddl_only(p.read_text())]
+    assert offenders == [], (
+        f"migration(s) {offenders} reference `public.teams`, which "
+        f"{RENAME_MIGRATION} renamed to `organizations` — they cannot apply")
+
+
+def _additive_tiers() -> dict[str, list[str]]:
+    """Every `_ORG_ADDITIVE_*_TIER` the ladder can drop, by name."""
+    return {name: list(getattr(sc, name)) for name in dir(sc)
+            if re.fullmatch(r"_ORG_ADDITIVE_[A-Z0-9_]*_TIER", name)}
+
+
+def test_the_additive_tier_registry_covers_every_additive_column():
+    """A column in `_ORG_ADDITIVE_SELECT` with no tier can never be dropped.
+
+    This is the invariant that makes the ladder complete: the terminal rung is
+    `[c for c in select if c not in dropped]`, so an unlisted column survives
+    every rung, every attempt 400s (PGRST204), and `_orgs_row_fail_soft` ends at
+    `raise last_exc` instead of degrading — the #1096/#1832 fail-OPEN-to-500
+    class. Pinned as a SET EQUALITY so adding a column without a tier reds here.
+    """
+    tiers = _additive_tiers()
+    assert tiers, "no additive tiers found — the scan is broken, not green"
+    covered = {column for columns in tiers.values() for column in columns}
+    assert covered == set(sc._ORG_ADDITIVE_SELECT)
+
+
+def _call_sites() -> list[tuple[str, int, set[str], set[str]]]:
+    """Every `_orgs_row_fail_soft(...)` call: (file, line, select tokens, tiers named).
+
+    Parsed, not grepped: the two defective call sites sat inside `lambda:` under
+    `_cp_offload`, and a text scan for "storage_notice_pct" cannot tell which
+    call site a ladder belongs to.
+    """
+    sites = []
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_orgs_row_fail_soft"):
+                continue
+            kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+            select_node, tiers_node = kwargs.get("select"), kwargs.get("additive_tiers")
+            if select_node is None or tiers_node is None:
+                continue
+            select_tokens: set[str] = set()
+            for sub in ast.walk(select_node):
+                if isinstance(sub, ast.Name):
+                    select_tokens.add(sub.id)
+                elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    select_tokens.add(sub.value)
+            tiers_named = {sub.id for sub in ast.walk(tiers_node)
+                           if isinstance(sub, ast.Name)}
+            sites.append((str(path.relative_to(ROOT)), node.lineno,
+                          select_tokens, tiers_named))
+    return sites
+
+
+def test_every_quota_select_ladder_names_the_storage_notice_tier():
+    """⛔ #13998 review 3 (BLOCKING): a `_QUOTA_SELECT` caller must name EVERY tier.
+
+    `_QUOTA_SELECT` is `_ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT`, and this PR
+    added `storage_notice_pct` to the additive list. The ladder only drops a
+    column that appears in a NAMED tier, so a caller that omits a tier keeps that
+    column on its terminal base-only rung, 400s there, and raises —
+    `hosted_api.py:9741-9743` records exactly what that cost the last time
+    (HTTP 500 on `/v1/team`, `/v1/team/keys`, `/v1/sessions`,
+    `/v1/onboarding/state`), and `_agent_recover_flow`'s comment says the
+    recovery emergency path *"must not 500 on migration skew"*.
+
+    Measured at the pre-fix head: `_session_user_org` (`hosted_api.py:9736`) and
+    `_agent_recover_flow` (`hosted_api.py:35768`) named NONE of the storage-notice
+    tier (and no `_QUOTA_SELECT` caller named `_ORG_ADDITIVE_ONBOARDING_TIER`
+    outside `supabase_control.py`, so `quota.resolve_org_limits` had the same
+    hole for the #2406 marker). Nothing in the repo parsed these call sites, so
+    no suite could have caught it.
+    """
+    tiers = _additive_tiers()
+    wants_all = {"_QUOTA_SELECT", "_ORG_ADDITIVE_SELECT", "storage_notice_pct"}
+    checked = 0
+    missing: list[str] = []
+    for path, line, select_tokens, tiers_named in _call_sites():
+        if not (select_tokens & wants_all):
+            continue
+        checked += 1
+        for name in sorted(tiers):
+            if name not in tiers_named:
+                missing.append(f"{path}:{line} omits {name}")
+    assert checked >= 4, f"only {checked} ladder call sites found — the scan broke"
+    assert missing == [], "\n".join(missing)
+
+
+def test_every_ladder_module_imports_the_tiers_it_names():
+    """A tier named but not imported is a NameError on a schema-drift read.
+
+    The import blocks live inside the endpoint functions, so a missing name is
+    not caught at module import — only on the path that is already degraded.
+    A module may also DEFINE a tier (`supabase_control` owns the registry), so
+    "bound" is imported-or-assigned, not imported alone.
+    """
+    tiers = set(_additive_tiers())
+    problems: list[str] = []
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        bound = {alias.name
+                 for node in ast.walk(tree)
+                 if isinstance(node, ast.ImportFrom)
+                 for alias in node.names}
+        bound |= {target.id
+                  for node in ast.walk(tree)
+                  if isinstance(node, (ast.Assign, ast.AnnAssign))
+                  for target in (node.targets if isinstance(node, ast.Assign)
+                                 else [node.target])
+                  if isinstance(target, ast.Name)}
+        used = {node.id for node in ast.walk(tree)
+                if isinstance(node, ast.Name) and node.id in tiers}
+        for name in sorted(used - bound):
+            problems.append(f"{path.relative_to(ROOT)} uses {name} without binding it")
+    assert problems == [], "\n".join(problems)

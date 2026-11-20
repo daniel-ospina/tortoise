@@ -2045,8 +2045,25 @@ surfaces:
   # diff, so the suite would have stayed green if the gate were deleted. That is
   # the #10513 / #1349 silent-drop class. Keep BOTH arms.
   - test_allowance_gate.py
-  # #9559 R11 review (F1/F3, BLOCKING): the blocked-release-conditions pins.
-  # DUAL-REGISTERED with `core` (below) for the #10668 reason exactly — measured
+  # #13998 review (BLOCKING): the 80 %/100 % capacity-notice evidence — the
+  # `api` arm. The suite pins `tortoise/capacity_notice.py` (the module) against
+  # `tortoise/email_notify.py` (`send_notice_email`/`recipient_first_name`, and
+  # the ONE Resend budget+idempotency seam), `tortoise/hosted_api.py` (the sweep
+  # loop's task membership), `tortoise/quota.py` and
+  # `tortoise/supabase_control.py` (the mark's read/CAS + the #1096 ladder
+  # completeness it asserts by PARSING the call sites). Both `email_notify.py`,
+  # `quota.py`, `supabase_control.py` and `hosted_api.py` are EXACT `api`
+  # SOURCE_PATTERNS matches, so an `api` row is what a diff to any of them
+  # selects. DUAL-REGISTERED with `core` (below) because the module the file
+  # mostly guards, `tortoise/capacity_notice.py`, matches NO pattern and falls
+  # through to the `core` fallback — measured: `--changed-files
+  # tortoise/capacity_notice.py` -> ['core'], `tortoise/allowance_gate.py` ->
+  # ['core'], `tortoise/email_notify.py`/`quota.py`/`supabase_control.py` ->
+  # ['api']. Absent either arm the suite runs on no leg on that diff class — and
+  # absent BOTH, `--integrity` reported it as `manifest drift` and the REQUIRED
+  # `manifest-integrity` leg reded (the #10513 / #1349 silent-drop class this
+  # file's siblings were registered for).
+  - test_13998_capacity_notice.py
   # at this head: `select(['tortoise/metering.py'])` -> ['api'] and
   # `select(['tortoise/postgres_bytes.py'])` -> ['api'] (both EXACT
   # `SOURCE_PATTERN` matches, and a match REPLACES the `core` fallback), while
@@ -3288,6 +3305,15 @@ surfaces:
   # guards is an exact `api` match, the other is a `core` fallback, and both
   # diffs must select the evidence.
   - test_allowance_gate.py
+  # #13998 review (BLOCKING): the `core` arm of the capacity-notice evidence
+  # above. `tortoise/capacity_notice.py` and `tortoise/allowance_gate.py` — the
+  # two modules this suite guards that the sweep reads its gauge through — match
+  # NO `SOURCE_PATTERNS` entry and fall through to the `core` fallback, so a
+  # `capacity_notice.py`-only diff selects `core` and would never reach the `api`
+  # row. Measured at this head: `--changed-files tortoise/capacity_notice.py` ->
+  # ['core']. Keep BOTH arms; a same-surface duplicate is refused by
+  # `--integrity`.
+  - test_13998_capacity_notice.py
   # #9559 R11 review (F1/F3, BLOCKING): the `core` arm of the blocked-release
   # pins above. `tortoise/allowance_gate.py` — the file the suite mostly guards —
   # matches NO `SOURCE_PATTERNS` entry and falls through to the `core` fallback,
