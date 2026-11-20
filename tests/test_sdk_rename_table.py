@@ -1827,14 +1827,20 @@ def test_every_group_has_a_pinned_representative() -> None:
     # ⛔ #12901 FINAL batch re-cut. SIX groups have no live member and their pin cannot be
     # "this member maps to this target" — there is no member and no row. They move to
     # `emptied` below, where the pin is the fact that survives: the group IS empty, which
-    # is what §C5 reports. ⛔ THE SIX ARE NOT SIX OF THIS BATCH'S MAKING: W6, W7, W16, N5
-    # and N6 had no live member BEFORE it (`#4282` deleted their only members), so this
-    # batch emptied R9 and INHERITED the rest — and the C5 arm above records that history
-    # and now names all six, R9 included, because R9's emptiness is a different shape (the
-    # canonical doc still names its two members). An earlier cut of this comment said "ten
-    # representatives were privatised, so TEN groups have no live member", which the
-    # `emptied` literal below refutes (#13899 re-cut review, P2) — the count that matters
-    # here is GROUPS, and it is six.
+    # is what §C5 reports. ⛔ FIVE OF THE SIX PREDATE THIS BATCH, and NOT for one reason —
+    # so do not compress them into one: W6 and W7 lost their only member to `#4282`
+    # (`capture_session` retired, `commit_session` deleted, 2026-10-27); N5 and N6 lost
+    # their whole membership to `#12901`'s WAVE 2 (`invitation_list` and
+    # `signup_token_lookup` privatised, 2026-11-16, `archive/sdk-methods/12901-wave-2/`);
+    # W16 never had members of its own at all — it is the canonical doc's WILDCARD spelling
+    # of N1–N6, so nothing could be deleted from it. This batch's only contribution is R9
+    # (`list_batch`/`list_batches` privatised while the doc still NAMES both members — a
+    # different emptiness from the other five, and the one the earlier `unfilled`
+    # computation missed). ⛔ An earlier cut of this comment said "ten representatives were
+    # privatised, so TEN groups have no live member" (refuted by the `emptied` literal
+    # below, which holds six), and the cut after it attributed all five inherited groups to
+    # `#4282`; both were record defects found by the #13899 re-cut review, P2. The count
+    # that matters here is GROUPS, it is six, and the reasons are three.
     # Nothing was dropped: every group in the partition is still pinned to exactly one of
     # the two sets, and the two-way closure at the end still reds on a group that escapes
     # both.
