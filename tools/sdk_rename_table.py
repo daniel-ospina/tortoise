@@ -97,8 +97,6 @@ from tools.bridge_table import _sdk_targets  # noqa: E402
 # W8 row routes `get_source_reliability`'s reads "via `list_sources`", which itself retires
 # into `list_knowledge` — the replacement it reaches has to come from somewhere. Importing
 # the ledger is the same rule as the line above: a second copy would be a second answer.
-from tortoise.sdk_retired import RETIRED_SDK_METHODS  # noqa: E402
-
 # The machine-readable record of EVERY name that LEFT the surface, in the four blocks the
 # ledger keeps (`#4282`'s 26 name surplus, the `#12901` wave-1 and wave-2 control-plane
 # blocks, the FINAL batch's privatised engine surface, plus the unhinted-but-live
@@ -117,6 +115,7 @@ from tortoise.sdk_retired import RETIRED_SDK_METHODS  # noqa: E402
 from tortoise.sdk_retired import (  # noqa: E402
     FINAL_DELETION_DESTINATIONS,
     REMOVED_SDK_METHODS,
+    RETIRED_SDK_METHODS,
     SURPLUS_DELETION_DESTINATIONS,
     UNHINTED_LIVE_DESTINATIONS,
     WAVE1_DELETION_DESTINATIONS,
