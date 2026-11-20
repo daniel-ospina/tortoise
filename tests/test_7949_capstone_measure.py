@@ -17139,6 +17139,18 @@ _D5_PINNED_PAIRS: tuple[tuple[str, str, str, _D5Needle, _D5Needle], ...] = (
     ),
 )
 
+#: The labels `_D5_PINNED_PAIRS` must still carry, one per entry. ⛔ THE SAME REASON
+#: `_D5_CURRENT_CLAIM_LABELS` EXISTS (#13879 review, cycle 2), and it cost one review round to
+#: learn it here too (#14003 review, round 2, P3 — MEASURED): the table's only reader walks
+#: whatever entries it FINDS, so DELETING an entry returns that pair to unread with NO red
+#: anywhere — and the pair-2 entry is the harder one to restore, so it is the one a lane under
+#: merge pressure drops. Compared as a SET (a drop and an undeclared addition both red) plus a
+#: LENGTH arm (the set comparison alone cannot see a duplicate).
+_D5_PINNED_PAIR_LABELS = frozenset({
+    "the alreadyDecided / _dedup_content_candidates pair",
+    "the _extract_session_llm docstring / empty-gate return dict pair",
+})
+
 
 def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     """Two D5 pairs this PR re-derived had no reader at all (#13956 review).
@@ -17158,6 +17170,23 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
         if line.lstrip().startswith("| **D5** |")
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    # ⛔ THE TABLE IS CENSUSED BEFORE IT IS READ. This arm walks the entries it FINDS, so a
+    # DROPPED entry converts a graded pair back to an ungraded one with no red anywhere — the
+    # defect `_D5_CURRENT_CLAIM_LABELS` was created for, and the one this table reproduced
+    # (#14003 review, round 2, P3). A duplicate label satisfies a set comparison while one
+    # entry is never read, which is what the length arm is for.
+    labels = [label for label, _pattern, _key, _a, _b in _D5_PINNED_PAIRS]
+    dropped = sorted(_D5_PINNED_PAIR_LABELS - set(labels))
+    undeclared = sorted(set(labels) - _D5_PINNED_PAIR_LABELS)
+    assert not dropped and not undeclared, (
+        f"`_D5_PINNED_PAIRS` and its declared label set disagree — dropped={dropped}, "
+        f"added_without_declaring={undeclared}. Re-derive the entry for this head rather "
+        "than removing it, and declare a new entry's label in `_D5_PINNED_PAIR_LABELS` in "
+        "the SAME commit")
+    assert len(labels) == len(_D5_PINNED_PAIR_LABELS), (
+        f"`_D5_PINNED_PAIRS` carries {len(labels)} entries for "
+        f"{len(_D5_PINNED_PAIR_LABELS)} declared labels — a duplicate label satisfies the "
+        f"set comparison while one entry is never read: {labels}")
     sources = {key: path.read_text(encoding="utf-8").splitlines()
                for key, path in _EPIC_CITE_SOURCES.items()}
 
