@@ -125,7 +125,12 @@ SWEEP_NAMES = 66
 #: `graph.query` 267, `cp.query` 263, `sdk._get_registry().query` 263, `self.g.query` 202) and typed
 #: references to a public name are still 0. An SDK-holding receiver is still residue: adding one
 #: still requires this same deliberate step, with its own reason.
-SWEEP_RESIDUE = (11758, "d2311d5af77fe5d5")
+#: RE-PINNED → (11757, 7a53ce4f33a41246) by the commit that re-keyed
+#: `tools/window_quality_m2.py`'s `cur["sdk"].tortoise_fts_query(` to the private
+#: `._tortoise_fts_query(`: that receiver is a SUBSCRIPT, so the sweep could not type it and had
+#: REPORTED it as residue — the re-key removes that one row. Measured with `--repin` on this tree,
+#: not arithmetic.
+SWEEP_RESIDUE = (11757, "7a53ce4f33a41246")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
