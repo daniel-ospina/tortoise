@@ -3065,8 +3065,65 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
 #: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
 #: `+`/`-` lines.
-_D5_ANY_COUNT_EXPR_RE = re.compile(r"grep -c[A-Za-z]* '([^']+)'")
+#:
+#: ⛔ AND THE FLAGS AND THE QUOTE ARE PART OF THE MATCH, BECAUSE "PREFIX-INDEPENDENT" WAS NOT
+#: (#13962, MEASURED). The cut above read `grep -c[A-Za-z]* '<expr>'` — ONE spelling of a count
+#: command — while claiming to read the expression "whatever command prefix". Four OTHER
+#: spellings of the SAME prescription left this arm GREEN, each measured by appending one line
+#: to the bundle and running the cell that calls `_d5_blank_count_expression` (all four:
+#: `1 passed`): `grep -Ec '^\+$'` (flag before the `c`), `grep -cE "^\+$"` (double-quoted
+#: expression — the exact byte pattern the row's own examples avoid and a re-wrap can produce),
+#: `grep -c -E '^\+$'` (flags split) and `grep --count '^\+$'` (long form). In every one the row
+#: carried TWO BLANK-class prescriptions — the retired, narrower one among the ungraded ones —
+#: while the arm whose whole job is to refuse that reported the class as graded once. So the
+#: flags are read as a RUN of `-…` words and asked only whether they request a count, and the
+#: expression may be single- OR double-quoted.
+#:
+#: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
+#: itself as complete (this file's own rule at `:1468`, and the over-claim was half of #13962):
+#: an UNQUOTED expression (`grep -cE ^[+-]$`), flags written AFTER the expression (`grep
+#: '^\+$' -c`), a count performed by another tool (`rg -c '^\+$'`) or assembled from a shell
+#: variable. Each of those carries a second prescription this reader cannot see, so "exactly
+#: one BLANK-class count command" is a claim about every count command spelled `grep
+#: <flags> '<expr>'` — not a claim that the class is prescribed once in the document.
+_D5_ANY_COUNT_EXPR_RE = re.compile(
+    r"grep\s+(?P<flags>-{1,2}[A-Za-z][\w-]*(?:\s+-{1,2}[A-Za-z][\w-]*)*)\s+"
+    r"(?P<quote>['\"])(?P<expr>[^'\"]+)(?P=quote)"
+)
 _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
+
+
+def _requests_a_count(flags: str) -> bool:
+    r"""Does this run of grep flags ask for a COUNT?
+
+    Word by word, because the flag run #13962 measured is not always ONE word: its four mutants
+    spell the count `-Ec`, `-cE` (in the double-quoted one), `-c -E` — TWO words — and
+    `--count`, alongside the `-c` that already worked. A whole-run test (`-` then
+    `[\w-]*c[\w-]*` anchored at both ends) reads the single-word forms and NOT the split
+    `-c -E`, which is one of the mutants — the defect this function exists for, one size
+    smaller. `c` is a count flag in GNU grep's short set and nothing else there means count, so
+    a word containing `c` IS a count request; a long flag must be the one long spelling,
+    `--count`.
+    """
+    return any(
+        word == "--count" or (word.startswith("-") and not word.startswith("--") and "c" in word[1:])
+        for word in flags.split()
+    )
+
+
+def _d5_count_prescriptions(bundle: str) -> list[str]:
+    """The EXPRESSION of every `grep` count command in `bundle`, whatever its spelling.
+
+    The count flag is what makes a `grep` a prescription to be counted, so the filter is
+    `_requests_a_count`, never a spelling of the flag run. Measured control: each of #13962's
+    four mutants returns exactly one BLANK-class expression here, and the two filter stages in
+    the same cell (`grep -E`, `grep -vE`) return none.
+    """
+    return [
+        match.group("expr")
+        for match in _D5_ANY_COUNT_EXPR_RE.finditer(bundle)
+        if _requests_a_count(match.group("flags"))
+    ]
 
 
 def _d5_blank_count_expression() -> str:
@@ -3082,8 +3139,17 @@ def _d5_blank_count_expression() -> str:
     """
     bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
               / "05-verify.md").read_text(encoding="utf-8")
-    prescriptions = _D5_ANY_COUNT_EXPR_RE.findall(bundle)
+    prescriptions = _d5_count_prescriptions(bundle)
     blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    # ⛔ ZERO AND MANY ARE TWO DIFFERENT DEFECTS AND GET TWO DIFFERENT MESSAGES (#13962). The
+    # single `== 1` this replaces rendered the ZERO case as "prescribes 0 BLANK-line count
+    # commands ([] of […]), so this arm would execute one of them while a reader follows
+    # another" — a sentence about picking between two prescriptions, printed over an EMPTY list,
+    # on the head where the sentence's expression had merely been re-spelled (`^-$`). A fixer
+    # reading it is told to look for a second command that does not exist.
+    assert blank_prescriptions, (
+        "05-verify.md prescribes NO BLANK-line count command at this head "
+        f"(count commands seen: {prescriptions!r}), so this arm executes nothing")
     assert len(blank_prescriptions) == 1, (
         f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
         f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
@@ -3092,7 +3158,8 @@ def _d5_blank_count_expression() -> str:
     assert len(found) == 1, (
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
         f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
-    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE; THIS ONE BINDS THE
+    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE, AND IT COUNTS THEM WHATEVER
+    # THEIR FLAG SPELLING (#13962 — the four mutants on `_D5_ANY_COUNT_EXPR_RE`); THIS ONE BINDS THE
     # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
     # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
     # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
@@ -3126,6 +3193,46 @@ def _blank_line_count(diff: str) -> int:
     assert out.returncode in (0, 1), (
         f"grep refused the document's own expression: {out.stderr!r}")
     return int(out.stdout.strip() or 0)
+
+
+def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
+    """#13962 — the count arm must read a COMMAND, not one SPELLING of one.
+
+    MEASURED on the pre-fix reader, which was `re.compile(r"grep -c[A-Za-z]* '([^']+)'")`
+    (if you are tempted to narrow it back, run this test first): each of the FOUR MUTANTS in
+    the loop below was appended to `05-verify.md` on its own and the cell that calls
+    `_d5_blank_count_expression()` was run — `1 passed` every time. Each mutant is a SECOND
+    prescription for the same BLANK class, and the arm whose entire job is to refuse a second
+    prescription reported the class as graded once, so the row told its reader to run one
+    command while it carried two. (The loop's fifth entry is not a mutant: it is the spelling
+    that already worked before the fix, kept as the floor so a future narrowing cannot pass by
+    breaking the case that was never broken.)
+
+    The control is the mutation itself, not a list of regexes: what is asserted is the outcome
+    the arm needs — one BLANK-class expression seen per spelling, and none from the two
+    non-count `grep` stages the same cell prescribes.
+    """
+    for spelling in (
+        "grep -Ec '^\\+$'",            # flag BEFORE the `c`
+        'grep -cE "^\\+$"',            # double-quoted expression
+        "grep -c -E '^\\+$'",          # flags split across two words
+        "grep --count '^\\+$'",        # the long form
+        "grep -c '^\\+$'",             # the spelling that already worked, kept as the floor
+    ):
+        seen = _d5_count_prescriptions(f"a prescription: `{spelling}`\n")
+        assert len(seen) == 1 and _D5_BLANK_CLASS_EXPR_RE.fullmatch(seen[0]), (
+            f"{spelling!r} is ONE BLANK-class count command and the reader must see exactly "
+            f"one BLANK-class expression for it — #13962's mutants each stayed green while "
+            f"the bundle carried two prescriptions. Seen: {seen!r}")
+
+    # …and the reader is a COUNT reader, not a `grep` reader: the two filter stages this same
+    # cell prescribes are not prescriptions to be counted, and admitting them would red a
+    # correct document. `grep -cE '^\+import '` is the other direction `_D5_ANY_COUNT_EXPR_RE`
+    # is deliberately NOT keyed on a command prefix to protect — it IS a count, it is just not
+    # this class, so it is seen and then excluded by the class filter.
+    assert _d5_count_prescriptions(
+        "`grep -E '^[+-][^+-]'` and `grep -vE '^[+-][[:space:]]*#'`") == []
+    assert _d5_count_prescriptions("`grep -cE '^\\+import '") == ["^\\+import "]
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
