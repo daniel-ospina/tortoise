@@ -12,6 +12,10 @@ itself and the expansion gate could never go red.
     uv run python tools/surface_manifest.py cut      # declaration -> manifest
     uv run python tools/surface_manifest.py render   # manifest -> docs/product/mcp-sdk-surface.md
     uv run python tools/surface_manifest.py check    # the AC13 ordering lint
+    uv run python tools/surface_manifest.py check --base-ref
+                                                     # …plus the SHRINK pin (#12327): no row
+                                                     # may leave the committed baseline
+                                                     # without a record or a named waiver
     uv run python tools/surface-guard.py             # the D2 expansion gate (#3863);
                                                      # a SEPARATE file, so a PR that
                                                      # re-cuts the baseline cannot
