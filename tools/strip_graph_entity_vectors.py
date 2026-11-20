@@ -198,9 +198,16 @@ confidence:
    `_write({**props, k: vec} if f else props)`, or a rebuild behind `.copy()`). The store lands
    in the mapping the write channel
    receives, so no `Subscript` target exists and the recogniser abstains. ⛔ A rebuild SITE was
-   written, measured and WITHDRAWN (round-9 review): it must resolve transparent wrappers first,
-   and the positional version certified every wrapped spelling while refusing two honest
-   fixtures — the same "partial rule claims coverage and leaks" failure this issue is about.
+   written, measured and WITHDRAWN (round-9 review): the positional version certified every
+   WRAPPED spelling while refusing honest fixtures — the same "partial rule claims coverage and
+   leaks" failure this issue is about. ⛔ THE WITHDRAWN RULE REFUSED `_write({**props, **extra})`
+   AND WAS RIGHT TO: that shape DOES place the vector whenever the caller's `extra` carries it
+   (measured by the review of `#14050`), so it is not an honest fixture and the refusal was not
+   the rule's cost — the withdrawal rests on the wrapped-spelling leak alone. The two spellings
+   the rule was written for — `_write({**props, k: vec})` and `_write(props | {k: vec})` — are
+   PINNED as known fail-opens
+   in `REBUILD_RESIDUAL_ROWS`, so closing them cannot happen silently and no later rule can
+   pass every pin while they stay open.
    Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
    mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
    another positional arm.
@@ -209,8 +216,13 @@ confidence:
    computed) and their mutator spellings (`globals().update({…})`) poison EVERY name the scope
    declares `global`/`nonlocal` — **in the writer's own statements AND one level down**, which is
    where the round-10 review measured the hole (`class _C: globals()["k"] = "embedding"` runs at
-   definition time and was unreachable in the nested-scope walk). A name with no `global`/
-   `nonlocal` declaration is either unproven (absent from the binding map ⇒ refuse) or out of
+   definition time and was unreachable in the nested-scope walk). **Every assignment spelling is
+   the same write** (`#14001`, measured by the review of `#14050` at its merged head): `Assign`,
+   `AnnAssign` (`globals()["k"]: str = "embedding"`) and `AugAssign`, with the dynamic subscript
+   nested inside a `Tuple`/`List` target — an `AnnAssign` target reached the generic assignment
+   arm, where `_poison` understands names only, and the writer certified while storing. A name
+   with no `global`/`nonlocal` declaration is either unproven (absent from the binding map ⇒
+   refuse) or out of
    reach (a `locals()` write does not rebind a fast local — measured: the writer stores nothing).
    Pinned by the `globals-*` rows in `DEFEATED_RESOLVER_ROWS`.
 
@@ -4555,6 +4567,43 @@ def _dynamic_namespace_write(target) -> bool:
             and _callee_name(value) in ("globals", "locals", "vars"))
 
 
+def _dynamic_namespace_target(target) -> bool:
+    """Does this assignment TARGET write into a dynamic namespace, however deeply nested?
+
+    ⛔ `globals()["k"], _z = …` IS THE SAME WRITE INSIDE A TUPLE TARGET (`#14001`, measured by
+    the review of `#14050` at its merged head): the subscript is one element of a `Tuple`/
+    `List` target, which the direct-subscript test never looked inside.
+    """
+    import ast
+
+    if _dynamic_namespace_write(target):
+        return True
+    if isinstance(target, ast.Starred):
+        return _dynamic_namespace_target(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(_dynamic_namespace_target(element) for element in target.elts)
+    return False
+
+
+def _assigns_into_dynamic_namespace(node) -> bool:
+    """Does this assignment rebind a dynamic-namespace name — `Assign`, `AnnAssign` or `AugAssign`?
+
+    ⛔ THE SPELLINGS ARE ONE WRITE (`#14001`, measured by the review of `#14050` at its merged
+    head): `globals()["gk"]: str = "embedding"` is an `ast.AnnAssign`, which fell to the generic
+    `Assign | AnnAssign` arm where `_poison` understands `Name`/`Starred`/`Tuple`/`List`
+    targets only — so nothing was poisoned and the writer certified while storing.
+    """
+    import ast
+
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign | ast.AugAssign):
+        targets = [node.target]
+    else:
+        return False
+    return any(_dynamic_namespace_target(target) for target in targets)
+
+
 def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     """``name -> every constant string it can hold`` in this scope; ``None`` is "cannot tell".
 
@@ -4621,6 +4670,18 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         elif isinstance(target, _ast.Tuple | _ast.List):
             for element in target.elts:
                 _poison(element)
+        elif _dynamic_namespace_write(target):
+            # ⛔ A DYNAMIC-NAMESPACE SUBSCRIPT IS A BINDING IN **EVERY** FORM THAT CAN BIND IT
+            # (`#14001`, measured by the review of the `AnnAssign` repair): `Assign`,
+            # `AnnAssign`, `AugAssign`, a `for` target, a comprehension target and a
+            # `with … as` target all reached this function, and a `Subscript` poisoned nothing
+            # — so `globals()["gk"] += "embedding"` and
+            # `for globals()["gk"] in ("embedding",)` CERTIFIED while storing. Teaching the
+            # poison function once closes all of them, in the writer's own scope AND one level
+            # down, instead of one arm per spelling — per-spelling arms are how this issue
+            # accumulated six peers. The dynamic name is not statically readable, so the write
+            # poisons EVERY name the scope declares `global`/`nonlocal`.
+            poisoned |= _scope_declarations    # `|=`: see the residue note in the caller's arm
 
     for sub in nodes:
         if isinstance(sub, ast.AugAssign | ast.For | ast.AsyncFor | ast.comprehension):
@@ -4645,15 +4706,14 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
                 poisoned.add(sub.rest)
         elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
             poisoned.add(sub.rest)
-        elif isinstance(sub, ast.Assign) and any(
-                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
-                for target in sub.targets):
+        elif _assigns_into_dynamic_namespace(sub):
             # ⛔ `globals()[<name>] = …` REBINDS A NAME THIS WALK BELIEVES IT PROVED (`#14001`,
             # measured by the round-5 review): the store's VALUE is a constant, so the
             # Subscript arm above is not even a key-bearing site, and the poisoned-name set
             # never heard about it. The dynamic name is not statically readable, so the write
             # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
-            # a write can reach from here.
+            # a write can reach from here. `Assign`, `AnnAssign` and `AugAssign`, with the
+            # subscript nested in a tuple/list target, are ONE write (review of `#14050`).
             #
             # ⛔ `|=`, NOT `poisoned.update(…)` (`#14001`, measured 2026-11-20): both are the
             # same `set` operation, but the `surface-guard` job's privatisation sweep
@@ -4693,10 +4753,10 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # definition time, and its `Subscript` target poisoned nothing because the generic
         # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
         # List targets — the branch written for it was unreachable.
-        if isinstance(sub, ast.Assign) and any(
-                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
-                for target in sub.targets):
-            poisoned |= _scope_declarations    # `|=`: see the residue note in the own-scope arm
+        if _assigns_into_dynamic_namespace(sub):
+            # `|=`: see the residue note in the own-scope arm (`Assign` / `AnnAssign` /
+            # `AugAssign` with the subscript nested in a tuple/list target are ONE write).
+            poisoned |= _scope_declarations
             continue
         if isinstance(sub, ast.Assign | ast.AnnAssign):
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
@@ -4922,7 +4982,8 @@ def _pairs_are_proven(pairs) -> bool:
     ``mapping_pairs(...) is None`` does not fire — and the recogniser then DROPS the unreadable
     operand and answers the remainder. `{**dict(zip(_keys(), [1]))}` therefore answered
     ``frozenset()`` ("proven clean") while it iterates `_keys()`, and the identical store WITHOUT
-    the `{**}` wrapper was refused. Twelve wrapper spellings leaked through it.
+    the `{**}` wrapper was refused. The wrapper spelling leaked through it, and the four
+    `wrapper-*` rows in `DEFEATED_RESOLVER_ROWS` are the pinned witnesses.
     """
     return pairs is not None and all(keys is not None for keys, _value in pairs)
 

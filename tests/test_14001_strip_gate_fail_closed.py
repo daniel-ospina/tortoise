@@ -632,6 +632,79 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE ANNOTATED SPELLING OF THE DYNAMIC-NAMESPACE WRITE (`#14001`, measured by the
+    # review of `#14050` at its merged head): `AnnAssign` fell to the generic assignment arm
+    # and its `Subscript` target poisoned nothing. All three are ONE write.
+    ("globals-annassign-own-scope", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"]: str = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-annassign-in-class-body", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        class _C:
+            globals()["gk"]: str = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-annassign-inside-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"], _z = "embedding", 1
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # ⛔ AND EVERY OTHER BINDING FORM (`#14001`, measured by the review of the `AnnAssign`
+    # repair): `AugAssign`, a `for` target and a comprehension target all reach `_poison` with a
+    # `Subscript` that poisoned nothing, so each CERTIFIED while storing.
+    ("globals-augassign-own-scope", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        globals()["gk"] += "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-for-target-own-scope", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        for globals()["gk"] in ("embedding",):
+            pass
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-for-target-in-class-body", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        class _C:
+            for globals()["gk"] in ("embedding",):
+                pass
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-comprehension-target", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        [None for globals()["gk"] in ("embedding",)]
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
 )
 
 
@@ -684,6 +757,24 @@ def test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open(tmp_path, monke
 #: SITE was written and WITHDRAWN (round-9 review): the positional version certified every WRAPPED
 #: spelling while refusing two honest fixtures, so the boundary is disclosed rather than half-held.
 REBUILD_RESIDUAL_ROWS = (
+    # ⛔ THE TWO SPELLINGS THE WITHDRAWN RULE WAS WRITTEN FOR (`#14001`, measured by the
+    # review of `#14050` at its merged head): withdrawing the rule deleted these rows, so
+    # nothing pinned the central spelling residual 3's own prose describes — a future rule
+    # could pass every remaining pin while these stayed open.
+    ("rebuilt-mapping-inline", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)})
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-bitor", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write(props | {k: _encode(ev)})
+        return None
+    _write(props)
+"""),
     ("handed-on", """
     k = "embed" + "ding"
     if not _derived_mirror_required("object"):
