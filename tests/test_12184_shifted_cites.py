@@ -176,13 +176,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
     # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11281` ``, count
-    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row twelve lines up
-    # (count 1) covers only the §2.5 one-token spelling. Measured on the merged document
+    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row above it (count 1,
+    # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
+    # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
+    # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
     # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
     # lines RE-MEASURED on this document rather than carried from the pre-merge edition — `main`'s
-    # merge `0656b056d7` shifted the last two by +2 and the #13991 P2 fix above added another +2, so
-    # the pre-merge `:182`/`:585` named lines that no longer hold:
+    # merge `0656b056d7` shifted the last two by +2, and the P2 fix above (which sits BETWEEN them)
+    # added another +2 to the last one only — so the pre-merge `:182`/`:585` named lines that no
+    # longer hold:
     #   :171  the header trio above — main's site, the one this row was created for;
     #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
