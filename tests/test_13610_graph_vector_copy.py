@@ -137,12 +137,41 @@ class _Cursor:
         return None
 
 
+class _SplitCursor(_Cursor):
+    """Answers the coverage ``count(*)`` PER KIND — one `public.source`, two halves.
+
+    `record_vector.LABEL_SERVED` splits `:Source` on `document_kind` while the graph
+    denominator counts the WHOLE label, so the two halves verify independently and a
+    single ``count`` (what :class:`_Cursor` answers) cannot express that state. This
+    reads the kind predicate out of the statement it is handed and answers that
+    half's own numerator — the only way to drive the half-verified read arm without
+    faking the count by call order.
+    """
+
+    def __init__(self, *, documents: int, sources: int, rows: list[tuple] | None = None):
+        super().__init__(count=documents, rows=list(rows or []))
+        self._documents = documents
+        self._sources = sources
+        self._answer = documents
+
+    def execute(self, sql, params=None):
+        super().execute(sql, params)
+        if "document_kind IS NOT NULL" in sql:
+            self._answer = self._documents
+        elif "document_kind IS NULL" in sql:
+            self._answer = self._sources
+
+    def fetchone(self):
+        return (self._answer,)
+
+
 class _Conn:
     def close(self):
         return None
 
 
-def _stub_record(monkeypatch, *, count: int, rows: list[tuple]) -> _Cursor:
+def _stub_record(monkeypatch, *, count: int, rows: list[tuple],
+                 cursor: _Cursor | None = None) -> _Cursor:
     """Point the record doors at an in-memory cursor (the #13422 pattern).
 
     Both statements the leg issues go to ONE cursor because both doors are the
@@ -151,11 +180,17 @@ def _stub_record(monkeypatch, *, count: int, rows: list[tuple]) -> _Cursor:
     :meth:`_Cursor.fetchall`). The fold's own DB half is stubbed — the cage is
     `tests/test_13422_object_subject_dense_leg.py`'s subject, and what THIS file
     measures is which STORE answered.
+
+    ``cursor`` overrides the default :class:`_Cursor` for a case whose numerator is
+    not one number (:class:`_SplitCursor`, i.e. the two halves of one `:Source`
+    label). Everything else about the stub — the DSN, the journal flag, the fold's
+    DB half, the coverage cache — is set up the same way, so such a case cannot
+    drift from the rest of the file's harness.
     """
     import tortoise.record_projection as rp
     import tortoise.record_serve as rs
 
-    cur = _Cursor(count=count, rows=rows)
+    cur = cursor if cursor is not None else _Cursor(count=count, rows=rows)
     monkeypatch.setattr(rs, "open_record", lambda *a, **k: _Conn(), raising=True)
     monkeypatch.setattr(rp, "scope_connection", lambda c, org: cur, raising=True)
     # `len(cur._rows)`, not `len(rows)`: the two are equal at setup, but a case that
@@ -500,6 +535,51 @@ def test_the_searcher_raises_the_no_fallback_answer_for_a_gated_label(monkeypatc
     _stub_record(monkeypatch, count=6, rows=[])
     with pytest.raises(record_vector.RecordVectorWithoutFallback):
         _searcher(5)("object", [0.1] * 8, 10)
+
+
+def test_the_contract_is_the_LABELS_freeze_not_one_half_of_it(monkeypatch):
+    """⛔ ONE HALT OF `:Source` VERIFYING DOES NOT FREEZE `:Source` (#13854 review).
+
+    The no-fallback arm claims the graph copy has been FROZEN, and the freeze is
+    produced by the WRITERS — which stop for a LABEL. Every writer of `:Source`
+    (`_upsert_document`, `_upsert_source`, `restore_graph`, `_update_entity`) asks
+    BOTH halves and stores while EITHER answers KEEP, so `document` verifying while
+    `source` has not leaves the graph copy COMPLETE and still being fed. Reading the
+    contract off the current `entity_type` alone answered `contracted=True` there
+    and turned a record blip into `RecordVectorWithoutFallback` — the complete graph
+    answer refused on the default posture, which `#11395`/option 2 never licensed.
+
+    ⛔ NON-VACUOUS BOTH WAYS: the half-verified case must reach the NAMED fallback,
+    and the BOTH-verified case must still refuse one — the conjunct is a label rule,
+    not a blanket disable of the contract for `:Source`.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorDeclined("bound")
+
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+
+    # ── one half verified (10 >= 10 documents), the other not (0 < 10 sources) ──
+    _stub_record(monkeypatch, count=0, rows=[],
+                 cursor=_SplitCursor(documents=10, sources=0))
+    # The NAMED fallback, i.e. the graph may answer — `vector_search`'s decline is
+    # passed through rather than sealed.
+    with pytest.raises(record_vector.RecordVectorDeclined):
+        _searcher(10)("document", [0.1] * 8, 10)
+
+    # ── BOTH halves verified → the graph really is frozen → sealed ─────────────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=0, rows=[],
+                 cursor=_SplitCursor(documents=10, sources=10))
+    with pytest.raises(record_vector.RecordVectorWithoutFallback):
+        _searcher(10)("document", [0.1] * 8, 10)
+
+    # ── and a single-type label is untouched by the conjunct ──────────────────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=10, rows=[])
+    with pytest.raises(record_vector.RecordVectorWithoutFallback):
+        _searcher(10)("object", [0.1] * 8, 10)
 
 
 # ── 4. the write gate: retained while unproven, removed when proven ───────
@@ -1221,6 +1301,92 @@ def test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback(
     rows, graph, _trace = _run(_searcher(3), graph=_Graph([("obj-graph-only", 1.0 / 1.5)]))
     assert rows == [], "a contracted `object` read recovered its frozen cohort"
     assert graph.queries == [], "the graph was queried after `object`'s contract"
+
+
+def test_a_HALF_verified_Source_label_keeps_the_fallback(monkeypatch):
+    """⮔ THE CONTRACT IS PER **LABEL**, not per `entity_type` (`#13826` review, P2).
+
+    `:Source` carries ONE vector per node and every fold that writes it keeps that
+    vector when EITHER `document` OR `source` answers KEEP (`_upsert_document`'s two
+    arms, `_upsert_source`, `restore_graph`'s ``all(...)``). So the graph copy is
+    frozen only when EVERY type addressing the label has verified — which is also the
+    AND `label_write_gate` requires before a strip can run. With one half verified
+    and the other not, the copy is complete and still being FED: refusing it turns a
+    record blip into a silent availability regression on the DEFAULT posture, and it
+    inverts the cutover order (the fallback goes LAST).
+
+    This is the ORDINARY state, not a corner: the graph denominator is LABEL-wide
+    (`_label_vector_count`) while the record numerator applies the KIND predicate, so
+    the half that dominates the label verifies against the same denominator the other
+    half cannot.
+
+    Both halves are driven — the `document`-verified direction AND its mirror, which
+    the searcher-level arm does not cover — and the fully-verified case is kept as the
+    control: a fix that simply removed `document`/`source` from
+    `MIRROR_RETIRED_LABELS` would pass the first two arms and fail the third. The
+    assertions are made on `run_vector_query`'s OUTCOME (the named
+    `scan_fallback` and the row it returns), not on which exception was raised.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    assert record_vector.LABEL_SERVED["document"][0] == \
+        record_vector.LABEL_SERVED["source"][0] == "source", (
+        "the two halves no longer share one served table — the label AND this file "
+        "pins is then measuring a population the product does not have")
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorDeclined("the record skipped this read")
+
+    def _searcher_by_label(populations):
+        return record_vector.searcher(
+            carried=_SCOPE, timeout_ms=500,
+            graph_population=lambda entity_type: populations.get(entity_type, 0))
+
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+
+    # ── the `document` half verified (3 >= 3), the `source` half NOT (3 < 9) ──
+    _stub_record(monkeypatch, count=3, rows=[])
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 3, "source": 9}), entity_type="document",
+        graph=_Graph([("doc-graph-only", 1.0 / 1.5)]))
+    assert [row[0] for row in rows] == ["doc-graph-only"], (
+        "a half-verified `:Source` read refused the graph — the label was still "
+        "being written by its other half, so the fallback was whole: "
+        f"{rows} (trace={trace[-1] if trace else None})")
+    assert graph.queries, "the graph branch never ran for a still-fed label"
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+    assert trace[-1]["degraded"] is False, trace
+
+    # ── symmetric: the `source` half verified (3 >= 3), `document` NOT (3 < 9) ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 9, "source": 3}), entity_type="source",
+        graph=_Graph([("src-graph-only", 1.0 / 1.5)]))
+    assert [row[0] for row in rows] == ["src-graph-only"], (
+        f"the mirror-image half-verified read refused the graph: {rows}")
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+
+    # ── the CONTROL: both halves verified → the contract still holds ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=9, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 3, "source": 9}), entity_type="document",
+        graph=_Graph([("doc-graph-only", 1.0 / 1.5)]))
+    assert rows == [], (
+        "a fully-verified `:Source` read recovered its frozen cohort — the fix "
+        "must narrow the contract to a half-verified label, not remove it")
+    assert graph.queries == [], "the graph was queried after `:Source`'s contract"
+    assert trace[-1]["reason"] == "query_failed", trace
+
+    # ── a single-type label is unaffected by the label AND (no extra refusal) ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(_searcher(3), graph=_Graph([("obj-graph-only", 1.0 / 1.5)]))
+    assert rows == [] and graph.queries == [], (
+        f"the single-type `object` contract was weakened by the label AND: {rows}")
 
 
 def test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing():
