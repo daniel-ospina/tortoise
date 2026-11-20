@@ -3224,9 +3224,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # against the merged tree. So NO number here is an
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
-    # that was about to be committed. `entities.py` happened to keep this branch's
-    # values across both merges because its inserts are the ones above the status
-    # latch; `sdk.py` moved for both sides each time, including
+    # that was about to be committed. `entities.py` used to keep this branch's values
+    # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
+    # status latch, so the whole block moved together and is re-derived here again
+    # (`+30` against the pre-`#13971` numbers, measured by resolving every pinned
+    # first/last line, not applied as an offset); `sdk.py` moves for both sides each
+    # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a
     # MEASUREMENT of the tree that carries them, and the test re-checks all 18 rows on

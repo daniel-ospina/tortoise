@@ -17100,12 +17100,22 @@ def test_the_D5_row_names_every_hit_of_the_literal_it_calls_the_only_one():
 #: ⛔ A NEEDLE IS ONE LINE'S TEXT, OR A TUPLE OF CONSECUTIVE LINES, AND THE TUPLE EXISTS
 #: BECAUSE OF A MEASURED FALSE PASS (#13956 review, round 6, P3 — MEASURED): the empty-gate
 #: return dict's `"provider": None, "route": None, "failover_used": False,` line is written
-#: FOUR times in `sdk.py` (19664, 19700, 20483, 20784 — 20784 inside `_extract_session_llm`
-#: itself, 376 lines from the docstring the row pairs it with), so a single-line needle
-#: accepted TWO addresses the row does not name: `:20483` -> `:20784` and `:20483` -> `:19664`
-#: both stayed GREEN under the very arm that exists to stop that. The lines that FOLLOW the
-#: fragment are what make it unique (`"warnings": [], "mode": "empty", "stats": {},`
-#: occurs once in the file).
+#: FOUR times in `sdk.py`, and one of those copies sits inside `_extract_session_llm` itself,
+#: far from the docstring the row pairs it with — so a single-line needle accepted addresses
+#: the row does not name (that function's own copy, and the FIRST copy in the file, which is
+#: in unrelated code) and both stayed GREEN under the very arm that exists to stop that. The
+#: lines that FOLLOW the fragment are what make it unique (`"warnings": [], "mode": "empty",
+#: "stats": {},` occurs once in the file). ⚠️ NO ADDRESSES ARE TYPED HERE ON PURPOSE
+#: (#14003 review, cycle 2, P3 — MEASURED: nothing reads a number in a comment, and four of
+#: them plus the intra-function distance were exactly the unread quartet a re-derivation
+#: leaves stale). The COUNT is the durable fact; the arm reads the addresses.
+#:
+#: ⛔ AND UNIQUENESS IS ASSERTED, NOT ASSUMED (#14003 review, cycle 2, P2 — MEASURED): this
+#: arm originally asked only `number in hits`, so MEMBERSHIP passed while the needle occurred
+#: anywhere — measured by appending a second copy of the 3-line tuple and re-pointing the row
+#: at it, where all six D5 arms stayed GREEN over an address whose own sentence says "beside
+#: it". The needle's whole discriminating power IS uniqueness, so the arm requires the single
+#: hit it names and reports the extras when they appear.
 _D5Needle = str | tuple[str, ...]
 
 
@@ -17204,11 +17214,16 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
             number = int(found.group(slot))
             fragment = (needle,) if isinstance(needle, str) else needle
             hits = _fragment_hits(lines, fragment)
-            if number not in hits:
+            # ⛔ NOT `number not in hits` — MEMBERSHIP IS NOT THE PIN (#14003 review, cycle
+            # 2, P2 — MEASURED). With a second copy of a needle in the file, membership
+            # accepted a re-point to the copy the row does not name, which is the exact
+            # false pass the tuple was introduced to close. Compare to the ONE hit.
+            if hits != [number]:
                 actual = lines[number - 1].strip()[:90] if 0 < number <= len(lines) else ""
                 failures.append(
                     f"D5 states {label} with `{slot}` at `:{number}`, but "
-                    f"{fragment!r} occurs at {hits} in `{source_key}` — "
+                    f"{fragment!r} occurs at {hits} in `{source_key}` — the pin binds "
+                    f"the ONE occurrence it names, so a duplicate needle is a red too. "
                     f"`: {number}` is {actual!r}")
     assert not failures, (
         "D5's present-tense PAIRS are not the lines they name (#13956 review):\n  - "
