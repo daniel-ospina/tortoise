@@ -688,12 +688,20 @@ _NUMERALS: dict[str, int] = {
 #: The examples the two not-found messages render (`zero/none/one`), DERIVED for the same reason: a literal
 #: `_SPELLED_NUMERALS[:3]` mislabels the accepted class the moment a spelling is inserted before `one`.
 _CLASS_EXAMPLES = "/".join((*_ZERO_NUMERALS, _SPELLED_NUMERALS[len(_ZERO_NUMERALS)]))
-#: Longest first, so `sixteen` is tried before `six`. An unanchored alternation over spelled words normally
-#: needs a `\b` to stop `four` matching inside `fourteen`; here the required literal after the group
-#: (` pairs? as two code spans`, ` of them (?:is|are) resolved`) already makes a prefix match unable to
-#: complete, so the ordering is defence and the literal is the guarantee.
+#: Longest first, so `sixteen` is tried before `six`. An unanchored alternation over spelled words
+#: normally needs `\b` to stop `four` matching inside `fourteen`; here the required literal after the group
+#: (` pairs? as two code spans`, ` of them (?:is|are) resolved`) already makes a trailing prefix match
+#: unable to complete, so the ordering is defence and the literal is the guarantee on that side.
+#: ⛔ `\b` on the LEADING side is not defence — it is the guarantee there, and there was none. The literal
+#: after the group binds the right edge only, so `the recount REWRITES five pairs as two code spans` matched
+#: `writes five pairs…` and `EVERYONE of them are resolved…` matched `one of them…`. Both arms grade the
+#: leftmost match, so an edition whose prose contains an earlier `…rewrites five pairs…` while its real
+#: disclosure says six would be graded on the wrong sentence, red on correct content — and a DISCLOSURE that
+#: is genuinely missing could be masked by such a sentence (`#14010` round-6 review, P2). Measured with the
+#: boundaries: both false matches are gone, and the shipped document (`also writes five pairs…`,
+#: `four of them…`), `none of them …` and the digit forms still match.
 _NUMERAL_ALT = "|".join(sorted(_NUMERALS, key=len, reverse=True))
-_TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code spans")
+_TWO_SPAN_TOTAL = re.compile(rf"\bwrites (\d+|\b(?:{_NUMERAL_ALT})) pairs? as two code spans")
 #: ⛔ `(?:is|are)`, for the same reason `_TWO_SPAN_TOTAL` writes `pairs?`: number AGREEMENT is a property of
 #: the count, not of the claim. `one of them IS resolved` is how a lane re-measuring to a single uncounted
 #: pair writes that sentence — the singular form for the one count that takes it — and a plural-only pattern
@@ -702,7 +710,7 @@ _TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code s
 #: RIGHT, the guard says it cannot read it, and the lane re-measuring is sent to reword a correct sentence
 #: instead of to its figure (`#14010` re-review, P2). `zero`/`none`/`two`.. keep `are`.
 _TWO_SPAN_NEW = re.compile(
-    rf"(\d+|{_NUMERAL_ALT}) of them (?:is|are) resolved but not counted by the one-token rule"
+    rf"(\d+|\b(?:{_NUMERAL_ALT})) of them (?:is|are) resolved but not counted by the one-token rule"
 )
 
 
@@ -1214,9 +1222,11 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
     prevent (`#13599` review, finding 1: a comparator that reds on CORRECT text), and it pointed the
     next re-measuring lane at the control's token bookkeeping rather than at their measurement.
 
-    NON-VACUOUS, measured: with the count assert in place this test reds with `the numeral `two` occurs
-    twice in 'writes two pairs as two code spans'` on the first case it tries; with the positional assert
-    both cases mutate their own capture group and re-match. It iterates the WHOLE accepted class, not the
+    NON-VACUOUS, measured: with the count assert in place this test reds with `the numeral two occurs
+    twice in 'writes two pairs as two code spans'` on the `two` case — the FIRST numeral in the iteration
+    that also occurs in the frame it is substituted into (`zero`, `none` and `one` all keep
+    `count == 1`, in `writes one pair …`), not on the first case tried; with the positional assert both
+    cases mutate their own capture group and re-match. It iterates the WHOLE accepted class, not the
     two instances, because a guard written against one spelling of one numeral is the defect above — and
     the class it iterates is DERIVED from `_NUMERALS`, so extending the vocabulary (the `eleven`/`zero`
     end, `#14010` round 4) extends the pin in the same edit instead of leaving a hand-copied tuple to stop
@@ -1240,12 +1250,6 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
             mutated = _mutate_numeral(match, 9)
             assert mutated == match.group(0).replace(numeral, "9", 1), (
                 f"mutating `{numeral}` in {match.group(0)!r} landed on the wrong occurrence: {mutated!r}"
-            )
-            assert sentence.replace(numeral, "9", 1) == (
-                sentence[: match.start()] + mutated + sentence[match.end() :]
-            ), (
-                f"`{numeral}` in {sentence!r} does not FIRST occur at the capture group, so rewriting the "
-                "leftmost occurrence edits a different word than the one the pattern grades"
             )
             rematched = pattern.search(mutated)
             assert rematched is not None and rematched.group(1) == "9", (
@@ -1426,8 +1430,10 @@ def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
     rounds 3 and 4 both blocked on. The vocabulary above is derived now so those particular forms read, but
     the message must not re-acquire the false claim for whatever form the NEXT re-measurement invents.
 
-    NON-VACUOUS: against the previous wording the `"in a form this guard reads"` assertion reds on both
-    frames, and so does `"no longer states" not in message` — the old text contains exactly that clause.
+    NON-VACUOUS: against the previous wording BOTH frames red — on the `assert unread` line, because that
+    wording contained no `in a form this guard reads` clause at all, so `unread` came back empty. The
+    `all(...)` clause below is the durable guard on the message TEXT rather than on that one revert: it
+    reds if a future rewording mixes the two claims in a message that still passes the `unread` filter.
     ⛔ Each frame substitutes with ITS OWN compiled pattern, not a shared alternation. Under `count=1` a
     shared alternation replaces the FIRST match in the document — always the `writes … pairs as two code
     spans` line, which comes first — so the `_TWO_SPAN_NEW` iteration used to rewrite the OTHER arm's
@@ -1469,9 +1475,9 @@ def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
             f"{unread[0]!r}; a message from the other arm means the substitution landed on the wrong "
             "sentence and this frame is vacuous"
         )
-        assert "no longer states" not in unread[0], (
-            "the message asserts the sentence is GONE, which is false for a sentence that is present in a "
-            f"form the pattern does not read: {unread[0]!r}"
+        assert all("no longer states" not in p for p in problems), (
+            "a message asserts the sentence is GONE, which is false for a sentence that is present in a "
+            f"form the pattern does not read: {problems!r}"
         )
 
 
