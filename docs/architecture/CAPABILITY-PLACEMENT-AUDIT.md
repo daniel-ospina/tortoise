@@ -63,6 +63,19 @@ sixteen written at the pin that never opened there, and the `#13124` review foun
 `main`** and sitting outside this list — so **the enumeration is a list of what has been RE-DERIVED, not
 the whole of the `main` set**, and the pin is the default for a cite in neither list only because that is
 where it was written.
+⛔ **THE `#13854` REVIEW FOUND THAT BASIS HALF-TRUE FOR THIS DOCUMENT, AND THIS EDITION IS THE OTHER
+HALF — read it, because it changes what the number under each row means.** The review measured addresses
+outside the enumeration whose value was the pin's PLUS this branch's own insert delta: they opened on
+unrelated code at BOTH heads, because a delta is not a re-derivation. Every one of them was then re-taken
+the way the review asked — by opening the line that carries the row's own quoted fragment, never by
+applying an offset — but **where it opens is THIS head, not the pin**: an outside address here now names
+the line that holds its fragment on the tree this document is written against, while the enumeration
+above still names `main` `ae54df166d`. So the census below compares two bases **on purpose** — pin text
+against this head's text, one line per cite — and the drift figure is exactly that comparison, not a claim
+that the document is written at the pin. ⚠️ A reader who opens an outside address at `ccb49741b2ec` will
+land on the wrong line; open it at the head `#13854` names. The alternative — repointing the whole
+document back to pin addresses — is the per-row pass the review recommended as its own doc lane, and it is
+NOT done here.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:468` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
