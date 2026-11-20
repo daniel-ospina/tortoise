@@ -3841,9 +3841,9 @@ def _d5_class_members(char_class: str) -> set[str] | None:
     ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
     over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
     inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` on a
-    probe carrying a lone `\` line, where this class counts `2` — the two agree at `2` on any
-    `\`-free probe, not only the 4-line one. So the escape model, answering `{+,-}`, grades a
-    SUPERSET as the class. That over-acceptance is the DECLARED superset written up at
+    probe carrying a lone `\` line, where this class counts `2` — on a `\`-free probe that
+    carries both signs they agree, not only on the 4-line one. So the escape model, answering
+    `{+,-}`, grades a SUPERSET as the class. That over-acceptance is the DECLARED superset at
     `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
     impossible diff line (no line of a unified diff is a bare `\`: every diff BODY line carries a
     `+`/`-`/space prefix, and the header lines — `diff --git`, `index`, `---`/`+++`, `@@` — and
@@ -3911,9 +3911,10 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
     `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
     are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
-    SUPERSET documented in the NEXT paragraph. They agree at `2` on any `\`-free probe, not
-    only the 4-line one. So the retired list REFUSING `^[+\-]$` was reading it as what it is — NOT
-    this class — rather than mis-reading it; that `main` now accepts the spelling as a DECLARED
+    SUPERSET documented in the NEXT paragraph. On a `\`-free probe that carries both signs they
+    agree, not only on the 4-line one. So the retired list REFUSING `^[+\-]$` was reading it as
+    what it is — NOT this class — rather than mis-reading it; that `main` now accepts the spelling
+    as a DECLARED
     SUPERSET is a deliberate widening (stated below), not a claim that it IS the class. The
     sentence therefore used a true statement about one spelling to carry a false one about the
     other — contradicting this docstring's own next paragraph, in the paragraph that justifies the
