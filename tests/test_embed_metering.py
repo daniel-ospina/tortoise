@@ -1261,9 +1261,13 @@ class TestRunnerWiring:
         # stayed green — a fail-open double under a comment claiming a mirror. The door is
         # `def _enforce_quota(resource="points", *, truth_carried=False)`
         # (`tortoise/mcp_server.py:3666`) and the only keyword call passes
-        # `truth_carried=` (`:3773`).
+        # `truth_carried=` (`:3773`). ⚠️ AND "EXACTLY" INCLUDES THE DEFAULTS (#14003
+        # review, cycle 3, P3 — MEASURED): the first cut carried `resource` with no default,
+        # so the double was strictly NARROWER than the door — `_enforce_quota()` is legal
+        # against the door and would have raised `TypeError` inside `<lambda>` here and read
+        # as a test defect. Name, kind AND default are now equal on both.
         monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource, *, truth_carried=False: None)
+                            lambda resource="points", *, truth_carried=False: None)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
@@ -1302,7 +1306,7 @@ class TestRunnerWiring:
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
         monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource, *, truth_carried=False: None)
+                            lambda resource="points", *, truth_carried=False: None)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default="org-M"))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
