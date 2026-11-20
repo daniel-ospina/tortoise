@@ -427,21 +427,30 @@ class Mcp:
 
         ⛔ The two failure classes are DIFFERENT, and their caller must not
         confuse them (#13913 review round 5): a **definite refusal** (the door
-        answered no) is a plain `RuntimeError` — nothing was written, so the
-        caller un-records its intent — while an **UNCONFIRMED** outcome is
-        `UnknownOutcome`, which the caller re-raises WITHOUT un-recording, because
-        a re-issue could write the node twice. `--verify` is the authority on
-        whether an unconfirmed write landed.
+        answered no) is `Refusal` — a `RuntimeError` SUBCLASS, but the subclass is
+        the distinction, not the base — and `write_once` un-records the intent on
+        that type alone, because nothing was written. An **UNCONFIRMED** outcome
+        is `UnknownOutcome`, which the caller re-raises WITHOUT un-recording,
+        because a re-issue could write the node twice. ⛔ AND A BARE
+        `RuntimeError` IS NOT A REFUSAL: `write_once` does not classify it, so the
+        intent STAYS recorded. An earlier cut of this docstring said a refusal was
+        "a plain `RuntimeError`", which is precisely how a new refusal arm gets
+        written as `RuntimeError` and leaves an intent no later run can clear
+        (#13950 review round 5). `--verify` is the authority on whether an
+        unconfirmed write landed.
         """
         for attempt in range(6):
             self._next_id += 1
-            # ⛔ BOUND BEFORE THE CALL, and re-bound on every attempt. The status
-            # arm below reads `headers` on BOTH paths into it — the tuple return
-            # (a 2xx/3xx) and the `HTTPError` handler (EVERY 4xx/5xx) — and an
-            # unbound or leftover name there is not a small defect: on attempt 0
-            # it is `UnboundLocalError`, which aborts the whole `--write` run on
-            # the first transient 5xx; on a later attempt it would back off on
-            # the PREVIOUS response's `Retry-After` (#13950 review).
+            # ⛔ A DEFENSIVE DEFAULT, NOT THE FIX. The load-bearing bind is the
+            # one in the `except HTTPError` handler below (every non-2xx raises
+            # there), and it is what makes a real 5xx's `Retry-After` readable —
+            # `headers` was unbound at the status arm before that bind existed,
+            # which is the `UnboundLocalError` this PR closes. This line only
+            # guarantees no arm can ever read a PREVIOUS attempt's headers. It is
+            # NOT what stops the unbound name: deleting it leaves the suite green
+            # (#13950 review round 5 measured that), so do not read it as the fix
+            # and do not "simplify" the handler's `dict(_hdrs)` normalisation
+            # away on the strength of it.
             headers: dict = {}
             try:
                 code, payload, headers = self._post({
@@ -622,7 +631,15 @@ class Mcp:
                     # (#13950 review round 2, measured: 6 posts, 6 sleeps against
                     # every other arm's 6 and 5).
                     if attempt < 5:
-                        time.sleep(min(120, retry_after))
+                        # ⛔ THE SAME 1 s FLOOR THE STATUS ARM APPLIES. Fractional
+                        # seconds are legal server advice, and this arm honoured
+                        # them literally: measured at #13950 review round 5,
+                        # `retry_after: 0.001` still produced 6 posts in ~15 ms on
+                        # a 2xx error envelope — the retry storm the floor exists
+                        # to prevent, on a channel the first fix did not cover.
+                        # The value is truthy at this point, so the `0` path is
+                        # untouched.
+                        time.sleep(min(120, max(1.0, retry_after)))
                         continue
                     raise UnknownOutcome(
                         f"{tool}: retry_after {retry_after:g}s after 6 attempts — "
@@ -1289,23 +1306,24 @@ def write_map(doc: dict) -> int:
     # `create_edge` wrote NOTHING and has NO marker, so it is not `carried` — but
     # it exits 1, and its only printed line names the failure without a route out
     # (#13913 review round 18).
-    declined = [f for f in failures if "create_edge returned created=" in f]
-    # ⛔ THE UNBOUND-ENDPOINT CLASS IS STUCK IN THE SAME WAY, and gating on
-    # `carried`/`declined` alone skipped it on the one run that matters: the run
-    # that FIRST records it, where `carried` is empty (the line is this run's own)
-    # and nothing was `declined` — so the exit below was never printed and the
-    # `!!` line was the whole trace, i.e. exactly the "names the failure without a
-    # route out" state this block exists to remove (#13950 review, measured on the
-    # recorded-intent-without-id resume the unbound pin builds).
-    unbound = [f for f in failures if "unbound endpoint" in f]
-    # ⛔ THE THIRD NO-ROUTE-OUT CLASS. A `mechanism_mismatch` DID land
-    # (warn-not-block) and stores the OPPOSITE meaning, so it is the one class
-    # whose remedy is bullet 3 rather than "nothing was written" — but the gate
-    # could not reach it either: the arm calls `mark(marker)`, so the marker
-    # enters `done`, so `carried` drops its line, and it matches neither
-    # `declined` nor `unbound`. The remedy was therefore printed only on a
-    # SECOND run (#13950 review round 2).
-    mismatched = [f for f in failures if "mechanism_mismatch" in f]
+    # ⛔ ONE ANCHORED CLASSIFIER PER CLASS, COMPUTED ONCE AND USED BY BOTH THE
+    # GATE AND THE EXIT SUMMARY. Each pattern is anchored on `": <class text>"`
+    # because the marker is followed by FIXED-POSITION module text — whereas a
+    # generic-`except` line ENDS with `{exc}`, arbitrary server or exception text.
+    # The may-have-landed class is a TYPE (see the append sites), and it is
+    # computed FIRST so the three prose classes can SUBTRACT it: a difference makes
+    # the buckets disjoint by construction, whatever a server puts in an exception
+    # message. Anchoring the prose on `": <class text>"` narrows the overlap but
+    # cannot close it — a door that quotes `": mechanism_mismatch — "` inside an
+    # error string reaches `_unknown`'s reason and then the generic-`except` line
+    # verbatim (#13950 review round 5, measured: `-1 edge(s) NOT written` plus two
+    # contradictory remedies for one line).
+    unknown = set(unknown_failures) & set(failures)
+    declined = {f for f in failures
+                if ": create_edge returned created=" in f} - unknown
+    unbound = {f for f in failures if ": unbound endpoint " in f} - unknown
+    mismatched = {f for f in failures
+                  if ": mechanism_mismatch — " in f} - unknown
     if carried or declined or unbound or mismatched:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
@@ -1427,12 +1445,14 @@ def write_map(doc: dict) -> int:
         # have — inviting a re-issue of a non-idempotent `create_operator` over
         # endpoints that may already be joined (#10849's EP double-count, the very
         # thing `retry_safe=False` exists to prevent) (#13950 review round 3).
-        mismatched_n = sum(1 for f in failures if "mechanism_mismatch" in f)
-        # ⛔ A SET INTERSECTION, not a count of the collected list: a line can be
-        # collected once and a marker can appear in `failures` more than once
-        # across retries, and the two counts must describe the SAME list.
-        unknown_n = len(set(unknown_failures) & set(failures))
-        unwritten_n = len(failures) - mismatched_n - unknown_n
+        mismatched_n = len(mismatched)
+        unknown_n = len(unknown)
+        # ⛔ A SET DIFFERENCE, NEVER ARITHMETIC: the buckets are disjoint by
+        # construction, and a difference cannot report a NEGATIVE count if a line
+        # ever matches two classifiers again — it just leaves the line in the
+        # NOT-written bucket, which is the fail-closed direction (#13950 review
+        # round 5).
+        unwritten_n = len(set(failures) - mismatched - unknown)
         parts = []
         if unwritten_n:
             parts.append(f"{unwritten_n} edge(s) NOT written")

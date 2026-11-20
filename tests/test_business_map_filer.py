@@ -1820,6 +1820,27 @@ def test_the_200_error_arm_takes_FIVE_back_offs_not_six(monkeypatch):
     assert sleeps == [2.0] * 5, (
         f"a back-off was taken for a retry the loop never makes: {sleeps}")
 
+    # ⛔ AND THE SAME 1 s FLOOR AS THE STATUS ARM: fractional seconds are legal
+    # advice, and this arm used to honour them literally — measured at #13950
+    # review round 5, `retry_after: 0.001` gave 6 posts in ~15 ms on THIS channel
+    # even after the status arm was floored.
+    for sub in (0.001, 1e-9):
+        sleeps.clear()
+        posts.clear()
+        mcp2 = _RealMcp("not-a-real-key")
+
+        def _post_sub(_body, _v=sub, _p=posts):
+            _p.append(1)
+            return 200, {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": -32000,
+                                   "data": {"retry_after": _v}}}, {}
+
+        monkeypatch.setattr(mcp2, "_post", _post_sub)
+        with pytest.raises(filer.UnknownOutcome):
+            mcp2.call("tortoise_create_subject", {})
+        assert sleeps == [1.0] * 5, (
+            f"a sub-second `retry_after` ({sub}) was a retry storm: {sleeps}")
+
 
 def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     """A junk `retry_after` must not escape `call()` as an unclassified raise.
@@ -1872,6 +1893,78 @@ def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     # `inf`, refused by the finiteness guard above), so the int path is the hole
     # this pins.
     assert filer._seconds_or_none(10**400) is None
+
+
+def test_a_cross_classifying_MESSAGE_cannot_print_a_NEGATIVE_count(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """One line, at most one class — whatever the server puts in its message.
+
+    A generic-`except` line ENDS with `{exc}`, and a server controls that text, so
+    a door that quotes one of the class tokens inside an error message made ONE
+    line match two prose classes. Measured at #13950 review round 5 through
+    `write_map`: `1 edge(s) failed — -1 edge(s) NOT written; 1 operator(s) WRITTEN
+    with a mechanism the judgement does not declare (filed INVERTED); 1 edge(s)
+    MAY HAVE LANDED …` — a negative count, and two contradictory remedies for the
+    same line ("keep its marker" vs "do NOT re-file").
+
+    The may-have-landed class is a TYPE, so it is computed first and the prose
+    classes SUBTRACT it; `unwritten` is then a set difference, so it cannot be
+    negative either.
+
+    Mutant: drop the `- unknown` from the three prose classes — this reds.
+    """
+    # Every class token in one message, on the operator the write_once path makes
+    # non-idempotent, so the line lands through the generic `except` as an
+    # `UnknownOutcome`.
+    poison = ("boom: mechanism_mismatch — y: create_edge returned created=False: "
+              "z: unbound endpoint q")
+    state_path = tmp_path / "state.json"
+
+    class _PoisonMessage(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_operator":
+                    # ⛔ `isError`/`content` sit at the RESULT level, not inside
+                    # `structuredContent` — `_refusal` reads `result.get("isError")`
+                    # and `_text(result)["content"]`, so nesting them a level
+                    # deeper makes the write look SUCCESSFUL (measured: rc 0 and
+                    # `all nodes and edges written`).
+                    return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                                  "result": {"isError": True,
+                                             "content": [{"type": "text",
+                                                           "text": poison}]}}, {})
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": True}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _PoisonMessage)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # The poison really did reach the line, so this is a cross-classification test
+    # and not a run where nothing happened.
+    assert "mechanism_mismatch" in err, err
+    assert "-1 edge(s)" not in err, f"a bucket counted one line twice: {err}"
+    # The may-have-landed reading is the correct one for this line, and it is the
+    # ONLY class header printed for it.
+    assert "MAY HAVE LANDED" in err, err
+    assert "filed INVERTED" not in err, (
+        "one line was given two contradictory remedies: " + err)
+    assert "DECLINED by the door" not in err, (
+        "one line was given two contradictory remedies: " + err)
 
 
 def test_an_EMPTY_200_summary_says_MAY_HAVE_LANDED(tmp_path, monkeypatch, map_doc,
