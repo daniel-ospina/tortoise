@@ -18,15 +18,20 @@ ARMS
 ``store``       a READ-ONLY COPY of a real embedded store (default
                 ``~/.tortoise/tortoise.db``). Copied with ``shutil.copy2`` before
                 the engine opens it; the original is never opened by the engine.
-``writer``      a FRESH capture driven by the REAL writer (``TortoiseSDK._capture_session``,
-                the one live capture implementation; ``sdk._create_object`` mints the
+``writer``      a FRESH capture driven by the REAL writer (``TortoiseSDK._capture_session``, the
+                SDK's capture door — the hosted ``/v1/sessions`` path has its own
+                ``hosted_api._capture_session_impl``, but both land in the one shared
+                ``_write_session_and_turns`` turn-store writer that this arm measures;
+                ``sdk._create_object`` mints the
                 WorkItem Object the link pass resolves) on ``TORTOISE_DB_URI``.
                 Three sessions: a realistic ref density (2 of 8 turns name an issue),
                 no ref at all, and every turn naming it. Measures BEFORE and AFTER and
                 reports the DELTA — a replay proves nothing about a writer, so a run
                 that replays a known session reports ``unmeasurable`` instead of numbers.
 ``live``        the graph the caller names (default ``docker://:@localhost:16379/tortoise``,
-                the URI string recorded at ``~/.zshrc:48``). ⛔ the tool does NOT read a
+                a built-in constant with no measured provenance — ``~/.zshrc:48`` was only
+                ever a string literal here, so it is asserted by ``DEFAULT_LIVE_URI`` and NOT
+                read from any profile). ⛔ the tool does NOT read a
                 shell profile: ``role_evidence.uri_source`` records what actually
                 SUPPLIED the URI (``--live-uri``, or the built-in constant), so the
                 receipt never asserts a provenance it did not measure. Read-only.
@@ -960,8 +965,10 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int]) -> str:
     ⛔ AND THE GATE QUESTION IS THE TURN ONE (#13919 cycle 11). ``aboutObject_edges`` is
     an ANY-LABEL count (``MATCH ()-[r:aboutObject]->()``), so "the edge is present" does
     not answer "is there an edge for the arm to walk from a TURN" — the SDK's own capture
-    path writes ``Session->Object`` and the live population carries 1,042
-    ``Event->Object`` edges, so a graph can hold attachments and zero turn-level ones.
+    path writes ``Session->Object`` and the live population carries 1,042 **Events**
+    holding an ``Event->Object`` edge (1,290 edges between them), so a graph can hold
+    attachments and zero turn-level ones. ⛔ Two different numbers: ``events_with_aboutObject``
+    is ``count(DISTINCT e)``, ``aboutObject_edges`` is an edge count.
     Branching on ``about > 0`` alone answered the gate AFFIRMATIVELY in that shape while
     the same sentence printed ``0 turn(s) carrying one``. ``turns_with_aboutObject`` is
     now what selects the affirmative arm, exactly as ``turn_n`` selects the event-only

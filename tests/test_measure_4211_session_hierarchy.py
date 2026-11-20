@@ -2082,8 +2082,11 @@ def test_c11_attachment_that_is_NOT_turn_level_does_not_answer_the_gate():
 
     ``aboutObject_edges`` is ``MATCH ()-[r:aboutObject]->()`` — any source label —
     while the #4211 question is about the TURN→Object arm. The SDK's own capture path
-    writes ``Session→Object`` and the live population carries 1,042 ``Event→Object``
-    edges, so "edges present, zero turn-level" is an ordinary shape. Measured before the
+    writes ``Session→Object`` and the live population has 1,042 **Events** holding an
+    ``Event→Object`` edge (1,290 edges between them), so "edges present,
+    zero turn-level" is an ordinary shape. ⛔ Two different numbers:
+    ``events_with_aboutObject`` is ``count(DISTINCT e)``, ``aboutObject_edges`` is an
+    edge count — the sentence conflated them until #13919 cycle 14. Measured before the
     fix: ``_instrument_note({"event": 22, "session-transcript": 3},
     {"aboutObject_edges": 2, "turns_with_aboutObject": 0})`` printed *"`aboutObject` IS
     present … So the writers … DID run an entity-link pass … answered AFFIRMATIVELY"*
@@ -2910,7 +2913,7 @@ def _revision_shape(node, prefix=""):
 # The committed receipt's revision shape, verbatim. A new disclosure block is a deliberate
 # edit to this table, never a silent addition to the artifact.
 _PINNED_REVISION_SHAPE = {
-    "<root>": ["action", "denominator_not_retroactively_verifiable", "round_10_review", "round_11_key_and_ledger_correction", "round_14_review", "round_20_review", "round_21_review", "round_7_census_and_gate", "round_7_note_correction", "second_review_round", "third_review_round", "values_a_rerun_on_this_population_would_change", "why"],
+    "<root>": ["action", "denominator_not_retroactively_verifiable", "round_10_review", "round_11_key_and_ledger_correction", "round_14_review", "round_20_review", "round_21_review", "round_22_review", "round_7_census_and_gate", "round_7_note_correction", "second_review_round", "third_review_round", "values_a_rerun_on_this_population_would_change", "why"],
     "values_a_rerun_on_this_population_would_change": ["sessions_with_gt1_contains_turn", "sessions_with_gt1_entity_linked_turn", "writer.turns_per_session_contains_max_avg"],
     "second_review_round": ["action", "not_in_this_receipt", "provenance_defects_fixed", "why"],
     "second_review_round.not_in_this_receipt": ["every_graph_has_fewer_turns_than_contains", "object_kinds", "pair_count_guard", "per_graph_omitted", "session_created_at_range"],
@@ -2928,7 +2931,8 @@ _PINNED_REVISION_SHAPE = {
     "round_20_review": ["fix", "not_in_this_receipt", "why"],
     "round_20_review.not_in_this_receipt": ["the SDK method name the writer arm calls", "tools/sdk_privatise.py's typed-reference count"],
     "round_21_review": ["fix", "not_in_this_receipt", "why"],
-    "round_21_review.not_in_this_receipt": ["arms.writer.per_session[*].shared_points"],
+    "round_21_review.not_in_this_receipt": ["arms.live.role_evidence.note", "arms.writer.per_session[*].shared_points"],
+    "round_22_review": ["fix", "why"],
 }
 
 
@@ -3004,6 +3008,7 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
             "tools/sdk_privatise.py's typed-reference count",
         },
         "round_21_review": {
+            "arms.live.role_evidence.note",
             "arms.writer.per_session[*].shared_points",
         },
     }
