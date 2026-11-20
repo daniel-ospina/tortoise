@@ -27,9 +27,12 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,6 +58,29 @@ def _module(tmp_path: Path, src: str) -> Path:
     return path
 
 
+def _base_is_readable(rev: str) -> bool:
+    """Is `rev`'s `tortoise/sdk.py` readable in THIS clone?
+
+    ⛔ The `test` job checks out at the default `fetch-depth: 1` (no `with:` block on
+    `actions/checkout`, and no `unshallow` anywhere under `.github/`), so a historical
+    `SWEEP_BASE` is ABSENT by construction there and `_sdk_source()` exits the session
+    (`SystemExit`, not a skip) — which reds the very job that runs this file. The arm
+    below therefore asks the question first and skips on ABSENCE, the same idiom as
+    `tests/test_7949_capstone_measure.py` (`git show <sha>:…` → `pytest.skip`) and
+    `tests/test_11739_quote_population_probe.py` (which names `fetch-depth: 1` for it).
+    The real measurement is carried at depth 0 by the `surface-guard` job's
+    `python3 tools/sdk_privatise.py --check` step, which resolves `SWEEP_BASE` through
+    `git show` — so a shallow clone reports UNCHECKED here, never a pass.
+    """
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{rev}:tortoise/sdk.py"],
+            cwd=ROOT, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        return False
+    return shown.returncode == 0
+
+
 # ── F3: the pin, and the refusal that makes it a verifier ───────────────────────
 
 
@@ -64,6 +90,13 @@ def test_the_pinned_base_still_derives_the_whole_batch():
     A grep-able count, not a vibe: 66 off-surface methods is the batch, and it is what the
     PR body, `tortoise/sdk_retired.py` and the manifest all claim.
     """
+    if not _base_is_readable(privatise.SWEEP_BASE):
+        pytest.skip(
+            f"{privatise.SWEEP_BASE[:12]} is not carried by this clone — a `fetch-depth: 1` "
+            "checkout lacks it by construction, so the map is UNCHECKED here, not empty. "
+            "The depth-0 `surface-guard` step runs `tools/sdk_privatise.py --check`, which "
+            "resolves the same pinned base; re-arm locally with "
+            f"`git fetch origin {privatise.SWEEP_BASE}`.")
     entries = privatise.rename_map(rev=privatise.SWEEP_BASE)
     assert [e.name for e in entries], "the pinned base derived an EMPTY map — `--check` is vacuous"
     assert len(entries) == privatise.SWEEP_NAMES

@@ -849,8 +849,10 @@ def test_patch_rename_session_owner_ok_member_403(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     # Registry lane: seed Membership nodes so the session face resolves.
     reg = sdk._get_registry()
+    # `reg` is a FalkorDB `Graph`, not the SDK: its public door is `query`
+    # (`_query` is the vendor's private delegate — #13899 review P2).
     for uid, role in (("owner-1", "owner"), ("member-1", "member")):
-        reg._query(
+        reg.query(
             "CREATE (m:Membership {user_id:$u, org_id:$tid,"
             " status:'active', role:$r})",
             params={"u": uid, "tid": tid, "r": role},

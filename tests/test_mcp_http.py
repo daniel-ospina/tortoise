@@ -182,13 +182,15 @@ class TestAuthPreLeak:
         tc, _ = mcp_client
         sdk, _ = seeded_registry_sdk
         reg = sdk._get_registry()
-        rows = reg._query(
+        # `reg` is a FalkorDB `Graph`, not the SDK: its public door is `query`
+        # (`_query` is the vendor's private delegate — #13899 review P2).
+        rows = reg.query(
             "MATCH (k:APIKey) RETURN k.last_used_at",
         ).result_set
         assert rows and rows[0][0] is None  # fresh key: never used
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200, r.text
-        rows = reg._query(
+        rows = reg.query(
             "MATCH (k:APIKey) RETURN k.last_used_at",
         ).result_set
         assert rows and rows[0][0] is not None  # write-through bumped it

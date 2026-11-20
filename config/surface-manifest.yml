@@ -24,6 +24,15 @@
 # cannot be green by construction.
 #
 #
+# LOWERED 105 → 39 (SDK methods) on 2026-11-20 by #12901's FINAL batch (PR #13899), to
+# the count THIS tree derives — 39, as `counts:` states — because the pin was left at
+# the pre-batch 105 by the cut that moved `counts:` (105 → 39) but carried the pin
+# forward, leaving 66 slots of slack. Same reason as every line below: slack above the
+# live surface is a false PASS waiting to happen, and a 105 ceiling would let a
+# re-added retired name (`update_point`, `supersede_point`, `query`, `dream`, …) land
+# UNDER it while `surface-guard` step 7 stayed green over a surface that grew back by
+# up to 66 names. The tools pin is unchanged at 48 (this batch touches no MCP tool).
+#
 # LOWERED 110 → 94 (SDK methods) on 2026-11-16 by #12901 wave 2 — the
 # control-plane partition (`N1`–`N6`): sixteen members left the public surface and
 # every body was privatised. The tools pin is unchanged at 55 (wave 2 touches no MCP
@@ -1105,7 +1114,7 @@ counts:
     operate: 2
 high_water_counts:
   tools: 48
-  sdk_public_methods: 105
+  sdk_public_methods: 39
 retired:
 - name: tortoise_annotate_operator
   use_instead: tortoise_adjust_relationship(id, bias=..., precision=..., consistency=..., directness=...)

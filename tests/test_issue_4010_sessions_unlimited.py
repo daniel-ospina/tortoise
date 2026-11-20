@@ -268,7 +268,9 @@ class TestStoredValuesCleared:
             reg = sdk._get_registry()
             for i in range(2):
                 team = sdk._org_create(f"clear-{i}-{os.urandom(4).hex()}")
-                reg._query(
+                # `reg` is a FalkorDB `Graph` (a vendor handle), NOT the SDK: its door is
+                # `query`, and `_query` is the vendor's PRIVATE delegate (#13899 review P2).
+                reg.query(
                     "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
                     params={"id": team["id"], "ms": LEGACY_CAP},
                 )
@@ -280,14 +282,14 @@ class TestStoredValuesCleared:
             assert len(dry["teams"]) == 2, dry["teams"]
             assert all(v == LEGACY_CAP for _, v in dry["teams"])
             # nothing written yet
-            assert reg._query(
+            assert reg.query(
                 "MATCH (t:Team) WHERE t.max_sessions IS NOT NULL "
                 "RETURN count(t)").result_set[0][0] == 2
             # the sweep clears them and names each row
             sweep = clear_stored_max_sessions(reg)
             assert sweep["found"] == 2 and sweep["cleared"] == 2
             assert all(v == LEGACY_CAP for _, v in sweep["teams"])
-            assert reg._query(
+            assert reg.query(
                 "MATCH (t:Team) WHERE t.max_sessions IS NOT NULL "
                 "RETURN count(t)").result_set[0][0] == 0
             # idempotent: a second run finds nothing
