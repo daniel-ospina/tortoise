@@ -176,12 +176,15 @@ def test_the_poisoned_verdict_is_always_red(harness):
     """A poisoned run is never a pass, including when it goes undetected."""
     report = {"queries": [{"query": "q0",
                            "record": {"ids_equal": True, "order": "exact",
-                                      "recall": 1.0},
+                                      "recall": 1.0,
+                                      "distance": {"ok": True, "max_delta": 0.0}},
                            "graph_index": {"ids_equal": True, "order": "exact",
-                                           "recall": 1.0},
+                                           "recall": 1.0,
+                                           "distance": {"ok": True, "max_delta": 0.0}},
                            "graph_scan_vs_euclidean": {
                                "ids_equal": True, "order": "exact",
-                               "recall": 1.0},
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
                            "metric_divergence_ids": []}]}
     clean = harness._verdict(report, poisoned=None)
     assert clean["ok"] is True
@@ -196,12 +199,15 @@ def test_the_poisoned_verdict_is_always_red(harness):
 def test_a_divergent_report_is_red_for_the_required_arms(harness):
     report = {"queries": [{"query": "q0",
                            "record": {"ids_equal": False, "order": "diverged",
-                                      "recall": 0.5},
+                                      "recall": 0.5,
+                                      "distance": {"ok": False, "max_delta": 0.4}},
                            "graph_index": {"ids_equal": True, "order": "exact",
-                                           "recall": 1.0},
+                                           "recall": 1.0,
+                                           "distance": {"ok": True, "max_delta": 0.0}},
                            "graph_scan_vs_euclidean": {
                                "ids_equal": True, "order": "exact",
-                               "recall": 1.0},
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
                            "metric_divergence_ids": ["x"]}]}
     v = harness._verdict(report, poisoned=None)
     assert v["ok"] is False
@@ -218,13 +224,58 @@ def test_metric_divergence_alone_does_not_fail_the_run(harness):
     """
     report = {"queries": [{"query": "q0",
                            "record": {"ids_equal": True, "order": "exact",
-                                      "recall": 1.0},
+                                      "recall": 1.0,
+                                      "distance": {"ok": True, "max_delta": 0.0}},
                            "graph_index": {"ids_equal": True, "order": "exact",
-                                           "recall": 1.0},
+                                           "recall": 1.0,
+                                           "distance": {"ok": True, "max_delta": 0.0}},
                            "graph_scan_vs_euclidean": {
                                "ids_equal": True, "order": "exact",
-                               "recall": 1.0},
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
                            "metric_divergence_ids": ["r001", "r002"]}]}
     v = harness._verdict(report, poisoned=None)
     assert v["ok"] is True
     assert v["informational"]["metric_divergence_ids_total"] == 2
+
+
+def test_a_distance_change_with_identical_ids_is_a_divergence(harness):
+    """⛔ The case an id-only comparison calls parity — measured, not invented.
+
+    The first `--poison vector` run negated one stored vector: its distance to
+    the query moved from 0.0 to 2.0 while every unrelated row in the corpus sat
+    15-25 away, so the returned IDS and their ORDER were unchanged and the
+    harness reported "no divergence". A store can hand back the same list with
+    different values, and that is a different store.
+    """
+    truth_rows = [("a", 0.10), ("b", 0.20), ("c", 0.30)]
+    same = harness.compare(truth_rows, ["a", "b", "c"],
+                           candidate_distances=[0.10, 0.20, 0.30])
+    assert same["distance"]["ok"] is True
+
+    moved = harness.compare(truth_rows, ["a", "b", "c"],
+                            candidate_distances=[2.00, 0.20, 0.30])
+    assert moved["ids_equal"] is True and moved["order"] == "exact"
+    assert moved["distance"]["ok"] is False
+    assert moved["distance"]["worst"] == "a"
+    assert moved["distance"]["max_delta"] == pytest.approx(1.9)
+
+
+def test_the_verdict_reds_on_a_distance_only_divergence(harness):
+    report = {"queries": [{"query": "q0",
+                           "record": {"ids_equal": True, "order": "exact",
+                                      "recall": 1.0,
+                                      "distance": {"ok": False,
+                                                   "max_delta": 1.9}},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0,
+                                           "distance": {"ok": True,
+                                                        "max_delta": 0.0}},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
+                           "metric_divergence_ids": []}]}
+    v = harness._verdict(report, poisoned=None)
+    assert v["ok"] is False
+    assert any("distance_delta=1.9" in f for f in v["failures"])

@@ -244,7 +244,8 @@ def truth(rows: list[Row], query: list[float], k: int, *, metric: str,
 # ── comparison ──────────────────────────────────────────────────────────────
 
 def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
-            *, k: int | None = None) -> dict:
+            *, candidate_distances: list[float] | None = None,
+            k: int | None = None, distance_tol: float = 1e-4) -> dict:
     """Diff one candidate list against the oracle.
 
     Three questions, kept separate because they fail differently:
@@ -255,6 +256,13 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
       it moves ids across DIFFERENT distances: a swap inside a tie group is the
       research rung's "tie-equivalence" case and is reported as ``tie``.
     * ``recall@k`` — ``|truth ∩ candidate| / |truth|``.
+
+    ``candidate_distances`` adds a fourth: the VALUE, not just the order. It is
+    not redundant — measured on this harness, a `--poison vector` that negated
+    one stored vector moved its distance from 0.0 to 2.0 while the corpus'
+    other rows were far enough away that the returned IDS AND ORDER did not
+    change, so an id-only comparison called a genuinely different store
+    "parity". A distance check is what makes the harness able to fail there.
     """
     k = k if k is not None else len(truth_rows)
     truth_ids = [key for key, _ in truth_rows]
@@ -289,7 +297,20 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         if len(mismatches) >= 5:  # bounded: a report, not a transcript
             break
 
+    distance = {"ok": None, "max_delta": None, "worst": None}
+    if candidate_distances is not None:
+        worst, worst_delta = None, 0.0
+        for key, dist in zip(cand, candidate_distances):
+            if key not in distance_of or dist is None:
+                continue
+            delta = abs(float(dist) - float(distance_of[key]))
+            if delta > worst_delta:
+                worst, worst_delta = key, delta
+        distance = {"ok": worst_delta <= distance_tol, "max_delta": worst_delta,
+                    "worst": worst, "tolerance": distance_tol}
+
     return {
+        "distance": distance,
         "ids_equal": cand_set == truth_set,
         "order": order,
         "recall": (len(overlap) / len(truth_set)) if truth_set else 1.0,
@@ -439,7 +460,7 @@ class GraphStore:
         from falkordb import FalkorDB
 
         self.graph_name = graph
-        self.client = FalkorDB(host=host, port=port, decode_responses=True)
+        self.client = FalkorDB(host=host, port=port)
         self.g = self.client.select_graph(graph)
 
     def reset(self) -> None:
@@ -480,11 +501,12 @@ class GraphStore:
                     params={"props": props,
                             "vec": [float(v) for v in row.embedding]})
 
-    def create_index(self) -> str:
+    def create_index(self, ef_runtime: int | None = None) -> str:
+        extra = f", efRuntime: {int(ef_runtime)}" if ef_runtime else ""
         try:
             self.g.query(
                 "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                f"OPTIONS {{dimension: {DIM}, similarityFunction: 'cosine'}}")
+                f"OPTIONS {{dimension: {DIM}, similarityFunction: 'cosine'{extra}}}")
             return "cypher"
         except Exception as e:  # noqa: BLE001
             if "already" in str(e).lower():
@@ -493,12 +515,78 @@ class GraphStore:
                 self.g.query(
                     "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
                     f"OPTIONS {{dimension: {DIM}, similarityFunction: 'cosine', "
-                    "'HNSW'}")
+                    f"'HNSW'{extra}}}")
                 return "procedure"
             except Exception as e2:  # noqa: BLE001
                 if "already" in str(e2).lower():
                     return "existing"
                 raise
+
+    def wait_index_ready(self, probe: list[float], timeout_s: float = 60.0) -> bool:
+        """Block until `queryNodes` ANSWERS — the index build is not synchronous.
+
+        ⛔ MEASURED, and it silently corrupts the measurement if skipped: on
+        FalkorDB 4.20.6 a freshly-created HNSW index returns ZERO rows for a few
+        seconds while it builds, and `run_vector_query` answers that with the
+        `#8429` fall-through to the brute-force scan. The arm then reports
+        ``mechanisms: ["index", "scan_fallback"]`` and the "indexed" column is
+        really a second scan — which is what this harness produced on its first
+        run against a real store (`q_anchor` graph_index recall 0.5 = the scan's
+        number, not an ANN result). A harness that measures the fallback while
+        claiming to measure the index is the failure class this whole file is
+        about, so readiness is a WAIT with a loud failure, never a `sleep`.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                res = self.g.query(
+                    "CALL db.idx.vector.queryNodes('Point', 'embedding', 1, "
+                    "vecf32($q)) YIELD node RETURN node.id",
+                    params={"q": [float(v) for v in probe]})
+                if res.result_set:
+                    return True
+            except Exception:  # noqa: BLE001, RUF100 — not built yet, or not registered yet
+                pass
+            time.sleep(0.25)
+        return False
+
+    def index_params(self) -> dict:
+        """The parameters the store ACTUALLY built the index with.
+
+        ⛔ Read from the engine, never assumed. FalkorDB's default `efRuntime` is
+        **10**, and a `queryNodes` call takes exactly FOUR arguments on 4.20.6
+        (measured: passing a fifth, `{efRuntime: N}`, is refused with
+        ``requires 4 arguments, got 5``), so the ef cannot be raised per query —
+        only by re-creating the index. Recording the parameters is what turns a
+        recall shortfall into a diagnosis instead of a bug report.
+        """
+        try:
+            # `CALL db.indexes()` row shape on 4.20.6 (measured):
+            #   [label, fields, types, OPTIONS, language, stopwords, entity, status, …]
+            # — so the index PARAMETERS are column 3, keyed by property. Reading
+            # column 2 instead yields `{'embedding': ['VECTOR']}` and an empty
+            # params dict, which silently costs the artifact its diagnosis.
+            for row in self.g.query("CALL db.indexes()").result_set:
+                if row[0] != LABEL_CYPHER or len(row) < 4:
+                    continue
+                params = row[3] or {}
+                if "embedding" in params:
+                    return dict(params["embedding"])
+        except Exception:  # noqa: BLE001, RUF100
+            pass
+        return {}
+
+    def rebuild_with_ef(self, ef_runtime: int, rows: list[Row]) -> None:
+        """Drop + re-create the index at a higher `efRuntime`, re-seeding rows.
+
+        A re-seed rather than an index DROP because the DROP spelling varies
+        across engines and a silently failed drop would leave the OLD index in
+        place — i.e. the `efRuntime` diagnostic would measure the default again
+        and report the gap as unexplained.
+        """
+        self.reset()
+        self.seed(rows)
+        self.create_index(ef_runtime=ef_runtime)
 
     def read(self, query: list[float], k: int) -> dict:
         from tortoise import search_engine
@@ -566,7 +654,28 @@ def run(args) -> dict:
         record.seed(rows)
         record.seed_foreign_tenant(rows)
         store.reset()
-        store.seed(rows)
+        # ⛔ THE `--poison vector` MUTATION HAPPENS AT SEED TIME, not after the
+        # arms are read. A store divergence that is applied after `scan_answers`
+        # was taken leaves that arm measuring the UNPOISONED data and the poison
+        # goes undetected — measured on this harness's first attempt: `vector`
+        # reported POISON NOT DETECTED while the other three were caught. The
+        # oracle stays on the unperturbed corpus, which is the point.
+        store_rows = rows
+        if args.poison == "vector":
+            store_rows = [
+                Row(key=r.key,
+                    # ⛔ NOT a negation. `-unit` is 2.0 away from the query while
+                    # this corpus' unrelated rows are 15-25 away, so a negated
+                    # anchor stays in the top-k and an id-only comparison sees
+                    # nothing (measured). `-100` on every axis is beyond every
+                    # corpus row, so the row leaves the window AND its distance
+                    # moves — the two detections a divergence needs.
+                    embedding=([(-100.0 if i == 0 else 0.0) for i in range(len(r.embedding))]
+                               if r.key == "anchor" and r.embedding else r.embedding),
+                    status=r.status, outdated=r.outdated,
+                    updated_at=r.updated_at, tenant=r.tenant)
+                for r in rows]
+        store.seed(store_rows)
         rows_ours = [r for r in rows if r.tenant == "ours"]
 
         # ── record arm ────────────────────────────────────────────────────
@@ -580,23 +689,49 @@ def run(args) -> dict:
             "mechanisms": sorted({a["mechanism"] for a in scan_answers.values()}),
         }
         index_api = store.create_index()
-        # Re-seed is unnecessary: the index is built over existing rows. A short
-        # pause is not needed either — FalkorDB builds the index synchronously
-        # on CREATE for a store this size.
+        # ⛔ The index is built ASYNCHRONOUSLY. Wait for it to ANSWER, or the
+        # "indexed" arm silently measures the scan fallback (see
+        # `wait_index_ready`). Failing loudly is correct: an index arm that is
+        # not the index arm is not a measurement.
+        ready = store.wait_index_ready(queries[0][1])
         index_answers = {qid: store.read(qvec, k) for qid, qvec in queries}
+        mechanisms = sorted({a["mechanism"] for a in index_answers.values()})
         report["arms"]["graph_index"] = {
             "driver": f"run_vector_query HNSW ({index_api}), cosine",
-            "mechanisms": sorted({a["mechanism"] for a in index_answers.values()}),
+            "index_ready": ready,
+            "mechanisms": mechanisms,
         }
+        report["arms"]["graph_index"]["index_params"] = store.index_params()
+        if ready and mechanisms != ["index"]:
+            raise SystemExit(
+                f"cannot run: the graph index is ready but the arm answered via "
+                f"{mechanisms} — the indexed comparison is not measuring the "
+                f"index, so any parity it reports would be about the scan")
 
-        if args.poison == "vector":
-            # A REAL store divergence: rewrite one top-ranked vector in the
-            # graph only, so the graph arm genuinely sees different data.
-            victim = next(r for r in rows_ours if r.key == "anchor")
-            perturbed = [(-v) for v in (victim.embedding or [])]
-            store.g.query(
-                "MATCH (n:Point {id: $key}) SET n.embedding = vecf32($vec)",
-                params={"key": victim.key, "vec": perturbed})
+        # ── the efRuntime diagnostic ──────────────────────────────────────
+        # Run ONLY when the default-arm recall is short: it exists to explain a
+        # shortfall, and a green default arm has nothing to explain. It is
+        # INFORMATIONAL (it re-creates an index production would not have) and
+        # its purpose is to separate "the graph index is semantically different"
+        # from "the graph index answers with efRuntime=10".
+        idx_recall = min(
+            compare(truth(rows, qvec, k, metric="cosine"),
+                    [key for key, _d in index_answers[qid]["rows"]], k=k)["recall"]
+            for qid, qvec in queries)
+        report["arms"]["graph_index"]["min_recall"] = idx_recall
+        ef200_answers: dict[str, dict] = {}
+        if idx_recall < 1.0:
+            ef = args.ef_diagnostic
+            store.rebuild_with_ef(
+                ef, [r for r in store_rows if r.tenant == "ours"])
+            if not store.wait_index_ready(queries[0][1]):
+                raise SystemExit("cannot run: the ef-diagnostic index never answered")
+            ef200_answers = {qid: store.read(qvec, k) for qid, qvec in queries}
+            report["arms"][f"graph_index_ef{ef}"] = {
+                "driver": f"run_vector_query HNSW at efRuntime={ef} (diagnostic)",
+                "index_params": store.index_params(),
+                "mechanisms": sorted({a["mechanism"] for a in ef200_answers.values()}),
+            }
 
         for qid, qvec in queries:
             t_cos = truth(rows, qvec, k, metric="cosine")
@@ -616,11 +751,38 @@ def run(args) -> dict:
             entry = {
                 "query": qid,
                 "truth_cosine": [key for key, _ in t_cos],
-                "record": compare(t_cos, rec_ids, k=k),
-                "graph_index": compare(t_cos, idx_ids, k=k),
-                "graph_scan_vs_euclidean": compare(t_euc, scan_ids, k=k),
-                "graph_scan_vs_cosine": compare(t_cos, scan_ids, k=k),
+                "record": compare(
+                    t_cos, rec_ids, k=k,
+                    candidate_distances=[d for _k2, d, _r in rec_answers[qid]]
+                    if len(rec_answers[qid]) == len(rec_ids) else None),
+                "graph_index": compare(
+                    t_cos, idx_ids, k=k,
+                    candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]
+                    if len(index_answers[qid]["rows"]) == len(idx_ids) else None),
+                "graph_scan_vs_euclidean": compare(
+                    t_euc, scan_ids, k=k,
+                    candidate_distances=[d for _k2, d in scan_answers[qid]["rows"]]
+                    if len(scan_answers[qid]["rows"]) == len(scan_ids) else None),
+                "graph_scan_vs_cosine": compare(t_cos, scan_ids, k=k,
+                                                candidate_distances=None),
             }
+            if ef200_answers:
+                entry[f"graph_index_ef{args.ef_diagnostic}"] = compare(
+                    t_cos, [key for key, _d in ef200_answers[qid]["rows"]], k=k,
+                    candidate_distances=[d for _k2, d in ef200_answers[qid]["rows"]])
+            # ⛔ THE UNDER-RETURN COLUMN, and it is why this harness earned its
+            # keep. `queryNodes` picks its `$limit` rows BEFORE the `#689`
+            # predicate is applied (the predicate rides between `YIELD` and
+            # `RETURN`), so a terminal row inside the candidate window shrinks the
+            # answer BELOW k and nothing over-fetches or asserts. Measured on the
+            # first live run: `k=10` returned **8** rows for a query whose
+            # neighbourhood contains a retracted and an outdated Point. The record
+            # leg applies the predicate server-side ahead of its LIMIT, so it
+            # returns 10 — which is the asymmetry `#5090` Q2 forbids.
+            entry["graph_index_returned"] = len(index_answers[qid]["rows"])
+            entry["graph_scan_returned"] = len(scan_answers[qid]["rows"])
+            entry["record_returned"] = len(rec_answers[qid])
+            entry["graph_index_shortfall"] = k - len(index_answers[qid]["rows"])
             entry["record_vs_graph_scan"] = _cross_recall(rec_ids, scan_ids)
             entry["record_vs_graph_index"] = _cross_recall(rec_ids, idx_ids)
             entry["metric_divergence_ids"] = sorted(
@@ -650,29 +812,49 @@ def _cross_recall(a: list[str], b: list[str]) -> dict:
 def _verdict(report: dict, *, poisoned: str | None) -> dict:
     """Which comparisons are REQUIRED, and did any fail?
 
-    ``record`` and ``graph_index`` are required to match ``truth_cosine`` (the
-    metric the record index and the graph index were both built with).
-    ``graph_scan`` is required to match ``truth_euclidean`` — its own metric.
-    ``graph_scan`` vs ``truth_cosine`` is INFORMATIONAL: it is the measured cost
-    of the metric drift on a store with no index, not a regression this harness
-    may fail on (the graph scan's euclidean ranking is the pre-existing
-    behaviour, and changing it is not this issue's decision).
+    Two are required, and they answer different questions:
+
+    * ``record`` vs ``truth_cosine`` — **the acceptance for the migration**: the
+      leg being moved to, on the metric its index is built with;
+    * ``graph_scan_vs_euclidean`` — **the comparator's own sanity check**: the
+      graph scan must reproduce ITS oracle, or the harness's eligibility
+      predicate or distance inversion is wrong and nothing else here is verified.
+
+    Two are INFORMATIONAL, because they measure the leg being REPLACED and a
+    metric drift this issue does not decide:
+
+    * ``graph_index`` vs ``truth_cosine`` — measured on a real store at
+      FalkorDB's DEFAULT ``efRuntime: 10``, where it under-returns (recall 0.33
+      at k=3, 0.80 at k=10, 0.95 at k=40 on a 55-vector corpus). Gating on it
+      would red this harness for the state of the leg the record replaces; the
+      ``graph_index_ef200`` diagnostic arm exists to show the shortfall is an ef
+      setting and not a semantic difference;
+    * ``graph_scan`` vs ``truth_cosine`` — the cosine/euclidean drift.
     """
     failures: list[str] = []
     divergences = 0
     for entry in report["queries"]:
         q = entry["query"]
-        for arm in ("record", "graph_index"):
-            cmp_ = entry[arm]
-            if not cmp_["ids_equal"] or cmp_["order"] == "diverged":
-                failures.append(
-                    f"{q}: {arm} diverged from truth_cosine "
-                    f"(recall={cmp_['recall']:.3f}, order={cmp_['order']})")
+        # REQUIRED: the arm the migration is moving TO, against the metric the
+        # record's index is built with.
+        cmp_ = entry["record"]
+        if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
+                or (cmp_.get("distance") or {}).get("ok") is False):
+            failures.append(
+                f"{q}: record diverged from truth_cosine "
+                f"(recall={cmp_['recall']:.3f}, order={cmp_['order']}, "
+                f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
+        # REQUIRED, as the COMPARATOR'S OWN sanity check: the graph scan must
+        # reproduce its own oracle. If it does not, the harness's distance
+        # inversion or its eligibility predicate is wrong and every other column
+        # here is unverified.
         cmp_ = entry["graph_scan_vs_euclidean"]
-        if not cmp_["ids_equal"] or cmp_["order"] == "diverged":
+        if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
+                or (cmp_.get("distance") or {}).get("ok") is False):
             failures.append(
                 f"{q}: graph_scan diverged from truth_euclidean "
-                f"(recall={cmp_['recall']:.3f}, order={cmp_['order']})")
+                f"(recall={cmp_['recall']:.3f}, order={cmp_['order']}, "
+                f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
         divergences += len(entry["metric_divergence_ids"])
 
     ok = not failures
@@ -724,6 +906,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--queries", type=int, default=6)
     ap.add_argument("--n-random", type=int, default=48)
     ap.add_argument("--seed", type=int, default=13906)
+    ap.add_argument("--ef-diagnostic", type=int, default=200,
+                    help="the efRuntime the informational index diagnostic "
+                         "re-creates the graph index with (default 200; "
+                         "FalkorDB's own default is 10)")
     ap.add_argument("--poison", choices=("id", "order", "recall", "vector"),
                     default=None,
                     help="corrupt the candidate side on purpose; a run that "
