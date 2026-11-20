@@ -485,9 +485,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "128 of this document's 223",
+        "127 of this document's 223",
         "dedupes the **328** as-written spellings to 223 — **105**",
-        "328 written spellings → 223 pairs → 105 collisions → 128 drifters of the 223",
+        "328 written spellings → 223 pairs → 105 collisions → 127 drifters of the 223",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -504,8 +504,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         "`MERGE (n:…) SET n += $props` at the pin",
         # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
-        # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pair adds
-        # `cache_projection.py:2485`, a `main`-set address, so the numerator moves to 123 from 122), and "±5"
+        # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pairs
+        # adds four addresses, three of them `main`-set drifters, so the numerator moves), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
         # arithmetic — the offset-not-content failure, one level down.
@@ -527,6 +527,12 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 #: spelling and counts once, at its START line (`(\d+)` stops there); the two-code-span form the header
 #: describes is deliberately NOT matched, exactly as the header says it is resolved but not counted.
 _SPELLING = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(\d+)")
+#: The TWO-code-span form the header also writes (`` `path.py` `:NNNN` ``). `_SPELLING` cannot see it — the
+#: `:NNNN` is not adjacent to the `.py` — so the one-token basis RESOLVES but does not COUNT these, which is
+#: exactly what the header's alternative-basis sentence discloses. Counting them here, from the document,
+#: is what makes that disclosure a measurement: it shipped as the asserted constant "one pair" while the
+#: document wrote MORE THAN ONE, so the comparator enforced a figure the tree contradicts (`#13854`).
+_TWO_SPAN = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.py)`\s*`(?::(\d+))")
 #: ⛔ The figures are matched with the header's EMPHASIS STRIPPED, never against one rendering of them.
 #: `main` bolds the spelling and collision counts (`dedupes the **327** … — **113**`) and not the ratio's
 #: three mentions, and which numbers it emphasises is an EDITORIAL choice that has already moved twice —
@@ -561,21 +567,34 @@ def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, i
     spellings = _SPELLING.findall(text)
     pairs: set[tuple[str, int]] = set()
     for written, line in spellings:
-        if (repo / written).is_file():
-            resolved = written
-        elif (repo / "tortoise" / written).is_file():
-            resolved = f"tortoise/{written}"
-        else:
-            hits = sorted(
-                p.relative_to(repo).as_posix() for p in (repo / "tortoise").rglob(written)
-            )
-            assert len(hits) == 1, (
-                f"`{written}:{line}` resolves to {len(hits)} files under `tortoise/` ({hits}) — the header's "
-                "rule assumes exactly one, so the pair it forms with is not the one the header counts."
-            )
-            resolved = hits[0]
-        pairs.add((resolved, int(line)))
+        pairs.add((_resolve_path(written, repo), int(line)))
     return len(spellings), pairs
+
+
+def _resolve_path(written: str, repo: Path = REPO) -> str:
+    """The header's resolution rule for ONE written path (docstring in `_resolved_pairs`)."""
+    if (repo / written).is_file():
+        return written
+    if (repo / "tortoise" / written).is_file():
+        return f"tortoise/{written}"
+    hits = sorted(
+        p.relative_to(repo).as_posix() for p in (repo / "tortoise").rglob(written)
+    )
+    assert len(hits) == 1, (
+        f"`{written}` resolves to {len(hits)} files under `tortoise/` ({hits}) — the header's "
+        "rule assumes exactly one, so the pair it forms with is not the one the header counts."
+    )
+    return hits[0]
+
+
+def _two_span_pairs(text: str, repo: Path = REPO) -> set[tuple[str, int]]:
+    """The `(resolved path, start line)` pairs this document writes as TWO code spans.
+
+    MEASURED, not asserted: the alternative-basis sentence discloses how many pairs this form adds, and
+    nothing else in the file can tell whether that number is the tree's. It is not a second basis — the
+    two sets are unioned with the one-token pairs to get the count the header publishes.
+    """
+    return {(_resolve_path(written, repo), int(line)) for written, line in _TWO_SPAN.findall(text)}
 
 
 def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
@@ -646,26 +665,31 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         problems.append("the header no longer states the alternative counting basis")
     else:
         alt_pairs, alt_drifters = map(int, alt.groups())
-        if alt_pairs != published_pairs + 1:
+        # ⛔ MEASURED from the document, never asserted as an offset. The two-code-span form is invisible to
+        # `_SPELLING`, so the count it adds is a property of THIS document and moves when the document does.
+        # A hard-coded `+1` here enforced "one pair" while the document wrote four — the comparator became
+        # the thing that was wrong, and it red on correct text the moment the document was measured.
+        extra_pairs = len(pairs | _two_span_pairs(text, repo)) - len(pairs)
+        if alt_pairs != published_pairs + extra_pairs:
             problems.append(
-                f"the alternative basis reads {alt_pairs} pairs, but it differs from the primary basis by "
-                f"exactly ONE pair (the two-code-span `cache_projection.py` `:2485` form), so over "
-                f"{published_pairs} it is {published_pairs + 1}"
+                f"the alternative basis reads {alt_pairs} pairs, but this document writes {extra_pairs} "
+                f"pair(s) in the two-code-span form the one-token basis resolves but does not count, so "
+                f"over {published_pairs} it is {published_pairs + extra_pairs}"
             )
         # ⛔ A BAND, not a lower bound. The two bases are one measurement under two counting decisions
-        # (`122 and 123 are one measurement under two counting decisions, not two findings`), and adding
-        # that one pair adds AT MOST one drifter — so the only legal numerators are `drifters` and
-        # `drifters + 1`. `alt_drifters < drifters` saw the downward violation and was blind to every
+        # (`122 and 123 are one measurement under two counting decisions, not two findings`), and each added
+        # pair adds AT MOST one drifter — so the only legal numerators are `drifters` .. `drifters +
+        # extra_pairs`. `alt_drifters < drifters` saw the downward violation and was blind to every
         # overstatement: a numerator inflated by +8 or +67 over the primary's read `problems == []`, which
         # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
         # three-mention agreement arm cannot reach the alternative basis, because the document publishes
         # `123` in that sentence alone, so there is no second mention to agree with.
-        if alt_drifters not in (drifters, drifters + 1):
+        if not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
-                f"{drifters} — one added pair can add at most one drifter, so it is {drifters} or "
-                f"{drifters + 1}"
+                f"{drifters} — its {extra_pairs} added pair(s) can add at most {extra_pairs} drifter(s) and "
+                f"cannot remove one, so it is {drifters}..{drifters + extra_pairs}"
             )
     return problems
 
@@ -721,7 +745,7 @@ def test_a_carried_forward_figure_is_reported() -> None:
     What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
     arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
     one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
-    primary, and an alternative basis whose numerator is inflated past the one drifter that added pair can
+    primary, and an alternative basis whose numerator is inflated past what its added pairs can
     contribute. Each is applied to the sentence AS SHIPPED, by capture-group position.
 
     ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
@@ -787,19 +811,21 @@ def test_a_carried_forward_figure_is_reported() -> None:
         (
             alt,
             {1: alt_pairs - 1},
-            "the alternative basis is one pair over the primary, not level with it",
+            "the alternative basis is one pair short of what the two-code-span form measures, not level with it",
         ),
         (
             alt,
             {2: alt_drifters + 7},
-            "the alternative basis's numerator is overstated past the one drifter its added pair can "
-            "contribute — the direction a stale figure takes when a denominator moves under it",
+            "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
+            "direction a stale figure takes when a denominator moves under it",
         ),
         (
             alt,
-            {2: alt_drifters - 2},
-            "the alternative basis reads FEWER drifters than the primary — adding a pair cannot remove one "
-            "(the direction the one-sided bound used to be the only guard for, never exercised)",
+            {2: _drifters - 1},
+            "the alternative basis reads FEWER drifters than the primary — adding pairs cannot remove one "
+            "(the direction the one-sided bound used to be the only guard for, never exercised; the mutant "
+            "is anchored to the PRIMARY numerator, not `alt - 2`, because a band wide enough for four added "
+            "pairs would swallow `alt - 2` and the control would silently stop proving anything)",
         ),
     ):
         stale = _mutate(match, overrides)
