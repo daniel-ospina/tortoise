@@ -127,7 +127,7 @@ def test_update_knowledge_annotation_arm_delegates_to_annotate_operator(monkeypa
 
 def test_update_knowledge_retract_arm_delegates_to_the_sdk_retract_point(monkeypatch):
     retract = _Member()
-    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _stub_sdk(retract_point=retract))
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _stub_sdk(_retract_point=retract))
     got = mcp_server.tortoise_update_knowledge("n1", invalid_at="2030-01-01T00:00:00Z")
     assert got is _Member.SENTINEL
     assert retract.calls == [(("n1",), {"valid_to": "2030-01-01T00:00:00Z"})]
@@ -136,7 +136,7 @@ def test_update_knowledge_retract_arm_delegates_to_the_sdk_retract_point(monkeyp
 def test_update_knowledge_invalidate_arm_delegates_to_the_sdk_invalidate_point(monkeypatch):
     invalidate = _Member()
     monkeypatch.setattr(mcp_server, "_get_org_sdk",
-                        lambda: _stub_sdk(invalidate_point=invalidate))
+                        lambda: _stub_sdk(_invalidate_point=invalidate))
     got = mcp_server.tortoise_update_knowledge(
         "n1", invalid_at="2030-01-01T00:00:00Z", corrected_by_id="n2")
     assert got is _Member.SENTINEL
@@ -304,7 +304,7 @@ def test_action_mitigate_CARRIES_credibility(monkeypatch):
     """
     mitigate = _Member()
     monkeypatch.setattr(mcp_server, "tortoise_mitigate_operator", mitigate)
-    stub = _stub_sdk(mitigate_operator=mitigate)
+    stub = _stub_sdk(_mitigate_operator=mitigate)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
 
     got = mcp_server.tortoise_adjust_relationship(
@@ -352,7 +352,7 @@ def test_the_RETIRED_door_itself_refuses_dimensions_on_its_mitigate_arm():
     recorded here (and any other name would `AttributeError` rather than pass).
     """
     mitigate = _Member()
-    stub = _stub_sdk(mitigate_operator=mitigate)
+    stub = _stub_sdk(_mitigate_operator=mitigate)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
         got = mcp_server.tortoise_operator_action(
@@ -404,7 +404,7 @@ def test_dry_run_PREVIEWS_the_temporal_arms_and_writes_nothing(monkeypatch):
     monkeypatch.setattr(mcp_server, "_preview_retract_point", previews)
     monkeypatch.setattr(mcp_server, "_preview_invalidate", previews)
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _stub_sdk(
-        retract_point=writes, invalidate_point=writes))
+        _retract_point=writes, _invalidate_point=writes))
 
     for kwargs in ({"invalid_at": "2030-01-01T00:00:00Z"},
                    {"invalid_at": "2030-01-01T00:00:00Z",
@@ -540,6 +540,54 @@ NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
     ),
 }
 
+#: The FalkorDB graph handle, recorded separately because its receiver is NOT an
+#: ``ast.Name`` in most call sites: the handle is reached as an ATTRIBUTE
+#: (``proj.g.query(...)``, ``FalkorProjection.g``), and a Name-only exemption
+#: therefore missed it. Measured on `main` at a296e6741e: the census reported FIVE
+#: offenders, all of them ``.g.query(...)`` on a graph client
+#: (``tortoise/why.py:1363``, ``tortoise/why_snapshot.py:151``/``:563``,
+#: ``tortoise/__main__.py:1926``/``:13229``) and ZERO SDK call sites — a false red
+#: that made the whole file unusable as evidence for #13036's V4 row.
+#:
+#: ⛔ `g` can never name a `TortoiseSDK`: the class carries no `g` member and its
+#: `__getattr__` RAISES on an unknown attribute (the retirement hint path), so a
+#: receiver spelled `g` cannot resolve to the SDK at all. The exemption stays
+#: PATH-scoped, so it cannot widen into a global blind spot.
+GRAPH_HANDLE_RECEIVERS: dict[tuple[str, str], str] = {
+    ("tortoise/why.py", "g"): "`g` is the FalkorDB graph handle (see below)",
+    ("tortoise/why_snapshot.py", "g"):
+        "`proj.g` is `FalkorProjection.g`, the FalkorDB graph client",
+    ("tortoise/__main__.py", "g"):
+        "`proj.g`/`g` is `FalkorProjection.g`, the FalkorDB graph client",
+}
+
+#: Retired names that COLLIDE with an ordinary method name on the objects this
+#: code base holds (the Cypher client). `query` is the whole class today: it is a
+#: retired ``TortoiseSDK`` name AND the universal ``<graph>.query(cypher)`` method, so
+#: a receiver-blind match reports every Cypher call in the package. MEASURED on
+#: `main` at a296e6741e — after the CALL-only narrowing, the census still reported
+#: HUNDREDS of offenders across `abuse.py`, `assembly.py`, `backup_sweep.py`,
+#: `analyze.py` … and zero SDK call sites, which is the same failure the CALL-only
+#: narrowing fixed once (`status`/`provenance`) recurring on a different name.
+#:
+#: For an ambiguous name the receiver must LOOK like the SDK (`sdk`, `_sdk`,
+#: `self.sdk`, `self._sdk`). The residual is recorded rather than hidden: a
+#: ``TortoiseSDK`` bound to some other variable name calling ``.query()`` is missed
+#: by this census — and `TortoiseSDK.__getattr__` still RAISES for it at runtime,
+#: which is the pin the census exists to back up, not a substitute for it.
+AMBIGUOUS_RETIRED_NAMES: frozenset[str] = frozenset(
+    {"query", "list_graphs", "link_source_to_entity"})
+SDK_RECEIVER_NAMES: frozenset[str] = frozenset({"sdk", "_sdk"})
+
+
+def _receiver_name(receiver: ast.expr) -> str | None:
+    """The receiver's terminal NAME, for a bare `g` or an attribute chain `proj.g`."""
+    if isinstance(receiver, ast.Name):
+        return receiver.id
+    if isinstance(receiver, ast.Attribute):
+        return receiver.attr
+    return None
+
 
 def _attribute_names(tree: ast.AST,
                      rel_path: str | None = None) -> list[tuple[int, str]]:
@@ -576,9 +624,17 @@ def _attribute_names(tree: ast.AST,
                 and node.func.attr in RETIRED_SDK_METHODS):
             continue
         receiver = node.func.value
-        if (rel_path is not None and isinstance(receiver, ast.Name)
-                and (rel_path, receiver.id, node.func.attr) in NON_SDK_RECEIVERS):
+        if rel_path is not None and isinstance(receiver, ast.Name) \
+                and (rel_path, receiver.id, node.func.attr) in NON_SDK_RECEIVERS:
             continue
+        if rel_path is not None:
+            name = _receiver_name(receiver)
+            if name is not None and (rel_path, name) in GRAPH_HANDLE_RECEIVERS:
+                continue
+        if node.func.attr in AMBIGUOUS_RETIRED_NAMES:
+            name = _receiver_name(receiver)
+            if name not in SDK_RECEIVER_NAMES:
+                continue
         out.append((node.func.lineno, node.func.attr))
     return out
 
