@@ -70,7 +70,7 @@ def _cleanup_sdk(sdk, *point_ids: str):
     _log = logging.getLogger(__name__)
     for pid in point_ids:
         try:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
         except Exception as e:
             _log.warning("Cleanup failed for point %s: %s", pid, e)
 
@@ -81,41 +81,41 @@ def _create_test_points(sdk):
     Returns (ids_dict, operator_ids) where ids_dict has keys:
         jtbd, uc, uj, wf, req, feature, customer_seg
     """
-    jtbd = sdk.create_point(
+    jtbd = sdk._create_point(
         "product-strategy:jobToBeDone", "Deliver product insights", jtbd_id="JTBD-7849-1",
     )
-    uc = sdk.create_point(
+    uc = sdk._create_point(
         "product-strategy:useCase", "Analyze market trends", uc_id="UC-7849-1",
     )
-    uj = sdk.create_point(
+    uj = sdk._create_point(
         "product-strategy:userJourney", "Market analyst workflow", covered_use_cases="UC-7849-1",
     )
-    wf = sdk.create_point(
+    wf = sdk._create_point(
         "product-strategy:workflow", "Weekly analysis pipeline", enables_jtbd="JTBD-7849-1",
     )
     # #7848: `dev:requirement` is no longer a DECLARED kind (requirement is an
     # Object kind declared by product-strategy; the old spelling survives only
     # as a read alias for stored Points); use a still-point dev kind here.
-    req = sdk.create_point(
+    req = sdk._create_point(
         "dev:technicalDebt", "REQ-1: Data pipeline", enabled_workflow=wf["id"],
     )
-    feature = sdk.create_point(
+    feature = sdk._create_point(
         "product-strategy:feature", "Automated reporting", )
-    customer_seg = sdk.create_point(
+    customer_seg = sdk._create_point(
         "product-strategy:customerSegment", "Enterprise data teams", )
 
     # Build relationships:
     # JTBD -(composedOf)-> UC
-    op_composed = sdk.create_operator(
+    op_composed = sdk._create_operator(
         "composedOf", jtbd["id"], [uc["id"]],
     )
     # Feature -(addresses)-> CustomerSegment
-    op_addresses = sdk.create_operator(
+    op_addresses = sdk._create_operator(
         "IMPL", feature["id"], [customer_seg["id"]],
     )
     # Label the addresses operator so traversal_path can find it
     try:  # noqa: SIM105
-        sdk.update_point(op_addresses["id"], {"label": "addresses"})
+        sdk._update_point(op_addresses["id"], {"label": "addresses"})
     except Exception:
         pass
 
@@ -215,7 +215,7 @@ class TestChainVerificationWithPacks:
         """check_structure returns a list (may be empty or contain violations)."""
         sdk = TortoiseSDK()
         try:
-            result = sdk.check_structure()
+            result = sdk._check_structure()
             assert isinstance(result, list)
         finally:
             del sdk
@@ -230,7 +230,7 @@ class TestChainVerificationWithPacks:
 
             # Run check_structure — should resolve product-strategy:useCase via
             # pack expansion (not just bare 'useCase'). verify the kinds are found.
-            violations = sdk.check_structure()
+            violations = sdk._check_structure()
             assert isinstance(violations, list)
 
             # Key assertion: check_structure ran against pack-prefixed kinds and
@@ -245,7 +245,7 @@ class TestChainVerificationWithPacks:
             _cleanup_sdk(sdk, *ids.values())
             for oid in operator_ids:
                 try:  # noqa: SIM105
-                    sdk.delete_point(oid)
+                    sdk._delete_point(oid)
                 except Exception:
                     pass
             del sdk
@@ -258,14 +258,14 @@ class TestChainVerificationWithPacks:
             # Create a useCase with a composedOf operator but NO parent JTBD (orphan).
             # The operator gives it edges so check_structure flags orphan_use_case,
             # not orphaned_draft (which fires for draft points with zero edges).
-            orphan = sdk.create_point(
+            orphan = sdk._create_point(
                 "product-strategy:useCase", "Orphan use case", uc_id="UC-ORPHAN-7849",
             )
             created.append(orphan["id"])
-            op = sdk.create_operator("composedOf", orphan["id"], [orphan["id"]])
+            op = sdk._create_operator("composedOf", orphan["id"], [orphan["id"]])
             created.append(op["id"])
 
-            violations = sdk.check_structure()
+            violations = sdk._check_structure()
             our_violations = [v for v in violations if v.get("id") == orphan["id"]]
             assert len(our_violations) >= 1, (
                 f"Expected orphan useCase violation for {orphan['id']}, got none"
@@ -285,14 +285,14 @@ class TestChainVerificationWithPacks:
         try:
             # Create a userJourney with a dangling UC reference.
             # Add an operator so it has edges (otherwise flagged orphaned_draft).
-            uj = sdk.create_point(
+            uj = sdk._create_point(
                 "product-strategy:userJourney", "Dangling ref journey", covered_use_cases="UC-NONEXISTENT-7849",
             )
             created.append(uj["id"])
-            op = sdk.create_operator("composedOf", uj["id"], [uj["id"]])
+            op = sdk._create_operator("composedOf", uj["id"], [uj["id"]])
             created.append(op["id"])
 
-            violations = sdk.check_structure()
+            violations = sdk._check_structure()
             our_violations = [v for v in violations if v.get("id") == uj["id"]]
             types = {v["type"] for v in our_violations}
             assert "dangling_use_case_ref" in types, (
@@ -306,7 +306,7 @@ class TestChainVerificationWithPacks:
         """All violations are dicts with expected keys."""
         sdk = TortoiseSDK()
         try:
-            violations = sdk.check_structure()
+            violations = sdk._check_structure()
             for v in violations:
                 assert isinstance(v, dict)
                 assert "type" in v
@@ -338,11 +338,11 @@ class TestMigrationScript:
         created = None
         try:
             # Create a point with an old core kind
-            pt = sdk.create_point("useCase", "Migration test use case")
+            pt = sdk._create_point("useCase", "Migration test use case")
             created = pt["id"]
 
             # Before migration, it should have old kind
-            fetched = sdk.get_point(created)
+            fetched = sdk._get_point(created)
             assert fetched.get("pointKind") == "useCase"
 
             # Run migration
@@ -351,7 +351,7 @@ class TestMigrationScript:
             assert result.get("useCase", {}).get("count", 0) >= 1
 
             # After migration, kind should be updated
-            fetched = sdk.get_point(created)
+            fetched = sdk._get_point(created)
             assert fetched.get("pointKind") == "product-strategy:useCase"
         finally:
             if created:
@@ -364,7 +364,7 @@ class TestMigrationScript:
         sdk = TortoiseSDK()
         created = None
         try:
-            pt = sdk.create_point("jobToBeDone", "Idempotent test")
+            pt = sdk._create_point("jobToBeDone", "Idempotent test")
             created = pt["id"]
 
             # First run
@@ -426,7 +426,7 @@ class TestMCPSurface:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
                 try:  # noqa: SIM105
-                    sdk_obj.delete_point(oid)
+                    sdk_obj._delete_point(oid)
                 except Exception:
                     pass
             del sdk_obj
@@ -464,7 +464,7 @@ class TestMCPSurface:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
                 try:  # noqa: SIM105
-                    sdk_obj.delete_point(oid)
+                    sdk_obj._delete_point(oid)
                 except Exception:
                     pass
             del sdk_obj
@@ -489,7 +489,7 @@ class TestMCPSurface:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
                 try:  # noqa: SIM105
-                    sdk_obj.delete_point(oid)
+                    sdk_obj._delete_point(oid)
                 except Exception:
                     pass
             del sdk_obj
@@ -538,7 +538,7 @@ class TestMCPSurface:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
                 try:  # noqa: SIM105
-                    sdk_obj.delete_point(oid)
+                    sdk_obj._delete_point(oid)
                 except Exception:
                     pass
             del sdk_obj
@@ -647,23 +647,23 @@ class TestKindReadFilterReadPaths:
         sdk = TortoiseSDK()
         created: list[str] = []
         try:
-            broad = sdk.create_point("WorkItem", "a work item, not an issue")
-            narrow = sdk.create_point("dev:issue", "an issue")
+            broad = sdk._create_point("WorkItem", "a work item, not an issue")
+            narrow = sdk._create_point("dev:issue", "an issue")
             created = [broad["id"], narrow["id"]]
 
-            narrow_ids = {row["id"] for row in sdk.query(kind="dev:issue")}
+            narrow_ids = {row["id"] for row in sdk._query(kind="dev:issue")}
             assert narrow["id"] in narrow_ids, (
                 "query(kind='dev:issue') lost its OWN row — wrong-empty")
             assert broad["id"] not in narrow_ids, (
                 "query(kind='dev:issue') returned a WorkItem row: the read "
                 "filter carries the ancestor (#11679)")
 
-            broad_ids = {row["id"] for row in sdk.query(kind="WorkItem")}
+            broad_ids = {row["id"] for row in sdk._query(kind="WorkItem")}
             assert {broad["id"], narrow["id"]} <= broad_ids, (
                 "query(kind='WorkItem') lost a narrower kind's row — the DOWN "
                 f"direction was over-narrowed (#6146): {broad_ids}")
 
-            page = sdk.paginated_query(kind="dev:issue", limit=50)
+            page = sdk._paginated_query(kind="dev:issue", limit=50)
             page_ids = {row["id"] for row in page["results"]}
             assert narrow["id"] in page_ids
             assert broad["id"] not in page_ids, (

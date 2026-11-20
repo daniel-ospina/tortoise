@@ -29,7 +29,7 @@ def sdk(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "topic.db"), namespace=TEST_GRAPH)
     yield sdk
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
     except Exception:
@@ -42,7 +42,7 @@ def _graph(sdk):
 
 
 def _point(sdk, kind="statement", content="some claim content here"):
-    return sdk.create_point(kind, content)
+    return sdk._create_point(kind, content)
 
 
 def _set_ep(sdk, pid, alpha, beta):
@@ -78,7 +78,7 @@ def test_support_mass_capped_family_size_reported(sdk):
     """1 result point, 1 IMPL op with 30 endpoints → ≤10 support entries + family_size."""
     a = _point(sdk, content="alpha claim target")
     peers = [_point(sdk, content=f"peer {i} claim") for i in range(30)]
-    sdk.create_operator("IMPL", a["id"], [p["id"] for p in peers])
+    sdk._create_operator("IMPL", a["id"], [p["id"] for p in peers])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     entries = out[a["id"]]
@@ -106,7 +106,7 @@ def test_support_mass_capped_family_size_reported(sdk):
 def test_operator_with_zero_non_operator_endpoints(sdk):
     """Op whose only endpoints are operators → no entries for the point."""
     a = _point(sdk, content="alpha claim")
-    other_op = sdk.create_operator("IMPL", a["id"], [])
+    other_op = sdk._create_operator("IMPL", a["id"], [])
     # connect a to another operator only (no non-operator endpoints)
     op = other_op["id"]
     _graph(sdk).query(
@@ -129,8 +129,8 @@ def test_nand_always_survives(sdk):
     nand_peers = [_point(sdk, content=f"nand peer {i}") for i in range(10)]
     impl_peers = [_point(sdk, content=f"impl peer {i}") for i in range(30)]
     for p in nand_peers:
-        sdk.create_operator("NAND", a["id"], [p["id"]])
-    sdk.create_operator("IMPL", a["id"], [p["id"] for p in impl_peers])
+        sdk._create_operator("NAND", a["id"], [p["id"]])
+    sdk._create_operator("IMPL", a["id"], [p["id"] for p in impl_peers])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     mechs = [e["mechanism"] for e in out[a["id"]]]
@@ -144,7 +144,7 @@ def test_twelve_nand_all_kept_cap_waived(sdk):
     a = _point(sdk, content="alpha claim target")
     peers = [_point(sdk, content=f"nand peer {i}") for i in range(12)]
     for p in peers:
-        sdk.create_operator("NAND", a["id"], [p["id"]])
+        sdk._create_operator("NAND", a["id"], [p["id"]])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     mechs = [e["mechanism"] for e in out[a["id"]]]
@@ -157,7 +157,7 @@ def test_contested_peer_always_survives(sdk):
     contested = _point(sdk, content="disputed peer claim")
     _set_ep(sdk, contested["id"], 2, 2)  # variance 0.05 > 0.04 → contested
     peers = [_point(sdk, content=f"impl peer {i}") for i in range(20)]
-    sdk.create_operator("IMPL", a["id"], [contested["id"]] + [p["id"] for p in peers])
+    sdk._create_operator("IMPL", a["id"], [contested["id"]] + [p["id"] for p in peers])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     related = {e["related_id"] for e in out[a["id"]] if "related_id" in e}
@@ -172,7 +172,7 @@ def test_superseded_peer_always_survives(sdk):
     stale = _point(sdk, content="stale superseded peer")
     _set_status(sdk, stale["id"], "superseded")
     peers = [_point(sdk, content=f"impl peer {i}") for i in range(20)]
-    sdk.create_operator("IMPL", a["id"], [stale["id"]] + [p["id"] for p in peers])
+    sdk._create_operator("IMPL", a["id"], [stale["id"]] + [p["id"] for p in peers])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     related = {e["related_id"] for e in out[a["id"]] if "related_id" in e}
@@ -184,7 +184,7 @@ def test_more_than_budget_criticals_all_kept(sdk):
     a = _point(sdk, content="alpha claim target")
     nand_peers = [_point(sdk, content=f"nand peer {i}") for i in range(45)]
     for p in nand_peers:
-        sdk.create_operator("NAND", a["id"], [p["id"]])
+        sdk._create_operator("NAND", a["id"], [p["id"]])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]], global_budget=10)
     mechs = [e["mechanism"] for e in out[a["id"]]]
@@ -197,11 +197,11 @@ def test_mitigation_surfaced_and_excluded_from_impl_endpoints(sdk):
     """Mitigation point appears as mitigated_by entry; never as an IMPL endpoint."""
     a = _point(sdk, content="alpha claim target")
     b = _point(sdk, content="beta claim")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
-    op_id = sdk.create_operator("IMPL", b["id"], [a["id"]])["id"]
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
+    op_id = sdk._create_operator("IMPL", b["id"], [a["id"]])["id"]
 
     # create mitigation: (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)
-    m = sdk.create_point("mitigation", "this claim is weakened by missing evidence")
+    m = sdk._create_point("mitigation", "this claim is weakened by missing evidence")
     _graph(sdk).query(
         "MATCH (op:Point {id:$oid}), (m:Point {id:$mid}) "
         "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
@@ -224,7 +224,7 @@ def test_self_peer_excluded(sdk):
     """other == n rows are excluded in assembly (no self-referential peers)."""
     a = _point(sdk, content="alpha claim target")
     b = _point(sdk, content="beta claim")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     related = {e["related_id"] for e in out[a["id"]]}
@@ -235,7 +235,7 @@ def test_self_peer_excluded(sdk):
 def test_retracted_operator_edges_excluded(sdk):
     a = _point(sdk, content="alpha claim target")
     b = _point(sdk, content="beta claim")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]])
     _set_status(sdk, op["id"], "retracted")
 
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
@@ -248,7 +248,7 @@ def test_role_and_direction_from_idx(sdk):
     """idx=0 → source/outgoing; idx>0 → target/incoming."""
     src = _point(sdk, content="source claim")
     tgt = _point(sdk, content="target claim")
-    sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+    sdk._create_operator("IMPL", src["id"], [tgt["id"]])
 
     out = get_relationships_bounded(_graph(sdk), [src["id"], tgt["id"]])
     src_entry = next(e for e in out[src["id"]] if e["related_id"] == tgt["id"])
@@ -264,7 +264,7 @@ def test_global_budget_exhaustion_degrades_to_counts(sdk):
     points = [_point(sdk, content=f"claim {i}") for i in range(20)]
     for i, p in enumerate(points):
         peers = [_point(sdk, content=f"p{i} peer {j}") for j in range(10)]
-        sdk.create_operator("IMPL", p["id"], [q["id"] for q in peers])
+        sdk._create_operator("IMPL", p["id"], [q["id"] for q in peers])
 
     ids = [p["id"] for p in points]
     # full expansion so the GLOBAL budget (not top-K) is what cuts the tail
@@ -283,7 +283,7 @@ def test_tail_private_op_points_get_counts_with_default_topk(sdk):
     points = [_point(sdk, content=f"claim {i}") for i in range(20)]
     for i, p in enumerate(points):
         peers = [_point(sdk, content=f"p{i} peer {j}") for j in range(10)]
-        sdk.create_operator("IMPL", p["id"], [q["id"] for q in peers])
+        sdk._create_operator("IMPL", p["id"], [q["id"] for q in peers])
 
     ids = [p["id"] for p in points]
     # DEFAULT expand_top_k=14: points 15-20 have private (unshared) operators
@@ -336,9 +336,9 @@ def test_criticals_do_not_consume_support_room(sdk):
     """Review-fix (D3): criticals are exempt from the per-point cap."""
     a = _point(sdk, content="alpha")
     peers = [_point(sdk, content=f"peer {i}") for i in range(5)]
-    sdk.create_operator("IMPL", a["id"], [p["id"] for p in peers])
+    sdk._create_operator("IMPL", a["id"], [p["id"] for p in peers])
     for i in range(12):
-        sdk.create_operator("NAND", a["id"], [_point(sdk, content=f"nand {i}")["id"]])
+        sdk._create_operator("NAND", a["id"], [_point(sdk, content=f"nand {i}")["id"]])
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     mechs = [e["mechanism"] for e in out[a["id"]]]
     assert mechs.count("NAND") == 12
@@ -350,7 +350,7 @@ def test_mixed_createdat_formats_no_crash(sdk):
     a = _point(sdk, content="alpha")
     p1 = _point(sdk, content="peer iso")
     p2 = _point(sdk, content="peer epoch")
-    sdk.create_operator("IMPL", a["id"], [p1["id"], p2["id"]])
+    sdk._create_operator("IMPL", a["id"], [p1["id"], p2["id"]])
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id SET n.createdAt = 1755500000",
         params={"id": p2["id"]},
@@ -363,7 +363,7 @@ def test_get_relationships_regression_full_content(sdk):
     """The unbounded shared function still returns full payloads with content."""
     a = _point(sdk, content="alpha claim target")
     b = _point(sdk, content="beta claim with unique content payload")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
 
     out = get_relationships(_graph(sdk), [a["id"]])
     entries = out[a["id"]]
@@ -389,7 +389,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     of the function under test.
     """
     rng = random.Random(seed)
-    points = [sdk.create_point("statement", f"claim {i}") for i in range(40)]
+    points = [sdk._create_point("statement", f"claim {i}") for i in range(40)]
     ids = [p["id"] for p in points]
 
     ops_of: dict[str, set] = defaultdict(set)      # point → op ids it participates in
@@ -402,7 +402,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     for oi in range(6):  # noqa: B007
         src = ids[rng.randrange(len(ids))]
         tgts = rng.sample([i for i in ids if i != src], 10)
-        op = sdk.create_operator("IMPL", src, tgts)
+        op = sdk._create_operator("IMPL", src, tgts)
         op_members[op["id"]] = {src, *tgts}
         op_mech[op["id"]] = "IMPL"
         for m in op_members[op["id"]]:
@@ -421,7 +421,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
                 and frozenset((src, i)) not in impl_pairs]
         assert free, "every pair is IMPL-covered — the fixture needs a free pair"
         tgt = rng.choice(free)
-        op = sdk.create_operator("NAND", src, [tgt])
+        op = sdk._create_operator("NAND", src, [tgt])
         op_members[op["id"]] = {src, tgt}
         op_mech[op["id"]] = "NAND"
         for m in op_members[op["id"]]:
@@ -445,10 +445,10 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     for _ in range(2):
         src = ids[rng.randrange(len(ids))]
         tgt = rng.choice([i for i in ids if i != src])
-        op = sdk.create_operator("IMPL", src, [tgt])
+        op = sdk._create_operator("IMPL", src, [tgt])
         op_members[op["id"]] = {src, tgt}
         op_mech[op["id"]] = "IMPL"
-        m = sdk.create_point("mitigation", "weakened by missing evidence")
+        m = sdk._create_point("mitigation", "weakened by missing evidence")
         _graph(sdk).query(
             "MATCH (op:Point {id:$o}), (m:Point {id:$m}) "
             "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
@@ -462,7 +462,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     # old's operator edges to `new` (documented write-path behavior). The oracle
     # mirrors the transfer so its membership matches the graph.
     old, new = ids[0], ids[1]
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     supersedes_out[new] = old
     superseded.add(old)
     for op in list(ops_of[old]):
@@ -526,7 +526,7 @@ def test_fetch_state_basic(sdk):
 
 def test_fetch_state_subject_direct(sdk):
     p = _point(sdk, content="claim about the team")
-    subj = sdk.create_subject("Epistemic Team", subjectKind="team")
+    subj = sdk._create_subject("Epistemic Team", subjectKind="team")
     sdk._get_proj().create_about_edge(p["id"], subj["id"], "aboutSubject")
     # #9974 R1: a Subject is born with NO stored status (the fold seeds
     # `status=$st`), so this leg exercises the ABSENT case — `status` below must
@@ -556,8 +556,8 @@ def test_fetch_state_subject_via_event(sdk):
     content-aboutness).
     """
     p = _point(sdk, content="claim from a session")
-    subj = sdk.create_subject("Daniel", subjectKind="legalPerson")
-    ev = sdk.create_event("session discussion", eventKind="humanApproval")
+    subj = sdk._create_subject("Daniel", subjectKind="legalPerson")
+    ev = sdk._create_event("session discussion", eventKind="humanApproval")
     sdk._get_proj().create_about_edge(ev["id"], subj["id"], "aboutSubject")
     # Provenance surface: the point's eventId property — no aboutEvent edge.
     _graph(sdk).query(
@@ -581,8 +581,8 @@ def test_fetch_state_subject_via_event_requires_eventid(sdk):
     """#1417: the fallback requires the point's eventId property — an aboutEvent
     edge alone (legacy/content) must NOT resolve the subject anymore."""
     p = _point(sdk, content="claim wired only via content edge")
-    subj = sdk.create_subject("Legacy", subjectKind="team")
-    ev = sdk.create_event("legacy session", eventKind="humanApproval")
+    subj = sdk._create_subject("Legacy", subjectKind="team")
+    ev = sdk._create_event("legacy session", eventKind="humanApproval")
     sdk._get_proj().create_about_edge(ev["id"], subj["id"], "aboutSubject")
     # Only the (content) aboutEvent edge exists — no eventId on the point.
     sdk._get_proj().create_about_edge(p["id"], ev["id"], "aboutEvent")
@@ -597,9 +597,9 @@ def test_fetch_state_subject_chain_not_resolved(sdk):
     """Subject reachable only via operator 2-hop → None (fail-closed, D10)."""
     p = _point(sdk, content="fact about something")
     other = _point(sdk, content="the actual subject claim")
-    subj = sdk.create_subject("Wrong Subject", subjectKind="other")
+    subj = sdk._create_subject("Wrong Subject", subjectKind="other")
     sdk._get_proj().create_about_edge(other["id"], subj["id"], "aboutSubject")
-    sdk.create_operator("IMPL", p["id"], [other["id"]])
+    sdk._create_operator("IMPL", p["id"], [other["id"]])
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
     assert state["subject"] is None, "chain-derived subject must NOT resolve (fail-closed)"
@@ -608,7 +608,7 @@ def test_fetch_state_subject_chain_not_resolved(sdk):
 def test_fetch_state_superseded_by(sdk):
     old = _point(sdk, content="old claim that is now wrong")
     new = _point(sdk, content="replacement claim with the truth")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     state = fetch_point_epistemic_state(_graph(sdk), [old["id"]])[old["id"]]
     assert state["status"] == "superseded"
@@ -620,7 +620,7 @@ def test_fetch_state_superseded_by(sdk):
 def test_fetch_state_supersedes(sdk):
     old = _point(sdk, content="old claim")
     new = _point(sdk, content="new claim")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     state = fetch_point_epistemic_state(_graph(sdk), [new["id"]])[new["id"]]
     assert any(s["id"] == old["id"] for s in state["supersedes"])
@@ -694,7 +694,7 @@ def test_searchresult_to_dict_additive(sdk):
 def test_point_with_relationships_does_not_read_as_empty(sdk):
     a = _point(sdk, content="claim A content for 6976")
     b = _point(sdk, content="claim B content for 6976")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
 
     out = get_relationships(_graph(sdk), [a["id"]])
     assert set(out) == {a["id"]}, "keys must be exactly the requested ids"
@@ -711,8 +711,8 @@ def test_id_predicate_does_not_leak_other_points(sdk):
     b = _point(sdk, content="claim B content for 6976")
     c = _point(sdk, content="claim C content for 6976")
     d = _point(sdk, content="claim D content for 6976")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
-    sdk.create_operator("IMPL", c["id"], [d["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", c["id"], [d["id"]])
 
     out = get_relationships(_graph(sdk), [a["id"]])
     assert set(out) == {a["id"]}
@@ -1560,7 +1560,7 @@ def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(
     """
     a = _point(sdk, content="claim whose only peer is degenerate")
     b = _point(sdk, content="peer carrying a degenerate (0.0, 0.0) posterior")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
     _graph(sdk).query(
         "MATCH (n:Point) WHERE n.id = $id " + degenerate_write,
         params={"id": b["id"]},

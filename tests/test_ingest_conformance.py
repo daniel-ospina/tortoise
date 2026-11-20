@@ -101,7 +101,7 @@ def test_sdk_success_response_key_set_equal(sdk):
     """A12 indicator 1: the SDK success response's key set == the canonical
     enumeration (top-level + created/deduped + ids); granular adds results."""
     for granularity in ("bulk", "granular"):
-        res = sdk.ingest(_bundle(), granularity=granularity)
+        res = sdk._ingest(_bundle(), granularity=granularity)
         assert set(res.keys()) == TOP_LEVEL | (
             {"results"} if granularity == "granular" else set()), \
             f"{granularity}: {sorted(res.keys())}"
@@ -159,7 +159,7 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
         ],
     }
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bad, granularity="granular")
+        sdk._ingest(bad, granularity="granular")
     # MCP surface: structured {error, code: ERR_BUNDLE_INVALID, violations}
     import tortoise.mcp_server as mcp_mod  # noqa: I001
     from tortoise.mcp_auth import (_current_org_id, _current_org_limits,

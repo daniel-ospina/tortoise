@@ -360,16 +360,16 @@ def _simulate_replay_outcome(sdk, pid: str) -> None:
 class TestBaselineProvenance:
     def test_explicit_default_persists_explicit(self, sdk):
         """Default provenance token is set-by-author (#2199 rename of 'explicit')."""
-        p = sdk.create_point("statement", "explicit claim")
-        sdk.set_point_baseline(p["id"], 5.0, 1.0)
+        p = sdk._create_point("statement", "explicit claim")
+        sdk._set_point_baseline(p["id"], 5.0, 1.0)
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.baseline_source", params={"id": p["id"]}
         ).result_set
         assert row[0][0] == "set-by-author"
 
     def test_inherited_source_persists_inherited(self, sdk):
-        p = sdk.create_point("statement", "inherited claim")
-        sdk.set_point_baseline(p["id"], 5.0, 1.0, source="inherited-from-source")
+        p = sdk._create_point("statement", "inherited claim")
+        sdk._set_point_baseline(p["id"], 5.0, 1.0, source="inherited-from-source")
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.baseline_source", params={"id": p["id"]}
         ).result_set
@@ -378,7 +378,7 @@ class TestBaselineProvenance:
     def test_legacy_baseline_set_true_no_marker_never_clobbered(self, sdk):
         """Legacy NULL+true baselines are explicit — inheritance never overwrites."""
         url = "https://legacy.example"
-        p = sdk.create_point("statement", "legacy explicit", extractedFrom=url)
+        p = sdk._create_point("statement", "legacy explicit", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T0")
         # Simulate a legacy explicit baseline (pre-marker era)
         sdk._get_proj().g.query(
@@ -386,7 +386,7 @@ class TestBaselineProvenance:
             params={"id": p["id"]},
         )
         sdk._apply_source_inheritance(recency_decay=1.0)
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt["ep_alpha"] == 9.0  # untouched (explicit)
         assert pt["ep_beta"] == 1.0
 
@@ -413,7 +413,7 @@ class TestBaselineProvenance:
         """
         url = "https://legacy-token.example"
         sdk.register_source(url, "document", tier="T1", sourceDate=FRESH)
-        pid = sdk.create_point("statement", "legacy token row",
+        pid = sdk._create_point("statement", "legacy token row",
                                extractedFrom=url)["id"]
 
         def _recompute_with_token(token):
@@ -423,7 +423,7 @@ class TestBaselineProvenance:
                 params={"id": pid, "tok": token},
             )
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-            return sdk.get_point(pid)
+            return sdk._get_point(pid)
 
         for legacy_token in ("explicit", "inherited", "banana"):
             pt = _recompute_with_token(legacy_token)
@@ -438,49 +438,49 @@ class TestBaselineProvenance:
     def test_inherited_recomputes_when_source_ages(self, sdk):
         """Dynamic decay: aging the sourceDate lowers the inherited prior (interval=0)."""
         url = "https://aging.example"
-        p = sdk.create_point("statement", "aging claim", extractedFrom=url)
+        p = sdk._create_point("statement", "aging claim", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T1", ingested_at="2024-01-01T00:00:00+00:00")
         sdk._apply_source_inheritance(recency_decay=0.95, recompute_interval=0)
-        alpha1 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha1 = sdk._get_point(p["id"])["ep_alpha"]
         # Age the source by 10 years
         sdk._get_proj().g.query(
             "MATCH (s:Source {url:$url}) SET s.sourceDate = $ts",
             params={"url": url, "ts": "2014-01-01T00:00:00+00:00"},
         )
         sdk._apply_source_inheritance(recency_decay=0.95, recompute_interval=0)
-        alpha2 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha2 = sdk._get_point(p["id"])["ep_alpha"]
         assert alpha2 < alpha1  # decay increased
 
     def test_time_gate_skips_within_interval(self, sdk):
         """Two calls within the interval → no rewrite (no dirty churn)."""
         url = "https://gated.example"
-        p = sdk.create_point("statement", "gated claim", extractedFrom=url)
+        p = sdk._create_point("statement", "gated claim", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T1")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-        alpha1 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha1 = sdk._get_point(p["id"])["ep_alpha"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-        alpha2 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha2 = sdk._get_point(p["id"])["ep_alpha"]
         assert alpha2 == alpha1  # gated — no rewrite
 
     def test_new_point_inherits_immediately_within_interval(self, sdk):
         """A point created from a tiered source inherits NOW (no hour-long neutral window)."""
         url = "https://newpoint.example"
-        p1 = sdk.create_point("statement", "first", extractedFrom=url)  # materializes Source  # noqa: F841
+        p1 = sdk._create_point("statement", "first", extractedFrom=url)  # materializes Source  # noqa: F841
         _set_source_tier_raw(sdk, url, "T0")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
         # Second point created AFTER the first compute — must inherit immediately
-        p2 = sdk.create_point("statement", "second", extractedFrom=url)
+        p2 = sdk._create_point("statement", "second", extractedFrom=url)
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-        pt2 = sdk.get_point(p2["id"])
+        pt2 = sdk._get_point(p2["id"])
         assert pt2.get("ep_alpha") == 10.0  # T0, no decay
 
     def test_edge_deletion_dirty_marks_revert(self, sdk):
         """Deleting the last extractedFrom edge reverts to neutral within the interval."""
         url = "https://revert.example"
-        p = sdk.create_point("statement", "revert claim", extractedFrom=url)
+        p = sdk._create_point("statement", "revert claim", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T0")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-        assert sdk.get_point(p["id"]).get("ep_alpha") == 10.0
+        assert sdk._get_point(p["id"]).get("ep_alpha") == 10.0
         # Delete the edge
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$pid})-[e:extractedFrom]->(s:Source {url:$url}) DELETE e",
@@ -489,24 +489,24 @@ class TestBaselineProvenance:
         sdk._invalidate_inheritance_gate([p["id"]])
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
         # No eligible sources → inherited baseline removed, back to neutral
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt.get("ep_alpha") in (None, 1.0), f"expected neutral, got {pt.get('ep_alpha')}"
         assert pt.get("baseline_source") != "inherited-from-source"
 
     def test_two_sdk_instances_dedupe_within_interval(self, sdk):
         """Graph-persisted gate: a second SDK instance within the interval dedupes."""
         url = "https://multi.example"
-        p = sdk.create_point("statement", "multi-instance claim", extractedFrom=url)
+        p = sdk._create_point("statement", "multi-instance claim", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T1")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-        alpha1 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha1 = sdk._get_point(p["id"])["ep_alpha"]
 
         # Second SDK instance on the SAME db file
         db_path = sdk._db_path
         sdk2 = TortoiseSDK(db_path)
         try:
             sdk2._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
-            alpha2 = sdk2.get_point(p["id"])["ep_alpha"]
+            alpha2 = sdk2._get_point(p["id"])["ep_alpha"]
             assert alpha2 == alpha1
             # And the gate held — inherited_at present means no rewrite needed
             row = sdk2._get_proj().g.query(
@@ -520,12 +520,12 @@ class TestBaselineProvenance:
     def test_epsilon_guard_no_rewrite_on_unchanged(self, sdk):
         """interval=0 recompute of unchanged values → no ep_alpha rewrite churn."""
         url = "https://epsilon.example"
-        p = sdk.create_point("statement", "epsilon claim", extractedFrom=url)
+        p = sdk._create_point("statement", "epsilon claim", extractedFrom=url)
         _set_source_tier_raw(sdk, url, "T2")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        alpha1 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha1 = sdk._get_point(p["id"])["ep_alpha"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        alpha2 = sdk.get_point(p["id"])["ep_alpha"]
+        alpha2 = sdk._get_point(p["id"])["ep_alpha"]
         assert alpha2 == alpha1
 
     def test_baseline_system_default_cannot_be_forged_via_props(self, sdk):
@@ -541,14 +541,14 @@ class TestBaselineProvenance:
         attempted self-grant pass unnoticed.
         """
         with pytest.raises(ValueError, match="baseline_system_default"):
-            sdk.create_point("option", "forged default", status="draft",
+            sdk._create_point("option", "forged default", status="draft",
                              baseline_system_default=True)
         # A legitimately-created explicit-status part carries NO such marker.
-        p = sdk.create_point("option", "plain draft", status="draft")["id"]
-        assert sdk.get_point(p).get("baseline_system_default") is None
+        p = sdk._create_point("option", "plain draft", status="draft")["id"]
+        assert sdk._get_point(p).get("baseline_system_default") is None
         with pytest.raises(ValueError, match="baseline_system_default"):
-            sdk.update_point(p, baseline_system_default=True)
-        assert sdk.get_point(p).get("baseline_system_default") is None, (
+            sdk._update_point(p, baseline_system_default=True)
+        assert sdk._get_point(p).get("baseline_system_default") is None, (
             "a rejected update must not have written the marker")
 
     def test_credibility_is_not_a_generic_property(self, sdk):
@@ -563,15 +563,15 @@ class TestBaselineProvenance:
         ``update_entity`` — with a pointer at the documented input, and nothing
         is written.
         """
-        p = sdk.create_point("statement", "no word")["id"]
-        assert sdk.get_point(p).get("credibility") is None
+        p = sdk._create_point("statement", "no word")["id"]
+        assert sdk._get_point(p).get("credibility") is None
         with pytest.raises(ValueError, match="credibility"):
-            sdk.update_point(p, credibility="gold")
+            sdk._update_point(p, credibility="gold")
         with pytest.raises(ValueError, match="credibility"):
             sdk.update_knowledge(p, credibility="banana")
         with pytest.raises(ValueError, match="credibility"):
             sdk.create_entity("subject", "generic cred", credibility="gold")
-        assert sdk.get_point(p).get("credibility") is None, (
+        assert sdk._get_point(p).get("credibility") is None, (
             "a rejected generic write must not have stored the label")
 
     def test_baseline_fields_are_not_generic_properties(self, sdk):
@@ -594,16 +594,16 @@ class TestBaselineProvenance:
         FROZEN 10.0 a real T1 source could never move. The `create_point`
         cases below fail on the pre-fix code (they were accepted and stored).
         """
-        p = sdk.create_point("statement", "no generic baseline")["id"]
+        p = sdk._create_point("statement", "no generic baseline")["id"]
         for key, val in (("ep_alpha", 0.4), ("ep_beta", 1.0),
                          ("baseline_set", True),
                          ("baseline_source", "set-by-author")):
             with pytest.raises(ValueError, match=key):
-                sdk.update_point(p, **{key: val})
+                sdk._update_point(p, **{key: val})
             # #6151 round 6 P1: the SAME keys are refused at birth, where the
             # caller's value would beat `_baseline_create_fields`.
             with pytest.raises(ValueError, match=key):
-                sdk.create_point("statement", f"forged {key} birth", **{key: val})
+                sdk._create_point("statement", f"forged {key} birth", **{key: val})
         with pytest.raises(ValueError, match="baseline_source"):
             sdk.update_knowledge(p, baseline_source="system-default")
         with pytest.raises(ValueError, match="ep_alpha"):
@@ -611,12 +611,12 @@ class TestBaselineProvenance:
         # The whole quartet at once (the measured forgery) and the forged
         # #2199 provision token must both be refused before any write.
         with pytest.raises(ValueError, match="baseline_set"):
-            sdk.create_point(
+            sdk._create_point(
                 "statement", "forged strong birth", status="live",
                 ep_alpha=10.0, ep_beta=1.0, baseline_set=True,
                 baseline_source="set-by-author")
         with pytest.raises(ValueError, match="baseline_source"):
-            sdk.create_point(
+            sdk._create_point(
                 "statement", "forged sysdefault birth", status="live",
                 ep_alpha=3.0, ep_beta=1.0, baseline_set=True,
                 baseline_source="system-default")
@@ -624,10 +624,10 @@ class TestBaselineProvenance:
         # ruling's own symptom (`credibility='T0'` on a mean-0.9091 prior)
         # reappearing through a non-word key.
         with pytest.raises(ValueError, match="ep_alpha"):
-            sdk.create_point(
+            sdk._create_point(
                 "statement", "word and forged prior", status="live",
                 credibility="gold", ep_alpha=10.0, ep_beta=1.0)
-        pt = sdk.get_point(p)
+        pt = sdk._get_point(p)
         assert pt.get("baseline_set") in (None, False), (
             "a rejected generic write must not have stored a baseline")
         assert pt.get("ep_alpha") is None, pt
@@ -670,24 +670,24 @@ class TestBaselineProvenance:
         """
         sdk.register_source("https://p1b-t4.example", "document", tier="T4",
                           sourceDate=FRESH)
-        honest = sdk.create_point("statement", "honest p1b", status="live",
+        honest = sdk._create_point("statement", "honest p1b", status="live",
                                   extractedFrom="https://p1b-t4.example")["id"]
-        sdk.create_point("statement", "honest p1b", dedup=True,
+        sdk._create_point("statement", "honest p1b", dedup=True,
                          credibility="gold")
-        forged = sdk.create_point("statement", "forged p1b", status="live",
+        forged = sdk._create_point("statement", "forged p1b", status="live",
                                   extractedFrom="https://p1b-t4.example")["id"]
         # The forgery: claim the #2199 provision through the provenance token.
-        sdk.set_point_baseline(forged, 1.0, 1.0, source="system-default")
-        sdk.create_point("statement", "forged p1b", dedup=True,
+        sdk._set_point_baseline(forged, 1.0, 1.0, source="system-default")
+        sdk._create_point("statement", "forged p1b", dedup=True,
                          credibility="gold")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        h, f = sdk.get_point(honest), sdk.get_point(forged)
+        h, f = sdk._get_point(honest), sdk._get_point(forged)
         assert h["ep_alpha"] == pytest.approx(1.2), h  # T4 + the weak word
         assert f.get("baseline_system_default") is None, f
         assert f["ep_alpha"] == pytest.approx(1.0), f  # no unearned +2.0
         # The generic surface refuses the same provenance outright.
         with pytest.raises(ValueError, match="baseline_source"):
-            sdk.update_point(forged, baseline_source="system-default",
+            sdk._update_point(forged, baseline_source="system-default",
                              baseline_set=True, ep_alpha=1.0, ep_beta=1.0)
 
     def test_label_bearing_point_keeps_its_prior_when_sources_are_removed(
@@ -703,12 +703,12 @@ class TestBaselineProvenance:
         uncalibrated.
         """
         url = "https://p31.example"
-        p = sdk.create_point("statement", "worded, then orphaned",
+        p = sdk._create_point("statement", "worded, then orphaned",
                              status="live", credibility="gold",
                              extractedFrom=url)["id"]
         sdk.register_source(url, "document", tier="T1", sourceDate=FRESH)
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(5.1)  # T1 + word
+        assert sdk._get_point(p)["ep_alpha"] == pytest.approx(5.1)  # T1 + word
         # Delete the ONLY source edge — the revert pass would otherwise fire.
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$pid})-[e:extractedFrom]->(s:Source {url:$url}) "
@@ -717,7 +717,7 @@ class TestBaselineProvenance:
         )
         sdk._invalidate_inheritance_gate([p])
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pt = sdk.get_point(p)
+        pt = sdk._get_point(p)
         # NOT reverted to neutral: the authored assertion is still a source.
         assert pt["ep_alpha"] == pytest.approx(5.1), pt
         assert pt["credibility"] == "T0", pt
@@ -827,9 +827,9 @@ class TestAuthorAsSourceIntegration:
         """#398 owner ruling 2026-10-12: a person-typed `gold` with NO source
         starts at ONE weak body (0.523), not the 10:1 T0 prior (0.909); the
         word is kept as a LABEL on the Point."""
-        p = sdk.create_point("statement", "person typed gold", status="live",
+        p = sdk._create_point("statement", "person typed gold", status="live",
                              credibility="gold")["id"]
-        pt = sdk.get_point(p)
+        pt = sdk._get_point(p)
         assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
         assert pt["ep_beta"] == pytest.approx(1.0)
         assert pt["credibility"] == "T0"  # the declared word, kept as a label
@@ -837,10 +837,10 @@ class TestAuthorAsSourceIntegration:
 
     def test_originating_agent_session_is_weak(self, sdk):
         sdk.register_source("session:orig", "agentSession")
-        p = sdk.create_point("statement", "agent reasoned it",
+        p = sdk._create_point("statement", "agent reasoned it",
                              extractedFrom="session:orig")
         sdk._apply_source_inheritance(recency_decay=1.0)
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
         assert pt["ep_beta"] == 1.0
         assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # weakest rung
@@ -854,11 +854,11 @@ class TestAuthorAsSourceIntegration:
             "CREATE (a)-[:references]->(b)",
             params={"a": "session:carrier", "b": "https://doc.example"},
         )
-        p = sdk.create_point("statement", "carried document claim",
+        p = sdk._create_point("statement", "carried document claim",
                              extractedFrom="https://doc.example")
         sdk._get_proj()._link_source(p["id"], "session:carrier")
         sdk._apply_source_inheritance(recency_decay=1.0)
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         # T1 document only — the carrying session adds nothing
         assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T1"][0])
 
@@ -888,16 +888,16 @@ class TestAuthorAsSourceIntegration:
                 "CREATE (a)-[:references]->(b)",
                 params={"a": sess, "b": "https://explicitdoc.example"},
             )
-        p = sdk.create_point("statement", f"explicit baseline + {session_kind}",
+        p = sdk._create_point("statement", f"explicit baseline + {session_kind}",
                              status="live",
                              extractedFrom="https://explicitdoc.example")["id"]
         # The author's explicit belief — #844 says this is immutable evidence.
-        sdk.set_point_baseline(p, 0.4, 1.0, source="set-by-author")
+        sdk._set_point_baseline(p, 0.4, 1.0, source="set-by-author")
         sdk._get_proj()._link_source(p, sess)
-        before = sdk.get_point(p)
+        before = sdk._get_point(p)
         assert before["ep_alpha"] == pytest.approx(0.4), before
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["ep_alpha"] == pytest.approx(0.4), after
         assert after["ep_beta"] == pytest.approx(1.0), after
         assert after["baseline_source"] == "set-by-author", after
@@ -909,10 +909,10 @@ class TestAuthorAsSourceIntegration:
         frozen strength, and the real source displaces it."""
         sdk.register_source("https://pw.example", "document", tier="T1",
                           sourceDate=FRESH)
-        p = sdk.create_point("statement", "gold word + T1 source", status="live",
+        p = sdk._create_point("statement", "gold word + T1 source", status="live",
                              credibility="gold", extractedFrom="https://pw.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt["ep_alpha"] == pytest.approx(5.1)
         assert pt["baseline_source"] == "inherited-from-source"
 
@@ -944,9 +944,9 @@ class TestAuthorAsSourceIntegration:
         elif ordering == "stub-first":
             ref = "https://neutral-stub.example"
         else:
-            ref = sdk.create_document("Neutral doc", "brief")["id"]
+            ref = sdk._create_document("Neutral doc", "brief")["id"]
 
-        p = sdk.create_point("statement", "word over a neutral source",
+        p = sdk._create_point("statement", "word over a neutral source",
                              status="live", credibility="T3",
                              extractedFrom=ref)["id"]
         before = proj.g.query(
@@ -970,7 +970,7 @@ class TestAuthorAsSourceIntegration:
         assert row[0] == "set-by-author", row
         assert row[1] == pytest.approx(1.1), row
         assert row[2] is None, row  # not marked as a derived baseline
-        summary = next(i for i in sdk.calibrate_summary() if i["id"] == p)
+        summary = next(i for i in sdk._calibrate_summary() if i["id"] == p)
         assert summary["provenance"] == \
             BASELINE_SOURCE_DISPLAY["set-by-author"], summary
 
@@ -979,11 +979,11 @@ class TestAuthorAsSourceIntegration:
         (weak); the word is not a T0 source, so the prior collapses from 0.909
         to the weakest registered weight, exactly like a person's word."""
         sdk.register_source("session:agent-gold", "agentSession")
-        p = sdk.create_point("statement", "agent asserts gold", status="live",
+        p = sdk._create_point("statement", "agent asserts gold", status="live",
                              credibility="gold",
                              extractedFrom="session:agent-gold")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
         assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])
 
@@ -994,16 +994,16 @@ class TestAuthorAsSourceIntegration:
                           sourceDate=FRESH)
         sdk.register_source("https://nb.example", "document", tier="T1",
                           sourceDate=FRESH)
-        a = sdk.create_point("statement", "A", status="live",
+        a = sdk._create_point("statement", "A", status="live",
                              extractedFrom="https://na.example")["id"]
-        b = sdk.create_point("statement", "B", status="live",
+        b = sdk._create_point("statement", "B", status="live",
                              extractedFrom="https://nb.example")["id"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
-        sdk.create_operator("NAND", b, [a])
+        assert sdk._get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        sdk._create_operator("NAND", b, [a])
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
-        assert sdk.get_point(a)["ep_beta"] == pytest.approx(1.0)
+        assert sdk._get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        assert sdk._get_point(a)["ep_beta"] == pytest.approx(1.0)
 
     def test_equal_t1_pair_under_nand_settles_669_post_ep(self, sdk):
         """(a) POST-EP: the symmetric ``phi_nand`` makes BOTH sides pay, so an
@@ -1013,12 +1013,12 @@ class TestAuthorAsSourceIntegration:
                           sourceDate=FRESH)
         sdk.register_source("https://eb.example", "document", tier="T1",
                           sourceDate=FRESH)
-        a = sdk.create_point("statement", "A", status="live",
+        a = sdk._create_point("statement", "A", status="live",
                              extractedFrom="https://ea.example")["id"]
-        b = sdk.create_point("statement", "B", status="live",
+        b = sdk._create_point("statement", "B", status="live",
                              extractedFrom="https://eb.example")["id"]
-        sdk.create_operator("NAND", b, [a])
-        res = sdk.compute_confidence(anchors=[a, b], max_hops=2,
+        sdk._create_operator("NAND", b, [a])
+        res = sdk._compute_confidence(anchors=[a, b], max_hops=2,
                                      recency_decay=1.0,
                                      require_calibration=False)
         ca = res["confidences"][a]["mean"]
@@ -1031,15 +1031,15 @@ class TestAuthorAsSourceIntegration:
         defend (prior 0.5238), so a weak T4 refutation pushes it below 0.5.
         Identical to the person case — the weight no longer varies by author."""
         sdk.register_source("session:agent-b", "agentSession")
-        c = sdk.create_point("statement", "agent reasoned it", status="live",
+        c = sdk._create_point("statement", "agent reasoned it", status="live",
                              credibility="gold",
                              extractedFrom="session:agent-b")["id"]
         sdk.register_source("https://weak.example", "document", tier="T4",
                           sourceDate=FRESH)
-        w = sdk.create_point("statement", "weak refuter", status="live",
+        w = sdk._create_point("statement", "weak refuter", status="live",
                              extractedFrom="https://weak.example")["id"]
-        sdk.create_operator("NAND", w, [c])
-        res = sdk.compute_confidence(anchors=[c, w], max_hops=2,
+        sdk._create_operator("NAND", w, [c])
+        res = sdk._compute_confidence(anchors=[c, w], max_hops=2,
                                      recency_decay=1.0,
                                      require_calibration=False)
         assert res["confidences"][c]["mean"] < 0.5
@@ -1049,14 +1049,14 @@ class TestAuthorAsSourceIntegration:
         with NO source must land BELOW 0.5 when refuted by a weak T4 source.
         Before the ruling a person's word carried the T0 prior, so the same
         refutation only moved 0.9091 -> 0.8992."""
-        c = sdk.create_point("statement", "person typed gold", status="live",
+        c = sdk._create_point("statement", "person typed gold", status="live",
                              credibility="gold")["id"]
         sdk.register_source("https://weak.example", "document", tier="T4",
                           sourceDate=FRESH)
-        w = sdk.create_point("statement", "weak refuter", status="live",
+        w = sdk._create_point("statement", "weak refuter", status="live",
                              extractedFrom="https://weak.example")["id"]
-        sdk.create_operator("NAND", w, [c])
-        res = sdk.compute_confidence(anchors=[c, w], max_hops=2,
+        sdk._create_operator("NAND", w, [c])
+        res = sdk._compute_confidence(anchors=[c, w], max_hops=2,
                                      recency_decay=1.0,
                                      require_calibration=False)
         assert res["confidences"][c]["mean"] < 0.5
@@ -1070,16 +1070,16 @@ class TestAuthorAsSourceIntegration:
                           sourceDate=FRESH)
         sdk.register_source("https://chb.example", "document", tier="T1",
                           sourceDate=FRESH)
-        a = sdk.create_point("statement", "chain A", status="live",
+        a = sdk._create_point("statement", "chain A", status="live",
                              extractedFrom="https://cha.example")["id"]
-        b = sdk.create_point("statement", "chain B", status="live",
+        b = sdk._create_point("statement", "chain B", status="live",
                              extractedFrom="https://chb.example")["id"]
-        sdk.create_operator("NAND", b, [a])
+        sdk._create_operator("NAND", b, [a])
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
         # the contradiction is NOT in the prior
-        assert sdk.get_point(a)["ep_alpha"] == pytest.approx(5.0)
-        assert sdk.get_point(b)["ep_alpha"] == pytest.approx(5.0)
-        res = sdk.compute_confidence(anchors=[a, b], max_hops=2,
+        assert sdk._get_point(a)["ep_alpha"] == pytest.approx(5.0)
+        assert sdk._get_point(b)["ep_alpha"] == pytest.approx(5.0)
+        res = sdk._compute_confidence(anchors=[a, b], max_hops=2,
                                      recency_decay=1.0,
                                      require_calibration=False)
         assert res["confidences"][a]["mean"] == pytest.approx(0.6689, abs=0.005)
@@ -1101,16 +1101,16 @@ class TestAuthorAsSourceIntegration:
         """
         sdk.register_source("https://d2t4.example", "document", tier="T4",
                           sourceDate=FRESH)
-        word = sdk.create_point("option", "draft word", status="draft",
+        word = sdk._create_point("option", "draft word", status="draft",
                                 credibility="gold",
                                 extractedFrom="https://d2t4.example")["id"]
-        plain = sdk.create_point("option", "draft no word", status="draft",
+        plain = sdk._create_point("option", "draft no word", status="draft",
                                  extractedFrom="https://d2t4.example")["id"]
-        live_word = sdk.create_point("option", "live word",
+        live_word = sdk._create_point("option", "live word",
                                      credibility="gold",
                                      extractedFrom="https://d2t4.example")["id"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        w, p, lw = (sdk.get_point(i) for i in (word, plain, live_word))
+        w, p, lw = (sdk._get_point(i) for i in (word, plain, live_word))
         # The explicit-status part recorded NO provision, so the recompute must
         # not invent one: the word is its own 0.1 weak body, over the T4 0.1.
         assert w.get("baseline_system_default") is None, w
@@ -1139,15 +1139,15 @@ class TestAuthorAsSourceIntegration:
             "CREATE (a)-[:references]->(b)",
             params={"a": "session:carrier", "b": "https://carrydoc.example"},
         )
-        person = sdk.create_point("statement", "person word + T1",
+        person = sdk._create_point("statement", "person word + T1",
                                   status="live", credibility="gold",
                                   extractedFrom="https://carrydoc.example")["id"]
-        agent = sdk.create_point("statement", "agent word + carried T1",
+        agent = sdk._create_point("statement", "agent word + carried T1",
                                  status="live", credibility="gold",
                                  extractedFrom="https://carrydoc.example")["id"]
         sdk._get_proj()._link_source(agent, "session:carrier")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pv, av = sdk.get_point(person), sdk.get_point(agent)
+        pv, av = sdk._get_point(person), sdk._get_point(agent)
         assert pv["ep_alpha"] == pytest.approx(5.1), pv  # word + T1
         assert av["ep_alpha"] == pytest.approx(5.1), av
         assert av["ep_alpha"] == pytest.approx(pv["ep_alpha"]), (
@@ -1163,12 +1163,12 @@ class TestAuthorAsSourceIntegration:
         recorded #2199 marker are persisted, and the T1 source raises it to
         1 + default(2.0) + word(0.1) + T1(4.0) = 7.1.
         """
-        a = sdk.create_point("statement", "mit input", status="live")["id"]
-        b = sdk.create_point("statement", "mit output", status="live")["id"]
-        op = sdk.create_operator("IMPL", a, [b])["id"]
-        mid = sdk.mitigate_operator(op, "reduces impact", strength=0.3,
+        a = sdk._create_point("statement", "mit input", status="live")["id"]
+        b = sdk._create_point("statement", "mit output", status="live")["id"]
+        op = sdk._create_operator("IMPL", a, [b])["id"]
+        mid = sdk._mitigate_operator(op, "reduces impact", strength=0.3,
                                     credibility="low")["id"]
-        before = sdk.get_point(mid)
+        before = sdk._get_point(mid)
         assert before["ep_alpha"] == pytest.approx(
             3.0 + AUTHOR_ASSERTION_WEAK_PC), before
         assert before["credibility"] == "T3", before  # 'low' ⇒ T3, as a label
@@ -1179,7 +1179,7 @@ class TestAuthorAsSourceIntegration:
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(mid, "https://mit-t1.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(mid)
+        after = sdk._get_point(mid)
         assert after["ep_alpha"] == pytest.approx(7.1), after
         assert after["ep_alpha"] > before["ep_alpha"], (
             "a real source must displace the mitigation's weak authored body")
@@ -1188,15 +1188,15 @@ class TestAuthorAsSourceIntegration:
         """#6151 review P2 — the idempotent (re-mitigation) path persists the
         same label + marker the create path does, so a re-mitigated word is
         also displaceable by a real source."""
-        a = sdk.create_point("statement", "mit2 input", status="live")["id"]
-        b = sdk.create_point("statement", "mit2 output", status="live")["id"]
-        op = sdk.create_operator("IMPL", a, [b])["id"]
-        first = sdk.mitigate_operator(op, "first", strength=0.3)  # no word
-        second = sdk.mitigate_operator(op, "second", strength=0.4,
+        a = sdk._create_point("statement", "mit2 input", status="live")["id"]
+        b = sdk._create_point("statement", "mit2 output", status="live")["id"]
+        op = sdk._create_operator("IMPL", a, [b])["id"]
+        first = sdk._mitigate_operator(op, "first", strength=0.3)  # no word
+        second = sdk._mitigate_operator(op, "second", strength=0.4,
                                        credibility="high")
         assert second["id"] == first["id"], "still the idempotent path"
         mid = second["id"]
-        pt = sdk.get_point(mid)
+        pt = sdk._get_point(mid)
         assert pt["credibility"] == "T1", pt
         assert pt["baseline_system_default"] is True, pt
         assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC), pt
@@ -1204,7 +1204,7 @@ class TestAuthorAsSourceIntegration:
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(mid, "https://mit2-t1.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(mid)
+        after = sdk._get_point(mid)
         assert after["ep_alpha"] == pytest.approx(7.1), after
 
     def test_carrying_a_neutral_source_is_not_originating(self, sdk):
@@ -1231,11 +1231,11 @@ class TestAuthorAsSourceIntegration:
             params={"a": "session:neutral-carrier",
                     "b": "https://neutral-carried.example"},
         )
-        p = sdk.create_point("statement", "wordless carried neutral",
+        p = sdk._create_point("statement", "wordless carried neutral",
                              extractedFrom="https://neutral-carried.example")["id"]
         sdk._get_proj()._link_source(p, "session:neutral-carrier")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pt = sdk.get_point(p)
+        pt = sdk._get_point(p)
         # Carrying contributes NOTHING: the point is never recomputed and
         # stays neutral. A misread ORIGINATING session would write 1.1.
         assert pt.get("ep_alpha") in (None, 1.0), pt
@@ -1253,19 +1253,19 @@ class TestAuthorAsSourceIntegration:
         """
         sdk.register_source("https://p2-t1.example", "document", tier="T1",
                           sourceDate=FRESH)
-        p = sdk.create_point("statement", "inherited then word",
+        p = sdk._create_point("statement", "inherited then word",
                              status="live",
                              extractedFrom="https://p2-t1.example")["id"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(5.0)
-        dup = sdk.create_point("statement", "inherited then word",
+        assert sdk._get_point(p)["ep_alpha"] == pytest.approx(5.0)
+        dup = sdk._create_point("statement", "inherited then word",
                                dedup=True, credibility="gold")["id"]
         assert dup == p
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["credibility"] == "T0", after  # the label IS written
         assert after["ep_alpha"] == pytest.approx(5.1), after  # + weak body
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        recomputed = sdk.get_point(p)
+        recomputed = sdk._get_point(p)
         assert recomputed["ep_alpha"] == pytest.approx(5.1), recomputed
         assert recomputed["credibility"] == "T0", recomputed
 
@@ -1280,10 +1280,10 @@ class TestAuthorAsSourceIntegration:
         now routes ``agentSession`` to the carrier rule BEFORE tier resolution.
         """
         sdk.register_source("session:tiered-p33", "agentSession", tier="T0")
-        p = sdk.create_point("statement", "tiered session", status="live",
+        p = sdk._create_point("statement", "tiered session", status="live",
                              extractedFrom="session:tiered-p33")["id"]
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        pt = sdk.get_point(p)
+        pt = sdk._get_point(p)
         assert pt["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
         assert pt["ep_alpha"] == pytest.approx(1.0 + weak_support_pc(1))
 
@@ -1298,12 +1298,12 @@ class TestAuthorAsSourceIntegration:
             "CREATE (a)-[:references]->(b)",
             params={"a": "session:p33-carrier", "b": "https://p33-doc.example"},
         )
-        p = sdk.create_point("statement", "tiered carrier", status="live",
+        p = sdk._create_point("statement", "tiered carrier", status="live",
                              extractedFrom="https://p33-doc.example")["id"]
         sdk._get_proj()._link_source(p, "session:p33-carrier")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
         # T1 document only — the tiered carrying session adds nothing.
-        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(TIER_PRIORS["T1"][0])
+        assert sdk._get_point(p)["ep_alpha"] == pytest.approx(TIER_PRIORS["T1"][0])
 
 
 class TestExplicitBaselineSupersedesTheWord:
@@ -1330,20 +1330,20 @@ class TestExplicitBaselineSupersedesTheWord:
             sdk.register_source("session:p1-origin", "agentSession")
             attached = "session:p1-origin"
         # Born with an authored word: label + one weak body.
-        p = sdk.create_point("statement", f"word then explicit ({carrier})",
+        p = sdk._create_point("statement", f"word then explicit ({carrier})",
                              status="live", credibility="gold",
                              extractedFrom=attached)["id"]
-        assert sdk.get_point(p)["credibility"] == "T0"
+        assert sdk._get_point(p)["credibility"] == "T0"
         # The author's explicit belief — supersedes the word.
-        sdk.set_point_baseline(p, 0.4, 1.0, source="set-by-author")
-        after_write = sdk.get_point(p)
+        sdk._set_point_baseline(p, 0.4, 1.0, source="set-by-author")
+        after_write = sdk._get_point(p)
         assert after_write["ep_alpha"] == pytest.approx(0.4), after_write
         assert after_write["baseline_source"] == "set-by-author", after_write
         assert after_write.get("credibility") is None, after_write
         # Any attached evidence (real source or originating session) must not
         # re-open the explicit baseline.
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["ep_alpha"] == pytest.approx(0.4), after
         assert after["ep_beta"] == pytest.approx(1.0), after
         assert after["baseline_source"] == "set-by-author", after
@@ -1356,17 +1356,17 @@ class TestExplicitBaselineSupersedesTheWord:
         """
         sdk.register_source("https://wordpath.example", "document", tier="T1",
                           sourceDate=FRESH)
-        p = sdk.create_point("statement", "word keeps its body",
+        p = sdk._create_point("statement", "word keeps its body",
                              status="live", credibility="gold",
                              extractedFrom="https://wordpath.example")["id"]
-        born = sdk.get_point(p)
+        born = sdk._get_point(p)
         assert born["ep_alpha"] == pytest.approx(TIER_PRIORS["T4"][0])  # 1.1
         assert born["credibility"] == "T0"
         assert born["baseline_source"] == "set-by-author"
         assert mean_from_beta(born["ep_alpha"], born["ep_beta"]) == \
             pytest.approx(0.5238, abs=1e-4)
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["ep_alpha"] == pytest.approx(5.1), after
         assert mean_from_beta(after["ep_alpha"], after["ep_beta"]) == \
             pytest.approx(0.8361, abs=1e-4)
@@ -1383,24 +1383,24 @@ class TestExplicitBaselineSupersedesTheWord:
         fix the marker is cleared in the same statement, the dedup word is
         refused by the #844 explicit-baseline rule, and 0.4 survives.
         """
-        p = sdk.create_point("option", "p1a decide word",
+        p = sdk._create_point("option", "p1a decide word",
                              credibility="gold")["id"]
-        assert sdk.get_point(p)["baseline_system_default"] is True
-        sdk.set_point_baseline(p, 0.4, 1.0)
-        after_write = sdk.get_point(p)
+        assert sdk._get_point(p)["baseline_system_default"] is True
+        sdk._set_point_baseline(p, 0.4, 1.0)
+        after_write = sdk._get_point(p)
         assert after_write["ep_alpha"] == pytest.approx(0.4), after_write
         assert after_write.get("credibility") is None, after_write
         assert after_write.get("baseline_system_default") is None, after_write
         # The word-bearing recompute: a dedup hit with a word, then a real T1
         # source. Before the fix this re-injected the default (7.1).
-        dup = sdk.create_point("option", "p1a decide word", dedup=True,
+        dup = sdk._create_point("option", "p1a decide word", dedup=True,
                                credibility="low")["id"]
         assert dup == p
         sdk.register_source("https://p1a.example", "document", tier="T1",
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(p, "https://p1a.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["ep_alpha"] == pytest.approx(0.4), after
         assert after.get("baseline_system_default") is None, after
         assert after.get("credibility") is None, after
@@ -1422,36 +1422,36 @@ class TestWordPointRebaselinedAfterRebuild:
     """
 
     def test_same_word_retry_rebaselines_a_rebuilt_point(self, sdk):
-        p = sdk.create_point("statement", "rebuilt word point",
+        p = sdk._create_point("statement", "rebuilt word point",
                              status="live", credibility="gold")["id"]
-        assert sdk.get_point(p)["ep_alpha"] == pytest.approx(1.1)
+        assert sdk._get_point(p)["ep_alpha"] == pytest.approx(1.1)
         _simulate_replay_outcome(sdk, p)
-        rebuilt = sdk.get_point(p)
+        rebuilt = sdk._get_point(p)
         assert rebuilt.get("credibility") == "T0"   # declared — replays
         assert rebuilt.get("baseline_set") is None   # denied — does not
         with pytest.raises(CalibrationError):
-            sdk.compute_confidence(require_calibration=True)
+            sdk._compute_confidence(require_calibration=True)
         # The retry with the SAME word heals the point (pre-fix: a no-op).
-        dup = sdk.create_point("statement", "rebuilt word point", dedup=True,
+        dup = sdk._create_point("statement", "rebuilt word point", dedup=True,
                                credibility="gold")["id"]
         assert dup == p
-        healed = sdk.get_point(p)
+        healed = sdk._get_point(p)
         assert healed["ep_alpha"] == pytest.approx(1.1), healed
         assert healed["baseline_set"] is True, healed
         assert healed["baseline_source"] == "set-by-author", healed
         assert healed["credibility"] == "T0", healed
-        summary = sdk.calibrate_summary()
+        summary = sdk._calibrate_summary()
         assert next(i for i in summary if i["id"] == p)["calibrated"] is True
-        sdk.compute_confidence(require_calibration=True)  # no longer raises
+        sdk._compute_confidence(require_calibration=True)  # no longer raises
 
     def test_same_word_retry_keeps_the_2199_provision_of_a_rebuilt_part(self, sdk):
-        p = sdk.create_point("option", "rebuilt decide word",
+        p = sdk._create_point("option", "rebuilt decide word",
                              credibility="gold")["id"]
-        born = sdk.get_point(p)
+        born = sdk._get_point(p)
         assert born["ep_alpha"] == pytest.approx(3.1), born
         assert born["baseline_system_default"] is True, born
         _simulate_replay_outcome(sdk, p)
-        rebuilt = sdk.get_point(p)
+        rebuilt = sdk._get_point(p)
         assert rebuilt.get("baseline_set") is None, rebuilt
         # The marker is a BIRTH fact in the original PointAdded snapshot, so it
         # replays even though the baseline does not. `set_point_baseline` on
@@ -1459,10 +1459,10 @@ class TestWordPointRebaselinedAfterRebuild:
         # without `_record_default` the recorded #2199 provision is LOST and a
         # later recompute can never re-inject the +2.0.
         assert rebuilt.get("baseline_system_default") is True, rebuilt
-        dup = sdk.create_point("option", "rebuilt decide word", dedup=True,
+        dup = sdk._create_point("option", "rebuilt decide word", dedup=True,
                                credibility="gold")["id"]
         assert dup == p
-        healed = sdk.get_point(p)
+        healed = sdk._get_point(p)
         assert healed["ep_alpha"] == pytest.approx(1.1), healed  # weak body
         assert healed["baseline_system_default"] is True, healed
         assert healed["credibility"] == "T0", healed
@@ -1472,7 +1472,7 @@ class TestWordPointRebaselinedAfterRebuild:
                           sourceDate=FRESH)
         sdk._get_proj()._link_source(p, "https://rebuilt.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(p)
+        after = sdk._get_point(p)
         assert after["baseline_system_default"] is True, after
         assert after["ep_alpha"] > 3.0, after  # provision + weak body + source
 
@@ -1484,13 +1484,13 @@ class TestNestedWordNeverLeaksIntoTheDedupUpdate:
         Otherwise the dedup path forwards the residual key to `update_point`,
         which HARD-REJECTS `credibility` from a generic bag.
         """
-        p = sdk.create_point("statement", "both word forms")["id"]
-        dup = sdk.create_point("statement", "both word forms", dedup=True,
+        p = sdk._create_point("statement", "both word forms")["id"]
+        dup = sdk._create_point("statement", "both word forms", dedup=True,
                                credibility="gold",
                                props={"credibility": "low"})
         assert dup["id"] == p
         # The explicit kwarg wins over the nested bag (as documented).
-        assert sdk.get_point(p)["credibility"] == "T0"
+        assert sdk._get_point(p)["credibility"] == "T0"
 
 
 class TestLowFactorFloodBound:

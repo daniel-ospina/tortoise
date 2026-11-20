@@ -68,7 +68,7 @@ def _prose_on_nodes(sdk) -> list:
 def test_an_unpaired_narrative_is_refused_rather_than_stored_nowhere(sdk, tmp_path):
     """The measured hole: accepted, dropped by the fold, in no store (#10399 residual)."""
     with pytest.raises(ValueError) as exc:
-        sdk.create_event("probe-unpaired", "AgentSession", story_arc=PROSE)
+        sdk._create_event("probe-unpaired", "AgentSession", story_arc=PROSE)
     message = str(exc.value)
     assert "story_arc" in message
     assert "sessionId" in message, (
@@ -93,7 +93,7 @@ def test_the_update_door_refuses_it_too(sdk):
     pre-fix), so `pytest.raises(ValueError)` on an `:Event` would pin nothing
     about this change. `:Object` is the label that used to ACCEPT the write.
     """
-    obj = sdk.create_object("probe-update-door")
+    obj = sdk._create_object("probe-update-door")
     object_id = obj.get("id") or obj.get("objectId")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(object_id, story_arc=PROSE, sessionId=SESSION)
@@ -107,7 +107,7 @@ def test_a_label_whose_fold_does_not_refuse_the_key_is_refused(sdk):
     """`:Object`/`:Subject` carry `story_arc` through #228 — a paired write there
     duplicates the prose into the graph (measured at #10389's head)."""
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("probe-object", story_arc=PROSE, sessionId=SESSION)
+        sdk._create_object("probe-object", story_arc=PROSE, sessionId=SESSION)
     message = str(exc.value)
     assert "cannot be written on a Object" in message
     assert "Object fold does not refuse the key" in message
@@ -119,7 +119,7 @@ def test_a_non_string_narrative_is_refused(sdk, bad):
     """A non-string lands in NO store: the fold drops the key and the record
     projects only a non-empty `str` (measured, review cycle 2 P2)."""
     with pytest.raises(ValueError) as exc:
-        sdk.create_event("probe-nonstring", "AgentSession",
+        sdk._create_event("probe-nonstring", "AgentSession",
                          story_arc=bad, sessionId=SESSION)
     assert "must be the narrative TEXT" in str(exc.value)
     assert _prose_on_nodes(sdk) == []
@@ -132,7 +132,7 @@ def test_an_empty_journal_path_is_not_an_armed_journal(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     empty = TortoiseSDK(str(tmp_path / "graph-emptyjournal.db"), event_log_path="")
     with pytest.raises(ValueError) as exc:
-        empty.create_event("probe-empty-journal", "AgentSession",
+        empty._create_event("probe-empty-journal", "AgentSession",
                            story_arc=PROSE, sessionId=SESSION)
     assert "no record to be filed in" in str(exc.value)
     assert _prose_on_nodes(empty) == []
@@ -145,13 +145,13 @@ def test_the_point_doors_refuse_the_narrative(sdk, door):
     (measured, review cycle 3), so a fold-only deny would make live ≠ replay."""
     if door == "create_point":
         with pytest.raises(ValueError) as exc:
-            sdk.create_point("statement", "a claim", story_arc=PROSE)
+            sdk._create_point("statement", "a claim", story_arc=PROSE)
         assert "cannot be written on a Point" in str(exc.value)
     else:
-        point = sdk.create_point("statement", "a claim for the update door")
+        point = sdk._create_point("statement", "a claim for the update door")
         pid = point.get("id") or point.get("pointId")
         with pytest.raises(ValueError) as exc:
-            sdk.update_point(pid, story_arc=PROSE, sessionId=SESSION)
+            sdk._update_point(pid, story_arc=PROSE, sessionId=SESSION)
         assert "cannot be written on a Point" in str(exc.value)
     assert _prose_on_nodes(sdk) == []
 
@@ -162,7 +162,7 @@ def test_a_paired_narrative_with_no_journal_is_refused(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     journal_less = TortoiseSDK(str(tmp_path / "graph-nojournal.db"))
     with pytest.raises(ValueError) as exc:
-        journal_less.create_event("probe-no-journal", "AgentSession",
+        journal_less._create_event("probe-no-journal", "AgentSession",
                                   story_arc=PROSE, sessionId=SESSION)
     assert "no record to be filed in" in str(exc.value)
     assert _prose_on_nodes(journal_less) == []
@@ -170,7 +170,7 @@ def test_a_paired_narrative_with_no_journal_is_refused(tmp_path, monkeypatch):
 
 def test_a_paired_narrative_is_journalled_and_files_its_record_row(sdk, tmp_path):
     """§9.1 end to end, DB-free: prose OFF the graph, ON a record the home can key."""
-    sdk.create_event("probe-paired", "AgentSession",
+    sdk._create_event("probe-paired", "AgentSession",
                      story_arc=PROSE, sessionId=SESSION)
     # (b) nothing duplicated back into the graph
     assert _prose_on_nodes(sdk) == []
@@ -213,7 +213,7 @@ def test_the_other_two_refusing_labels_accept_a_paired_narrative(sdk, door, labe
         created = sdk.register_source(f"https://example.test/{SESSION}",
                                     "webpage", story_arc=PROSE, sessionId=SESSION)
     else:
-        created = sdk.create_document(f"probe-{SESSION}", documentKind="transcript",
+        created = sdk._create_document(f"probe-{SESSION}", documentKind="transcript",
                                       story_arc=PROSE, sessionId=SESSION)
     assert created, f"the {label} door refused a paired narrative"
     assert _prose_on_nodes(sdk) == [], (

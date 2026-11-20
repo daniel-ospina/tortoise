@@ -558,9 +558,9 @@ def naive_setup(sdk, scenario: Scenario, *,
         props = {k: v for k, v in p.items() if k not in ("id", "kind", "content")}
         props["id"] = p["id"]
         props["dedup"] = True
-        sdk.create_point(p["kind"], p["content"], **props)
+        sdk._create_point(p["kind"], p["content"], **props)
     for op in graph.operators:
-        sdk.create_operator(
+        sdk._create_operator(
             op["op_type"], op["source_id"],
             [i["id"] for i in op["inputs"][1:]],
             label=op.get("label"), direction=None)
@@ -585,7 +585,7 @@ def _sdk_get_point(sdk, point_id: str) -> dict | None:
     """Best-effort point fetch over the SDK (the ingest-lane warm guard's
     read surface). Missing/raises ⇒ None (absent)."""
     try:
-        pt = sdk.get_point(point_id)
+        pt = sdk._get_point(point_id)
     except Exception:  # noqa: BLE001, RUF100
         return None
     if not isinstance(pt, dict) or not pt.get("id"):
@@ -603,7 +603,7 @@ def _sdk_marker_present(sdk, scenario: Scenario) -> bool:
     # rows survive that cut, and this guard would then report "stale PRE-FIX
     # graph" for a graph that is not stale. Opt out: nothing here asserts
     # anything about rerank quality.
-    rows = sdk.tortoise_fts_query("battery:seed_manifest", limit=20,
+    rows = sdk._tortoise_fts_query("battery:seed_manifest", limit=20,
                                   _rerank_candidates=False) or []
     return any(str(r.get("content") or "") == want for r in rows)
 
@@ -685,7 +685,7 @@ def seed_scenario_via_ingest(sdk, scenario: Scenario, *,
     bundle = {"points": points}
     if connections:
         bundle["connections"] = connections
-    resp = sdk.ingest(bundle, granularity="bulk",
+    resp = sdk._ingest(bundle, granularity="bulk",
                       promotion_policy="gated")
     batch_id = resp.get("batch_id")
     ids = resp.get("ids", {}) or {}
@@ -697,7 +697,7 @@ def seed_scenario_via_ingest(sdk, scenario: Scenario, *,
         if pt is not None and str(pt.get("content") or "") == marker_content:
             continue  # the seeder-owned marker stays as written (never promoted)
         try:
-            pr = sdk.promote_point(pid)
+            pr = sdk._promote_point(pid)
         except Exception:  # noqa: BLE001, RUF100
             continue  # operator/terminal rows are blocked — ride the source
         if isinstance(pr, dict) and pr.get("promoted"):

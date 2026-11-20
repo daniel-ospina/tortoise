@@ -214,7 +214,7 @@ def test_the_epoch_still_advances_and_a_create_still_lands(sdk_with_journal):
     assert sdk._advance_ep_version() == 1
     assert sdk._advance_ep_version() == 2
 
-    point = sdk.create_point("fact", "the epoch advances per create")
+    point = sdk._create_point("fact", "the epoch advances per create")
     rows = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN count(p)",
         params={"id": point["id"]}).result_set
@@ -264,7 +264,7 @@ def test_a_create_path_is_not_refused_for_its_epoch_write(sdk_with_journal,
 
     monkeypatch.setattr(_GuardedGraph, "query", query)
 
-    point = sdk.create_point("fact", "a create with the epoch guard armed")
+    point = sdk._create_point("fact", "a create with the epoch guard armed")
     assert refused == [], (
         "the epoch write did not declare itself, so arming #9079's guard "
         "would refuse every create path: " + " | ".join(c[:120] for c in refused))
@@ -319,7 +319,7 @@ def test_the_epoch_is_not_journaled(sdk_with_journal):
     """
     sdk, journal = sdk_with_journal
     sdk._advance_ep_version()
-    sdk.create_point("fact", "a point whose create advances the epoch")
+    sdk._create_point("fact", "a point whose create advances the epoch")
     epoch = sdk._ep_epoch()
 
     text = _journal_text(journal)
@@ -376,7 +376,7 @@ def test_a_rebuild_does_not_restore_the_epoch(sdk_with_journal):
     """
     sdk, journal = sdk_with_journal
     proj = sdk._get_proj()
-    point = sdk.create_point("fact", "a point that survives the rebuild")
+    point = sdk._create_point("fact", "a point that survives the rebuild")
     assert _epoch(proj) == 1
 
     proj.rebuild_all(str(journal.parent), confirm_destructive=True)

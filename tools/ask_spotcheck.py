@@ -852,7 +852,7 @@ def _seed_distilled_claim(sdk: TortoiseSDK, claim: dict) -> str:
     claims, and a draft would make the gate measure a shape the product never
     shows a reader.
     """
-    out = sdk.create_point(
+    out = sdk._create_point(
         "statement", claim["text"], is_episodic=False, dedup=True,
         session_id=claim["session_id"],
         validFrom=claim["valid_from"],
@@ -887,7 +887,7 @@ def seed_distilled_corpus(sdk: TortoiseSDK, case: dict) -> dict[str, str]:
     """
     old_id = _seed_distilled_claim(sdk, case["old_claim"])
     new_id = _seed_distilled_claim(sdk, case["new_claim"])
-    sdk.supersede_point(old_id, new_id)
+    sdk._supersede_point(old_id, new_id)
     return {"old": old_id, "new": new_id}
 
 

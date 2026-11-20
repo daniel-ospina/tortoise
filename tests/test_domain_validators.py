@@ -323,28 +323,28 @@ def _seed_chain_violations(sdk: TortoiseSDK) -> dict:
     """
     ids = {}
     # Live orphan useCase (fires orphan_use_case)
-    ids["orphan_uc"] = sdk.create_point(
+    ids["orphan_uc"] = sdk._create_point(
         "product-strategy:useCase", "orphan uc", uc_id="UC-ORPH-405",
         status="live")
     # Draft orphan useCase (must be EXCLUDED from orphan_use_case — draft rule)
     # Draft is EXPLICIT now: since #1088 a no-status create_point is LIVE, so
     # the fixture states the status it means.
-    ids["draft_uc"] = sdk.create_point(
+    ids["draft_uc"] = sdk._create_point(
         "product-strategy:useCase", "draft orphan uc", uc_id="UC-DRAFT-405",
         status="draft")
     # Properly parented chain (clean control)
-    ids["jtbd"] = sdk.create_point(
+    ids["jtbd"] = sdk._create_point(
         "product-strategy:jobToBeDone", "JTBD", jtbd_id="JTBD-405",
         status="live")
-    ids["wired_uc"] = sdk.create_point(
+    ids["wired_uc"] = sdk._create_point(
         "product-strategy:useCase", "wired uc", uc_id="UC-WIRED-405",
         status="live")
-    sdk.create_operator("composedOf", ids["jtbd"]["id"], [ids["wired_uc"]["id"]])
+    sdk._create_operator("composedOf", ids["jtbd"]["id"], [ids["wired_uc"]["id"]])
     # Dangling refs (live)
-    ids["uj"] = sdk.create_point(
+    ids["uj"] = sdk._create_point(
         "product-strategy:userJourney", "uj dangling",
         covered_use_cases="UC-MISSING-405", status="live")
-    ids["wf"] = sdk.create_point(
+    ids["wf"] = sdk._create_point(
         "workflow", "wf dangling", enables_jtbd="JTBD-MISSING-405",
         status="live")
     # #7848: `requirement` is now an Object kind, but stored graphs still hold
@@ -353,7 +353,7 @@ def _seed_chain_violations(sdk: TortoiseSDK) -> dict:
     # registry keeps `dev:requirement` as a read alias in
     # `expand_kind('requirement')` (LEGACY_KIND_ALIASES). The Object shape is
     # covered by test_object_requirement_fires_dangling_workflow_ref below.
-    ids["req"] = sdk.create_point(
+    ids["req"] = sdk._create_point(
         "dev:requirement", "req dangling", enabled_workflow="WF-MISSING-405",
         status="live")
     return ids
@@ -523,7 +523,7 @@ class TestGraphValidators:
         must not drop the legacy `dev:requirement` Points `migrate_kinds` wrote.
         `expand_kind('requirement')` carries the old spelling as a read alias
         (LEGACY_KIND_ALIASES), so the rule still sees them."""
-        graph_sdk.create_point(
+        graph_sdk._create_point(
             "dev:requirement", "legacy-shaped requirement",
             enabled_workflow="WF-MISSING-405", status="live")
         res = graph_sdk.graph_overview("validate_domain", domain="product-strategy")
@@ -555,9 +555,9 @@ class TestGraphValidators:
         whose ``enabled_workflow`` names an existing workflow is clean, whether
         the workflow is stored as a Point (legacy) or an Object (the core
         ``workflow`` kind), and the requirement itself is Point or Object."""
-        graph_sdk.create_point(
+        graph_sdk._create_point(
             "workflow", "a real workflow", wf_id="WF-OK-405", status="live")
-        graph_sdk.create_point(
+        graph_sdk._create_point(
             "dev:requirement", "wired point requirement",
             enabled_workflow="WF-OK-405", status="live")
         graph_sdk.create_entity(
@@ -596,7 +596,7 @@ class TestGraphValidators:
         on a live-points fixture (output contract + messages preserved)."""
         _seed_chain_violations(graph_sdk)
         proj = graph_sdk._get_proj()
-        new = graph_sdk.check_structure()
+        new = graph_sdk._check_structure()
         legacy = _legacy_check_structure(proj)
         # Draft-exclusion divergence: the draft orphan is orphaned_draft-only
         # in the NEW output; legacy double-flags it as orphan_use_case.

@@ -23,7 +23,7 @@ def show(tag, r):
 sdk = TortoiseSDK()
 
 # 1. The scope limitation: the Aug audit covered hardware only, never firmware.
-scope = sdk.create_point(
+scope = sdk._create_point(
     "statement",
     "The safety audit Solstice Robotics passed on 2026-08-28 was scoped to hardware only; "
     "it did not cover the firmware.",
@@ -37,7 +37,7 @@ scope = sdk.create_point(
 show("scope point", scope)
 
 # 2. The outstanding second audit, covering firmware, still open.
-fw_audit = sdk.create_point(
+fw_audit = sdk._create_point(
     "statement",
     "A second safety audit covering Solstice Robotics' firmware was still open as of 2026-10-06; "
     "it has not concluded.",
@@ -52,7 +52,7 @@ fw_audit = sdk.create_point(
 show("firmware audit point", fw_audit)
 
 # 3. The two open findings the auditors flagged.
-findings = sdk.create_point(
+findings = sdk._create_point(
     "issue",
     "Auditors have flagged two open findings in the Solstice Robotics firmware-scope audit "
     "(as of 2026-10-06).",
@@ -80,7 +80,7 @@ EVENT_NAME = (
 # create_event and the other two are minted as structural ``related`` edges
 # (``aboutPoint`` is NOT a predicate create_edge accepts).
 ev_id = None
-for e in sdk.get_events("observation", limit=200):
+for e in sdk._get_events("observation", limit=200):
     if e.get("name") != EVENT_NAME:
         continue
     linked = sdk._get_proj().g.query(
@@ -90,14 +90,14 @@ for e in sdk.get_events("observation", limit=200):
         ev_id = e["id"]           # already wired by a prior run: reuse
         print("--- event (reused) ---", ev_id)
     else:
-        sdk.delete(e["id"])       # bare event from a run that mis-passed a list
+        sdk._delete(e["id"])       # bare event from a run that mis-passed a list
 if ev_id is None:
-    ev = sdk.create_event(EVENT_NAME, "observation", occurredAt=AS_OF, aboutPoint=scope_id)
+    ev = sdk._create_event(EVENT_NAME, "observation", occurredAt=AS_OF, aboutPoint=scope_id)
     show("event", ev)
     ev_id = ev["id"]
 
 for target in (fw_id, fnd_id):
-    show(f"edge related {ev_id}->{target}", sdk.create_edge("related", ev_id, target))
+    show(f"edge related {ev_id}->{target}", sdk._create_edge("related", ev_id, target))
 
 # 5. The scope fact is the same audit, narrowed -> relate it to the existing audit claim.
 for relation, f, t in [
@@ -106,13 +106,13 @@ for relation, f, t in [
     ("related", fnd_id, fw_id),
     ("related", fw_id, TRANCHE),
 ]:
-    show(f"edge {relation} {f}->{t}", sdk.create_edge(relation, f, t))
+    show(f"edge {relation} {f}->{t}", sdk._create_edge(relation, f, t))
 
 # 6. The core epistemic action: the existing IMPL bridge (audit => tranche release) is
 #    damped, not refuted. The audit happened and still speaks to hardware; what it cannot
 #    do is vouch for the firmware half of the release, and the firmware audit is unresolved
 #    with two open findings. Major dampening within the sanctionted [0.10, 0.50] band.
-mit = sdk.mitigate_operator(
+mit = sdk._mitigate_operator(
     OP,
     reason=(
         "The 2026-08-28 audit was scoped to hardware only and did not cover firmware "
@@ -127,7 +127,7 @@ show("mitigation", mit)
 
 # 7. Verify final state.
 print("\n=== VERIFY ===")
-for p in sdk.query():
+for p in sdk._query():
     print(p["id"], p["pointKind"], "|", p["content"][:110])
 proj = sdk._get_proj()
 res = proj.g.query(

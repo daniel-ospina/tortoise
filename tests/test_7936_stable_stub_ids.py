@@ -352,7 +352,7 @@ class TestStubAdoptionDurability:
         byte-identically (live == replay)."""
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
+            sdk._create_event(
                 "probe event", "test", object="probe-object",
                 subject="probe-subject",
                 startedAt="2026-01-01T00:00:00Z")
@@ -379,7 +379,7 @@ class TestStubAdoptionDurability:
         """The Subject leg of the same probe-gate."""
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
+            sdk._create_event(
                 "probe event", "test", object="probe-object",
                 subject="probe-subject",
                 startedAt="2026-01-01T00:00:00Z")
@@ -408,7 +408,7 @@ class TestStubAdoptionDurability:
         keeps the node instead of deleting it."""
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
+            sdk._create_event(
                 "probe event", "test", object="probe-object",
                 subject="probe-subject",
                 startedAt="2026-01-01T00:00:00Z")
@@ -444,7 +444,7 @@ class TestStubAdoptionDurability:
         """
         sdk, events = _journal(tmp_path)
         try:
-            sdk.create_event(
+            sdk._create_event(
                 "probe event", "test", object="probe-object",
                 uses=[{"name": "probe-use", "kind": "core:tool"}],
                 startedAt="2026-01-01T00:00:00Z")

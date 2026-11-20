@@ -272,7 +272,7 @@ class _FakeSDK:
     def _get_proj(self):
         return self.proj
 
-    def tortoise_fts_query(self, query, **kw):
+    def _tortoise_fts_query(self, query, **kw):
         return [{"id": r[0]} for r in self.rows]
 
     def close(self):

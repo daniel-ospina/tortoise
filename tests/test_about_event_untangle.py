@@ -44,7 +44,7 @@ def sdk(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "capture.db"), namespace=TEST_GRAPH)
     yield sdk
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -73,7 +73,7 @@ def _scan(sdk, limit=100):
     """Full-scan query — runs the real decoration path (#1353 steps 4-9),
     including fetch_point_epistemic_state's D10 subject resolution. Full-scan
     requires a kind; the test stamps pointKind on the extracted points below."""
-    return sdk.tortoise_fts_query(query=None, kind="statement",
+    return sdk._tortoise_fts_query(query=None, kind="statement",
                                   entity_type="point", limit=limit)
 
 
@@ -126,7 +126,7 @@ def test_capture_session_subject_resolves_via_eventid_fallback(sdk):
     )
 
     # Wire the Event's subject — the fallback hop the D10 decoration uses.
-    subj = sdk.create_subject("Epistemic Team", subjectKind="team")
+    subj = sdk._create_subject("Epistemic Team", subjectKind="team")
     proj.create_about_edge(eid, subj["id"], "aboutSubject")
 
     results = _scan(sdk)

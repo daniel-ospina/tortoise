@@ -1338,7 +1338,7 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
     submit, which is exactly M2's posture.
     """
     if arm != ARM_LEXICAL:
-        return sdk.tortoise_fts_query(
+        return sdk._tortoise_fts_query(
             text,
             entity_type="point",
             limit=deep,
@@ -1363,7 +1363,7 @@ def _query(sdk, arm: str, text: str, deep: int, trace: list[dict]) -> list[dict]
         lambda cls, *a, **k: None
     )
     try:
-        return sdk.tortoise_fts_query(
+        return sdk._tortoise_fts_query(
             text,
             entity_type="point",
             limit=deep,

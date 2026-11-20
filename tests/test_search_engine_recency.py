@@ -46,13 +46,13 @@ def test_fts_query_recency_field_reorders_fused_pool(tmp_path):
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(str(tmp_path / "lme.db"))
     try:
-        sdk.create_point("statement", "user adopted a dog", id="old",
+        sdk._create_point("statement", "user adopted a dog", id="old",
                          createdAt="2025-06-01T00:00:00Z")
-        sdk.create_point("statement", "user adopted a dog", id="new",
+        sdk._create_point("statement", "user adopted a dog", id="new",
                          createdAt="2025-06-14T00:00:00Z")
         # equal RRF (single identical-term queries) → recency must win
-        hits_plain = sdk.tortoise_fts_query("dog", entity_type="point", limit=10)
-        hits_recent = sdk.tortoise_fts_query(
+        hits_plain = sdk._tortoise_fts_query("dog", entity_type="point", limit=10)
+        hits_recent = sdk._tortoise_fts_query(
             "dog", entity_type="point", limit=10,
             recency_field="createdAt", recency_boost=0.5)
         ids_plain = [h["id"] for h in hits_plain]
@@ -67,10 +67,10 @@ def test_fts_query_recency_default_off_is_unchanged(tmp_path):
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(str(tmp_path / "lme.db"))
     try:
-        sdk.create_point("statement", "user adopted a dog", id="p1",
+        sdk._create_point("statement", "user adopted a dog", id="p1",
                          createdAt="2025-06-01T00:00:00Z")
-        plain = sdk.tortoise_fts_query("dog", entity_type="point", limit=10)
-        boosted = sdk.tortoise_fts_query(
+        plain = sdk._tortoise_fts_query("dog", entity_type="point", limit=10)
+        boosted = sdk._tortoise_fts_query(
             "dog", entity_type="point", limit=10,
             recency_field="createdAt", recency_boost=0.0)
         assert [h["id"] for h in plain] == [h["id"] for h in boosted]
@@ -84,9 +84,9 @@ def test_fts_query_recency_bad_field_fails_open(tmp_path):
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(str(tmp_path / "lme.db"))
     try:
-        sdk.create_point("statement", "user adopted a dog", id="p1",
+        sdk._create_point("statement", "user adopted a dog", id="p1",
                          createdAt="2025-06-01T00:00:00Z")
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             "dog", entity_type="point", limit=10,
             recency_field="nonexistentProp", recency_boost=0.5)
         ids = [h["id"] for h in hits]
@@ -100,7 +100,7 @@ def test_fts_query_recency_boost_clamped(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "lme.db"))
     try:
         with pytest.raises(ValueError):
-            sdk.tortoise_fts_query("dog", entity_type="point", limit=10,
+            sdk._tortoise_fts_query("dog", entity_type="point", limit=10,
                                    recency_field="createdAt",
                                    recency_boost=11.0)
     finally:

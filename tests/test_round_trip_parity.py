@@ -43,7 +43,7 @@ def _round_trip(tmp_path, point_id: str, content: str):
     # plus a raw search. Each leg provably runs its intended backend.
     sdk = TortoiseSDK(str(tmp_path / "roundtrip.db"))
     try:
-        sdk.create_point("claim", content, id=point_id)
+        sdk._create_point("claim", content, id=point_id)
         proj = sdk._get_proj()
         hits = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.id, n.content, n.content_hash",

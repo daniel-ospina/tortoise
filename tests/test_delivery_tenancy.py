@@ -65,7 +65,7 @@ def _spine_env(tmp_path):
     sdk._graph_create(tid, "default", kind="default")
     g = sdk._graph_create(tid, "deliv-g", kind="custom")
     default_sdk = ha_mod._make_sdk(namespace=tid)
-    def_pt = default_sdk.create_point(
+    def_pt = default_sdk._create_point(
         "default-secret", content="default-secret")
     default_sdk.close()
     tc = verdict_client(ha_mod.app)
@@ -849,6 +849,8 @@ def test_patch_rename_session_owner_ok_member_403(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     # Registry lane: seed Membership nodes so the session face resolves.
     reg = sdk._get_registry()
+    # `reg` is a FalkorDB `Graph`, not the SDK: its public door is `query`
+    # (`_query` is the vendor's private delegate — #13899 review P2).
     for uid, role in (("owner-1", "owner"), ("member-1", "member")):
         reg.query(
             "CREATE (m:Membership {user_id:$u, org_id:$tid,"

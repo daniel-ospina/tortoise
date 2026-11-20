@@ -855,7 +855,11 @@ def run(args: argparse.Namespace) -> int:
     def query(kind: str, text: str, k: int) -> list[str]:
         """EXACTLY the leg ``_fts_rows`` runs, at width ``k``, returning ids."""
         trace: list[dict] = []
-        rows = cur["sdk"].tortoise_fts_query(
+        # ⛔ `cur["sdk"]` is a SUBSCRIPT, so the sweep could not type it and left the retired
+        # public spelling here (the residue it REPORTS rather than rewrites) — which meant this
+        # leg would raise AttributeError at run time. #12901's FINAL batch: `tortoise_fts_query`
+        # is `_tortoise_fts_query` on the class.
+        rows = cur["sdk"]._tortoise_fts_query(
             _sanitise_query_text(text), entity_type=kind, limit=k,
             # `_fts_rows` opts the entity legs back INTO terminal-inclusive; the
             # Point leg keeps the default. Mirrored exactly, per leg.

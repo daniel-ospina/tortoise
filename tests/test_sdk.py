@@ -46,7 +46,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
-    return sdk.create_point(kw.pop("kind", "statement"),
+    return sdk._create_point(kw.pop("kind", "statement"),
                             kw.pop("content", "test content"), **kw)
 
 
@@ -54,7 +54,7 @@ def _make_point(sdk: TortoiseSDK, **kw):
 
 class TestCreatePoint:
     def test_valid_kind(self, sdk):
-        p = sdk.create_point("statement", "hello")
+        p = sdk._create_point("statement", "hello")
         assert p["pointKind"] == "statement"
         assert p["content"] == "hello"
         assert "id" in p
@@ -63,12 +63,12 @@ class TestCreatePoint:
         # ponytail: _validate_kind warns, doesn't reject
         assert UNRECOGNIZED_KIND not in known_kinds()
         with caplog.at_level(logging.WARNING):
-            p = sdk.create_point(UNRECOGNIZED_KIND, "anyway")
+            p = sdk._create_point(UNRECOGNIZED_KIND, "anyway")
         assert p["pointKind"] == UNRECOGNIZED_KIND
         assert len(caplog.records) >= 1
 
     def test_with_props(self, sdk):
-        p = sdk.create_point("statement", "x", confidence=0.9)
+        p = sdk._create_point("statement", "x", confidence=0.9)
         assert p["confidence"] == 0.9
         assert "context" not in p
 
@@ -81,13 +81,13 @@ class TestCreatePoint:
 class TestUpdatePoint:
     def test_set_properties(self, sdk):
         p = _make_point(sdk)
-        updated = sdk.update_point(p["id"], confidence=0.5)
+        updated = sdk._update_point(p["id"], confidence=0.5)
         assert updated["confidence"] == 0.5
 
     def test_verify_with_get_point(self, sdk):
         p = _make_point(sdk, content="before")
-        sdk.update_point(p["id"], content="after")
-        assert sdk.get_point(p["id"])["content"] == "after"
+        sdk._update_point(p["id"], content="after")
+        assert sdk._get_point(p["id"])["content"] == "after"
 
 
     def test_update_content_recomputes_content_hash(self, sdk):
@@ -105,11 +105,11 @@ class TestUpdatePoint:
         elsewhere, this consequence is not.
         """
         import hashlib
-        p = sdk.create_point("statement", "X")
-        sdk.update_point(p["id"], content="Y")
-        after = sdk.get_point(p["id"])
+        p = sdk._create_point("statement", "X")
+        sdk._update_point(p["id"], content="Y")
+        after = sdk._get_point(p["id"])
         assert after["content_hash"] == hashlib.sha256(b"Y").hexdigest()
-        again = sdk.create_point("statement", "Y", dedup=True)
+        again = sdk._create_point("statement", "Y", dedup=True)
         assert again["id"] == p["id"]
         g = sdk._get_proj().g
         cnt = g.query(
@@ -125,8 +125,8 @@ class TestUpdatePoint:
         import json
         sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                           event_log_path=str(tmp_path / "events.jsonl"))
-        p = sdk.create_point("statement", "X")
-        sdk.update_point(p["id"], content="Y")
+        p = sdk._create_point("statement", "X")
+        sdk._update_point(p["id"], content="Y")
         lines = (tmp_path / "events.jsonl").read_text().splitlines()
         revised = [json.loads(l) for l in lines  # noqa: E741
                    if json.loads(l).get("type") == "PointRevised"]
@@ -141,11 +141,11 @@ class TestUpdatePoint:
 class TestDeletePoint:
     def test_existing(self, sdk):
         p = _make_point(sdk)
-        assert sdk.delete_point(p["id"]) is True
-        assert sdk.get_point(p["id"]) == {}
+        assert sdk._delete_point(p["id"]) is True
+        assert sdk._get_point(p["id"]) == {}
 
     def test_nonexistent(self, sdk):
-        assert sdk.delete_point("no-such-id") is False
+        assert sdk._delete_point("no-such-id") is False
 
 
 # ── create_operator ──────────────────────────────────────────────────
@@ -153,24 +153,24 @@ class TestDeletePoint:
 class TestCreateOperator:
     def test_impl(self, sdk):
         a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         assert op["is_operator"] is True
         assert op["op_type"] == "IMPL"
         assert "id" in op
 
     def test_nand(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("NAND", a["id"], [b["id"]])
+        op = sdk._create_operator("NAND", a["id"], [b["id"]])
         assert op["op_type"] == "NAND"
 
     def test_composed_of(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("composedOf", a["id"], [b["id"]])
+        op = sdk._create_operator("composedOf", a["id"], [b["id"]])
         assert op["op_type"] == "composedOf"
 
     def test_invalid_type_raises(self, sdk):
         with pytest.raises(ValueError, match="op_type must be"):
-            sdk.create_operator("FOOBAR", "x", ["y"])
+            sdk._create_operator("FOOBAR", "x", ["y"])
 
     def test_mitigates_is_not_an_operator_kind(self, sdk):
         """#4937 (F1 ruling on #2552): MITIGATES left the generic operator
@@ -178,7 +178,7 @@ class TestCreateOperator:
         op_type' leaves the caller with no route to the mechanism."""
         a, b = _make_point(sdk), _make_point(sdk)
         with pytest.raises(ValueError) as exc:
-            sdk.create_operator("MITIGATES", a["id"], [b["id"]])
+            sdk._create_operator("MITIGATES", a["id"], [b["id"]])
         msg = str(exc.value)
         assert "MITIGATES is not an operator kind" in msg
         assert "mitigate_operator" in msg
@@ -192,7 +192,7 @@ class TestCreateOperator:
         relations). Spelling MITIGATES as a label no longer silently rides
         the built-in fallback — it is warned as undeclared (warn-not-block)."""
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="MITIGATES")
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]], label="MITIGATES")
         assert op["op_type"] == "IMPL"
         assert any(w.get("code") == "undeclared_relation"
                    for w in op.get("warnings", [])), op.get("warnings")
@@ -212,22 +212,22 @@ class TestCreateOperator:
     def test_invalid_direction_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
         with pytest.raises(ValueError, match="direction must be"):
-            sdk.create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
+            sdk._create_operator("IMPL", a["id"], [b["id"]], direction="sideways")
 
     def test_valid_direction_accepted(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op_bi = sdk.create_operator("IMPL", a["id"], [b["id"]], direction="bidirectional")
+        op_bi = sdk._create_operator("IMPL", a["id"], [b["id"]], direction="bidirectional")
         assert op_bi.get("direction") == "bidirectional"
         # #12067: the mechanism set is CLOSED and a pair carries at most one, so
         # the NAND probe is its own pair — the direction gate is what this test
         # is about, and reusing (a, b) would measure the closure instead.
         c, d = _make_point(sdk), _make_point(sdk)
-        op_uni = sdk.create_operator("NAND", c["id"], [d["id"]], direction="unidirectional")
+        op_uni = sdk._create_operator("NAND", c["id"], [d["id"]], direction="unidirectional")
         assert op_uni.get("direction") == "unidirectional"
 
     def test_direction_default_bidirectional(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         assert op.get("direction") == "bidirectional"
 
 
@@ -235,32 +235,32 @@ class TestCreateOperator:
 
 class TestQuery:
     def test_by_kind(self, sdk):
-        sdk.create_point("statement", "A")
-        sdk.create_point("goal", "B")
-        results = sdk.query(kind="statement")
+        sdk._create_point("statement", "A")
+        sdk._create_point("goal", "B")
+        results = sdk._query(kind="statement")
         assert len(results) == 1
         assert results[0]["pointKind"] == "statement"
 
     def test_by_kind_filter(self, sdk):
         """P2 #49: context removed — query filters by kind instead."""
-        sdk.create_point("statement", "X")
-        sdk.create_point("observation", "Y")
-        results = sdk.query(kind="statement")
+        sdk._create_point("statement", "X")
+        sdk._create_point("observation", "Y")
+        results = sdk._query(kind="statement")
         assert len(results) == 1
         assert results[0]["pointKind"] == "statement"
 
     def test_by_filter(self, sdk):
-        sdk.create_point("statement", "A", confidence=0.99)
-        sdk.create_point("statement", "B", confidence=0.01)
-        results = sdk.query(confidence=0.99)
+        sdk._create_point("statement", "A", confidence=0.99)
+        sdk._create_point("statement", "B", confidence=0.01)
+        results = sdk._query(confidence=0.99)
         assert len(results) == 1
         assert results[0]["confidence"] == 0.99
 
     def test_empty_results(self, sdk):
-        assert sdk.query(kind="nonexistent") == []
+        assert sdk._query(kind="nonexistent") == []
 
     def test_filter_key_injection_rejected(self, sdk):
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         # Keys that reach the filters loop (not bound by the signature)
         payloads = [
             {"kind_0": "goal"},                       # reserved (expansion prefix)
@@ -270,25 +270,25 @@ class TestQuery:
         ]
         for filters in payloads:
             with pytest.raises(ValueError):
-                sdk.query(**filters)
+                sdk._query(**filters)
 
     def test_filter_key_signature_collision_raises(self, sdk):
         # kind binds to the method signature — a caller passing it via
         # **filters together with the named arg gets TypeError at the call
         # site (MCP path), never a silently-corrupted WHERE.
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         with pytest.raises(TypeError):
-            sdk.query(kind="statement", **{"kind": "goal"})
+            sdk._query(kind="statement", **{"kind": "goal"})
         with pytest.raises(TypeError):
-            sdk.paginated_query(kind="statement", **{"kind": "goal"})
+            sdk._paginated_query(kind="statement", **{"kind": "goal"})
 
     def test_filter_key_legit_still_works(self, sdk):
         # #1088: a draft must be asked for explicitly now that live is the
         # default — this keeps the test about the status FILTER, not the
         # retired implicit draft default.
-        sdk.create_point("statement", "A", confidence=0.9, status="draft")
-        sdk.create_point("statement", "B", confidence=0.1, status="live")
-        results = sdk.query(confidence=0.9, status="draft")
+        sdk._create_point("statement", "A", confidence=0.9, status="draft")
+        sdk._create_point("statement", "B", confidence=0.1, status="live")
+        results = sdk._query(confidence=0.9, status="draft")
         assert len(results) == 1
         assert results[0]["content"] == "A"
 
@@ -298,8 +298,8 @@ class TestQuery:
 class TestPaginatedQuery:
     def test_pagination_structure(self, sdk):
         for i in range(5):
-            sdk.create_point("statement", f"point {i}")
-        result = sdk.paginated_query(kind="statement", skip=0, limit=2)
+            sdk._create_point("statement", f"point {i}")
+        result = sdk._paginated_query(kind="statement", skip=0, limit=2)
         assert "results" in result
         assert "total" in result
         assert "hasMore" in result
@@ -309,23 +309,23 @@ class TestPaginatedQuery:
 
     def test_no_more_pages(self, sdk):
         for i in range(3):
-            sdk.create_point("statement", f"point {i}")
-        result = sdk.paginated_query(kind="statement", skip=0, limit=10)
+            sdk._create_point("statement", f"point {i}")
+        result = sdk._paginated_query(kind="statement", skip=0, limit=10)
         assert result["total"] == 3
         assert len(result["results"]) == 3
         assert result["hasMore"] is False
 
     def test_filter_key_reserved_rejected(self, sdk):
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         for key in ("kind_0", "kind_7", "x`} DETACH DELETE (n) //", "émoji"):
             with pytest.raises(ValueError):
-                sdk.paginated_query(kind="statement", **{key: 1})
+                sdk._paginated_query(kind="statement", **{key: 1})
 
     def test_skip_returns_correct_page(self, sdk):
         for i in range(5):
-            sdk.create_point("statement", f"point {i}")
-        page1 = sdk.paginated_query(kind="statement", skip=0, limit=2)
-        page2 = sdk.paginated_query(kind="statement", skip=2, limit=2)
+            sdk._create_point("statement", f"point {i}")
+        page1 = sdk._paginated_query(kind="statement", skip=0, limit=2)
+        page2 = sdk._paginated_query(kind="statement", skip=2, limit=2)
         assert page1["total"] == 5
         assert page2["total"] == 5
         assert len(page1["results"]) == 2
@@ -340,11 +340,11 @@ class TestPaginatedQuery:
         # on non-empty graphs (infinite pagination loop); negative skip/limit
         # would pass raw into Cypher. Both must fail cleanly (ValueError →
         # clean 400 at the API surface).
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         for kwargs in ({"limit": 0}, {"limit": -5}, {"skip": -1},
                        {"skip": -1, "limit": 0}):
             with pytest.raises(ValueError, match="must be"):
-                sdk.paginated_query(kind="statement", **kwargs)
+                sdk._paginated_query(kind="statement", **kwargs)
 
 
 # ── get_point ────────────────────────────────────────────────────────
@@ -360,10 +360,10 @@ class TestGetPoint:
         adv = p.pop("advisories")
         assert [a["code"] for a in adv] == ["no_source"]
         assert adv[0]["node_id"] == p["id"], "advisory not about THIS node"
-        assert sdk.get_point(p["id"]) == p
+        assert sdk._get_point(p["id"]) == p
 
     def test_nonexistent(self, sdk):
-        assert sdk.get_point("nope") == {}
+        assert sdk._get_point("nope") == {}
 
 
 # ── traverse ─────────────────────────────────────────────────────────
@@ -381,7 +381,7 @@ class TestTraverse:
 
         proj = sdk._get_proj()
         a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]], label="produces")
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]], label="produces")
 
         hops = {n["node"]["id"]: n
                 for n in tortoise_traverse(proj.db, proj.graph_name, op["id"], 2)["nodes"]}
@@ -398,11 +398,11 @@ class TestTraverse:
 
 class TestVerifyChain:
     def test_returns_list(self, sdk):
-        result = sdk.check_structure()
+        result = sdk._check_structure()
         assert isinstance(result, list)
 
     def test_no_crash_empty_db(self, sdk):
-        result = sdk.check_structure()
+        result = sdk._check_structure()
         assert result == []  # empty db → no violations
 
 
@@ -410,7 +410,7 @@ class TestVerifyChain:
 
 class TestGetChainStatus:
     def test_expected_keys(self, sdk):
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         for key in ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
                      "gate3_workflows", "gate4_requirements",
                      "total", "operators", "gate_total"):
@@ -421,7 +421,7 @@ class TestGetChainStatus:
         """#2205 total-vs-gate semantics: gate_total is the gate-kind
         subtotal (the pre-#2205 meaning of 'total'); total spans ALL kinds
         and is >= the gate-only subtotal."""
-        status = sdk.summarize_structure()
+        status = sdk._summarize_structure()
         gate_keys = ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
                      "gate3_workflows", "gate4_requirements")
         assert status["gate_total"] == sum(status[k] for k in gate_keys)
@@ -442,20 +442,20 @@ class TestInvalidateSupersede:
         # #330: missing corrected_by would orphan an outdated point — must raise
         old = _make_point(sdk, content="old")
         with pytest.raises(ValueError):
-            sdk.invalidate_point(old["id"], "missing-new")
+            sdk._invalidate_point(old["id"], "missing-new")
         # Old point must NOT be marked outdated (no partial write)
-        assert not sdk.get_point(old["id"]).get("outdated")
+        assert not sdk._get_point(old["id"]).get("outdated")
 
 
     def test_supersede_atomically_replaces(self, sdk):
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
-        result = sdk.supersede_point(old["id"], new["id"])
+        result = sdk._supersede_point(old["id"], new["id"])
         assert result["invalidated"] is True
         assert result["id"] == old["id"]
         assert result["corrected_by"] == new["id"]
         # New point should NOT be marked outdated
-        new_after = sdk.get_point(new["id"])
+        new_after = sdk._get_point(new["id"])
         assert not new_after.get("outdated")
 
     def test_supersede_missing_old_raises(self, sdk):
@@ -464,17 +464,17 @@ class TestInvalidateSupersede:
         # the #432 terminal guard).
         new = _make_point(sdk, content="new")
         with pytest.raises(ValueError, match="No point"):
-            sdk.supersede_point("missing-old", new["id"])
+            sdk._supersede_point("missing-old", new["id"])
 
     def test_invalidate_sets_outdated_and_corrects_edge(self, sdk):
         old = _make_point(sdk, content="old claim")
         new = _make_point(sdk, content="new claim")
-        result = sdk.invalidate_point(old["id"], new["id"])
+        result = sdk._invalidate_point(old["id"], new["id"])
         assert result["invalidated"] is True
         assert result["id"] == old["id"]
         assert result["corrected_by"] == new["id"]
         # Verify outdated flag persisted
-        old_after = sdk.get_point(old["id"])
+        old_after = sdk._get_point(old["id"])
         assert old_after["outdated"] is True
         # Verify CORRECTS edge exists (traverse outgoing from new)
         corrected = _corrects_into(sdk, new["id"])
@@ -484,7 +484,7 @@ class TestInvalidateSupersede:
     def test_invalidate_missing_old_is_false(self, sdk):
         # #330: invalidate_point must not report success for a missing old point
         new = _make_point(sdk, content="new")
-        result = sdk.invalidate_point("missing-old", new["id"])
+        result = sdk._invalidate_point("missing-old", new["id"])
         assert result["invalidated"] is False
         assert result["id"] == "missing-old"
         assert result["corrected_by"] == new["id"]
@@ -496,8 +496,8 @@ class TestInvalidateSupersede:
         # #330: a self-CORRECTS edge poisons traversal/credibility — must raise
         old = _make_point(sdk, content="old")
         with pytest.raises(ValueError):
-            sdk.invalidate_point(old["id"], old["id"])
-        assert not sdk.get_point(old["id"]).get("outdated")
+            sdk._invalidate_point(old["id"], old["id"])
+        assert not sdk._get_point(old["id"]).get("outdated")
         assert len(_corrects_into(sdk, old["id"])) == 0
 
     def test_supersede_idempotent_corrects_edge(self, sdk):
@@ -505,9 +505,9 @@ class TestInvalidateSupersede:
         # terminal). The CORRECTS edge from the first call is still unique.
         old = _make_point(sdk, content="old-sup")
         new = _make_point(sdk, content="new-sup")
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.supersede_point(old["id"], new["id"])
+            sdk._supersede_point(old["id"], new["id"])
         corrected = _corrects_into(sdk, new["id"])
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-supersede"
 
@@ -521,10 +521,10 @@ class TestInvalidateSupersede:
         # excludes. The first call's CORRECTS edge stays unique.
         old = _make_point(sdk, content="old")
         new = _make_point(sdk, content="new")
-        r1 = sdk.invalidate_point(old["id"], new["id"])
+        r1 = sdk._invalidate_point(old["id"], new["id"])
         assert r1["invalidated"] is True
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.invalidate_point(old["id"], new["id"])
+            sdk._invalidate_point(old["id"], new["id"])
         corrected = _corrects_into(sdk, new["id"])
         assert len(corrected) == 1, "CORRECTS edge duplicated on re-invalidate"
 
@@ -532,9 +532,9 @@ class TestInvalidateSupersede:
         # #547: missing new point would orphan an outdated old — must raise
         old = _make_point(sdk, content="old")
         with pytest.raises(ValueError):
-            sdk.supersede_point(old["id"], "missing-new")
+            sdk._supersede_point(old["id"], "missing-new")
         # Old point must NOT be marked outdated (no partial write)
-        assert not sdk.get_point(old["id"]).get("outdated")
+        assert not sdk._get_point(old["id"]).get("outdated")
         # No CORRECTS edge
         assert len(_corrects_into(sdk, old["id"])) == 0
 
@@ -542,8 +542,8 @@ class TestInvalidateSupersede:
         # #547: a self-CORRECTS edge poisons traversal — must raise
         old = _make_point(sdk, content="old")
         with pytest.raises(ValueError):
-            sdk.supersede_point(old["id"], old["id"])
-        assert not sdk.get_point(old["id"]).get("outdated")
+            sdk._supersede_point(old["id"], old["id"])
+        assert not sdk._get_point(old["id"]).get("outdated")
         assert len(_corrects_into(sdk, old["id"])) == 0
 
 
@@ -556,7 +556,7 @@ class TestClose:
     def test_can_reopen(self, sdk):
         sdk.close()
         # methods re-init the projection on next call (lazy init)
-        p = sdk.create_point("statement", "after close")
+        p = sdk._create_point("statement", "after close")
         assert "id" in p
 
 
@@ -565,8 +565,8 @@ class TestClose:
 class TestAnnotateOperator:
     def test_valid_operator(self, sdk):
         a, b = _make_point(sdk, content="A"), _make_point(sdk, content="B")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        result = sdk.annotate_operator(op["id"], 0.1, 0.8, 0.7, 0.9)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk._annotate_operator(op["id"], 0.1, 0.8, 0.7, 0.9)
         assert result["annotator_bias"] == 0.1
         assert result["annotator_precision"] == 0.8
         assert result["annotator_consistency"] == 0.7
@@ -574,35 +574,35 @@ class TestAnnotateOperator:
 
     def test_nonexistent_id_raises(self, sdk):
         with pytest.raises(ValueError, match="not found"):
-            sdk.annotate_operator("nonexistent-id", 0.5, 0.5, 0.5, 0.5)
+            sdk._annotate_operator("nonexistent-id", 0.5, 0.5, 0.5, 0.5)
 
     def test_non_operator_raises(self, sdk):
         p = _make_point(sdk, content="not an operator")
         with pytest.raises(ValueError, match="not an operator"):
-            sdk.annotate_operator(p["id"], 0.5, 0.5, 0.5, 0.5)
+            sdk._annotate_operator(p["id"], 0.5, 0.5, 0.5, 0.5)
 
     def test_out_of_range_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         with pytest.raises(ValueError, match="bias must be 0-1"):
-            sdk.annotate_operator(op["id"], -0.1, 0.5, 0.5, 0.5)
+            sdk._annotate_operator(op["id"], -0.1, 0.5, 0.5, 0.5)
         with pytest.raises(ValueError, match="precision must be 0-1"):
-            sdk.annotate_operator(op["id"], 0.5, 1.5, 0.5, 0.5)
+            sdk._annotate_operator(op["id"], 0.5, 1.5, 0.5, 0.5)
 
     def test_boundary_values(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        result = sdk.annotate_operator(op["id"], 0.0, 1.0, 0.0, 1.0)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk._annotate_operator(op["id"], 0.0, 1.0, 0.0, 1.0)
         assert result["annotator_bias"] == 0.0
         assert result["annotator_precision"] == 1.0
 
     def test_zombie_operator(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.delete_point(a["id"])
-        sdk.delete_point(b["id"])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._delete_point(a["id"])
+        sdk._delete_point(b["id"])
         # annotating orphaned operator should still succeed
-        result = sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+        result = sdk._annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
         assert result["annotator_bias"] == 0.5
 
 
@@ -611,8 +611,8 @@ class TestAnnotateOperator:
 class TestMitigateOperator:
     def test_valid_mitigation(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        result = sdk.mitigate_operator(op["id"], "sample too small", 0.3)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk._mitigate_operator(op["id"], "sample too small", 0.3)
         assert result["pointKind"] == "statement"
         assert "[MITIGATION] sample too small" in result["content"]
         assert result["mitigation_strength"] == 0.3
@@ -620,31 +620,31 @@ class TestMitigateOperator:
     def test_non_operator_raises(self, sdk):
         p = _make_point(sdk)
         with pytest.raises(ValueError, match="not an operator"):
-            sdk.mitigate_operator(p["id"], "reason")
+            sdk._mitigate_operator(p["id"], "reason")
 
     def test_nonexistent_operator_raises(self, sdk):
         with pytest.raises(ValueError, match="not found"):
-            sdk.mitigate_operator("nonexistent", "reason")
+            sdk._mitigate_operator("nonexistent", "reason")
 
     def test_invalid_strength_raises(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         with pytest.raises(ValueError, match="strength must be 0-1"):
-            sdk.mitigate_operator(op["id"], "reason", 1.5)
+            sdk._mitigate_operator(op["id"], "reason", 1.5)
 
     def test_idempotent(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        first = sdk.mitigate_operator(op["id"], "reason v1", 0.3)
-        second = sdk.mitigate_operator(op["id"], "reason v2", 0.7)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        first = sdk._mitigate_operator(op["id"], "reason v1", 0.3)
+        second = sdk._mitigate_operator(op["id"], "reason v2", 0.7)
         assert first["id"] == second["id"]  # same mitigation Point
         assert "reason v2" in second["content"]  # updated reason
         assert second["mitigation_strength"] == 0.7  # updated strength
 
     def test_strength_default(self, sdk):
         a, b = _make_point(sdk), _make_point(sdk)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        result = sdk.mitigate_operator(op["id"], "reason")
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        result = sdk._mitigate_operator(op["id"], "reason")
         assert result["mitigation_strength"] == 0.5
 
 
@@ -656,23 +656,23 @@ class TestListTags:
         assert sdk.graph_overview("tags") == []
 
     def test_single_tag(self, sdk):
-        p = sdk.create_point("statement", "tagged content", tags=["alpha"])  # noqa: F841
+        p = sdk._create_point("statement", "tagged content", tags=["alpha"])  # noqa: F841
         tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "alpha"
         assert tags[0]["count"] == 1
 
     def test_multiple_points_same_tag(self, sdk):
-        sdk.create_point("statement", "first", tags=["shared"])
-        sdk.create_point("statement", "second", tags=["shared"])
+        sdk._create_point("statement", "first", tags=["shared"])
+        sdk._create_point("statement", "second", tags=["shared"])
         tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
         assert tags[0]["count"] == 2
 
     def test_multiple_tags(self, sdk):
-        sdk.create_point("statement", "a", tags=["alpha", "beta"])
-        sdk.create_point("statement", "b", tags=["beta", "gamma"])
+        sdk._create_point("statement", "a", tags=["alpha", "beta"])
+        sdk._create_point("statement", "b", tags=["beta", "gamma"])
         tags = sdk.graph_overview("tags")
         names = {t["name"] for t in tags}
         assert names == {"alpha", "beta", "gamma"}
@@ -683,8 +683,8 @@ class TestListTags:
         assert by_name["gamma"] == 1
 
     def test_untagged_point_not_counted(self, sdk):
-        sdk.create_point("statement", "no tags here")
-        sdk.create_point("statement", "tagged", tags=["solo"])
+        sdk._create_point("statement", "no tags here")
+        sdk._create_point("statement", "tagged", tags=["solo"])
         tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "solo"
@@ -694,46 +694,46 @@ class TestListTags:
 class TestQueryPointsByTag:
     def test_no_match(self, sdk):
         """Querying a non-existent tag returns empty list."""
-        assert sdk.query_points_by_tag("nonexistent") == []
+        assert sdk._query_points_by_tag("nonexistent") == []
 
     def test_single_point(self, sdk):
-        p = sdk.create_point("statement", "find me", tags=["alpha"])
-        results = sdk.query_points_by_tag("alpha")
+        p = sdk._create_point("statement", "find me", tags=["alpha"])
+        results = sdk._query_points_by_tag("alpha")
         assert len(results) == 1
         assert results[0]["id"] == p["id"]
         assert results[0]["content"] == "find me"
 
     def test_multiple_points_same_tag(self, sdk):
-        p1 = sdk.create_point("statement", "first", tags=["shared"])
-        p2 = sdk.create_point("statement", "second", tags=["shared"])
-        results = sdk.query_points_by_tag("shared")
+        p1 = sdk._create_point("statement", "first", tags=["shared"])
+        p2 = sdk._create_point("statement", "second", tags=["shared"])
+        results = sdk._query_points_by_tag("shared")
         assert len(results) == 2
         ids = {r["id"] for r in results}
         assert ids == {p1["id"], p2["id"]}
 
     def test_point_with_multiple_tags(self, sdk):
-        p = sdk.create_point("statement", "multi-tagged", tags=["alpha", "beta"])
+        p = sdk._create_point("statement", "multi-tagged", tags=["alpha", "beta"])
         # Querying alpha returns the point
-        alpha_results = sdk.query_points_by_tag("alpha")
+        alpha_results = sdk._query_points_by_tag("alpha")
         assert len(alpha_results) == 1
         assert alpha_results[0]["id"] == p["id"]
         # Querying beta also returns the same point
-        beta_results = sdk.query_points_by_tag("beta")
+        beta_results = sdk._query_points_by_tag("beta")
         assert len(beta_results) == 1
         assert beta_results[0]["id"] == p["id"]
 
     def test_mixed_untagged_excluded(self, sdk):
-        sdk.create_point("statement", "untagged")
-        tagged = sdk.create_point("statement", "tagged", tags=["alpha"])
-        results = sdk.query_points_by_tag("alpha")
+        sdk._create_point("statement", "untagged")
+        tagged = sdk._create_point("statement", "tagged", tags=["alpha"])
+        results = sdk._query_points_by_tag("alpha")
         assert len(results) == 1
         assert results[0]["id"] == tagged["id"]
 
     def test_tag_case_sensitive(self, sdk):
         """Tag names are case-sensitive — 'Alpha' != 'alpha'."""
-        sdk.create_point("statement", "x", tags=["Alpha"])
-        assert sdk.query_points_by_tag("alpha") == []
-        assert len(sdk.query_points_by_tag("Alpha")) == 1
+        sdk._create_point("statement", "x", tags=["Alpha"])
+        assert sdk._query_points_by_tag("alpha") == []
+        assert len(sdk._query_points_by_tag("Alpha")) == 1
 
 
 # ── update_point tag sync + orphan Tag GC (#485) ──────────────────
@@ -745,102 +745,102 @@ class TestUpdatePointTags:
 
     def test_update_adds_tags_and_query_returns_point(self, sdk):
         """Updating a point with tags creates TAGGED edges + Tag nodes."""
-        p = sdk.create_point("statement", "tagged later")
-        assert sdk.query_points_by_tag("alpha") == []
-        sdk.update_point(p["id"], tags=["alpha"])
-        results = sdk.query_points_by_tag("alpha")
+        p = sdk._create_point("statement", "tagged later")
+        assert sdk._query_points_by_tag("alpha") == []
+        sdk._update_point(p["id"], tags=["alpha"])
+        results = sdk._query_points_by_tag("alpha")
         assert len(results) == 1
         assert results[0]["id"] == p["id"]
         # n.tags property and list_tags agree
-        assert sdk.get_point(p["id"])["tags"] == ["alpha"]
+        assert sdk._get_point(p["id"])["tags"] == ["alpha"]
         by_name = {t["name"]: t["count"] for t in sdk.graph_overview("tags")}
         assert by_name["alpha"] == 1
 
     def test_update_removes_tag_deletes_edge(self, sdk):
         """Removing a tag deletes the TAGGED edge — query stops returning it."""
-        p = sdk.create_point("statement", "multi", tags=["alpha", "beta"])
-        sdk.update_point(p["id"], tags=["alpha"])
-        assert sdk.query_points_by_tag("beta") == []
-        assert [r["id"] for r in sdk.query_points_by_tag("alpha")] == [p["id"]]
-        assert sdk.get_point(p["id"])["tags"] == ["alpha"]
+        p = sdk._create_point("statement", "multi", tags=["alpha", "beta"])
+        sdk._update_point(p["id"], tags=["alpha"])
+        assert sdk._query_points_by_tag("beta") == []
+        assert [r["id"] for r in sdk._query_points_by_tag("alpha")] == [p["id"]]
+        assert sdk._get_point(p["id"])["tags"] == ["alpha"]
 
     def test_update_replaces_all_tags(self, sdk):
         """A full tag swap leaves no stale edges behind."""
-        p = sdk.create_point("statement", "swap", tags=["old1", "old2"])
-        sdk.update_point(p["id"], tags=["new1"])
+        p = sdk._create_point("statement", "swap", tags=["old1", "old2"])
+        sdk._update_point(p["id"], tags=["new1"])
         for stale in ("old1", "old2"):
-            assert sdk.query_points_by_tag(stale) == [], f"{stale} edge not removed"
-        assert len(sdk.query_points_by_tag("new1")) == 1
+            assert sdk._query_points_by_tag(stale) == [], f"{stale} edge not removed"
+        assert len(sdk._query_points_by_tag("new1")) == 1
 
     def test_update_clears_tags_with_empty_list(self, sdk):
         """tags=[] removes all TAGGED edges for the point."""
-        p = sdk.create_point("statement", "clear", tags=["alpha"])
-        sdk.update_point(p["id"], tags=[])
-        assert sdk.query_points_by_tag("alpha") == []
+        p = sdk._create_point("statement", "clear", tags=["alpha"])
+        sdk._update_point(p["id"], tags=[])
+        assert sdk._query_points_by_tag("alpha") == []
         # point still exists, just untagged
-        assert sdk.get_point(p["id"])["id"] == p["id"]
-        assert sdk.get_point(p["id"]).get("tags") == []
+        assert sdk._get_point(p["id"])["id"] == p["id"]
+        assert sdk._get_point(p["id"]).get("tags") == []
 
     def test_update_nested_props_tags(self, sdk):
         """MCP-style props={'tags': [...]} shape is synced too (#218)."""
-        p = sdk.create_point("statement", "nested")
-        sdk.update_point(p["id"], props={"tags": ["gamma"]})
-        assert [r["id"] for r in sdk.query_points_by_tag("gamma")] == [p["id"]]
+        p = sdk._create_point("statement", "nested")
+        sdk._update_point(p["id"], props={"tags": ["gamma"]})
+        assert [r["id"] for r in sdk._query_points_by_tag("gamma")] == [p["id"]]
 
     def test_update_removal_gc_orphan_tag(self, sdk):
         """Removing a tag's last reference GCs the orphan :Tag node — no
         count-0 entry lingers in list_tags (#485)."""
-        p = sdk.create_point("statement", "solo", tags=["only"])
-        sdk.update_point(p["id"], tags=[])
-        assert sdk.query_points_by_tag("only") == []
+        p = sdk._create_point("statement", "solo", tags=["only"])
+        sdk._update_point(p["id"], tags=[])
+        assert sdk._query_points_by_tag("only") == []
         assert sdk.graph_overview("tags") == []
 
     def test_update_non_list_tags_no_crash(self, sdk):
         """Non-list tag values match create_point: property set, no edge sync."""
-        p = sdk.create_point("statement", "scalar", tags=["alpha"])
-        sdk.update_point(p["id"], tags="not-a-list")
+        p = sdk._create_point("statement", "scalar", tags=["alpha"])
+        sdk._update_point(p["id"], tags="not-a-list")
         # edges untouched — old edge still there
-        assert len(sdk.query_points_by_tag("alpha")) == 1
+        assert len(sdk._query_points_by_tag("alpha")) == 1
 
     def test_update_none_clears_tags(self, sdk):
         """tags=None normalizes to [] like create_point — clears edges, no stale
         state left behind by the 'clear' idiom (#485)."""
-        p = sdk.create_point("statement", "clear-none", tags=["alpha"])
-        sdk.update_point(p["id"], tags=None)
-        assert sdk.query_points_by_tag("alpha") == []
-        assert sdk.get_point(p["id"]).get("tags") is None
+        p = sdk._create_point("statement", "clear-none", tags=["alpha"])
+        sdk._update_point(p["id"], tags=None)
+        assert sdk._query_points_by_tag("alpha") == []
+        assert sdk._get_point(p["id"]).get("tags") is None
 
     def test_update_object_branch_tags(self, sdk):
         """The :Point:Object branch (SET n += $props whole-dict + version bump)
         also syncs TAGGED edges (#485)."""
-        p = sdk.create_point("statement", "entity-ish")
+        p = sdk._create_point("statement", "entity-ish")
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": p["id"]})
-        sdk.update_point(p["id"], tags=["objtag"])
-        assert [r["id"] for r in sdk.query_points_by_tag("objtag")] == [p["id"]]
-        assert sdk.get_point(p["id"])["version"] == 1  # Object branch bumps version
-        sdk.update_point(p["id"], tags=[])
-        assert sdk.query_points_by_tag("objtag") == []
+        sdk._update_point(p["id"], tags=["objtag"])
+        assert [r["id"] for r in sdk._query_points_by_tag("objtag")] == [p["id"]]
+        assert sdk._get_point(p["id"])["version"] == 1  # Object branch bumps version
+        sdk._update_point(p["id"], tags=[])
+        assert sdk._query_points_by_tag("objtag") == []
 
     def test_update_nonexistent_point_no_orphan(self, sdk):
         """update_point on a non-existent id must not create phantom :Tag
         nodes (empty MATCH short-circuits the MERGEs)."""
-        sdk.update_point("000000000000-000000000000", tags=["phantom"])
+        sdk._update_point("000000000000-000000000000", tags=["phantom"])
         assert sdk.graph_overview("tags") == []
 
     def test_int_tag_names_roundtrip(self, sdk):
         """Non-string (int) tag names are param-bound and round-trip."""
-        p = sdk.create_point("statement", "ints", tags=[123])
-        assert [r["id"] for r in sdk.query_points_by_tag(123)] == [p["id"]]
+        p = sdk._create_point("statement", "ints", tags=[123])
+        assert [r["id"] for r in sdk._query_points_by_tag(123)] == [p["id"]]
         names = {t["name"] for t in sdk.graph_overview("tags")}
         assert 123 in names
 
     def test_update_shared_tag_survives_removal(self, sdk):
         """Removing a tag from one point leaves the Tag intact if another
         point still uses it (GC only deletes truly orphaned Tags)."""
-        a = sdk.create_point("statement", "a", tags=["shared"])
-        b = sdk.create_point("statement", "b", tags=["shared"])  # noqa: F841
-        sdk.update_point(a["id"], tags=[])
+        a = sdk._create_point("statement", "a", tags=["shared"])
+        b = sdk._create_point("statement", "b", tags=["shared"])  # noqa: F841
+        sdk._update_point(a["id"], tags=[])
         tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
@@ -849,10 +849,10 @@ class TestUpdatePointTags:
     def test_dedup_syncs_tags(self, sdk):
         """create_point(dedup=True) routes through update_point — tags reconcile
         to the latest call (no stale edges from the earlier tags)."""
-        sdk.create_point("statement", "same content", tags=["first"])
-        sdk.create_point("statement", "same content", dedup=True, tags=["second"])
-        assert sdk.query_points_by_tag("first") == []
-        assert len(sdk.query_points_by_tag("second")) == 1
+        sdk._create_point("statement", "same content", tags=["first"])
+        sdk._create_point("statement", "same content", dedup=True, tags=["second"])
+        assert sdk._query_points_by_tag("first") == []
+        assert len(sdk._query_points_by_tag("second")) == 1
 
 
 class TestOrphanTagGC:
@@ -860,16 +860,16 @@ class TestOrphanTagGC:
 
     def test_delete_gc_orphan_tags(self, sdk):
         """Deleting the only tagged point removes its Tag from list_tags."""
-        p = sdk.create_point("statement", "only tagged", tags=["alpha"])
+        p = sdk._create_point("statement", "only tagged", tags=["alpha"])
         assert len(sdk.graph_overview("tags")) == 1
-        sdk.delete_point(p["id"])
+        sdk._delete_point(p["id"])
         assert sdk.graph_overview("tags") == []
 
     def test_delete_keeps_shared_tag(self, sdk):
         """A tag still used by another point survives GC."""
-        p1 = sdk.create_point("statement", "one", tags=["shared"])
-        sdk.create_point("statement", "two", tags=["shared"])
-        sdk.delete_point(p1["id"])
+        p1 = sdk._create_point("statement", "one", tags=["shared"])
+        sdk._create_point("statement", "two", tags=["shared"])
+        sdk._delete_point(p1["id"])
         tags = sdk.graph_overview("tags")
         assert len(tags) == 1
         assert tags[0]["name"] == "shared"
@@ -881,21 +881,21 @@ class TestOrphanTagGC:
 class TestSanitizeProps:
     def test_create_document_rejects_sourcepath_and_id(self, sdk):
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.create_document("Doc", "planDoc", sourcePath="/etc/passwd")
+            sdk._create_document("Doc", "planDoc", sourcePath="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.create_document("Doc", "planDoc", source_path="/etc/passwd")
+            sdk._create_document("Doc", "planDoc", source_path="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.create_document("Doc", "planDoc", id="/etc/passwd")
+            sdk._create_document("Doc", "planDoc", id="/etc/passwd")
 
     def test_create_document_clean_has_no_sourcepath(self, sdk):
         """Positive: a clean create_document stores no sourcePath property."""
-        doc = sdk.create_document("Clean", "planDoc")
+        doc = sdk._create_document("Clean", "planDoc")
         assert "sourcePath" not in doc
 
     def test_create_document_links_extracted_from_source(self, sdk):
         """#394 + D10: create_document wires the document Source → Source via
         extractedFrom (a document is a :Source)."""
-        doc = sdk.create_document(
+        doc = sdk._create_document(
             "Sourced", "planDoc", extractedFrom="https://docs.example.com/spec"
         )
         proj = sdk._get_proj()
@@ -908,7 +908,7 @@ class TestSanitizeProps:
 
     def test_create_document_no_extracted_from_no_edge(self, sdk):
         """#394 + D10: without extractedFrom, no extractedFrom edge is created."""
-        doc = sdk.create_document("Unsourced", "planDoc")
+        doc = sdk._create_document("Unsourced", "planDoc")
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (d:Source {url:$did})-[:extractedFrom]->(s) RETURN count(s)",
@@ -917,7 +917,7 @@ class TestSanitizeProps:
         assert r[0][0] == 0
 
     def test_update_entity_rejects_sourcepath_and_id(self, sdk):
-        doc = sdk.create_document("Upd", "planDoc")
+        doc = sdk._create_document("Upd", "planDoc")
         did = doc["id"]
         with pytest.raises(ValueError, match="server-managed"):
             sdk.update_knowledge(did, sourcePath="/etc/passwd")
@@ -937,19 +937,19 @@ class TestSanitizeProps:
             sdk.update_knowledge(did, props={"id": "evil"})
 
     def test_update_point_rejects_id_and_sourcepath(self, sdk):
-        p = sdk.create_point("statement", "A")
+        p = sdk._create_point("statement", "A")
         # id binds to the signature → TypeError at the call site (never
         # silently mutates node identity)
         with pytest.raises(TypeError):
-            sdk.update_point(p["id"], **{"id": "evil"})
+            sdk._update_point(p["id"], **{"id": "evil"})
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_point(p["id"], sourcePath="/etc/passwd")
+            sdk._update_point(p["id"], sourcePath="/etc/passwd")
         with pytest.raises(ValueError, match="server-managed"):
-            sdk.update_point(p["id"], source_path="/etc/passwd")
+            sdk._update_point(p["id"], source_path="/etc/passwd")
 
     def test_create_event_document_mint_safe_and_unsafe_ids(self, sdk):
         # Safe basename id mints a document Source (D10: a document is a :Source)
-        sdk.create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
+        sdk._create_event("ev1", "meeting", object="session-2026-08-07.md", objectType="Document")
         rows = sdk._get_proj().g.query(
             "MATCH (s:Source {url:$id}) RETURN count(s)",
             params={"id": "session-2026-08-07.md"},
@@ -957,15 +957,15 @@ class TestSanitizeProps:
         assert rows[0][0] == 1
         # Unsafe id → ValueError at write
         with pytest.raises(ValueError, match="Invalid document id"):
-            sdk.create_event("ev2", "meeting", object="/etc/passwd", objectType="Document")
+            sdk._create_event("ev2", "meeting", object="/etc/passwd", objectType="Document")
         with pytest.raises(ValueError, match="Invalid document id"):
-            sdk.create_event("ev3", "meeting", object="../x", objectType="Document")
+            sdk._create_event("ev3", "meeting", object="../x", objectType="Document")
 
     def test_create_point_explicit_id_preserved(self, sdk):
         """Operator explicit-id path (create_point props.pop('id')) still works."""
         import uuid
         pid = f"op-{uuid.uuid4().hex[:8]}"
-        p = sdk.create_point("statement", "Explicit", id=pid)
+        p = sdk._create_point("statement", "Explicit", id=pid)
         assert p["id"] == pid
 
 
@@ -978,8 +978,8 @@ class TestDocumentFtsPostRetrievalFilters:
     ``id`` instead of ``url``."""
 
     def test_document_with_kind_returns_the_document(self, sdk):
-        doc = sdk.create_document("Licensing Brief", "brief")
-        hits = sdk.tortoise_fts_query("licensing", entity_type="document",
+        doc = sdk._create_document("Licensing Brief", "brief")
+        hits = sdk._tortoise_fts_query("licensing", entity_type="document",
                                       kind="brief")
         ids = {h["id"] for h in hits}
         assert doc["id"] in ids, \
@@ -1020,17 +1020,17 @@ def _make_draft_operator(sdk, op_type, inputs, *, label=None):
             "CREATE (o)-[:NAND {idx:$i}]->(s)",
             params={"oid": oid, "sid": pid, "i": i},
         )
-    return sdk.get_point(oid)
+    return sdk._get_point(oid)
 
 
 class TestPromotePoint:
     def test_promote_draft_to_live(self, sdk):
         p = _make_point(sdk, status="draft")
-        res = sdk.promote_point(p["id"])
+        res = sdk._promote_point(p["id"])
         assert res["promoted"] is True
         assert res["status"] == "live"
         assert res["reviewed"] is True
-        live = sdk.get_point(p["id"])
+        live = sdk._get_point(p["id"])
         assert live["status"] == "live"
         assert live["reviewed"] is True
         assert "promotedAt" in live
@@ -1038,35 +1038,35 @@ class TestPromotePoint:
     def test_promote_already_live_is_noop(self, sdk):
         # DE2E-N9: already-live promote → no-op, no error.
         p = _make_point(sdk, status="live")
-        res = sdk.promote_point(p["id"])
+        res = sdk._promote_point(p["id"])
         assert res == {"id": p["id"], "status": "live", "promoted": False,
                        "blocked": False, "reason": "already_live"}
 
     def test_promote_terminal_point_is_blocked(self, sdk):
         p = _make_point(sdk, status="draft")
-        sdk.retract_point(p["id"])
-        res = sdk.promote_point(p["id"])
+        sdk._retract_point(p["id"])
+        res = sdk._promote_point(p["id"])
         assert res["blocked"] is True
         assert res["reason"] == "not_draft"
         assert res["status"] == "retracted"
 
     def test_promote_missing_point_raises(self, sdk):
         with pytest.raises(ValueError, match="No point"):
-            sdk.promote_point("no-such-point")
+            sdk._promote_point("no-such-point")
 
     def test_promote_blocked_on_quarantined_batch(self, sdk):
         from tortoise.mining import quarantine_batch
         p = _make_point(sdk, status="draft", batch_id="qb1")
         quarantine_batch(sdk._get_proj(), "qb1", reason="EP drift (W-3)")
-        res = sdk.promote_point(p["id"])
+        res = sdk._promote_point(p["id"])
         assert res == {"id": p["id"], "status": "draft", "promoted": False,
                        "blocked": True, "reason": "batch_quarantined",
                        "batch_id": "qb1"}
-        assert sdk.get_point(p["id"])["status"] == "draft"  # stays draft
+        assert sdk._get_point(p["id"])["status"] == "draft"  # stays draft
 
     def test_promote_not_blocked_by_unregistered_batch(self, sdk):
         p = _make_point(sdk, status="draft", batch_id="never-ran")
-        res = sdk.promote_point(p["id"])
+        res = sdk._promote_point(p["id"])
         assert res["promoted"] is True
 
     def test_r16_operator_promoted_once_all_endpoints_live(self, sdk):
@@ -1075,12 +1075,12 @@ class TestPromotePoint:
         op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
         assert op["status"] == "draft"
         # promote only A → operator must stay draft (B not live yet)
-        sdk.promote_point(a["id"])
-        assert sdk.get_point(op["id"])["status"] == "draft"
+        sdk._promote_point(a["id"])
+        assert sdk._get_point(op["id"])["status"] == "draft"
         # promote B → all endpoints live → R16 promotes the operator
-        res = sdk.promote_point(b["id"])
+        res = sdk._promote_point(b["id"])
         assert res["operator_nodes_promoted"] == [op["id"]]
-        assert sdk.get_point(op["id"])["status"] == "live"
+        assert sdk._get_point(op["id"])["status"] == "live"
 
     def test_r16_no_promote_for_operator_with_live_endpoints_only(self, sdk):
         # operator whose endpoints were ALREADY live before this promote
@@ -1088,7 +1088,7 @@ class TestPromotePoint:
         b = _make_point(sdk, status="draft")
         op = _make_draft_operator(sdk, "IMPL", [a["id"], b["id"]])
         # promoting b: endpoint a is live, b now live → operator promotes
-        res = sdk.promote_point(b["id"])
+        res = sdk._promote_point(b["id"])
         assert op["id"] in res["operator_nodes_promoted"]
 
     def test_r16_skips_live_operator_nodes(self, sdk):
@@ -1097,8 +1097,8 @@ class TestPromotePoint:
         b = _make_point(sdk, status="draft")
         op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
         _set_status(sdk, op["id"], "live")
-        sdk.promote_point(a["id"])
-        res = sdk.promote_point(b["id"])
+        sdk._promote_point(a["id"])
+        res = sdk._promote_point(b["id"])
         assert res["operator_nodes_promoted"] == []
 
     def test_r16_refuses_an_operator_over_a_flag_dead_endpoint(self, sdk):
@@ -1115,21 +1115,21 @@ class TestPromotePoint:
         live_endpoint = _make_point(sdk, status="draft", content="fresh claim")
         dead = _make_point(sdk, status="live", content="claim to be invalidated")
         replacement = _make_point(sdk, status="live", content="the correction")
-        sdk.invalidate_point(dead["id"], replacement["id"])
+        sdk._invalidate_point(dead["id"], replacement["id"])
         # The staged shape IS the defect: status untouched, flag set.
-        dead_point = sdk.get_point(dead["id"])
+        dead_point = sdk._get_point(dead["id"])
         assert dead_point["status"] == "live", (
             "#10828's premise: invalidate_point leaves the status alone")
         assert dead_point["outdated"] is True
 
         op = _make_draft_operator(sdk, "NAND", [live_endpoint["id"], dead["id"]])
-        res = sdk.promote_point(live_endpoint["id"])
+        res = sdk._promote_point(live_endpoint["id"])
 
         assert res["operator_nodes_promoted"] == [], (
             "an operator over a flag-dead endpoint must NOT be promoted — "
             "EP strips that input, so the promotion buys a degenerate factor "
             "and a permanently-live operator over a dead endpoint")
-        assert sdk.get_point(op["id"])["status"] == "draft"
+        assert sdk._get_point(op["id"])["status"] == "draft"
 
     def test_r16_still_promotes_over_live_endpoints_that_are_not_flag_dead(
             self, tmp_path):
@@ -1149,10 +1149,10 @@ class TestPromotePoint:
             a = _make_point(sdk, status="draft", content="a")
             b = _make_point(sdk, status="live", content="b")
             op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
-            assert sdk.get_point(b["id"]).get("outdated") is not True
-            res = sdk.promote_point(a["id"])
+            assert sdk._get_point(b["id"]).get("outdated") is not True
+            res = sdk._promote_point(a["id"])
             assert res["operator_nodes_promoted"] == [op["id"]]
-            assert sdk.get_point(op["id"])["status"] == "live"
+            assert sdk._get_point(op["id"])["status"] == "live"
             types = [json.loads(line).get("type")
                      for line in (tmp_path / "events.jsonl").read_text().splitlines()
                      if line.strip()]
@@ -1166,7 +1166,7 @@ class TestPromotePoint:
         sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                           event_log_path=str(tmp_path / "events.jsonl"))
         p = _make_point(sdk, status="draft")
-        sdk.promote_point(p["id"])
+        sdk._promote_point(p["id"])
         log = sdk._get_event_log()
         assert log is not None
         types = [e["type"] for e in log.read_all() if e.get("type")]
@@ -1189,9 +1189,9 @@ def test_de2e8_contradiction_propagates_after_promotion(sdk):
             "n.baseline_set=true",
             params={"id": pid, "al": 8.0, "be": 1.0},
         )
-    sdk.promote_point(a["id"])
-    sdk.promote_point(b["id"])
-    assert sdk.get_point(op["id"])["status"] == "live", (
+    sdk._promote_point(a["id"])
+    sdk._promote_point(b["id"])
+    assert sdk._get_point(op["id"])["status"] == "live", (
         "R16: operator must go live once ALL endpoints are live"
     )
 
@@ -1228,10 +1228,10 @@ def test_promote_operator_node_is_blocked(sdk):
     a = _make_point(sdk, status="draft", content="a")
     b = _make_point(sdk, status="draft", content="b")
     op = _make_draft_operator(sdk, "NAND", [a["id"], b["id"]])
-    res = sdk.promote_point(op["id"])
+    res = sdk._promote_point(op["id"])
     assert res["blocked"] is True
     assert res["reason"] == "is_operator"
-    assert sdk.get_point(op["id"])["status"] == "draft"
+    assert sdk._get_point(op["id"])["status"] == "draft"
 
 
 def test_r16_skips_unset_status_operator(sdk):
@@ -1251,14 +1251,14 @@ def test_r16_skips_unset_status_operator(sdk):
     op = _make_draft_operator(sdk2, "NAND", [a["id"], b["id"]])
     sdk2._get_proj().g.query(
         "MATCH (o:Point {id:$id}) REMOVE o.status", params={"id": op["id"]})
-    assert sdk2.get_point(op["id"]).get("status") is None
-    res = sdk2.promote_point(a["id"])
+    assert sdk2._get_point(op["id"]).get("status") is None
+    res = sdk2._promote_point(a["id"])
     assert res["operator_nodes_promoted"] == [], (
         "unset-status operator must NOT be re-promoted"
     )
-    res2 = sdk2.promote_point(b["id"])
+    res2 = sdk2._promote_point(b["id"])
     assert res2["operator_nodes_promoted"] == []
-    assert sdk2.get_point(op["id"]).get("status") is None
+    assert sdk2._get_point(op["id"]).get("status") is None
     lines = open(os.path.join(tmp, "events.jsonl")).read().splitlines()  # noqa: SIM115
     types = [json.loads(l).get("type") for l in lines]  # noqa: E741
     assert "OperatorPromoted" not in types, (
@@ -1286,9 +1286,9 @@ def test_update_content_replay_hash_parity(tmp_path):
     event_log = tmp_path / "events.jsonl"
     sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                       event_log_path=str(event_log))
-    p = sdk.create_point("statement", "X")
-    sdk.update_point(p["id"], content="Y")
-    live_hash = sdk.get_point(p["id"])["content_hash"]
+    p = sdk._create_point("statement", "X")
+    sdk._update_point(p["id"], content="Y")
+    live_hash = sdk._get_point(p["id"])["content_hash"]
     assert live_hash == hashlib.sha256(b"Y").hexdigest()
 
     # fold() is the replay's single source of truth (projection module
@@ -1308,7 +1308,7 @@ def test_update_content_replay_hash_parity(tmp_path):
         params={"id": p["id"]},
     ).result_set[0]
     assert row[0] == "Y"
-    again = sdk.create_point("statement", "Y", dedup=True)
+    again = sdk._create_point("statement", "Y", dedup=True)
     assert again["id"] == p["id"]
     sdk.close()
 
@@ -1323,9 +1323,9 @@ def test_promotion_survives_rebuild(sdk, tmp_path):
     a = _make_point(sdk2, status="draft", content="a")
     b = _make_point(sdk2, status="draft", content="b")
     op = _make_draft_operator(sdk2, "NAND", [a["id"], b["id"]])
-    sdk2.promote_point(a["id"])
-    sdk2.promote_point(b["id"])
-    assert sdk2.get_point(op["id"])["status"] == "live"
+    sdk2._promote_point(a["id"])
+    sdk2._promote_point(b["id"])
+    assert sdk2._get_point(op["id"])["status"] == "live"
     sdk2.close()
 
     proj = sdk._get_proj()
@@ -1428,86 +1428,86 @@ class TestExplicitDraftIsHonoured1088:
         # 'draft'; the decide parts were already born live (#2199). Both
         # families must stay live — #1088's ruling is universal, and #6107's
         # acceptance rail is what this pin answers.
-        p = sdk.create_point(kind, "the sky is blue")
+        p = sdk._create_point(kind, "the sky is blue")
         assert p["status"] == "live"
-        assert sdk.get_point(p["id"])["status"] == "live"
+        assert sdk._get_point(p["id"])["status"] == "live"
 
     def test_1088_explicit_draft_survives_default_operator_promotion(self, sdk):
         """#1088 REGRESSION: a point explicitly created draft is NOT promoted
         to live as a side effect of create_operator's DEFAULT promote_source
         (the exact call the tortoise_create_operator MCP tool makes).
         """
-        draft = sdk.create_point("statement", "deliberately staged",
+        draft = sdk._create_point("statement", "deliberately staged",
                                  status="draft")
-        other = sdk.create_point("statement", "second operand")
-        assert sdk.get_point(draft["id"])["status"] == "draft"
-        sdk.create_operator("IMPL", draft["id"], [other["id"]])
-        assert sdk.get_point(draft["id"])["status"] == "draft", (
+        other = sdk._create_point("statement", "second operand")
+        assert sdk._get_point(draft["id"])["status"] == "draft"
+        sdk._create_operator("IMPL", draft["id"], [other["id"]])
+        assert sdk._get_point(draft["id"])["status"] == "draft", (
             "explicit draft must not be moved to live by create_operator"
         )
 
     def test_1088_explicit_draft_survives_default_direct_edge(self, sdk):
         """#1088 REGRESSION: the direct-edge promotion-on-created path is
         narrowed the same way — an explicit draft stays draft."""
-        draft = sdk.create_point("statement", "staged draft", status="draft")
-        other = sdk.create_point("statement", "peer")
-        sdk.create_direct_edge("IMPL", draft["id"], other["id"])
-        assert sdk.get_point(draft["id"])["status"] == "draft"
+        draft = sdk._create_point("statement", "staged draft", status="draft")
+        other = sdk._create_point("statement", "peer")
+        sdk._create_direct_edge("IMPL", draft["id"], other["id"])
+        assert sdk._get_point(draft["id"])["status"] == "draft"
 
     def test_1088_null_status_is_still_filled_with_live(self, sdk):
         """The narrowed clause still fills in a never-set status: promotion
         is not simply disabled. A raw NULL-status node goes live on the first
         operator edge."""
-        p = sdk.create_point("statement", "legacy node")
+        p = sdk._create_point("statement", "legacy node")
         _set_status(sdk, p["id"], None)
-        other = sdk.create_point("statement", "peer")
-        sdk.create_operator("IMPL", p["id"], [other["id"]])
-        assert sdk.get_point(p["id"])["status"] == "live"
+        other = sdk._create_point("statement", "peer")
+        sdk._create_operator("IMPL", p["id"], [other["id"]])
+        assert sdk._get_point(p["id"])["status"] == "live"
 
     def test_1088_explicit_draft_still_promotable(self, sdk):
         """The explicit routes still work: promote_point moves a
         deliberately-drafted point to live."""
-        p = sdk.create_point("statement", "ready to ship", status="draft")
-        assert sdk.get_point(p["id"])["status"] == "draft"
-        res = sdk.promote_point(p["id"])
+        p = sdk._create_point("statement", "ready to ship", status="draft")
+        assert sdk._get_point(p["id"])["status"] == "draft"
+        res = sdk._promote_point(p["id"])
         assert res["promoted"] is True
-        assert sdk.get_point(p["id"])["status"] == "live"
+        assert sdk._get_point(p["id"])["status"] == "live"
 
     def test_1088_explicit_draft_promotable_via_update_point(self, sdk):
-        p = sdk.create_point("statement", "ready", status="draft")
-        sdk.update_point(p["id"], status="live")
-        assert sdk.get_point(p["id"])["status"] == "live"
+        p = sdk._create_point("statement", "ready", status="draft")
+        sdk._update_point(p["id"], status="live")
+        assert sdk._get_point(p["id"])["status"] == "live"
 
     def test_1088_update_point_live_on_live_is_idempotent(self, sdk):
         """#1088: with live as the create default, ordinary flows reach
         update_point(status="live") on an ALREADY-live point. That is an
         idempotent success (mirrors promote_point's DE2E-N9 already_live
         no-op), not the draft-born guard's illegal transition."""
-        p = sdk.create_point("statement", "already live")
-        assert sdk.get_point(p["id"])["status"] == "live"
-        sdk.update_point(p["id"], status="live")
-        sdk.update_point(p["id"], status="live")
-        assert sdk.get_point(p["id"])["status"] == "live"
+        p = sdk._create_point("statement", "already live")
+        assert sdk._get_point(p["id"])["status"] == "live"
+        sdk._update_point(p["id"], status="live")
+        sdk._update_point(p["id"], status="live")
+        assert sdk._get_point(p["id"])["status"] == "live"
 
     def test_1088_update_point_live_plus_props_still_applies_props(self, sdk):
         """#1088: when status="live" rides along with other props on an
         ALREADY-live point, only the status is dropped as already-satisfied —
         the remaining props are still the caller's and must be applied (the
         `len(props) > 1` branch), never silently discarded."""
-        p = sdk.create_point("statement", "already live with props")
-        assert sdk.get_point(p["id"])["status"] == "live"
-        out = sdk.update_point(p["id"], status="live", confidence=0.42)
+        p = sdk._create_point("statement", "already live with props")
+        assert sdk._get_point(p["id"])["status"] == "live"
+        out = sdk._update_point(p["id"], status="live", confidence=0.42)
         assert out["confidence"] == 0.42
-        after = sdk.get_point(p["id"])
+        after = sdk._get_point(p["id"])
         assert after["status"] == "live"
         assert after["confidence"] == 0.42
 
     def test_1088_update_point_still_refuses_terminal_resurrection(self, sdk):
         """The narrowing is only for the already-live case: a terminal point
         cannot be resurrected through the promote guard."""
-        p = sdk.create_point("statement", "retracted claim", status="live")
-        sdk.retract_point(p["id"])
-        assert sdk.get_point(p["id"])["status"] == "retracted"
+        p = sdk._create_point("statement", "retracted claim", status="live")
+        sdk._retract_point(p["id"])
+        assert sdk._get_point(p["id"])["status"] == "retracted"
         with pytest.raises(ValueError):
-            sdk.update_point(p["id"], status="live")
+            sdk._update_point(p["id"], status="live")
 

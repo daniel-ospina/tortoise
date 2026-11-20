@@ -501,7 +501,7 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "vector, so a syntactic rule would force dozens of declarations that assert "
         "nothing. There are TWO live instances, and they are dispositioned differently: "
         "`sdk._update_entity` carries the NAMED `#4094` exemption in the register, and "
-        "`sdk.update_point` merges through `n += $props` in its promote arm while ALSO "
+        "`sdk._update_point` merges through `n += $props` in its promote arm while ALSO "
         "calling `encode_for_row` — so discovery classes it `gated` before any write "
         "predicate runs and it owes (and carries) no declaration (#11398)"
     ),
@@ -1660,9 +1660,9 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
-    "tortoise.sdk::ingest_corpus": (
+    "tortoise.sdk::_ingest_corpus": (
         CENSUS_RECOGNISED,
-        "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
+        "`tortoise/sdk.py::_ingest_corpus` — `self._session_embedding(...)` + "
         "`set_embedding_clause(\"e\")`, the same canonical chain"),
     "tortoise.vector_write::set_embedding_clause": (
         CENSUS_EXEMPT,
@@ -1787,9 +1787,9 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_write_capture_turns": (
         ("tortoise/sdk.py", "_write_capture_turns",
          '_turn_snapshot["embedding"] ='),),
-    "tortoise.sdk::ingest_corpus": (
-        ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
-        ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
+    "tortoise.sdk::_ingest_corpus": (
+        ("tortoise/sdk.py", "_ingest_corpus", "self._session_embedding("),
+        ("tortoise/sdk.py", "_ingest_corpus", "set_embedding_clause("),),
     "tortoise.vector_write::set_embedding_clause": (
         ("tortoise/vector_write.py", "set_embedding_clause",
          "vecf32({vector_expr})"),),
@@ -8818,7 +8818,11 @@ def _cypher_label(label: str) -> str:
 #: `tortoise_fts_query`), and a rename there must red
 #: `tests/test_dod_5090_probe.py`'s caller pin rather than silently make this
 #: census name a method that no longer exists.
-VECTOR_LEG_SDK_METHOD = "tortoise_fts_query"
+# ⛔ #12901 FINAL batch: the method was PRIVATISED to `_tortoise_fts_query` (body
+# unchanged, public spelling a tombstone), and `tool_registry`'s rows were re-pointed
+# with it — so the ONE name this census keys on moves too. A rename still reds the
+# caller pin (`tests/test_dod_5090_probe.py`), which is the point of naming it.
+VECTOR_LEG_SDK_METHOD = "_tortoise_fts_query"
 
 #: The module-level runner the leg itself lives in — the second half of the
 #: path, so a reader can walk it without searching.

@@ -189,7 +189,7 @@ def _retrieval_legs(sdk, query: str, *, kind: str | None = None,
     reproduced.
     """
     leg_trace: list[dict] = []
-    sdk.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+    sdk._recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
     marker = declared_degraded_read(leg_trace)
     refusal_reason: str | None = None
     try:
@@ -224,8 +224,8 @@ def test_partial_turn_corpus_read_is_declared_degraded(
         turn_ids = _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-part")
         # Extracted Points ARE embedded (the "partially embedded" half).
         _embedder(monkeypatch, embedder)
-        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
-        sdk.create_point("statement", "website config root cause claim", id="ext-2")
+        sdk._create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        sdk._create_point("statement", "website config root cause claim", id="ext-2")
 
         census = sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n), count(n.embedding)").result_set[0]
@@ -285,10 +285,10 @@ def test_an_out_of_scope_object_arm_cannot_launder_the_read(
         _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-obj")
         _embedder(monkeypatch, embedder)
         # Extracted Points ARE embedded (the in-scope half of the corpus).
-        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        sdk._create_point("statement", "auth dead-end top issue claim", id="ext-1")
         # An embedded Object OUTSIDE the read's objectKind scope — the
         # production "plus any embedded Object" shape that laundered.
-        obj = sdk.create_object("website config", objectKind="other")
+        obj = sdk._create_object("website config", objectKind="other")
 
         legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
@@ -347,7 +347,7 @@ def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
         # An embedded Object IN the read's objectKind scope but TERMINAL: the
         # Object leg's own status clause excludes it, so it is NOT material
         # for this read even though it physically holds a dense vector.
-        obj = sdk.create_object("auth dead-end website config",
+        obj = sdk._create_object("auth dead-end website config",
                                 objectKind="event", status="retracted")
         rows = sdk._get_proj().g.query(
             "MATCH (o:Object {id: $i}) "
@@ -398,8 +398,8 @@ def test_the_returned_material_is_keyword_only_for_the_turns(
     try:
         _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-prov")
         _embedder(monkeypatch, embedder)
-        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
-        hits = sdk.recall_state("auth dead-end", kind="event", limit=5)
+        sdk._create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        hits = sdk._recall_state("auth dead-end", kind="event", limit=5)
         turn_hits = [h for h in hits if str(h.get("id", "")).startswith(
             "sess-4199-prov_t")]
         assert turn_hits, f"no turn hit in the read: {[h.get('id') for h in hits]}"
@@ -454,7 +454,7 @@ def test_unscoped_read_keeps_reporting_hybrid(
     try:
         _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-noscope")
         _embedder(monkeypatch, embedder)
-        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        sdk._create_point("statement", "auth dead-end top issue claim", id="ext-1")
 
         legs = _retrieval_legs(sdk, "auth dead-end", limit=5)
     finally:
@@ -480,7 +480,7 @@ def test_empty_kind_scope_read_is_not_refused(
     sdk = sdk_factory()
     try:
         _embedder(monkeypatch, embedder)
-        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        sdk._create_point("statement", "auth dead-end top issue claim", id="ext-1")
         legs = _retrieval_legs(
             sdk, "auth dead-end", kind="kind-nobody-wrote", limit=5)
     finally:

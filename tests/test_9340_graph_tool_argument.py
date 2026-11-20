@@ -823,7 +823,7 @@ def test_list_graphs_names_the_workspaces_other_graphs(monkeypatch):
                      f"org_{ORG_A}_g_fund_b", "org_org_b_x", "org_org_b_y"]
 
     class _SDK:
-        def list_graphs(self):
+        def _list_graphs(self):
             return list(server_graphs)
 
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _SDK())
@@ -854,7 +854,7 @@ def test_a_prefix_collision_between_workspace_ids_does_not_leak(monkeypatch):
     server_graphs = [f"org_{ORG_A}", f"org_{ORG_A}_g_fund_a", f"org_{other}_x"]
 
     class _SDK:
-        def list_graphs(self):
+        def _list_graphs(self):
             return list(server_graphs)
 
     monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _SDK())
@@ -882,7 +882,7 @@ def test_a_prefix_collision_between_workspace_ids_does_not_leak(monkeypatch):
 def test_a_degraded_graph_set_falls_back_to_the_tenant_filter(monkeypatch):
     """Discovery is best-effort; a failure must not widen the answer."""
     class _SDK:
-        def list_graphs(self):
+        def _list_graphs(self):
             return [f"org_{ORG_A}", "org_org_b_x"]
 
     def _boom(org_id):
