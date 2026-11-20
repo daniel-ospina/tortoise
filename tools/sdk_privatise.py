@@ -60,6 +60,23 @@ USAGE
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the
+# rest of the imports, so a stale local `python3` fails LOUDLY with a remedy instead of
+# with whichever 3.12-only construct happens to trip first. This tool was ADDED by #12901
+# and carried no guard: `tests/test_entry_point_python_guard.py` walks every entry point in
+# `tools/`, so the omission was caught the moment the file became a required-surface
+# subject rather than a lane scratch script.
+if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
+    print(
+        f"tools/sdk_privatise.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/sdk_privatise.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(70)
+
 import argparse
 import ast
 import hashlib
@@ -70,12 +87,6 @@ import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/sdk_privatise.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]})"
-    )
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -143,7 +154,19 @@ SWEEP_NAMES = 66
 #: `requests`/`httpx` header map, same file:591), plus 17 typed references in that one new file
 #: that `--apply` rewrote. Again row-diffed against the pre-cut head, not arithmetic.
 #: Measured with `--repin`, not arithmetic.
-SWEEP_RESIDUE = (11760, "7eac1e084fe07dfc")
+#: RE-PINNED DOWN → (11752, "910c86ce66c0eac9") by the lane that re-pointed the retired-name
+#: CALL SITES (`#13899`'s correction comment: 25 NAME ids, 15 of them in
+#: `tests/test_vocab_gating_by_graph.py`). ⛔ The move is DOWNWARD, which is the harmless
+#: direction — a residue count that FALLS cannot hide a new untyped reference. Each of the 8
+#: removed rows is one name the lane re-pointed to its private spelling, and each was diffed
+#: by re-running `edits_for` per file against the pre-fix blob (`git show 3dd8717b66^:<f>`),
+#: never by arithmetic: `type(sdk).promote_point` 1, `scale_graph.compute_confidence` 2,
+#: `type(sdk).issue_insight` 1, `b.compute_confidence` 1, `clone.set_point_baseline` 1,
+#: `clone.dream` 1, `store.delete_point` 1 — seven receiver expressions over six files, and
+#: the eighth row is `scale_graph.compute_confidence`'s second occurrence. A receiver such as
+#: `type(sdk)` or `store` is exactly what the sweep refuses to guess at, so the row was
+#: REPORTED rather than rewritten; fixing the call site is what removes it.
+SWEEP_RESIDUE = (11752, "910c86ce66c0eac9")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

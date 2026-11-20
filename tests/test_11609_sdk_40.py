@@ -31,6 +31,7 @@ what a delegation changes. The writers' own behaviour is covered by their own su
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -659,6 +660,14 @@ def test_an_absent_control_plane_refuses_by_naming_the_mode_and_never_returns_em
 
 # ── 4. the instrument: like-for-like, with the fallback kept ────────────────────
 
+#: An approved row in `docs/product/beta-sdk-surface.md`'s surface table: `(ordinal, name)`.
+#: The ORDINAL is the discriminator, not the spelling — row 1 is `Tortoise(...)`, the
+#: entry-point CLASS, which is the one approved name that is not a method and therefore the
+#: one row `sdk_public_methods` must not count. Matching on "looks like a snake_case name"
+#: gets this wrong twice: it drops `close()` (rendered with parens, but a real method) and
+#: it cannot tell an entry point from a method.
+_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`")
+
 
 def test_the_checker_compares_declared_names_that_resolve_and_reports_40():
     sys.path.insert(0, str(ROOT / "tools"))
@@ -680,7 +689,40 @@ def test_the_checker_compares_declared_names_that_resolve_and_reports_40():
         # public-method count, because `tests/test_surface_manifest.py` pins it against
         # the manifest's `counts.sdk_public_methods`. Redefining it would have made that
         # pin compare two different questions (the #10034 defect, inverted).
-        assert live["sdk"] == live["sdk_public_methods"] >= 40
+        # ⛔ #12901 FINAL batch: the approved surface is **40 NAMES**, and only **39** of them
+        # are METHOD rows — row 1 is the `Tortoise(...)` entry point, a class, not a method
+        # (`docs/product/beta-sdk-surface.md`; this file's own docstring states the same
+        # split). `sdk_public_methods` counts METHODS by construction, so the two views
+        # differ by exactly that row.
+        #
+        # Before the retirement the bound here read `>= 40` and was satisfied by the 105
+        # OVER-DELIVERED methods, so it never exercised the distinction — 40 methods happened
+        # to exist. Landing on the approved 39 exposed the conflation. The repair is an
+        # EQUALITY against the doc's own rows: a lowered bound would have CONFIRMED the
+        # conflation rather than fixed it, and a number chosen to make the line pass is the
+        # false pass this assertion exists to prevent.
+        beta_rows = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        rows = [(int(m.group(1)), m.group(2))
+                for m in map(_APPROVED_ROW.match, beta_rows) if m]
+        rows.sort()
+        assert len(rows) == 40, (
+            "the approved surface table must carry 40 rows — the owner's list")
+        assert rows[0] == (1, "Tortoise(...)"), (
+            f"row 1 of the approved table is {rows[0]!r}, not the `Tortoise(...)` entry "
+            "point — the names/methods split below is derived from the ordinal, so the "
+            "entry point moving is a pin move, not a count to adjust")
+        method_rows = [name for ordinal, name in rows if ordinal != 1]
+        assert len(method_rows) == 39, (
+            f"the approved table carries {len(method_rows)} method rows, not 39 — the "
+            "names/methods split this assertion rests on has moved")
+        assert live["sdk_public_methods"] == len(method_rows), (
+            f"`sdk_public_methods` is {live['sdk_public_methods']} and the approved table "
+            f"carries {len(method_rows)} method rows — the live surface and the approved "
+            "one must be EQUAL, method row for method row")
+        assert live["sdk"] == live["sdk_public_methods"], (
+            "`sdk` and `sdk_public_methods` are the same question and must agree")
         assert live["sdk_public_methods"] != live["sdk_declared"], (
             "the two views coincide only if the off-surface set is empty — if they do, "
             "the fallback has stopped reporting anything"
