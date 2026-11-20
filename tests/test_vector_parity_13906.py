@@ -1025,15 +1025,28 @@ def test_the_float64_oracle_agrees_with_a_float32_store(harness):
     asserted) but the rung's tie policy: the same ids, and any permutation
     inside one distance bucket rather than across buckets.
 
+    ⛔ WHICH OF ITS TWO ASSERTIONS CARRIES THE POWER — recorded because the README
+    cell cites this test as the tie-policy gate, and the `order != "diverged"`
+    line CANNOT fire from the mechanism under test. `compare()` buckets at
+    `TIE_TOL = 1e-6` while the float32-induced distance deltas on this corpus
+    measure 2.06e-9 … 4.40e-9 — roughly 250x BELOW one bucket — so any permutation
+    rounding can cause lands in the SAME bucket and is classified `tie` at worst.
+    That line reds only on a corpus-scale move (measured: 0.9458), i.e. a fixture
+    change. The real power is the `ids_equal` assertion (mutant: an extra
+    near-query row → RED), and the tie-vs-cross-bucket discrimination is pinned
+    by `test_a_within_tie_permutation_is_NOT_a_divergence` and
+    `test_a_cross_distance_permutation_IS_a_divergence` — both named here so a
+    reader does not take a defensive guard for the load-bearing one.
+
     ⛔ WHY IT CANNOT BE VACUOUS: `as_f32` is guarded by a non-vacuity assert
     (float32 rounding must change at least one coordinate), so the identity
     mutant — `as_f32` returning its argument, which would compare float64 with
     float64 and pass while measuring nothing — reds. What the assert buys is the
     same thing `--poison vector` buys on the live stores: a comparison that has
     only ever seen agreement has not been shown able to see disagreement, and
-    `compare()`'s ability to red on a changed id set and on a cross-bucket
-    re-order is pinned separately (`test_a_missing_id_is_reported_as_recall_loss`,
-    `test_a_cross_distance_permutation_IS_a_divergence`).
+    `compare()`'s ability to red on a changed id set is pinned separately
+    (`test_a_missing_id_is_reported_as_recall_loss`) — a different question from
+    the tie policy named above, which those two tests cover.
     """
     import numpy as np
 
@@ -1075,6 +1088,17 @@ def test_the_float64_oracle_agrees_with_a_float32_store(harness):
             f"{name}: rounding the corpus and the query to float32 changed WHICH "
             f"rows the oracle ranks, so a float32 store reds the record arm for a "
             f"precision reason rather than a defect: {diff}")
+        # ⛔ A DEFENSIVE GUARD, NOT THE LOAD-BEARING ASSERTION — said here because
+        # the README cell cites this line as the tie-policy gate. It CANNOT fire
+        # from the mechanism under test: `compare()` buckets at `TIE_TOL = 1e-6`
+        # and the float32-induced deltas on this corpus measure 2.06e-9…4.40e-9,
+        # ~250x BELOW one bucket, so any permutation rounding causes lands in the
+        # SAME bucket → `tie` at worst. It reds only on a corpus-scale move
+        # (measured: 0.9458), i.e. a fixture change. The real power of this test
+        # is `ids_equal` above (mutant: an extra near-query row → RED), and the
+        # tie-vs-cross-bucket discrimination is pinned by
+        # `test_a_within_tie_permutation_is_NOT_a_divergence` and
+        # `test_a_cross_distance_permutation_IS_a_divergence` (review round 9).
         assert diff["order"] != "diverged", (
             f"{name}: float32 rounding moved a row ACROSS a distance bucket — a "
             f"re-order, not the tie permutation the rung allows: {diff}")
