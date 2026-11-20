@@ -17173,7 +17173,7 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     # ⛔ THE TABLE IS CENSUSED BEFORE IT IS READ. This arm walks the entries it FINDS, so a
     # DROPPED entry converts a graded pair back to an ungraded one with no red anywhere — the
     # defect `_D5_CURRENT_CLAIM_LABELS` was created for, and the one this table reproduced
-    # (#14003 review, round 2, P3). A duplicate label satisfies a set comparison while one
+    # (#14003 review, round 2, P2). A duplicate label satisfies a set comparison while one
     # entry is never read, which is what the length arm is for.
     labels = [label for label, _pattern, _key, _a, _b in _D5_PINNED_PAIRS]
     dropped = sorted(_D5_PINNED_PAIR_LABELS - set(labels))
