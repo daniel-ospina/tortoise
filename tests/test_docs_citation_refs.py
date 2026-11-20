@@ -3841,8 +3841,8 @@ def _d5_class_members(char_class: str) -> set[str] | None:
     ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
     over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
     inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` on a
-    probe carrying a lone `\` line, where this class counts `2` — the two agree at `2` only on
-    the 4-line probe, which carries no `\`. So the escape model, answering `{+,-}`, grades a
+    probe carrying a lone `\` line, where this class counts `2` — the two agree at `2` on any
+    `\`-free probe, not only the 4-line one. So the escape model, answering `{+,-}`, grades a
     SUPERSET as the class. That over-acceptance is the DECLARED superset written up at
     `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
     impossible diff line (no line of a unified diff is a bare `\`: every diff BODY line carries a
@@ -3870,9 +3870,11 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             # cannot run as a BLANK-class prescription. The rule, exactly as the two branches below
             # implement it (#14026 review, P2 — MEASURED: this comment used to merge three
             # different spellings into one sentence, and then two of them into a second one):
-            #   * an escaped `-` with ANY character after it is refused, because that `-` is a
-            #     RANGE — `grep -cE` refuses `^[\-+]$` and `^[+\-+]$` with `Invalid range end`,
-            #     rc 2, and both answer `None` here;
+            #   * an escaped `-` with any character after it is refused as a RANGE. grep agrees
+            #     only where that range DESCENDS — `grep -cE` refuses `^[\-+]$` and `^[+\-+]$`
+            #     with `Invalid range end`, rc 2 — while an ASCENDING one grep RUNS: `^[+\-z]$`
+            #     -> rc 0, count `3` (measured), and this helper still answers `None`, an
+            #     over-refusal in the safe direction rather than agreement with grep;
             #   * an escaped `-` in the LAST position is consumed as the member `-`, which is
             #     what keeps `[+\-]` accepted — it also matches a lone `\`, so it counts `3` on
             #     a probe carrying one where this class counts `2`;
@@ -3908,8 +3910,8 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
     `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
     are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
-    SUPERSET documented in the NEXT paragraph. They agree at `2` only on the 4-line probe, which
-    carries no `\`. So the retired list REFUSING `^[+\-]$` was reading it as what it is — NOT
+    SUPERSET documented in the NEXT paragraph. They agree at `2` on any `\`-free probe, not
+    only the 4-line one. So the retired list REFUSING `^[+\-]$` was reading it as what it is — NOT
     this class — rather than mis-reading it; that `main` now accepts the spelling as a DECLARED
     SUPERSET is a deliberate widening (stated below), not a claim that it IS the class. The
     sentence therefore used a true statement about one spelling to carry a false one about the
@@ -4473,6 +4475,10 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "an expression-level pin cannot witness this rule (#13995 review round 21, P2)")
     assert _d5_class_members("[+\\-]") == {"+", "-"}, (
         "and the ordinary escaped-hyphen spelling is a plain set: `[+\\-]` is `{+,-}`")
+    assert _d5_class_members("[-\\+]") == {"+", "-"}, (
+        "and the LEADING escaped-hyphen spelling is the same plain set: `[-\\+]` consumes an "
+        "escaped `+`, so the bullet list in `_d5_class_members` is witnessed here too — "
+        "`grep -cE '^[-\\+]$'` counts 3 on a `\\`-carrying probe (measured)")
 
     # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
     # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
