@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-13814-1795143395-p3539666-4174cd1a",
+  "_sha": "1f09f25b4695d8012e37ba21243e4ad7ed490a21",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-13814.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/13674-declare-embedder-warmup"
+    },
+    {
+      "kind": "sha",
+      "value": "e5df6714a2385cd3d12c82a026b45c7bd073d13c"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-13814"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 4615,
+  "ended_at": 1795148010,
+  "exit_code": 0,
+  "heartbeat_at": 1795148010,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-13814-1795143395-p3539666-4174cd1a",
+  "lease_until": 1795184610,
+  "pid": 3539666,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795143395,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-13814",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-13814"
+}
