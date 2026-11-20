@@ -600,7 +600,8 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
     # closure claim above is read as "closed under formatting ON ONE LINE". ⛔ THE SEPARATOR
     # IS NOT CUT THERE (#13900 review, cycle 10, P2): a hard-wrapped COMMAND→VERB pair stays
-    # graded, because `\s` is in the separator class and `origin/main` graded it too.
+    # graded, because `\n(?![^\S\n]*\n)` admits a soft break while a blank line stops the
+    # gap — `origin/main` graded it too.
     # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
     # (#13845): a claim that names the command by PRONOUN — "the command this clause
     # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can

@@ -1212,7 +1212,7 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 
     `:12111`/`:12164` is `#13456`'s pre-`#13466` value, so the cell quoted two heads as
     one. ⛔ **Why no existing row saw it**: the capstone pin's `_pin_row_failures` scopes a
-    row to ONE markdown LINE, and D5 is one line carrying ~50 numbers — so any `:12111`
+    row to ONE markdown LINE, and D5 is one line carrying 262 numbers — so any `:12111`
     anywhere on it satisfied every `sdk`-keyed row, and the addendum's own contradictory
     spelling was read by nothing. This arm is scoped to the addendum's SENTENCE, which is
     the narrowest thing that can disagree with it.
