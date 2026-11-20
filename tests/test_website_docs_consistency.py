@@ -1133,6 +1133,132 @@ def test_no_dead_issue_references_in_public_copy(page: Path) -> None:
 # ── Link integrity on the new page ───────────────────────────────────────────
 
 
+def test_docs_toc_anchors_all_resolve() -> None:
+    """Every TOC entry on the docs page must land on a real id.
+
+    The FAQ half of this pin is below; `docs.html` never had one, and #14013 is
+    the first change that depends on it from OUTSIDE the page (`#13998`'s
+    capacity notices link to `/tortoise/docs#storage`). A TOC entry with no
+    target, or a section whose id was renamed under a notice that still points
+    at it, is a dead deep link for every reader arriving from that email.
+    """
+    html = _read(DOCS)
+    hrefs = set(re.findall(r'href="#([^"]+)"', html))
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    assert hrefs, "website/docs.html has no in-page anchors — did the TOC get removed?"
+    assert hrefs <= ids, f"website/docs.html anchors with no target: {sorted(hrefs - ids)}"
+
+
+# ── #14013: the page the working-set capacity notices link to ────────────────
+#
+# `tortoise/capacity_notice.py` (#13998) ships `STORAGE_DOCS_URL` =
+# `https://premiselabs.co/tortoise/docs#storage` and names this section as its
+# destination. Three things make that link honest rather than merely live:
+#
+#   1. the anchor exists, and the TOC advertises it (else it is an orphan);
+#   2. the section keeps the notices' NON-TECHNICAL voice — the whole point of
+#      the link is the reader who does not know the architecture, and internal
+#      vocabulary (`allowance`, `eviction`, `tier`, `FalkorDB`, `working set`)
+#      is a vocabulary that email is explicitly guarded against;
+#   3. it states what is NOT lost, because the notices' promise is that the
+#      record holds everything. A page that only describes degradation is a
+#      page that undoes the email it was written for.
+#
+# The claims themselves are the durable ones `#13989` records — true before and
+# after the tracker's strands land, because the sections outside the fast layer
+# are fetched when searched. Nothing here quotes a rate or a limit, so nothing
+# here can rot when `product/pricing.json` changes.
+
+
+def _docs_section(anchor: str = "storage") -> str:
+    """The markup of `docs.html`'s `#<anchor>` section, up to the next `<h2`.
+
+    A slice rather than the whole page: the vocabulary rule applies to what a
+    reader arriving at the anchor meets, and holding the page's deliberately
+    technical sections (`How it works`, the API reference) to it would be wrong.
+    """
+    html = _read(DOCS)
+    start = html.index(f'<h2 id="{anchor}">')
+    rest = html[start + 1:]
+    end = rest.find("<h2 id=")
+    return rest if end == -1 else rest[:end]
+
+
+def test_the_storage_section_is_the_notices_destination_and_is_advertised() -> None:
+    """The anchor the email links to exists on the page AND appears in its TOC."""
+    html = _read(DOCS)
+    assert 'id="storage"' in html, (
+        "website/docs.html has no `id=\"storage\"`. `capacity_notice.STORAGE_DOCS_URL` "
+        "points at `/tortoise/docs#storage` (#13998), so the notice's link text "
+        "nowhere lands."
+    )
+    assert 'href="#storage"' in html, (
+        "the storage section is an orphan: it has an id but no TOC entry, so the "
+        "only way to reach it is the email itself."
+    )
+
+
+def test_the_storage_section_uses_no_internal_vocabulary() -> None:
+    """Plain language, per #14013's contradiction test.
+
+    These are the words the notices themselves are guarded against. A reader who
+    clicks *\"How Tortoise stores and searches your data\"* arrives without the
+    architecture; naming `FalkorDB`, a `tier`, an `allowance` or `eviction` hands
+    them the internal model instead of the explanation.
+    """
+    section = _docs_section().lower()
+    banned = {
+        "allowance": "the notices say 'fast-search capacity'",
+        "evict": "the notices say items 'step out of' the fast layer",
+        "eviction": "the notices say items 'step out of' the fast layer",
+        "tier": "capacity is offered first; a plan change is never the answer",
+        "falkordb": "the notices say 'a graph database'",
+        "working set": "plain phrasing is 'the fast layer'",
+        "hot cache": "plain phrasing is 'the fast layer'",
+    }
+    for word, why in banned.items():
+        assert word not in section, (
+            f"the #storage section contains {word!r}: {why}. Keep it in the "
+            f"same voice as the capacity notices (#13998/#14013)."
+        )
+
+
+def test_the_storage_section_states_what_is_not_lost_and_quotes_no_figure() -> None:
+    """The promise the email makes, and no number that could contradict it.
+
+    #14013's done-when is that *\"a reader who has never seen the architecture
+    can say what happens when the fast layer fills\"* — so the section must state
+    the loss mode (a moment longer) and the non-loss mode (nothing) outright.
+
+    The figure half is a real constraint, not tidiness: `product/pricing.json`
+    is the one source for any rate the product publishes, and a docs page that
+    quotes one drifts from it silently. Asserting the ABSENCE of figures is the
+    honest form of \"no number the pricing file does not carry\" — the section
+    needs none to explain the model.
+    """
+    section = _docs_section()
+    folded = section.lower()
+    for claim in (
+        "nothing is lost",
+        "stays searchable",
+        "can take a moment longer",
+        "postgres",
+        "graph database",
+    ):
+        assert claim in folded, (
+            f"the #storage section no longer says {claim!r}. Those are the "
+            f"notices' own claims (#13998) — the page is where a reader who went "
+            f"looking for the durable explanation has to find them."
+        )
+    for figure in ("$", "%"):
+        assert figure not in section, (
+            f"the #storage section carries {figure!r}. No rate or limit belongs "
+            f"on this page: `product/pricing.json` is the one source for a "
+            f"published figure, and #14013 forbids quoting anything it does not "
+            f"carry."
+        )
+
+
 def test_faq_toc_anchors_all_resolve() -> None:
     """Every TOC entry must land on a real heading id."""
     html = _read(FAQ)

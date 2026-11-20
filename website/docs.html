@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Docs — Tortoise</title>
-  <meta name="description" content="Tortoise documentation: what it is, quickstart, and API reference.">
+  <meta name="description" content="Tortoise documentation: what it is, how your data is stored and searched, quickstart, and API reference.">
   <meta name="theme-color" content="#060b14">
   <link rel="canonical" href="https://premiselabs.co/tortoise/docs">
   <link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
@@ -119,6 +119,7 @@
     <div class="toc">
       <a href="#what">What is Tortoise?</a>
       <a href="#how">How it works</a>
+      <a href="#storage">How your data is stored and searched</a>
       <a href="#quickstart">Quickstart (5 minutes)</a>
       <a href="#mcp">Connect your agent (MCP)</a>
       <a href="#api">API reference</a>
@@ -182,6 +183,44 @@
     <div class="card">
       <h3>Search</h3>
       <p>Search fuses three strategies with RRF (Reciprocal Rank Fusion): full-text search (FTS) on content/title/name, vector similarity (embeddings, when available), and structural matches. Results are ranked by fused relevance, not recency.</p>
+    </div>
+
+    <!-- Maintainer note (#14013): the two capacity notices of #13998 link to
+         https://premiselabs.co/tortoise/docs#storage — this section is their
+         destination, and it is pinned by the notice's own module docstring.
+         ⛔ Keep it in the same non-technical voice as the notices: no internal
+         vocabulary (allowance, eviction, tier, FalkorDB, working set), no rate or
+         limit the email does not itself carry, and nothing that is untrue either
+         before or after the #13989 strands land. The durable promise is the one
+         the notices make: nothing is lost, and items outside the fast layer are
+         fetched when searched, so they can take a moment longer.
+         tests/test_website_docs_consistency.py pins the anchor, the plain-language
+         rule and the "nothing is lost" statement against this block. -->
+    <h2 id="storage">How your data is stored and searched</h2>
+    <p>If you arrived here from a note about your search layer filling up, this is the full explanation behind it — no architecture required.</p>
+    <div class="card">
+      <h3 id="storage-record">Everything you save is kept</h3>
+      <p>Your data is kept in a Postgres database. Postgres is ordinary, inexpensive storage, so we can keep all of it: every point, every connection, every session that captured it. This copy is your <strong>record</strong>, and it is the complete one — everything else is built from it.</p>
+    </div>
+    <div class="card">
+      <h3 id="storage-fast-layer">A second copy, for the things you use most</h3>
+      <p>On top of the record we run a graph database. It mirrors a slice of your data in a shape that makes two things quick: finding things by meaning rather than by exact wording, and following the connections between them — so a search can bring back what is <em>related</em> to what you asked for, not only what matches it.</p>
+      <p>That graph database is expensive to run and holds far less than the record does, so it is reserved for what matters most: the items you search for and use most often, and the items that other things hang off. Everything else stays in the record.</p>
+    </div>
+    <div class="card">
+      <h3 id="storage-when-full">What happens when the fast layer fills</h3>
+      <p><strong>Nothing is lost, and nothing is deleted.</strong> Everything you have saved stays searchable. What changes is how quickly some older items come back.</p>
+      <p>When the fast layer is full, the items used least step out of it and stay in the record. Search still covers everything: items outside the fast layer are fetched when you search for them, so they can take a moment longer to answer.</p>
+      <p>That is the whole effect — <strong>you can lose speed on the items you use least; you never lose the items.</strong></p>
+    </div>
+    <div class="card">
+      <h3 id="storage-what-you-can-do">What you can do about it</h3>
+      <ul>
+        <li><strong>Add capacity.</strong> More fast capacity can be added to your account at any time — write to <a href="mailto:support@premiselabs.co">support@premiselabs.co</a> and we will raise it. This makes the fast layer bigger; it is not a different plan.</li>
+        <li><strong>Keep this resident.</strong> You can mark the items you rely on to stay in the fast layer, so the things that matter to you stay quick however rarely you search them.</li>
+        <li><strong>See what is outside.</strong> You can see what has stepped out of the fast layer — how much of it, roughly when, and what it was about — so what is outside is something you can look at rather than a black box.</li>
+      </ul>
+      <p>None of the three changes what is stored. Whatever you choose, your record holds everything you have saved.</p>
     </div>
 
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
