@@ -1267,7 +1267,17 @@ def _findings(rows: list[dict], methods: dict[str, int], targets: list[str],
         "contested": sorted(r["name"] for r in rows if r["basis"] == BASIS_CONTESTED),
         "tensions": TENSIONS,
         "phantoms": PHANTOMS,
-        "unfilled": [g for g, m in groups.items() if not m],
+        # ⛔ A group is a C5 finding when it has no LIVE member — which is two
+        # different things and both are true: the canonical doc declares it empty
+        # (`m == []`: W6/W7/W16/N5/N6), or every member it names has LEFT the surface
+        # (`m` non-empty, none of them a row — R9 after the #12901 FINAL batch
+        # privatised `list_batch` and `list_batches`). Reading only the first was
+        # accurate until the batch and silently under-reported after it: C5's own prose
+        # promises "a group with no live member", and R9 was one that it did not name.
+        "unfilled": sorted(
+            g for g, m in groups.items()
+            if not any(name in methods for name in m)
+        ),
         # Computed from the sibling Phase 0.1 artifact, never restated.
         "bridge_divergences": _bridge_divergences(rows),
     }
@@ -2019,14 +2029,32 @@ def render(rows: list[dict], targets: list[str], groups: dict[str, list[str]],
                 f"agree on. |"
             )
 
+    # The live methods are EXACTLY the rows (a row exists per public `def`; `_validate`
+    # refuses an UNMAPPED public method), so the row set is the live set here.
+    live_names = {r["name"] for r in rows}
+    _live_in_groups = sum(
+        1 for members in groups.values() for m in members if m in live_names)
+    _departed_in_groups = sum(
+        1 for members in groups.values() for m in members if m not in live_names)
+    assert _live_in_groups + _departed_in_groups == sum(
+        len(m) for m in groups.values()), "the split must reconcile the partition"
     out += [
         "",
         "### Structural notes",
         "",
+        # ⛔ The partition is HISTORICAL by the doc's own declaration: it was cut over
+        # the pre-retirement surface, and the departure sections cite it as the record.
+        # So the reconciliation is arithmetic over three facts that are all derived —
+        # members in the groups, members that are live today, members recorded as
+        # departures — and the sentence states the split rather than claiming every
+        # member is live (which was true before the FINAL batch and is false after it).
         "- The canonical inventory partitions the surface into **"
         f"{len([g for g in groups if not g.startswith('ARCHIVE')])} groups** over "
-        f"**{sum(len(m) for m in groups.values())}** named members — every member is a "
-        f"live method, so Total: {sum(len(m) for m in groups.values())} = the "
+        f"**{sum(len(m) for m in groups.values())}** named members — that partition is "
+        f"HISTORICAL (`canonical-sdk-methods.md` says so itself): **{_live_in_groups}** "
+        f"of them are live methods today and **{_departed_in_groups}** are recorded "
+        f"departures, so Total: {sum(len(m) for m in groups.values())} = "
+        f"{_live_in_groups} live + {_departed_in_groups} departed, over the "
         f"{n}-method surface.",
         "- Every group collapse above is checked against the AST walk at build time: a "
         "method the docs know and the code does not (or the reverse) **fails the build**.",
