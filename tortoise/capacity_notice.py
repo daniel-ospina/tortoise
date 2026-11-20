@@ -67,7 +67,8 @@ the wrong order — "at 100 %" then "at 80 %". The pre-send re-read (:func:`noti
 narrows that to one round trip; it does not close it, and closing it would need a
 pre-send reservation (a stamp-first protocol with a compensating unset), which is
 recorded on the PR rather than improvised here. Reachable only with N>1 workers,
-which `hosted_api.assert_multi_worker_admissible` refuses, and with the gauge
+which `worker_topology.assert_multi_worker_admissible` refuses BY DEFAULT (it
+warns instead when `TORTOISE_MULTI_WORKER=1` is acknowledged), and with the gauge
 moving ≥20 pp between two near-simultaneous reads. The stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
@@ -629,7 +630,8 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
 
     Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
     ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
-    (the ledger column has not been migrated yet), ``below-threshold``/
+    (the account ROW could not be read — the ledger column has not been migrated,
+    or a base column is missing; the log line names which), ``below-threshold``/
     ``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
     them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
