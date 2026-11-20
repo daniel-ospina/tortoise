@@ -208,6 +208,15 @@ SWEEP_NAMES = 66
 #: references it records were `main`'s own red and are **0** on this tree, measured with `--check`
 #: (exit 0); a reader must not re-derive `main`'s red from this paragraph.
 #:
+#: ⛔ WHY THIS PIN'S RED IS NEVER EXCUSABLE AS `main`'s OWN: `surface-guard` is NOT in the
+#: `DEFERRABLE_LEGS` set (located with `grep -n 'DEFERRABLE_LEGS="' .github/workflows/python-ci.yml`
+#: — one hit; it read `:5450` at `fe322247d1`, and the number is cited this way rather than typed
+#: because D5 is exactly that a line number rots on merge), so the loop's non-test `case` arm
+#: sends it straight to `FAILED_LEGS` and it reds the REQUIRED `python-ci-gate` for EVERY open PR —
+#: measured on `44747206237`: `surface-guard` failure, `ci-introduced-failure` success,
+#: `python-ci-gate` failure. A wrong pin here is therefore a fleet-wide block, not one PR's
+#: inconvenience; the typed-reference arm is a separate repair and reads `0` on this tree.
+#:
 #: RE-CUT to the MERGED tree → (11822, "05e0ff542dfb8e62") by `#13919` (the `#4211` hierarchy-census
 #: lane), merging `origin/main` `6fbd96f270` into `chore/4211-edge-census-mac`. The pin is an
 #: ABSOLUTE count, so it moves with the base as well as with the PR, and this block therefore
@@ -255,6 +264,12 @@ SWEEP_NAMES = 66
 #: moved neither side's number — and the merged tree prints (11822, "05e0ff542dfb8e62"), i.e. the
 #: same 11804 + this PR's declared +18 (the two census files, row by row above). `--check` on the
 #: merged tree: `typed references still pointing at a public name: 0`, exit 0.
+#: RE-MEASURED AT THIS MERGE (the one that resolved this file's conflict) — not carried forward:
+#: `origin/main` `3d99bd51d6` pins 11804 and `5ba273a1dc` (#13919) moved it to 11822 on `main`'s own
+#: tree, and the merged tree here prints the SAME 11822, so this PR's delta against `main` is
+#: comment-only: its contribution is the provenance and the non-delegability finding above, not a
+#: new number. `--check` on the merged tree exits 0 with typed references `0`. Re-derive with
+#: `--repin` on your own tree, never by arithmetic on the last pin.
 SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
