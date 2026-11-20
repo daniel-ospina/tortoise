@@ -562,24 +562,31 @@ def test_the_real_docs_tree_is_not_empty():
 #: keeps reviewing itself for. (`_OPEN_TAG` makes this TWO pairs, not one: the previous revision of
 #: this paragraph called `[` "the ONE same-first-character pair", and the `<` hole below is what
 #: that miscount was hiding.) The real reason each pair is disjoint is that the SECOND branch
-#: matches only when the first cannot: `_BRACKET` is tried first and requires a closer, and
-#: `_OPEN_BRACKET` is that test NEGATED — same interior, escape included,
-#: `(?!(?:\\.|[^\\\]\n])*\])`; `_TAG` is tried first and requires the `>`, and `_OPEN_TAG` is
-#: a bare `<` with NO guard at all, because for that pair the ORDER alone is the guard. ⛔ An earlier
-#: revision of this paragraph said "the lookahead is what keeps each pair disjoint" and named a
-#: `_OPEN_TAG` lookahead that THIS ROUND DELETED — the tag half of that sentence described code
-#: that no longer existed, one commit after the sentence was written (#13921 review, finding 3).
+#: reaches only when the first cannot: `_BRACKET` is tried first and requires a closer, and
+#: `_OPEN_BRACKET` is a bare `[`; `_TAG` is tried first and requires the `>`, and `_OPEN_TAG` is
+#: a bare `<`. ⛔ NEITHER SIBLING HAS A GUARD, AND THE BRACKET ONE WAS DELETED AS INERT (#13921
+#: review after cycle 2, finding 4, MEASURED). Its lookahead asked the SAME question as
+#: `_BRACKET` over the SAME alphabet — a strict subset of `_BRACKET`'s interior — so wherever
+#: `_BRACKET` fails, no path through the subset reaches a `]` either and the negative lookahead is
+#: ALWAYS satisfied. MEASURED: replacing it with a bare `[` changed no answer across 69,904 fuzz
+#: cases and HALVED the run (`[` x3200 0.3987 -> 0.2212 s). ⛔ An earlier revision of this
+#: paragraph said "the lookahead is what keeps each pair disjoint" and named a `_OPEN_TAG`
+#: lookahead that an earlier round DELETED — the tag half of that sentence described code that no
+#: longer existed, one commit after the sentence was written (#13921 review, finding 3).
 #: The one input where the BRACKET pair can both start is a run whose interior crosses a soft
-#: break (`[a\n]`): the closing unit takes it whole while the lookahead, being line-bounded, cannot
-#: see the closer — a bounded residual that is the BRACKET pair's alone, not shared, and not an
-#: exponential.
+#: break (`[a\n]`): the closing unit takes it whole while the bare `[` cannot — a bounded residual,
+#: not an exponential.
 #: ⛔ AND THE RUN IS **NOT** LINEAR — the word this block used to carry, on the strength of a
 #: single 200-point reading (#13921 review, finding 4). MEASURED at this head: 200 × `[` ->
-#: 0.0014 s, 400 -> 0.0037, 800 -> 0.0144, 1600 -> 0.0559, 3200 -> 0.2248 s — about x3.9 per
-#: DOUBLING, i.e. ~n^2, because each start is scanned TWICE (the closing unit scans to the end and
-#: fails, then its lookahead scans to the end and succeeds). 200 × `<` behaves the same way
-#: (0.0010 -> 0.20 s over the same range). What the lookahead buys is the removal of the EXPONENT
-#: (16 x `[\]` took 22.8 s before it), not linearity, and 3200 repeated brackets is not a shape a
+#: 0.0011 s, 400 -> 0.0040, 800 -> 0.0152, 1600 -> 0.0612, 3200 -> 0.2332 s — about x3.9 per
+#: DOUBLING, i.e. ~n^2, because at every `[` the closing unit scans to the end and fails, and a
+#: run of `[` is ~n such starts. 200 × `<` behaves the same way (0.0009 -> 0.1896 s over the same
+#: range): `_TAG` scans the run and fails, then the bare `<` unit takes one character.
+#: ⛔ AND IT IS BRANCH DISJOINTNESS THAT REMOVED THE EXPONENT, NOT ANY LOOKAHEAD (#13921 review,
+#: finding 5). `_BRACKET`'s overlapping branches held a 2^n that this file's walk made reachable
+#: on every `[`; making the branches disjoint removed it, and a lookahead is family with the atomic
+#: group this block names as a MASK rather than a fix. The five `[` points were RE-MEASURED after
+#: that fix and after the inert guard was dropped; 3200 repeated brackets is not a shape a
 #: document reaches; the honest statement is ~n^2, measured at these five points.
 #:
 #: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
@@ -588,14 +595,14 @@ def test_the_real_docs_tree_is_not_empty():
 #: ⛔ THE `<` RESIDUAL IS ATTACHED TO THE INPUT THAT HAS IT (#13921 review, finding 3, MEASURED).
 #: This paragraph used to say "the cost of a tag probe on an UNTERMINATED `<` run (measured 28
 #: characters -> 0.19 s, growing about x1.7 per character)" — and a bare `<` run is not that
-#: input: 200 `<` takes 0.0018 s and scales ~n^2 like every other pair above (the `_TAG` probe
+#: input: 200 `<` takes 0.0009 s and scales ~n^2 like every other pair above (the `_TAG` probe
 #: scans the run and fails, then the bare `<` unit takes one character). The exponential
 #: belongs to a tag that OPENS and never CLOSES with a QUOTE inside it, `<a` + a run of `'`, where
 #: the quoted branch and the catch-all both consume each quote. ⛔ THE BRACKET PAIR'S SIBLING
 #: OVERLAP IS NOW GONE (#13921 review, finding 1 — disjoint branches, flat at every n); the TAG's
 #: is the one that REMAINS, and it is DECLARED. MEASURED at this head on the exact input the
 #: timing row below uses (`"`-- tortoise/`" + "<a" + "'" * n`, three runs, min): n=20 ->
-#: 0.0016 s, 24 -> 0.0110, 26 -> 0.0290, 28 -> 0.0758, 32 -> 0.5192 s (a x1.6-1.7 step per
+#: 0.0016 s, 24 -> 0.0107, 26 -> 0.0283, 28 -> 0.0682, 32 -> 0.5154 s (a x1.6-1.7 step per
 #: character). ⛔ THESE FIGURES ARE STATED HERE AND NOWHERE ELSE (#13921 review, finding 3):
 #: the timing row below used to restate them and the two copies had drifted 2.3x apart —
 #: 0.194 s vs 0.0841 s for the SAME input at the SAME head — which is exactly the rot the module
@@ -669,11 +676,17 @@ _BRACKET = r"\[(?:\\.|[^\\\]\n]|" + _SOFT + r")*(?:\]|\\\])"
 #: MEASURED): `[a\]b]` grades under EVERY variant including `origin/main`, because `_BRACKET` is
 #: tried first and takes it whole, so the two grammars' disagreement on it is INERT; and `[a\]b`
 #: is `[]` under every variant including `origin/main`, because the unclosed label exposes a word
-#: character to the declared prose stop. Naming those two is what hid the row that does bite. The
-#: pair therefore moves TOGETHER: with `_BRACKET`'s catch-all excluding `\` and the lookahead
-#: still counting `\` as ordinary, `[\]` goes graded -> `[]` (MEASURED) — the one-constant form
-#: is the regression, which is why the two constants are one edit.
-_OPEN_BRACKET = r"\[(?!(?:\\.|[^\\\]\n])*\])"
+#: character to the declared prose stop. Naming those two is what hid the row that does bite.
+#: ⛔ AND THE LOOKAHEAD ITSELF IS NOW GONE, BECAUSE IT WAS INERT (#13921 review after cycle 2,
+#: finding 4, MEASURED). Once its alphabet was made the SAME as `_BRACKET`'s interior, it asked a
+#: question `_BRACKET` had already answered: that alphabet is a strict SUBSET of the interior's,
+#: so wherever `_BRACKET` fails no path through the subset reaches a `]` either, and the negative
+#: lookahead is ALWAYS satisfied at the positions this constant is reached. MEASURED: replacing it
+#: with a bare `[` changed NO answer in 69,904 fuzz cases and HALVED the run (`[` x3200 0.3987 ->
+#: 0.2212 s). So this pair's disjointness is ORDER alone, exactly as the `<` pair's is: `_BRACKET`
+#: is tried first and requires its closer. ⛔ Do not re-add a lookahead over `_BRACKET`'s interior:
+#: it cannot change an outcome and it doubles the scan.
+_OPEN_BRACKET = r"\["
 #: ⛔ AND AN UNTERMINATED TAG IS ONE TOO (#13921 review, finding 1, MEASURED). `_TAG` requires a
 #: closing `>`, so BEFORE this constant a bare `<` matched NOTHING in the alternation and the
 #: separator walk stopped dead on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
@@ -2063,7 +2076,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # the shape a reader would NOT guard by intuition: `[` is how `_OPEN_BRACKET` is usually
     # exercised, and a bare `[` run is ~n^2, so the reds-from-the-wrong-shape trap is live.
     # MEASURED through the walk: 0.0196 s at 20 backslashes, 0.0973 at 24, 0.5960 at 28, 3.8566 at
-    # 32, 42.97 at 36 before the catch-all excluded `\`; 0.0001 s at every one of them after, and
+    # 32, 42.97 at 36 before the catch-all excluded `\`; ~0.00003 s at every one of them after,
     # 0.0014 s at 3200. Bounded at 2 s, so the exponent can only come back as a RED, never as a
     # hung suite. Non-vacuity, EXECUTED: restoring `[^\]\n]` as the catch-all reds this row.
     _t0 = _time.monotonic()
@@ -2072,7 +2085,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     assert _time.monotonic() - _t0 < 2.0, (
         "the BRACKET pair's branches are ambiguous again — `[` + 36 backslashes with no reachable "
         "`]` took longer than 2 s; it measured 42.97 s while `_BRACKET`'s catch-all admitted `\\` "
-        "and 0.0001 s once it excluded it (#13921 review, finding 1)")
+        "and ~0.00003 s once it excluded it (#13921 review, finding 1)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
