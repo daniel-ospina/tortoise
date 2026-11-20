@@ -7888,7 +7888,16 @@ def test_an_unchanged_baseline_is_green():
 
 
 def test_a_waiver_that_waives_nothing_is_reported():
-    """A false record is worse than no record: it reads as a departure somebody checked."""
+    """A false record is worse than no record: it reads as a departure somebody checked.
+
+    ⛔ The "never carried" wording is pinned, not just the verdict (review P3 of PR #14039).
+    All three waiver shapes share the `waives nothing` prefix and the `else` fallback also
+    names the symbol, so asserting only those two strings left this row GREEN when the
+    `symbol not in prior_symbols` branch was deleted — the survivor then said
+    `'tortoise_never_existed' is a [] symbol in the base ref's baseline`, which is the false
+    explanation the branch exists to prevent. Measured on the pre-fix tree: delete
+    `if symbol not in prior_symbols:` -> this test still passes.
+    """
     sm = _load_manifest_tool()
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
@@ -7896,6 +7905,10 @@ def test_a_waiver_that_waives_nothing_is_reported():
     problems = sm.shrink_problems(doc, doc, allowed=["tool:tortoise_never_existed"])
 
     assert any("waives nothing" in p and "tortoise_never_existed" in p for p in problems), problems
+    assert any("never carried" in p and "tortoise_never_existed" in p for p in problems), (
+        f"nothing left the surface and the base never had it, so the report must SAY that "
+        f"rather than describe the surviving row: {problems}"
+    )
 
 
 def test_a_deliberate_shrink_passes_with_a_named_waiver():
@@ -8024,16 +8037,31 @@ def test_a_waiver_for_a_row_that_never_LEFT_is_reported(monkeypatch):
 
 
 def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
-    """Non-vacuity for the consumption check: the class-mismatch shape must not be lost."""
+    """Non-vacuity for the consumption check: the class-mismatch shape must not be lost.
+
+    ⛔ The CLASS is pinned too (review P3 of PR #14039). `waives nothing` alone is shared with
+    the `else` fallback, so deleting the `cls is not None and (symbol, cls) not in prior`
+    branch left this row GREEN over a report that had stopped naming the surface at all.
+    Measured on the pre-fix tree: delete that branch -> this test still passes.
+
+    The row is picked as a TOOL row rather than `rows[0]`: the claim under test is `this symbol
+    is live on the 'tool' surface`, and `rows[0]` only happens to be one today — a re-cut that
+    reordered the baseline would turn the new assertion into a false red on a required job.
+    """
     sm = _load_manifest_tool()
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
-    live = doc["rows"][0]
+    live = next(row for row in doc["rows"] if not row.get("method"))
     symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+    assert symbol, live
 
     problems = sm.shrink_problems(doc, doc, allowed=[f"sdk:{symbol}"])
 
     assert any("waives nothing" in p for p in problems), problems
+    assert any("on the 'sdk' surface" in p for p in problems), (
+        f"`{symbol}` is live on the 'tool' surface, so the waiver is on the wrong surface "
+        f"and the report must name the surface it is on: {problems}"
+    )
 
 
 def test_a_recorded_SDK_rename_is_green_on_the_shrink_arm():
