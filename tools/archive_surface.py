@@ -1172,6 +1172,52 @@ def parse_shrink_waiver(text: str) -> tuple[str, str]:
     return kind, symbol.strip()
 
 
+def _reanchor_is_verified(root: Path, symbol: str, rel: str, entry: dict) -> bool:
+    """Is this REWRITE an EVIDENCED re-anchor, rather than a faithless edit? (#12291)
+
+    A re-anchor happens when the frozen body is refreshed from the commit that LAST held the
+    code (`main` edited the file while a batch was in flight — `archive/mcp-tools/b1-removed-no-
+    destination/tortoise_analyze.py` records one), and the anchor AND often the blocks must then
+    move together. The printed remedy for a rewrite is `--allow-archive-shrink`, a LOCAL-SHELL
+    waiver that the workflow deliberately never passes, so before this arm a legitimate
+    correction had no route a PR could take (review P2 of PR #14039) — and `verify-anchors`, run
+    immediately before this step in the same job, is what REQUIRES the correction. That is a
+    gate-against-gate deadlock, not a protection.
+
+    So the question asked here is the one the anchor arm already knows how to answer: does the
+    frozen file still match the recorded blocks, and does the NEW anchor hold each recorded body
+    BYTE-FOR-BYTE? When both hold, the record still proves exactly what it claims — the removed
+    code is what it says it is — which is the property #12291 exists to protect. When either
+    fails, it is the faithless edit and stays a violation.
+
+    ⛔ The anchor must be READABLE in this clone. `_anchor_violations` is deliberately
+    three-valued and returns [] when the commit object is absent (a shallow clone cannot tell a
+    forged anchor from an un-fetched one), so accepting on an unreadable anchor would turn this
+    arm into a rubber stamp. A clone that cannot read the anchor keeps the violation — fail
+    closed, and the archive's own step (`fetch-depth: 0`) is what makes it answerable in CI.
+    """
+    if not rel:
+        return False
+    text = _file_text(root, rel)
+    if text is None:
+        return False
+    blocks = frozen_blocks(text)
+    recorded = entry.get("blocks")
+    if not blocks or not isinstance(recorded, list) or len(recorded) != len(blocks):
+        return False
+    sha = str(entry.get("archived_at") or "")
+    if not _SHA_RE.match(sha) or not _git_has_commit(root, sha):
+        return False
+    for (path, body), row in zip(blocks, recorded, strict=True):
+        if not isinstance(row, dict):
+            return False
+        if row.get("path") != path or row.get("sha256") != _sha256(body):
+            return False
+        if _anchor_violations(root, symbol, rel, entry, path, body, row.get("node")):
+            return False
+    return True
+
+
 def shrink_violations(
     root: Path | None = None,
     *,
@@ -1239,6 +1285,41 @@ def shrink_violations(
             f"{MODULE_ROUTE} (the file was {where})"
         )
 
+    # ── arm 1b: a module EMPTIED IN PLACE — the file is still there, its body is not (#12402) ──
+    # `_modules_with_a_body` grades an `__init__.py` by CONTENT because the PATH set cannot tell
+    # scaffolding from an API (review F2). The SAME reasoning holds for every module, and the
+    # version that applied it to `__init__.py` alone was a live fail-open (review P2): `>
+    # tortoise/x.py` — or `git rm` of the body while the file stays — left the name in BOTH sets,
+    # so the arm reported green while the module's code was gone, and no sibling arm sees it
+    # (`file_violations` walks manifest rows, `package_violations` only checks the archive
+    # locations). Reading is narrowed to the names present on BOTH sides and to the head file
+    # first, so the arm costs one working-tree read per shared module and no git call unless the
+    # head file is body-less.
+    base_paths_by_module = {module_name(path): path for path in base_paths}
+    head_paths_by_module = {module_name(path): path for path in head_paths}
+    for module in sorted(base_modules & head_modules):
+        head_text = _file_text(root, head_paths_by_module[module])
+        if head_text is None or _init_carries_a_body(head_text):
+            continue  # unreadable is content (fail closed), and content is not a removal
+        base_text = _git_blob(root, sha, base_paths_by_module[module])
+        if base_text is None or not _init_carries_a_body(base_text):
+            continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
+        key = (MODULE, module)
+        if key in working:
+            continue  # an entry of the right kind names it: the removal has its record
+        if key in waivers:
+            used.add(key)
+            continue
+        out.append(
+            f"{module}: MODULE BODY REMOVED — {base_label} carries statements in "
+            f"`{base_paths_by_module[module]}` and this tree's `{head_paths_by_module[module]}` "
+            "carries none (empty, whitespace, comments or a bare docstring). The PATH survived, "
+            "so a set comparison over module names cannot see this, and the surface baseline "
+            "carries no `module` rows: the code left the product and nothing records it "
+            "(#12402). "
+            f"{MODULE_ROUTE}"
+        )
+
     # ── arm 2: an entry that left, or was rewritten in, MANIFEST.json (#12291) ───
     for key, base_entry in sorted(base_entries.items()):
         kind, symbol = key
@@ -1257,8 +1338,10 @@ def shrink_violations(
                 f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
                 "it and this tree does not, so the only index of what was removed from the "
                 "product no longer names it. The frozen file under archive/ may still be on "
-                "disk; without its row it is code nothing indexes, and every other arm here "
-                "iterates the rows it FINDS, so the drop is invisible to them (#12291). "
+                "disk — that sub-case is the one the file arm DOES see (`archived code that no "
+                "manifest row indexes — orphan`); what no other arm sees is dropping the row AND "
+                "the file together, because every other arm here iterates the rows it FINDS "
+                "(#12291). "
                 "REMEDY: restore the entry — or, if the code came back to the PRODUCT too, "
                 "delete its frozen file in the same commit (that is the restore procedure in "
                 "archive/README.md, and this arm treats a live symbol as a restore, so no "
@@ -1269,6 +1352,12 @@ def shrink_violations(
         elif _entry_claim(working[key]) != _entry_claim(base_entry):
             if key in waivers:
                 used.add(key)
+                continue
+            if _reanchor_is_verified(
+                root, symbol, str(working[key].get("file") or ""), working[key]
+            ):
+                # Not a faithless edit: the frozen file still matches the record and the new
+                # anchor holds the recorded body byte-for-byte (see `_reanchor_is_verified`).
                 continue
             changed = [
                 field for field in CLAIM_FIELDS
@@ -1674,7 +1763,20 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     rel = symbol.replace(".", "/") + ".py"
     path = root / rel
     if not path.exists():
-        raise ArchiveRefused(f"module {symbol} has no file at {rel} — nothing to archive")
+        # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
+        # Without this fallback the rule arm 1 grades was UNRUNNABLE for the very shape it was
+        # built for (review P1 of PR #14039): `_modules_with_a_body` grades an `__init__.py` by
+        # CONTENT, so deleting a 406-line `tortoise/__init__.py` reports `tortoise: MODULE
+        # REMOVED`, whose printed remedy is `archive module tortoise` — and this function refused
+        # it with "no file at tortoise.py" while CI passes no waiver, so the operator had a
+        # correct red and NO route. The archived FILE stays `<dotted>.py` (`archive_rel`), so no
+        # `__init__.py` ever lands under `archive/` (`package_violations` refuses that), and
+        # `archived_from` names the init file the body actually came from.
+        package_rel = symbol.replace(".", "/") + "/__init__.py"
+        if (root / package_rel).exists():
+            rel, path = package_rel, root / package_rel
+        else:
+            raise ArchiveRefused(f"module {symbol} has no file at {rel} and no package at {package_rel} — nothing to archive")
     try:
         source = path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(path))

@@ -234,7 +234,10 @@ compares the MERGE BASE's module set with this tree's and grades an `__init__.py
 **CONTENT**, not by its path: deleting one that carries only a docstring (or nothing) is
 scaffolding, so the package still resolves and nothing left the product — while deleting one
 that carries statements IS a removal even though the package name still resolves through a
-surviving sibling, because the code that answered as that package's front door left. It is part
+surviving sibling, because the code that answered as that package's front door left. The SAME
+rule grades every module file, not just an `__init__.py`: a module whose file survives with its
+body gone — truncated to nothing, or reduced to a docstring — is a removal too, because the name
+no longer resolves to any code, and a comparison over paths cannot see it. It is part
 of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
 never a quiet pass. If the deletion is already recorded somewhere this gate cannot read, state
 it: `--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a
