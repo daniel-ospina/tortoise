@@ -78,7 +78,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
 
 #: Imported, not restated: the one vocabulary the read surfaces use. The
 #: `Row.eligible` predicate below is the CALLERS' rule, so it reads the rule from
@@ -556,6 +556,12 @@ def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
 
 
 RECORD_DSN_NO_HOST = "<host not resolvable — cannot PROVE it is local>"
+#: Two parsers, two answers: Python ends the URL at `#`, libpq has no fragment
+#: concept and keeps reading, so `…/db#?hostaddr=<remote>` is query-less to
+#: `urlsplit` and a real `hostaddr=` to libpq. Refused rather than guessed.
+RECORD_DSN_AMBIGUOUS = (
+    "<a `#` before the query string — Python and libpq disagree about where "
+    "the host is, so it cannot be PROVEN local>")
 
 #: A DSN naming a libpq SERVICE delegates the dialled host to `pg_service.conf`,
 #: which this harness cannot read before connecting — so it is as unknowable as an
@@ -641,8 +647,19 @@ def _record_dsn_hosts(dsn: str) -> list[str]:
     """
     hosts: list[str] = []
     if "://" in dsn:
+        # ⛔ READ THE QUERY THE WAY LIBPQ DOES, not the way Python does. libpq has
+        # no FRAGMENT: it finds the parameters at the first `?` of the RAW string
+        # and keeps reading past anything Python would call a fragment. Reading
+        # `urlsplit(dsn).query` therefore DROPPED a query libpq still honours —
+        # `postgresql://127.0.0.1/db#?hostaddr=203.0.113.9` reached 203.0.113.9
+        # while this returned `['127.0.0.1']` — and a `#` anywhere before the `?`
+        # means the two parsers disagree about where the authority even ends, so
+        # that shape is refused instead of resolved one way.
+        head, sep, raw_query = dsn.partition("?")
+        if "#" in head:
+            return [RECORD_DSN_AMBIGUOUS]
         parts = urlsplit(dsn)
-        query = parse_qs(parts.query)
+        query = parse_qs(raw_query) if sep else {}
         if query.get("service") or os.environ.get("PGSERVICE"):
             return [RECORD_DSN_SERVICE]
         # `hostaddr` first: it is the address libpq dials, so naming it first in
@@ -689,11 +706,30 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
 
 
 def app_role_dsn(dsn: str) -> str:
-    parts = urlsplit(dsn)
-    query = parse_qs(parts.query)
-    query["options"] = [f"-c role={APP_ROLE}"]
-    return urlunsplit(parts._replace(
-        query=urlencode(query, doseq=True, quote_via=quote)))
+    """The DSN with `-c role=<app>` added, in the SPELLING it arrived in.
+
+    ⛔ TWO SPELLINGS, TWO SYNTAXES, and the one-line `urlunsplit` knew neither.
+    For an authority-less URI it emits `postgresql:/db?…` — `postgresql` is not in
+    `urllib.parse.uses_netloc`, so an empty netloc loses a slash and libpq rejects
+    the whole string (`invalid connection option "postgresql:/tortoise_record?host"`).
+    For the whitespace conninfo there is no `?` at all, so a `?options=…` suffix
+    lands inside the LAST keyword's value (`host=127.0.0.1?options=…`), which then
+    does not resolve. Both spellings are DSNs `_assert_local_record_dsn` accepts,
+    so the tool could certify a store it then could not read one row from — and
+    every query would carry a `record_error`, i.e. a cannot-measure run.
+    """
+    options = f"-c role={APP_ROLE}"
+    if "://" in dsn:
+        head, sep, raw_query = dsn.partition("?")
+        params = parse_qsl(raw_query, keep_blank_values=True) if sep else []
+        params = [(k, v) for k, v in params if k != "options"]
+        params.append(("options", options))
+        # `head` is kept VERBATIM — never re-serialized — so `postgresql:///db`
+        # keeps all three slashes.
+        return f"{head}?{urlencode(params, quote_via=quote)}"
+    tokens = shlex.split(dsn)
+    kept = [t for t in tokens if t.partition("=")[0] != "options"]
+    return " ".join([*kept, f"options='{options}'"])
 
 
 def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
@@ -1542,13 +1578,22 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
             # re-run is needed to keep true.
             verdict["unmeasured"] = True
         return verdict
-    return {"ok": ok, "failures": failures,
-            "informational": {"metric_divergence_ids_total": divergences,
-                              "metric_divergence_note":
-                                  "ids the graph SCAN (euclidean, production "
-                                  "today on an index-less store) ranks "
-                                  "differently from the canonical cosine "
-                                  "metric — informational, not a gate"}}
+    verdict = {"ok": ok, "failures": failures,
+               "informational": {"metric_divergence_ids_total": divergences,
+                                   "metric_divergence_note":
+                                       "ids the graph SCAN (euclidean, production "
+                                       "today on an index-less store) ranks "
+                                       "differently from the canonical cosine "
+                                       "metric — informational, not a gate"}}
+    if not ok and failures and all(f in unmeasured for f in failures):
+        # ⛔ THE SAME CONFLATION, ONE BRANCH OVER. The `unmeasured` key was only
+        # ever set on the POISONED branch, so an ordinary run whose every failure
+        # was a cannot-measure one exited **1** — byte-identical to "a required
+        # comparison DIVERGED", which is a claim about a measurement this run never
+        # made. `main` reads this key to choose exit 2 (cannot run); the key stays
+        # ABSENT on a measured run so the committed artifacts replay bit-identically.
+        verdict["unmeasured"] = True
+    return verdict
 
 
 def _queries(rows: list[Row], count: int) -> list[tuple[str, list[float]]]:
@@ -1713,10 +1758,17 @@ def main(argv: list[str] | None = None) -> int:
         # a measured arm"; exit **2** says "this run could not measure what the
         # poison would have to move", which is the same class as every other
         # cannot-run — and a repro loop that ticks `exit=1` as "confirmed" would
-        # otherwise certify the harness from a run that never looked.
-        print("cannot run: the poison was NOT measured (see the failures above) "
-              "— this run says nothing about the harness's blindness",
-              file=sys.stderr)
+        # otherwise certify the harness from a run that never looked. The same
+        # holds for an UNPOISONED run: exit 1 there claims a divergence, and a
+        # cannot-measure run is not one.
+        if v.get("poison"):
+            print("cannot run: the poison was NOT measured (see the failures "
+                  "above) — this run says nothing about the harness's blindness",
+                  file=sys.stderr)
+        else:
+            print("cannot run: NOTHING was measured (see the failures above) — "
+                  "a cannot-measure failure is not a divergence, so this run is "
+                  "not a parity verdict", file=sys.stderr)
         return 2
     if (v.get("poison_status") or "").startswith("POISON NOT DETECTED"):
         # ⛔ A BLIND HARNESS IS NOT A CONFIRMED ONE. Everything measured and the
