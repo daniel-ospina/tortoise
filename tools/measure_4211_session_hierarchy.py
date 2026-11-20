@@ -404,11 +404,31 @@ def _failed_keys(counts: dict) -> list[str]:
 
 
 def _note_unreadable_emptiness(body: dict) -> dict:
-    """An unreadable node count makes the arm UNMEASURABLE, not non-empty."""
+    """An unreadable OR EMPTY node count makes the arm UNMEASURABLE.
+
+    ⛔ Both halves (#13919 cycle 7). ``is None`` (the read raised) was handled from
+    the start; ``is True`` was not — so a graph that was READ and holds no nodes
+    published ``sessions 0 / turns 0`` as MEASURED, exited 0, and ``--out <receipt>
+    || exit 1`` replaced the artifact of record. That is the state ``_is_empty``'s own
+    docstring says the caller MUST name: "a graph with no nodes is
+    INDISTINGUISHABLE from a mistyped/absent graph name … The caller must name that
+    state instead of publishing zeros as a measurement." The absent-name case was
+    already refused (the `GRAPH.LIST` membership check, control-measured: rc 2, receipt
+    untouched); only this one reached `return 0`.
+
+    The SAME rule is what ``_mark_shrunken_denominator`` applies to the census arm ("a
+    census of zero graphs is not a measurement") — this is that rule for one graph.
+    """
     if body.get("empty_or_absent", False) is None:
         body["unmeasurable"] = (
             "nodes_by_label raised, so whether this graph is empty is UNKNOWN — the "
             "counts beside it cannot be read as a measurement of a graph that was read")
+    elif body.get("empty_or_absent") is True:
+        body["unmeasurable"] = (
+            "the graph was READ and holds no nodes — a ZERO SHAPE, which this tool "
+            "cannot tell apart from a mistyped or absent graph name (select_graph "
+            "creates a graph on demand). The zeros beside it are not a measurement of "
+            "'nothing to walk'; re-run against the graph you meant.")
     return body
 
 
@@ -1392,6 +1412,17 @@ def _could_not_measure(body) -> str | None:
                 f"({', '.join(failed[:5])}"
                 f"{', …' if len(failed) > 5 else ''}) — a partial read is not a "
                 "measurement")
+    # ⛔ The corpus arm's zero shape (#13919 cycle 7): a journal directory holding files
+    # but NO parseable session is the same non-answer as an empty graph — the files were
+    # read, so this is not "no journal here" (that is the `skipped` branch above), and
+    # publishing `sessions: 0 / turns_distinct: 0` as a measurement asserts something
+    # about the population from a read that yielded nothing.
+    stats = body.get("stats")
+    if (body.get("sessions") == 0 and isinstance(stats, dict) and stats.get("files")):
+        return (f"the journal was read ({stats.get('files')} file(s), "
+                f"{stats.get('records', 0)} record(s), "
+                f"{stats.get('parse_errors', 0)} unparseable) and yielded NO session — "
+                "a zero shape is not a measurement")
     return None
 
 

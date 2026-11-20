@@ -1775,3 +1775,88 @@ def test_c6_the_write_refusal_names_the_SEGMENT_predicate_it_implements():
     # weak — a mutant that kept "contain one of" survived it.)
     assert "contain one of" not in refusal.lower(), (
         "the message describes a CONTAINMENT test; the predicate is a delimited SEGMENT")
+
+
+# ── #13919 review cycle 7 ───────────────────────────────────────────────────
+def test_c7_an_EMPTY_live_graph_is_unmeasurable_not_a_zero_measurement(monkeypatch,
+                                                                       tmp_path):
+    """C7 (P1): `_is_empty` returns `True` and NOTHING read it.
+
+    `_note_unreadable_emptiness` handled only `is None` (the read RAISED), so a graph
+    that was READ and holds no nodes published `sessions 0 / turns 0` as MEASURED,
+    exited 0, and `--out <receipt> || exit 1` replaced the artifact of record — the
+    exact state `_is_empty`'s own docstring says the caller MUST name ("a graph with no
+    nodes is INDISTINGUISHABLE from a mistyped/absent graph name"). The absent-name case
+    was already refused by the `GRAPH.LIST` membership check; only this one reached 0.
+    """
+    class _EmptyGraph(_FakeLiveGraph):
+        """Read fine, holds nothing — `nodes_by_label` answers an empty list."""
+
+        def query(self, cypher: str, params=None) -> _Result:
+            if cypher.startswith("MATCH (n) UNWIND labels"):
+                return _Result([])
+            return _Result([[0]])
+
+    monkeypatch.setattr(mod, "_open_live",
+                        lambda uri: (_FakeDB({"tortoise": _EmptyGraph()}),
+                                     {"graph": "tortoise"}))
+    body = mod.measure_live("docker://:@localhost:1/tortoise")
+    assert body["empty_or_absent"] is True
+    assert mod._could_not_measure(body), (
+        "an empty graph published its zeros as a measurement")
+    assert "ZERO SHAPE" in mod._could_not_measure(body).upper()
+
+    good = {"issue": 4211, "purpose": "the of-record artifact"}
+    out = tmp_path / "receipt.json"
+    out.write_text(json.dumps(good) + "\n")
+    assert mod.main(["--arms", "live", "--live-uri", "docker://:@localhost:1/tortoise",
+                     "--out", str(out)]) == 2
+    assert json.loads(out.read_text()) == good, "the receipt of record was replaced"
+
+
+def test_c7_an_EMPTY_store_graph_is_bound_by_the_same_rule(monkeypatch, tmp_path):
+    """C7, second site: the store arm reaches the same branch."""
+    src = tmp_path / "store.db"
+    src.write_bytes(b"rdb-bytes")
+
+    class _EmptyStore(_MutatingEngine):
+        def select_graph(self, _name):
+            class _G:
+                def query(self, cypher, params=None):
+                    if cypher.startswith("MATCH (n) UNWIND labels"):
+                        return _Result([])
+                    return _Result([[0]])
+            return _G()
+
+    monkeypatch.setattr(mod, "_open_embedded", lambda path: _EmptyStore(path))
+    body = mod.measure_store(str(src), "tortoise")
+    assert body["empty_or_absent"] is True
+    assert mod._could_not_measure(body), (
+        "an empty embedded graph published zeros as a measurement")
+
+
+def test_c7_a_journal_of_unparseable_records_is_a_zero_shape_not_a_measurement(
+        tmp_path):
+    """C7, third site: files were read, no session came out, and it published `sessions: 0`.
+
+    `measure_corpus` returns `skipped` when there are no files (no journal here), but a
+    directory holding files whose every record is unparseable fell through to
+    `sessions: 0 / turns_distinct: 0` and exited 0 — asserting something about the
+    population from a read that yielded nothing.
+    """
+    d = tmp_path / "events"
+    d.mkdir()
+    (d / "a.jsonl").write_text("{not json\n{also not json\n")
+    body = mod.measure_corpus(str(d))
+    assert body["stats"]["files"] == 1
+    assert body["stats"]["parse_errors"] == 2
+    assert body["sessions"] == 0
+    assert mod._could_not_measure(body), (
+        "a journal whose every record was unparseable published `sessions: 0` as a "
+        "measurement")
+    assert "zero shape" in mod._could_not_measure(body).lower()
+
+    # …and the genuinely-EMPTY directory is a SKIP (no journal here), not a zero shape.
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    assert "skipped" in mod.measure_corpus(str(empty))
