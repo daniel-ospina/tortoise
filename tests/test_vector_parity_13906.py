@@ -691,6 +691,44 @@ def test_the_guard_answers_what_libpq_would_DIAL_not_what_this_string_says(
         harness._assert_local_record_dsn("postgresql:///db", False)
 
 
+@pytest.mark.timeout(10)
+def test_a_conninfo_token_starting_with_equals_cannot_spin_forever(harness):
+    """⛔ A NON-PROGRESS BRANCH IN `_drop_options_pairs` IS AN UNBOUNDED SPIN.
+
+    The word scan stops immediately when the character at the word start IS `=`
+    (`=x host=127.0.0.1`). The old branch then re-emitted the empty word
+    (`dsn[word_start:i]` is `""`) and `continue`d WITHOUT advancing `i`, so
+    `while i < n` spun forever — no refusal, no traceback, no exit, and a lane
+    watchdog kills it with no diagnosis. Measured: `app_role_dsn` on
+    `"host=127.0.0.1 dbname=x = "` never returned and was killed by
+    `timeout 5` (exit 124).
+
+    ⛔ WHY THE `timeout` MARK: on the mutation this test must FAIL, not hang the
+    suite. pytest-timeout is a declared test dependency (pyproject `test` extra),
+    so a spin here is reported as a failure with the stack, which is the only
+    readable form of this defect.
+
+    The guard certifies these strings — `_conninfo_hosts` still finds
+    `host=127.0.0.1` in all three — so they reach `app_role_dsn`; through `run()`
+    libpq rejects them at connect (`invalid connection option ""`), which is why
+    the spin was reachable from the module's API and from this suite rather than
+    from a live run.
+    """
+    for dsn in (
+        "host=127.0.0.1 dbname=x = ",      # trailing bare `=`
+        "=x host=127.0.0.1",               # leading `=`
+        "host=127.0.0.1  =  dbname=x",     # bare `=` in the middle
+    ):
+        rebuilt = harness.app_role_dsn(dsn)
+        # the pair was ADDED and nothing was dropped
+        assert "options=" in rebuilt, rebuilt
+        assert "role=tortoise_record_app" in rebuilt or "%2Dc" in rebuilt, rebuilt
+        # …and the rest of the spelling survived (the `=` tokens are kept, not
+        # silently swallowed) — a rebuild that DELETED them would be the M/N
+        # class: a wrong DSN handed to psycopg2
+        assert rebuilt.startswith(dsn), (dsn, rebuilt)
+
+
 def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
     """⛔ BYTE-PRESERVATION, asserted structurally — because every tokenising
     rebuild here was wrong in a different way.

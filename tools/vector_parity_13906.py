@@ -907,6 +907,19 @@ def _drop_options_pairs(dsn: str) -> str:
         while j < n and dsn[j].isspace():
             j += 1
         if not word or j >= n or dsn[j] != "=":
+            # ⛔ MUST ADVANCE. An EMPTY word happens when the scan stopped on `=`
+            # itself — the shape `=x host=127.0.0.1`, which libpq parses far enough
+            # to report `host`, so the locality guard certifies it. Re-emitting
+            # `dsn[word_start:i]` (the empty string) and `continue`-ing leaves `i`
+            # exactly where it was: an UNBOUNDED SPIN with no refusal, no
+            # traceback and no exit — a lane watchdog kills it with no diagnosis
+            # (measured: `app_role_dsn("host=127.0.0.1 dbname=x = ")` never
+            # returned; killed by `timeout 5`, exit 124). Consume the character
+            # that stopped the scan so every branch of this loop advances.
+            if not word and i < n:
+                out.append(dsn[i])
+                i += 1
+                continue
             out.append(dsn[word_start:i])
             continue
         j += 1                                   # consume `=`
