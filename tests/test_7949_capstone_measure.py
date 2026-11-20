@@ -6797,7 +6797,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # catch. `count == 2` makes a half-move red (1) and an all-move red (0).
     _twin = "sits at `:9722` at this head and on `origin/main` alike"
     assert _d5.count(_twin) == 2, (
-        f"05-verify.md states the `register_source(..., raw_state=...)` line at `:9715` in this "
+        f"05-verify.md states the `register_source(..., raw_state=...)` line at `:9722` in this "
         f"phrasing {_d5.count(_twin)} time(s), and it must be stated exactly twice. Re-derive "
         "BOTH twins from the tree (`sed -n 'Np' tortoise/sdk.py`) — the row's own rule is that "
         "one present-tense fact carries one number")
@@ -16495,7 +16495,7 @@ def test_the_D5_row_is_still_one_table_row():
     """D5 is the row this bundle re-derives 270 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `269` reds instead of leaving four comments behind (a
+    any commit moving the line off `270` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
