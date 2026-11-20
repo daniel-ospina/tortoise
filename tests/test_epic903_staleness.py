@@ -72,8 +72,11 @@ def _post_mutation_oracle(ids: dict[str, str]) -> dict[str, float]:
         # Hermetic posture, matching ``fresh_sdk`` and ``capture_f4_oracle``:
         # the fixture is synthetic, so it must not depend on the ambient
         # TORTOISE_EP_REQUIRE_CALIBRATION another lane left in the process.
-        clone._set_point_baseline(clone_ids["r1"], 1.0, 8.0)  # same mutation
-        # #12901 FINAL batch: `dream` was PRIVATISED too — same body, private spelling.
+        # ⛔ ONE mutation, not two: the privatisation re-point of the line above
+        # also inserted a DUPLICATE `_set_point_baseline(...)` here, so the oracle
+        # applied the baseline twice while the live fixture applies it once — the
+        # pair this function exists to keep identical (#13899 re-cut review, P2).
+        # `_dream` keeps the private spelling (`dream` was privatised too).
         clone._dream(mode="full", warm_start=False, require_calibration=False)
         proj = clone._get_proj()
         rows = proj.g.query(
