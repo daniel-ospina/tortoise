@@ -63,6 +63,47 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
     for var in (*DB_ENV_VARS, "TORTOISE_API_KEY", "TORTOISE_API_URL"):
         monkeypatch.delenv(var, raising=False)
+    # ⛔ RESTORE THE #4071 CANONICAL-STORE GUARD THIS DELENV JUST REMOVED.
+    # `conftest.py` repoints the URI-less embedded lane away from the canonical
+    # store by setting `TORTOISE_DB_PATH` at IMPORT time (#4071) — its comment
+    # says that ONE choke point "covers every embedded constructor in the lane,
+    # including a test file that forgets an explicit path, which per-file edits
+    # cannot". This fixture clears `TORTOISE_DB_PATH` on purpose (`DB_ENV_VARS`,
+    # because "no env says where the store is" IS the state under test), which
+    # silently drops that guard: `resolve_db_path()` then falls through to
+    # `DEFAULT_DB_PATH` — the OWNER'S or the RUNNER'S REAL `~/.tortoise/tortoise.db`.
+    #
+    # Measured (shard `test (b)` at `79eaae021c` — the run head of PR #13856, which squash-landed,
+    # so that sha is NOT an ancestor of `main` and cannot be opened on a default clone; the
+    # measurement is run 44605355679, job 135864583112, self-hosted runner). `doctor`
+    # probed that real store, FalkorDBLite is single-writer, and a live peer
+    # process held it —
+    #
+    #     ❌ Graph: health: Embedded store busy:
+    #        '/home/cmux/.tortoise/tortoise.db' is held by a live process (pid 3391344)
+    #
+    # — so `doctor` exited 1 and six tests that only assert `.env` DISCLOSURE
+    # went red for a reason none of them is about. The tracker for these six is #13867 (its Root 1
+    # is this fixture); #13856 is only the PR whose run head the red was OBSERVED on, and it landed
+    # a different root (the D14 embedded leg), so following it leads to a closed, unrelated fix.
+    #
+    # ⛔ `HOME` does NOT redirect it: `DEFAULT_DB_PATH` is computed at IMPORT
+    # (`tortoise/config.py:31`), so the `setenv("HOME", …)` above is too late. The
+    # constant itself is what must be pinned — the same pattern this file already
+    # uses at its two relative-path arms (`monkeypatch.setattr(config,
+    # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist, and THAT
+    # is what makes these tests hermetic: `doctor`'s pre-init arm grades a MISSING
+    # target without opening it (`⚠️ … no Tortoise DB at …`, the expected #5815 first
+    # run), so no store is ever opened. ⛔ ONE ROW IS NOT A `doctor` ROW — ITS PIN PINS IT, NOT THE FIXTURE:
+    # `test_the_daemons_refusal_is_still_the_one_the_user_sees` builds an SDK, and
+    # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`). Pinned, the absent
+    # `<db_path>.settings` returns first (`sdk.py:14194-14195`) — and it is THAT PIN, not naming
+    # `_isolated`, that makes the row hermetic (`autouse` just above: every row runs it regardless).
+    # Unpinned, the row resolves to the REAL `~/.tortoise/tortoise.db` (measured), so that registry's
+    # CONTENTS choose the arm: missing/dead pidfile -> `:14201-14202`/`:14211-14212`; LIVE -> `:14216`.
+    import tortoise.config as _config
+    monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
+                        str(tmp_path / "canonical" / "tortoise.db"))
     monkeypatch.chdir(tmp_path)
     env_path = tmp_path / "repo" / ".env"
     monkeypatch.setattr(dotenv_file, "dotenv_path", lambda: str(env_path))
@@ -820,7 +861,7 @@ def test_config_show_does_not_reassure_when_the_daemon_refuses(capsys, _isolated
     assert "the same graph target as above" not in out, out
 
 
-def test_the_daemons_refusal_is_still_the_one_the_user_sees(monkeypatch):
+def test_the_daemons_refusal_is_still_the_one_the_user_sees(monkeypatch, _isolated):
     """`_get_sdk` must stay constructible on the refusal rung.
 
     `main()` calls `_get_sdk()` BEFORE its own "set TORTOISE_DB_URI … in the

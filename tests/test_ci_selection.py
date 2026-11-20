@@ -10350,6 +10350,16 @@ ROWED_BY_THIS_FOLD = (
     # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
     # listed has no `durations:` row and deleting the row this PR adds reds nothing.
     "test_13036_capstone_v2.py",
+    # #13880/#13913 - the business map's FILE DOOR. A file this fold ADDED,
+    # registered on `core` because `graph-scripts/` selects `core` (the
+    # default/fallback surface) and the pins it carries are the three legs
+    # `--dry-run` cannot reach: the write path executing at all (the `_resolve`
+    # binding that raised a TypeError), `Mcp.call` raising on `result.isError`,
+    # `_resolve`'s name-is-not-an-id refusal, and the identity-scoped read-back
+    # verdict that replaced a whole-graph count. Listed here for the reason every
+    # row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds.
+    "test_business_map_filer.py",
 )
 
 
