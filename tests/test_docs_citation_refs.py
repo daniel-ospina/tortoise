@@ -2136,7 +2136,18 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # NOT here, so `returns the empty set` was detector-read and ban-blind — and the ban is the
     # only arm over 12 of the 13 bundle documents. `an empty set` was already carried; `the`
     # is the same answer with a determiner the sibling strips.
-    r"|(?:an?|the|THE)\s+(?:empty|EMPTY|non[- ]?empty|not[- ]empty)|(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
+    # ⛔ AND EVERY DETERMINER THE DETECTOR STRIPS, NOT ONLY `a`/`an`/`the` (#13802 review, round 19,
+    # P2 — MEASURED: the detector strips determiners in a LOOP at `:698`
+    # (`the|a|an|its|this|that|those|these|just|only|still|now|actually|also|…`), while the two
+    # alternatives here carried only `a`/`an`/`the`. `returns its empty set` was therefore
+    # detector-read (`[('returns its empty set', True)]`) and BAN-BLIND, and `the`/`an`/`a`
+    # reaching the answer is the same answer with a determiner the sibling already strips. The
+    # shape is the detector's own — a REPEATED strip, so `those two files` and
+    # `just the empty set` are read the same way the detector reads them.
+    r"|(?:(?:the|THE|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|no\s+fewer\s+than)\s+)+"
+    r"(?:empty|EMPTY|non[- ]?empty|not[- ]empty|non[- ]?EMPTY)"
+    r"|(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
     r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
@@ -2165,7 +2176,18 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|both)"
     r"(?=[\s.,;:!?)*_`]|$)"
     r"|`?tortoise/`?(?=[\s.,;:!?)*_`]|$)"
-    r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)[*_`]{0,3}\s+"
+    # ⛔ AND THE SAME REPEATED-DETERMINER SHAPE ON THE COUNT ANSWER (#13802 review, round 19, P2 —
+    # MEASURED: `prints those two files` and `returns its two files` were detector-read and
+    # ban-blind, while the pinned sibling `prints both files` red — a ONE-WORD deletion from a
+    # pinned must-red witness. Swept 940 detector-read/ban-blind cells over
+    # determiner×count×noun×verb before the widening; 0 after.)
+    r"|(?:(?:the|THE|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|no\s+fewer\s+than)\s+)*"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|both|\d+|a|an|the)[*_`]{0,3}\s+"
+    # ⛔ `\d+` IS IN THAT GROUP BECAUSE THE ANSWER GROUP STARTS AFTER THE VERB (#13802 review,
+    # round 19, P2 — MEASURED): the bare-digit alternative is the separate `\b\d+\b` arm, which
+    # only fires when the digit sits DIRECTLY after the verb, so `returns its 2 files` and
+    # `returns those 2 files` were detector-read and ban-blind while `returns 2 files` red.
     # ⛔ THE WHITESPACE IS REQUIRED, AND THAT IS THE WHOLE GUARD AGAINST A SUBSTRING MATCH
     # (#13802 review, cycle 7 — MEASURED): with `\s*` on either side of the adjective, the
     # word `narrow` in `its `-- tortoise/` sibling is the NARROWER measurement` matched as
@@ -2249,7 +2271,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `This diff carries (measured at this head) no …` were GREEN while the bare form red)
     r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\))?\s+"
     r"(?:no|zero|only)\s+`?tortoise/[^`]*`?"
-    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`` cannot anchor before `-` or `→`,
+    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`\b` cannot anchor before `-` or `→`,
     # which is why putting them in the list above left them blind — MEASURED, round 17)
     r"|\s(?:=|:|->|→)\s+(?:no|zero|only)\s+`?tortoise/[^`]*`?"
     r"(?:\s+(?:paths?|files?|modules?|edits?)\b)?"
@@ -2463,6 +2485,19 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff carries, at this head, no `tortoise/` path at all.",
         "This diff carries (measured at this head) no `tortoise/` path at all.",
         "`None` is what the `tortoise/` set holds at this head.",
+        # ⛔ AND EVERY DETERMINER THE DETECTOR STRIPS (#13802 review, round 19, P2 — MEASURED:
+        # `_typed_answers_to_tortoise_cmd` strips determiners in a LOOP at `:698`, but this ban's
+        # count and emptiness answer groups carried only `a`/`an`/`the`, so `returns those two
+        # files` was detector-read (`[('returns those two files', False)]`) and ban-blind while
+        # the pinned sibling `prints both files` red — a ONE-WORD deletion from a must-red
+        # witness. Swept determiner x count x noun x verb: 940 detector-read/ban-blind cells,
+        # 0 after the widening, with 0 new refusals over the 855-doc corpus (6 before, 6 after).
+        # `\d+` is in the count group because the separate `\b\d+\b` arm only fires when the
+        # digit sits DIRECTLY after the verb, so `returns those 2 files` was blind too.
+        "`-- tortoise/` returns those two files at this head",
+        "the `tortoise/` set prints its two files at this head",
+        "`-- tortoise/` returns those 2 files at this head",
+        "`-- tortoise/` returns its empty set at this head",
         "`-- tortoise/` (run at this head) prints nothing",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
