@@ -2790,6 +2790,13 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: separate sentences of the D5 cell made — and the second one was not among the three the
 #: review quoted, which is why the correction is a ban over the class and not a patch of one
 #: sentence.
+#:
+#: ⛔ TWO ARMS, BECAUSE A LIST OF SPELLINGS IS NOT A CLASS BAN (#13853 review round 17, P2).
+#: The tuple below bans the rows the round-16 review MEASURED; on its own it misses the same
+#: false property RE-WORDED. Measured on the merged document: replacing "whose first non-space
+#: character **after that marker** is `#`" with "whose first non-space character is `#`"
+#: matched no row and left the suite green (466 passed). `_FALSE_FILTER_PROPERTY_RE` grades the
+#: SHAPE instead, so the property cannot come back in different words.
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
     "drops exactly the lines whose first non-space character is `#`",
@@ -2799,6 +2806,24 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
     "comment",
 )
+
+#: ⛔ THE SHAPE ARM. The false property is "the FIRST non-space character is `#`", which is
+#: unsatisfiable for a line that has already passed `grep -E '^[+-][^+-]'` — that character is
+#: always `+` or `-`. Every TRUE statement of it carries the qualifier ("… AFTER the marker
+#: …"), so the ban is "no `after` between the phrase and its verdict". It is a shape ban and
+#: not another row: a re-wording that keeps the false claim still has to say the character IS
+#: `#` without qualifying it by the marker, and an honest re-wording keeps the qualifier.
+_FALSE_FILTER_PROPERTY_RE = re.compile(
+    r"first non-space character(?:(?!\bafter\b).){0,160}?is `#`", re.S)
+
+#: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
+#: '<exclude>'`, spelled with or without markdown's escaped pipe.
+_FILTER_PIPELINE_RE = re.compile(r"grep -E '([^']+)' \\?\| grep -vE '([^']+)'")
+
+
+def _false_filter_property_restatements(doc: str) -> list[str]:
+    """Every re-wording of the false property still spelled in `doc` (#13853 review round 17)."""
+    return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(doc)]
 
 
 def _false_filter_descriptions(doc: str) -> list[str]:
@@ -2811,20 +2836,31 @@ def _false_filter_descriptions(doc: str) -> list[str]:
     return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling in doc]
 
 
-def _comment_filter(payload: str) -> str:
-    """The document's two grep stages, executed on `payload`.
+def _document_filter_patterns(doc: str) -> list[tuple[str, str]]:
+    """Every `grep -E … | grep -vE …` pair `05-verify.md` states, deduplicated.
 
-    `05-verify.md` grades the `tortoise/` half of the diff with
-    `grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`. Running the REAL filters rather
-    than a Python mirror is the point: the claim under test is about what `grep` does with
-    those two expressions, and a re-spelled mirror would prove only that the mirror agrees
-    with itself.
+    ⛔ THE PATTERNS ARE READ OUT OF THE DOCUMENT, NEVER MIRRORED HERE (#13853 review round 17,
+    P2-1). This helper did not exist: the arm hardcoded the pair, so the document could state
+    a DIFFERENT filter and the mechanism assertions stayed green — measured on the merged
+    document, changing the D5 cell's `[[:space:]]*` to `[[:space:]]+` left 466 passed while
+    the document no longer described the filter its own examples run. The document is the
+    artifact under test, so the patterns it states are the ones executed.
+    """
+    return sorted(set(_FILTER_PIPELINE_RE.findall(doc)))
+
+
+def _comment_filter(payload: str, include: str, exclude: str) -> str:
+    """The document's two grep stages, executed on `payload` with the DOCUMENT's patterns.
+
+    Running the REAL filters rather than a Python mirror is the point: the claim under test
+    is about what `grep` does with those two expressions, and a re-spelled mirror would prove
+    only that the mirror agrees with itself.
     """
     staged = subprocess.run(
-        ["grep", "-E", r"^[+-][^+-]"], input=payload,
+        ["grep", "-E", include], input=payload,
         capture_output=True, text=True, check=False)
     return subprocess.run(
-        ["grep", "-vE", r"^[+-][[:space:]]*#"], input=staged.stdout,
+        ["grep", "-vE", exclude], input=staged.stdout,
         capture_output=True, text=True, check=False).stdout
 
 
@@ -2855,6 +2891,21 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "proves the lines OPEN with `#`, never that they are comments (#13853 review "
         "round 16, P2-1 and P2-2)")
 
+    # (1b) THE SHAPE of the property, not just the rows — see `_FALSE_FILTER_PROPERTY_RE`.
+    assert _false_filter_property_restatements(bundle) == [], (
+        "05-verify.md states the `#`-only filter's drop test as 'the first non-space "
+        f"character is `#`' without the marker qualifier: {_false_filter_property_restatements(bundle)!r}. "
+        "Every line reaching that stage carries the diff marker, so that character is always "
+        "`+` or `-`; the qualifier is what makes the sentence true (#13853 review round 17, "
+        "P2-2)")
+    # ...and the shape arm must be able to FIRE. Measured against the merged document it is
+    # what the row list could not do: the same false property, re-worded.
+    assert _false_filter_property_restatements(
+        "… whose first non-space character is `#` — a comment …"
+    ) == ["first non-space character is `#`"], (
+        "the shape ban no longer matches the property it exists to retire, so a re-worded "
+        "restatement would pass it (#13853 review round 17, P2-2)")
+
     # (2) CONTENT, not size: the tuple is pinned WHOLE. A loop over the module constant
     # iterates the MUTATED list, so deleting a row (or re-wording one by a character) left
     # the injection loop green while that description could be re-inserted into the document
@@ -2884,20 +2935,109 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             "(even by one character) turns this arm inert — the bypass #13807 review "
             "finding 5 recorded for the membership ledger")
 
-    # (4) MECHANISM: the premise of (1), executed rather than reasoned about.
+    # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
+    # with the patterns the DOCUMENT states, so a document that states a different filter is
+    # caught here instead of staying green (#13853 review round 17, P2-1).
+    patterns = _document_filter_patterns(bundle)
+    assert len(patterns) == 1, (
+        "05-verify.md states the `#`-only filter's two grep stages more than one way, or no "
+        f"longer states them as one `grep -E … | grep -vE …` pipeline: {patterns!r}. One "
+        "pipeline, stated once, is what lets this arm run the document's own patterns; two "
+        "spellings would let one of them rot unseen (#13853 review round 17, P2-1)")
+    include, exclude = patterns[0]
     docstring_line = "+        #11702 — an ABSENT belief contributes NO term.\n"
     code_line = "+        subject_binding = resolve_subject()\n"
     assert docstring_line.lstrip()[0] == "+", (
         "the fixture stopped carrying a diff marker, so it no longer reproduces the "
         "condition the retired description got wrong")
-    assert _comment_filter(docstring_line) == "", (
-        "the filter no longer drops a docstring line whose own text opens with `#` — if "
-        "that changed, the replacement prose in `05-verify.md` is now the wrong one")
-    assert _comment_filter(code_line) == code_line, (
-        "the filter no longer prints a code line, so the replacement prose's second half "
-        "is false")
-    assert _comment_filter(docstring_line + code_line) == code_line, (
+    assert _comment_filter(docstring_line, include, exclude) == "", (
+        "the filter the document STATES no longer drops a docstring line whose own text "
+        "opens with `#` — if that changed, the replacement prose in `05-verify.md` is now "
+        "the wrong one")
+    assert _comment_filter(code_line, include, exclude) == code_line, (
+        "the filter the document states no longer prints a code line, so the replacement "
+        "prose's second half is false")
+    assert _comment_filter(docstring_line + code_line, include, exclude) == code_line, (
         "the two-stage pipeline is not behaving as the document describes it")
+    # ⛔ THE DOCUMENT'S OWN MEASURED EXAMPLES, executed. Each one is a case where a DIFFERENT
+    # but plausible pattern agrees with the canonical pair — which is why asserting only the
+    # three fixtures above let `[[:space:]]*` become `[[:space:]]+` with the suite green. The
+    # first line is the document's own ("printf '+#2521 (C5 #2513)' … is silent": a `#` with
+    # NO space after the marker, which `[[:space:]]+#` would print).
+    for payload, expected, why in (
+            ("+#2521 (C5 #2513) — text\n", "",
+             "a `#` immediately after the marker is dropped by the documented filter"),
+            ("+\n", "", "stage 1 drops an added line that is just the marker"),
+            ("++i\n", "",
+             "stage 1 drops a line whose content itself opens with `+`"),
+            ("--counter\n", "",
+             "stage 1 drops a line whose content itself opens with `-`")):
+        assert _comment_filter(payload, include, exclude) == expected, (
+            f"05-verify.md's stated filter does not behave as the document says: {why}. "
+            f"Patterns read from the document: include={include!r} exclude={exclude!r} "
+            f"(#13853 review round 17, P2-1)")
+
+
+#: Verdicts about the HEAD BEING MERGED that the D5 cell typed and the tree refuted at that
+#: head. Retired BY NAME (#13853 review round 17, P1) — they came BACK with the re-cut merge,
+#: which resolved `05-verify.md`'s `:134` to `main`'s side and dropped the branch's corrected
+#: sentences, so this is a regression a pin would have caught and no arm did.
+_D5_HEAD_BOUND_VERDICTS = (
+    "does NOT hold for this head",
+    "the FIRST of them prints a path",
+)
+
+
+def _d5_head_bound_verdicts(doc: str) -> list[str]:
+    """Every retired per-head verdict still spelled in `doc` (#13853 review round 17, P1)."""
+    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if spelling in doc]
+
+
+def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
+    """Two typed per-head verdicts the re-cut merge restored, and the tree refuted (#13853 r17).
+
+    MEASURED at `84b94ad74f` (the head that merged), against the base `290912f303`:
+
+    ```
+    $ git diff --name-only 290912f303...HEAD -- tortoise/
+    (no output)                       # so "no runtime behaviour change" DOES hold here
+    $ git diff --name-only 290912f303...HEAD -- docs/epics/…/04-plan.md
+    (no output)                       # so the FIRST of the two members prints NOTHING
+    ```
+
+    and the cell said the opposite of both — `does NOT hold for this head`, and "at this head
+    the FIRST of them prints a path". PROVENANCE, measured: the merged `:134` is byte-identical
+    to `main`'s (`git show 84b94ad74f:…:134 | md5sum` == `git show e23cf75b0a:…:134`), while
+    the branch's own `:134` carried the corrected sentences — so the conflict resolution took
+    one side wholesale, and nothing in the suite read either sentence.
+
+    Two things are asserted: the document states neither verdict, and each needle still matches
+    itself (a typo'd row is an inert ban — the bypass #13807 review finding 5 recorded).
+    """
+    bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+              / "05-verify.md").read_text(encoding="utf-8")
+    assert _d5_head_bound_verdicts(bundle) == [], (
+        "05-verify.md types a verdict about the head being merged, which the tree refuted at "
+        f"the head that wrote it: {_d5_head_bound_verdicts(bundle)!r}. Membership, counts and "
+        "runtime impact are the ANSWER OF A COMMAND at the head the reader merges — name the "
+        "command, never the answer (#13853 review round 17, P1)")
+
+    # CONTENT, not size: the tuple is pinned WHOLE, so a row that is edited (or deleted) cannot
+    # leave the ban inert while the injection loop below still passes.
+    assert (
+        "does NOT hold for this head",
+        "the FIRST of them prints a path",
+    ) == _D5_HEAD_BOUND_VERDICTS, (
+        "the per-head-verdict ledger changed. These are the exact sentences #13853's re-cut "
+        "merge restored and the tree refuted; retiring a NEW spelling means adding it, never "
+        "re-wording one (#13853 review round 17, P1)")
+
+    # INJECTION: every needle must be reachable through the detector.
+    for spelling in _D5_HEAD_BOUND_VERDICTS:
+        probe = f"… and the claim {spelling} at this head …"
+        assert _d5_head_bound_verdicts(probe) == [spelling], (
+            f"the ban's own row {spelling!r} is not detected when injected, so editing it "
+            "(even by one character) turns this arm inert")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
