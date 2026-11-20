@@ -669,7 +669,17 @@ def _gate_decision(node, entity_types: tuple[str, ...]) -> tuple[bool, str]:
         # encode-guard form `#13617` uses (`embedding = derived_embedding.encode(...)`).
         polarity = _gate_polarity(sub.test, wanted)
         if polarity == 0:
-            continue                          # masked: `… is False`, `bool(…)`, a lookup
+            # ⛔ A MASKED ASK IS UNPROVEN, NOT IGNORABLE (`#14001`, measured by the round-11
+            # review): `if not gate("object") is True:` ASKS the gate, and the old `continue`
+            # discarded it — so a LATER, decidable guard certified the writer while this arm
+            # stored on exactly the run a strip creates. Abstention must never read as clean,
+            # which is the whole issue; a masked shape is the abstention of the POLARITY
+            # reader. Measured cost: one fixture in the whole corpus has a masked ask and it is
+            # already refused; every real writer's ask is ±1, so this adds a refusal and cannot
+            # become an inert enforcer.
+            return False, ("the guard asks the write gate but its polarity cannot be decided "
+                           "(`not gate(…) is True`, `bool(gate(…))`, a lookup), so the stop "
+                           "arm it guards is unproven")
         # ⛔ AND THE TEST ITSELF RUNS ON EVERY ARM (`#14001`, measured by the round-3 review):
         # `if not gate("object") and props.update({"embedding": vec}): return None` stores the
         # vector on the stop run AND on the mirror run, and only `sub.body`/`sub.orelse` were
