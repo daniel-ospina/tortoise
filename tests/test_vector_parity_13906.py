@@ -1,0 +1,230 @@
+"""#13906 — the comparator that gates the vector move is itself gate-tested.
+
+WHY THIS FILE IS DB-FREE AND NOT ANOTHER LIVE TEST. `tools/vector_parity_13906.py`
+is the instrument that is allowed to say "the two dense legs agree". An
+instrument is only evidence if its NEGATIVE exists too: a comparison that has
+never returned `False` cannot distinguish parity from a blind spot, and the
+brief's own rule puts it bluntly — *a harness that has never reported a
+difference is not a harness*.
+
+The live half (fresh pgvector + FalkorDB, real corpus) is run by hand and its
+artifacts are committed under `docs/research/2026-11-20-13906-vector-parity/`.
+What CI can pin without a database is the part that would silently make that
+artifact meaningless: the diff itself, the tie policy, and the poisons.
+
+⛔ THE ONE PROPERTY EVERY TEST HERE PROTECTS: **passing must be hard.** If
+`compare` can be made to return `ids_equal=True` / `order="exact"` on a list
+that differs from the oracle, then every green run of the live harness — this
+lane's included — is unverified.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+MODULE_PATH = ROOT / "tools" / "vector_parity_13906.py"
+
+
+@pytest.fixture(scope="module")
+def harness():
+    spec = importlib.util.spec_from_file_location("vector_parity_13906", MODULE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    # ⛔ IN `sys.modules` BEFORE `exec_module`, and not for tidiness: the harness
+    # uses `from __future__ import annotations`, so `Row`'s field types are
+    # STRINGS and `dataclasses` resolves them through
+    # `sys.modules[cls.__module__]`. Without this line it is `None` and every
+    # test errors with `AttributeError: 'NoneType' object has no attribute
+    # '__dict__'` — measured, not theorised.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# ── the oracle ─────────────────────────────────────────────────────────────
+
+def test_truth_is_ordered_by_distance_then_key(harness):
+    rows = [
+        harness.Row(key="b", embedding=[0.0, 1.0, 0.0, 0.0]),
+        harness.Row(key="a", embedding=[0.0, 1.0, 0.0, 0.0]),
+        harness.Row(key="far", embedding=[1.0, 0.0, 0.0, 0.0]),
+    ]
+    got = harness.truth(rows, [0.0, 1.0, 0.0, 0.0], 3, metric="euclidean")
+    # Two EXACT duplicates (a, b) tie at distance 0 and the key breaks the tie;
+    # `far` is orthogonal. A bare `sort` on distance alone would make the oracle
+    # itself non-deterministic, and every parity claim derived from it too.
+    assert [key for key, _ in got] == ["a", "b", "far"]
+    assert got[0][1] == pytest.approx(0.0)
+    assert got[2][1] == pytest.approx(2 ** 0.5)
+
+
+def test_truth_excludes_the_populations_the_read_legs_exclude(harness):
+    """Width, terminal status, the legacy flag — the three eligibility rules."""
+    rows = [
+        harness.Row(key="live", embedding=[0.0, 1.0, 0.0, 0.0]),
+        harness.Row(key="wide", embedding=[0.0] * 768),
+        harness.Row(key="none", embedding=None),
+        harness.Row(key="retracted", embedding=[0.0, 1.0, 0.0, 0.0],
+                    status="retracted"),
+        harness.Row(key="outdated", embedding=[0.0, 1.0, 0.0, 0.0],
+                    outdated=True),
+        harness.Row(key="foreign", embedding=[0.0, 1.0, 0.0, 0.0],
+                    tenant="other"),
+    ]
+    got = [key for key, _ in harness.truth(
+        rows, [0.0, 1.0, 0.0, 0.0], 10, metric="cosine")]
+    assert got == ["live"], (
+        "an excluded population reached the oracle — the harness would then "
+        "report a leg that correctly hides it as MISSING a row, i.e. it would "
+        f"fail a correct leg. Got {got}")
+
+
+def test_cosine_and_euclidean_disagree_when_norms_differ(harness):
+    """The metric-drift premise, pinned rather than assumed.
+
+    The record leg scores COSINE; the graph's brute-force SCAN scores EUCLIDEAN.
+    On un-normalised vectors (`embeddings.compute_embeddings` stores the model's
+    raw output) the two orderings can differ — this is the fact the live
+    harness's `graph_scan_vs_cosine` column measures, and if it were false the
+    harness's informational column would be meaningless.
+    """
+    query = [1.0, 0.0, 0.0, 0.0]
+    rows = [
+        # Same direction as the query, long: cosine 0 (best), euclidean 9.
+        harness.Row(key="same_dir_long", embedding=[10.0, 0.0, 0.0, 0.0]),
+        # Slightly off direction, short: cosine > 0, euclidean tiny.
+        harness.Row(key="off_dir_short", embedding=[0.1, 0.02, 0.0, 0.0]),
+    ]
+    cos = [k for k, _ in harness.truth(rows, query, 2, metric="cosine")]
+    euc = [k for k, _ in harness.truth(rows, query, 2, metric="euclidean")]
+    assert cos == ["same_dir_long", "off_dir_short"]
+    assert euc == ["off_dir_short", "same_dir_long"], (
+        "the two metrics agreed on un-normalised vectors — either the fixture "
+        "stopped exercising the drift or the distances were mixed up")
+
+
+# ── the comparator ─────────────────────────────────────────────────────────
+
+def _truth():
+    return [("a", 0.10), ("b", 0.20), ("c", 0.30)]
+
+
+def test_an_identical_list_is_reported_as_parity(harness):
+    cmp_ = harness.compare(_truth(), ["a", "b", "c"])
+    assert cmp_["ids_equal"] is True
+    assert cmp_["order"] == "exact"
+    assert cmp_["recall"] == 1.0
+
+
+def test_a_within_tie_permutation_is_NOT_a_divergence(harness):
+    """The research rung's tie-equivalence policy, as a decision.
+
+    Two ids at the SAME distance are interchangeable: the stores tie-break by
+    recency-then-id, the oracle by id, so a swap inside the tie group is the
+    correct classification — not a pass, and not a failure.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.1), ("c", 0.5)]
+    cmp_ = harness.compare(truth_rows, ["b", "a", "c"])
+    assert cmp_["order"] == "tie"
+    assert cmp_["ids_equal"] is True
+
+
+def test_a_cross_distance_permutation_IS_a_divergence(harness):
+    cmp_ = harness.compare(_truth(), ["b", "a", "c"])
+    assert cmp_["order"] == "diverged", (
+        "a swap across DIFFERENT distances was called a tie — the tie policy "
+        "is now wide enough to hide a real ranking change")
+    assert cmp_["ids_equal"] is True
+    assert cmp_["order_mismatches"][0] == {
+        "position": 0, "truth": "a", "candidate": "b",
+        "truth_distance": 0.10, "candidate_distance": 0.20}
+
+
+def test_a_missing_id_is_reported_as_recall_loss(harness):
+    cmp_ = harness.compare(_truth(), ["a", "b"])
+    assert cmp_["ids_equal"] is False
+    assert cmp_["recall"] == pytest.approx(2 / 3)
+    assert cmp_["missing"] == ["c"]
+
+
+def test_an_extra_id_is_reported_even_when_recall_is_full(harness):
+    """A leg that invents a row is wrong in a way recall alone cannot see."""
+    cmp_ = harness.compare(_truth(), ["a", "b", "c", "zzz"])
+    assert cmp_["ids_equal"] is False
+    assert cmp_["recall"] == 1.0
+    assert cmp_["extra"] == ["zzz"]
+
+
+# ── the falsifier ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("kind", ["id", "order", "recall"])
+def test_each_poison_makes_the_comparison_fail(harness, kind):
+    """⛔ THE GATE ON THE GATE. Each poison must produce a red comparison."""
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3), ("d", 0.4)]
+    candidate = ["a", "b", "c", "d"]
+    poisoned = harness.poison(candidate, truth_rows, kind)
+    cmp_ = harness.compare(truth_rows, poisoned)
+    assert cmp_["order"] != "exact" or cmp_["ids_equal"] is False, (
+        f"poison {kind!r} produced NO divergence — the harness is blind to it")
+    assert not (cmp_["ids_equal"] and cmp_["order"] == "exact")
+
+
+def test_the_poisoned_verdict_is_always_red(harness):
+    """A poisoned run is never a pass, including when it goes undetected."""
+    report = {"queries": [{"query": "q0",
+                           "record": {"ids_equal": True, "order": "exact",
+                                      "recall": 1.0},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0},
+                           "metric_divergence_ids": []}]}
+    clean = harness._verdict(report, poisoned=None)
+    assert clean["ok"] is True
+
+    blind = harness._verdict(report, poisoned="id")
+    assert blind["ok"] is False, (
+        "a poisoned run that found nothing was reported GREEN — that is the "
+        "exact failure mode the poison exists to expose")
+    assert blind["poison_status"] == "POISON NOT DETECTED — HARNESS BLIND"
+
+
+def test_a_divergent_report_is_red_for_the_required_arms(harness):
+    report = {"queries": [{"query": "q0",
+                           "record": {"ids_equal": False, "order": "diverged",
+                                      "recall": 0.5},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0},
+                           "metric_divergence_ids": ["x"]}]}
+    v = harness._verdict(report, poisoned=None)
+    assert v["ok"] is False
+    assert any("record diverged" in f for f in v["failures"])
+
+
+def test_metric_divergence_alone_does_not_fail_the_run(harness):
+    """The graph scan's euclidean ranking is pre-existing behaviour.
+
+    It is MEASURED and reported, never gated here: this issue moves the read to
+    the record, it does not decide the graph scan's metric. A harness that
+    failed on it would fail every run on an index-less store for a reason no PR
+    in this issue changes.
+    """
+    report = {"queries": [{"query": "q0",
+                           "record": {"ids_equal": True, "order": "exact",
+                                      "recall": 1.0},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0},
+                           "metric_divergence_ids": ["r001", "r002"]}]}
+    v = harness._verdict(report, poisoned=None)
+    assert v["ok"] is True
+    assert v["informational"]["metric_divergence_ids_total"] == 2
