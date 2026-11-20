@@ -16666,11 +16666,12 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: `:6791`-`:6794` asserts each of the four against `_honours_line`, and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. THREE things here are new coverage: the
-#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
-#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
-#: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
-#: a number that IS on D5's line but belongs to a clause about a different file.
+#: that clause ever had a reader. What IS new coverage here: the `dedup_reviewed IS NULL`
+#: clause below, the `_D5_TRIPLE_RE` three-anchor sentence (a number swapped onto ANOTHER
+#: anchor's slot, which no per-line row can see), the #13845 quota guard (a number ON D5's
+#: line belonging to a clause about another file), the I7 `nodes_used`/`max_nodes` pair and
+#: the `sdk.py` import's other hit — the last two from #13879. No count is stated here: this
+#: list grows, and a count in a comment is the head-bound figure the rows below forbid.
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
