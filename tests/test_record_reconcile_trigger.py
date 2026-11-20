@@ -985,11 +985,14 @@ def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
     rather than the old one.** The refusal that used to answer this case existed
     because DERIVING was the only alternative to guessing — and a derivation is
     wrong about exactly one graph, an org's default at ``org_<org_id>``. A fact
-    exists now (``public.graphs.namespace``), so the flag is optional; what must
-    never come back is the SILENT derivation this test was written against. So
-    the assertion is unchanged in substance — both conventions are named and the
-    run says the coordinate was assumed — while the exit code is no longer the
-    flag refusal's (this run fails on the stubbed record instead).
+    exists now (``public.graphs.namespace``), so the flag is optional WHERE A
+    FACT ANSWERS. What must never come back is the SILENT derivation this test
+    was written against — and, per #13337's own ruling, a GRADED one either: on
+    this shape (no control plane) the verb still refuses, now naming the spelling
+    it would have used. So the assertion is unchanged in substance — both
+    conventions are named, the run says the coordinate would be assumed, and the
+    exit code is still no-verdict — while the message is the actionable one and
+    not the old blanket flag refusal.
     """
     from tortoise import __main__ as cli
 

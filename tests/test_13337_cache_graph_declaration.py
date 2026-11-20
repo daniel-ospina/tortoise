@@ -450,27 +450,10 @@ def test_record_restore_REFUSES_when_the_name_would_be_DERIVED(
     assert "Nothing was restored" in captured.err, captured.err
 
 
-def test_record_restore_REFUSES_a_WHITESPACE_only_cache_graph(
-        monkeypatch, capsys):
-    """⛔ THE REFUSAL ITSELF WAS DEFEATED BY `--cache-graph "   "` (#14068).
-
-    The gate read the RAW argument, so a whitespace-only value (the shape
-    ``--cache-graph "$UNSET_VAR"`` takes) skipped the derived-arm refusal and
-    handed the DERIVED spelling to ``FalkorProjection.from_uri`` /
-    ``restore_from_record_view`` — a wipe against a coordinate nobody stated.
-    Gating on ``declared.source`` closes it.
-    """
-    _no_control_plane(monkeypatch)
-    _stub_psycopg2(monkeypatch)
-    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
-
-    code = cli._cmd_record_restore(_restore_args(cache_graph="   "))
-    captured = capsys.readouterr()
-
-    assert code == 2, (
-        f"a blank flag must not reach the wipe path: {captured.err}")
-    assert "Nothing was restored" in captured.err, captured.err
-    assert "org_orgrepro_grepro" in captured.err, captured.err
+# ⛔ The BLANK-FLAG case has its own row for both verbs:
+# ``test_a_WHITESPACE_only_cache_graph_is_NOT_a_stated_name`` (reconcile) and
+# ``test_a_WHITESPACE_only_cache_graph_cannot_defeat_the_DESTRUCTIVE_refusal``
+# (restore, the one where it reached the wipe path).
 
 
 def test_record_restore_HANDS_THE_FACT_to_the_composition(monkeypatch, capsys):
@@ -538,10 +521,163 @@ def test_record_restore_HANDS_THE_FACT_to_the_composition(monkeypatch, capsys):
         "the READ name is what must be opened — not the derived spelling "
         f"and not None: {seen}")
     assert seen["composition"] == "org_orgrepro", seen
-    assert "note: restoring into cache graph 'org_orgrepro' (control_plane)" \
-        in captured.err, (
-            "a destructive run must state WHICH coordinate it wipes, and how it "
-            f"was resolved, before it wipes: {captured.err}")
+    assert "restore target" in captured.err, (
+        "and the run must state the coordinate it resolved, with its source "
+        f"(the ordering pin is its own row): {captured.err}")
+
+
+def test_record_restore_STATES_its_target_BEFORE_it_touches_the_graph(
+        monkeypatch, capsys):
+    """⛔ THE FACT ARM WIPES, SO THE COORDINATE IS STATED BEFORE THE FIRST TOUCH.
+
+    `#14068` review P2-1: once the fact arm stopped refusing, the FIRST line such
+    a run emitted was the POST-restore outcome — the operator learned which graph
+    had been wiped only after it was gone, and `FalkorProjection.from_uri` has
+    already CREATED the graph it names by then.
+
+    Discriminating by construction: the assertion needs a statement that exists
+    ONLY on the path this test asserts, and the ordering assertion pins it BEFORE
+    the record read (hence before `from_uri`, before the wipe) rather than merely
+    somewhere in the output.
+    """
+    import types
+
+    stub = types.ModuleType("psycopg2")
+
+    def _connect(*a, **k):
+        raise OSError("no database here")
+
+    stub.connect = _connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        args = argparse.Namespace(
+            db="docker://localhost:6379",
+            record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
+            org="orgrepro", graph="grepro", cache_graph=None,
+            limit=None, allow_empty=False, json=True)
+        code = cli._cmd_record_restore(args)
+    finally:
+        _restore_control_plane(table)
+    captured = capsys.readouterr()
+
+    assert code == 2, captured.err
+    assert "restore target" in captured.err, (
+        "a destructive verb must state the graph it is about to wipe BEFORE it "
+        f"wipes it: {captured.err}")
+    stated = captured.err.index("restore target")
+    assert "org_orgrepro" in captured.err[stated:], (
+        f"the statement must name the FACT's graph: {captured.err}")
+    assert SOURCE_CONTROL_PLANE in captured.err[stated:], (
+        f"and say whether the coordinate was read or assumed: {captured.err}")
+    assert stated < captured.err.index("record is unreadable"), (
+        "the target is stated BEFORE the record is read, hence before any "
+        f"projection opens (and creates) the graph: {captured.err}")
+
+
+def test_a_WHITESPACE_only_cache_graph_cannot_defeat_the_DESTRUCTIVE_refusal(
+        monkeypatch, capsys):
+    """⛔ A BLANK FLAG IS NOT A STATED NAME, and a destructive verb must not read
+    it as one.
+
+    `declared_cache_graph` trims before it decides, so `--cache-graph "   "` falls
+    through to the derived arm and is REFUSED. The arms in the verbs keyed on the
+    RAW `args.cache_graph`, which is truthy for `"   "` — so the refusal was
+    skipped and the derived name was handed to the verb that WIPES, i.e. the
+    `#9556` refusal defeated by three spaces (`#14068` review P3-3b, and a P2
+    once you follow it into this verb). This test is the regression: the blank
+    flag must land in the same arm as no flag at all.
+    """
+    import types
+
+    stub = types.ModuleType("psycopg2")
+
+    def _connect(*a, **k):
+        raise OSError("no database here")
+
+    stub.connect = _connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.setattr(
+        "tortoise.cache_graph.namespace_from_control_plane",
+        lambda _org, _gid: None, raising=True)
+
+    args = argparse.Namespace(
+        db="docker://localhost:6379",
+        record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
+        org="orgrepro", graph="grepro", cache_graph="   ",
+        limit=None, allow_empty=False, json=True)
+    code = cli._cmd_record_restore(args)
+    captured = capsys.readouterr()
+
+    assert code == 2, (
+        f"three spaces must not authorise a wipe on a derived name: {captured.err}")
+    assert "--cache-graph is required" in captured.err, captured.err
+    assert "org_orgrepro_grepro" in captured.err, captured.err
+    assert "Nothing was restored" in captured.err, captured.err
+    assert "restore target" not in captured.err, (
+        f"nothing was restored, so no target may be announced as one: {captured.err}")
+
+
+def test_record_reconcile_HANDS_the_declared_name_to_the_CACHE_CONSUMER(
+        monkeypatch, capsys):
+    """⛔ THE WIRING, PINNED WITHOUT STORES (`#14068` review P3-4).
+
+    The reported `cache_graph` field is `declared.name` — reporting it proves
+    nothing about what the run GRADED. Reverting `cache_graph = declared.name`
+    back to the derived spelling left every store-less test green, because both
+    end-to-end legs skip without Postgres + FalkorDB.
+
+    So this leg fails the CACHE OPEN, which is downstream of the wiring and whose
+    message is built from the wired name: with the control plane answering
+    `org_orgrepro`, the run must try to open THAT graph — not the registry
+    spelling `org_orgrepro_grepro`. No store is involved: psycopg2 and the
+    projection are both stubbed, and the assertion is about the name the consumer
+    was handed.
+    """
+    import types
+
+    stub = types.ModuleType("psycopg2")
+
+    class _Conn:
+        def close(self):
+            return None
+
+    stub.connect = lambda *a, **k: _Conn()
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+
+    import tortoise.cache_projection as projection_read_mod
+    import tortoise.projection as projection_mod
+
+    monkeypatch.setattr(projection_read_mod, "read_record_view",
+                        lambda _conn, **_kw: object(), raising=True)
+
+    class _NoCache:
+        @staticmethod
+        def from_uri(_uri, graph_name=None):
+            raise RuntimeError(f"cannot open {graph_name}")
+
+    monkeypatch.setattr(projection_mod, "FalkorProjection", _NoCache,
+                        raising=True)
+
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        code = cli._cmd_record_reconcile(_reconcile_args(cache_graph=None))
+    finally:
+        _restore_control_plane(table)
+    captured = capsys.readouterr()
+
+    assert code == 2, captured.err
+    assert "could not be opened" in captured.err, captured.err
+    assert "org_orgrepro" in captured.err, (
+        f"the consumer must be handed the FACT's name: {captured.err}")
+    assert "org_orgrepro_grepro" not in captured.err, (
+        "the registry spelling is what the defect graded — the fact's name must "
+        f"reach the cache read instead: {captured.err}")
 
 
 # ── 3. the end-to-end acceptance (both stores; SKIPS without them) ───────────

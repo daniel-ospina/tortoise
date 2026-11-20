@@ -916,14 +916,20 @@ def _cmd_record_reconcile(args):
         cache_graph=args.cache_graph,
         read_namespace=lambda _org, _gid: namespace_fact)
     cache_graph = declared.name
-    # ⛔ GATE ON THE DECLARATION, NEVER ON THE RAW ARGUMENT. `declared_cache_graph`
-    # STRIPS the stated value, so `--cache-graph "   "` lands on the derived arm
-    # while `args.cache_graph` is truthy — reading the raw flag there let a
-    # whitespace-only name skip BOTH messages and grade an assumed coordinate
-    # silently (#14068 review). It is also the shape `--journal "$UNSET_VAR"`
-    # takes, which this file already designs for (`:17777`).
-    if declared.source == SOURCE_FLAG and namespace_fact \
-            and namespace_fact != declared.name:
+    # ⛔ THE WARNING IS ROUTED OFF THE RESOLVED SOURCE, NOT OFF `args.cache_graph`
+    # (#14068 review P3-3b). A whitespace-only `--cache-graph "   "` is TRUTHY,
+    # so keying on the raw flag both fired a disagreement warning about a name the
+    # operator never stated and SKIPPED the derived-arm arm below — reporting a
+    # verdict on a coordinate it had not established as read. `declared.source` is
+    # the same fact with the blank case already folded (`declared_cache_graph`
+    # trims before it decides), so the arms can no longer disagree with it.
+    # ⛔ THE CONTROL-PLANE READ ABOVE IS NOT SKIPPED WHEN THE FLAG IS STATED, and
+    # that is deliberate (#14068 review P3-3a): the disagreement warning IS the
+    # read's purpose — a stated name is exactly the coordinate that can be wrong,
+    # and skipping the read would delete the only signal that says so. One
+    # control-plane lookup, on a verb that then scans a whole tenant's cache, is
+    # not the cost that matters here.
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
         # A stated name is a fact and is never overridden — but grading the
         # wrong coordinate produces a WRONG VERDICT, which is the thing this
         # verb exists to refuse. Say it, grade what was asked for.
@@ -1436,8 +1442,9 @@ def _cmd_record_restore(args):
     ⛔ ``--cache-graph`` is OPTIONAL for the same reason and by the same
     declaration as ``record-reconcile`` (#13337): the name is READ from the
     control plane's ``public.graphs.namespace``. ⛔ A DERIVED name is REFUSED
-    here (exit 2), and unlike ``record-reconcile`` that refusal is not about the
-    verdict — it is that a wrong guess opens an EMPTY graph, so the run would
+    here (exit 2) — `record-reconcile` refuses it too, because a graded assumed
+    coordinate is a wrong verdict, but the consequence here is WORSE: a wrong
+    guess opens an EMPTY graph, so the run would
     report a restore into a graph nobody reads while the operator's real graph
     stayed destroyed. That is why the pre-wipe node count is reported too, why
     the resolved coordinate and its source are stated BEFORE anything is opened
@@ -1518,8 +1525,7 @@ def _cmd_record_restore(args):
         org_id=args.org, graph_id=args.graph,
         cache_graph=args.cache_graph,
         read_namespace=lambda _org, _gid: namespace_fact)
-    if declared.source == SOURCE_FLAG and namespace_fact \
-            and namespace_fact != declared.name:
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
         print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
               f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
               f"This run restores into the name you stated; if the tenant's "
@@ -1546,13 +1552,17 @@ def _cmd_record_restore(args):
             file=sys.stderr)
         return EXIT_UNAVAILABLE
     args.cache_graph = declared.name
-    # ⛔ THIS VERB WIPES. Say WHICH coordinate and HOW it was resolved BEFORE
-    # anything is opened or deleted: on the fact arm a `public.graphs.namespace`
-    # an operator typed somewhere else is what authorises the wipe, and a
-    # destructive run that never states its target is the shape the review named
-    # (#14068). One line, before the pre-wipe count.
-    print(f"note: restoring into cache graph {args.cache_graph!r} "
-          f"({declared.source})", file=sys.stderr)
+    # ⛔ A DESTRUCTIVE VERB STATES ITS COORDINATE BEFORE IT TOUCHES IT (#14068
+    # review P2-1). The derived arm refuses above; the fact arms fall through —
+    # and before this line the FIRST thing such a run emitted was the
+    # post-restore outcome, so an operator learned WHICH graph had been wiped
+    # only after it was gone. `record-reconcile` states its coordinate in the
+    # verdict; this verb wipes, so it states it up front, with the source and the
+    # detail that produced it. Printed before `FalkorProjection.from_uri`, which
+    # CREATES the target, so the statement always precedes the first touch.
+    print(f"restore target: {declared.name!r} — {declared.source}"
+          f"{' (' + declared.detail + ')' if declared.detail else ''}",
+          file=sys.stderr)
     if args.limit is not None and args.limit < 1:
         print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
               f"cache and writes nothing, so it is refused before any write. "
