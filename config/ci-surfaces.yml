@@ -9138,7 +9138,7 @@ surfaces:
   # `❌ manifest drift: ['test_evictor_invalidates_fallback_snapshot_13123.py']`,
   # exit 1.
   # ⚠️ The registration is THREE entries, not one, and each is enforced by a
-  # DIFFERENT check — none of them by `--integrity`, whose drift list names only a file
+  # DIFFERENT check — only the FIRST by `--integrity`, whose drift list names only a file
   # no surface owns. ⛔ `leg_coverage_issues` is NOT one of the three: it is push-leg
   # membership (shards vs slow/carve-out/on-demand, `tools/ci_selection.py:6382`) and it
   # never reads `uri_requiring` or `durations` — an earlier revision of this note said it
