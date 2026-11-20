@@ -3522,9 +3522,11 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
         return option, ""
     if not (rest.startswith("=") or rest[0] in "'\""):
         # ⛔ AN UNQUOTED ATTACHED VALUE IS STILL A VALUE (#13995, MEASURED): `grep -c -e^[+-]$`
-        # is `-e` with the pattern `^[+-]$`, and real grep counts the blank class with it. Only a
-        # cluster whose LAST character takes an argument can own such a value — `-c^[+-]$` is
-        # `grep: invalid option`, so it stays `None`.
+        # is `-e` with the pattern `^[+-]$`, and real grep counts the blank class with it. That
+        # case never reaches here any more — the cluster SPLIT at the top of this function takes
+        # `-e^[+-]$` apart as `-e` + `^[+-]$` (#14027 round 9, P2) — so a token that arrives with
+        # an unquoted, non-`=` tail has NO argument-taking character in it, and is therefore not a
+        # flag word at all: `-c^[+-]$` is argv `grep: invalid option`, rc 2 (measured).
         if option.startswith("--"):
             # ⛔ A LONG OPTION NEVER OWNS AN UNQUOTED VALUE, SO NOTHING IS ATTACHED HERE AND THE
             # TAIL IS PART OF THE NAME (#13995 review, P3 — MEASURED): getopt requires `=` for a
