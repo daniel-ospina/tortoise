@@ -2820,21 +2820,39 @@ def test_r15_a_failed_out_write_exits_2_not_1_on_EVERY_path(monkeypatch, tmp_pat
     `rc=1` traceback could be restored silently — and the *other* `_publish` call site,
     inside `except Exception`, still exited 1 when an arm RAISED and the write failed.
 
-    Both paths are asserted, and the report is asserted to still PRINT: a caller must be
-    able to tell "measured but not published" from "nothing measured".
+    What is asserted, and no more (#13919 round 17, P3-2/P3-3 — the earlier docstring
+    claimed "the report is asserted to still PRINT", which nothing checked AND which the
+    crash path deliberately contradicts, because `_print_report` is not called there):
+    the documented exit code, an ATTRIBUTED stderr line, and — on the normal path only —
+    that the human report still prints. The crash path is asserted to state that the
+    receipt was NOT written and to print its traceback, since that block's traceback is the
+    only record left once the write failed.
     """
     # `/dev/null/x.json`: the parent is a character device, so mkdir raises.
     bad = "/dev/null/x.json"
 
-    # Path A — the normal path, corpus arm with no capture journal.
+    # Path A — the normal path. The corpus arm is stubbed with a body that HAS stats, so
+    # `_print_report` actually renders a block and "the report still printed" is a
+    # falsifiable claim rather than a claim about an empty stdout (an absent capture
+    # journal yields a `skipped` body, which renders nothing).
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
-    rc = mod.main(["--arms", "corpus", "--sessions-dir", str(tmp_path / "absent"),
+    monkeypatch.setattr(mod, "measure_corpus", lambda *_a, **_k: {
+        "stats": {"files": 1, "records": 2, "records_without_text": 0},
+        "sessions": 1, "turns_distinct": 2, "turns_naming_a_ref_distinct": 1,
+        "sessions_with_gt1_turn": 1,
+    })
+    rc = mod.main(["--arms", "corpus", "--sessions-dir", str(tmp_path),
                    "--out", bad])
     assert rc == 2, f"a failed --out write exited {rc}, not the documented 2"
-    err = capsys.readouterr().err
-    assert "could not write --out" in err, (
+    cap = capsys.readouterr()
+    assert "could not write --out" in cap.err, (
         "the write failure must be ATTRIBUTED on stderr, not raised as a traceback: "
-        f"stderr was {err!r}")
+        f"stderr was {cap.err!r}")
+    # The NORMAL path still prints the human report — that is what distinguishes
+    # "measured but not published" from "nothing measured".
+    assert "the measurement is printed below but NOT published" in cap.err, cap.err
+    assert "== arm" in cap.out, (
+        f"the report did not print on the normal path: stdout was {cap.out!r}")
 
     # Path B — an arm RAISED and the write failed: the second call site.
     def _boom():
@@ -2845,6 +2863,20 @@ def test_r15_a_failed_out_write_exits_2_not_1_on_EVERY_path(monkeypatch, tmp_pat
     assert rc == 2, (
         f"an arm that RAISED with a failing --out write exited {rc}, not 2 — the second "
         "_publish call site is unguarded again")
+    # ⛔ THE CRASH PATH'S OWN HALVES ARE PINNED (#13919 round 17, P3-2). Both were
+    # unpinned and both reverted silently: reverting `why=` to the false "printed below"
+    # sentence, and deleting the traceback print, each left the suite at 100 passed — the
+    # round-15 finding ("the exit-contract fix has NO pin") recurring one level up.
+    cap_b = capsys.readouterr()
+    assert "the receipt was NOT written" in cap_b.err, (
+        "the crash path claims its output is 'printed below' — `_print_report` is not "
+        f"called there, so that sentence points at nothing: {cap_b.err!r}")
+    assert "RuntimeError: arm blew up" in cap_b.err, (
+        "the crash path dropped the exception that caused it — an unattributed rc=2 is "
+        f"not a verdict a caller can act on: {cap_b.err!r}")
+    assert "Traceback (most recent call last)" in cap_b.err, (
+        "the traceback is the ONLY record left when the receipt could not be written, and "
+        f"it was not printed: {cap_b.err!r}")
 
 
 def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
@@ -2915,6 +2947,18 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
             "queries text for the keys the turn-filter and multiplicity fixes touched",
         },
     }
+    # ⛔ THE ROUND SET IS DERIVED, not enumerated (#13919 round 17, P3-1). Listing the
+    # rounds closed the class WITHIN a pinned round while leaving the COUNT open: a sixth
+    # round's `not_in_this_receipt` block re-entered unchecked, which is the same "a
+    # disclosure nobody can verify" this pin exists for. Measured by review round 17:
+    # injecting `round_16_review.not_in_this_receipt = {<fabricated row>}` left 100 passed.
+    declared = {k for k, v in pm.items()
+                if isinstance(v, dict) and "not_in_this_receipt" in v}
+    assert declared == set(expected_rounds), (
+        "`post_measurement_revision` carries a disclosure round this pin does not know: "
+        f"unpinned {sorted(declared - set(expected_rounds))}, "
+        f"stale {sorted(set(expected_rounds) - declared)} — add the round's key set here "
+        "BEFORE adding its rows")
     for round_key, want in expected_rounds.items():
         got = set((pm.get(round_key) or {}).get("not_in_this_receipt") or {})
         assert got == want, (
