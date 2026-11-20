@@ -270,7 +270,16 @@ SWEEP_NAMES = 66
 #: comment-only: its contribution is the provenance and the non-delegability finding above, not a
 #: new number. `--check` on the merged tree exits 0 with typed references `0`. Re-derive with
 #: `--repin` on your own tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
+#: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
+#: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
+#: still calling the RETIRED public spelling on a `TortoiseSDK`, `stub.get_point("p-1", served_out={})`
+#: — #13899's sweep re-pointed that file's seven other sites to `_get_point` and missed this one, so it
+#: raised `AttributeError` instead of asserting the record bound and reddened `test (a)`. Re-pointed
+#: to `stub._get_point(...)`, which removes exactly that one untyped-receiver row (-1: 11822 → 11821).
+#: Direction matters and is the reason this is safe to take: a residue that SHRINKS cannot hide a new
+#: reference shape, and `typed references still pointing at a public name: 0` on this tree says no
+#: typed site replaced it. Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+SWEEP_RESIDUE = (11821, "abf4a5c65f380206")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
