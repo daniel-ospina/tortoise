@@ -4120,11 +4120,15 @@ E6_CENSUS = "docs/evidence/11083/pack-relation-census.json"
 #: into a committed log, and an absolute path there is a claim about one operator's machine.
 PACKS_DIR = "packs"
 
-#: The TWO surfaces a declared connection is written on, and the ONLY place the scan's
-#: breadth is stated (#11695 review F4d). Both the population loop and the defect scan read
-#: `_e6_census_rows`, so a later edit cannot narrow one of them to `relations[]` without
-#: moving this tuple — which is what §10.21 means by *"never from the census's `verdicts`
+#: The TWO surfaces a declared connection is written on, and the ONLY place the breadth is
+#: stated (#11695 review F4d). BOTH readers go through this tuple: the defect scan enumerates
+#: it inside `_e6_census_rows`, and the beside column (`_e6_write_cells`, which reads the
+#: COMMITTED artifact rather than the live census) iterates it directly — so a later edit
+#: cannot narrow either to `relations[]` without moving this constant, which is what §10.21
+#: means by *"never from the census's `verdicts`
 #: aggregate — that sums `relations[]` only and would silently drop every hierarchy cell"*.
+#: The population numbers come from the census's own registered aggregate
+#: (`population.declared`/`population.packs`), which is why they are read there and not here.
 E6_SURFACES = ("relations", "hierarchies")
 
 #: The open issue that owns a declared row which binds NO write path — `#11484`
@@ -4199,6 +4203,10 @@ def _e6_row_ref(row: dict) -> dict:
 def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     """The committed census's ``written`` cell per row, keyed by that row's identity.
 
+    Spans the SAME breadth the metric does — every ``relations[]`` and every
+    ``hierarchies[]`` row — by iterating ``E6_SURFACES`` rather than restating the tuple,
+    so the beside column cannot drift narrower than the bar it is reported beside.
+
     Returns ``(cells, source)``. A missing/unreadable artifact is NOT an error for E6's
     bar (the bar's own population is re-derived at this head); it only means the beside
     column reads ``unmeasured``, and ``source`` states why rather than leaving a blank.
@@ -4215,7 +4223,7 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     for pack, block in (artifact.get("packs") or {}).items():
         if not isinstance(block, dict):
             continue
-        for surface in ("relations", "hierarchies"):
+        for surface in E6_SURFACES:
             for row in block.get(surface) or []:
                 if not isinstance(row, dict):
                     continue
@@ -4238,9 +4246,11 @@ def _e6_key(pack: str, surface: str, row: dict) -> tuple:
 def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
     """Every declared row of every pack, as ``(pack, surface, row)``.
 
-    ⛔ BOTH surfaces, from ONE place: the population, the defect scan and the beside column all
-    read this, so "the metric spans the ROWS of both surfaces" is a property of the code rather
-    than of three loops that happen to agree today.
+    ⛔ BOTH surfaces, from ONE place: the defect scan and the beside column both read this, so
+    "the metric spans the ROWS of both surfaces" is a property of the code rather than of two
+    loops that happen to agree today. The population figures are NOT counted here — they are
+    the census's own registered aggregate (``population.declared``/``population.packs``),
+    which is the number the bar is registered over.
     """
     rows: list[tuple[str, str, dict]] = []
     for pack, block in (census.get("packs") or {}).items():
