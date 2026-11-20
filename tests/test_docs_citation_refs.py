@@ -3809,8 +3809,8 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: `_long_option_is_accepted` declines every alias spelling (`--fixed-regexp`, `--fixed-r`,
 #: `--fixed-re`), so a member here would be UNREACHABLE: this line used to carry one and nothing
 #: witnessed it — dropping it left the suite green, which is the inert-table-member defect
-#: (agent-infra#3442). The residual is that those spellings are UNREAD, and ALL THREE are pinned:
-#: `--fixed-regexp` and `--fixed-r` in
+#: (agent-infra#3442). The residual is that those spellings are UNREAD, and ALL THREE are pinned
+#: — `--fixed-regexp`, `--fixed-r` and `--fixed-re` — in
 #: `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX`'s
 #: `alias_spelling` loop, and `--fixed-regexp` again as a control in
 #: `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS` — this paragraph used to
@@ -5340,9 +5340,13 @@ def test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REG
     # review, P3 — MEASURED: `_d5_count_prescriptions` answers `[]` for all three).
     for alias_spelling in ("grep -c --fixed-regexp '^[+-]$'", "grep -c --fixed-r '^[+-]$'",
                            "grep -c --fixed-re '^[+-]$'"):
-        # ⛔ `--fixed-re` is NOT decoration: it is the longest prefix that is still an alias and
-        # still unambiguous against `--fixed-strings` alone, so deleting it leaves the paragraph's
-        # three-name claim with two witnesses again.
+        # ⛔ `--fixed-re` is NOT decoration: it is the THIRD spelling the residual paragraph
+        # NAMES, so a two-row loop leaves that paragraph claiming three witnesses with two — the
+        # defect the previous cycle found. ⛔ AND IT IS NOT A BOUNDARY, which this comment used to
+        # call it ("the longest prefix that is still an alias"): measured on GNU grep 3.11,
+        # `--fixed-reg`, `--fixed-rege` and `--fixed-regex` are ALL accepted as the same alias and
+        # print `0`, while `--fixed-regexx` is `unrecognized option` — a contiguous accepted range,
+        # of which this row is one sample. The row's reason is the three-name claim, not a limit.
         assert _d5_count_prescriptions(f"a prescription: `{alias_spelling}`\n") == [], (
             f"{alias_spelling!r} is now READ — grep accepts it as `-F` and it prints `0` on the "
             "blank-class probe, so if the reader sees it, `_retargets_the_matched_text` must "
@@ -5412,15 +5416,17 @@ def test_the_d5_count_reader_does_not_describe_itself_as_complete():
     """#13995 — the reader's prose may not promise more than its own residual list gives.
 
     ⛔ NON-VACUOUS BY CONSTRUCTION, which is why a prose finding gets a cell at all. Each needle
-    below is a substring of the PRE-FIX SNIPPET recorded beside it in `_D5_RETIRED_OVERCLAIMS` —
-    seven review rounds' wordings, so WHICH commit a snippet is the text of depends on the round:
-    the round-1 and round-6 wordings are `origin/main`'s own text, the round-5 one is an earlier
-    state of this branch. ⛔ NO COUNT IS STATED HERE ON PURPOSE (#14027 round 7, P3 — this sentence
-    used to say "measured: four of the six needles do not occur in `git show origin/main:…`", and
-    appending a needle made both integers false; a hardcoded census inside the cell whose subject
-    is "a claim that outruns its own artifact" is that same defect one tuple entry later). The
-    per-needle provenance is beside each row in `_D5_RETIRED_OVERCLAIMS`, where the round that
-    produced it is named. The ban therefore REDS on
+    below is a substring of the PRE-FIX SNIPPET recorded beside it in `_D5_RETIRED_OVERCLAIMS`, and
+    both checks are made against THAT SNIPPET and this file's own source — never against a named
+    commit, because the tuple does not record one per row: the rows were cut from successive review
+    rounds whose texts live on `origin/main` and on earlier states of this branch, and the round
+    comment above a row names its round only where one was written. ⛔ NEITHER A COUNT NOR A
+    PER-COMMIT MAP IS STATED HERE ON PURPOSE (#14027 round 7, P3 — this sentence used to say
+    "measured: four of the six needles do not occur in `git show origin/main:…`", and appending a
+    needle made both integers false; its replacement then said the provenance "is beside each row",
+    which does not resolve either, since not every row carries a round comment). A hardcoded
+    census inside the cell whose subject is "a claim that outruns its own artifact" is that same
+    defect one tuple entry later. The ban therefore REDS on
     code a review round actually graded — it is not a test written beside a wording edit, it IS the
     wording edit asserted. The
     checks run in the control direction first: every needle must still be found in the pre-fix
