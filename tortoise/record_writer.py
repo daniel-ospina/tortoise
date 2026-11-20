@@ -312,9 +312,11 @@ RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 #: product read `degraded`. Armed + an `active` cursor row therefore means the
 #: record is the ONLY allocator: `tortoise.live_write.write` asks
 #: :func:`record_owns_position` BEFORE it appends and skips the file append
-#: entirely, and the counted number comes from the counter alone. The JSONL is an
-#: EXPORT from that point (an explicit export job writes it); it is no longer a
-#: position source, so nothing numbers off it and the truncation class of failure
+#: entirely, and the counted number comes from the counter alone. The JSONL is a
+#: FROZEN PREFIX from that point — an OPTIONAL copy, not an export: nothing writes
+#: it yet (no drainer ships; `event_id`/`initiated_by`/`projection_version` have
+#: no column, `§A7.8` item 6). What is true either way is that it is no longer a
+#: POSITION SOURCE, so nothing numbers off it and the truncation class of failure
 #: is gone.
 #:
 #: ⛔ IT IS SAFE TO SET ONLY ON A CUT-OVER GRAPH (`record_cursor` row in mode
