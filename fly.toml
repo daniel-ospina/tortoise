@@ -429,8 +429,9 @@ kill_timeout = 30
   # SHADOWS `[env]`), so the two states cannot come apart.
   # The FOURTH value below arrived differently — an UNDECLARED Fly secret,
   # recorded NOWHERE (that absence is exactly what the gate refused, on every
-  # deploy since at least 2026-11-19T19:47Z), tracked in #13923 rather than #4126. For it
-  # "the deploy needs no secret" becomes true only once that secret is unset.
+  # deploy since at least 2026-11-19T19:47Z), tracked in #13923 rather than
+  # #4126. For it "the deploy needs no secret" becomes true only once that
+  # secret is unset.
   #
   # ⛔ THE VALUES ARE CARRIED OVER FROM THE LIVE FLY SECRETS, NOT FROM
   # `.env.example`. TORTOISE_MANUAL_LINKING_ENABLED is `1` in production while
@@ -456,9 +457,9 @@ kill_timeout = 30
   # EMBEDDING — a read, or one of the opt-in `bounded=True` write folds; it is not
   # reads-only — and a REQUEST still cannot absorb it: it blocks. So: do not
   # restate "the load cannot complete" as a present fact (it fits its LOAD bound
-  # now), and do not say the pre-warm "buys nothing" — `entrypoint.sh` bans that
-  # wording for a reason: skipping the warm-up MOVES the cost, it does not remove
-  # it (#13674 review F3).
+  # now), and do not call the pre-warm a no-op — `entrypoint.sh` bans that claim
+  # and restates it as "skipping this MOVES the cost, it does not remove it"
+  # (#13674 review F3).
   # The switch gates the WARM-UP surface — `EmbeddingModel.get()` on the REQUEST
   # path is deliberately NOT gated — but `0` ALSO selects the request-path bounds:
   # `await_write_ready_reason` / `await_read_ready_reason` return None at `0`
