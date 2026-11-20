@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-13880-businessmap-1795132261-p318085-756ef048",
+  "_sha": "dea236b364fd5f4a6ee6aebc8998d4001fefc9c7",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/13880-businessmap.log"
+    },
+    {
+      "kind": "branch",
+      "value": "chore/13880-business-map"
+    },
+    {
+      "kind": "sha",
+      "value": "6181adc98714718d3123d510d6ab6c15de1375eb"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/13880-businessmap"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 43800,
+  "duration_s": 2495,
+  "ended_at": 1795134756,
+  "exit_code": 0,
+  "heartbeat_at": 1795134756,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13880-businessmap-1795132261-p318085-756ef048",
+  "lease_until": 1795178556,
+  "pid": 318085,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795132261,
+  "state": "DONE",
+  "tag": "13880-businessmap",
+  "worktree": "/home/cmux/tortoise/.worktrees/13880-businessmap"
+}
