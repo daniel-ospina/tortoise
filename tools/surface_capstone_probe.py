@@ -824,10 +824,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     tool_rows: list[Row] = []
+    retired_rows: list[tuple[str, bool, str, str]] = []
+    archived_rows: list[tuple[str, str]] = []
     tc = _open_transport(reg, s, db)
     with tc:
         door = _Door(tc)
         tool_rows = probe_tools(door, s)
+        retired_rows, archived_rows = probe_retired(door, s)
 
     sdk_rows = _probe_sdk_methods(sdk, s, tmpdir)
 
@@ -846,9 +849,13 @@ def main(argv: list[str] | None = None) -> int:
               f"(refused-by-design {sum(1 for r in tool_rows if r.status == REFUSED)})")
         print(f"  SDK    answered: {len(sdk_pass)}/{len(sdk_rows)}   "
               f"(unmeasured {sum(1 for r in sdk_rows if r.status == UNMEASURED)})")
+        print(f"  retired shim: {sum(1 for _n, o, _u, _a in retired_rows if o)}"
+              f"/{len(retired_rows)} families publish the notice; "
+              f"{sum(1 for _n, a in archived_rows if a.lower().startswith('unknown tool'))}"
+              f"/{len(archived_rows)} archived names are not-found")
         print()
 
-    md = _render_markdown(tool_rows, sdk_rows)
+    md = _render_markdown(tool_rows, sdk_rows, retired_rows, archived_rows)
 
     if args.markdown:
         p = Path(args.markdown)
@@ -885,7 +892,113 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row]) -> str:
+def _retired_sample(s: dict) -> dict[str, dict]:
+    """One retired name per destination-container family, with a VALID request.
+
+    V3 asks whether a RETIRED name still answers with its previous behaviour and the
+    #3883 retirement notice. The notice is attached by the shim when the handler RUNS,
+    so a sample driven with `{}` proves nothing for a door that requires arguments — a
+    validation refusal happens before the shim's wrapper and carries no notice
+    (measured: `tortoise_create_source` with the wrong kwarg answered `notice=no`).
+    Every entry below is a real request for its own old signature.
+
+    Population: 22 of the 22 families in `RETIRED_USE_INSTEAD` (68 names).
+    """
+    return {
+        "tortoise_mitigate_operator": {"id": s["operator"], "reason": "probe",
+                                       "strength": 0.3},
+        "tortoise_get_confidence": {"claim_id": s["calibrated"]},
+        "tortoise_create_point": {"content": "A retired-door probe point.",
+                                  "kind": "statement"},
+        "tortoise_delete_point": {"id": s["claim2"]},
+        "tortoise_entity_profile": {"entity_id": s["claim"]},
+        "tortoise_get": {"id": s["claim"]},
+        "tortoise_health": {},
+        "tortoise_index_files": {"directory": "/tmp"},
+        "tortoise_list_batch": {"batch_id": s["batch"]},
+        "tortoise_set_source_tier": {"url": s["source_url"], "tier": "high"},
+        "tortoise_onboarding_github_index": {"org": "probe-org"},
+        "tortoise_mine_conversations": {},
+        "tortoise_checkpoint": {"items": [{"content": "A retired-item probe."}]},
+        "tortoise_paginated_query": {"kind": "statement"},
+        "tortoise_file_human_approval": {"approver_id": s["subject"],
+                                         "artifact_id": s["object"],
+                                         "point_ids": [s["claim"]]},
+        "tortoise_dream": {},
+        "tortoise_create_source": {"url": "https://example.test/retired-c",
+                                   "sourceKind": "web"},
+        "tortoise_list_dedup_candidates": {},
+        "tortoise_issue_insight": {"title": "A retired-door probe issue"},
+        "tortoise_supersede": {"old_id": s["claim"], "new_id": s["topic_decision"]},
+        "tortoise_update_point": {"id": s["claim"], "props": {"topic": "retired"}},
+        "tortoise_file_decision": {"options": ["a", "b"], "evidence": ["e"],
+                                   "choice": 0},
+    }
+
+
+#: Names REMOVED with no destination (the four archived tools + the five removed
+#: `tortoise_onboarding_*` ones). They have no shim, so the documented answer is
+#: not-found — and a silent empty answer would be the failure (#2952).
+ARCHIVED_NO_DESTINATION: tuple[str, ...] = (
+    "tortoise_analyze", "tortoise_backfill_v25", "tortoise_packs_list",
+    "tortoise_pack_install", "tortoise_onboarding_state", "tortoise_onboarding_seed",
+    "tortoise_onboarding_demo_create", "tortoise_onboarding_github_connect",
+    "tortoise_onboarding_github_status",
+)
+
+
+def probe_retired(door: _Door, s: dict) -> tuple[list[tuple[str, bool, str, str]], list[tuple[str, str]]]:
+    """-> (retired samples `(name, notice_seen, use_instead, answer)`, archived answers).
+
+    `answer` is what the retired door DID: answered with its previous behaviour, or
+    refused — and a `-32004` refusal is `http_policy=False` doing its job, which is a
+    different observation from a broken shim. The V3 claim is the NOTICE column: a
+    retired name that still answers without saying it is retired teaches a caller a
+    name the product has stopped supporting.
+    """
+    samples: list[tuple[str, bool, str, bool]] = []
+    for name, args in _retired_sample(s).items():
+        # ONE call: the notice and the payload must come from the SAME invocation — a
+        # second call re-runs the handler (a delete arm would refuse the second time)
+        # and the two halves would then describe different invocations.
+        notice, result = _retired_notice(door, name, args)
+        payload = _tool_payload({"result": result})
+        err = _error_of(payload)
+        raw_err = payload.get("error") if isinstance(payload, dict) else None
+        code = raw_err.get("code") if isinstance(raw_err, dict) else None
+        if code == -32004:
+            # the transport excludes this row by design; the shim notice still
+            # published, so the retirement contract held and the CAPABILITY is
+            # served elsewhere (SDK / hosted REST). Not a broken shim.
+            answer = "REFUSED (-32004, http_policy=False by design)"
+        elif err:
+            answer = f"REFUSED ({err[:70]})"
+        else:
+            answer = "answered (previous behaviour)"
+        samples.append((name, bool(notice), str((notice or {}).get("use_instead") or ""),
+                        answer))
+    archived: list[tuple[str, str]] = []
+    for name in ARCHIVED_NO_DESTINATION:
+        _status, payload, _ms = door.call(name, {})
+        archived.append((name, str(payload)[:80]))
+    return samples, archived
+
+
+def _retired_notice(door: _Door, name: str, args: dict):
+    """The RAW `_meta.tortoise.retired` block, which `_tool_payload` discards."""
+    door._n += 1
+    r = door._c.post("/mcp", json={
+        "jsonrpc": "2.0", "id": door._n, "method": "tools/call",
+        "params": {"name": name, "arguments": args or {}},
+    })
+    result = (_parse_sse_json(r) or {}).get("result", {}) or {}
+    meta = result.get("_meta") or {}
+    return (meta.get("tortoise") or {}).get("retired"), result
+
+
+def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row],
+                     retired_rows: list[tuple[str, bool, str, str]] | None = None,
+                     archived_rows: list[tuple[str, str]] | None = None) -> str:
     lines: list[str] = []
     lines.append("### Approved MCP tools — one real call each, through the authenticated tenant door")
     lines.append("")
@@ -910,6 +1023,22 @@ def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row]) -> str:
             note = note[:147] + "…"
         lines.append(f"| {i} | `{r.approved}` | **{r.status}** | {ms} | `{r.shape}` | {note} |")
     lines.append("")
+    if retired_rows:
+        lines.append("### V3 — the retirement shim: one retired name per destination family")
+        lines.append("")
+        lines.append("| retired name | notice published | use_instead | what the retired door did |")
+        lines.append("|---|---|---|---|")
+        for name, notice, use, answer in retired_rows:
+            lines.append(f"| `{name}` | {'YES' if notice else '**NO**'} | `{use[:70]}` | "
+                         f"{answer[:80]} |")
+        lines.append("")
+        lines.append("### V3 — archived with no destination: the documented not-found")
+        lines.append("")
+        lines.append("| archived name | answer |")
+        lines.append("|---|---|")
+        for name, answer in archived_rows or []:
+            lines.append(f"| `{name}` | `{answer[:70]}` |")
+        lines.append("")
     return "\n".join(lines)
 
 
