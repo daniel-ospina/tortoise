@@ -2747,3 +2747,54 @@ def test_delete_knowledge_verifies_the_read_back_its_note_claims():
     assert row.status == probe.FAIL, (
         "the confirm arm upgraded a row the approved-name preview had already failed: "
         f"{row.note}")
+
+
+def test_an_undeclared_error_is_a_FAIL_never_a_documented_refusal():
+    """FINDING 3: any error payload used to become REFUSED, and REFUSED exits 0.
+
+    `REFUSED` rows are `partial`, not `problems` (`main()` returns `1 if problems else 0`),
+    so a broken approved tool was filed as "a documented refusal", kept its stale note and
+    left the run's failure list. Mutant: make any approved tool return `{"error": …}`;
+    pre-fix the row read REFUSED and the probe exited 0 on a broken approved tool.
+    """
+    probe = _probe_module()
+    declared = sorted(probe.DECLARED_REFUSALS)
+    assert declared, "no declared refusals — this pin would measure nothing"
+    approved = set(probe.APPROVED_TOOLS) | set(probe.APPROVED_SDK)
+    assert set(declared) <= approved, (
+        "a declared refusal names something that is not an approved row: "
+        f"{sorted(set(declared) - approved)}")
+
+    errored = {r.approved: r
+               for r in probe.probe_tools(
+                   _StubDoor({"error": {"code": -32000, "message": "boom"}}), _PROBE_SEED)}
+
+    # a NON-declared approved tool that errors is a FAIL, and the note says why
+    undeclared = [n for n in probe.APPROVED_TOOLS
+                  if n not in probe.DECLARED_REFUSALS and n not in probe.HTTP_EXCLUDED
+                  and n not in probe.NO_LIVE_DOOR]
+    assert undeclared, "no undeclared approved tool left — the pin would be vacuous"
+    for name in undeclared:
+        assert errored[name].status == probe.FAIL, (
+            f"`{name}` returned an ERROR and was filed as {errored[name].status} — a "
+            f"broken approved tool must not read as a documented refusal: "
+            f"{errored[name].note}")
+        assert "NO declaration" in errored[name].note, errored[name].note
+
+    # a DECLARED refusal keeps its REFUSED status, quoting the record that declares it
+    for name in declared:
+        assert errored[name].status == probe.REFUSED, (name, errored[name].status)
+        assert probe.DECLARED_REFUSALS[name][:40] in errored[name].note, errored[name].note
+
+    # the SDK leg is held to the same rule, through the same pass
+    rows = [probe.Row(approved="search_knowledge", door="TortoiseSDK.search_knowledge",
+                      status=probe.REFUSED, note="returned an error"),
+            probe.Row(approved=declared[0], door="TortoiseSDK", status=probe.REFUSED,
+                      note="declared")]
+    probe._demote_undeclared_refusals(rows)
+    assert rows[0].status == probe.FAIL, (
+        "an UNDECLARED SDK error stayed REFUSED — it would leave `problems` and the probe "
+        "would exit 0 on a method that stopped answering")
+    assert "no declaration" in rows[0].note, rows[0].note
+    assert rows[1].status == probe.REFUSED, (
+        "a DECLARED refusal was demoted — the declaration IS the row's answer")

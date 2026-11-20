@@ -60,6 +60,11 @@ EXIT CODES
     "refused rows do NOT exit 0" while `main()` returned `1 if problems else 0` with
     REFUSED/ARM GAP in `partial`. A published contract its own code violates is worse
     than no contract: a later lane reads the docstring instead of the code.)
+    ⛔ Because a REFUSED row does not fail the run, `REFUSED` is reachable ONLY from a
+    DECLARATION — `HTTP_EXCLUDED` (measured out of the transport's own `-32004`) or
+    `DECLARED_REFUSALS` (a refusal that IS the tool's documented answer). An ERROR on any
+    other approved row is a FAIL, so an approved tool that breaks cannot file itself as a
+    documented refusal and leave `problems` (#14045 review, finding 3).
 1 — at least one approved row did not answer (FAIL / MISSING / UNMEASURED), or the
     approved surface could not be READ and the probe refused to measure it (the SDK
     declaration or the MCP approval record disagreeing with this file's transcription)
@@ -186,10 +191,28 @@ HTTP_EXCLUDED: dict[str, str] = {
         "tenant MCP door",
 }
 
+#: Approved names whose ERROR answer is a DECLARED refusal, with the record that settles
+#: it. This table is the ONLY way an error payload on an approved row can be filed as
+#: `REFUSED` — see `_refusal_verdict` below (#14045 review, finding 3).
+#:
+#: ⛔ A NAME BELONGS HERE ONLY WHEN THE REFUSAL IS ITS DOCUMENTED ANSWER. `approve_merge`
+#: refuses a non-candidate BY NAME (#2952: a tool that cannot answer says so), so its MCP
+#: row is a measured refusal and its SUCCESS arm — unreachable on a graph with no
+#: dedup/temporal candidate — is the ARM GAP. Every other error on every other approved
+#: name is a FAILURE: an approved tool that starts erroring must not file itself as a
+#: design decision and walk out of the failure list.
+DECLARED_REFUSALS: dict[str, str] = {
+    "approve_merge": (
+        "the product refuses a non-candidate BY NAME (#2952) — the SUCCESS arm is the gap, "
+        "so the refusal is the answer a caller with no ambiguity pair gets"
+    ),
+}
+
 #: The 40 approved SDK methods, transcribed from `tortoise/__all__.py` (row order).
-#: The probe re-reads that module at run time (`_read_declaration`) and REFUSES when the
-#: two disagree — a probe that measured a surface other than the approved one would be a
-#: second instrument, which is the #10034 defect.
+#: The probe re-reads that module at run time
+#: (`tools.sdk_surface_declaration.load_declaration`) and REFUSES when the two disagree —
+#: a probe that measured a surface other than the approved one would be a second
+#: instrument, which is the #10034 defect.
 APPROVED_SDK: tuple[str, ...] = (
     "Tortoise", "close", "search_knowledge", "list_knowledge", "check_confidence",
     "get_entity", "get_historical_knowledge", "explore_connections", "graph_overview",
@@ -275,6 +298,48 @@ def _error_of(payload) -> str:
     if isinstance(payload, str) and "error" in payload.lower():
         return payload[:300]
     return ""
+
+
+def _refusal_verdict(approved: str, message: str) -> tuple[str, str]:
+    """REFUSED only where a DECLARATION records the refusal; every other error is FAIL.
+
+    ⛔ A REFUSAL IS A DECLARED ANSWER, NEVER A DEDUCTION FROM AN ERROR PAYLOAD (#14045
+    review, finding 3). The tools leg read `elif _error_of(payload): status_word = REFUSED`
+    for any of the 27 approved names, and a `REFUSED` row is `partial` rather than
+    `problems` — so an approved tool that started ERRORING was filed as "a documented
+    refusal", kept its stale note, left the failure list, and the probe exited **0**. A
+    regression then reads as a design decision, on the one figure this file exists to
+    produce.
+
+    The declarations are `HTTP_EXCLUDED` (read out of the transport's own `-32004`, see
+    `_door_refusal`) and `DECLARED_REFUSALS` (a refusal that IS the tool's documented
+    answer). An error on any other approved row is a FAIL whose note says why it is not
+    a documented refusal.
+    """
+    declared = DECLARED_REFUSALS.get(approved, "")
+    if declared:
+        return REFUSED, f"{declared} — the product said: {message[:200]}"
+    return FAIL, (
+        "the product returned an ERROR and NO declaration records this row as a refusal, "
+        f"so it is not filed as a documented one: {message[:300]}")
+
+
+def _demote_undeclared_refusals(rows: list[Row]) -> None:
+    """A REFUSED row on an UNDECLARED name is a FAIL — applied to the SDK leg too.
+
+    `_measure` cannot know which name it is measuring, and a returned `{"error": …}` is
+    correctly not an answer (`REFUSED`, not `PASS`, #14045 review F4). But `REFUSED` must
+    stay reachable only from a declaration in BOTH legs, or the SDK half opens the same
+    hole the tools half had: a method that starts returning an error would leave
+    `problems` and RAISE "N answered". `probe_sdk`'s `approve_merge` ARM GAP conversion
+    runs BEFORE this pass, so that row's status is untouched.
+    """
+    for row in rows:
+        if row.status == REFUSED and row.approved not in DECLARED_REFUSALS:
+            row.status = FAIL
+            row.note = (
+                "the method RETURNED an ERROR and no declaration records this row as a "
+                f"refusal, so it is not a documented one: {row.note or 'no message'}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -644,6 +709,7 @@ def probe_tools(door: _Door, s: dict) -> list[Row]:
             ok, note = check(payload)
             if ok:
                 note = ""
+        err = _error_of(payload)
         if status != 200:
             status_word = FAIL
             note = f"HTTP {status}: {str(note or payload)[:300]}"
@@ -663,10 +729,16 @@ def probe_tools(door: _Door, s: dict) -> list[Row]:
                         f"tenant door did NOT refuse it with -32004 — it answered "
                         f"{_shape_of(payload)}: {str(payload)[:200]}. The exclusion is no "
                         "longer in force, so this row is not a measured refusal.")
+        elif err:
+            # ⛔ AN ERROR PAYLOAD IS NEVER PASS, and REFUSED only from a DECLARATION
+            # (#14045 review, finding 3). The ORDER matters: a LENIENT shape check can be
+            # satisfied by an error dict — `list_knowledge`'s accepts any dict whose
+            # `items`/`results` keys are absent — so evaluating `ok` first let a broken
+            # tool read PASS, the "a check that only said it returned a dict" class this
+            # file exists to refuse. See `_refusal_verdict`.
+            status_word, note = _refusal_verdict(approved, err)
         elif ok:
             status_word = PASS
-        elif _error_of(payload):
-            status_word = REFUSED
         else:
             status_word = FAIL
         rows.append(Row(approved=approved, door=live, status=status_word,
@@ -888,6 +960,8 @@ def _probe_sdk_methods(sdk, s: dict, tmpdir: str) -> list[Row]:
         status_word, ms, shape, note = _measure(fn)
         rows.append(Row(approved=name, door=f"TortoiseSDK.{name}", status=status_word,
                         latency_ms=ms, shape=shape, note=note))
+    # ⛔ REFUSED stays reachable only from a DECLARATION in this leg too (#14045 finding 3).
+    _demote_undeclared_refusals(rows)
     return rows
 
 

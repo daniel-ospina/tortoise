@@ -602,11 +602,20 @@ def _attribute_names(tree: ast.AST,
     directions on synthetic trees rather than leaving the narrowing as an
     unverified claim.
 
-    ``rel_path`` scopes the ONE kind of false red a shape-only census cannot
-    avoid: a non-SDK class that shares a retired name as a method. Only rows
-    DECLARED in ``NON_SDK_RECEIVERS`` are skipped, only for that module, only
-    for that receiver NAME — and passing no path exempts nothing, so the
-    synthetic-tree pins below keep their full strength.
+    Two exemptions exist, and they are NOT the same shape (#14045 review, finding 5c):
+
+    1. ``NON_SDK_RECEIVERS`` — a non-SDK class that shares a retired name as a method. Its
+       rows are skipped only for that module, only for that receiver NAME, and passing no
+       path exempts nothing, so the synthetic-tree pins below keep their full strength.
+    2. ``AMBIGUOUS_RETIRED_NAMES`` — the retired names that are ALSO the Cypher client's own
+       methods. This skip is PATH-INDEPENDENT on purpose (it keys on the RECEIVER alone: an
+       ambiguous name counts only on an ``sdk``/``_sdk`` receiver), so it DOES apply when
+       ``rel_path`` is None. An earlier version of this paragraph claimed "passing no path
+       exempts nothing", which was false from the moment this branch existed:
+       ``_attribute_names(ast.parse("def f(x):\n return x.query(1)\n"))`` answers ``[]``, so
+       the no-path pins below cannot reach it. Its pin is the parameterised
+       ``test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver`` — which asserts
+       both directions with NO path passed, which is exactly how it pins the path-independence.
     """
     out: list[tuple[int, str]] = []
     for node in ast.walk(tree):
