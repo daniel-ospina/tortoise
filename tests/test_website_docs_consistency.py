@@ -1191,8 +1191,10 @@ def _docs_section(anchor: str = "storage") -> str:
         f"section silently breaks the notices' link text."
     )
     start = html.index(opening)
-    rest = html[start + 1:]
-    end = rest.find("<h2 id=")
+    rest = html[start:]
+    # `<h2 id=` searched from index 1 so the section's OWN opening tag is not
+    # mistaken for the next section.
+    end = rest.find("<h2 id=", 1)
     return rest if end == -1 else rest[:end]
 
 
@@ -1217,14 +1219,20 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     clicks *\"How Tortoise stores and searches your data\"* arrives without the
     architecture; naming `FalkorDB`, a `tier`, an `allowance` or `eviction` hands
     them the internal model instead of the explanation.
+
+    ⛔ THE SECTION IS NORMALISED FIRST, and the vendor key is `falkor`, not
+    `falkordb`. A raw substring test on the lowercased markup is defeated by
+    every spelling a writer actually uses — `Falkor DB`, `working-set`,
+    `hot-cache` all passed a first version of this pin (measured, #14066 review
+    round 2). Punctuation collapses to a space and `falkor` subsumes
+    `falkordb`, `falkor db` and the bare product name the owner himself uses.
     """
-    section = _docs_section().lower()
+    section = re.sub(r"[^a-z0-9]+", " ", _docs_section().lower())
     banned = {
         "allowance": "the notices say 'fast-search capacity'",
         "evict": "the notices say items 'step out of' the fast layer",
-        "eviction": "the notices say items 'step out of' the fast layer",
         "tier": "capacity is offered first; a plan change is never the answer",
-        "falkordb": "the notices say 'a graph database'",
+        "falkor": "the notices say 'a graph database'",
         "working set": "plain phrasing is 'the fast layer'",
         "hot cache": "plain phrasing is 'the fast layer'",
     }
@@ -1235,24 +1243,92 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
         )
 
 
+#: The reviewed wording of `#storage`, as a reader sees it.
+#:
+#: ⛔ Regenerate ONLY as part of a deliberate copy change, with these steps, and
+#: treat the resulting diff as the thing that needs reviewing:
+#:
+#:     uv run python - <<'PY'
+#:     import re
+#:     from html import unescape
+#:     from pathlib import Path
+#:     html = Path("website/docs.html").read_text(encoding="utf-8")
+#:     start = html.index('<h2 id="storage">')
+#:     section = html[start:][: html[start + 1:].index('<h2 id=')]
+#:     print("\n".join(textwrap.wrap(
+#:         " ".join(unescape(re.sub(r"<[^>]+>", " ", section)).split()), 98)))
+#:     PY
+#:
+#: (with `import textwrap` — elided above so this comment cannot be run by
+#: accident).
+STORAGE_SECTION_GOLDEN = REPO_ROOT / "tests" / "fixtures" / "14013_storage_section.txt"
+
+
+def _visible_text(markup: str) -> str:
+    """What a reader sees: tags to spaces, entities decoded, whitespace folded.
+
+    The two punctuation fixes exist so the golden reads like prose and its diff
+    is reviewable: stripping an inline `<strong>`/`<a>` leaves a space before the
+    following `.` or `,` (`your record</strong> ,`), which is not what is on the
+    page.
+    """
+    text = html_unescape(re.sub(r"<[^>]+>", " ", markup))
+    text = " ".join(text.split())
+    for spaced in (" .", " ,", " ;", " :"):
+        text = text.replace(spaced, spaced[1])
+    return text
+
+
+def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
+    """Golden block — the WORDING is the deliverable, so any edit is a red.
+
+    Presence pins cannot catch a CONTRADICTING sentence: a first version of these
+    tests passed *\"Items outside the fast layer are removed permanently after 30
+    days of inactivity\"* inserted above the required *\"nothing is lost\"* line,
+    and passed a cost written as words rather than `$`/% (#14066 review round 2,
+    measured against a mutated copy). A page whose whole reason to exist is that
+    it cannot drift from what the product does has to fail on new text, not only
+    on missing text — so the section is compared to the copy that was reviewed.
+
+    This is the same mechanism `tests/test_13998_capacity_notice.py` uses for the
+    notices themselves (`tests/fixtures/13998_notice_*.txt`): the copy is
+    reviewed once, then held. When `#14012` lands its two controls, the wording
+    changes — regenerate the fixture in that PR, where the change IS the review.
+    """
+    got = _visible_text(_docs_section())
+    want = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+    assert got == want, (
+        "the #storage section no longer matches the reviewed wording "
+        "(tests/fixtures/14013_storage_section.txt). This section is the "
+        "destination of #13998's notices, so a wording change is a claim change: "
+        "regenerate the fixture deliberately if it is right, do not paste the "
+        "actual text into it to make this green.\n\n"
+        f"--- reviewed ---\n{want}\n\n--- in the page ---\n{got}"
+    )
+
+
 def test_the_storage_section_states_what_is_not_lost_and_quotes_no_figure() -> None:
-    """The promise the email makes, and no number that could contradict it.
+    """The claims the email makes, and no figure that could contradict it.
 
     #14013's done-when is that *\"a reader who has never seen the architecture
     can say what happens when the fast layer fills\"* — so the section must state
-    the loss mode (a moment longer) and the non-loss mode (nothing) outright.
+    the loss mode (a moment longer) and the non-loss mode (nothing) outright,
+    in the notices' own words.
 
     The figure half is a real constraint, not tidiness: `product/pricing.json`
-    is the one source for any rate the product publishes, and a docs page that
-    quotes one drifts from it silently. Asserting the ABSENCE of figures is the
-    honest form of \"no number the pricing file does not carry\" — the section
-    needs none to explain the model.
+    is the one source for any rate the product publishes.
+
+    ⚠️ This pin is NAMED-CLAIMS + SYMBOL-ABSENCE only, and it is deliberately not
+    the drift guard: a cost written as words, or a contradicting sentence, passes
+    it. `test_the_storage_section_says_exactly_what_was_reviewed` above is the
+    pin that fails on new text.
     """
     section = _docs_section()
     folded = section.lower()
     for claim in (
         "nothing is lost",
         "stays searchable",
+        "search keeps working across everything",
         "can take a moment longer",
         "postgres",
         "graph database",
