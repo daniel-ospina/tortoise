@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (60 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (61 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -373,6 +373,13 @@ Restored tree: **56 passed**.
 | **P2** this artifact quotes the euclidean median as `28.283`. A reviewer measured `28.848` over the 48 draws and `28.044` over the 52-row eligible population; an earlier reviewer measured `28.283`. ⛔ The committed artifacts do not contain the per-draw distances, so NEITHER figure is verifiable from the evidence in this directory — it is recorded here as disputed rather than "corrected", because a correction that is itself wrong is the failure mode §8 documents | `build_corpus(13906, 48)` + median over the draws, both reviewers' recipes | left as-is with this note. A live re-run regenerating `parity-run.json` with the per-draw distances would settle it; rewriting the number from a second unverifiable recipe would not |
 | **P3** the committed `parity-run.json` has no `arms.record.index` key, although round 11's K5 states the verified `indexdef` "is recorded under `arms.record.index`". The artifact predates that fix — the same staleness O4 records for `poison-vector.json`'s params | read the JSON | noted here; a fresh live run records it. Nothing else in the artifact depends on it |
 
+### Round 15: a `?` inside userinfo is not a query separator — libpq resolves the authority FIRST
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** `_uri_hosts` split the DSN at the FIRST `?` anywhere, which is not libpq's order: libpq takes the AUTHORITY as everything after `://` up to the first `/` (or the end), and only then looks for the `?` separator in what follows. So a `?` inside userinfo/password is not a separator — `postgresql://127.0.0.1:p?ss@203.0.113.9:1/db` has `host='203.0.113.9'` to libpq (`PQconninfoParse`: user `127.0.0.1`, password `p?ss`, host `203.0.113.9`, and `psql` DIALS that address) while the split truncated the authority at `127.0.0.1` and certified the remote store as local — on the path where `run()` seeds and `teardown()` deletes by `org_id`. The same misparse ran in the OTHER direction too: a loopback DSN whose password contained `?` was refused | `PQconninfoParse` + `psql` on three shapes, plus the over-block control | `_split_uri()` implements libpq's order once, and `_uri_hosts` and `app_role_dsn` both use it — so the guard reads the host libpq will dial AND `app_role_dsn` no longer cuts a DSN in the middle of a password. Pinned by `test_a_question_mark_inside_userinfo_is_not_a_query_separator` (three remote shapes refused, the loopback-with-`?`-password shape accepted, and the split itself asserted); the mutant restoring `partition("?")` reds it |
+| **P2 (non-blocking)** `PGHOST` is still consulted when the DSN sets `hostaddr`: libpq dials `hostaddr` and uses `host` only as the TLS name, so this is a friction-only over-block in the fail-closed direction | `dbname=x hostaddr=127.0.0.1` under `PGHOST=203.0.113.9` → refused, though libpq dials the loopback address | left as-is, deliberately: the over-block is cleared with `--allow-remote-writes`, and narrowing it buys nothing this guard needs |
+
 ## 6. Reproducing
 
 ```bash
@@ -402,7 +409,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **60 passed**.
+tests/test_vector_parity_13906.py -q` → **61 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
