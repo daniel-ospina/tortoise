@@ -16821,8 +16821,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     _stated_count = re.search(r"carrying (\d+) numbers", text)
     assert _stated_count is not None, (
         "the D5 row no longer states how many `:N` tokens carry its line — that figure was "
-        "refuted once at `~50` while the line carried 262, so a row that stops stating it "
-        "cannot be checked at all (#13900 review, P2-1)")
+        "refuted once at `~50` when the line already carried hundreds, so a row that stops "
+        "stating it cannot be checked at all (#13900 review, P2-1; #13879 review round 5: "
+        "the digit that stood here was a SECOND, ungraded copy of the figure this arm grades "
+        "by measurement, and nothing reddened when it went stale — see the `carrying hundreds` "
+        "spellings above for the same repair)")
     _measured_count = len(re.findall(r":\d{2,}", text))
     assert int(_stated_count.group(1)) == _measured_count, (
         f"the D5 row says its line carries {_stated_count.group(1)} `:N` tokens, but the line "
