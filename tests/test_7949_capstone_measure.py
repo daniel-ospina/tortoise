@@ -16909,8 +16909,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "`:15328-15405`. ⛔ `04-plan.md` carries `sdk.py:28718` (the pair's TARGET, "
             "not its base) and the I7 range `:15346-15423` at this head, and it does not "
             "carry `:15262` at all — measured while correcting this message, whose "
-            "earlier cut called those pairs the document's and was false for two of "
-            "them. What this arm asserts about that file is its DIFF MEMBERSHIP "
+            "earlier cut called those pairs the document's and was false for ONE of "
+            "them — the `sdk.py` pair's BASE (that file carries only the TARGET), while "
+            "the retired I7 pair it already attributed to the ROW, which is what this "
+            "message now says for both. What this arm asserts about that file is its DIFF MEMBERSHIP "
             "(`git diff --numstat origin/main...HEAD` at the head you merge), never a "
             "claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
