@@ -3849,7 +3849,8 @@ def _d5_class_members(char_class: str) -> set[str] | None:
     `+`/`-`/space prefix, and the header lines — `diff --git`, `index`, `---`/`+++`, `@@` — and
     the `\ No newline at end of file` marker are all multi-character). Removing the machinery would
     be stricter and would reverse a landed decision, so it is a reopen rather than a tidy-up —
-    which is why this paragraph states what the CODE does and not what POSIX says.
+    which is why the case for keeping it rests on what the CODE does and on that decision, rather
+    than on POSIX's reading.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
@@ -4427,12 +4428,12 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # than as an equivalence: it also matches a lone `\`, so on a probe carrying one it counts `3`
     # where the class counts `2` (see `_d5_counts_the_blank_class`). Stated rather than implied,
     # because "the SAME class" on its own was false for that row (#14026 review, P2 — MEASURED).
-    # The old test,
-    # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the other
-    # two — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
-    # the arm GREEN (false PASS), and in place of the row's own expression it tripped the ZERO
-    # assertion whose message blamed the count READER (false RED, misattributed). The two the list
-    # already carried are kept as controls, so a narrowing that loses them reds here too.
+    # The old test, `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and
+    # REJECTED the other two — measured on the pre-fix reader — in both directions: as a SECOND
+    # prescription it left the arm GREEN (false PASS), and in place of the row's own expression it
+    # tripped the ZERO assertion whose message blamed the count READER (false RED, misattributed).
+    # The two the list already carried are kept as controls, so a narrowing that loses them reds
+    # here too.
     for equivalent_class in (
         "grep -cE '^[+-]$'",           # the form the row itself uses
         "grep -cE '^[+\\-]$'",         # the hyphen escaped inside the class
