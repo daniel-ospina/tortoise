@@ -421,7 +421,7 @@ kill_timeout = 30
   R2_SECRET_ACCESS_KEY = ""
   R2_BUCKET = ""
   # ── #4126 secret-provenance: non-secret CONFIG, version-controlled here ────
-  # The three above are #4126's recorded debt in
+  # The three below WERE #4126's recorded debt in
   # `.github/scripts/fly-managed-secrets.txt`. A non-secret config value belongs
   # in version control, so they live here and are declared `fly-toml-env` there;
   # the deploy then needs no secret for any of them, and the gate fails a
@@ -429,7 +429,7 @@ kill_timeout = 30
   # SHADOWS `[env]`), so the two states cannot come apart.
   # The FOURTH value below arrived differently — an UNDECLARED Fly secret,
   # recorded NOWHERE (that absence is exactly what the gate refused, on every
-  # deploy after 2026-11-19T19:47Z), tracked in #13923 rather than #4126. For it
+  # deploy since at least 2026-11-19T19:47Z), tracked in #13923 rather than #4126. For it
   # "the deploy needs no secret" becomes true only once that secret is unset.
   #
   # ⛔ THE VALUES ARE CARRIED OVER FROM THE LIVE FLY SECRETS, NOT FROM
@@ -449,15 +449,17 @@ kill_timeout = 30
   # preserving. Flipping it is an operator/owner call, not a correction of it.
   # ⚠️ THE PREMISE FOR `0` IS DATED: it was set while the ~196 s cold load could
   # not fit the request budget (#13674). The deploy that applies THIS entry
-  # carries that fix (a 300 s load bound under a 420 s grace), after which the
-  # pre-warm pays that cost BEFORE traffic instead of on the first embedding
-  # read. So do not restate "the load cannot fit" as a present fact, and do not
+  # carries that fix (a 300 s load bound under a 420 s grace), so a FLIPPED flag
+  # would then pay that cost BEFORE traffic instead of on the first embedding
+  # read — at `0` (this entry) it is STILL paid on the first read, which is the
+  # whole point of `0`. So do not restate "the load cannot fit" as a present fact, and do not
   # say the pre-warm "buys nothing": `entrypoint.sh` bans that wording for a
   # reason — skipping the warm-up MOVES the cost, it does not remove it (#13674
   # review F3). The switch gates the WARM-UP only; `EmbeddingModel.get()` on the
-  # REQUEST path is deliberately NOT gated. ONE declaration feeds both
-  # consumers: `entrypoint.sh::_prewarm_embedder` and the hosted lifespan
-  # pre-warm, whose earlier flag-blindness is #7809.
+  # REQUEST path is deliberately NOT gated. ONE declaration gates the whole
+  # WARM-UP surface — `entrypoint.sh::_prewarm_embedder`, `EmbeddingModel.start_warm_up`
+  # (+ `warm_up`) at SDK engine init, and the hosted lifespan pre-warm, whose
+  # earlier flag-blindness is #7809 — so a flip arms all three.
   # ⛔ `0` HERE IS THE LIVE VALUE, NOT `.env.example`'s default — see the ⛔ above;
   # do NOT "fix" it to match `.env.example`.
   # ⛔ Moving it off the Fly secret is route (b) of the #4126 block in
