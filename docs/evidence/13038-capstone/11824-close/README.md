@@ -27,11 +27,14 @@ Three disclosures, because they bound what this run can be used to claim:
   run at a different product** (`capstone13038_20261117t184234z`, product
   `446bd09a`). So the verdict prose here is a re-used baseline; where it
   disagrees with this run's payload, trust the payload.
-- **The read path was degraded in every read** — `vector` 11/11
-  (`load_timeout`, `load_in_flight`), `fallback` 9/9, `fts` 4/11. The instrument
+- **The retrieval read path was degraded in every retrieval read** — of the 13
+  reads that carry a `read_status`, 11 are `degraded` and the remaining 2 are the
+  leg-less `ended_scope` searches (Q5, Q6), which run no legs at all and report
+  `available` for that reason alone. Per leg: `vector` 11/11 (`load_timeout`,
+  `load_in_flight`), `fallback` 9/9, `fts` 4/11. The instrument
   says explicitly that a row failing because unrelated content came back is the
   read path, not the model.
-- Consequence: this run is evidence that the board **was** 3/3 at that product,
+- Consequence: this run is evidence that the board **was** 3/6 at that product,
   not a clean measurement of *why*.
 
 ## After — `6 right · 0 wrong · 0 blocked · 0 unjudged`
