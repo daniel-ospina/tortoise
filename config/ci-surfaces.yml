@@ -2875,6 +2875,23 @@ surfaces:
   # failure, not a note. Hermetic apart from the throwaway EMBEDDED engine the refusal case builds in
   # a `tempfile` scratch dir it removes in teardown: no docker, no Postgres, no network, no model.
   - test_13634_9063_pointer_resolves.py
+  # #14002: the JSONL comes OFF the hosted write path — with `TORTOISE_RECORD_ALLOCATE=1` on a
+  # cut-over graph the chokepoint does not append, so one number space remains and
+  # `position_divergence` is unreachable in steady state. `core` selection rationale: the DB-FREE
+  # legs (the decision incl. its real helper, the chokepoint's skip, the seam's two `seq is None`
+  # states, the coverage reading's export flag, and the wiring gate's ten mutants) are the ones
+  # that catch a deletion — and BOTH files they pin resolve the
+  # `core` fallback, measured: `--changed-files tortoise/live_write.py` -> `surfaces: [core], full:
+  # false`, and the same for `tortoise/record_writer.py`. So this row is LOAD-BEARING, not a rider
+  # on a full-matrix run: without it a diff that touches only a test file would grade nothing, and
+  # a deletion of the cutover skip would ship behind a green gate. Its FIVE Postgres legs (the
+  # 120-write concurrent acceptance, the falsifier, the non-cut-over arm and the un-armed-cursor
+  # arm, plus the coverage reading against a real record) SKIP without `TEST_RECORD_DB_URI` and are
+  # armed by the `test-record-postgres` job, which
+  # names this file explicitly — the `test_9078_record_written_by_production_path.py` pattern
+  # (DUAL-registered: matrix + job). ONE row only: this file is `merge=union` in `.gitattributes`,
+  # so a second `core` row on the merge result is a `duplicate_entries()` gate failure.
+  - test_14002_record_only_journal.py
   # #13034's `test_13034_currency_rule_reads_position.py` is registered on `core`
   # FURTHER DOWN this file, in the block the main-red repair (#13139 / #13144)
   # added with its own rationale. This branch registered it here first; the
