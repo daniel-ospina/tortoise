@@ -859,6 +859,53 @@ def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
         "a structural edge the door DECLINED was marked as written")
     assert any("created=False" in f for f in state["failed"]), state["failed"]
     assert "created=False" in err, err
+    # ⛔ AND ITS OWN REMEDY: this class wrote NOTHING and has NO marker, so the
+    # "otherwise the write landed — keep its marker in `written`" bullet is a
+    # wrong instruction for it: following it ADDS the marker, which is the
+    # permanent skip this guard exists to remove (#13913 review round 18).
+    assert "line says `create_edge returned created=`" in err, err
+    assert "do NOT add a marker to `written`" in err, err
+    # …and the line is reported ONCE, not once in-loop and again as "STILL
+    # unresolved" (the same line twice reads as two failures).
+    one = structural[0]
+    assert err.count(one) == 1, (
+        f"the declined edge is reported more than once ({err.count(one)}x): "
+        "once in-loop and again as an earlier run's line reads as two failures")
+
+
+def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The same marker in `failed` and re-reported this run is ONE failure.
+
+    An operator whose marker is in `written` AND in `unconfirmed` is reported by
+    the loop (`attempted, outcome UNCONFIRMED — NOT re-issued`) and is also
+    `carried` (its marker never re-enters `done`), so the "STILL unresolved"
+    block listed it a second time — two headings over one failure, and the
+    earlier run's wording differs from today's (#13913 review round 18).
+
+    Mutant: `repeated = list(carried)` (no dedupe) — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    first = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first)
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [marker],
+        "unconfirmed": [marker],
+        # an EARLIER run's wording for the SAME marker
+        "failed": [f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued."],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert err.count(marker) == 1, (
+        f"{marker!r} is reported {err.count(marker)}x — once in-loop and again "
+        "as an earlier run's line reads as two failures")
 
 
 def test_a_non_idempotent_write_is_not_retried(monkeypatch):

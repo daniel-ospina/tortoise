@@ -1058,7 +1058,12 @@ def write_map(doc: dict) -> int:
     st["failed"] = sorted({*carried, *failures})
     st["unconfirmed"] = sorted(pending)
     save_state(st)
-    if carried:
+    # ⛔ THE REMEDY BLOCK IS REACHED BY A DECLINED EDGE TOO. A declined
+    # `create_edge` wrote NOTHING and has NO marker, so it is not `carried` — but
+    # it exits 1, and its only printed line names the failure without a route out
+    # (#13913 review round 18).
+    declined = [f for f in failures if "create_edge returned created=" in f]
+    if carried or declined:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
         # the line can never clear itself. Saying so — with the exact edit — is
@@ -1066,16 +1071,33 @@ def write_map(doc: dict) -> int:
         # with no route out (#13913 review round 11, measured: the printed remedy
         # for the UNCONFIRMED arm cleared `unconfirmed` and the run still exited 1
         # forever, because nothing named the `failed` line).
-        print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
-              "(their markers were not re-written this run) — see state.json",
-              file=sys.stderr)
-        for line in carried[:10]:
+        # ⛔ NOT TWICE: a line this run re-observed and re-failed was already
+        # printed as `!!` in the loop that produced it. Repeating it here reads
+        # as a second, unrelated failure (#13913 review round 18).
+        # Keyed on the MARKER, not the whole sentence: an earlier run's wording
+        # for the same marker differs from today's, and the duplicate reads as a
+        # second, unrelated failure either way.
+        reobserved = {f.split(": ", 1)[0] for f in failures}
+        repeated = [line for line in carried
+                    if line.split(": ", 1)[0] not in reobserved]
+        if carried:
+            print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
+                  "(their markers were not re-written this run) — see state.json",
+                  file=sys.stderr)
+        else:
+            print(f"\n{len(declined)} edge(s) were DECLINED by the door — nothing "
+                  "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
+        if not repeated:
+            print("  (…all of them were re-observed and printed above)", file=sys.stderr)
         # ⛔ THE REMEDY IS PER CLASS. The marker-bearing lines (a landed write
-        # whose follow-up step failed) and the `unbound endpoint` lines (a write
-        # that never happened) have DIFFERENT exits, and printing one of them for
-        # both is a permanent false red with a wrong instruction (#13913 review
-        # round 12).
+        # whose follow-up step failed), the `unbound endpoint` lines and the
+        # `create_edge returned created=` lines (both writes that never happened,
+        # with different edits) have DIFFERENT exits, and printing one of them for
+        # another is a permanent false red with a wrong instruction (#13913 review
+        # rounds 12 and 18).
         print("  → to resolve one, `--verify` decides what is in the graph:\n"
               "    * line says `unbound endpoint`: nothing was written for the "
               "EDGE, and its endpoint is missing an id. A plain re-run does NOT "
@@ -1083,6 +1105,12 @@ def write_map(doc: dict) -> int:
               "that WAS written, or (the load-bearing edit) record the landed "
               "node's id under the item's ref in `ids`; then delete this line "
               "from `failed`.\n"
+              "    * line says `create_edge returned created=`: NOTHING was "
+              "written and NO marker exists — this is a line an earlier run "
+              "recorded over a write the door DECLINED. Delete this line from "
+              "`failed` and do NOT add a marker to `written`: the next run "
+              "re-attempts the edge and clears it itself once the endpoints "
+              "resolve.\n"
               "    * otherwise the write landed: if it is correct, delete this "
               "line from `failed` and keep its marker in `written`; if it is wrong "
               "(e.g. a mechanism inversion, which `--verify` cannot see), delete "
