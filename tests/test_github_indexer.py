@@ -3279,9 +3279,9 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # whole block would have re-pinned `update_knowledge` to the wrong function and
     # left it looking "carried". Each address was found by searching its own pinned
     # FIRST-line text (and, for the arm, its own LAST-line text `continue`) at
-    # `28ca66878d`: `55742-55744` (the non-scalar refusal), `55894-55903` (the
-    # un-supersede arm) and `56343` (the per-label `SET n += $props`). `update_knowledge`
-    # re-measured UNCHANGED at `22779-22954`. The `+194` is the consistency check on a
+    # `28ca66878d`: `55547-55549` (the non-scalar refusal), `55699-55708` (the
+    # un-supersede arm) and `56148` (the per-label `SET n += $props`). `update_knowledge`
+    # re-measured UNCHANGED at `22629-22804`. The `+194` is the consistency check on a
     # measurement, never its input.
     # ⛔ RE-MEASURED at the `#13854` merge of `origin/main` `f2e5e3a98f0` — and the three later
     # rows are `55774` / `55926` / `56420` again, NOT `28ca66878d`'s figures plus any offset: this

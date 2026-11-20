@@ -155,11 +155,6 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
-    # ⛔ RE-DERIVED at the `origin/main` merge that brought in `#13899` (the SDK retirement): that
-    # commit inserts ONE line at `mcp_server.py:4363` (`tortoise_create_point`), so every
-    # `entity_type` passthrough below it moved by `+1` — 5183/5653/8205 -> 5184/5654/8206, each
-    # located by its own pinned text rather than by applying the offset. `#13899` is the ONLY
-    # commit in `bd020ff45b..origin/main` that touches `tortoise/mcp_server.py`.
     (_AUDIT, "`mcp_server.py:5184`", _MCP, 5184, "entity_type=entity_type"),
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
@@ -355,7 +350,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
     # false pin over a token the documents no longer carry.
     # ⚠️ THAT WAS HOP ONE, and these two rows below are HOP TWO (`#13746`): `28067` itself rotted, and
-    # the same re-point moved both documents to `28373` — which is also where `#13724`'s own
+    # the same re-point moved both documents to `28178` — which is also where `#13724`'s own
     # `tortoise/sdk.py` insertion independently landed it (`_PINS` above follows it). So `28019` and
     # `28067` are BOTH tokens the documents no longer carry, and a row for either is a false pin.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
@@ -1268,7 +1263,7 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 
     `:12111`/`:12164` is `#13456`'s pre-`#13466` value, so the cell quoted two heads as
     one. ⛔ **Why no existing row saw it**: the capstone pin's `_pin_row_failures` scopes a
-    row to ONE markdown LINE, and D5 is one line carrying hundreds of numbers — so any `:12111`
+    row to ONE markdown LINE, and D5 is one line carrying 262 numbers — so any `:12111`
     anywhere on it satisfied every `sdk`-keyed row, and the addendum's own contradictory
     spelling was read by nothing. This arm is scoped to the addendum's SENTENCE, which is
     the narrowest thing that can disagree with it.

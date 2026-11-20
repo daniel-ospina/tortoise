@@ -6615,12 +6615,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moves by a uniform +66; then `main`'s `819a473cd4`
-        # (`#13674` close `#13819`'s last review round, `#13841`) inserted 18 lines above `org_info`
-        # (that block OPENS at `:8556`, the first line it added TEXT on — `:8555` is the blank
-        # separator it also added, and `:8552` is the hunk's opening CONTEXT line, already
-        # there, so naming `:8552` would point at a line this commit did not add), so the span
-        # moves by a further uniform +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
+        # further down), so the span moved by a uniform +66 — the START was the `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`,
+        # measured at THAT head), and the END was the blank line before `return OrgInfoResponse(`
+        # (`:15405`, with the call at `:15406`). ⛔ THOSE FIGURES ARE HISTORY AT `09f5c99afd`, NOT
+        # THIS HEAD'S; presenting them as this head's is the exact rot this file exists to refuse
+        # (#13900 review, finding 4).
+        # The three offsets (+29 `nodes_used`, +39 `max_nodes`, +77 END) held EXACTLY from that
+        # START, which is how the figures were re-derived rather than nudged. The span at the
+        # PREVIOUS head, `:15262-15339`, no longer contains the `nodes_used` read at all
+        # (`grep -c 'nodes_used = await asyncio.to_thread'` over those lines -> 0), which is why
+        # carrying it would have been a false pin.
+        # ⛔ AND RE-DERIVED ONCE MORE AT THIS HEAD, by the branch that repaired `main` after it
+        # moved `hosted_api.py` by +18 under five anchors and re-derived none of them (#13844):
+        # the span is `:15346-15423` — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
@@ -6827,19 +6835,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING (`:28373` is the file's only `dedup_reviewed IS NULL`),
+    # named`, which is DISCRIMINATING (`:28178` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28373` four times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28178` six times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28373` (the only hit), while
-    # at `e679d22286` `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
-    #
-    # ⛔ AND AT THIS HEAD THAT COMMAND DOES NOT PRINT IT (fresh review at `1021ff6ed7`, P2,
-    # MEASURED): `sed -n '28067p' tortoise/sdk.py` reads `resolver just proved there is only
-    # one.` here and the Tier 1 comment is `:28262`. The reading above is `e679d22286`'s — a
-    # PAST head's — which is the same one-reading-two-heads defect this comment is about.
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178` (the only hit), while
+    # `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
     # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes THREE commits, not
     # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
     # `:28178` (main's `#13724`) — each hop measured on `docs/00_index.md`'s `#12296` row
@@ -6847,10 +6850,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
     # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
-    # prints `:28067` six times and it is still not what the clause says. The live value — and
-    # the one the pin row above asserts — is `:28373`. (`:28336`/`:28337` are the `def` and signature lines, which is a
+    # prints `:28067` four times and it is still not what the clause says. The live value — and
+    # the one the pin row above asserts — is `:28178`. (`:28141`/`:28142` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
-    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28373`" left the
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28178`" left the
     # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
     # source, so both halves are graded: a source move the document did not follow reds, and
     # a document re-point the source did not make reds.
@@ -6889,9 +6892,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
     # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle
-    # (`:15385` itself already carries it — the slice is END-INCLUSIVE, so the failing band
-    # stops one line short of the safe threshold; #13879 review round 5, P2),
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -16720,16 +16721,11 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: `:6798`-`:6801` asserts each of the four (the symbol derived at `:6794`), and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. What IS new coverage here: the `dedup_reviewed IS NULL`
-#: clause below, the `_D5_TRIPLE_RE` three-anchor sentence (a number swapped onto ANOTHER
-#: anchor's slot, which no per-line row can see), the #13845 quota guard (a number ON D5's
-#: line belonging to a clause about another file) and the `sdk.py` import's other hit
-#: (#13879) — and NOT the I7 `nodes_used`/`max_nodes` pair, which this tuple does not carry: those
-#: two rows are DELETED (see the note at their old site below), because the `_i7` arms bind
-#: `04-plan.md`'s range endpoints, not this row's pair of anchors. Provenance is attached to each
-#: item rather than to a POSITION — "the last two" would silently re-attribute the next
-#: entry appended here. No count is stated either: this list grows, and a count in a
-#: comment is the head-bound figure the rows below forbid.
+#: that clause ever had a reader. THREE things here are new coverage: the
+#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
+#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
+#: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
+#: a number that IS on D5's line but belongs to a clause about a different file.
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
@@ -16929,7 +16925,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
     # re-point — `sdk.py:28559` → `:28592`", while at THAT head the file was not in the diff at
     # all (`git diff --name-only origin/main...HEAD -- …/04-plan.md` was EMPTY there, and so was
-    # its `--numstat`) and the document's own row reads `sdk.py:28935`. ⛔ THAT MEMBERSHIP IS NOT
+    # its `--numstat`) and the document's own row reads `sdk.py:28718`. ⛔ THAT MEMBERSHIP IS NOT
     # TYPED AS CURRENT, on purpose: `main`'s `#13819` later moved `hosted_api.py` by +66 and this
     # branch re-derived the I7 range, which puts the file IN the diff — `git diff --numstat
     # origin/main...HEAD -- …/04-plan.md` at the head you merge is the command, never this line.
