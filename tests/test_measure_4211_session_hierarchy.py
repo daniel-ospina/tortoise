@@ -2927,7 +2927,8 @@ _PINNED_REVISION_SHAPE = {
     "round_14_review.keyed_query_changes": ["per_session_queries.session_aboutObject_edges", "queries.contains_distinct_pairs", "queries.objects_reaching_gt1_event", "queries.objects_with_gt1_turn", "queries.sessions_with_gt1_aboutObject_edge", "queries.sessions_with_gt1_contains_turn", "queries.sessions_with_gt1_entity_linked_turn", "queries.turns_per_session_contains_max_avg"],
     "round_20_review": ["fix", "not_in_this_receipt", "why"],
     "round_20_review.not_in_this_receipt": ["the SDK method name the writer arm calls", "tools/sdk_privatise.py's typed-reference count"],
-    "round_21_review": ["fix", "why"],
+    "round_21_review": ["fix", "not_in_this_receipt", "why"],
+    "round_21_review.not_in_this_receipt": ["arms.writer.per_session[*].shared_points"],
 }
 
 
@@ -3001,6 +3002,9 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
         "round_20_review": {
             "the SDK method name the writer arm calls",
             "tools/sdk_privatise.py's typed-reference count",
+        },
+        "round_21_review": {
+            "arms.writer.per_session[*].shared_points",
         },
     }
     # ⛔ THE WHOLE SHAPE IS PINNED, and the ROUND SET is DERIVED from it (#13919 round 18,
