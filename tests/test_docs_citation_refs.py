@@ -2144,6 +2144,9 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
     # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
     r"now|still|actually|also)\s+)?"
+    # ⛔ AND ONE DASH IS AN INSERTION TOO (#13802, round 21 — `f0fea1ce1c` made the closing dash
+    # optional; the row claimed it, and `The `tortoise/` set prints — NOTHING` had been GREEN
+    # because the alternative demanded a CLOSING dash as well)
     r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?\s*"
     # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
     # between the command and the verb, and `set (measured with `git diff …`) is empty`,
@@ -2254,7 +2257,26 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # here — an asymmetry between the two orders of the same sentence, and one the row's own
     # residual sentence did not cover, because these nouns are inside the ban's own lists.
     r"entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
-    r"|(?:an?|the)\s+(?:empty|non[- ]?empty))"
+    r"|(?:an?|the)\s+(?:empty|non[- ]?empty)"
+    # ⛔ AND THE `no <noun>` SPELLING IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+    # MEASURED at this head: `There are no files in the `tortoise/` set at this head.` is GREEN
+    # while its VERB-FIRST twin `The `tortoise/` set shows no changes at this head` is refused
+    # by the arm below — the same claim, two orders, one refused, which is exactly the
+    # asymmetry rounds 13 and 16 closed twice before). The noun class is the ban's OWN count
+    # class (`entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?`) plus the
+    # three shapes it spells out (`files?|paths?|modules?`), so the two orders cannot drift
+    # apart again. Bounded exactly like its siblings: the clause must OPEN with `no <noun>`,
+    # `tortoise/` must follow inside the same sentence, and a verb or subject-noun of the anchor
+    # list must follow THAT — so `No changes to `tortoise/` are needed` stays allowed (its
+    # `are` is not in the list), pinned in the must-not-refuse set below.
+    r"|no\s+(?:files?|paths?|modules?|entries|entry|edits?|diffs?|hits?|records?|items?|"
+    r"rows?|lines?|changes?))"
+    # ⚠️ DECLARED RESIDUAL, MEASURED (delta review of this widening): the QUOTE- and
+    # PAREN-wrapped answer (`The `tortoise/` set prints 'NOTHING' at this head.`, `… prints
+    # (NOTHING) at this head.`) is read by NEITHER arm — the emphasis class is `[*_`]`, and the
+    # sibling DETECTOR strips `[*_`]` but matches on a COMMAND token, so it reads none of them
+    # either. A gap in BOTH arms, not the detector-read/ban-blind asymmetry the rail must not
+    # carry; the live-victim scan over all 855 `docs/**/*.md` finds zero of either form.
     # ⛔ AND THE ANCHOR MUST BE FOLLOWED BY THE VERB OR THE SUBJECT-NOUN (#13802 review, round
     # 16 — MEASURED): without that, ordinary prose (`… it is transport only — nothing in
     # `tortoise/``, `; `tortoise/x.py` was in an earlier cut`) matched the emptiness answer and
@@ -2556,6 +2578,8 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # (#13802 review, round 21 — the dash alternative required a CLOSING dash, and the `no`
         # alternative listed 5 of the 13 nouns its own count class lists)
         "The `tortoise/` set prints — NOTHING at this head.",
+        # …in both dash spellings (the `[–]` half is the same insertion, pinned separately)
+        "The `tortoise/` set prints – NOTHING at this head.",
         "The `tortoise/` set shows no changes at this head",
         "The `tortoise/` set carries no edits at this head",
         "The `tortoise/` set reports no rows at this head",
@@ -2569,6 +2593,12 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff comes back with no `tortoise/` file at this head.",
         "This diff answers with no tortoise/ file at this head.",
         "This diff carries — at this head — no `tortoise/` path at all.",
+        # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+        # MEASURED GREEN at this head while every verb-first twin above was refused: the
+        # `no <noun>` branch existed only on the verb-then-answer side)
+        "There are no files in the `tortoise/` set at this head.",
+        "There are no entries in the `tortoise/` set at this head.",
+        "There are no changes in the `tortoise/` diff at this head.",
         # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
         # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
         # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
@@ -2639,6 +2669,11 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "At `2584a86ec1` the `tortoise/` set was non-empty — five paths.",
         "In `2584a86ec1` the `tortoise/` set was non-empty",
         "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all",
+        # ⛔ AND THE `no <noun>` ANSWER-FIRST BOUND MUST NOT REFUSE ORDINARY PROSE (#13802
+        # review, round 21). The verb after the anchor is the bound: `are` is not in that list,
+        # so this sentence states no direction about the `-- tortoise/` set and stays allowed —
+        # the over-block pin for the widening above.
+        "No changes to `tortoise/` are needed for this row",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "
