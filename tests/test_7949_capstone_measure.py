@@ -16994,7 +16994,12 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "reads `sdk.py:28718`, the new `sdk.py:28913`) — re-derive the pair, do not "
             "drop it (#13879 review, cycle 3)")
     # and the chimera is refused, not merely absent from the message above
-    assert ":15262-15339` → `:15346-15423" not in text, (
+    # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
+    # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
+    # backtick the target, so a literal caught ONE spelling and let three through — green
+    # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
+    # exact old spelling fired, and all three variants stayed green under the literal.
+    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
         "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
         "`:15346-15423` reads identically on `origin/main` and at this head, because "
         "`main` made that move — a pair whose two halves come from two different heads "
