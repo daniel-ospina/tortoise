@@ -788,8 +788,6 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
-                                                          # (and THIS PR's own guard file adds ONE more match,
-                                                          #   which is why the totals above are not typed),
                                                           # consumers: one is the `extractor_v2.py` scan
                                                           # (`:15427`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this

@@ -2289,10 +2289,23 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ⛔ WITH THE SAME INSERTION TOLERANCE FAMILY A CARRIES (#13802 review, round 18, P2 —
     # MEASURED: `This diff carries, at this head, no `tortoise/` path at all` and
     # `This diff carries (measured at this head) no …` were GREEN while the bare form red)
-    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\))?\s+"
-    r"(?:no|zero|only)\s+`?tortoise/[^`]*`?"
-    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`` cannot anchor before `-` or `→`,
-    # which is why putting them in the list above left them blind — MEASURED, round 17)
+    # ⛔ AND THE PREPOSITION BRIDGE AND THE DASH INSERTS, WHICH FAMILY A HAD AND THIS ONE DID
+    # NOT (#13802 review, round 21, P2 — MEASURED in-process at `9024f2e5d0`): the verb list
+    # above was widened to "every verb the rest of this pattern carries" and it then carried
+    # `resolves?`/`answers?`/`comes? back` WITHOUT the particle bridge family A pairs them with
+    # at its own `(?:(?:with|to|as|into|out|of)\s+)?`, so the natural spelling of the very verbs
+    # the round-17 widening added stayed GREEN through BOTH arms (`This diff resolves to no
+    # `tortoise/` path at all.` / `comes back with no …` / `answers with no …` -> ban-NONE), while
+    # family A's `resolves to ZERO` red. Family C also had no dash insert at all. The pre-fix
+    # readings are pinned as must-red witnesses in the test below, so this is measured rather
+    # than asserted. `\s*` before the qualifier is what lets the bridge's own trailing space be
+    # consumed — family A's post-insert tolerance is `\s*` for the same reason, and it cannot
+    # cross a word, so the over-block surface is unchanged (verified over all 855 docs).
+    r"\s*(?:(?:with|to|as|into|out|of)\s+)?"
+    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\)|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?"
+    r"\s*(?:no|zero|only)\s+`?tortoise/[^`]*`?"
+    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (the regex `\b` cannot anchor before
+    # `-` or `→`, which is why putting them in the list above left them blind — MEASURED, round 17)
     r"|\s(?:=|:|->|→)\s+(?:no|zero|only)\s+`?tortoise/[^`]*`?"
     r"(?:\s+(?:paths?|files?|modules?|edits?)\b)?"
     r"|\b(?:carries|touches|has|holds|contains|includes|names|lists)\s+"
@@ -2520,6 +2533,16 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "The `tortoise/` set shows no changes at this head",
         "The `tortoise/` set carries no edits at this head",
         "The `tortoise/` set reports no rows at this head",
+        # ⛔ AND THE PARTICLE BRIDGE AND THE DASH IN THE VERB-BEFORE-THE-PATH FAMILY (#13802
+        # review, round 21, P2 — MEASURED at `9024f2e5d0`: the round-17 widening added
+        # `resolves?|answers?|comes? back` to family C's verb list but not the preposition bridge
+        # family A pairs them with, and family C had no dash insert at all, so all four strings
+        # below were GREEN through the ban AND the sibling detector. Non-vacuity: every one of
+        # them FAILS on the pre-fix code and passes here.)
+        "This diff resolves to no `tortoise/` path at all, at this head.",
+        "This diff comes back with no `tortoise/` file at this head.",
+        "This diff answers with no tortoise/ file at this head.",
+        "This diff carries — at this head — no `tortoise/` path at all.",
         # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
         # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
         # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
