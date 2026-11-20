@@ -10148,16 +10148,21 @@ class TestProductTeamsCopy:
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
     repo reads it (the product page's guard deliberately stopped pinning copy in
-    #9652).
+    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
+    reason beside them — a builder "fixing" them is the failure this class
+    exists to catch.
 
-    ⛔ TWO DEPARTURES FROM THE PDF ARE OWNER-RULED AND MUST NOT BE UNDONE
-    (#13645). Page 2's "make decision" ships as "make decisions" and step 03's
-    "super intelligence" ships as "superintelligence"; the owner ruled both are
-    ACCIDENTAL slips, not phrasing. The pins below therefore assert the
-    CORRECTED strings — an earlier revision of this class pinned the PDF's
-    spelling and told the next reader not to "fix" it, which preserved a typo
-    the owner had already called accidental. If a lane re-derives "verbatim"
-    from the PDF and flips these back, that is a reversal of an owner ruling.
+    ⛔ THE COPY MAY NOT BE "CORRECTED" WITHOUT THE RULING ON THE ARTIFACT.
+    `e654a120ad` flipped both strings here and on the page to the corrected
+    forms, citing an owner ruling on #13645 that is not on that artifact: the
+    issue's owner decision comment says the PDF's copy "must survive the build
+    **unchanged** — this is the owner's prose, not a draft to improve", and the
+    scoping comment's "If the owner says nothing, the plan below ships (1) and
+    (2) as recommended" is a DEFAULT, not a ruling. #14020's review at
+    `73dbbf66ea` measured the absence (no comment on #13645, #13696 or the PR
+    records it), so the copy and these pins were reverted TOGETHER at #14020's
+    P1 fix — the only correct pair move. If the owner rules, quote the ruling in
+    this docstring and move the page's copy AND these pins in ONE commit.
     """
 
     #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
@@ -10178,11 +10183,11 @@ class TestProductTeamsCopy:
     )
 
     #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
-    #: ⛔ `decisions` (plural) is an OWNER-RULED correction of the PDF's
-    #: "make decision" — #13645, accidental slip. Not a builder's edit.
+    #: ⛔ `decision` (SINGULAR) is the PDF's own text, not a builder's typo —
+    #: see the class docstring (#14020 review P1 at `73dbbf66ea`).
     COMPUTE = (
         "Tortoise then computes over this context, analysing hundreds or even "
-        "millions of variables so you and your agents make decisions with "
+        "millions of variables so you and your agents make decision with "
         "superintelligence."
     )
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
@@ -10200,7 +10205,7 @@ class TestProductTeamsCopy:
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
         ("beat-reason", "03 · Reason",
-         "Improve decision-making with superintelligence, grounded in your "
+         "Improve decision-making with super intelligence, grounded in your "
          "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
          "inspired by interconnected prediction markets, Tortoise can compute "
          "hundreds or even millions of data points."),
@@ -10308,11 +10313,18 @@ class TestProductTeamsCopy:
                 "502.97px vs 605.63px at 768x900, #14020 review P1). The serif "
                 "belongs on the inner <span>.")
 
-        span_rules = _css_rules(css, "#beat-intro .lead > span")
+        span_rules = [body for body, _inside_media in
+                      _css_rules_with_scope(css, "#beat-intro .lead > span")]
         assert span_rules, (
             "`#beat-intro .lead > span` declares no rule — the lead's serif has "
             "to live on an inner element, or it lands back on the element whose "
             "font-size resolves `74ch` (#14020 review P1)")
+        # …read through the COMMENT-BLANKED reader (`_css_rules_with_scope`),
+        # not `_css_rules`: the latter scans the raw sheet, so wrapping the
+        # declaration in `/* … */` inside its own rule — the shape an editor
+        # leaves while debugging — keeps this row GREEN while the lead loses its
+        # serif. That is the exact false PASS `_css_blanked` exists to close
+        # (#14020 review P2).
         assert any("font-family: var(--serif)" in b for b in span_rules), (
             "the lead's inner <span> does not take the serif; owner item 2 has "
             "the opening line read as the section's title, not as body copy")
@@ -10461,31 +10473,41 @@ class TestProductTeamsCopy:
                 f"the last base `{selector}` rule reads {base[-1].strip()!r}; "
                 f"{why}. A later top-level rule wins the cascade even when an "
                 "earlier one says `left` (#14020 review P2.4)")
-        links = " ".join(_css_rules(css, "#beat-hero .hero-links"))
+        # Comment-blanked, like the alignment rows above: `_css_rules` scans the
+        # raw sheet, so `#beat-hero .hero-links { /* display: flex; */ }` — a
+        # commented-out declaration inside its own rule — would satisfy this row
+        # while the row stops being a row (#14020 review P2).
+        links = " ".join(body for body, _inside_media in
+                         _css_rules_with_scope(css, "#beat-hero .hero-links"))
         assert "display: flex" in links, (
             "`.hero-links` is not a flex row on the copy column's left edge — "
             "the `·` separators are `::after` on non-last links, a layout that "
             "only holds as a row (#13696 item 1)")
 
-    def test_the_compute_claim_carries_the_owner_ruled_correction(self):
-        """The PDF's "make decision" ships as "make decisions" — owner ruling.
+    def test_the_compute_claim_is_verbatim_including_its_defect(self):
+        """⛔ "make decision with superintelligence" is NOT a typo to fix.
 
         The PDF reads "so you and your agents make decision with
-        superintelligence." A copy editor would flag the singular `decision`,
-        the owner ruled it ACCIDENTAL on #13645, so the page carries the
-        corrected plural and this pin asserts THAT. ⛔ Flipping this pin back to
-        the PDF's spelling is not "honouring verbatim" — it re-lands a typo the
-        owner already ruled on, which is what an earlier revision of this class
-        did while claiming the defect was deliberate.
+        superintelligence." (singular `decision`). It is a defect a copy editor
+        would flag, and the scoping recommended normalising it — but the owner's
+        recorded instruction on #13645 is that the PDF's copy "must survive the
+        build unchanged", so it ships as written, and this pin is what keeps the
+        next reader from "correcting" it silently.
+
+        ⛔ A corrected form was shipped once (`e654a120ad`, on a ruling recorded
+        on no artifact) and reverted with its pin at #14020's review P1 — the
+        two move together or not at all. If the owner rules, change the copy AND
+        this pin in the same commit and quote the ruling here.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
         first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
         assert first, "#beat-compute has no paragraph"
         assert _beat_text(first.group(1)) == self.COMPUTE, (
             f"the compute claim reads {_beat_text(first.group(1))!r}; the "
-            f"owner's ruled text reads {self.COMPUTE!r}. ⛔ `make decisions` "
-            "(plural) is the owner's correction on #13645, not a builder typo "
-            "— do not restore the PDF's singular.")
+            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
+            "(singular) is the owner's text, not a builder typo. A correction "
+            "is allowed only with the owner's ruling recorded on #13645, and "
+            "then the copy and THIS pin move in the same commit.")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -10517,10 +10539,11 @@ class TestProductTeamsCopy:
                 f"PDF reads {heading!r}")
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
-                f"#{section_id}'s paragraph reads {body!r}; the ruled copy reads "
-                f"[{paragraph!r}]. ⛔ `superintelligence` (one word) in step 03 "
-                "is the owner's correction on #13645 — the PDF's two-word "
-                "spelling is the accidental slip, do not restore it.")
+                f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
+                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
+                "is the owner's spelling — corrected only with the ruling "
+                "recorded on #13645, and then together with this pin "
+                "(#14020 review P1 at `73dbbf66ea`).")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")

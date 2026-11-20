@@ -22,14 +22,23 @@
        decision, one file over — keep the two in step.
 
        COPY is the owner's prose from
-       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
-       with TWO deliberate departures the owner RULED on (#13645): page 2's
-       "make decision" is written "make decisions", and step 03's
-       "super intelligence" is written "superintelligence". Both are ACCIDENTAL
-       slips in the PDF, not phrasing — the owner's instruction is to ship the
-       corrected strings, so a lane that "restores" either one to the PDF's
-       spelling is reverting an owner ruling, not honouring verbatim. Copy is
-       verbatim everywhere else.
+       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM —
+       including "make decision with superintelligence" (page 2, singular
+       "decision") and "super intelligence" (step 03) as the PDF spells them.
+       Those are recorded copy DEFECTS the owner has NOT ruled on. #13645's
+       owner decision comment is explicit: the PDF's copy "must survive the
+       build **unchanged** — this is the owner's prose, not a draft to
+       improve." A scoping comment's "If the owner says nothing, the plan below
+       ships (1) and (2) as recommended" is a DEFAULT, not a ruling, so it does
+       not license a correction.
+
+       ⛔ Both strings were corrected once and reverted, copy and pin together:
+       `e654a120ad` shipped "make decisions"/"superintelligence" citing an owner
+       ruling on #13645 that is on no artifact, and #14020's review at
+       `73dbbf66ea` measured its absence (no comment on #13645, #13696 or this
+       PR records it). Verbatim outranks a builder's opinion. If the owner
+       rules, quote the ruling here, change BOTH strings on the page, AND move
+       `TestProductTeamsCopy` in the same commit.
 
        PRICING is forked from /tortoise as the PDF instructs, and renders from
        the SAME SOURCE: `/assets/tortoise-pricing.js`, loaded by both pages.
@@ -756,7 +765,7 @@
 
     <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
     <section id="beat-compute" class="beat workflow">
-      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decisions with superintelligence.</p>
+      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decision with superintelligence.</p>
       <!-- investors.html's `.outcomes` component: two lists, green ↑ / gold ↓,
            collapsing to one column on narrow viewports. The PDF's labels. -->
       <div class="outcomes">
@@ -784,7 +793,7 @@
     </section>
     <section id="beat-reason" class="beat workflow">
       <h2><span class="beat-num">03</span> · Reason</h2>
-      <p>Improve decision-making with superintelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
+      <p>Improve decision-making with super intelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
     </section>
 
     <!-- ══ 7. Onboarding ═════════════════════════════════════════════════ -->
