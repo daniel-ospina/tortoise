@@ -1072,7 +1072,10 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
         "a deployment with a RECORD configured allowed a journal rebuild while "
         "the flag was absent — the arm an operator shell takes, where the "
         "rebuild silently drops every record after the cutover point")
-    assert "NOT an export yet" in refusal, (
+    # `.lower()`: the pin is the CLAIM, not a capital letter — a copyedit to
+    # "it is not an export yet" must not red, while the pre-fix text (which has no
+    # such substring in any case) still does.
+    assert "not an export yet" in refusal.lower(), (
         "the refusal claims the file is an export — nothing writes it on a "
         "cut-over graph, so an operator sent looking for one finds nothing")
     assert "Nothing was wiped" in refusal
