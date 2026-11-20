@@ -63,8 +63,14 @@ until the first concurrent pair).
 the right call: the guard is the only thing that kept the record honest while
 both allocators existed. `write_live_record` still refuses any ordinal a caller
 holds that disagrees with the issued number (`tests/test_12894_record_cursor_live.py::test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured`
-still passes), and `tests/test_14002_record_only_journal.py::test_the_guard_itself_is_untouched`
-pins the comparison's shape so a future lane cannot "fix" a red by weakening it.
+still passes), and `tests/test_14002_record_only_journal.py::
+test_the_divergence_guard_still_REFUSES_a_caller_held_ordinal` drives the door to
+pin the behaviour (an ordinal of 9 against an allocation of 4 must REFUSE, roll
+back once and never commit), with
+`test_the_guard_still_COMPARES_on_the_source` as its reformat-catching supplement.
+⚠️ The behavioural leg replaced a pair of source-substring checks: a mutant that
+turned the guard's own test into `if False:` kept both substrings intact, so the
+pin passed with the guard disabled (review cycle 2, P3).
 What changed is that the PRODUCTION path no longer manufactures the
 disagreement the guard refuses.
 
@@ -95,8 +101,8 @@ continuously), scaled down to a deterministic count.
 
 Run: `TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 uv run pytest
 tests/test_14002_record_only_journal.py -q` →
-**23 passed** (19 DB-free + 4 live). Without `TEST_RECORD_DB_URI` the same file
-reports **19 passed, 4 skipped**, which is the split the `core` matrix leg sees.
+**26 passed** (21 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
+reports **21 passed, 5 skipped**, which is the split the `core` matrix leg sees.
 
 **Red-first, the same window with the fix disabled** (`journal_skipped = False`
 in the chokepoint — the pre-#14002 tree, everything else identical):
@@ -107,9 +113,12 @@ E  AssertionError: 117 of 120 writes were REFUSED on a cut-over graph —
    events=0, statements=0, first_seq=4, last_seq=3, …)
 ```
 
-117 of 120. Each refusal logs the door's `position_divergence` warning naming
-both numbers (`the journal holds the record at position 95 and the ORDINAL
-ALLOCATOR issued 3`) — the hosted lane's symptom, reproduced on demand.
+**115–120 of 120, and the exact count is scheduling-dependent — the DIRECTION is
+not.** Repeated runs on two hosts produced 117 and 115; what is stable is that the
+pre-fix path refuses almost every write in the window and each refusal logs the
+door's `position_divergence` warning naming both numbers (`the journal holds the
+record at position 95 and the ORDINAL ALLOCATOR issued 3`) — the hosted lane's
+symptom, reproduced on demand.
 
 **And the falsifier the issue asks for**:
 `test_the_falsifier_an_appending_cut_over_graph_wedges_and_grows_the_file`
@@ -151,12 +160,18 @@ cutover by the same window. The measured cost above is the alternative.
    Once the file stops growing, a rebuild from it would produce a graph as of the
    arming point and **silently drop every later record** — `rebuild_all` prints
    `Done:` either way and its counts are the journal's own. So the operator door
-   refuses when the deployment is armed and a record DSN resolves
-   (`__main__._journal_rebuild_refusal`), with `unset the flag` as the escape.
+   refuses when a RECORD DSN resolves (`__main__._journal_rebuild_refusal`) —
+   keyed on the record's EXISTENCE, never on the writer's
+   `TORTOISE_RECORD_ALLOCATE`, because an operator shell, a cron job and a
+   maintenance one-off do not carry a writer flag: keying on it left the
+   destructive door open exactly where the people who run it live (review cycle 3,
+   P2). The escape is `--journal-is-complete` — the operator asserting that no
+   graph on this record is cut over, so the file IS the full log.
    ⚠️ It is deliberately BROADER than per-graph: a `record_cursor` row is keyed by
    `(org_id, graph_id)` and the rebuild door has neither, so it can refuse a
-   rebuild on an armed box where no graph is cut over yet. Too broad refuses a
-   rebuild that would have been fine; too narrow destroys work with no error. A
+   rebuild on a configured record where no graph is cut over yet. Too broad
+   refuses a rebuild that would have been fine (one flag); too narrow destroys
+   work with no error. A
    MALFORMED DSN is not refused — nothing can allocate there, so the append
    stays and the journal IS the source.
    ⚠️ **Reachability, stated so the gate is not read as covering more than it
@@ -181,7 +196,15 @@ cutover by the same window. The measured cost above is the alternative.
    the arming step `journal_ready` tells an operator to run. So the reading now
    carries `journal_is_export` (the same two facts `record_owns_position` asks:
    armed + an `active` cursor row), and that shape answers `unprojected == 0`
-   instead. **Found by review cycle 2, not by the lane** — the module text it
+   instead. ⚠️ **The reading asks the RECORD, never the reading process's
+   `TORTOISE_RECORD_ALLOCATE`** (review cycle 3, P2): the row is the fact
+   `ALLOCATION_SQL` keys on, while the flag is a WRITER switch an operator's
+   shell does not carry — keying on it made `record-reconcile --journal` (the
+   arming step a runbook tells an operator to execute) report a contradiction on
+   a healthy pair. With the row `active` and the writers unarmed, the enumerated
+   arm is refused, so the record cannot gain positions while the journal does: a
+   row-active + `present > enumerated` reading can only be one the allocator fed.
+   **Found by review cycle 2, not by the lane** — the module text it
    contradicts said "every healthy graph satisfies it … so no correct deployment
    is refused by this", which was true before this change. `LiveWrite.unprojected`
    `0` on the skip arm is the same fact one layer down, and the loss case — if the

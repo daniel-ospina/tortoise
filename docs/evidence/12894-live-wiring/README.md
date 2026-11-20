@@ -346,7 +346,8 @@ document, never in a Python module — V5 item 7).
 > `test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured` still
 > passes — it pins the GUARD's behaviour, not the production path's, and the
 > production path no longer reaches it. Measurements (120 concurrent writes, 0
-> divergence refusals; the same window pre-fix: **117 of 120 refused**), the
+> divergence refusals; the same window pre-fix: **115-120 of 120 refused**, the exact
+> count being scheduling-dependent), the
 > falsifier and the new residuals: `docs/evidence/14002-record-only-journal/`.
 > ⚠️ §3's verdict (*"the append stays the commit point"*) is unchanged in the
 > sense that matters there: the JSONL LINE is still not reproducible from the

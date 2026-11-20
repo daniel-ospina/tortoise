@@ -7996,24 +7996,32 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
 def _journal_is_export(cursor: Any, org_id: str, graph_id: str) -> bool:
     """Does the RECORD own this graph's ordinal — so the file is an EXPORT (#14002)?
 
-    The same two facts :func:`record_writer.record_owns_position` requires — the
-    deployment is armed AND the graph's `record_cursor` row is `active` — read
-    on the caller's ALREADY-SCOPED cursor, so this costs one SELECT on a
-    connection the reading holds anyway and never a second `scope_connection`.
+    ⛔ ASKED OF THE RECORD, NEVER OF THE CALLER'S ENVIRONMENT (#14002 review
+    cycle 3, P2). The first cut of this function also required
+    ``record_writer.record_live_allocate()`` — a WRITER switch, read from the
+    READING process. So `python -m tortoise record-reconcile --journal <path>`
+    (the arming step `journal_ready` tells an operator to run) answered
+    "unanswerable — that file cannot be the journal that fed this record" on a
+    healthy cut-over pair whenever the operator's shell did not carry the flag,
+    pointing them at destructive remedies for a contradiction that does not
+    exist. The ROW is the fact `ALLOCATION_SQL` keys on, and it is the record's
+    own statement about itself — so the row alone decides.
 
-    ⚠️ A READ THAT FAILS ANSWERS ``False``, and the direction is deliberate: the
-    pre-#14002 reading then stands (a `present > enumerated` file is treated as
-    the contradiction it always was). The other way round would let a failed
-    read quietly bless a rotated journal — a false CLEAN on the one surface that
-    exists to detect it. The cost is that a transient failure keeps the dense leg
-    on the graph branch for this request, which is exactly what an unreadable
-    record does today.
+    ⚠️ AND ROW-ACTIVE + ``present > enumerated`` CANNOT mean a rotated journal:
+    with the row `active` and the writers NOT armed, the enumerated arm is
+    refused outright (`_refuse_an_enumerated_replay`), so the record cannot gain
+    positions while the journal does. A record that holds more positions than its
+    file enumerates, on an `active` row, is therefore one the allocator fed.
+
+    ⚠️ A READ THAT FAILS ANSWERS ``False``, deliberately: the pre-#14002 reading
+    then stands (a `present > enumerated` file is treated as the contradiction it
+    always was), so a failed read keeps the dense leg on the graph branch for one
+    request instead of quietly blessing a rotated journal on the one surface that
+    exists to detect it. Read on the caller's ALREADY-SCOPED cursor, so this costs
+    one SELECT on a connection the reading holds anyway and never a second
+    `scope_connection`.
     """
     try:
-        from . import record_writer
-
-        if not record_writer.record_live_allocate():
-            return False
         cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
         row = cursor.fetchone()
     except Exception:  # noqa: BLE001, RUF100 — see the docstring's fail-closed note

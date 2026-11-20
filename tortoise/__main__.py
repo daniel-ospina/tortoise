@@ -70,7 +70,7 @@ def _markdown_files(root: Path | str) -> list[Path]:
     )
 
 
-def _journal_rebuild_refusal() -> str | None:
+def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None:
     """Why `tortoise rebuild` must REFUSE on this deployment, or ``None`` (#14002).
 
     ⛔ THE CONSEQUENCE #14002 CREATES, NAMED AT THE DOOR THAT WOULD ACT ON IT.
@@ -85,19 +85,22 @@ def _journal_rebuild_refusal() -> str | None:
     direction nothing can see: `rebuild_all` prints `Done:` and the counts it
     prints are the journal's, not the record's.
 
-    ⛔ SO THE GATE IS FAIL-CLOSED, AND DELIBERATELY BROADER THAN PERFECT. It asks
-    the two facts a rebuild CAN know without an org (a `record_cursor` row is
-    scoped per `(org_id, graph_id)` and this door has neither): this deployment
-    is ARMED (`TORTOISE_RECORD_ALLOCATE`) and a record DSN resolves. That can
-    refuse a rebuild on an armed box where no graph is cut over yet — the
-    intentional over-block, and the escape is explicit: unset the flag (or run on
-    a deployment that is not armed) if the journal really is complete here. The
-    opposite polarity cannot be undone: a partial rebuild presented as a full one
-    destroys work with no error.
+    ⛔ THE POLARITY IS FAIL-CLOSED ON THE RECORD'S **EXISTENCE**, NOT ON A FLAG
+    (#14002 review cycle 3, P2). The first cut refused only when
+    `TORTOISE_RECORD_ALLOCATE` was set — a WRITER switch that an operator's
+    shell, a cron job and a maintenance one-off do not carry, so the destructive
+    door failed OPEN exactly where the operators who run it live. The condition
+    is now: **a record DSN resolves ⇒ refuse**, and the escape is an explicit
+    acknowledgement of the thing that actually matters — `--journal-is-complete`,
+    i.e. "no graph on this record is cut over, so the file IS the full log".
+    That is a deliberate over-block (it can refuse a rebuild on a configured
+    record with no cutover at all) chosen against the alternative, because the
+    two directions are not symmetric: refused friction is one flag, and a partial
+    rebuild presented as a full one destroys work with no error.
 
-    A MALFORMED DSN is NOT an armed record (`record_dsn` raises on it, and with no
-    usable DSN the write path cannot allocate either, so the append stays and the
-    journal IS the source): that arm allows the rebuild.
+    A MALFORMED DSN is NOT a usable record (`record_dsn` raises on it): the write
+    path cannot allocate there either, so the append stays and the journal is the
+    source — that arm allows the rebuild, as does an unconfigured deployment.
     """
     try:
         from tortoise import record_writer
@@ -105,31 +108,30 @@ def _journal_rebuild_refusal() -> str | None:
         # turn a recovery tool into an error; the pre-#14002 behaviour stands.
         return None
     try:
-        if not record_writer.record_live_allocate():
-            return None
         if record_writer.record_dsn() is None:
             return None
-    except Exception:  # noqa: BLE001, RUF100 — see above
+    except Exception:  # noqa: BLE001, RUF100 — a malformed DSN: see above
+        return None
+    if journal_is_complete:
         return None
     return (
-        "this deployment's record OWNS the journal's ordinal "
-        f"({record_writer.RECORD_ALLOCATE_ENV} is set and a record DSN is "
-        "configured), so the JSONL is an EXPORT on every graph that has been cut "
-        "over — it stops being appended to, and `derived = replay(journal)` no "
+        "this deployment has a RECORD configured, and on any graph that has been "
+        "cut over the record owns the journal's ordinal — the JSONL is an EXPORT "
+        "there, it stops being appended to, and `derived = replay(journal)` no "
         "longer holds for it (STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
         "rebuild from it would produce a graph as of the arming point and "
-        "silently drop every later record. Nothing was wiped. If no graph on "
-        "this box is cut over yet, unset "
-        f"{record_writer.RECORD_ALLOCATE_ENV} (the journal is complete there and "
-        "this refusal does not apply); otherwise restore the graph from the "
-        "record's own backup, not from the journal"
+        "silently drop every later record. Nothing was wiped. If NO graph on this "
+        "record is cut over — so the journal really is the full log — re-run with "
+        "`--journal-is-complete`; otherwise restore the graph from the record's "
+        "own backup, not from the journal"
     )
 
 
 def _cmd_rebuild(args):
     from tortoise.log import TornTailResurrectionError
 
-    refusal = _journal_rebuild_refusal()
+    refusal = _journal_rebuild_refusal(
+        journal_is_complete=bool(getattr(args, "journal_is_complete", False)))
     if refusal is not None:
         print(f"Refused: {refusal}", file=sys.stderr)
         return 1
@@ -17556,6 +17558,15 @@ def main(argv: list[str] | None = None) -> int:
     rb = sp.add_parser("rebuild", help="Rebuild FalkorDB from all .jsonl files")
     rb.add_argument("--db", required=True)
     rb.add_argument("--dir", default=".")
+    # #14002: a wipe + journal-only replay on a deployment whose RECORD owns the
+    # journal's ordinal drops every record after the cutover point, silently. The
+    # refusal is the default and this flag is the assertion that no graph on the
+    # record is cut over (so the file IS the full log) — an acknowledgement of the
+    # fact that decides it, not a bypass of the check.
+    rb.add_argument(
+        "--journal-is-complete", dest="journal_is_complete", action="store_true",
+        help="Proceed on a deployment with a RECORD configured: assert that NO "
+             "graph is cut over, so the journal is the complete log (#14002)")
     sp.add_parser("demo", help="Run mock extractor on sample transcript")
     sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)").add_argument("--db", required=True, help="Docker URI or file path")
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")

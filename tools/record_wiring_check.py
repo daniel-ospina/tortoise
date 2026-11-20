@@ -1003,6 +1003,17 @@ def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:
     return found
 
 
+def _is_parameter(scope: ast.AST, name: str) -> bool:
+    """Is `name` a parameter of this function, whatever its default? (#14002)
+
+    The forwarding shape every door uses: the chokepoint's decision arrives as an
+    argument and is passed straight through, so its provenance is the CALLER's
+    write, not a value this scope invented. `_parameters` answers the same
+    question; this reads as intent at the one call site that needs it.
+    """
+    return name in _parameters(scope)
+
+
 def _parameters(scope: ast.AST) -> dict[str, ast.expr | None]:
     """`{parameter: default-or-None}` for one function signature."""
     args = getattr(scope, "args", None)
@@ -1258,7 +1269,7 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
     """
     modules, functions = _record_bindings(tree)
     problems: list[str] = []
-    for _scope, call in _calls_by_scope(tree):
+    for scope, call in _calls_by_scope(tree):
         owner, name = _resolve_record_call(call, modules, functions)
         if owner is None or name != _LIVE_DOOR:
             continue
@@ -1281,6 +1292,27 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
                 "`position_unverifiable`, so it lands in neither store) and "
                 "`True` forces allocation on a graph that is not cut over. "
                 "Forward the name the chokepoint bound (#14002)")
+            continue
+        # ⛔ A NAME IS NOT PROVENANCE EITHER (#14002 review cycle 3, P3). A door
+        # can bind a LOCAL constant (`journal_skipped = True`) a few lines above
+        # the call and forward that name — the same two defects, one assignment
+        # away, with the gate green. So the name must be either a PARAMETER of the
+        # enclosing door (the forwarding shape the SDK uses) or bound in that
+        # scope from a call whose callee is the chokepoint's decision.
+        if _is_parameter(scope, value.id):
+            continue
+        origins = _assigned_targets_in(scope).get(value.id, [])
+        if any(callee.endswith("record_owns_position")
+               for origin in origins for callee in _call_names_in(origin)):
+            continue
+        problems.append(
+            f"{rel}:{call.lineno} forwards `{value.id}` as `journal_skipped`, but "
+            f"`{value.id}` is neither a parameter of {_function_name(scope)}() nor "
+            "bound from the chokepoint's `*record_owns_position(…)` decision in "
+            "this scope — a locally bound constant is the same defect as a "
+            "literal: `False` skips the append and gets every cut-over write "
+            "refused, `True` forces allocation on a graph that is not cut over "
+            "(#14002)")
     return problems
 
 

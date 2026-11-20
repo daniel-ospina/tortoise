@@ -377,28 +377,68 @@ def test_the_import_failure_arm_appends(monkeypatch):
 # ── 3. the seam: the two `seq is None` states stay distinguishable ────────
 
 
-def test_the_seam_refuses_an_unproven_position_unless_the_append_was_skipped():
-    """⛔ THE COLLAPSE THAT WOULD TURN THE FIX INTO AN OUTAGE (#14002).
+def test_the_seam_REFUSES_an_unproven_position_but_ALLOCATES_a_skipped_one(
+        monkeypatch):
+    """⛔ THE COLLAPSE THAT WOULD TURN THE FIX INTO AN OUTAGE (#14002), DRIVEN.
 
-    `seq is None` has two causes and they need opposite answers:
-    `#9307`'s "the append succeeded and could not prove a position" is a
-    REFUSAL (the counter would issue a number nothing corroborates), while
-    "there is no line, the counter is the only allocator" is the healthy
-    cutover. One flag separates them, and this leg pins the ARITHMETIC of the
-    distinction without a database: the unproven arm is reached exactly when
-    `journal_skipped` is False.
+    `seq is None` has two causes and they need opposite answers: #9307's "the
+    append succeeded and could not prove a position" is a REFUSAL (nothing can
+    corroborate the issued number), while "there is no line, the counter is the
+    only allocator" is the healthy cutover. One flag separates them.
+
+    ⚠️ MEASURED-REWRITTEN: an earlier cut of this leg asserted two SOURCE
+    SUBSTRINGS and called that "the arithmetic" — and `… and not journal_skipped
+    and False:` satisfies both, so the pin passed with the arm disabled. It now
+    drives the door twice, with the same stubs, and reads the outcome.
     """
-    import inspect
+    from tortoise import monitoring
 
-    source = inspect.getsource(rw.write_live_record)
-    assert "if seq is None and allocate and not journal_skipped:" in source, (
-        "the `position_unverifiable` refusal no longer excludes the "
-        "journal-skipped arm — every write on a cut-over graph would be "
-        "refused (`write_failed`, counted, WARNed) while the append is "
-        "correctly skipped, i.e. a total outage instead of a fix")
-    assert "allocate = allocate or record_live_allocate() or journal_skipped" in source, (
-        "a skipped append no longer implies allocation — the write would take "
-        "the enumerated arm with no ordinal at all")
+    def drive(*, journal_skipped: bool):
+        conn = _GuardConn()
+        monkeypatch.setattr(rw, "_live_write_verdict",
+                            lambda **_kw: (None, ("org", "graph"), None))
+        monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+        calls: list = []
+
+        def _write_records(records, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(applied=True, first_seq=7, last_seq=7,
+                                   connection=conn, statements=1, events=1,
+                                   written_bytes=1, written_rows=1)
+        monkeypatch.setattr(rw, "write_records", _write_records)
+        write = rw.write_live_record(RECORD, durable=True, seq=None,
+                                     tenant=("org", "graph"),
+                                     journal_skipped=journal_skipped)
+        return write, calls, conn
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    before = dict(monitoring.record_write_failure_counts())
+
+    unproven, unproven_calls, unproven_conn = drive(journal_skipped=False)
+    assert unproven is not None and not unproven.applied, (
+        "a `seq=None` write that was NOT skipped was allocated — the counter "
+        "issued a number nothing corroborates (#9307)")
+    assert unproven.refusal == "write_failed"
+    assert unproven_calls == [], "the plan ran for a write that must be refused"
+    assert unproven_conn.committed == 0
+
+    skipped, skipped_calls, skipped_conn = drive(journal_skipped=True)
+    assert skipped is not None and skipped.applied, (
+        "a SKIPPED append (the healthy cutover) was refused as "
+        "`position_unverifiable` — every write on a cut-over graph would fail")
+    assert len(skipped_calls) == 1, "the plan did not run for the skip arm"
+    # `allocate` is implied by the skip: a skipped append can only be numbered by
+    # the counter, so the plan must be told to allocate (and to start at 1,
+    # because `replay_plan` refuses a caller watermark on that arm).
+    assert skipped_calls[0]["allocate"] is True
+    assert skipped_calls[0]["first_seq"] == 1
+    assert skipped_conn.committed == 1
+
+    after = dict(monitoring.record_write_failure_counts())
+    assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1, (
+        "the unproven refusal was not counted exactly once — the skip arm must "
+        "add nothing to `record_write_failures`")
 
 
 class _GuardConn:
@@ -531,27 +571,41 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     `Done:` either way, and the counts it prints are the journal's own.
 
     The gate is deliberately broader than per-graph (a `record_cursor` row is
-    keyed by `(org_id, graph_id)` and this door has neither): armed deployment +
-    a resolvable record DSN ⇒ refuse, with `unset the flag` as the escape. Too
+    keyed by `(org_id, graph_id)` and this door has neither): a resolvable record
+    DSN ⇒ refuse, with an explicit `--journal-is-complete` as the escape. Too
     broad refuses a rebuild that would have been fine; too narrow destroys work.
     """
     from tortoise.__main__ import _journal_rebuild_refusal
 
+    # No record configured at all: the journal IS the rebuild source.
+    monkeypatch.delenv(rw.RECORD_DSN_ENV, raising=False)
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
-    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
     assert _journal_rebuild_refusal() is None, (
-        "an un-armed deployment refused a journal rebuild — the journal IS the "
-        "rebuild source there")
+        "a deployment with NO record refused a journal rebuild — the journal is "
+        "the rebuild source there")
 
-    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+
+    # ⛔ FAIL-CLOSED ON THE RECORD'S EXISTENCE, NOT ON A WRITER FLAG (#14002
+    # review cycle 3, P2). The first cut refused only when
+    # `TORTOISE_RECORD_ALLOCATE` was set — which an operator's shell, a cron job
+    # and a maintenance one-off do not carry — so the destructive door failed OPEN
+    # for exactly the people who run it.
+    monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
     refusal = _journal_rebuild_refusal()
     assert refusal is not None and "EXPORT" in refusal, (
-        "an ARMED deployment allowed a journal rebuild: the journal is an "
-        "export there, so the rebuild would silently drop every record after "
-        "the cutover point")
+        "a deployment with a RECORD configured allowed a journal rebuild while "
+        "the flag was absent — the arm an operator shell takes, where the "
+        "rebuild silently drops every record after the cutover point")
     assert "Nothing was wiped" in refusal
+    assert "--journal-is-complete" in refusal, (
+        "the refusal does not name its own escape — an operator has no way to "
+        "say 'no graph here is cut over'")
 
-    # A MALFORMED DSN is not an armed record: nothing can allocate, the append
+    # The escape is the ASSERTION, not a bypass: with it, the rebuild proceeds.
+    assert _journal_rebuild_refusal(journal_is_complete=True) is None
+
+    # A MALFORMED DSN is not a usable record: nothing can allocate, the append
     # stays, and the journal is complete — so the rebuild is allowed.
     monkeypatch.setenv(rw.RECORD_DSN_ENV, "not-a-dsn")
     assert _journal_rebuild_refusal() is None
@@ -563,6 +617,8 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
 
     assert _cmd_rebuild(SimpleNamespace(dir=".", db="mem")) == 1
     assert "Refused:" in capsys.readouterr().err
+    # …and the acknowledgement reaches the door through the CLI surface too.
+    assert _journal_rebuild_refusal(journal_is_complete=True) is None
 
 
 # ── 5. the wiring gate: the deletion class, with its mutations ────────────
@@ -658,8 +714,25 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
             ("dropped", "            )"),
             ("as a constant False", "            journal_skipped=False)"),
             ("as a constant True", "            journal_skipped=True)"),
-            ("as None", "            journal_skipped=None)")):
-        problems = problems_for(source.replace(old, replacement, 1))
+            ("as None", "            journal_skipped=None)"),
+            # ⛔ AND THE ONE-ASSIGNMENT-AWAY FORM (#14002 review cycle 3, P3): a
+            # local binding forwarded BY NAME is the same defect as a literal,
+            # and it passed the gate until the rule also checked provenance.
+            ("via a local constant",
+             "            journal_skipped=_local_constant)")):
+        mutated = source.replace(old, replacement, 1)
+        if "_local_constant" in replacement:
+            mutated = mutated.replace(
+                "    def _write_record_projection(self, record: dict,",
+                "    def _write_record_projection(self, record: dict,",
+                1)
+            # Bind it INSIDE the door, above the call — the shape a lane writes
+            # when it "knows" the answer.
+            mutated = mutated.replace(
+                "        log = self._event_log",
+                "        journal_skipped = True\n        log = self._event_log",
+                1)
+        problems = problems_for(mutated)
         assert problems, (
             f"the gate certified a door that supplies journal_skipped {label} — "
             "a constant reproduces the two-allocator loss (False: the append is "
