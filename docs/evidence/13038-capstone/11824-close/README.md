@@ -246,10 +246,11 @@ cannot carry its own `sha256` and still be unchanged by carrying it.
 - The two runs are **different products scored by different judges** (a
   transported baseline file, then a fresh reader), so this is a comparison of two
   states of the product, not a controlled A/B. The after arm measures a `main`
-  commit that trailed main's tip by 42 first-parent commits when it ran, so
-  anything that landed on `main` between them — and everything that landed after
-  `28ca66878d` and before that tip — is in neither arm and therefore not in the
-  delta either.
+  commit with **117 first-parent commits between the before product and it** —
+  the landings the attribution table above credits, and so squarely IN the after
+  arm — which itself trailed main's tip by 42 first-parent commits when it ran.
+  Those 42 landed after `28ca66878d` and before that tip, so they are in neither
+  arm and therefore not in the delta either.
 - **The before arm's verdicts are not this product's**, so the 3 in 3 → 6 is a
   comparison reference rather than a measurement. The measured half of the before
   arm is its payloads, and five baseline clauses (Q5's `because` and `cause`, Q1's
