@@ -1181,12 +1181,17 @@ def test_MAIN_refuses_a_map_that_VALIDATE_rejected(tmp_path, monkeypatch, map_do
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
 
+    # ⛔ EACH MODE'S REFUSAL IS READ IN ITS OWN OUTPUT: `verify()` also exits 2
+    # without a graph URI, so one shared read let a `--verify`-only weakening
+    # (`if errs and not args.verify:`) pass the whole suite (#13950 round 22).
     for mode in ("--dry-run", "--write", "--verify"):
+        capsys.readouterr()
         monkeypatch.setattr(filer.sys, "argv", ["file_map.py", mode])
         assert filer.main() == 2, f"{mode} accepted a map validate() refused"
+        err = capsys.readouterr().err
+        assert "MAP REFUSED" in err, (
+            f"{mode} exited 2 for some OTHER reason, not validate(): {err!r}")
         assert not calls, f"{mode} reached the transport: {calls[:3]}"
-    err = capsys.readouterr().err
-    assert "MAP REFUSED" in err, err
 
 
 @pytest.mark.parametrize(("mutate", "expect"), [
@@ -1498,6 +1503,37 @@ def test_a_5xx_or_429_ERROR_ENVELOPE_is_not_a_refusal(monkeypatch, status):
         mcp.call("tortoise_create_operator", {}, retry_safe=False)
     assert "UNKNOWN" in str(excinfo.value), excinfo.value
     assert len(posts) == 1, f"a non-idempotent write was POSTed {len(posts)} times"
+
+
+def test_a_DECLINE_with_a_non_boolean_created_value_is_still_a_decline(
+        tmp_path, monkeypatch, map_doc):
+    """The guard is `created is not True`, not `created is False`.
+
+    A payload carrying the key with a non-boolean (`created: null`, or a
+    re-serialised `"false"`) is not a success, and reading it as one is the same
+    false PASS the guard exists to remove: the edge would be marked `written` and
+    every resume would skip it. No such payload is reachable from today's
+    projection (it returns a `bool`), which is why this is the narrowest pin
+    rather than a reachable bug (#13950 review round 22).
+
+    Mutant: `is not True` → `is False` — this reds.
+    """
+    class _NullCreated(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                return {"structuredContent": {"edge": {"relation": "related"},
+                                              "created": None, "nudges": []}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _NullCreated)
+    assert filer.write_map(map_doc) == 1
+    state = json.loads(state_path.read_text())
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert not [m for m in state["written"] if m in structural], (
+        "an edge whose `created` was None was marked as written")
 
 
 def test_a_REAL_HTTPError_honours_the_Retry_After_HEADER(monkeypatch):
