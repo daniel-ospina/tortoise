@@ -8076,7 +8076,6 @@ def _journal_is_export(cursor: Any, org_id: str, graph_id: str, *,
     rolled yet this reading is `True` and the door STILL APPENDS. The question this
     answers is the READING's: may `present > enumerated` be treated as the healthy
     shape rather than as an impossible journal?
-
     ⛔ ASKED OF THE RECORD, NEVER OF THE CALLER'S ENVIRONMENT (#14002 review
     cycle 3, P2). The first cut of this function also required
     ``record_writer.record_live_allocate()`` — a WRITER switch, read from the
