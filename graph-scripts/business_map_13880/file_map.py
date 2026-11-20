@@ -435,6 +435,14 @@ class Mcp:
         """
         for attempt in range(6):
             self._next_id += 1
+            # ⛔ BOUND BEFORE THE CALL, and re-bound on every attempt. The status
+            # arm below reads `headers` on BOTH paths into it — the tuple return
+            # (a 2xx/3xx) and the `HTTPError` handler (EVERY 4xx/5xx) — and an
+            # unbound or leftover name there is not a small defect: on attempt 0
+            # it is `UnboundLocalError`, which aborts the whole `--write` run on
+            # the first transient 5xx; on a later attempt it would back off on
+            # the PREVIOUS response's `Retry-After` (#13950 review).
+            headers: dict = {}
             try:
                 code, payload, headers = self._post({
                     "jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
@@ -448,16 +456,24 @@ class Mcp:
                 # retired a non-idempotent intent the server may have acted on —
                 # the resume then re-issued `create_operator` (#13913 review
                 # round 8, measured). No body is an UNKNOWN body, never a refusal.
-                # ⛔ THE HEADERS COME FROM THE EXCEPTION, not from the `_post`
-                # unpack: `urlopen` reports EVERY non-2xx as `HTTPError`, so the
-                # `code, payload, headers = self._post(...)` line below never runs
-                # on this path — and the status arm then dereferenced an unbound
-                # `headers` (UnboundLocalError, measured on a real
-                # `HTTPError(504)`: one POST, no retry, no `state.json`), which is
-                # EXACTLY the 5xx path the `Retry-After` handling exists for
-                # (#13913 review round 18).
+                # ⛔ `headers` IS BOUND HERE BECAUSE THIS IS WHERE A REAL 5xx
+                # LANDS: `urlopen` raises `HTTPError` for every non-2xx, so the
+                # tuple-returning path above is 2xx/3xx only and the status arm's
+                # `Retry-After` read would otherwise reach an unbound name on
+                # exactly the responses it was written for (measured: a real
+                # `HTTPError(503, …, {"Retry-After": "7"})` from `_post` raised
+                # `UnboundLocalError` instead of backing off — one POST where
+                # `main` made six; #13950 review).
+                # ⛔ AND IT IS NORMALISED TO A `dict`: `HTTPError.headers` is an
+                # `email.message.Message`, and `_retry_after_seconds` requires a
+                # mapping — binding the Message directly would leave the header
+                # unread, i.e. the same defect wearing the fix's clothes.
                 code, payload = exc.code, None
-                headers = dict(exc.headers or {})
+                _hdrs = getattr(exc, "headers", None)
+                try:
+                    headers = dict(_hdrs) if _hdrs else {}
+                except (TypeError, ValueError):
+                    headers = {}
                 # ⛔ THE BODY READ IS PART OF THE CLASSIFICATION. This read sits
                 # inside `except HTTPError`, so an exception raised HERE is not
                 # caught by the sibling `except` below — and it escaped all the
@@ -537,10 +553,17 @@ class Mcp:
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, f"HTTP {code}"))
                 if attempt < 5:
-                    # The back-off can ride a HEADER only: the middleware
-                    # answers `Retry-After` in headers and `call()` used to
-                    # discard the third element of `_post`'s result.
-                    wait = _retry_after_seconds(headers)
+                    # ⛔ THE ADVICE CAN RIDE EITHER CHANNEL, SO READ BOTH. The
+                    # control-plane middleware answers `Retry-After` in HEADERS
+                    # and `call()` used to discard the third element of `_post`'s
+                    # result; some surfaces answer only in the BODY
+                    # (`error.data.retry_after`). Reading the header alone dropped
+                    # a server's advertised 30 s back-off and retried 5 s later
+                    # (#13950 review round 2, measured) — and the `error` arm that
+                    # used to carry the body value sits BELOW this arm, so it can
+                    # no longer speak for a non-2xx at all.
+                    wait = (_retry_after_seconds(headers)
+                            or _body_retry_after(payload))
                     time.sleep(min(120, wait) if wait else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
@@ -559,15 +582,24 @@ class Mcp:
             # genuinely unknown.
             err = (payload or {}).get("error")
             if err:
-                data = err.get("data") if isinstance(err, dict) else None
-                retry_after = data.get("retry_after") if isinstance(data, dict) else None
+                retry_after = _body_retry_after(payload)
                 if retry_after:
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
                     if not retry_safe:
                         raise UnknownOutcome(_unknown(tool, err))
-                    time.sleep(min(120, float(retry_after) + 1))
-                    continue
+                    # ⛔ THE ATTEMPT GUARD EVERY SIBLING ARM HAS. Without it the
+                    # SIXTH iteration slept and then `continue`d out of the loop,
+                    # so a 120 s back-off was taken for a request no attempt would
+                    # make, inside a run that was already ready to report
+                    # (#13950 review round 2, measured: 6 posts, 6 sleeps against
+                    # every other arm's 6 and 5).
+                    if attempt < 5:
+                        time.sleep(min(120, retry_after))
+                        continue
+                    raise UnknownOutcome(
+                        f"{tool}: retry_after {retry_after:g}s after 6 attempts — "
+                        "the write is UNCONFIRMED")
                 raise Refusal(f"{tool} refused: {err}")
             if 400 <= code < 500:
                 raise Refusal(
@@ -660,23 +692,73 @@ def _unknown(tool: str, reason: object) -> str:
             "it is not retried; re-run and let --verify decide what landed")
 
 
+def _seconds_or_none(value: object) -> float | None:
+    """A `Retry-After` value in seconds, or None when it is not one.
+
+    ⛔ ONE CONVERTER FOR BOTH CHANNELS — the header (`Retry-After`) and the body
+    (`error.data.retry_after`). The module's fail-closed contract is decided by
+    exception TYPE (`Refusal` vs `UnknownOutcome`), so an unclassified raise is
+    the same defeat as a wrong verdict: a bare `float()` on a non-numeric body
+    value (`"10s"`, `[30]`) raised `ValueError` straight out of `call()`, and the
+    node loops call `mcp.call` with no `try`, so `--write` aborted on its FIRST
+    write with `state.json` still `{}` — no summary, no ledger, no exit code
+    (#13950 review round 2, measured). `_retry_after_seconds` already promised
+    "never a raise"; the body path did not, because it used `float` directly.
+    """
+    # `bool` is an `int` in Python, and `Retry-After: True` is not a wait.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    # ⛔ `nan`/`inf` ARE NOT A WAIT. `min(120, nan)` is NOT 120 — every
+    # comparison against `nan` is False, so `min` returns its FIRST argument and
+    # the cap silently does nothing — and an infinite back-off is not advice.
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        return None
+    return max(0.0, seconds)
+
+
 def _retry_after_seconds(headers: object) -> float | None:
     """The `Retry-After` a transport answered with, in seconds (or None).
 
     `mcp_auth`'s control-plane answers carry the back-off as a HEADER
     (`headers={"Retry-After": …}`) while their JSON-RPC body's `data` may hold
     none, so reading only `data["retry_after"]` ignored the server's own advice.
+
+    ⛔ REQUIRES A `dict`, DELIBERATELY: `HTTPError.headers` is an
+    `email.message.Message`, and a caller that binds that directly gets `None`
+    back — the fix silently not fixing anything. `Mcp.call` normalises at the one
+    place a real `HTTPError` is caught, and the strict guard is what makes that
+    normalisation load-bearing rather than decorative.
     """
     if not isinstance(headers, dict):
         return None
     for key, value in headers.items():
         if str(key).lower() != "retry-after":
             continue
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            return None
+        return _seconds_or_none(value)
     return None
+
+
+def _body_retry_after(payload: object) -> float | None:
+    """The `retry_after` a JSON-RPC error body advertised, in seconds (or None).
+
+    The SECOND channel for the same advice. It is read on the status arm as well
+    as the `error` arm because the status arm sits ABOVE the `error` arm — so a
+    non-2xx whose body names a delay but whose headers carry no `Retry-After`
+    would otherwise reach the status arm and be retried on the client's own
+    5-second ramp, silently dropping the server's advertised back-off (#13950
+    review round 2).
+    """
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    data = err.get("data") if isinstance(err, dict) else None
+    if not isinstance(data, dict):
+        return None
+    return _seconds_or_none(data.get("retry_after"))
 
 
 def _mechanism_mismatch(result: dict) -> str | None:
@@ -1056,6 +1138,16 @@ def write_map(doc: dict) -> int:
                     # stored is not the one the meaning declares, so the
                     # judgement is filed INVERTED and only a re-filing fixes it.
                     failures.append(f"{marker}: {mismatch}")
+                    # ⛔ PRINTED, like every other failure class: this arm and the
+                    # two below are the ONLY producers of a `failed` line, and the
+                    # other two print. Silently appending left the `mismatch` arm's
+                    # diagnosis in `state.json` alone on the run that recorded it —
+                    # the very condition the unbound arm's print exists to remove
+                    # (#13950 review round 2, measured: a run that wrote all 51
+                    # operators against a warn-not-block surface reported
+                    # `51 edge(s) not written` and named `mechanism_mismatch` ZERO
+                    # times on stderr).
+                    print(f"  !! {failures[-1]}", file=sys.stderr)
                     # ⛔ PERSISTED AS IT IS OBSERVED, not at the end of the run.
                     # `failures` is a LOCAL list: `mark()`/`write_once()` save
                     # `st` while `st["failed"]` still holds the value loaded from
@@ -1126,7 +1218,23 @@ def write_map(doc: dict) -> int:
     # it exits 1, and its only printed line names the failure without a route out
     # (#13913 review round 18).
     declined = [f for f in failures if "create_edge returned created=" in f]
-    if carried or declined:
+    # ⛔ THE UNBOUND-ENDPOINT CLASS IS STUCK IN THE SAME WAY, and gating on
+    # `carried`/`declined` alone skipped it on the one run that matters: the run
+    # that FIRST records it, where `carried` is empty (the line is this run's own)
+    # and nothing was `declined` — so the exit below was never printed and the
+    # `!!` line was the whole trace, i.e. exactly the "names the failure without a
+    # route out" state this block exists to remove (#13950 review, measured on the
+    # recorded-intent-without-id resume the unbound pin builds).
+    unbound = [f for f in failures if "unbound endpoint" in f]
+    # ⛔ THE THIRD NO-ROUTE-OUT CLASS. A `mechanism_mismatch` DID land
+    # (warn-not-block) and stores the OPPOSITE meaning, so it is the one class
+    # whose remedy is bullet 3 rather than "nothing was written" — but the gate
+    # could not reach it either: the arm calls `mark(marker)`, so the marker
+    # enters `done`, so `carried` drops its line, and it matches neither
+    # `declined` nor `unbound`. The remedy was therefore printed only on a
+    # SECOND run (#13950 review round 2).
+    mismatched = [f for f in failures if "mechanism_mismatch" in f]
+    if carried or declined or unbound or mismatched:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
         # the line can never clear itself. Saying so — with the exact edit — is
@@ -1151,9 +1259,21 @@ def write_map(doc: dict) -> int:
             print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
                   "STILL unresolved (their markers were not re-written this run) "
                   "— see state.json", file=sys.stderr)
-        else:
+        # ⛔ ONE HEADER PER NON-EMPTY CLASS, not an `else` chain: a run can record
+        # a declined edge AND an unbound one, and an `elif` silently drops the
+        # second class's count (#13950 review).
+        if declined:
             print(f"\n{len(declined)} edge(s) were DECLINED by the door — nothing "
                   "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        if unbound:
+            print(f"\n{len(unbound)} edge(s) hit an UNBOUND endpoint — nothing "
+                  "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        if mismatched:
+            print(f"\n{len(mismatched)} operator(s) LANDED with a mechanism the "
+                  "judgement does not declare — the write DID happen, so its "
+                  "marker stays in `written` (see `failed` in state.json)",
                   file=sys.stderr)
         for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
@@ -1220,7 +1340,23 @@ def write_map(doc: dict) -> int:
         for marker in ambiguous:
             print(f"  ? {marker}", file=sys.stderr)
     if failures:
-        print(f"\n{len(failures)} edge(s) not written — recorded in state.json", file=sys.stderr)
+        # ⛔ NOT "not written" FOR A LANDED WRITE. `mechanism_mismatch` DID write
+        # (warn-not-block) and stored the OPPOSITE meaning, so one "not written"
+        # verb inverts the state the operator has to repair — they would re-file a
+        # node that exists instead of removing the inverted operator (#13950
+        # review round 2, measured: a run that wrote all 51 operators printed
+        # `51 edge(s) not written`). The sentence names each class that is
+        # present, because no single verb is true of both.
+        mismatched_n = sum(1 for f in failures if "mechanism_mismatch" in f)
+        unwritten_n = len(failures) - mismatched_n
+        parts = []
+        if unwritten_n:
+            parts.append(f"{unwritten_n} edge(s) NOT written")
+        if mismatched_n:
+            parts.append(f"{mismatched_n} operator(s) WRITTEN with a mechanism "
+                         "the judgement does not declare (filed INVERTED)")
+        print(f"\n{len(failures)} edge(s) failed — {'; '.join(parts)} — "
+              "recorded in state.json", file=sys.stderr)
         return 1
     if ambiguous or carried:
         return 1
