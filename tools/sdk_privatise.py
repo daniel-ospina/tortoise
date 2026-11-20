@@ -169,7 +169,33 @@ SWEEP_NAMES = 66
 #: the eighth row is `scale_graph.compute_confidence`'s second occurrence. A receiver such as
 #: `type(sdk)` or `store` is exactly what the sweep refuses to guess at, so the row was
 #: REPORTED rather than rewritten; fixing the call site is what removes it.
-SWEEP_RESIDUE = (11752, "910c86ce66c0eac9")
+#: RE-PINNED → (11802, "9e7cfa678c4d1126") by `#13919` (the `#4211` hierarchy-census lane), and
+#: this move is declared row-by-row because it is an UPWARD move on TWO fronts that are not the same
+#: event. The pin (11752) was measured on `127294ccad`, `#13899`'s own head — re-measured there with
+#: `--repin` on a detached worktree at that commit, still 11752 / `910c86ce66c0eac9`, so the pin's
+#: provenance holds and this is not a drifted pin.
+#: `main` had already moved the residue to 11784 (+32) WITHOUT a re-pin, in commits that are not this
+#: PR's:
+#:   * `g.query` 1460 → 1483 (+23) and `proj.g.query` 3629 → 3637 (+8) — ordinary-word rows on a
+#:     FalkorDB `Graph`;
+#:   * +1 NEW row, `retired_vector_labels.update` — a plain `set` `.update(…)` from the derived-vector
+#:     retirement (`#13629`), the same shape as the already-declared `declared_markers.update`.
+#: THIS PR adds the remaining +18, all inside the two files it introduces for the census, and each
+#: delta below was read off `--repin` on the merged tree rather than by arithmetic:
+#:   * `tools/measure_4211_session_hierarchy.py` — `g.query` +7, `h.update` 60 → 62;
+#:   * `tests/test_measure_4211_session_hierarchy.py` — `super().query` 62 → 67, `seen.update` 99 →
+#:     101, `out.update` 41 → 42, `graph.query` 267 → 268.
+#: Every one is an ordinary-word receiver on a dict/set or on a FalkorDB `Graph` (or a fake standing in
+#: for one). ⛔ The five `super().query(…)` rows are a test double that OVERRIDES `Graph.query` and
+#: delegates to the fake's own implementation — re-pointing them at a private spelling would break the
+#: double's fidelity to the API it stands in for, which is exactly the `declared_markers.update` case
+#: above (a name-scoped rewrite would be sabotage). No new SDK-holding receiver is added.
+#: The typed-reference count went 5 → 0 in the same commit: 4 `sdk.ingest_corpus(…)` calls in
+#: `tests/test_13826_write_gate.py` and 1 `sdk.create_object(…)` in `tools/measure_4211_session_hierarchy.py`
+#: still used the RETIRED public spellings, which the SDK's `__getattr__` answers with an
+#: `AttributeError` migration hint rather than forwarding — so those were latent runtime failures, not
+#: style.
+SWEEP_RESIDUE = (11802, "9e7cfa678c4d1126")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

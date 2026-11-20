@@ -889,7 +889,7 @@ def test_f1_a_keyless_replay_is_unmeasurable_and_the_token_is_not_the_invariant(
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -950,7 +950,7 @@ def test_f1_a_real_capture_under_the_same_keyless_env_still_measures(monkeypatch
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -1084,7 +1084,7 @@ def test_r6_a_writer_run_whose_counts_RAISED_is_unmeasurable_not_a_zero_delta(
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -1249,7 +1249,7 @@ def test_r7_the_writer_queries_failed_describes_BOTH_reads(monkeypatch):
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -1661,7 +1661,7 @@ def test_r9_per_session_is_END_STATE_not_a_mid_run_snapshot(monkeypatch):
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -1732,7 +1732,7 @@ def test_c6_a_writer_run_with_UNRELATED_queries_failing_is_unmeasurable(monkeypa
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -2012,7 +2012,7 @@ def test_c9_a_BEFORE_side_partial_read_is_a_verdict_even_with_a_READABLE_delta(
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -2307,7 +2307,7 @@ def test_r10_every_arm_publishes_the_queries_it_ran(monkeypatch, tmp_path):
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -2725,7 +2725,7 @@ def test_r14_a_PARTIAL_replay_is_not_published_as_a_measurement(monkeypatch):
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):
@@ -2780,7 +2780,7 @@ def test_r15_the_per_session_loop_measures_EVERY_capture(monkeypatch):
         def _get_proj(self):
             return _Proj()
 
-        def create_object(self, *_a, **_k):
+        def _create_object(self, *_a, **_k):
             return {}
 
         def _capture_session(self, conv, session_id=None):

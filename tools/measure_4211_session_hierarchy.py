@@ -19,7 +19,7 @@ ARMS
                 ``~/.tortoise/tortoise.db``). Copied with ``shutil.copy2`` before
                 the engine opens it; the original is never opened by the engine.
 ``writer``      a FRESH capture driven by the REAL writer (``TortoiseSDK._capture_session``,
-                the one live capture implementation; ``sdk.create_object`` mints the
+                the one live capture implementation; ``sdk._create_object`` mints the
                 WorkItem Object the link pass resolves) on ``TORTOISE_DB_URI``.
                 Three sessions: a realistic ref density (2 of 8 turns name an issue),
                 no ref at all, and every turn naming it. Measures BEFORE and AFTER and
@@ -1273,7 +1273,12 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
     try:
         g = sdk._get_proj().g
         before = _run_queries(g)
-        obj = sdk.create_object("test/repo#42", objectKind="pm:issue")
+        # ⛔ `create_object` is RETIRED (to `_create_object`) by #13899, and the SDK's
+        # `__getattr__` raises with the migration hint rather than forwarding — so the
+        # public spelling is an AttributeError on the `writer` arm, not a style nit. The
+        # sweep's typed-reference arm (`tools/sdk_privatise.py --check`, the required
+        # `surface-guard` job) is what reds when this regresses.
+        obj = sdk._create_object("test/repo#42", objectKind="pm:issue")
         captures, per_session = {}, {}
         for sid, conv in (
             ("m4211-ref-2of8", CONV_REFERENCING),
