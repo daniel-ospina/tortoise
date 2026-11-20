@@ -390,7 +390,6 @@ paragraph cannot describe a closure the membership does not use.
 map places them; 0 are placed ELSEWHERE by it; 0 have
 no place in it at all.** Every count is computed from the doc, not typed.
 
-
 **The approved row itself, for each disputed row that has one** (whole table row, by
 construction, so it cannot be a truncation of what the doc says):
 
