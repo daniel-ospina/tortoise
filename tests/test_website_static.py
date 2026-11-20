@@ -4204,7 +4204,7 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         for path, selector, what in SHORT_VIEWPORT_BEATS:
             html = path.read_text(encoding="utf-8")
             beat_id = selector.lstrip("#")
-            assert PE_ON_RULE_RE.search(html), (
+            assert PE_ON_RULE_RE.search(_css_blanked(html)), (
                 f"{path.name} declares no `.beat.pe-on {{ pointer-events: auto "
                 "}` rule. `.beat` is `pointer-events: none`, so the overflow "
                 f"hatch on {selector} can never receive a wheel/touch gesture "
@@ -10229,7 +10229,7 @@ class TestProductTeamsIdentity:
 
 
 class TestProductTeamsCopy:
-    """The owner's PDF copy, VERBATIM, section by section — with the ONE ruled exception.
+    """The owner's PDF copy, VERBATIM, section by section — with THREE ruled exceptions.
 
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
@@ -10242,7 +10242,10 @@ class TestProductTeamsCopy:
     https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
     It names the two readings as typos and states that, for those two strings
     only, it supersedes the earlier "must survive the build unchanged"
-    instruction. Everything else stays verbatim.
+    instruction. Everything else stays verbatim — except the onboarding
+    heading's trailing full stop, which the owner also asked to remove (#13696
+    item 4). That is a THIRD departure, and it is recorded as one rather than
+    folded into the copy ruling.
 
     ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
     (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
@@ -10617,15 +10620,17 @@ class TestProductTeamsCopy:
         # plain form alone silently re-leaks `·` into all three names, and
         # dropping the fallback makes the dot VANISH on Chrome<77 / Firefox<128 /
         # Safari 16–17.3 (measured, #14020 review).
-        sep_rules = _css_rule_preludes(
+        # ⛔ BASE rule only, read through the SCOPE-AWARE, comment-blanked
+        # reader. Joining every body for the selector is scope-blind: moving both
+        # declarations into the narrow-viewport block (where a `content: none`
+        # also lives) satisfied the assertions while Chromium rendered NO dot on
+        # desktop and one on mobile — the exact inversion of the intent
+        # (#14020 review).
+        sep_scoped = _css_rules_with_scope(
             css, "#beat-hero .hero-links a:not(:last-child)::after")
-        assert sep_rules, "the hero `::after` separator rule is gone"
-        sep_all = "".join(body for _prelude, body in sep_rules)
-        # ⛔ Count `content:` declarations, not occurrences of the WORD: a
-        # narrow-viewport rule sets `content: none` on this same selector to
-        # switch the separators off, so a `count("content:") >= 2` guard is
-        # satisfied by the dot rule PLUS that one and would pass with the
-        # fallback deleted (measured — the first version of this row did).
+        sep_base = [body for body, inside_media in sep_scoped if not inside_media]
+        assert sep_base, "the hero `::after` separator rule has no base rule"
+        sep_all = "".join(sep_base)
         assert 'content: "\\00b7" / ""' in sep_all, (
             "the separator lost its CSS ALT TEXT (`content: \"\\00b7\" / \"\"`), "
             "so `·` is back in every link's accessible name")
@@ -10728,6 +10733,14 @@ class TestProductTeamsCopy:
             assert ruled in served, (
                 f"the rendered page is missing the ruled string {ruled!r} "
                 "(#13645#issuecomment-7047852104)")
+        # The onboarding heading is the THIRD departure (#13696 item 4) and its
+        # pair-revert was unpinned: `ONBOARD_H2` has no full stop, so reverting
+        # page and constant together kept every copy row green. Pinned ABSENT
+        # here for the same reason as the two spellings above.
+        assert "without learning another UI." not in served, (
+            "the onboarding heading renders a trailing full stop. The owner "
+            "asked for it to go (#13696 item 4) — restoring it reverts an owner "
+            "item, and a page+constant pair-revert would otherwise stay green")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")

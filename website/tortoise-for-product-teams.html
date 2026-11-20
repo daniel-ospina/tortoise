@@ -23,18 +23,29 @@
 
        COPY is the owner's prose from
        `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
-       with TWO departures the owner RULED on, recorded here so this is a
-       decision and not an assertion:
-       https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
-       In the owner's terms the two readings are TYPOS and the corrected strings
-       are what ships — page 2's "make decision" is written "make decisions",
-       and step 03's "super intelligence" is written "superintelligence". That
-       comment states that, for these two strings only, it supersedes the
-       earlier "must survive the build unchanged" instruction — which was the
-       default UNTIL the owner ruled, and is why `ba53339f58` reverted an
-       earlier correction with "the copy stays verbatim until the ruling is ON
-       the artifact". The ruling is now on the artifact, so copy and pin move
-       together, as that revert required. Copy is verbatim everywhere else.
+       with THREE departures, all owner items on #13696/#14020, recorded here
+       so these are decisions and not assertions:
+
+       1. page 2 — "make decision" is written "make decisions";
+       2. step 03 — "super intelligence" is written "superintelligence";
+          both ruled as TYPOS, with the correction recorded on the artifact:
+          https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+          That comment states that, for these two strings only, it supersedes
+          the earlier "must survive the build unchanged" instruction — which
+          was the default UNTIL the owner ruled, and is why `ba53339f58`
+          reverted an earlier correction with "the copy stays verbatim until
+          the ruling is ON the artifact". The ruling is now on the artifact, so
+          copy and pin move together, as that revert required.
+
+       3. the onboarding heading — the owner asked for the trailing full stop
+          to go (#13696 item 4), so it reads "Onboard in 5 minutes, without
+          learning another UI" with no period. This is a THIRD departure, not
+          part of the copy ruling above: `origin/main`'s pin asserted the
+          period as the PDF's text, so the departure is recorded here and
+          pinned by `test_the_pdfs_two_typos_are_absent_from_the_rendered_page`
+          rather than left to a comment.
+
+       Copy is verbatim everywhere else.
 
        PRICING is forked from /tortoise as the PDF instructs, and renders from
        the SAME SOURCE: `/assets/tortoise-pricing.js`, loaded by both pages.
