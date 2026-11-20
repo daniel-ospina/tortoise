@@ -512,6 +512,32 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # a `{**…}` WRAPPER over a half-read mapping: the pairs list carries keys=None, which a
+    # `is None` guard reads as a proof — the wrapper, not the callee, was the leak
+    ("wrapper-over-half-read-mapping", """
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**dict(zip(_keys(), [1]))}}
+        return None
+    _write(props)
+"""),
+    ("wrapper-over-fromkeys", """
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys({**dict(zip(_keys(), [1]))}, _encode(ev))
+        return None
+    _write(props)
+"""),
+    ("wrapper-over-constructor-kwargs", """
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict({"x": 1}, **dict(zip(_keys(), [1])))}
+        return None
+    _write(props)
+"""),
+    ("wrapper-with-literal-key", """
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**dict(zip(_keys(), [1])), "y": 2}}
+        return None
+    _write(props)
+"""),
     # the MUTATOR spelling of the dynamic-namespace write (residual 4's other half) …
     ("globals-mutator-rebinding", """
     global gk

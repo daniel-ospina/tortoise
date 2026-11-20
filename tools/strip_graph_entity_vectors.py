@@ -173,6 +173,8 @@ confidence:
 1. **A store that reaches the arm through an UNRECOGNISED HELPER CALL.** The reproducible
    witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
    `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
+   `exec(code, globals())` after a `global` declaration is the same class (the CALLEE is what the
+   gate cannot read), measured as a certifying witness and not separately pinned.
    The same class covers a local `def` written in the arm and CALLED there
    (`def _bg(): props["embedding"] = …; _bg()`): the body is not this arm's text, the call is a
    callee the gate cannot read, and `_stop_arm_walk` prunes it for that reason. `_set(props, k,
@@ -4891,6 +4893,20 @@ def _stop_arm_indexed_key_values(container, index: int, bindings, _depth: int = 
     return frozenset(resolved)
 
 
+def _pairs_are_proven(pairs) -> bool:
+    """Is this pairs list a PROOF — every pair's key set resolved?
+
+    ⛔ A LIST IS NOT A PROOF (`#14001`, measured by the round-10 review):
+    `_stop_arm_mapping_pairs` returns a NON-``None`` list carrying ``keys=None`` for a mapping it
+    only half-read (`dict(zip(_keys(), [1]))` -> ``[(None, [1])]``), so a guard written as
+    ``mapping_pairs(...) is None`` does not fire — and the recogniser then DROPS the unreadable
+    operand and answers the remainder. `{**dict(zip(_keys(), [1]))}` therefore answered
+    ``frozenset()`` ("proven clean") while it iterates `_keys()`, and the identical store WITHOUT
+    the `{**}` wrapper was refused. Twelve wrapper spellings leaked through it.
+    """
+    return pairs is not None and all(keys is not None for keys, _value in pairs)
+
+
 def _stop_arm_source_forms(source, bindings, _depth: int = 0):
     """What ONE iteration of a clause over `source` yields — in PROOF polarity.
 
@@ -4938,7 +4954,8 @@ def _stop_arm_source_forms(source, bindings, _depth: int = 0):
                 _TRANSPARENT_SOURCE_CALLS | set(_MAPPING_CONSTRUCTORS)) \
                 and (len(node.args) + len(node.keywords) > 1
                      or any(keyword.arg is None for keyword in node.keywords)) \
-                and _stop_arm_mapping_pairs(node, bindings, _depth + 1) is None:
+                and not _pairs_are_proven(
+                    _stop_arm_mapping_pairs(node, bindings, _depth + 1)):
             # ⛔ A CONSTRUCTOR WHOSE OPERAND SET IS ONLY PARTIALLY READABLE IS NOT A PROOF
             # (`#14001`, measured by the round-7 review). `dict({"x": 1}, **d)` is
             # `{"x": 1, **d}`, and the RECOGNISER drops an operand it cannot read — so
@@ -4949,7 +4966,8 @@ def _stop_arm_source_forms(source, bindings, _depth: int = 0):
             # seam has its own, more precise arm for `defaultdict(factory, mapping)`.
             return None
         if isinstance(node, ast.Dict) and any(key is None for key in node.keys) \
-                and _stop_arm_mapping_pairs(node, bindings, _depth + 1) is None:
+                and not _pairs_are_proven(
+                    _stop_arm_mapping_pairs(node, bindings, _depth + 1)):
             # ⛔ A `{**d}` OPERAND THE MAPPING RESOLVER CANNOT READ IS **NOT** "NO KEYS"
             # (`#14001`, measured by the review of this branch): iterating such a dict yields
             # `d`'s keys, and `_comprehension_source_yields` dropped the unreadable operand
