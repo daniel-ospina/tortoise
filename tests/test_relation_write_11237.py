@@ -515,9 +515,9 @@ def test_a_manifest_only_structural_predicate_names_the_writer_it_would_reach():
     sentence that contradicts its own parenthetical. A reader of that row goes
     looking for an operator to mint when the actual state is "a different
     structural writer exists, and this leg does not call it"
-    (``docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md:149`` records what a
-    wrong cause here costs: a lane sent off to build a writer the graph already
-    has).
+    (``docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md``, the row that records
+    — `grep -n 'lane off to build a writer'` — what a wrong cause here costs: a
+    lane sent off to build a writer the graph already has).
 
     Mutation: reuse the operator-path sentence for this state (the pre-fix
     shape) and ``"create_edge"`` disappears from the reason while
