@@ -1,6 +1,6 @@
 {
   "issue": "#13906",
-  "generated_at": "2026-11-20T00:11:57Z",
+  "generated_at": "2026-11-20T00:25:29Z",
   "k": 10,
   "seed": 13906,
   "n_rows": 59,
@@ -67,6 +67,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -105,6 +107,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.8,
@@ -180,6 +184,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -257,6 +263,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.4,
@@ -345,6 +353,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.8,
@@ -478,6 +488,8 @@
           "worst": "r006",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -516,6 +528,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -554,6 +568,8 @@
           "worst": "r013",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -631,6 +647,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.5,
@@ -717,6 +735,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -808,6 +828,8 @@
           "worst": "r005",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -846,6 +868,8 @@
           "worst": "r009",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -924,6 +948,8 @@
           "worst": "r004",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1001,6 +1027,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.2,
@@ -1093,6 +1121,8 @@
           "worst": "r009",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1240,6 +1270,8 @@
           "worst": "r003",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -1278,6 +1310,8 @@
           "worst": "r039",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1356,6 +1390,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1433,6 +1469,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.2,
@@ -1525,6 +1563,8 @@
           "worst": "r039",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1672,6 +1712,8 @@
           "worst": "r007",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1710,6 +1752,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1748,6 +1792,8 @@
           "worst": "r034",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1825,6 +1871,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.4,
@@ -1913,6 +1961,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -2008,6 +2058,8 @@
           "worst": "r037",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -2046,6 +2098,8 @@
           "worst": "r017",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.8,
@@ -2100,6 +2154,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -2177,6 +2233,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.4,
@@ -2265,6 +2323,8 @@
           "worst": "r017",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.8,
@@ -2364,12 +2424,12 @@
     "poison": "vector",
     "poison_status": "POISON DETECTED",
     "failures": [
-      "q_anchor: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=1.2572615322170577e-06)",
-      "q_tie: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=4.094970130097408e-06)",
-      "q00: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=1.0541391624485641e-05)",
-      "q01: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=1.2693586178613714e-05)",
-      "q02: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=3.880892116114865e-06)",
-      "q03: graph_scan diverged from truth_euclidean (recall=0.900, order=diverged, distance_delta=9.467861978862402e-06)"
+      "q_anchor: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.2572615322170577e-06)",
+      "q_tie: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=4.094970130097408e-06)",
+      "q00: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.0541391624485641e-05)",
+      "q01: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.2693586178613714e-05)",
+      "q02: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=3.880892116114865e-06)",
+      "q03: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=9.467861978862402e-06)"
     ],
     "informational": {
       "metric_divergence_ids_total": 76

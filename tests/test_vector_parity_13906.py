@@ -164,9 +164,10 @@ def test_an_extra_id_is_reported_even_when_recall_is_full(harness):
 def test_each_poison_makes_the_comparison_fail(harness, kind):
     """⛔ THE GATE ON THE GATE. Each poison must produce a red comparison."""
     truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3), ("d", 0.4)]
-    candidate = ["a", "b", "c", "d"]
+    candidate = [("a", 0.1), ("b", 0.2), ("c", 0.3), ("d", 0.4)]
     poisoned = harness.poison(candidate, truth_rows, kind)
-    cmp_ = harness.compare(truth_rows, poisoned)
+    cmp_ = harness.compare(truth_rows, [k for k, _d in poisoned],
+                           candidate_distances=[d for _k, d in poisoned])
     assert cmp_["order"] != "exact" or cmp_["ids_equal"] is False, (
         f"poison {kind!r} produced NO divergence — the harness is blind to it")
     assert not (cmp_["ids_equal"] and cmp_["order"] == "exact")
@@ -283,7 +284,7 @@ def test_the_verdict_reds_on_a_distance_only_divergence(harness):
 
 def test_a_non_loopback_store_is_refused_without_an_explicit_opt_in(harness):
     """The harness WRITES. A fire-and-forget cleanup is not a safety property."""
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(harness.CannotRun) as exc:
         harness._assert_loopback("db.example.com", "record database", False)
     assert "NON-LOCAL" in str(exc.value)
     assert "--allow-remote-writes" in str(exc.value)
@@ -291,3 +292,89 @@ def test_a_non_loopback_store_is_refused_without_an_explicit_opt_in(harness):
     harness._assert_loopback("db.example.com", "record database", True)
     for host in ("127.0.0.1", "localhost", "::1"):
         harness._assert_loopback(host, "record database", False)
+
+
+def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
+    """The misalignment the review caught: ids permuted, distances not.
+
+    The first ids-only poison swapped `rec_ids[0]` with `rec_ids[j]` while
+    `candidate_distances` stayed put, so `zip` paired id *i* with distance *j*
+    and the comparator reported a 0.8967 `distance_delta` that no store ever
+    produced. A re-order must move the row, distance included.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    pairs = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    poisoned = harness.poison(pairs, truth_rows, "order")
+    assert [k for k, _d in poisoned][0] == "b"
+    cmp_ = harness.compare(truth_rows, [k for k, _d in poisoned],
+                           candidate_distances=[d for _k, d in poisoned])
+    assert cmp_["order"] == "diverged"
+    assert cmp_["distance"]["ok"] is True, (
+        "the re-order manufactured a distance delta — the pairs are misaligned "
+        "again, and the falsifier's evidence would be an artifact")
+    assert cmp_["distance"]["max_delta"] == pytest.approx(0.0)
+
+
+def test_a_repeated_id_is_not_set_agreement(harness):
+    """⛔ `set(cand) == set(truth)` is TRUE for `[a,b,c,a]`. Multiplicity counts.
+
+    A leg returning `k+1` rows with one key repeated (a remainder appended to a
+    primary answer, a fold join without DISTINCT) used to print PARITY with
+    recall 1.0, because the positional loop is bounded by the shorter list.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    cmp_ = harness.compare(truth_rows, ["a", "b", "c", "a"],
+                           candidate_distances=[0.1, 0.2, 0.3, 0.1])
+    assert cmp_["ids_equal"] is False
+    assert cmp_["duplicates"] == ["a"]
+    assert cmp_["count_equal"] is False
+
+
+def test_a_short_distance_list_is_a_failure_not_a_truncated_pass(harness):
+    """`zip` stops at the shorter side — so a length mismatch must fail loudly."""
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    cmp_ = harness.compare(truth_rows, ["a", "b", "c"], candidate_distances=[0.1])
+    assert cmp_["distance"]["ok"] is False
+    assert "distances" in cmp_["distance"]["reason"]
+
+
+def test_an_unmeasured_distance_fails_a_REQUIRED_arm(harness):
+    """`None is False` is False — so `is False` was fail-open on absence."""
+    report = {"queries": [{"query": "q0",
+                           "record": {"ids_equal": True, "order": "exact",
+                                      "recall": 1.0,
+                                      "distance": {"ok": None}},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
+                           "metric_divergence_ids": []}]}
+    v = harness._verdict(report, poisoned=None)
+    assert v["ok"] is False
+    assert any("distance_ok=None" in f for f in v["failures"])
+
+
+def test_an_empty_oracle_is_not_parity(harness):
+    truth_rows: list[tuple[str, float]] = []
+    cmp_ = harness.compare(truth_rows, [])
+    assert cmp_["recall"] is None
+
+
+def test_the_cli_refuses_argument_shapes_that_cannot_measure(harness):
+    """`--k 0` used to report PARITY over an empty comparison."""
+    class A:
+        graph_port = 1
+        record_dsn = "postgresql://u:p@127.0.0.1/db"
+        k = 0
+        queries = 1
+        n_random = 48
+    with pytest.raises(harness.CannotRun):
+        harness._validate_args(A())
+    A.k, A.queries = 10, 0
+    with pytest.raises(harness.CannotRun):
+        harness._validate_args(A())
+    A.queries, A.n_random = 6, 0
+    with pytest.raises(harness.CannotRun):
+        harness._validate_args(A())
