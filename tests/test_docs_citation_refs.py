@@ -506,51 +506,66 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
-#: ⛔ TWO GAPS, BECAUSE THE TWO SUBJECTS ASK DIFFERENT QUESTIONS (#13900 review, cycles 9-13).
+#: ⛔ ONE GAP, FIVE UNIT KINDS, NO BUDGET — AND `_GAP_UNIT` IS THE LIST (#13921 review, F5).
 #:
-#: The FULL command (`git diff --name-only origin/main...HEAD -- tortoise/`) names THIS head, so
-#: anything behind it is a claim about this head and the gap is WIDE: at most 40 units of
-#: non-`;`, non-`|`, non-newline text. A period is NOT a terminator — an inline tag's attribute
-#: carries one (`<span class="x">`, in-house spelling: 44 uses under `docs/`), and a claim one
-#: clause past the command is safer graded than skipped.
+#: This block used to describe TWO gaps: a WIDE one for the FULL command
+#: (`git diff --name-only origin/main...HEAD -- tortoise/`) budgeted at 40 units of text that
+#: stopped at `;` and `|`, and a NARROW one for the ABBREVIATION (`-- tortoise/`). Both were
+#: retired by the verification round that measured the prose admission fail-open, and this
+#: write-up was left behind describing them: there is ONE gap, it has NO budget, and `;`, `|`
+#: and `.` are ordinary single characters (#13921 review, P2-3). What survives from that split
+#: is the REASON it existed — the abbreviation is a SUBSTRING of every longer `git diff <other
+#: revs> -- tortoise/` invocation — and it is honoured by the SUBJECT LIST the callers pass
+#: (`_TORTOISE_CENSUS_SUBJECTS`), not by two gap constants. `_GAP_FULL` / `_GAP_ABBREV` are
+#: gone: aliasing both to `_GAP` made the selection between them a no-op that kept these
+#: paragraphs alive.
 #:
-#: The ABBREVIATION (`-- tortoise/`) is a SUBSTRING of every longer `git diff <other revs> --
-#: tortoise/` invocation, so its gap must stay NARROW — no word characters outside a unit — or a
-#: quoted invocation's later clause is refused (the F4 fail-open, measured: three true, head-named
-#: history sentences on the live document red under a wide gap and none red under this one).
-#:
-#: Both gaps are built from FOUR UNIT KINDS and nothing else — all four in BOTH gaps (the wide
-#: gap's budget is 40 units, the narrow one's is unbounded, and the bracket unit was missing
-#: from the wide gap until a verification round measured it). Listing them is not an enumeration
-#: of SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
+#: The gap is a run of FIVE UNIT KINDS and nothing else. Listing them is not an enumeration of
+#: SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
 #: itself, stated once, and each kind is defined structurally:
 #:
-#:   1. a single character — a non-word one (plus `_`, which Python counts as a word character and
-#:      markdown emphasis depends on), and for the wide gap any other non-`;`, non-`|`, non-`<`
-#:      character;
+#:   1. a single character — a non-word one, plus `_`, which Python counts as a word character
+#:      and markdown emphasis depends on. `&`, `<` and `[` are EXCLUDED from this class: each of
+#:      them has its own unit below, so each has exactly one way to parse;
 #:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is one unit (so
 #:      `title="a > b"` does not close early: CommonMark allows any character but the matching
-#:      quote inside a quoted value) and in which a SOFT break is allowed but a BLANK line is not:
-#:      `_TAG` below;
-#:   3. a BRACKETED run — `[…]`, which covers `[^1]`, `[^note]`, `[^A]`, `[12]` and a markdown
+#:      quote inside a quoted value) and in which a SOFT break is allowed but a BLANK line is
+#:      not: `_TAG` below;
+#:   3. a BRACKETED run — `[...]`, which covers `[^1]`, `[^note]`, `[^A]`, `[12]` and a markdown
 #:      link label alike; a run of DIGITS or of LETTERS is not spelled separately anywhere;
-#:   4. an AMPERSAND — `_AMP` below, which is EITHER an entity (`&…;` with `[#\w]{1,10}` inside,
-#:      covering `&nbsp;`, `&#160;` and `&#xA0;`) OR a bare `&` that does not begin one. Both gaps
-#:      take `&` out of their single-character unit and reach it ONLY through `_AMP`, whose two
+#:   4. an AMPERSAND — `_AMP` below, which is EITHER an entity (`&...;` with `[#\w]{1,10}`
+#:      inside, covering `&nbsp;`, `&#160;` and `&#xA0;`) OR a bare `&` that does not begin one.
+#:      The single-character unit excludes `&`, which is reached ONLY through `_AMP`, whose two
 #:      branches a negative lookahead keeps mutually exclusive, so `&` has one parse.
-#:      ⛔ THE BARE BRANCH IS NOT DECORATION (#13900 review, cycles 9-13, MEASURED): the first form
-#:      of this unit dropped it, and ``… -- tortoise/` R&D prints TWO paths`` then returned `[]` —
-#:      a claim left GREEN. `&` is a character `origin/main`'s gap already admitted, and a closure
-#:      that drops a form the previous rule had is a regression wearing a widening's clothes.
+#:      ⛔ THE BARE BRANCH IS NOT DECORATION (#13900 review, cycles 9-13, MEASURED): the first
+#:      form of this unit dropped it, and ``... -- tortoise/` R&D prints TWO paths`` then
+#:      returned `[]` — a claim left GREEN. `&` is a character `origin/main`'s gap already
+#:      admitted, and a closure that drops a form the previous rule had is a regression wearing
+#:      a widening's clothes.
+#:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no reachable `]`.
+#:
+#: ⛔ `_OPEN_BRACKET` IS THE ONE SAME-FIRST-CHARACTER PAIR, AND ITS LOOKAHEAD IS WHY THE RUN IS
+#: STILL LINEAR (#13921 review, P2-3, MEASURED). `_BRACKET` and `_OPEN_BRACKET` both begin `[`,
+#: so the reason this block used to give — "each kind begins with a unique first character" — is
+#: FALSE, and a stale reason in this file is the defect class it keeps reviewing itself for. The
+#: real reason is that the two are DISJOINT by construction: `_BRACKET` matches only when a
+#: closing `]` is reachable, and `_OPEN_BRACKET` is guarded by `(?![^\]\n]*\])`, i.e. it matches
+#: only when none is. The one input where both can start is a bracket whose interior crosses a
+#: soft break (`[a\n]`): `_BRACKET` takes it whole while the lookahead, being line-bounded,
+#: cannot see the `]` — the same bounded residual as the unterminated `<` run below, not an
+#: exponential. MEASURED at this head: 200 x `[` -> 0.0009 s, 40 x `[\]` -> 0.0000 s.
 #:
 #: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
-#: crossed, a BLANK line is the boundary. Every unit in the WIDE gap begins with a different
-#: character, so that run has one parse. The narrow gap is not fully DISJOINT — `<` can begin
-#: both a tag and a single-character unit — because the single-character branch matching a bare
-#: `<` is the wider reading and is kept; a tag probe that then fails costs one bounded scan
-#: (measured: 3,200 `<` with no `>` / 9.6 KB → 0.001-0.002 s). The measured cost is linear:
-#: 8/16/28/40/80/200 spaces and 40 repeated units of each kind → 0.000-0.002 s; the ambiguous
-#: form `7557a52cf5` replaced took 15.8 s at 24 spaces.
+#: crossed, a BLANK line is the boundary — and a blank line ends the gap with no guard of its
+#: own, because `_SOFT` refuses to cross one and the single-character unit excludes `\n`.
+#: ⛔ `<` IS NOT AMBIGUOUS ANY MORE (#13921 review, P2-3): the single-character unit excludes
+#: it, so `<` reaches only `_TAG` — the old note that "`<` can begin both a tag and a
+#: single-character unit" describes a class member that no longer exists. What remains is the
+#: cost of a tag probe on an UNTERMINATED `<` run (measured 28 characters -> 0.19 s, growing
+#: about x1.7 per character), which is a DECLARED residual pinned by its own timing witness, not
+#: a claim of linearity. Otherwise the measured cost is linear: 8/16/28/40/80/200 spaces and 40
+#: repeated units of each kind -> 0.000-0.002 s; the ambiguous form `7557a52cf5` replaced took
+#: 15.8 s at 24 spaces.
 _AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
 #: ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT, NOT ONLY BETWEEN UNITS (#13900 review,
 #: verification round, MEASURED). Three holes, each reproduced on the LIVE document:
@@ -577,9 +592,12 @@ _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
 #: as assertions: telling a quotation from an assertion is semantics, not punctuation, and no
 #: gap can do it. It also LATCHED on the `is`/`has`/`:` inside its own separator and dropped
 #: the claim, and it backtracked exponentially where `[` began two units (16 × `[\]` = 22.8 s).
-#: So a WORD between the command and the verb is NOT DETECTED — a declared limit, pinned by a
-#: witness, and the four unit kinds below are what may sit there instead (each with a unique
-#: first character, which is what makes the run linear).
+#: So a WORD between the command and the verb is NOT DETECTED — a declared limit, pinned by TWO
+#: witnesses (the `R&D` row, and this PR's own two latching reproductions), and the unit kinds
+#: above are what may sit there instead. ⛔ AND THAT DECLARATION IS WHY #13921'S BODY HAD TO BE
+#: CORRECTED: those two reproductions are NOT graded by this gap and this PR no longer claims
+#: they are (#13921 review, F2/P1-1) — what the retry fixes is a listed verb sitting INSIDE the
+#: separator (`is`, a URL's `:`), not a word between the command and the verb.
 _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
 #: ⛔ ONE GAP, ONE UNIT LIST, AND THE UNITS ARE WHAT THE MATCHER WALKS (#13921 review, F5).
 #: `_GAP_UNIT` is the single alternation every separator character goes through; `_GAP` is its
@@ -756,15 +774,15 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # graded wherever it sits on the line, whatever surrounds it — the gap between the
         # command and the verb is a run of separator UNITS (the four kinds stated at the
         # constants, not a character class), and the budget and the boundary differ BY SUBJECT:
-        # the FULL command admits at most 40 units and the ABBREVIATION is unbounded; in both, a
-        # SOFT break is crossed and a BLANK line is the boundary, `;` and `|` stop the wide gap
-        # and a `.` does not. ⛔ An earlier form of this sentence said "up to 40 characters with no
-        # newline and no sentence terminator", which was wrong on four counts at once — measured
-        # (#13900 review, verification round, P2): a newline is crossed, the abbreviation's gap is
-        # unbounded, a `.` is not a terminator, and the budget counts UNITS (a tag or a bracket is
-        # one, however long). The exceptions are the residuals THIS docstring declares (a
-        # hard-wrapped ANSWER, a verb or an answer word outside the listed classes, a pronoun
-        # subject), and they are named THERE, not left to be inferred from this sentence.
+        # ⛔ NO BUDGET, NO SECOND GAP, AND NO `;`/`|` TERMINATORS (#13921 review, F5). This
+        # sentence used to say "the FULL command admits at most 40 units and the ABBREVIATION is
+        # unbounded; in both, `;` and `|` stop the wide gap and a `.` does not" — all four
+        # clauses false since the prose admission was retired: there is ONE gap, it has no
+        # budget, and `;`, `|` and `.` are ordinary single characters. What DOES hold, and is
+        # what the witnesses pin: a SOFT break is crossed and a BLANK line is the boundary. The
+        # exceptions are the residuals THIS docstring declares (a hard-wrapped ANSWER, a verb or
+        # an answer word outside the listed classes, a pronoun subject), and they are named
+        # THERE, not left to be inferred from here.
         #
         # RESIDUAL, stated: a PRESENT-TENSE answer about another head is now refused here.
         # That is the deliberate trade — re-word a sentence, in exchange for a class of
