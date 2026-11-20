@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import email.message
 import importlib.util
+import io
 import json
 import re
 import urllib.error as urllib_error
@@ -546,6 +547,22 @@ def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_do
     state = json.loads(state_path.read_text())
     assert any("mechanism_mismatch" in f for f in state["failed"])
     assert len([m for m in state["written"] if m.startswith("edge:")]) == len(map_doc["edges"])
+    err = capsys.readouterr().err
+    # ⛔ THE RUN THAT RECORDS IT MUST ALSO REPORT IT. This arm appends a failure
+    # and calls `mark(marker)`, so the marker enters `done` and `carried` drops
+    # its line on every LATER run — meaning a `state.json`-only diagnosis was the
+    # permanent state of the one run that observed the inversion, while the exit
+    # summary told the operator `51 edge(s) not written` about 51 writes that all
+    # landed (#13950 review round 2). Three surfaces: the `!!` line, the class
+    # header, and a summary that does not invert the state.
+    assert "mechanism_mismatch" in err, err
+    assert "LANDED with a mechanism the judgement does not declare" in err, err
+    # Bullet 3 is the RIGHT remedy for this class — the write landed — and it was
+    # unreachable because the gate could not be entered.
+    assert "otherwise the write landed" in err, err
+    assert "filed INVERTED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "a landed write was reported as not written: " + err)
     capsys.readouterr()
 
 
@@ -1499,6 +1516,131 @@ def test_a_NON_IDEMPOTENT_write_on_a_REAL_5xx_is_POSTed_once(monkeypatch):
     assert "UNKNOWN" in str(excinfo.value), excinfo.value
     assert len(posts) == 1, (
         f"a non-idempotent write was re-issued {len(posts)} times over a 5xx")
+
+
+def test_a_BODY_ONLY_retry_after_is_honoured_on_a_NON_2xx(monkeypatch):
+    """The advice can ride the BODY, and the status arm must read it there too.
+
+    The status arm sits ABOVE the `error` arm (that reordering is this PR's
+    point), so a 429 whose body names a delay and whose headers carry no
+    `Retry-After` reaches the status arm and — with a header-only read — was
+    retried on the client's own 5-second ramp. Measured at #13950 review round 2:
+    head slept `[5, 10, 15, 20, 25]` for a server that asked for 30 s, while the
+    pre-reorder arm order slept `[31, 31, …]`.
+
+    ⛔ EXACTLY 5 SLEEPS, not 6: the body arm used to `continue` on the SIXTH
+    attempt too, so the last back-off was taken for a request no attempt would
+    make (measured: 6 posts, 6 sleeps, against 6 and 5 in every sibling arm).
+
+    Mutants: drop `_body_retry_after(payload)` from the status arm's `wait` (this
+    reds on the sleeps); drop the `if attempt < 5` guard (this reds on the
+    length).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+    posts: list[int] = []
+
+    def _post(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError(
+            "http://x", 429, "x", email.message.Message(),
+            io.BytesIO(json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -32000, "data": {"retry_after": 30}},
+            }).encode()))
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, f"a retryable 429 was POSTed {len(posts)} times"
+    assert sleeps == [30.0] * 5, (
+        f"the body's own `retry_after` was not the back-off: {sleeps}")
+
+
+def test_the_200_error_arm_takes_FIVE_back_offs_not_six(monkeypatch):
+    """The `data.retry_after` arm is the only retry arm with no attempt guard.
+
+    ⛔ A DIFFERENT ARM FROM THE ONE ABOVE. A non-2xx now reaches the STATUS arm
+    (that reordering is this PR's point), so the `error` arm's `retry_after`
+    branch is only reachable from a 200/3xx that carries an error envelope — which
+    is what this row drives. An earlier cut of this round pinned only the
+    non-2xx shape, so the guard this row exists for was still unpinned and the
+    mutant that removes it stayed green (#13950 review round 2).
+
+    Measured pre-fix: `data.retry_after: 2` produced 6 posts and 6 sleeps — the
+    sixth back-off taken for a request no attempt would make — while every
+    sibling arm does 6 and 5. At `retry_after: 119` that is a full 120 s stall
+    inside a run that is otherwise ready to report.
+
+    Mutants: `if attempt < 5:` → `if attempt < 6:` in this arm (reds on the sleep
+    count); or drop the guard and the raise (reds on the `UnknownOutcome` text).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+    posts: list[int] = []
+
+    def _post(_body):
+        posts.append(1)
+        return 200, {"jsonrpc": "2.0", "id": 1,
+                     "error": {"code": -32000,
+                               "data": {"retry_after": 2}}}, {}
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome,
+                       match="retry_after 2s after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, f"POSTed {len(posts)} times"
+    assert sleeps == [2.0] * 5, (
+        f"a back-off was taken for a retry the loop never makes: {sleeps}")
+
+
+def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
+    """A junk `retry_after` must not escape `call()` as an unclassified raise.
+
+    This module's fail-closed contract is decided by exception TYPE, so a bare
+    `float()` on a non-numeric body value raised `ValueError` straight out of
+    `call()` — and the node loops call `mcp.call` with no `try`, so `--write`
+    aborted on its FIRST write with `state.json` still `{}`: no summary, no
+    ledger, no exit code (#13950 review round 2, measured with `"10s"` and
+    `[30]`). The header channel already promised "never a raise"; the body path
+    did not, because it used `float` directly.
+
+    Mutant: `_body_retry_after` → `float(data.get("retry_after"))` (this reds with
+    the `ValueError` escaping instead of `UnknownOutcome`).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    for junk in ("10s", [30], {"s": 30}, "nan", "inf", True, b"30"):
+        posts: list[int] = []
+
+        def _post(_body, _junk=junk, _posts=posts):
+            _posts.append(1)
+            raise urllib_error.HTTPError(
+                "http://x", 429, "x", email.message.Message(),
+                io.BytesIO(json.dumps({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "data": {"retry_after": _junk}},
+                }, default=str).encode()))
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome) as excinfo:
+            mcp.call("tortoise_create_subject", {})
+        assert "after 6 attempts" in str(excinfo.value), (junk, excinfo.value)
+        assert len(posts) == 6, (junk, len(posts))
+
+    # The converter's own contract, which is what the two call sites rely on.
+    assert filer._seconds_or_none("7") == 7.0
+    assert filer._seconds_or_none(7) == 7.0
+    assert filer._seconds_or_none(-5) == 0.0
+    assert filer._seconds_or_none(True) is None
+    assert filer._seconds_or_none(float("nan")) is None
+    assert filer._seconds_or_none(float("inf")) is None
+    assert filer._seconds_or_none(b"7") is None
+    assert filer._seconds_or_none(None) is None
 
 
 def test_the_event_identity_is_the_name_its_door_writes(map_doc):
