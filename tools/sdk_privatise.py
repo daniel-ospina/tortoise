@@ -169,7 +169,20 @@ SWEEP_NAMES = 66
 #: the eighth row is `scale_graph.compute_confidence`'s second occurrence. A receiver such as
 #: `type(sdk)` or `store` is exactly what the sweep refuses to guess at, so the row was
 #: REPORTED rather than rewritten; fixing the call site is what removes it.
-SWEEP_RESIDUE = (11752, "910c86ce66c0eac9")
+#: RE-PINNED AGAIN → (11784, "812517696e5cc1d7") by the lane that fixed the four typed
+#: references `#13854` left behind (`tests/test_13826_write_gate.py` called the RETIRED public
+#: `sdk.ingest_corpus(`, which is `_ingest_corpus` since this sweep; re-pointed, so
+#: `typed references still pointing at a public name` is back to 0). The move is UPWARD, +32,
+#: so it is declared row-by-row rather than accepted as arithmetic — `#13854` is the single
+#: merge that carries every one of them, and all 32 are ordinary-word receivers on objects
+#: that are NOT the SDK: +23 `g.query` and +8 `proj.g.query` in the new
+#: `tests/test_13826_write_gate.py` (a FalkorDB `Graph` handle; `query` is one of the 47
+#: ordinary words, and the sweep will not type `g`), and +1 `retired_vector_labels.update`
+#: at `tortoise/hosted_backup.py:1308` (a plain `set.update`, the same documented edge as
+#: `declared_markers.update` above). Measured with `--repin` on this tree; the row set was
+#: also diffed against the pin by removing candidates one at a time, which is how the +1 was
+#: isolated to that single file — not by arithmetic.
+SWEEP_RESIDUE = (11784, "812517696e5cc1d7")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

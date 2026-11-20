@@ -541,7 +541,7 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
     # ⛔ `eventKind` DISPATCHES this frozen branch — it does not classify the frontmatter
     # (that is the new `index_sources_from_directory` path), so the session arm is only
     # reached by naming it.
-    out = sdk.ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
+    out = sdk._ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
     assert out["ingested"] == 1, out
     rows = g.query("MATCH (e:Event {session_id:'sess-13826'}) RETURN e.embedding"
                    ).result_set
@@ -552,7 +552,7 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
 
     g.query("MATCH (e:Event) DETACH DELETE e")
     _gate(monkeypatch, False)
-    out = sdk.ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
+    out = sdk._ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
     assert out["ingested"] == 1, out
     rows = g.query("MATCH (e:Event {session_id:'sess-13826'}) "
                    "RETURN e.embedding, e.eventStatus").result_set
@@ -577,7 +577,7 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
         "---\ntitle: A Session\nsessionId: sess-13826\n---\nuser: hi again\n",
         encoding="utf-8")
     _gate(monkeypatch, False)
-    out = sdk.ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
+    out = sdk._ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
     assert out["updated"] == 1, out
     rows = g.query("MATCH (e:Event {session_id:'sess-13826'}) RETURN e.embedding"
                    ).result_set
@@ -593,7 +593,7 @@ def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
         "---\ntitle: A Session\nsessionId: sess-13826\n---\nuser: hi a third time\n",
         encoding="utf-8")
     _gate(monkeypatch, True)
-    out = sdk.ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
+    out = sdk._ingest_corpus(str(corpus), eventKind="AgentSession", extract_metadata=True)
     assert out["updated"] == 1, out
     rows = g.query("MATCH (e:Event {session_id:'sess-13826'}) RETURN e.embedding"
                    ).result_set
