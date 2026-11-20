@@ -789,6 +789,8 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
                                                           # (`:15421`) that derives the doc's cite, two are the
+                                                          # finder's own conditions (#12569), and the fourth is
+                                                          # a prose line about `#11001`'s in-place correction
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -796,8 +798,6 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — T
                                                           # line — so it was RE-DERIVED (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`, measured
                                                           # at the merge, `:15228` on the resolved tree) rather than side-picked.
-                                                          # finder's own conditions (#12569), and the fourth is
-                                                          # a prose line about `#11001`'s in-place correction
                                                           # ⛔ AND RE-DERIVED AGAIN at the forward merge of
                                                           # `main` `e3f894b31b` (#13900's block landing in this
                                                           # file): the scan sits at `:15421` on THIS resolved
