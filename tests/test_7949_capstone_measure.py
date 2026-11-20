@@ -16820,7 +16820,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
     for _pair, _carried in (
-            ("`sdk.py:28682` → `:28718`", "`04-plan.md` carries at THIS head"),
+            ("`sdk.py:28682` → `:28718`",
+             "`04-plan.md` carries the TARGET (`tortoise/sdk.py:28718`); `:28682` is "
+             "D5's own spelling of the base-side address and `04-plan.md` does not "
+             "spell it — the pin below grades both halves"),
             (":15346-15423`", "`04-plan.md` carries at THIS head (`#13841`'s `+18`)"),
             (":15262-15339` → `:15328-15405`",
              "HISTORY — the head `main`'s `#13674`/`#13819` `+66` produced, which the "
@@ -16830,6 +16833,55 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "here because the range's TARGET was once "
             "typed as the base's own value while its SOURCE was already re-derived "
             "(#13750 review, cycle 3)")
+
+    # ⛔ THE DESIGNATION IS A MEASUREMENT, NOT PROSE (#13879 review). The loop above grades
+    # that each pair is NAMED and says nothing about whether the document calls the CURRENT
+    # pair current and the older one HISTORY — and a row restating `:15262-15339` ->
+    # `:15328-15405` as the PRESENT tense is this PR's own defect one direction over: a
+    # reader gets the pre-`#13841` numbers as current. Grading the wording alone is not
+    # enough (a phrase can be present while the fact is false), so grade the TREE, which is
+    # what the designation CLAIMS (`grep -c -F` at this head: `hosted_api.py:15346-15423` ->
+    # 1 and `sdk.py:28718` -> 1; `15262-15339`, `15328-15405` and `sdk.py:28682` -> 0).
+    # Range/token forms on purpose — a bare `15328` would go red on an unrelated edit.
+    _plan_doc = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
+    for _current in ("hosted_api.py:15346-15423", "sdk.py:28718"):
+        assert _current in _plan_doc, (
+            f"D5 designates `{_current}` as what `04-plan.md` carries at THIS head, but "
+            "the document does not carry it. Re-derive BOTH ends; never relabel a stale "
+            "value as current (#13841 moved the span by a further +18)")
+    for _history in ("15262-15339", "15328-15405", "sdk.py:28682"):
+        assert _history not in _plan_doc, (
+            f"D5 designates `{_history}` as HISTORY, but `04-plan.md` carries it — so "
+            "the document and the pin disagree about which pair is current. Re-derive "
+            "both ends rather than moving the label (#13750 review, cycle 3)")
+
+    # ⛔ AND THE TENSE (#13879 review, finding 1 — MEASURED survivor). The facts above were
+    # green while a mutant that restated the HISTORY pair as current ALSO stayed green:
+    # rewriting D5's "are the pairs this branch carried at the head it carried them" to
+    # "are the pairs `04-plan.md` carries at THIS head" passed, because the loop grades that
+    # the pair is NAMED and never how it is DESIGNATED — which is the pre-`#13841` numbering
+    # read as present tense, this PR's own defect one direction over.
+    #
+    # BOUNDED windows, never an unbounded regex: D5 is a single ~50k-char line, so a `.*`
+    # would match almost anywhere in the row and prove nothing.
+    _hist_at = text.find(":15262-15339` → `:15328-15405`")
+    assert _hist_at != -1, "D5 no longer names the retired pair at all"
+    _hist_window = text[_hist_at:_hist_at + 120]
+    assert "at THIS head" not in _hist_window, (
+        "D5 designates the pre-`#13841` pair `:15262-15339` -> `:15328-15405` as CURRENT "
+        "('at THIS head'), but `04-plan.md` carries `:15346-15423` and carries NEITHER "
+        "history endpoint — that is the pre-`#13841` numbering read as present tense, "
+        "which is the exact rot this row exists to stop")
+    assert "carried at the head" in _hist_window, (
+        "D5 no longer marks the retired pair as HISTORY ('carried at the head'): the "
+        "row keeps it as a record of the head that produced it, so it must not lose "
+        "that designation (#13750 review, cycle 3)")
+    _cur_at = text.find("`:15346-15423`")
+    assert _cur_at != -1, "D5 no longer names the current I7 span"
+    assert "at THIS head" in text[max(0, _cur_at - 120):_cur_at], (
+        "D5 states `:15346-15423` without designating it as the CURRENT span ('at THIS "
+        "head'). A reader cannot tell a current address from a superseded one, and "
+        "`04-plan.md` carries exactly this range")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
