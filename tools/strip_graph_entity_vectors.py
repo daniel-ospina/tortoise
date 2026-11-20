@@ -1185,9 +1185,13 @@ def _container_call_operand(node):
 #: (`_pairs_operand_stores_the_vector`) answers 30/60, leg 3
 #: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and **24** rows
 #: are answered by NOTHING upstream, in two disjoint classes of 12: the NESTED extras wrappers,
-#: where this arm is the SOLE decider, and the two extras spellings
-#: (`[("embedding", 1, 1)]`, `[(1, "embedding", _encode(ev))]`) whose produced key is not the
-#: property by any reading these rules make. (The earlier text said "the 12 rows nothing upstream
+#: where this arm is the SOLE decider, and the two extras spellings — `[("embedding", 1, 1)]`,
+#: whose key IS the property but whose value is a bare constant, and
+#: `[(1, "embedding", _encode(ev))]`, whose produced key is not the property by any reading these
+#: rules make. ⛔ THE KEY IS NOT WHAT RULES THE FIRST ONE OUT: `[("embedding", _encode(ev), 1)]`
+#: and `[("embedding", 1, 1)]` carry the SAME key and leg 3 answers only the one with a live
+#: value, so the constancy of `v[1]` is the deciding factor there (measured at this head). (The
+#: earlier text said "the 12 rows nothing upstream
 #: answers are exactly the nested extras spellings": re-measured at `f2e5e3a98f`, nothing-upstream
 #: is 24, so that sentence counted one class and named it the whole.) `set`/`list`/`tuple` are
 #: SAMPLED here — never extrapolated from the `sorted`/`reversed`/`iter` sweep that named only

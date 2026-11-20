@@ -9960,10 +9960,14 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
         # the class the review's counterexample was made of. Leaving it out of the sample is what
         # made `0 of 30` look like a licence.
         '[("embedding", _encode(ev), 1)]',
-        # …and two extras spellings NO leg answers at source level (the produced key is not the
-        # property by any reading these rules make) — kept in the sample so the redundancy claim
-        # is measured over them too rather than silently skipped; their end-to-end rows live in
-        # `test_the_stop_arm_must_not_store_the_vector`.
+        # …and two extras spellings NO leg answers at source level — one whose KEY is the property
+        # but whose VALUE is a bare constant (`[("embedding", 1, 1)]`), one whose produced key is
+        # not the property (`[(1, "embedding", _encode(ev))]`). ⛔ Do not reduce both to one reason:
+        # the key is not what rules the first out (measured at this head, `[("embedding",
+        # _encode(ev), 1)]` and `[("embedding", 1, 1)]` carry the same key and leg 3 answers only
+        # the live-valued one) — its constant `v[1]` is. Kept in the sample so the redundancy
+        # claim is measured over them too rather than silently skipped; their
+        # end-to-end rows live in `test_the_stop_arm_must_not_store_the_vector`.
         '[("embedding", 1, 1)]',
         '[(1, "embedding", _encode(ev))]',
     )
@@ -10019,12 +10023,14 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
                 continue
             assert upstream is True, (
                 f"`{name}({inner})` is answered by the FOURTH leg and by nothing upstream — the "
-                f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding: "
-                f"leg 3 lost a wrapper it read, or the record is stale and must be "
-                f"corrected before anyone quotes it again. (Leg 1 is asked too, but it is a "
-                f"DUPLICATE at this seam — measured 0 rows where leg 1 answers and leg 3 does "
-                f"not — so a red here can only have come from leg 3. A real store is still "
-                f"REFUSED, so nothing certifies: this is the record's guard, not a fail-open.)"
+                f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding. "
+                f"TWO causes raise this exact message and it cannot tell them apart: leg 3 lost "
+                f"a wrapper it read, OR the FOURTH leg WIDENED to answer one of the 12 rows "
+                f"nothing upstream answers (measured at this head by mutation — an arm-only "
+                f"widening reddens HERE, on a row whose upstream legs were never touched). Rule "
+                f"leg 1 out: it is a DUPLICATE at this seam — measured 0 rows where leg 1 "
+                f"answers and leg 3 does not — so it cannot be the cause. A real store is still "
+                f"REFUSED, so nothing certifies: this is the record's guard, not a fail-open."
             )
 
 
