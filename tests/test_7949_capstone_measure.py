@@ -16892,20 +16892,29 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
+            "PAIRS instead (`sdk.py:28718` -> `:28913` and the I7 range "
             "`:15262-15339` -> `:15346-15423`), which the document CARRIES at this head — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15346-15423`"):
+    for _pair in ("`sdk.py:28718` → `:28913`", ":15262-15339` → `:15346-15423`"):
         assert _pair in text, (
             f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
             "this head. Both ends are pinned here because the range's TARGET was once "
             "typed as the base's own value while its SOURCE was already re-derived "
             "(#13750 review, cycle 3)")
-    assert "sdk.py:28718" in text, (
-        "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
-        "this head (`grep -n 'declared_relation_predicates()' "
+    # ⛔ THE VALUE IS READ OUT OF `04-plan.md`, NOT TYPED (#13768). The literal this arm used
+    # to carry (`sdk.py:28718`) had to be hand-moved every time the source moved, which is the
+    # exact rot the D5 row exists to prevent — so the address is derived from the source the
+    # triple arm already resolved (`declared_relation_predicates()`) and then looked for in the
+    # doc itself, which is the document this assert is ABOUT.
+    assert triple is not None, (
+        "the three-anchor clause did not parse, so `04-plan.md`'s carried value cannot be "
+        "derived — see the failure above")
+    _plan_text = _EPIC_CITE_DOCS["04-plan.md"].read_text(encoding="utf-8")
+    assert f"sdk.py:{triple.group('c')}" in _plan_text, (
+        f"`04-plan.md` no longer carries `sdk.py:{triple.group('c')}`, the address its own "
+        "row must state at this head (`grep -n 'declared_relation_predicates()' "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
         "address; do not drop it")
 
