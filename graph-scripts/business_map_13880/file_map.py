@@ -407,6 +407,18 @@ class Mcp:
                 # `written` while 50 were never created (#13913 review).
                 raise UnknownOutcome(f"{tool}: HTTP {code} after 6 attempts — the "
                                    "write is UNCONFIRMED")
+            # ⛔ A 4xx IS NOT AN UNKNOWN OUTCOME. The request was rejected BEFORE
+            # the handler ran, so nothing landed — leaving the intent recorded
+            # would make it permanent: an auth failure on the operator door
+            # recorded 51 unconfirmed intents that no later run could clear, and
+            # the only recovery was hand-editing `state.json` (#13913 review
+            # round 6). A 2xx/3xx that carries no readable tool result is the
+            # opposite case — the server accepted the call and the outcome is
+            # genuinely unknown.
+            if 400 <= code < 500:
+                raise RuntimeError(
+                    f"{tool} refused: HTTP {code} — the write did not land "
+                    f"({json.dumps(payload)[:200]})")
             if not payload:
                 raise UnknownOutcome(f"{tool}: empty response (HTTP {code})")
             result = payload.get("result", payload)
@@ -610,6 +622,14 @@ def write_map(doc: dict) -> int:
         """
         mark(marker)
         pending.add(marker)
+        # ⛔ PERSISTED BEFORE THE CALL. `pending` is a COPY of the saved list, so
+        # saving `st` without this line left the intent only in memory: a run
+        # killed between the write and its response (the exact window this guard
+        # exists for) resumed with `unconfirmed: []`, and the operator it may
+        # have written was indistinguishable from a completed one — the resume
+        # printed `all nodes and edges written` with a declared edge silently
+        # absent (#13913 review round 6, measured with a BaseException kill).
+        st["unconfirmed"] = sorted(pending)
         save_state(st)
         try:
             res = mcp.call(tool, args, retry_safe=False)
@@ -626,6 +646,7 @@ def write_map(doc: dict) -> int:
             unmark(marker)      # a definite refusal: the write certainly did not land
             raise
         pending.discard(marker)
+        st["unconfirmed"] = sorted(pending)
         save_state(st)
         return res
 
@@ -857,6 +878,16 @@ SECTION_LABELS = {"subjects": "Subject", "objects": "Object", "sources": "Source
 #: accepts and returns for the same two model values.
 DIRECTION_ALIASES = {"unidirectional": "->", "bidirectional": "<->"}
 
+#: `pack_registry.SEMANTICS_DIRECTIONS` — the direction each Layer-2 meaning
+#: records. A bare-box transcription, pinned equal to the shipped table by a
+#: test (a drifted transcription is how a read-back starts refusing legal maps).
+FALLBACK_SEMANTICS_DIRECTIONS = {
+    "addresses": "->", "causes": "->", "dependsOn": "->", "managedBy": "->",
+    "ownedBy": "->", "produces": "<-", "refutes": "->", "supports": "->",
+    "hasPart": "<->", "mutuallyExclusive": "<->", "mutuallySupportive": "<->",
+    "related": "-", "transacts": "-",
+}
+
 
 def declared_identity(item: dict) -> tuple[str, str]:
     """The (property, value) that identifies the node ONE map item writes."""
@@ -921,18 +952,51 @@ def _row_identities(row: list) -> set[tuple[str, str, str]]:
 
 
 def direction_of(edge: dict) -> str:
-    """The direction the write DECLARES, as the model's own two values.
+    """The direction the write DECLARES, resolved the way the DOOR resolves it.
 
-    An edge that declares none is read back as the door's per-mechanism DEFAULT
-    (`bidirectional` for IMPL/NAND — the mutual reading — and `->` for
-    `coherence`), never as "whatever happens to be stored": the read-back exists
-    to catch a writer that dropped the keyword, and taking the stored value as
-    the expectation would certify exactly that regression (#13913 review).
+    ⛔ This is NOT "read the stored value back", and it is not a hand restatement
+    of the door's steps either. `create_operator` resolves a direction along a
+    FOUR-step chain (`TortoiseSDK._effective_direction`): a declared semantics
+    outranks a NON-DECLARATION, an absent direction canonicalizes per mechanism,
+    and `coherence` rewrites the legacy `bidirectional` default to `->`. A
+    read-back that modelled only the default step FALSELY REFUSES a legal write —
+    `IMPL` + `supports` with no declared direction stores `->`, and the pre-fix
+    expectation (`<->`) refused it (#13913 review round 6).
+
+    So the expectation is the writer's own resolver whenever the repo is
+    importable; `_fallback_direction` reproduces its outcome otherwise, and is
+    pinned equal to it by a test.
     """
-    declared = edge.get("direction")
-    if declared:
-        return DIRECTION_ALIASES.get(declared, declared)
-    return "->" if edge.get("op") == "coherence" else "<->"
+    try:
+        from tortoise.sdk import TortoiseSDK
+    except Exception:  # no checkout: the fallback, not a silent pass
+        return _fallback_direction(edge)
+    return TortoiseSDK._effective_direction(
+        edge.get("op") or "", edge.get("direction"), edge.get("label"))
+
+
+def _fallback_direction(edge: dict) -> str:
+    """`TortoiseSDK._effective_direction`'s outcome, without the import."""
+    op_type = edge.get("op") or ""
+    direction = edge.get("direction")
+    semantics = edge.get("label")
+    # `_declares_direction`: the parameter default (and its model spelling) is
+    # NOT a declaration — except for `coherence`, whose own default is one-way,
+    # so `<->` IS a statement there.
+    if op_type != "coherence":
+        declared = direction not in (None, "bidirectional", "<->")
+    else:   # `coherence`'s own default is ONE-WAY, so `<->` IS a statement there
+        declared = direction not in (None, "bidirectional")
+    if semantics is not None and not declared:
+        derived = FALLBACK_SEMANTICS_DIRECTIONS.get(semantics)
+        if derived is not None:
+            direction = derived
+    if direction is None:                       # `_canonical_direction`
+        direction = {"NAND": "unidirectional", "coherence": "->"}.get(
+            op_type, "bidirectional")
+    if op_type == "coherence" and direction == "bidirectional":
+        direction = "->"                     # step 4's last half
+    return direction
 
 
 def presence(doc: dict, node_rows: list, edge_rows: list,
@@ -992,7 +1056,11 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
     for e in doc["edges"]:
         a, b = by_ref[e["from"]], by_ref[e["to"]]
         if "op" in e:
+            # Both sides through the SAME alias table: the door's resolver can
+            # return a legacy spelling (`bidirectional`) that the node stores
+            # verbatim, while the read-back normalizes it to the model token.
             want = direction_of(e)
+            want = DIRECTION_ALIASES.get(want, want)
             held = any(
                 kind == e["op"]
                 and direction == want

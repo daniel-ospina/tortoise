@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import re
 from pathlib import Path
 from typing import ClassVar
 
@@ -811,8 +812,14 @@ def test_a_non_rpc_body_is_not_read_as_success(monkeypatch):
     mcp = _RealMcp("not-a-real-key")
     monkeypatch.setattr(mcp, "_post",
                         lambda body: (401, {"message": "Unauthorized"}, {}))
-    with pytest.raises(RuntimeError, match="carried no tool result"):
+    with pytest.raises(RuntimeError, match="refused: HTTP 401") as exc:
         mcp.call("tortoise_create_edge", {})
+    # ⛔ AND IT IS A DEFINITE REFUSAL, not an UNKNOWN outcome: a 401 is rejected
+    # before the handler runs, so the write did not land and the caller may
+    # re-issue it after fixing auth. Classifying it `UnknownOutcome` left 51
+    # operator intents recorded forever with no way to clear them (#13913 review
+    # round 6). Mutant: treat every no-tool-result body as `UnknownOutcome`.
+    assert not isinstance(exc.value, filer.UnknownOutcome)
 
 
 def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
@@ -1066,3 +1073,137 @@ def test_an_Object_cannot_certify_a_declared_Event(map_doc):
     structural, operators = _edge_rows(map_doc, sabotaged)
 
     assert filer.verdict(map_doc, node_rows, structural, operators) == 1
+
+
+# ── #13913 review round 6: the ledgers, the 4xx class, and the pins ──────
+def test_the_unconfirmed_intent_is_on_disk_BEFORE_the_call(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A run killed mid-write leaves the intent ON DISK, not only in memory.
+
+    `pending` is a copy of the saved list, so `save_state(st)` without updating
+    `st["unconfirmed"]` persisted nothing: measured with a `BaseException` kill
+    at the first `create_operator`, the state on disk read `written=85,
+    unconfirmed=[]`, and the healthy resume printed `all nodes and edges
+    written`, exited 0, and issued 50 of 51 operators — the missing one
+    indistinguishable from a completed write.
+
+    Mutant: `save_state(st)` before `st["unconfirmed"] = sorted(pending)` — the
+    kill fixture leaves `unconfirmed` empty and the resume exits 0.
+    """
+    state_path = tmp_path / "state.json"
+    seen: dict[str, object] = {}
+
+    class _Killed(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator" and "killed" not in seen:
+                    seen["killed"] = True
+                    seen["on_disk"] = json.loads(state_path.read_text())
+                    raise KeyboardInterrupt("SIGINT between the write and its response")
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Killed)
+    with pytest.raises(KeyboardInterrupt):
+        filer.write_map(map_doc)
+    capsys.readouterr()
+
+    on_disk = seen["on_disk"]
+    assert on_disk["unconfirmed"], (
+        "the intent was never persisted — a killed run is indistinguishable "
+        "from a completed one")
+    marker = on_disk["unconfirmed"][0]
+    assert marker in on_disk["written"]
+
+    # The resume REPORTS it (never re-issues it) — the round-5 behaviour, now
+    # driven by what is actually on disk.
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    failed = json.loads(state_path.read_text())["failed"]
+    assert any(marker in f for f in failed), failed
+
+
+def test_the_direction_expectation_is_the_DOOR_s_OWN_resolution(map_doc):
+    """`direction_of` is the writer's resolver, not a partial restatement.
+
+    `create_operator` applies FOUR steps (`_effective_direction`): a declared
+    semantics outranks a NON-DECLARATION, an absent direction canonicalizes per
+    mechanism, and `coherence` rewrites the legacy default. A read-back that
+    modelled only the default refused a legal write — `IMPL`+`supports` with no
+    declared direction stores `->`, the pre-fix expectation said `<->`.
+
+    Mutant: `return "->" if op == "coherence" else "<->"` — every row below reds.
+    """
+    cases = [
+        ({"op": "IMPL"}, "bidirectional"),                    # absent = mutual
+        ({"op": "NAND"}, "unidirectional"),                    # NAND's own default
+        ({"op": "coherence"}, "->"),
+        ({"op": "IMPL", "direction": "->"}, "->"),             # verbatim
+        ({"op": "IMPL", "label": "supports"}, "->"),           # semantics resolves
+        ({"op": "NAND", "label": "refutes"}, "->"),
+        ({"op": "IMPL", "label": "hasPart"}, "<->"),
+        ({"op": "IMPL", "label": "produces"}, "<-"),           # #11083's `<-`
+        ({"op": "IMPL", "label": "related"}, "-"),             # neutral transfers none
+        ({"op": "IMPL", "direction": "->", "label": "hasPart"}, "->"),
+    ]
+    for edge, want in cases:
+        assert filer.direction_of(edge) == want, (edge, want)
+
+
+def test_the_direction_FALLBACK_is_the_shipped_resolution(map_doc):
+    """The bare-box transcription resolves exactly what the door resolves.
+
+    Non-vacuity for `_fallback_direction`, and the pin for
+    `FALLBACK_SEMANTICS_DIRECTIONS`: a drifted copy is how a read-back starts
+    refusing (or certifying) the wrong thing.
+    """
+    from tortoise.pack_registry import SEMANTICS_DIRECTIONS
+
+    assert dict(SEMANTICS_DIRECTIONS) == filer.FALLBACK_SEMANTICS_DIRECTIONS
+    edges = [{"op": op, "direction": d, "label": s}
+             for op in ("IMPL", "NAND", "coherence")
+             for d in (None, "->", "<->", "bidirectional", "unidirectional")
+             for s in (None, *SEMANTICS_DIRECTIONS)]
+    for edge in edges:
+        assert filer._fallback_direction(edge) == filer.direction_of(edge), edge
+
+
+def test_the_direction_aliases_are_the_SHIPPED_ones():
+    """`DIRECTION_ALIASES` is `live.py`'s table, not a fresh transcription."""
+    from tortoise.live import DIRECTION_ALIASES
+
+    assert dict(DIRECTION_ALIASES) == filer.DIRECTION_ALIASES
+
+
+def test_the_section_labels_are_the_projection_s_LABELS():
+    """Each declared label is a label the projection actually WRITES.
+
+    The identity's first leg is the node label, so a wrong entry makes `--verify`
+    refuse a correctly filed map — and nothing in the suite could see it, because
+    the fixture rows are built from `identity_by_ref` (one authority on both
+    sides). This pins the declaration against the projection's own `MERGE`/`CREATE`
+    statements.
+
+    Mutant: swap any two entries (`subjects`: "Point", `points`: "Subject") — the
+    suite stayed green before this pin.
+    """
+    src = (ROOT / "tortoise" / "projection" / "entities.py").read_text(encoding="utf-8")
+    for section, label in filer.SECTION_LABELS.items():
+        pattern = re.compile(
+            rf"(?:MERGE|CREATE)\s*\(\w*:\s*{re.escape(label)}\s*\{{")
+        assert pattern.search(src), (
+            f"{section} -> {label!r} is not a label the projection writes")
+    assert len(set(filer.SECTION_LABELS.values())) == 5
