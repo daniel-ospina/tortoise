@@ -1768,6 +1768,72 @@ def test_a_TOOL_LEVEL_failure_on_a_NON_IDEMPOTENT_door_is_an_UNKNOWN_outcome(
         pre.call("tortoise_create_operator", {}, retry_safe=False)
 
 
+class _OperatorRefusingMcp:
+    """Every OPERATOR write is refused PRE-handler: the JSON-RPC envelope failed.
+
+    A refusal is the one class where nothing can have landed, so the intent must
+    be RETIRED — not kept — or 51 operator intents wedge forever (the round-6
+    incident). Injected at `_post` so the real `Mcp.call` classifies it.
+    """
+
+    def __init__(self, *_args, **_kw) -> None:
+        self._n = 0
+        self._inner = _RealMcp("not-a-real-key")
+
+        def _post(body: dict):
+            tool = (body.get("params") or {}).get("name")
+            self._n += 1
+            if tool == "tortoise_create_operator":
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "error": {"code": -32000,
+                                        "message": "unauthorized"}}, {})
+            return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+        self._inner._post = _post
+
+    def initialize(self) -> None:  # pragma: no cover - no session to open
+        return None
+
+    def call(self, tool: str, args: dict, **kw) -> dict:
+        return self._inner.call(tool, args, **kw)
+
+
+def test_a_REFUSED_operator_retires_its_intent_instead_of_wedging_it(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A pre-handler REFUSAL wrote nothing, so its intent must be RETIRED.
+
+    The `except Refusal` arm in `write_once` is what keeps a 4xx / envelope
+    refusal from stranding every non-idempotent intent forever: the intent is
+    recorded before the call, and a refusal leaves it in `unconfirmed` while its
+    marker is already in `written` — so a resume neither re-issues it (nothing
+    landed) nor clears it (nothing re-observes it). Measured: with the arm
+    replaced by a bare `raise`, the operator's marker stays in `written` and its
+    intent stays in `unconfirmed` after a refused run (#13913 review round 16 —
+    this pin was LOST when the edge-refusal fake was narrowed to the edge door).
+
+    Mutant: `except Refusal:` → `raise`, i.e. keep the intent — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _OperatorRefusingMcp)
+
+    first = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+
+    st = json.loads(state_path.read_text())
+    assert marker not in st["written"], (
+        "a REFUSED write retires its marker only if `write_once` says so — but "
+        f"{marker!r} is in `written`: a resume now skips an operator that was "
+        "never filed")
+    assert marker not in st["unconfirmed"], (
+        f"{marker!r} stayed in `unconfirmed` after a refusal — nothing will ever "
+        "clear it (a refusal cannot land, and no resume re-observes it)")
+
+
 def test_a_TOOL_LEVEL_failure_does_not_REISSUE_the_operator_on_resume(
         tmp_path, monkeypatch, map_doc, capsys):
     """The consequence, on disk: the resume issues ZERO second operators.
