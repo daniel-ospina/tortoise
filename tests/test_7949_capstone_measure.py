@@ -1448,6 +1448,114 @@ def test_e6_reports_an_unmeasurable_written_cell_as_unmeasured_never_zero(tmp_pa
     assert e6["unbound_and_unexplained"] == 0, e6["unbound_and_unexplained"]
 
 
+def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
+    """`#11695` review F4d: the scan's `hierarchies[]` breadth, pinned WHERE IT IS USED.
+
+    `e6_defects` takes the row enumeration rather than a census precisely so a synthetic
+    hierarchy defect can be driven through the SAME function a run calls, and until this case
+    existed nothing drove it at all. At this head the committed census declares 45 rows and
+    every one binds a path or is explained, so `unbound_and_unexplained == 0` and every other
+    defect assertion in this file compares zero with zero — which is why the breadth needed
+    an arm here rather than a real-tree one.
+
+    Non-vacuity, both mutants the review built, and neither reddens any other case here:
+
+    * `e6_defects`' body replaced by `return []` → the returned list is empty;
+    * `if surface != "relations": continue` at its loop head → the hierarchy row drops out
+      silently, which is §10.21's false PASS ("that sums `relations[]` only").
+    """
+    pnia = measure._pack_census_module().RELATION_PREDICATE_NOT_IN_ALLOWLIST
+    unbound = {"predicate": "declaredHierarchy", "from_kind": "dev:theme",
+               "to_kind": "dev:epic", "verdict": "unbound", "write_path": None,
+               "declaration_only": False}
+    defects = measure.e6_defects([("dev", "hierarchies", unbound)], pnia_verdict=pnia)
+    assert len(defects) == 1, defects
+    defect = defects[0]
+    assert defect["surface"] == "hierarchies", defect
+    assert defect["pack"] == "dev", defect
+    assert (defect["predicate"], defect["from_kind"], defect["to_kind"]) == (
+        "declaredHierarchy", "dev:theme", "dev:epic"), defect
+    assert any("no write path" in reason for reason in defect["reasons"]), defect
+    # …and the scan is not "everything is a defect": the same tuple carrying a BOUND row that
+    # records its effective_direction produces nothing, so the assertion above is attributable
+    # to the SURFACE rather than to a scan that counts unconditionally.
+    bound = {"predicate": "hasPart", "from_kind": "dev:theme", "to_kind": "dev:epic",
+             "verdict": "writable", "write_path": "structural",
+             "effective_direction": "<->", "declaration_only": False}
+    assert measure.e6_defects([("dev", "hierarchies", bound)], pnia_verdict=pnia) == []
+
+
+def test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan(monkeypatch):
+    """`#11695` review F4d, the other end of the path: a hierarchy defect REDS the row.
+
+    The scan's output is only worth pinning if it reaches the REGISTERED bar, and the real
+    tree loads clean — `unbound_and_unexplained == 0` — so this is the only way to drive
+    `measure_e6` → `e6_defects` → `unbound_and_unexplained` → `build_e6_row` with a non-zero
+    numerator. One `hierarchies[]` row is added to the census the loader returns: it binds no
+    write path and records no `declarationOnly` reason, so it is a defect by §3.1's own
+    definition.
+
+    Non-vacuity: under either review mutant (`return []`, and `surface != "relations"`) the
+    count stays 0, the row reads GREEN over its own population — the false PASS §10.21
+    forbids — and the defect/unbound/verdict assertions below all red.
+    """
+    real = measure._pack_census_module()
+    census = real.build_census(_REPO / measure.PACKS_DIR)
+    census["packs"]["dev"]["hierarchies"].append(
+        {"surface": "hierarchies", "pack": "dev", "predicate": "declaredHierarchy",
+         "from_kind": "dev:theme", "to_kind": "dev:epic", "verdict": "unbound",
+         "write_path": None, "declaration_only": False,
+         "declaration_only_reason": None, "effective_direction": None})
+    census["packs"]["dev"]["declared"] += 1
+    for key in ("hierarchies", "declared"):
+        census["population"][key] += 1
+
+    class _Census:
+        RELATION_WRITABLE = real.RELATION_WRITABLE
+        RELATION_PREDICATE_NOT_IN_ALLOWLIST = real.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+
+        @staticmethod
+        def build_census(_packs_dir):
+            return census
+
+    monkeypatch.setattr(measure, "_pack_census_module", _Census)
+    e6 = measure.measure_e6()
+    assert e6["error"] is None, e6["error"]
+    assert [d["surface"] for d in e6["defects"]] == ["hierarchies"], e6["defects"]
+    assert e6["unbound_and_unexplained"] == 1, e6["unbound_and_unexplained"]
+    # The beside column still covers the population it is reported beside: the injected row has
+    # no cell in the committed artifact, so it reads `unmeasured`, never 0 (#10995).
+    assert sum(e6["written"].values()) == e6["declared"], e6["written"]
+    assert e6["written"]["unmeasured"] == 1, e6["written"]
+    row = measure.build_e6_row(e6, bars=BARS)
+    assert row["verdict"] == "RED", row
+    assert row["numerator"] == e6["declared"] - 1, row
+    assert row["denominator"] == e6["declared"], row
+    assert row["blocked_by"] == measure.E6_BINDING_OWNER, row
+    assert "dev:hierarchies:declaredHierarchy" in row["note"], row["note"]
+
+
+def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
+    """`#11695` review F4d/P3: "the ONLY place the scan's breadth is stated" — PINNED, not asserted.
+
+    The claim was FALSE at `df27f88f`: `_e6_write_cells` — the beside column — restated
+    `("relations", "hierarchies")` inline, so the comment above `E6_SURFACES` and
+    `_e6_census_rows`' docstring both named a property the file did not have. It mattered
+    because the comment is an INVITATION TO NARROW: an editor who trusts it and drops
+    `"hierarchies"` from the tuple moves the population and the defect scan while the beside
+    column keeps the old breadth — silently, because (F4d) no case counted a hierarchy defect
+    either. Both loops now read the tuple; this case holds the probe to that, so restating the
+    literal inline reds here instead of surviving as a comment nobody can falsify.
+    """
+    text = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py").read_text()
+    assert text.count('("relations", "hierarchies")') == 1, (
+        "the E6 surface breadth must be stated ONCE, in `E6_SURFACES` — a second inline "
+        "literal is how the beside column kept a breadth the tuple no longer had")
+    assert text.count("for surface in E6_SURFACES:") == 2, (
+        "the population loop and the beside column must both READ the tuple — the claim "
+        "`_e6_census_rows`' docstring makes")
+
+
 def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
     """`#11695` review F4a: the three keys the row cannot be honest without are REFUSED.
 
@@ -16157,11 +16265,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             encoding="utf-8", errors="replace").splitlines() if mention.search(line))
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
-    #: The probe's count moved 10 -> 19 with `#11695`'s E6 producer comments, which name the
+    #: The probe's count moved 10 -> 20 with `#11695`'s E6 producer comments, which name the
     #: `hierarchies[]` surface the metric spans, and the record's own §10.39 entry adds one
     #: more to `PRE-REGISTRATION.md` (23 -> 24); the note in the record is re-derived with them.
+    #: It then moved 20 -> 19 when `_e6_write_cells` was made to read `E6_SURFACES` instead of
+    #: restating the tuple inline (`#11695` review F4d/Finding 2), which is the second half of
+    #: the body's "stated once" claim: the record's block and this map are re-derived together.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 20}, (
+                        "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")

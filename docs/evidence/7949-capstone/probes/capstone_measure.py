@@ -4215,7 +4215,7 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     for pack, block in (artifact.get("packs") or {}).items():
         if not isinstance(block, dict):
             continue
-        for surface in ("relations", "hierarchies"):
+        for surface in E6_SURFACES:
             for row in block.get(surface) or []:
                 if not isinstance(row, dict):
                     continue
