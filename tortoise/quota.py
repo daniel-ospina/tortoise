@@ -1364,7 +1364,8 @@ def _resolve_count_sdk(sdk, sdk_factory, *, org_id, resource):
 
 
 def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
-                      slot_credit: int = 0, sdk_factory=None) -> None:
+                      slot_credit: int = 0, sdk_factory=None,
+                      truth_carried: bool = False) -> None:
     """Reject a write when the org is at/over its resource limit.
 
     Args:
@@ -1468,6 +1469,15 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             (``api_key_occupies_slot``) that the displaced row is counted once.
             MUST be 0 everywhere else, and MUST never become reachable from a
             client-supplied value — an unproven credit is a free slot.
+        truth_carried: #13829 — the caller's statement that this write reaches
+            the RECORD (the journal is its commit point, ``#7951``) before any
+            derived store is touched, so an over-cap reading on a dimension that
+            declares ``derived_layer`` (``graph_storage``, the FalkorDB hot
+            cache) degrades that store instead of refusing the write. Default
+            ``False``, which is the safety property: on a door nobody has proven
+            reaches the record, the derived store may be the write's only durable
+            copy and refusing is the honest behaviour. See
+            ``allowance_gate.enforce_allowances`` for the arm-by-arm contract.
 
     Raises:
         QuotaExceededError: org at/over limit (402-equivalent) — including a
@@ -1532,7 +1542,8 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None, *,
             org_id, e)
         raise QuotaCheckError(
             f"the allowance gate is unavailable ({type(e).__name__}: {e})") from e
-    enforce_allowances(limits, org_id=org_id, resource=resource)
+    enforce_allowances(limits, org_id=org_id, resource=resource,
+                       truth_carried=truth_carried)
     # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
     # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
     # pricing.json max_documents field would ripple through tier_limits /
