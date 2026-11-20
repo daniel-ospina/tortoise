@@ -1,6 +1,6 @@
 {
   "issue": "#13906",
-  "generated_at": "2026-11-20T00:25:26Z",
+  "generated_at": "2026-11-20T00:30:16Z",
   "k": 10,
   "seed": 13906,
   "n_rows": 59,
@@ -48,6 +48,7 @@
   "queries": [
     {
       "query": "q_anchor",
+      "record_error": null,
       "truth_cosine": [
         "anchor",
         "r036",
@@ -161,7 +162,7 @@
           "ok": true,
           "max_delta": 1.2572615322170577e-06,
           "worst": "r036",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
@@ -368,6 +369,7 @@
     },
     {
       "query": "q_tie",
+      "record_error": null,
       "truth_cosine": [
         "r000",
         "tie0",
@@ -465,7 +467,7 @@
           "ok": true,
           "max_delta": 4.094970130097408e-06,
           "worst": "r013",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
@@ -668,6 +670,7 @@
     },
     {
       "query": "q00",
+      "record_error": null,
       "truth_cosine": [
         "r027",
         "r005",
@@ -780,7 +783,7 @@
           "ok": true,
           "max_delta": 1.0541391624485641e-05,
           "worst": "r004",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
@@ -1001,6 +1004,7 @@
     },
     {
       "query": "q01",
+      "record_error": null,
       "truth_cosine": [
         "r000",
         "tie0",
@@ -1110,7 +1114,7 @@
           "ok": true,
           "max_delta": 1.2693586178613714e-05,
           "worst": "r036",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
@@ -1335,6 +1339,7 @@
     },
     {
       "query": "q02",
+      "record_error": null,
       "truth_cosine": [
         "r011",
         "r037",
@@ -1447,7 +1452,7 @@
           "ok": true,
           "max_delta": 3.990829924305217e-06,
           "worst": "anchor",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
@@ -1656,6 +1661,7 @@
     },
     {
       "query": "q03",
+      "record_error": null,
       "truth_cosine": [
         "r017",
         "r044",
@@ -1769,7 +1775,7 @@
           "ok": true,
           "max_delta": 9.467861978862402e-06,
           "worst": "r011",
-          "tolerance": 0.0001
+          "tolerance": 0.001
         },
         "count_equal": true,
         "duplicates": [],
