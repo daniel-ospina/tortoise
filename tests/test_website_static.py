@@ -3579,11 +3579,17 @@ def _css_blanked(css: str) -> str:
     Same length on purpose: an index found in the blanked text is a valid index
     into the real sheet, so a reader can brace-count structure here and still
     describe the sheet. Comments matter to every structural reader below — a
-    comment that QUOTES a rule (this page's own notes write `@media (max-width:
-    760px)` and `--prose-measure: min(660px, 74ch)` in prose) is matched as a
-    rule by any `@media…{` or `--x:` scan: measured, the quoted `@media swallowed
-    the hero's base rule into a phantom media span and the quoted `ch` measure
-    read as a declaration (#14020 review P1/P2.4).
+    comment that QUOTES a rule is matched as a rule by any `@media…{` or `--x:`
+    scan. Measured: a note quoting `@media (max-width: 760px)` swallowed the
+    hero's base rule into a phantom media span, and the page still quotes
+    `--prose-measure: min(660px, 74ch)` in prose (:445-446), which a `--x:` scan
+    reads as a declaration (#14020 review P1/P2.4).
+
+    ⛔ The `@media` example is HISTORICAL: that note was deleted in
+    `d6b4776350a`, so no comment on the page quotes a media query today — the
+    rationale outlives the example, and `_max_width_media_blocks` /
+    `_max_height_media_blocks` both cite it. Do not read this docstring as a
+    claim about the sheet's current comments.
     """
     return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), css, flags=re.S)
 
