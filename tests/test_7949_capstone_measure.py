@@ -2224,6 +2224,12 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     must print the moved number, so the sentence is read from the record rather
     than typed into the f-string.
     """
+    # ⛔ E6 BEFORE the census: `_canned_census` swaps `sys.modules["tortoise"]` for a bare
+    # module so the real `census()` runs against canned rows, and `measure_e6` loads the pack
+    # registry through `tortoise.pack_registry` — measured, calling it AFTER the swap makes the
+    # import fail inside `measure_e6`, which correctly reports a NAMED BLOCKED row (fail-closed,
+    # not zeros) and would make this pin assert against a gap instead of a measurement.
+    e6_measure, e6_row = _e6_fixture()
     census_data = _canned_census(monkeypatch)
     e1 = measure.measure_e1_e2(_REPO)
     # ⛔ The receipt is selected BY the frozen pin (#10679): `load_e4` refuses an
@@ -2261,7 +2267,6 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
                                     sentences=e5["raw_n"], bars=bars)
         e4_out = measure.e4_outcome(edge_correct=e4["edge_correct"],
                                     planted=e4["planted"], bars=bars)
-        e6_measure, e6_row = _e6_fixture()
         return measure.render_log(
             head="f" * 40, prereg_sha="0" * 40, bars=bars,
             corpus_sha=corpus_sha, graph="capstone_measure_fixture_0",
@@ -2298,9 +2303,27 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
                     corpus_sha=corpus_sha)},
             e3_out=e3_out, e4=e4, e4_out=e4_out, e5=e5, e5_out=e5_out,
             e6=e6_measure, e6_row=e6_row,
-            rows=_rows(), out_path="docs/evidence/9889/e1-e2-scores.json")
+            rows=_rows(e6=e6_row), out_path="docs/evidence/9889/e1-e2-scores.json")
 
     text = render(_prereg())
+    # ⛔ #11695: the record this renderer WRITES is the complete one `REQUIRED_CRITERIA`
+    # demands. Before the producer, this block carried five rows and no census, so a scored
+    # run's artifact was incomplete by the record's own definition — and nothing read the
+    # block back to say so.
+    block = cvc.extract_block(text)
+    assert [row["criterion"] for row in block["rows"]] == [*cvc.CRITERIA, "E6"], (
+        f"the emitted record's rows are {[r['criterion'] for r in block['rows']]} — the "
+        f"closing five in order plus E6")
+    assert "e6_census" in block["run"], sorted(block["run"])
+    census_block = block["run"]["e6_census"]
+    assert census_block["unbound_and_unexplained"] == 0, census_block
+    assert census_block["population"]["declared"] >= BARS["floors"]["e6_declared_rows"], (
+        census_block["population"])
+    assert set(census_block["written"]) == {"direct", "mediated", "none", "unmeasured"}, (
+        "E6's beside-the-bar column must be in the MACHINE record, not only in the note — "
+        f"got {sorted(census_block['written'])}")
+    assert block["rows"][-1]["written_counts"] == census_block["written"], (
+        "the row's beside column and the census block's must be the same measurement")
     assert "e1 note: both before realizations clear E1's own floors" in text
     # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
     # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
@@ -11734,8 +11757,10 @@ def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
     same shape the sibling renderer pin uses, so this fixture cannot drift from the
     keys `render_log` subscripts off it.
     """
-    bars = measure.parse_bars(_prereg())
+    # ⛔ `_e6_fixture()` FIRST — before `_canned_census` swaps `sys.modules["tortoise"]` in the
+    # call arguments below; see `test_the_renderer_renders_a_log_from_the_committed_record`.
     e6_measure, e6_row = _e6_fixture()
+    bars = measure.parse_bars(_prereg())
     return measure.render_log(
         head="a" * 40, prereg_sha="b" * 40,
         bars=bars, corpus_sha=corpus_sha,
