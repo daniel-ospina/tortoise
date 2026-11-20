@@ -3082,18 +3082,37 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: express a bare `--` (a letter is required after the dashes) nor `--flag=value` (`=` is outside
 #: `[\w-]`), and its quote could not express `$'…'` — so the last three mutants above were
 #: invisible to it while its own paragraph called the claim "every count command spelled
-#: `grep <flags> '<expr>'`". The flag word is now `-`-ANCHORED and otherwise OPEN
-#: (`[^\s'\"]*`): a flags token may not contain whitespace or a quote, which is what keeps the
-#: match from running past the command into the sentence, and every word must still begin with
-#: `-`, which is what keeps a non-flag token (a filename, a revision) out of the run. The
-#: expression may be single-, double- or ANSI-C-quoted.
+#: `grep <flags> '<expr>'`". The flag word is now `-`-ANCHORED and otherwise OPEN, and may
+#: carry an ATTACHED quoted value (`--include='*.py'`, `--color='never'`), which is a flag's
+#: own argument and not the expression beside it. The expression may be single-, double- or
+#: ANSI-C-quoted.
+#:
+#: ⛔ AND THE BOUNDARY IS THE MATCH'S, NOT THE TOKEN'S (#13995 review round 2, P2 — MEASURED).
+#: The round-1 wording said the run "keeps a non-flag token (a filename, a revision) out of the
+#: run", which reads as *the token is skipped and the expression is still found*. It is not:
+#: a token that does not begin with `-` ENDS the run, and because the quote must be ADJACENT to
+#: the run, the whole command then goes UNSEEN. That is why the value-taking spellings below are
+#: listed as unread rather than as "a token that is ignored" — each one returns `[]`, so a second
+#: BLANK-class prescription written that way is invisible, exactly as #13962's original mutants
+#: were.
 #:
 #: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
 #: itself as complete — this file's own rule (`_typed_answers_to_tortoise_cmd`'s closing
-#: sentence, cited by NAME rather than by line because the number is exactly what rots):
+#: sentence, cited by NAME rather than by line because the number is exactly what rots). Every
+#: bullet is MEASURED as `[]` from `_d5_count_prescriptions`, and every one is a second
+#: BLANK-class prescription when appended to the row:
 #:   * an UNQUOTED expression — `grep -cE ^[+-]$`;
-#:   * flags written AFTER the expression — `grep '^+$' -c`;
-#:   * a count performed by another tool — `rg -c '^+$'`, `awk`;
+#:   * flags written AFTER the expression — `grep '^\+$' -c`;
+#:   * a count performed by another tool — `rg -c '^\+$'`, `awk`;
+#:   * a value ATTACHED to a flag that IS the expression — `grep -c -e'^[+-]$'`, `grep -ce'^[+-]$'`,
+#:     `grep -c'^[+-]$'`, `grep --count --regexp='^[+-]$'` (the attached quoted value is read as
+#:     the FLAG's argument, so no expression follows it);
+#:   * a value SEPARATED from its flag by a bare token — `grep -c -m 2 '^[+-]$'`,
+#:     `grep -c -A 2 '^[+-]$'`, `grep -c -f /tmp/pats '^[+-]$'`. The bare token ends the run, so
+#:     the command is unseen. ⛔ Admitting a bare token to the run was REJECTED as a fix: for
+#:     `-f` the positional argument is a FILE, not the expression, so reading it would report a
+#:     count of something the command does not count — a false RED on a correct document, which
+#:     is the failure mode this file treats as the worse one;
 #:   * an expression built by CONCATENATION — `grep -cE '^'"[+-]"'$'` is read only up to its
 #:     first quoted fragment (`^`), so a class constraint living in the tail is invisible. This
 #:     is NOT uniformly a gap (`"^[+-]$"''` reads the whole class, because the class is inside
@@ -3106,7 +3125,8 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: one BLANK-class count command" is a claim about count commands whose quoted expression the
 #: reader can SEE — never a claim that the class is prescribed once in the document.
 _D5_ANY_COUNT_EXPR_RE = re.compile(
-    r"grep\s+(?P<flags>-{1,2}[^\s'\"]*(?:\s+-{1,2}[^\s'\"]*)*)\s+"
+    r"grep\s+(?P<flags>-{1,2}[^\s'\"]*(?:'[^']*'|\"[^\"]*\")?"
+    r"(?:\s+-{1,2}[^\s'\"]*(?:'[^']*'|\"[^\"]*\")?)*)\s+"
     r"(?:\$)?(?P<quote>['\"])(?P<expr>[^'\"]+)(?P=quote)"
 )
 _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
@@ -3273,6 +3293,55 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # makes. `rg -c` is not read at all.
     assert _d5_count_prescriptions('`grep -cE "$RE"`') == ["$RE"]
     assert _d5_count_prescriptions("`rg -c '^\\+$'`") == []
+
+    # ⛔ A FLAG'S OWN QUOTED ARGUMENT IS PART OF THE FLAG WORD, NOT THE EXPRESSION
+    # (#13995 review round 2, P2 — MEASURED). Before this round `--include='*.py'` broke the
+    # match entirely, so the expression beside it went unseen; it is read now, and the two
+    # spellings below are the control.
+    for with_flag_value in (
+        "grep -c --include='*.py' '^\\+$'",
+        "grep -c --color='never' '^\\+$'",
+    ):
+        seen = _d5_count_prescriptions(f"a prescription: `{with_flag_value}`\n")
+        assert seen == ["^\\+$"], (
+            f"{with_flag_value!r} carries its expression AFTER a flag's own quoted argument, "
+            f"and the reader must still find it — a flag's value is not the pattern "
+            f"(#13995 review round 2). Seen: {seen!r}")
+
+    # ⛔ AND THE RESIDUALS THE COMMENT DECLARES ARE PINNED AS RESIDUALS (#13995 review round 2,
+    # P2 — MEASURED). Each of these is a legal count of the BLANK class, and each is INVISIBLE
+    # to the reader — so a second BLANK-class prescription spelled this way leaves the arm
+    # green. They are asserted `[]` rather than fixed because the fix that would read them
+    # (`-f`'s positional is a FILE, not a pattern; `-e'…'` attaches the pattern to the flag)
+    # cannot tell those apart without parsing the shell, and a guess there reports a false RED
+    # on a correct document — the worse direction. Pinning `[]` is what makes the comment's
+    # list falsifiable: a future widening that starts reading one of them reds HERE, and the
+    # author then either keeps it (and deletes the bullet) or narrows again.
+    for residual in (
+        "grep -c -e'^\\+$'",              # value attached to `-e`, i.e. the pattern itself
+        "grep -ce'^\\+$'",                # …same, combined into one short-flag word
+        "grep -c'^\\+$'",                 # …same, with no separating space at all
+        "grep --count --regexp='^\\+$'",  # the long spelling of the same attachment
+        "grep -c -m 2 '^\\+$'",           # a value SEPARATED by a bare token
+        "grep -c -A 2 '^\\+$'",           # …same, context flag
+        "grep -c -f /tmp/pats '^\\+$'",    # …same, and here the positional is a FILE
+        "grep -cE ^\\+$",                 # unquoted expression
+        "grep '^\\+$' -c",                # flags AFTER the expression
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{residual}`\n") == [], (
+            f"{residual!r} is now READ by `_D5_ANY_COUNT_EXPR_RE`. That may be an improvement — "
+            "but the comment on that constant lists it as a shape the reader does not read, so "
+            "delete the bullet (or narrow the reader again) in the same commit instead of "
+            "leaving a false statement beside the code (#13995 review round 2, P2)")
+
+    # …and CONCATENATION is the one residual that is neither read nor unread: the first quoted
+    # fragment IS read, and everything after it is not — which is what makes a class constraint
+    # in the tail invisible. Asserted with its fragment so the bullet's wording stays exact
+    # ("read only up to its first quoted fragment") rather than collapsing into either bucket.
+    assert _d5_count_prescriptions("a prescription: `grep -cE '^'\"[+-]\"'$'`\n") == ["^"], (
+        "a concatenated expression must be read as its FIRST fragment only — if it is now read "
+        "whole, the comment's concatenation bullet is stale; if it is not read at all, the "
+        "fragment claim is stale (#13995 review rounds 1-2)")
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
