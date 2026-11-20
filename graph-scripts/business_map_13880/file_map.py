@@ -476,12 +476,17 @@ class Mcp:
                 # round 8, measured). No body is an UNKNOWN body, never a refusal.
                 # ⛔ `headers` IS BOUND HERE BECAUSE THIS IS WHERE A REAL 5xx
                 # LANDS: `urlopen` raises `HTTPError` for every non-2xx, so the
-                # tuple-returning path above is 2xx/3xx only and the status arm's
-                # `Retry-After` read would otherwise reach an unbound name on
-                # exactly the responses it was written for (measured: a real
-                # `HTTPError(503, …, {"Retry-After": "7"})` from `_post` raised
-                # `UnboundLocalError` instead of backing off — one POST where
-                # `main` made six; #13950 review).
+                # tuple-returning path above is 2xx/3xx only. The bind supplies
+                # the VALUE the status arm reads — normalised from the handler's
+                # `email.message.Message` to a plain `dict`, without which a
+                # header whose name differs only in case is not found. ⛔ REMOVING
+                # IT DOES NOT RAISE: `headers: dict = {}` is initialised above the
+                # `try`, so the name stays bound to `{}` and the `Retry-After` is
+                # SILENTLY DROPPED — the ramp runs where the server advertised a
+                # wait (measured: `[5, 10, 15, 20, 25]`, not five 7 s waits). The
+                # PRE-FIX tree raised `UnboundLocalError` here because that
+                # initialisation did not exist yet; that is history, not the
+                # present mechanism (#13950 review rounds 5, 6 and 34).
                 # ⛔ AND IT IS NORMALISED TO A `dict`: `HTTPError.headers` is an
                 # `email.message.Message`, and `_retry_after_seconds` requires a
                 # mapping — binding the Message directly would leave the header
@@ -649,7 +654,8 @@ class Mcp:
                 # written and no later run could clear it — the hand-edited-
                 # `state.json` recovery the `4xx` arm's own comment describes
                 # (#13950 review round 33). On a 4xx the STATUS, not the advice,
-                # decides landed-ness; the advice arm still governs 2xx/3xx/5xx.
+                # decides landed-ness; the advice arm still governs every other
+                # response (#13950 review round 34).
                 if retry_after is not None and not (400 <= code < 500):
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
@@ -818,9 +824,13 @@ def _seconds_or_none(value: object) -> float | None:
         # (#13950 review round 3). A string that is not a number is the OTHER
         # legal form of the same header, so it is tried as one before giving up.
         return _http_date_seconds(value) if isinstance(value, str) else None
-    # ⛔ `nan`/`inf` ARE NOT A WAIT. `min(120, nan)` is NOT 120 — every
-    # comparison against `nan` is False, so `min` returns its FIRST argument and
-    # the cap silently does nothing — and an infinite back-off is not advice.
+    # ⛔ `nan`/`inf` ARE NOT A WAIT — refused HERE, not left to a `min`/`max` cap
+    # downstream. The cap CANNOT express the refusal: `min(120, nan)` is 120 and
+    # `min(120, max(1.0, nan))` is 1.0, because every comparison against `nan` is
+    # False and `min`/`max` then keep whichever operand they saw first. So a `nan`
+    # escaping this guard would silently become a real wait instead of no advice,
+    # and `inf` would become a 120 s stall on every attempt. Returning `None` is
+    # what routes the caller to its own ramp (#13950 review round 34).
     if seconds != seconds or seconds in (float("inf"), float("-inf")):
         return None
     return max(0.0, seconds)

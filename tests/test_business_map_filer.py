@@ -1943,8 +1943,11 @@ def test_a_RETRY_AFTER_HEADER_is_the_back_off_when_the_body_names_none(monkeypat
     the status arm.
 
     Mutants, each measured to RED this row: (b) delete the `headers = dict(_hdrs)
-    …` bind in the `HTTPError` handler (the arm then reads an unbound name);
-    (c) `_retry_after_seconds(headers)` → `None` at the sleep site. ⛔ NOT a
+    …` bind in the `HTTPError` handler — NOT an `UnboundLocalError` (`headers`
+    is also initialised to `{}` above the `try`), so the `Retry-After` is
+    silently dropped and the client ramp `[5, 10, 15, 20, 25]` runs where arm
+    (a) asserts `[7.0] * 5`; (c) `_retry_after_seconds(headers)` → `None` at the
+    sleep site. ⛔ NOT a
     mutant: reverting the call site to `code, payload, _ = self._post(...)`. Once
     the handler binds `headers`, that tuple element is never READ on a 5xx — a
     real `_post` cannot return one — so the mutation is equivalent and this row
@@ -2326,8 +2329,7 @@ def test_a_4xx_carrying_retry_after_is_still_a_REFUSAL(monkeypatch):
     Non-vacuity, MEASURED: with the `not (400 <= code < 500)` exclusion removed
     from the `retry_after` arm this raises `UnknownOutcome` — a `RuntimeError`
     sibling of `Refusal`, not a subclass — so the `pytest.raises(filer.Refusal)`
-    below reds on the first value, and `sleeps` fills in for the idempotent
-    spellings.
+    below reds on the first value.
     """
     for zero in (0, -5, "0", 0.0, 30):
         posts: list[int] = []
@@ -2560,6 +2562,29 @@ def test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE(monkeypatch):
         f"an exhausted transport raised {type(excinfo.value).__name__}, which "
         "`write_once` does not classify")
     assert "outcome UNKNOWN" in str(excinfo.value), excinfo.value
+
+    # ⛔ AND THE SECOND EXHAUSTED-TRANSPORT ARM: the `HTTPError` whose BODY dies on
+    # the LAST attempt. `_DeadBody.read` raises `IncompleteRead`, so this leaves
+    # through the handler's `attempt == 5` arm rather than the `not retry_safe`
+    # one above it — and a bare `RuntimeError` there makes the summary say "NOT
+    # written" over a request that WAS sent. REVERTING THAT ARM ALONE LEAVES
+    # EVERY OTHER ROW GREEN (measured at #13950 review round 34), so this drive
+    # is the arm's only pin; without it the docstring's "either arm" is false.
+    posts: list[int] = []
+
+    def _post_dead_body(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", {}, _DeadBody())
+
+    mcp2 = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp2, "_post", _post_dead_body)
+    with pytest.raises(filer.UnknownOutcome) as dead:
+        mcp2.call("tortoise_create_subject", {})
+    assert type(dead.value) is filer.UnknownOutcome, (
+        "an exhausted unreadable-body transport raised "
+        f"{type(dead.value).__name__}, which `write_once` does not classify")
+    assert len(posts) == 6, (
+        f"a retryable 5xx was POSTed {len(posts)} times")
 
 
 def test_a_SUB_SECOND_retry_after_is_FLOORED(monkeypatch):
