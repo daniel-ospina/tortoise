@@ -31,9 +31,16 @@ USAGE
 `--dry-run` needs no credentials and no network. `--verify` needs
 `FALKORDB_CLOUD_URI` (and the optional `redis` package). `--write` needs
 `TORTOISE_MCP_API_KEY` in the environment (on the lane box: `set -a; .
-/home/cmux/businessmap.env; set +a`). It is resumable: ids are
-persisted to `state.json` after every write and re-resolved by name on retry, so
-re-running after a transport death converges instead of duplicating.
+/home/cmux/businessmap.env; set +a`).
+
+RESUMING — what `state.json` actually promises. Every landed write is recorded
+there, and the two NON-IDEMPOTENT doors (`create_operator`, `create_event`) are
+recorded BEFORE the call: `create_operator` has no existence check and a second
+one double-counts the claim's EP weight (#10849), so an interrupted run must
+fail closed on the duplicate side. A definite refusal un-records it; an UNKNOWN
+transport outcome leaves it recorded and is REPORTED — `--verify` is the
+authority on what landed, and a re-run writes only what `state.json` does not
+record. Ids are never looked up by name (there is no such door on this surface).
 
 ⛔ It never deletes, supersedes or mitigates anything. Mitigations are
 0.10-0.50 and must be written one at a time; this map needs none.
@@ -142,12 +149,23 @@ def shipped_vocab() -> dict | None:
                     object_kinds.add(f"{ns}:{kind}" if ns else kind)
         except Exception:  # an unreadable pack contributes no kinds
             pass
+    # The structural predicate set is the writer's own (`create_edge` gates on
+    # `_VALID_EDGE_PREDICATES`). Reading it here is why this is not the hand
+    # transcription above: `STRUCTURAL_RELS` lags the surface (it omits
+    # `aboutAction`, #13913 review), and a validator that refuses a surface-legal
+    # edge is the same class as one that accepts an illegal kind.
+    try:
+        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+        relations = set(_VALID_EDGE_PREDICATES)
+    except Exception:  # the fallback is the transcription, not a silent pass
+        relations = set(STRUCTURAL_RELS)
     return {
         "point": set(vocab.point_kinds),
         "event": set(vocab.event_kinds),
         "source": set(vocab.source_kinds),
         "object": object_kinds,
         "goal_state": set(GOAL_STATE_VALUES),
+        "relation": relations,
     }
 
 
@@ -160,13 +178,15 @@ def validate(doc: dict) -> list[str]:
     source_kinds = vocab["source"] if vocab else SOURCE_KINDS
     object_kinds = vocab["object"] if vocab else OBJECT_KINDS
     goal_states = vocab["goal_state"] if vocab else GOAL_STATES
+    structural_rels = vocab["relation"] if vocab else STRUCTURAL_RELS
     if vocab is None:
         print("! shipped vocabularies unavailable — validating against the "
               "transcription in this file", file=sys.stderr)
     else:
         print(f"vocabularies: shipped (point {len(point_kinds)}, event "
               f"{len(event_kinds)}, source {len(source_kinds)}, object "
-              f"{len(object_kinds)}, goalState {len(goal_states)})")
+              f"{len(object_kinds)}, goalState {len(goal_states)}, "
+              f"relation {len(structural_rels)})")
     refs: dict[str, str] = {}   # ref -> layer
 
     def reg(ref: str, layer: str) -> None:
@@ -229,7 +249,7 @@ def validate(doc: dict) -> list[str]:
                 if refs[e[end]] not in {"point", "subject", "object", "event"}:
                     errs.append(f"{where}: operator endpoint {e[end]} is a {refs[e[end]]}, not epistemic")
         elif "relation" in e:
-            if e["relation"] not in STRUCTURAL_RELS:
+            if e["relation"] not in structural_rels:
                 errs.append(f"{where}: relation {e['relation']!r} not a valid structural predicate")
         else:
             errs.append(f"{where}: neither op nor relation")
@@ -363,9 +383,27 @@ class Mcp:
                 if attempt < 5:
                     time.sleep(min(60, 5 * (attempt + 1)))
                     continue
+                # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
+                # body is not a JSON-RPC `result`, so `_refusal` found nothing
+                # and the failure was returned as success — 101 edges marked
+                # `written` while 50 were never created (#13913 review).
+                raise RuntimeError(f"{tool}: HTTP {code} after 6 attempts — the "
+                                   "write is UNCONFIRMED")
             if not payload:
                 raise RuntimeError(f"{tool}: empty response (HTTP {code})")
             result = payload.get("result", payload)
+            # A `result` that is not a tool result at all (a 4xx JSON body such
+            # as {"message": "Unauthorized"}) is a FAILURE, not a success: the
+            # MCP wire always answers a `tools/call` with `content[]` and/or
+            # `structuredContent`. Without this, `_refusal` has nothing to read
+            # and the body is returned as if the write had landed.
+            if not isinstance(result, dict) or not (
+                isinstance(result.get("content"), list)
+                or isinstance(result.get("structuredContent"), dict)
+            ):
+                raise RuntimeError(
+                    f"{tool}: HTTP {code} carried no tool result — the write is "
+                    f"UNCONFIRMED ({json.dumps(payload)[:200]})")
             # ⛔ A TOOL THAT FAILED IS NOT A SUCCESSFUL CALL. MCP reports a
             # handler failure as `result.isError: true` with the reason in
             # `content[]` — the JSON-RPC envelope is still a `result`, so
@@ -481,6 +519,29 @@ def write_map(doc: dict) -> int:
             st["written"].append(marker)
         save_state(st)
 
+    def unmark(marker: str) -> None:
+        if marker in st["written"]:
+            st["written"].remove(marker)
+            save_state(st)
+
+    def write_once(marker: str, tool: str, args: dict) -> dict:
+        """A NON-IDEMPOTENT write: the intent is recorded BEFORE the call.
+
+        `create_operator` and `create_event` have no existence check, so a
+        retry — or a run killed between the write and its response — writes a
+        SECOND node, and a duplicate operator double-counts the claim's EP
+        weight (#10849). Recording the intent first makes that window fail
+        CLOSED on the duplicate side: a definite refusal un-records it, and an
+        UNKNOWN outcome stays recorded while being reported, with `--verify` as
+        the authority on whether it landed.
+        """
+        mark(marker)
+        try:
+            return mcp.call(tool, args, retry_safe=False)
+        except Exception:
+            unmark(marker)
+            raise
+
     def _resolve(item_ref: str, name: str, res: dict, what: str) -> str:
         """The id the write returned — or a refusal, never a plausible stand-in.
 
@@ -546,11 +607,10 @@ def write_map(doc: dict) -> int:
         props = {"content": e["content"]}
         if e.get("startedAt"):
             props["startedAt"] = e["startedAt"]
-        res = mcp.call("tortoise_create_event",
-                       {"name": event_name(e), "eventKind": e["eventKind"], "props": props},
-                       retry_safe=False)
+        res = write_once(f"event:{e['ref']}", "tortoise_create_event",
+                         {"name": event_name(e), "eventKind": e["eventKind"],
+                          "props": props})
         ids[e["ref"]] = _resolve(e["ref"], e["content"], res, "event")
-        mark(f"event:{e['ref']}")
         print(f"  event    {e['ref']:<34} -> {ids[e['ref']]}")
 
     # 5. Points — the claims.
@@ -588,7 +648,7 @@ def write_map(doc: dict) -> int:
                     args["semantics"] = e["label"]
                 if e.get("direction"):
                     args["direction"] = e["direction"]
-                mcp.call("tortoise_create_operator", args, retry_safe=False)
+                write_once(marker, "tortoise_create_operator", args)
             else:
                 mcp.call("tortoise_create_edge",
                          {"source_id": src, "target_id": dst,
@@ -647,6 +707,22 @@ CLEAN_GRAPH = "org_3326a01ea34ae595d84de5d8f9_g_311d79c684de4d0e8953d189ed"
 IDENTITY_PROPS = ("name", "url", "content")
 
 
+def identity_by_ref(doc: dict) -> dict[str, tuple[str, str]]:
+    """ref -> the (property, value) that identifies the node it writes."""
+    out: dict[str, tuple[str, str]] = {}
+    for s in doc["subjects"]:
+        out[s["ref"]] = ("name", s["name"])
+    for o in doc["objects"]:
+        out[o["ref"]] = ("name", o["name"])
+    for s in doc["sources"]:
+        out[s["ref"]] = ("url", s["url"])
+    for e in doc["events"]:
+        out[e["ref"]] = ("name", event_name(e))
+    for p in doc["points"]:
+        out[p["ref"]] = ("content", p["content"])
+    return out
+
+
 def map_identities(doc: dict) -> list[tuple[str, str]]:
     """Every node the map declares, as the (property, value) that identifies it.
 
@@ -656,18 +732,7 @@ def map_identities(doc: dict) -> list[tuple[str, str]]:
     node and zero edges was a PASS too. A count cannot tell the map from
     anything else; the identity can.
     """
-    out: list[tuple[str, str]] = []
-    for s in doc["subjects"]:
-        out.append(("name", s["name"]))
-    for o in doc["objects"]:
-        out.append(("name", o["name"]))
-    for s in doc["sources"]:
-        out.append(("url", s["url"]))
-    for e in doc["events"]:
-        out.append(("name", event_name(e)))
-    for p in doc["points"]:
-        out.append(("content", p["content"]))
-    return out
+    return list(identity_by_ref(doc).values())
 
 
 def _row_identities(row: list) -> set[tuple[str, str]]:
@@ -675,43 +740,79 @@ def _row_identities(row: list) -> set[tuple[str, str]]:
             if value}
 
 
-def presence(doc: dict, node_rows: list, edge_rows: list) -> tuple[list, int]:
-    """Which declared identities the graph holds, and how many declared edges
-    join two of them.
+def presence(doc: dict, node_rows: list, edge_rows: list,
+             op_rows: list) -> tuple[list, list]:
+    """(declared identities absent, declared EDGES absent).
 
-    Pure, so the verdict can be exercised without a database: `verify()` is the
-    only thing that needs Falkor, and its arithmetic is the part that was wrong.
+    ⛔ A declared edge is present only if the graph holds THAT edge — matched by
+    relation type and both endpoint identities (structural) or by an operator
+    node of that mechanism over exactly those two endpoints (operators). The
+    pre-fix arm counted any edge joining two present identities, and the DOOR
+    ITSELF mints undeclared edges (`props.extractedFrom` on 8 Points
+    materialises the Source and links it), so a read-back missing 8 declared
+    edges still printed 101/101 (#13913 review round 3).
+
+    Pure, so the verdict can be exercised without a database.
     """
     present: set[tuple[str, str]] = set()
     for row in node_rows:
         present |= _row_identities(row)
-    missing = [(prop, value) for prop, value in map_identities(doc)
-               if (prop, value) not in present]
-    joined = 0
+    by_ref = identity_by_ref(doc)
+    missing_nodes = [(prop, value) for prop, value in by_ref.values()
+                     if (prop, value) not in present]
+
+    structural: set[tuple[str, tuple[str, str], tuple[str, str]]] = set()
     for row in edge_rows:
-        if _row_identities(row[:3]) & present and _row_identities(row[3:]) & present:
-            joined += 1
-    return missing, joined
+        kind = row[0]
+        for a in _row_identities(row[1:4]):
+            for b in _row_identities(row[4:7]):
+                structural.add((kind, a, b))
+
+    # An operator is a NODE whose typed edges reach its endpoints; its identity
+    # is the operator's own id, grouped here.
+    operators: dict[object, tuple[str, set[tuple[str, str]]]] = {}
+    for row in op_rows:
+        nid, kind = row[0], row[1]
+        _kind, endpoints = operators.setdefault(nid, (kind, set()))
+        endpoints |= _row_identities(row[2:5])
+
+    missing_edges: list[tuple[str, str, str]] = []
+    for e in doc["edges"]:
+        a, b = by_ref[e["from"]], by_ref[e["to"]]
+        if "op" in e:
+            held = any(kind == e["op"] and a in ends and b in ends
+                       for kind, ends in operators.values())
+        else:
+            held = (e["relation"], a, b) in structural
+        if not held:
+            missing_edges.append((e.get("op") or e.get("relation"),
+                                  e["from"], e["to"]))
+    return missing_nodes, missing_edges
 
 
-def verdict(doc: dict, node_rows: list, edge_rows: list) -> int:
+def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
     """0 only when every declared node AND every declared edge reads back."""
-    missing, joined = presence(doc, node_rows, edge_rows)
+    missing_nodes, missing_edges = presence(doc, node_rows, edge_rows, op_rows)
     total = len(map_identities(doc))
     expected_edges = len(doc["edges"])
-    print(f"\nnodes: {total - len(missing)}/{total} declared identities present")
-    print(f"edges: {joined}/{expected_edges} declared edges join two present nodes")
-    if missing:
-        print(f"MISSING — {len(missing)} declared node(s) are not in the graph:",
+    print(f"\nnodes: {total - len(missing_nodes)}/{total} declared identities present")
+    print(f"edges: {expected_edges - len(missing_edges)}/{expected_edges} "
+          "declared edges present")
+    if missing_nodes:
+        print(f"MISSING — {len(missing_nodes)} declared node(s) are not in the graph:",
               file=sys.stderr)
-        for prop, value in missing[:20]:
+        for prop, value in missing_nodes[:20]:
             print(f"  - {prop}: {value[:70]!r}", file=sys.stderr)
-        if len(missing) > 20:
-            print(f"  … and {len(missing) - 20} more", file=sys.stderr)
-    if joined < expected_edges:
-        print(f"EDGES SHORT — {expected_edges - joined} declared edge(s) are absent "
-              "(an unjoined map is filed but not findable)", file=sys.stderr)
-    return 0 if not missing and joined >= expected_edges else 1
+        if len(missing_nodes) > 20:
+            print(f"  … and {len(missing_nodes) - 20} more", file=sys.stderr)
+    if missing_edges:
+        print(f"EDGES MISSING — {len(missing_edges)} declared edge(s) are absent "
+              "(an unjoined map is filed but not findable):", file=sys.stderr)
+        for kind, frm, to in missing_edges[:20]:
+            print(f"  - {kind}: {frm} -> {to}", file=sys.stderr)
+        if len(missing_edges) > 20:
+            print(f"  … and {len(missing_edges) - 20} more", file=sys.stderr)
+    return 0 if not missing_nodes and not missing_edges else 1
 
 
 def verify(doc: dict) -> int:
@@ -754,10 +855,21 @@ def verify(doc: dict) -> int:
 
     node_rows = q("MATCH (n) RETURN coalesce(n.name,''), coalesce(n.url,''), "
                   "coalesce(n.content,'')")
-    edge_rows = q("MATCH (a)-[e]->(b) RETURN coalesce(a.name,''), coalesce(a.url,''), "
+    edge_rows = q("MATCH (a)-[e]->(b) "
+                  "WHERE NOT (a.is_operator = true OR a.op_type IS NOT NULL) "
+                  "RETURN type(e), coalesce(a.name,''), coalesce(a.url,''), "
                   "coalesce(a.content,''), coalesce(b.name,''), coalesce(b.url,''), "
                   "coalesce(b.content,'')")
-    return verdict(doc, node_rows, edge_rows)
+    # An operator is a NODE: its typed edges reach its endpoints, so the declared
+    # operator is matched by (mechanism, both endpoints) grouped per operator id
+    # — never by a direct `(from)-[:IMPL]->(to)` edge, which the writer does not
+    # create (`projection/edges.py`: `MERGE (o)-[:IMPL]->(s)`).
+    op_rows = q("MATCH (o)-[e]->(x) "
+                "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
+                "RETURN coalesce(o.id, o.nodeKey, toString(id(o))), "
+                "coalesce(o.op_type,''), coalesce(x.name,''), coalesce(x.url,''), "
+                "coalesce(x.content,'')")
+    return verdict(doc, node_rows, edge_rows, op_rows)
 
 
 def main() -> int:

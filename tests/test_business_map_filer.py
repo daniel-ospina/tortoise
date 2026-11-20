@@ -383,7 +383,7 @@ def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
     Mutant: `return 0 if got >= expected * 0.9 else 1` over a whole-graph count.
     """
     unrelated = [["", f"unrelated-{i}", ""] for i in range(71)]
-    assert filer.verdict(map_doc, unrelated, []) == 1
+    assert filer.verdict(map_doc, unrelated, [], []) == 1
 
 
 def test_the_readback_verdict_refuses_a_map_with_no_edges(map_doc):
@@ -392,11 +392,156 @@ def test_the_readback_verdict_refuses_a_map_with_no_edges(map_doc):
     Mutant: a verdict that counts nodes only — `verify()`'s docstring says edges
     are "the difference between filed and findable", so this is the arm it owes.
     """
-    assert filer.verdict(map_doc, _node_rows(map_doc), []) == 1
+    assert filer.verdict(map_doc, _node_rows(map_doc), [], []) == 1
+
+
+def _edge_rows(doc: dict) -> tuple[list[list], list[list]]:
+    """The read-back rows a correctly-filed map would produce.
+
+    Structural edges: `(type, from-identity…, to-identity…)`. Operator edges: an
+    operator NODE whose typed edges reach both endpoints — grouped per operator,
+    mirroring `presence()` and the writer's own shape (`MERGE (o)-[:IMPL]->(s)`).
+    """
+    structural: list[list] = []
+    operators: list[list] = []
+    op_index: dict[str, list] = {}
+    for e in doc["edges"]:
+        a, b = _row_for(doc, e["from"]), _row_for(doc, e["to"])
+        if "op" in e:
+            nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
+            operators.append([nid[0], e["op"], *a])
+            operators.append([nid[0], e["op"], *b])
+        else:
+            structural.append([e["relation"], *a, *b])
+    return structural, operators
 
 
 def test_the_readback_verdict_passes_a_complete_map(map_doc):
-    """Non-vacuity for the two refusals above: the real map reads back GREEN."""
-    edge_rows = [_row_for(map_doc, e["from"]) + _row_for(map_doc, e["to"])
-                 for e in map_doc["edges"]]
-    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows) == 0
+    """Non-vacuity for the refusals: the real map reads back GREEN."""
+    edge_rows, op_rows = _edge_rows(map_doc)
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, op_rows) == 0
+
+
+def test_the_verdict_refuses_when_only_UNDECLARED_edges_are_present(map_doc):
+    """Declared edges, not merely edges between present nodes.
+
+    The door mints edges the map does not declare (`props.extractedFrom` on 8
+    Points materialises the Source and links it), so a read-back that counts
+    joinable edges printed 101/101 with 8 declared edges absent.
+
+    Mutant: count edges whose endpoints are present (`joined >= expected`) —
+    this fixture then reports 50/50 and exits 0.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    structural = [row for row in edge_rows if row[0] != "extractedFrom"]
+    assert len(structural) == 50
+    # Eight declared structural edges replaced by an UNRELATED relation over the
+    # same endpoints: the edge count is unchanged, the declared set is not.
+    sabotaged = structural[:-8] + [["extractedFrom", *row[1:]] for row in structural[-8:]]
+    assert filer.verdict(map_doc, _node_rows(map_doc), sabotaged, op_rows) == 1
+
+
+def test_a_5xx_after_the_last_attempt_raises_instead_of_returning_the_body(monkeypatch):
+    """A gateway error body on the final attempt is a FAILURE, never a success.
+
+    Mutant: let the `code >= 500` arm fall through at `attempt == 5` — the body
+    `{"message": "Internal Server Error"}` carries no `result`, `_refusal` finds
+    nothing, and 101 edges are marked `written` while 50 were never created.
+    """
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(
+        mcp, "_post",
+        lambda body: (500, {"message": "Internal Server Error", "status": 500}, {}),
+    )
+    with pytest.raises(RuntimeError, match="UNCONFIRMED"):
+        mcp.call("tortoise_create_edge", {})
+
+
+def test_a_non_rpc_body_is_not_read_as_success(monkeypatch):
+    """A 4xx JSON body is not a tool result — the MCP wire answers `content[]`
+    and/or `structuredContent`, so anything else is a refusal.
+
+    Mutant: return `payload.get("result", payload)` unconditionally — a 401
+    `{"message": "Unauthorized"}` is then reported as a landed write.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post",
+                        lambda body: (401, {"message": "Unauthorized"}, {}))
+    with pytest.raises(RuntimeError, match="carried no tool result"):
+        mcp.call("tortoise_create_edge", {})
+
+
+def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The operator's marker exists at the moment its request is sent.
+
+    `create_operator` has no existence check: a run killed between the write and
+    its response must not duplicate the operator on resume (a duplicate
+    double-counts the claim's EP weight, #10849), so the intent is recorded
+    first and `--verify` decides whether it landed.
+
+    Mutant: mark AFTER the call — the first operator request sees no marker.
+    """
+    state_path = tmp_path / "state.json"
+    seen: dict[str, bool] = {}
+    first_op = next(i for i, e in enumerate(map_doc["edges"]) if "op" in e)
+
+    class _Intent(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator" and "op" not in seen:
+                    written = json.loads(state_path.read_text())["written"]
+                    # THIS edge's marker — structural edges earlier in the list
+                    # have their own markers, so a prefix test would pass either way.
+                    seen["op"] = f"edge:{first_op}" in written
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Intent)
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+    assert seen.get("op") is True, "the operator intent was not recorded before the call"
+
+
+def test_the_structural_relation_set_is_the_SHIPPED_one(map_doc):
+    """`validate()` refuses a relation the surface accepts, or it is a transcription.
+
+    `STRUCTURAL_RELS` lags the shipped predicates (`aboutAction` is missing), so
+    the validator must read `tortoise.projection.edges._VALID_EDGE_PREDICATES`
+    when the repo is importable.
+
+    Mutant: validate against the literal — an `aboutAction` edge is refused.
+    """
+    from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+
+    vocab = filer.shipped_vocab()
+    assert vocab is not None, "the shipped vocabularies are importable here"
+    assert vocab["relation"] == set(_VALID_EDGE_PREDICATES)
+    assert "aboutAction" in vocab["relation"]
+    assert "aboutAction" not in filer.STRUCTURAL_RELS, (
+        "the transcription caught up — re-derive this pin")
+
+    # And `validate()` must USE it: a surface-legal edge the transcription omits
+    # has to pass. Mutant: validate against `STRUCTURAL_RELS` — this is refused.
+    legal = json.loads(json.dumps(map_doc))
+    for edge in legal["edges"]:
+        if "relation" in edge:
+            edge["relation"] = "aboutAction"
+            break
+    else:  # pragma: no cover - the map always has structural edges
+        pytest.fail("the map has no structural edge to re-point")
+    errs = filer.validate(legal)
+    assert not any("not a valid structural predicate" in e for e in errs), errs
