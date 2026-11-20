@@ -1122,13 +1122,15 @@ def checker(monkeypatch, derived_baseline):
     return sm
 
 
-def _check(sm, doc: dict, tmp_path, *, strict: bool = False) -> tuple[int, str]:
+def _check(sm, doc: dict, tmp_path, *, strict: bool = False, **extra) -> tuple[int, str]:
     """Run `cmd_check` with a redirected manifest, capturing stdout AND stderr.
 
-    stderr is captured because a traceback goes there: an assertion that the output carries
+    `stderr` is captured because a traceback goes there: an assertion that the output carries
     no traceback is vacuous against a stdout-only buffer (review finding). `MANIFEST_FILE`
     is restored, so a test cannot leak the redirect into another one. `strict` drives the
-    `--provenance-strict` arm (#11057) through the SAME path the workflow step uses.
+    `--provenance-strict` arm (#11057) through the SAME path the workflow step uses, and
+    `**extra` carries any other `check` flag — `base_ref`/`allow_surface_shrink` drive the
+    SHRINK arm (#12327) through that same path rather than through a helper.
     """
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -1140,7 +1142,7 @@ def _check(sm, doc: dict, tmp_path, *, strict: bool = False) -> tuple[int, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            rc = sm.cmd_check(argparse.Namespace(provenance_strict=strict))
+            rc = sm.cmd_check(argparse.Namespace(provenance_strict=strict, **extra))
     finally:
         sm.MANIFEST_FILE = previous
     return rc, buf.getvalue()
@@ -7786,3 +7788,200 @@ def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
     assert (repo / entry["file"]).exists(), entry
     assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
 
+
+
+# ── 15. the SHRINK pin on the COMMITTED baseline (#12327) ─────────────────────────────────
+#
+# `cut`'s removal gate (#12237) grades the transition "committed rows -> freshly derived
+# rows". A HAND-SPLICE never makes that transition: delete a row from the baseline, fix the
+# four mechanical cells a splicer already edits, delete the code — and `cut` never runs, so
+# the removal gate never runs. Property 12 then compares the artifact against a derivation
+# of the code that no longer has the tool, `tools/surface-guard.py` compares the live class
+# against those same rows, and both are green BY THE SAME CONSTRUCTION. It is the shape
+# three gates could not see, and it is the RECOMMENDED procedure here (`MEMORY.md`
+# `[surface-cut]`), so it sat on the path a careful lane is told to take.
+#
+# The reference that fixes it is a version the PR cannot author: the merge base. These tests
+# prove BOTH directions on REAL records — the archive manifest and the retirement maps are
+# the repository's own, never stubbed, because the accounting rule is the thing under test.
+
+
+def _baseline_pair(*, extra_rows: tuple[str, ...] = (), extra_retired: tuple[str, ...] = ()):
+    """`(base, now)`: the real baseline plus the rows a splice would have removed.
+
+    `base` is what the BASE REF held; `now` is the artifact after the hand-edit. Every test
+    below builds its violation this way, so nothing about the accounting is simulated — only
+    the prior is, because no same-tree check can have one.
+    """
+    with MANIFEST.open() as fh:
+        now = yaml.safe_load(fh)
+    base = copy.deepcopy(now)
+    template = now["rows"][0]
+    base["rows"] = list(base["rows"]) + [
+        dict(template, name=name) for name in extra_rows
+    ]
+    if extra_retired:
+        now = copy.deepcopy(now)
+        now["retired"] = list(now.get("retired") or []) + [
+            {"name": name, "use_instead": "tortoise_search"} for name in extra_retired
+        ]
+    return base, now
+
+
+def test_a_spliced_tool_row_with_no_record_is_red_and_names_the_symbol():
+    """#12327's measured exploit: the row AND the code are gone, every gate green."""
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_spliced_ghost",))
+
+    problems = sm.shrink_problems(base, now)
+
+    assert any("tortoise_spliced_ghost" in p for p in problems), (
+        f"the pin must NAME the symbol that left the baseline: {problems}"
+    )
+    assert any("DROPPED with no record" in p for p in problems), problems
+
+
+def test_a_spliced_row_covered_by_an_archive_entry_is_green():
+    """The legitimate case, on a REAL archive entry (an `mcp-tool` row in archive/MANIFEST.json).
+
+    Not a fixture entry: `removal_records()` re-grades the committed archive, so this is the
+    same accounting a splicer's PR would have to satisfy.
+    """
+    sm = _load_manifest_tool()
+    from tools import archive_surface as arch
+
+    archived = sorted(
+        entry["symbol"]
+        for entry in arch.load_manifest(arch.MANIFEST_PATH).get("entries", [])
+        if entry.get("kind") == arch.MCP_TOOL
+    )
+    assert archived, "the fixture needs a real `mcp-tool` archive entry to prove the green direction"
+    base, now = _baseline_pair(extra_rows=(archived[0],))
+
+    assert sm.shrink_problems(base, now) == [], (
+        f"{archived[0]} left the baseline WITH an archive record, which is a recorded removal"
+    )
+
+
+def test_a_row_that_reappears_as_a_retired_name_is_not_a_shrink():
+    """A retirement is still SERVED (#3883), so nothing left the surface at all.
+
+    This is #12327's acceptance case: the same tree with the name in `RETIRED_USE_INSTEAD`
+    is green — because the derivation writes it into the `retired:` half, which
+    `surface_symbols` reads. Nothing is waived; nothing was removed.
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(
+        extra_rows=("tortoise_retired_door",), extra_retired=("tortoise_retired_door",)
+    )
+
+    assert sm.shrink_problems(base, now) == []
+
+
+def test_an_unchanged_baseline_is_green():
+    """Non-vacuity: the pin must not red an ordinary merge (a gate that always fires is off)."""
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    assert sm.shrink_problems(doc, doc) == []
+
+
+def test_a_waiver_that_waives_nothing_is_reported():
+    """A false record is worse than no record: it reads as a departure somebody checked."""
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    problems = sm.shrink_problems(doc, doc, allowed=["tool:tortoise_never_existed"])
+
+    assert any("waives nothing" in p and "tortoise_never_existed" in p for p in problems), problems
+
+
+def test_a_deliberate_shrink_passes_with_a_named_waiver():
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_deliberate_drop",))
+
+    assert sm.shrink_problems(base, now, allowed=["tool:tortoise_deliberate_drop"]) == []
+
+
+def test_the_gate_reds_through_cmd_check_and_not_only_through_the_helper(
+    checker, tmp_path, monkeypatch
+):
+    """The acceptance says the GATE exits non-zero — so the arm is driven through `cmd_check`.
+
+    A scratch repo supplies the base ref (a real git tree with a real committed baseline),
+    and the assertion is the waiver arm because it is the one shape that needs no archive
+    re-grade: `removal_records()` re-reads every frozen file against THIS checkout, which a
+    scratch tree cannot satisfy, and stubbing it would make the proof prove nothing.
+    """
+    sm = checker  # `checker` is the module with `build_doc` pinned to the real derivation
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    repo = tmp_path / "scratch"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+
+    monkeypatch.setattr(sm, "ROOT", repo)
+    rc, out = _check(
+        sm, doc, tmp_path, base_ref="HEAD", allow_surface_shrink=["tool:tortoise_never_existed"]
+    )
+
+    assert rc == 1, f"the gate must exit non-zero on a false record, not print and pass: {out}"
+    assert "waives nothing" in out and "tortoise_never_existed" in out, out
+
+
+def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, monkeypatch):
+    """`check` keeps its documented meaning: a depth-1 `test` job cannot resolve a merge base."""
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    called = []
+    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: called.append(1) or ([], "x"))
+
+    rc, out = _check(sm, doc, tmp_path)
+
+    assert rc == 0, out
+    assert called == [], "the shrink arm ran without --base-ref"
+    assert "shrink checked against" not in out
+
+
+def test_a_shrink_waiver_needs_a_reason_and_a_base_ref():
+    """Same pairing `archive_surface.py check` refuses, for the same two reasons."""
+    assert _run(
+        "tools/surface_manifest.py", "check", "--allow-surface-shrink", "tool:x"
+    ).returncode == 2
+    assert _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--allow-surface-shrink",
+        "tool:x",
+        "--allow-surface-shrink-reason",
+        "why not",
+    ).returncode == 2
+
+
+def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
+    """Wiring: an arm no job invokes is a no-op gate (the measured #9075/#11057 shape)."""
+    workflow = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    needle = "tools/surface_manifest.py check --base-ref"
+    assert needle in workflow, (
+        "no workflow runs the surface shrink arm; deleting the flag from the step must red "
+        "here, not read as a cleanup"
+    )
+    index = workflow.index(needle)
+    job = workflow.rfind("\n  surface-guard:", 0, index)
+    assert job != -1, "the shrink arm needs the job whose clone has real history"
+    assert "fetch-depth: 0" in workflow[job:index], (
+        "the job running the shrink arm must check out full history, or the merge base is "
+        "absent by construction and the gate cannot answer"
+    )

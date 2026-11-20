@@ -3088,7 +3088,7 @@ def removal_report(
 # record rule, and a second implementation of it here would be a second answer.
 
 
-def _manifest_at(root: Path, sha: str) -> dict | None:
+def _manifest_at(root: Path, sha: str, rel: str = "config/surface-manifest.yml") -> dict | None:
     """The surface baseline AS THE GIVEN COMMIT RECORDS IT, `None` when it had no baseline.
 
     ABSENT is an honest answer only where the file genuinely did not exist (a commit before
@@ -3096,8 +3096,11 @@ def _manifest_at(root: Path, sha: str) -> dict | None:
     surface did not shrink" from a base this gate cannot read is the false green the arm
     exists to prevent, and it is the same distinction `archive_surface._entries_at` draws
     (asked of the tree, never inferred from a `None` that means both).
+
+    `rel` is a parameter rather than `MANIFEST_FILE.relative_to(ROOT)` on purpose: the tests
+    redirect both globals to grade a SCRATCH tree, and a path derived from them would either
+    raise or silently grade the wrong repository's history.
     """
-    rel = MANIFEST_FILE.relative_to(ROOT).as_posix()
     try:
         present = subprocess.run(
             ["git", "cat-file", "-e", f"{sha}:{rel}"],
@@ -3134,6 +3137,55 @@ def _manifest_at(root: Path, sha: str) -> dict | None:
     return doc
 
 
+def shrink_problems(
+    base_doc: dict,
+    doc: dict,
+    *,
+    allowed: tuple[str, ...] | list[str] = (),
+) -> list[str]:
+    """`problems` for a committed surface that SHRANK from `base_doc` with no record.
+
+    The pure half of #12327, split out so it can be proven on real records without a real
+    merge base (the base DOCUMENT is the input; where it came from is `shrink_report`'s
+    question, not this one's). `removal_report` decides the accounting — its eighteen
+    review rounds are the record rule, and a second implementation here would be a second
+    answer — so the only thing this function adds is the PRIOR set, which is the half no
+    same-tree check can supply: the PR authors both sides of every comparison it could make.
+    """
+    prior = surface_symbols(base_doc)
+    derived = surface_symbols(doc)
+    out: list[str] = []
+    if prior - derived:
+        # `removal_records()` is the EXPENSIVE half (~55 s: it re-grades every frozen archive
+        # file, the same work `archive_surface.py check` does), so it is paid only when a
+        # symbol actually left the surface — exactly when the accounting is the question.
+        records = removal_records()
+        problems, _accounting = removal_report(prior, derived, records, allowed=list(allowed))
+        out = [str(p) for p in problems]
+        # ⛔ A WAIVER THAT WAIVES NOTHING IS A FALSE RECORD, and `removal_report` cannot report
+        # it here: it only grades a waiver against a removal it met, so a waiver naming a
+        # symbol the BASE never carried falls through silently. That is the one shape a false
+        # record takes on a tree with nothing to remove — and it is worse than no record,
+        # because it reads as a departure somebody checked. (`archive_surface.shrink_violations`
+        # carries the same arm for its own waivers; `removal_report`'s redundant/ambiguous arms
+        # cover the rest.)
+    prior_symbols = {symbol for symbol, _cls in prior}
+    for entry in list(allowed):
+        cls, symbol = parse_waiver(entry)
+        if symbol not in prior_symbols:
+            out.append(
+                f"`--allow-surface-shrink {entry}` waives nothing: the base ref's baseline "
+                f"never carried {symbol!r}, so there is no removal for it to record"
+            )
+        elif cls is not None and (symbol, cls) not in prior:
+            out.append(
+                f"`--allow-surface-shrink {entry}` waives nothing on the {cls!r} surface: "
+                f"{symbol!r} is a {sorted(c for s, c in prior if s == symbol)!r} symbol in the "
+                "base ref's baseline"
+            )
+    return out
+
+
 def shrink_report(
     doc: dict,
     *,
@@ -3146,8 +3198,7 @@ def shrink_report(
     A symbol in the BASE ref's baseline and absent from the COMMITTED one is a removal, and
     it is accounted for exactly as `cut` would demand: an `archive/MANIFEST.json` entry of
     the symbol's own kind, or (for an SDK method) that freeze PLUS the retirement-map entry,
-    or a waiver that NAMES the symbol and surface. `removal_report` decides that; this
-    function's only job is to supply a `prior` the PR cannot have authored.
+    or a waiver that NAMES the symbol and surface (see `shrink_problems`).
 
     `base_ref` is `""` for "the default branch, as this clone names it" (the CLI's `const`).
     An unresolvable ref is a REFUSAL, not an empty removal set.
@@ -3173,10 +3224,10 @@ def shrink_report(
     if base_doc is None:
         # No baseline at the base: nothing to have shrunk. SAID, not silent — a gate that
         # skipped its own question must not read as one that answered it.
-        return [], f"{label} (which carries no {MANIFEST_FILE.name} — no shrink to grade)"
+        return [], f"{label} (which carries no {Path('config/surface-manifest.yml').name} — " \
+            "no shrink to grade)"
     try:
-        prior = surface_symbols(base_doc)
-        derived = surface_symbols(doc)
+        return shrink_problems(base_doc, doc, allowed=allowed), label
     except SurfaceEvidenceUnreadable:
         raise
     except Exception as exc:
@@ -3184,11 +3235,6 @@ def shrink_report(
             f"could not enumerate the surface symbols on both sides of the comparison: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
-    if prior <= derived:
-        return [], label
-    records = removal_records()
-    problems, _accounting = removal_report(prior, derived, records, allowed=list(allowed))
-    return [str(p) for p in problems], label
 
 
 def cmd_cut(args: argparse.Namespace) -> int:
