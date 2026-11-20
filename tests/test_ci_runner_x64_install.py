@@ -4323,9 +4323,9 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: Every citation whose target sits AT OR BELOW the insert moved DOWN by 25; the ones above it did
 #: not. Re-derive each from the workflow, never offset the old number by the insert's size.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4774", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4807", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4766-4768", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4799-4801", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3230", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
