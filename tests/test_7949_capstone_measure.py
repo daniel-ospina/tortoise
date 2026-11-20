@@ -6634,6 +6634,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is again how the numbers below were re-derived
         # rather than nudged — a uniform +18, and the offsets re-measured rather than assumed.
+        # ⛔ THIS BRANCH REACHED THE SAME PAIR INDEPENDENTLY, by STRUCTURE rather than by an
+        # inferred offset, at `32307d0109` — whose PARENT `eefad7c242` still pinned the stale
+        # pair against a tree whose own START was already this one. Each of the four anchors was
+        # found from its own `grep -n`, in the order stated above, and each landed exactly where
+        # the three offsets predict. The figures are deliberately NOT repeated here: what is new
+        # is the ATTRIBUTION, and that the two sides of this merge resolved to the SAME pair by
+        # structure rather than picking one.
         # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`
         # `0774035055`, where `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split)
         # inserted 22 lines above `org_info` and the span was `:15262-15339` at THAT head, with
@@ -6805,10 +6812,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 269 cite-shaped `:N` tokens at this head
-    # (the `~50` these
-    # comments used to say was an order of magnitude low — #13900 review, finding 5): a row
-    # cannot separate two
+    # because D5 is one markdown LINE carrying 262 cite-shaped `:N` tokens (the `~50` these
+    # comments used to say was about five times low, `262/50 ≈ 5.2`, not a tenfold one —
+    # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
     # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
     _honours_line = next(
@@ -16486,11 +16492,14 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 262 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    `6991e2f0ad` moving the line off `262` reds instead of leaving four comments behind (a
+    any commit moving the line off `262` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
+    ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
+    and the pins that read it live here), so the branch row's count is the one that holds; a
+    figure read off the other side's row is a reading of a different line.
 
     ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
     this file is line-scoped, so this row can be broken structurally — 6 cells against a
@@ -16594,10 +16603,18 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
         # restatement that drops the number is out of scope, which is a different claim.
         ("45728", "a DIFFERENT call site"),
-        "measured at this head: `:45728` is a NAME in an import list "
-        "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
+        "measured rather than carried: the import-list hit is what "
+        "`grep -n 'subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,' "
+        "tortoise/sdk.py` prints (a NAME in an import list, not a call), and the "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
-        "prints (#13794 measurement, P2)",
+        "prints — ⛔ no line number is typed here, because the number this note "
+        "used to carry rotted to a docstring line while the import list itself "
+        "moved: the same grep prints `:45867` at `1a193d4c39`, and printed "
+        "`:45728` at `09f5c99afd` — the head that wrote that PIN, ⛔ not the head "
+        "that wrote this note (`d6a3c93308`), which already printed `:45867` — "
+        "which is the same correction the D5 cell now records "
+        "(#13794 measurement, P2; #13853 review, P2; #13853 review at "
+        "`1a193d4c39`, P2: the first cut of this parenthesis named the wrong head)",
     ),
     (
         # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
@@ -16689,7 +16706,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 269 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 262 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -16701,7 +16718,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
 #: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6791`-`:6794` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: `:6798`-`:6801` asserts each of the four (the symbol derived at `:6794`), and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
 #: that clause ever had a reader. THREE things here are new coverage: the
@@ -16718,10 +16735,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 269 cite-shaped `:N` tokens at this head (re-measured after `6991e2f0ad` moved
-    # the line off the `262` this comment carried, which was true at `f16ef087d1`; measured here with
+    # carries 262 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
-    # say was an order of magnitude low, which is the same rot one layer up) — so `:20329`
+    # say was about five times low (`262/50 ≈ 5.2`), which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
@@ -16757,8 +16774,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
-    number that shared a line with 262 others at `f16ef087d1` (the `~50` this sentence used to say
-    was an order of magnitude low: #13900 review, cycle 11).
+    number that shared a line with 262 others (the `~50` this sentence used to say
+    was about five times low — `262/50 ≈ 5.2`: #13900 review, finding 5).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
     document handed them two different answers for ONE statement on the SAME line.
