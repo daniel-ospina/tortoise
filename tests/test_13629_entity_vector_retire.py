@@ -8274,6 +8274,62 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE VALUES VIEW AS A *KEY* SOURCE IS NOT AN HONEST WRITE-STOP (`#13788` review
+        #    round 11, P1, measured). The `.values()` arm's own comment claimed it was —
+        #    "where the view is the KEY source and nothing is stored" — and a key-source
+        #    clause binds the VALUE, so a mapping whose values ARE the property name places
+        #    the vector exactly as the refused `.keys()` / bare-iteration twins do. This is
+        #    the ONLY row that reds when the arm's scalar reading is removed, so it is that
+        #    leg's witness; the pairs reading beside it is pinned by the row above.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": "embedding"}.values()}
+        return None
+    _write(props)
+""",
+        # ⛔ A CONSTANT *KEY* INTO A MAPPING IS A MAPPING LOOKUP (`#13788` review round 11, P1,
+        #    measured). The const-index twin was closed in round 9 for a SEQUENCE
+        #    (`[{"embedding": 1}][0]`, refused above); the DICT half of the same seam was
+        #    left open and `d4f3de3ab0`'s message called that residue closed. Each row below
+        #    is a witness for one leg — the first three and the `dict(...)` one for the
+        #    `_mapping_items_pairs` Subscript arm, the bare-iteration and `.keys()` pair for
+        #    `_comprehension_source_yields`' twin. Revert either leg and its rows go CERTIFIED.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"a": {"embedding": 1}}["a"].items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"a": {"b": ("embedding", 1)}}["a"].values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"a": {"embedding": 1}}["a"]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"].keys()}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -8288,6 +8344,33 @@ def _upsert_object(props, ev):
     # ⛔ AND THE HONEST STOP ARMS MUST STILL CERTIFY, or the rule is an inert enforcer: a
     # removal, a bare exit, and a non-store statement before the exit are all write-stops.
     accepted = (
+        # ⛔ THE TWO NEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review round 11). Each
+        #    control below is the same SHAPE as a row the fix refuses, with the property absent
+        #    from the one position the rule reads — so a rule that refused on the spelling
+        #    rather than on the store would pass every refused row above and still be wrong.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": "embedding_model"}.values()}
+        return None
+    _write(props)
+""",
+
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": {"embedding_model": 1}}["a"]}
+        return None
+    _write(props)
+""",
+
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"a": {"embedding_model": 1}}["a"].items()}
+        return None
+    _write(props)
+""",
         # ⛔ THE ONE-SEQUENCE-RESOLVER MUST NOT SWALLOW A NON-STORE (`#13788`, measured at
         # `6504b28f`): a zip whose value column is empty or names no property, a `set(...)` of
         # non-stores, a `+` of non-stores and a `{**X}` source naming no property are all honest
