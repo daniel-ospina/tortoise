@@ -3599,7 +3599,15 @@ def _media_block_spans(css: str) -> list[tuple[int, int]]:
 
 
 def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
-    """Every `selector { … }` body in document order, `(body, inside_media)`.
+    """Every rule whose selector LIST contains `selector`, `(body, inside_media)`.
+
+    Reads the comma-separated PRELUDE, not the rule's exact text: a rule that
+    shares its prelude with other selectors (`#beat-hero .hero-sub,
+    #beat-hero .hero-links { text-align: center }`) is a different string from
+    the exact selector, so an exact-text reader cannot see it — measured at
+    #14020 review P2.5: appending that rule at top level left the hero rows
+    green while the desktop subtitle was centred (the 71px-off-axis defect of
+    #13696 item 1). `_css_rule_preludes` reads the same way for `.outcomes`.
 
     Bodies come from the COMMENT-BLANKED sheet (see `_css_blanked`), so a
     `text-align`/`max-width` named in a comment cannot satisfy an assertion.
@@ -3614,9 +3622,16 @@ def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
     """
     blanked = _css_blanked(css)
     media = _media_block_spans(css)
-    return [(_brace_block(blanked, m.end() - 1),
-             any(start <= m.start() < end for start, end in media))
-            for m in re.finditer(re.escape(selector) + r"\s*\{", blanked)]
+    out: list[tuple[str, bool]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        if selector not in {p.strip() for p in prelude.split(",")}:
+            continue
+        out.append((_brace_block(blanked, m.end() - 1),
+                    any(start <= m.start() < end for start, end in media)))
+    return out
 
 
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
@@ -10278,6 +10293,20 @@ class TestProductTeamsCopy:
                 "`min(660px, 74ch)` from `#beat-intro p` — a second declaration "
                 "is a second measure, and a `var(--…)` one resolves its `ch` "
                 "at this <p> anyway (#14020 review P1)")
+            # `ch` is the advance of `0` in the CONSUMING element's font, so the
+            # FONT FAMILY matters as much as the size: guarding `font-size`
+            # alone left this row blind. Measured (#14020 review P1): adding
+            # `#beat-intro .lead { font-family: Georgia, serif }` made the lead
+            # 502.97px against the prose's 605.63px at 768x900 — 51.3px the
+            # OTHER way, the alignment defect restored — with this row green.
+            assert not re.search(r"(?:^|;)\s*(?:font-family|font)\s*:", body), (
+                "`#beat-intro .lead` switches its own font "
+                f"({where}): {body.strip()!r}. `max-width: min(660px, 74ch)` is "
+                "resolved in THIS element's font — `ch` is the advance of `0` — "
+                "so a serif or mono switch moves the lead's measure away from "
+                "the prose's even at the same size (measured with Georgia: "
+                "502.97px vs 605.63px at 768x900, #14020 review P1). The serif "
+                "belongs on the inner <span>.")
 
         span_rules = _css_rules(css, "#beat-intro .lead > span")
         assert span_rules, (
@@ -10287,6 +10316,21 @@ class TestProductTeamsCopy:
         assert any("font-family: var(--serif)" in b for b in span_rules), (
             "the lead's inner <span> does not take the serif; owner item 2 has "
             "the opening line read as the section's title, not as body copy")
+        # …and the <span> has to EXIST. The serif moved onto it, so deleting it
+        # from the markup drops the lead back to body copy with every CSS row
+        # above still green: `_beat_text` strips tags, so the copy pins cannot
+        # see it, and the rule for `> span` simply never applies (#14020 review
+        # P1, measured: span removed, nothing reds).
+        lead_markup = re.search(
+            r'<p[^>]*\bclass="lead"[^>]*>(.*?)</p>',
+            _element_by_id(_product_teams_html(), "beat-intro"), re.S)
+        assert lead_markup, 'the page carries no `<p class="lead">`'
+        assert re.match(r"\s*<span[\s>]", lead_markup.group(1)), (
+            f"the lead's markup reads {lead_markup.group(0)[:160]!r}; the serif "
+            'is declared on `#beat-intro .lead > span`, so the markup must stay '
+            '<p class="lead"><span>…</span></p> — without the inner <span> the '
+            "serif silently disappears and no CSS row above reds (#14020 "
+            "review P1)")
 
         ch_property = re.search(r"--[\w-]+\s*:[^;{}]*\bch\b", _css_blanked(css))
         assert ch_property is None, (
@@ -10350,6 +10394,33 @@ class TestProductTeamsCopy:
             f"{body.strip()!r}; the grid's ONLY max-width must be the shared "
             "`min(660px, 74ch)` — a flat value is the 54.1px overhang at 760px "
             "(#13696)")
+        # ⛔ The DECLARATION being right is not the MEASURE being right: `74ch`
+        # is only the same length for the grid and the prose if both resolve `ch`
+        # against the same font-size (`ch` = advance of `0` in the CONSUMING
+        # element's font). `.outcomes` used to inherit the body's 14px while
+        # `.beat p` carries the clamp below, so the shared term computed 623.7px
+        # for the grid against 605.9px for the prose at 768 — item 3 again, 18px
+        # the other way. Measured (#14020 review P2.4): `font-size: 14px` on
+        # `.outcomes` reds no other row in this file.
+        prose_rules = [
+            (b, inside) for b, inside in _css_rules_with_scope(css, ".beat p")
+            if not inside and "font-size" in b]
+        assert prose_rules, "`.beat p` declares no base `font-size` to mirror"
+        want = re.search(r"font-size:\s*([^;]+);", prose_rules[-1][0]).group(1).strip()
+        grid_rules = [
+            (b, inside) for b, inside in _css_rules_with_scope(css, ".outcomes")
+            if not inside and "font-size" in b]
+        assert grid_rules, (
+            "`.outcomes` declares no base `font-size`, so it inherits the body's "
+            "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
+            "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
+            "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
+        got = re.search(r"font-size:\s*([^;]+);", grid_rules[-1][0]).group(1).strip()
+        assert got == want, (
+            f"`.outcomes` resolves `ch` at `{got}` while `.beat p` resolves it at "
+            f"`{want}` — so the shared `min(660px, 74ch)` is two different "
+            "measures and the grid can sit wider than the prose above it "
+            "(#14020 review P2.4, #13696 item 3)")
 
     def test_the_hero_copy_column_shares_one_left_edge(self):
         """#13696 item 1: `.beat p` centring may not leak into the hero.
