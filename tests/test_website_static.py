@@ -3541,6 +3541,38 @@ STYLE_OR_SCRIPT_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
 MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{")
 
 
+#: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
+#: `_max_height_media_blocks`; width had no reader, which is how owner item 3
+#: (a flat `.outcomes { max-width }` override inside this block) survived a
+#: full review cycle and had to be caught by eye (#13696).
+MAX_WIDTH_MEDIA_RE = re.compile(r"@media\s*\(\s*max-width:\s*(\d+)\s*px\s*\)\s*\{")
+
+
+def _css_rules(css: str, selector: str) -> list[str]:
+    """Every `{...}` body for an EXACT selector, in document order.
+
+    A selector can legitimately appear twice (base rule + narrow-viewport
+    override), so callers that ask "is this property declared for the
+    selector" must read ALL bodies — reading only the last would report
+    `display: flex` as missing because a media block re-states the rule to
+    re-flow it.
+    """
+    return [_brace_block(css, m.end() - 1)
+            for m in re.finditer(re.escape(selector) + r"\s*\{", css)]
+
+
+def _css_declarations(css: str, selector: str) -> str | None:
+    """The body of the LAST `selector { ... }` rule, or None."""
+    rules = _css_rules(css, selector)
+    return rules[-1] if rules else None
+
+
+def _max_width_media_blocks(html: str) -> list[tuple[int, str]]:
+    """Every `@media (max-width: Npx) { ... }` block as `(N, body)`."""
+    return [(int(m.group(1)), _brace_block(html, m.end() - 1))
+            for m in MAX_WIDTH_MEDIA_RE.finditer(html)]
+
+
 def _heading_levels(html: str) -> list[int]:
     """Heading levels in document order, ignoring comments and style/script."""
     stripped = HTML_COMMENT_RE.sub("", html)
@@ -10081,6 +10113,91 @@ class TestProductTeamsCopy:
         assert "\n".join(paragraphs) == self.INTRO, (
             f"the intro block reads {paragraphs!r}; the owner's page 1 reads "
             f"{self.INTRO!r}")
+
+    def test_the_intro_opens_on_the_lead_and_carries_no_rule(self):
+        """#13696 item 2: the hairline rule is GONE, the first line IS the lead.
+
+        Both halves read the SERVED markup. Without this row the owner's item 2
+        could be reverted silently and the whole suite stay green — measured:
+        re-inserting `<div class="rule" aria-hidden="true"></div>` and dropping
+        `class="lead"` reds nothing else here, because
+        `test_the_intro_block_carries_the_three_paragraphs` counts <p>s (a div
+        is invisible to it) and the lead is still a <p>.
+        """
+        intro = _element_by_id(_product_teams_html(), "beat-intro")
+        assert 'class="rule"' not in intro, (
+            "the intro still renders a `class=\"rule\"` element — the owner "
+            "asked for the hairline divider to be DELETED (#13696 item 2), and "
+            "it also outdented 32.8px past the text at 390px wide")
+        first = re.search(r"<p[^>]*>", intro)
+        assert first, "#beat-intro has no paragraph"
+        assert 'class="lead"' in first.group(0), (
+            f"the intro's first paragraph reads {first.group(0)!r}; it must "
+            "carry `class=\"lead\"` so the opening line reads as the section's "
+            "title rather than as body copy (#13696 item 2)")
+
+    def test_the_outcomes_grid_is_never_wider_than_the_prose_above_it(self):
+        """#13696 item 3: ONE measure, and no flat override in the narrow block.
+
+        The defect this pins is not the shared measure (that was right) but a
+        FLAT `.outcomes { max-width: 660px }` inside `@media (max-width: 760px)`
+        which overrode it for every width from 670 to 760 — at 760 the grid box
+        was 660px against a 605.9px prose box, 54.1px wider (27.1px out on each
+        side), which is exactly what the owner reported. It regressed once
+        INSIDE the fix that was meant to close it, so it is pinned twice: the
+        shared measure must exist, and no max-width block may re-declare one.
+        """
+        css = _product_teams_html()
+        shared = _css_declarations(
+            css, "#beat-intro p, #beat-compute > p, .outcomes")
+        assert shared is not None, (
+            "no shared-measure rule for `#beat-intro p, #beat-compute > p, "
+            ".outcomes` — the prose and the ↑/↓ grid must stand on one measure")
+        assert "min(660px, 74ch)" in shared, (
+            f"the shared measure reads {shared!r}; it must stay "
+            "`min(660px, 74ch)` — a flat 660px keeps 80 mono characters per "
+            "line at the 13.6px font floor (the band is 45–75ch)")
+        for width, body in _max_width_media_blocks(css):
+            for m in re.finditer(r"\.outcomes\s*\{([^}]*)\}", body):
+                assert "max-width" not in m.group(1), (
+                    f"`@media (max-width: {width}px)` re-declares a FLAT "
+                    f"`max-width` for `.outcomes` ({m.group(1).strip()!r}). "
+                    "That overrides the shared `min(660px, 74ch)` for every "
+                    "width in the band and makes the grid wider than the prose "
+                    "it sits under — owner item 3, #13696. Delete the override "
+                    "and let the grid inherit the shared measure.")
+
+    def test_the_hero_copy_column_shares_one_left_edge(self):
+        """#13696 item 1: `.beat p` centring may not leak into the hero.
+
+        `.beat p` sets `text-align: center` and caps at 560px, and `.hero-sub` /
+        `.hero-links` ARE <p> elements — so without these overrides the h1/CTA
+        sat on the column's left edge while the link row started 71px right of
+        it (measured at 1440x900: h1/CTA x=220, links x=291), in three axes.
+        """
+        css = _product_teams_html()
+        # The BASE rule, not the last: `@media (max-width: 760px)` deliberately
+        # re-centres the stacked hero (`.doc-copy`/`.hero-sub` -> centre), which
+        # is correct on one column. What must never regress is the desktop base.
+        copy_rules = _css_rules(css, "#beat-hero .doc-copy")
+        assert copy_rules, "`#beat-hero .doc-copy` declares no rule"
+        assert "text-align: left" in copy_rules[0], (
+            f"the base `#beat-hero .doc-copy` rule reads {copy_rules[0].strip()!r}; "
+            "it must declare `text-align: left`, or `.beat p`'s centring leaks "
+            "into `.hero-sub` and `.hero-links` — the 71px-off-axis defect of "
+            "#13696 item 1")
+        for selector in ("#beat-hero .hero-sub", "#beat-hero .hero-links"):
+            bodies = _css_rules(css, selector)
+            assert bodies, f"{selector} declares no rule"
+            assert any("text-align: left" in b for b in bodies), (
+                f"{selector} does not pin `text-align: left` in any rule; it is "
+                "a <p>, so it inherits `.beat p`'s centred alignment "
+                "(#13696 item 1)")
+        links = " ".join(_css_rules(css, "#beat-hero .hero-links"))
+        assert "display: flex" in links, (
+            "`.hero-links` is not a flex row on the copy column's left edge — "
+            "the `·` separators are `::after` on non-last links, a layout that "
+            "only holds as a row (#13696 item 1)")
 
     def test_the_compute_claim_carries_the_owner_ruled_correction(self):
         """The PDF's "make decision" ships as "make decisions" — owner ruling.

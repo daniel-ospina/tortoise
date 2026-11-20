@@ -75,8 +75,10 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     /* Tokens are product.html's, plus `--border` lifted from investors.html —
-       the hero's video frame and the intro's hairline rule need it, and minting
-       a third grey for one rule is exactly what the brief excludes. */
+       the hero's video frame and the pricing toggle's fallback need it, and
+       minting a third grey for one hairline is exactly what the brief excludes.
+       (The intro's hairline rule that also used this token was removed on the
+       owner's instruction — #13696 item 2; the token outlived it.) */
     :root {
       --bg: #060b14;
       --border: #1e293b;
@@ -265,8 +267,20 @@
        and the CTA sat on the column's left edge (measured at 1440x900: h1/CTA
        x=220, links row started x=291 — 71px off the axis, in three axes).
        The subtitle's 560px cap also broke "…& logical picture." onto a second
-       line with one short word alone. Both are overridden here: one left edge,
-       one measure, one vertical step. */
+       line with one short word alone. Both are overridden here: one left edge
+       and one measure.
+
+       ⛔ NOT literally "one vertical step" at every width, and the comment that
+       used to say so was wrong: `margin-top: 1.5rem` is on `.hero-sub` and on
+       the links row, but `#beat-hero .cta-start` only gets its 1.5rem inside
+       `@media (max-width: 760px)` (:592), and the global reset zeroes
+       `.hero-sub`'s `margin-bottom` — so on desktop the sub → CTA gap is 0
+       while h1 → sub and CTA → links are 24px. That is pre-existing (main is
+       identical), and it is deliberately NOT "fixed" here: the hero is
+       height-constrained and `safe center` (:~120) is what keeps its 5rem
+       `padding-top` clear of the fixed Login pill, so adding 24px to the
+       desktop stack is a layout change that needs a measured pass, not a
+       drive-by in a copy PR. */
     #beat-hero .doc-copy { text-align: left; }
     #beat-hero .hero-sub {
       margin-top: 1.5rem;           /* the copy column's step */
@@ -397,6 +411,16 @@
        was REMOVED on the owner's instruction (#13696 item 2) — it also
        outdented 32.8px past the text at 390px wide and sat 660px wide over a
        358.8px column. */
+    /* `ch` resolves against the element's OWN font-size, so the shared measure
+       is declared here — on `#beat-intro`, whose font-size is the body mono —
+       and consumed below. A `min(660px, 74ch)` written directly on `.lead`
+       would resolve `74ch` against the serif clamp (1.3–1.9rem), where 74ch is
+       ~782px at Georgia's ~0.51em digit advance: `min()` would then pick the
+       flat 660px while the paragraphs beneath it are 605.9px at 768, leaving
+       the intro's first line ~54px wider than the prose and — every box being
+       flex-centred — starting ~27px left of it. That is owner item 3's defect,
+       one element up. */
+    #beat-intro { --prose-measure: min(660px, 74ch); }
     #beat-intro p, #beat-compute > p, .outcomes {
       max-width: min(660px, 74ch);
     }
@@ -423,7 +447,14 @@
       line-height: 1.35;
       letter-spacing: -0.005em;
       color: var(--text);
-      margin-bottom: 1rem;
+      /* The lead's OWN measure, resolved against the body font-size (see
+         `--prose-measure` above) rather than this element's serif size. */
+      max-width: var(--prose-measure);
+      /* 36px below the lead against 20px between body paragraphs. Declared as
+         `margin-bottom` and left to collapse against the next paragraph's
+         `margin-top: 1.25rem` — which is `max(2.25rem, 1.25rem)`, so the 36px
+         is what renders. A value under 1.25rem here would be dead. */
+      margin-bottom: 2.25rem;
       /* Same orphan rule as the hero subtitle: at ~768px this breaks into
          611.8 / 129.4 ("dependencies." alone) without it. */
       text-wrap: balance;
