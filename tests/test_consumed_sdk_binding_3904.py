@@ -416,7 +416,14 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
 }
 
 
-# ── the exact PUBLIC-read expectation (dynamic reach, closed both ways) ──────
+# ── the exact SDK-read expectation (dynamic reach, closed both ways) ─────────
+#
+# ⛔ "PUBLIC" WAS THE WORD UNTIL #12901's FINAL BATCH PRIVATISED THE READ NAMES. The
+# gate pins the SDK reads a handler REACHES, and since the retirement those are the
+# private spellings (`_annotate_operator`, `_mitigate_operator`). Calling the set
+# "public" was doubly misleading: it was false about this tree, and it is what made a
+# leading-underscore FILTER look correct — the filter is exactly what emptied the pin
+# (see the note at the assertion). Say what it is: the SDK read set.
 #
 # ``tests/tool_surface_capabilities.py`` used to pin each of these two entries'
 # exact PUBLIC reached set through ``DECLARED_BINDING_DIVERGENCES`` (it compared
@@ -591,11 +598,11 @@ def test_entry_consumes_its_declared_sdk_binding(entry, record_property):
 
 
 def test_declared_sdk_read_set_is_exact():
-    """The exact PUBLIC SDK read set is pinned for the entries this gate declares.
+    """The exact SDK read set is pinned for the entries this gate declares.
 
     ``_EXPECTED_SDK_READS`` is a CLOSED map, asserted in BOTH directions:
 
-      * an entry whose recorded public reads differ from its expectation fails —
+      * an entry whose recorded SDK reads differ from its expectation fails —
         a NEW read, a dropped read, or a changed dispatch branch (an expectation
         that says ``unreached`` while the handler now reaches something is
         exactly this case); and
@@ -604,8 +611,9 @@ def test_declared_sdk_read_set_is_exact():
 
     This is the dynamic replacement for the static exact-reach pin the emptied
     ``DECLARED_BINDING_DIVERGENCES`` ledger used to carry (see the map's
-    comment): a NEW public read reached by ``tortoise_traverse`` — the case the
-    ledger removal left unflagged — is a red here.
+    comment): a NEW read reached by ``tortoise_traverse`` — the case the ledger
+    removal left unflagged — is a red here. The names it pins are the PRIVATE
+    spellings the tree holds (#12901 final batch), never a "public" subset.
     """
     registry_names = {e.name for e in TOOL_REGISTRY}
     mismatches: list[str] = []
@@ -623,10 +631,10 @@ def test_declared_sdk_read_set_is_exact():
         observed = frozenset(result.reads)
         if observed != expected:
             mismatches.append(
-                f"{name}: expected public reads {sorted(expected)} but recorded "
+                f"{name}: expected SDK reads {sorted(expected)} but recorded "
                 f"{sorted(observed)} (all reads: {list(result.reads)!r})"
             )
-    assert not mismatches, "exact public-read expectation drifted:\n  " + "\n  ".join(mismatches)
+    assert not mismatches, "exact SDK-read expectation drifted:\n  " + "\n  ".join(mismatches)
 
 
 def test_handler_served_no_read_ledger_is_exact():
