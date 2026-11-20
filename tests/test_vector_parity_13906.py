@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -2550,3 +2552,65 @@ def test_the_index_name_comes_from_the_index_relation(harness):
     assert "JOIN pg_class ic ON ic.oid = i.indexrelid" in query, query
     assert "JOIN pg_class c ON c.oid = i.indrelid" in query, query
     assert "SELECT c.relname" not in source, "the indexed TABLE's name is not the index name"
+
+
+# ── the exit-code contract, tied to the code the tool actually exits ───────
+
+#: The tool run under a faked pre-3.12 interpreter. `version_info` is replaced
+#: before `runpy` executes the file, so the file's OWN guard node runs and
+#: nothing below it does — no old interpreter needed.
+_FORCED_39 = (
+    "import runpy, sys\n"
+    "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+)
+
+README_PATH = ROOT / "docs" / "research" / "2026-11-20-13906-vector-parity" / "README.md"
+
+
+def _documented_exit_codes(docstring: str) -> tuple[set[int], set[int]]:
+    """The code table in the module docstring, and the one in §6 of the artifact README."""
+    block = docstring[docstring.index("Exit codes:"):]
+    in_docstring = {int(code) for code in re.findall(r"``(\d+)``", block)}
+    readme = README_PATH.read_text()
+    section = readme[readme.index("Falsifier exit codes"):]
+    section = section[: section.index("\n## ")]
+    in_readme = {int(code) for code in re.findall(r"^\| \*\*(\d+)\*\* \|", section, re.M)}
+    return in_docstring, in_readme
+
+
+def test_every_exit_code_the_tool_can_take_is_documented_in_both_tables(harness):
+    """★ §6's repro loop reads ONE BIT — `echo exit=$?` — so an undocumented code is unreadable.
+
+    The artifact states the falsifier's exit codes are *"part of the contract, not
+    decoration"*, and the repro recipe in §6 is one `echo exit=$?` per poison. A
+    code the tool can exit but no table lists is therefore an answer the recipe's
+    own reader has to guess at — which is the class of harm this harness exists to
+    close (a cannot-run wearing a verdict's number, #13906 rounds I1/O1).
+
+    MEASURED, and the reason this row exists: the #5128 interpreter guard at
+    `tools/vector_parity_13906.py:96` exits **4**, and neither the module's own
+    exit-code block nor §6's table carried a 4 — the guard's fix was pinned in
+    code and left the two tables that document the contract one row short.
+
+    Pinned as an EQUALITY between the two tables plus the code a REAL pre-3.12 run
+    exits, not as a literal `{0,1,2,3,4}`: a new code may be added deliberately,
+    but it cannot be added to one table only, and it cannot be left out of both
+    while the tool exits it.
+    """
+    doc_codes, readme_codes = _documented_exit_codes(harness.__doc__ or "")
+    assert doc_codes == readme_codes, (
+        "the module docstring's exit table and §6 of the artifact README disagree: "
+        f"docstring={sorted(doc_codes)} readme={sorted(readme_codes)}"
+    )
+    probe = subprocess.run(
+        [sys.executable, "-c", _FORCED_39, str(MODULE_PATH)],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert probe.returncode != 0, (
+        f"the interpreter guard must refuse an old interpreter, exited 0: {probe.stderr!r}"
+    )
+    assert probe.returncode in doc_codes, (
+        f"the tool exits {probe.returncode} under a pre-3.12 interpreter and no table "
+        f"documents it — documented: {sorted(doc_codes)}; stderr={probe.stderr!r}"
+    )

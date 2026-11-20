@@ -481,6 +481,7 @@ contract, not decoration:
 | **1** | `--poison`: the corruption was SEEN on a measured arm of the arm it moves — or, without `--poison`, a required comparison diverged |
 | **2** | cannot run: no store/schema/driver, a refused argument shape, or a poisoned run that could not measure what the poison would have to move |
 | **3** | `--poison` and every arm measured but the poison moved NOTHING — the harness is BLIND. ⛔ Not 1: `exit=1` is the one bit §6's loop reads as "confirmed", and a blind harness must never read as confirmed |
+| **4** | cannot run here: the interpreter is below this tool's 3.12 floor, refused by the `#5128` guard above the imports. ⛔ Not 1: a guard wearing 1 makes `--poison id` read "confirmed" on an interpreter that measured nothing — the same false PASS `CannotRun` closes. A separate code from 2 because 2 is a state the tool reports after it loaded; 0/1/2/3 are all readings §6's one-bit loop already consumes, so 4 is the only non-answer left. Pinned EQUAL to the module docstring's own table by `test_every_exit_code_the_tool_can_take_is_documented_in_both_tables` |
 
 ## 7. What this artifact does NOT establish
 
