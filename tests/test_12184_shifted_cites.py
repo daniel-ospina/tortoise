@@ -290,6 +290,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
     # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
     (_PLAN_4997, "tortoise/hosted_backup.py:2666", _HB, 2666, "def _index_has_is_operator() -> bool:"),
+    # --- #14043 review, finding 3: FOUR addresses this revision writes at THIS head were in neither
+    # the header's enumeration nor any pin here, so the header's own reader rule resolved them to the
+    # PIN — where a review measured that all four land on something else (a docstring, a comment, an
+    # `if not rows` guard and a bare `)`). An unlisted token is coverage this file only APPEARED to
+    # have; these rows are the same shape as the `:6989` and `hosted_backup.py:2666` rows above.
+    # NON-VACUOUS: move any of the four by `+1` and the content arm reds (the token arm cannot fire —
+    # the document still carries the address); measured at this head, each fragment below is the
+    # line's own text, and at `ccb49741b2ec` none of the four numbers carries it.
+    (_AUDIT, "live.py:667", "tortoise/live.py", 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
+    (_AUDIT, "sdk.py:15787", _SDK, 15787, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
+    (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
+    (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -433,6 +445,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28395`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28759`'): 1,
     ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2666'): 1,
+    # #14043 review, finding 3: the four addresses this revision writes at THIS head. ONE site each
+    # except `live.py:667`, which the document names three times (§2.1's table, the dead-pair paragraph
+    # and row 2's summary) — all three are the same address, so a re-point at any one of them is what
+    # the count is here to red. Measured: `grep -o 'live.py:667' <the document> | wc -l` -> 3.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15787'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
 }
 
 
@@ -551,8 +571,8 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
         "132 of this document's 229",
-        "dedupes the **341** as-written spellings to 229 — **112**",
-        "341 written spellings → 229 pairs → 112 collisions → 132 drifters of the 229",
+        "dedupes the **342** as-written spellings to 229 — **113**",
+        "342 written spellings → 229 pairs → 113 collisions → 132 drifters of the 229",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -801,7 +821,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
 
     The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
-    328 → 333 — and so 105 → 110 collisions … while adding **no pair at all**: 223 either way, because
+    342 → 347 — and so 113 → 118 collisions … while adding **no pair at all**: 229 either way, because
     each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
     was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
     more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
@@ -1042,7 +1062,11 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
     # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
     # line are the neighbours that already carry their own bare-token row.
-    assert len(_PINS) == 68
+    # 68 -> 72 at the #14043 review (finding 3): four addresses the revision writes at THIS head were
+    # in neither the header's enumeration nor `_PINS`, so the header's reader rule sent a reader to the
+    # pin, where none of them opens. Same shape as the `:6989` / `hosted_backup.py:2666` rows above:
+    # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
+    assert len(_PINS) == 72
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
