@@ -4120,6 +4120,13 @@ E6_CENSUS = "docs/evidence/11083/pack-relation-census.json"
 #: into a committed log, and an absolute path there is a claim about one operator's machine.
 PACKS_DIR = "packs"
 
+#: The TWO surfaces a declared connection is written on, and the ONLY place the scan's
+#: breadth is stated (#11695 review F4d). Both the population loop and the defect scan read
+#: `_e6_census_rows`, so a later edit cannot narrow one of them to `relations[]` without
+#: moving this tuple — which is what §10.21 means by *"never from the census's `verdicts`
+#: aggregate — that sums `relations[]` only and would silently drop every hierarchy cell"*.
+E6_SURFACES = ("relations", "hierarchies")
+
 #: The open issue that owns a declared row which binds NO write path — `#11484`
 #: ("a pack-declared object relation must be writable as an edge, not just an IMPL label").
 #: ⛔ NOT `#11237`: that issue owns the runtime WRITER, i.e. `written`, which this row
@@ -4228,6 +4235,55 @@ def _e6_key(pack: str, surface: str, row: dict) -> tuple:
             row.get("to_kind"))
 
 
+def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
+    """Every declared row of every pack, as ``(pack, surface, row)``.
+
+    ⛔ BOTH surfaces, from ONE place: the population, the defect scan and the beside column all
+    read this, so "the metric spans the ROWS of both surfaces" is a property of the code rather
+    than of three loops that happen to agree today.
+    """
+    rows: list[tuple[str, str, dict]] = []
+    for pack, block in (census.get("packs") or {}).items():
+        if not isinstance(block, dict):
+            continue
+        for surface in E6_SURFACES:
+            for row in block.get(surface) or []:
+                if isinstance(row, dict):
+                    rows.append((pack, surface, row))
+    return rows
+
+
+def e6_defects(rows: list[tuple[str, str, dict]], *, pnia_verdict: str) -> list[dict]:
+    """The rows that are unbound-and-unexplained, each NAMED with its reasons.
+
+    Takes the enumeration rather than a census so a test can drive a synthetic
+    ``hierarchies[]`` defect through the SAME scan a run uses — the breadth is then pinned
+    where it is exercised, not only where it is declared.
+    """
+    defects: list[dict] = []
+    for pack, surface, row in rows:
+        reasons = e6_row_reasons(row, pnia_verdict=pnia_verdict)
+        if reasons:
+            defects.append({**_e6_row_ref(row), "pack": pack, "surface": surface,
+                            "reasons": reasons})
+    return defects
+
+
+def _e6_reason_text(reason: object) -> str:
+    """A registry error rendered for a COMMITTED cell.
+
+    ``PackRegistry.errors`` is typed ``dict[str, list[str]]`` and the census copies it with
+    ``list(v)`` — so the value here is a LIST, and ``str(list)`` writes a Python repr
+    (``['duplicate namespace: …']``) into the scored log and the machine record. The shapes
+    are joined instead, and the list-ness is handled here rather than at the fixture, because
+    a fixture that disagrees with the producer is how this got through the first time
+    (#11695 review F3).
+    """
+    if isinstance(reason, (list, tuple)):
+        return "; ".join(str(item) for item in reason)
+    return str(reason)
+
+
 def measure_e6(*, packs_dir: Path | str | None = None,
                census_path: str = E6_CENSUS) -> dict:
     """E6's numbers at THIS head: the population, and the rows unbound AND unexplained.
@@ -4245,7 +4301,6 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     floor of 30, and every other cell read clean. A population that is not "every declared
     row across the installed packs" is therefore REFUSED rather than scored.
     """
-    census_tool = _pack_census_module()
     relative = os.path.relpath(Path(packs_dir or (ROOT / PACKS_DIR)), ROOT)
     measurement: dict = {
         "census_tool": "tools/pack_relation_census.py (build_census, write_probe=False)",
@@ -4260,6 +4315,10 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         "error": None,
     }
     try:
+        # ⛔ THE IMPORT IS INSIDE THE TRY, not beside it (#11695 review F4b). The arm that
+        # drives this clause found that a loader fault — not a pack fault — escaped the
+        # `except` and would have crashed `main` after the run had already paid its cost.
+        census_tool = _pack_census_module()
         census = census_tool.build_census(Path(packs_dir or (ROOT / PACKS_DIR)))
     except Exception as exc:  # the other rows must still be scored, and the gap named
         measurement["error"] = census_reason(exc)
@@ -4268,19 +4327,17 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         return measurement
 
     packs = census.get("packs") or {}
-    rows: list[tuple[str, str, dict]] = []
-    for pack, block in packs.items():
-        for surface in ("relations", "hierarchies"):
-            for row in (block or {}).get(surface) or []:
-                rows.append((pack, surface, row))
+    rows = _e6_census_rows(census)
     population = census.get("population") or {}
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
     # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
     # this function's docstring. Carried rather than dropped, and the row refuses on it.
     load_errors = census.get("load_errors") or {}
     measurement.update({
-        "load_errors": ({str(pack): str(reason) for pack, reason in load_errors.items()}
-                        if isinstance(load_errors, dict) else {"<census>": str(load_errors)}),
+        "load_errors": ({str(pack): _e6_reason_text(reason)
+                         for pack, reason in load_errors.items()}
+                        if isinstance(load_errors, dict)
+                        else {"<census>": _e6_reason_text(load_errors)}),
         "packs": population.get("packs", len(packs)),
         "relations": population.get("relations", 0),
         "hierarchies": population.get("hierarchies", 0),
@@ -4295,12 +4352,7 @@ def measure_e6(*, packs_dir: Path | str | None = None,
                                           if row.get("verdict") == pnia),
     })
 
-    for pack, surface, row in rows:
-        reasons = e6_row_reasons(row, pnia_verdict=pnia)
-        if reasons:
-            measurement["defects"].append(
-                {**_e6_row_ref(row), "pack": pack, "surface": surface,
-                 "reasons": reasons})
+    measurement["defects"] = e6_defects(rows, pnia_verdict=pnia)
     measurement["unbound_and_unexplained"] = len(measurement["defects"])
 
     cells, source = _e6_write_cells(census_path)
