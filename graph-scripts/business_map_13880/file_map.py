@@ -40,6 +40,7 @@ re-running after a transport death converges instead of duplicating.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pathlib
@@ -109,11 +110,14 @@ def shipped_vocab() -> dict | None:
     precisely ONTOLOGY §5's rule ("core values are here, pack kinds are
     declared in the pack manifests").
     """
+    # Imported inside the function on purpose: a bare box with no checkout can
+    # still run `--dry-run`, and the shipped registries are simply unavailable
+    # there rather than a hard module-level dependency.
     try:
-        from tortoise.commit_schema import get_vocab            # noqa: PLC0415
-        from tortoise.pack_registry import KIND_OWNER_AXES      # noqa: PLC0415
-        from tortoise.sdk import GOAL_STATE_VALUES              # noqa: PLC0415
-    except Exception:                                            # noqa: BLE001
+        from tortoise.commit_schema import get_vocab
+        from tortoise.pack_registry import KIND_OWNER_AXES
+        from tortoise.sdk import GOAL_STATE_VALUES
+    except Exception:  # any import failure means "no shipped vocab here"
         return None
 
     vocab = get_vocab()
@@ -121,13 +125,13 @@ def shipped_vocab() -> dict | None:
     packs_dir = HERE.parents[1] / "packs"
     if packs_dir.is_dir():
         try:
-            import yaml                                          # noqa: PLC0415
+            import yaml  # optional, only read when packs are installed
             for manifest in sorted(packs_dir.glob("*/manifest.yaml")):
                 doc = yaml.safe_load(manifest.read_text()) or {}
                 ns = doc.get("namespace")
                 for kind in (doc.get("ontology") or {}).get("objectKinds") or []:
                     object_kinds.add(f"{ns}:{kind}" if ns else kind)
-        except Exception:                                        # noqa: BLE001
+        except Exception:  # an unreadable pack contributes no kinds
             pass
     return {
         "point": set(vocab.point_kinds),
@@ -271,7 +275,7 @@ class Mcp:
 
     def initialize(self) -> None:
         self._next_id += 1
-        code, payload, hdrs = self._post({
+        _code, payload, hdrs = self._post({
             "jsonrpc": "2.0", "id": self._next_id, "method": "initialize",
             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                        "clientInfo": {"name": "business-map-13880", "version": "1"}},
@@ -281,10 +285,9 @@ class Mcp:
         if payload and payload.get("error"):
             raise RuntimeError(f"initialize refused: {payload['error']}")
         # notifications/initialized is a notification: no id, no body expected
-        try:
+        with contextlib.suppress(urllib.error.HTTPError):
+            # some transports answer 202/204 with an error-ish shape
             self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        except urllib.error.HTTPError:
-            pass  # some transports answer 202/204 with an error-ish shape
 
     def call(self, tool: str, args: dict) -> dict:
         """Call one tool, with the transport's own retry contract honoured."""
@@ -406,9 +409,7 @@ def write_map(doc: dict) -> int:
     failures: list[str] = []
 
     def already(marker: str) -> bool:
-        if marker in st["written"]:
-            return True
-        return False
+        return marker in st["written"]
 
     def mark(marker: str) -> None:
         if marker not in st["written"]:
@@ -513,7 +514,7 @@ def write_map(doc: dict) -> int:
                 mcp.call("tortoise_create_edge",
                          {"from_id": src, "to_id": dst, "relation": e["relation"]})
             mark(marker)
-        except Exception as exc:                      # noqa: BLE001 — recorded, not swallowed
+        except Exception as exc:  # recorded in `failures`, never swallowed
             failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
                             f"{e['from']}->{e['to']}: {exc}")
             print(f"  !! {failures[-1]}", file=sys.stderr)
@@ -539,7 +540,8 @@ CLEAN_GRAPH = "org_3326a01ea34ae595d84de5d8f9_g_311d79c684de4d0e8953d189ed"
 
 
 def verify(doc: dict) -> int:
-    import redis  # noqa: PLC0415 — optional dep, only needed for --verify
+    # optional dep, only needed for --verify
+    import redis
 
     uri = os.environ.get("FALKORDB_CLOUD_URI")
     if not uri:
