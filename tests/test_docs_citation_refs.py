@@ -2807,14 +2807,20 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "comment",
 )
 
-#: ⛔ THE SHAPE ARM. The false property is "the FIRST non-space character is `#`", which is
-#: unsatisfiable for a line that has already passed `grep -E '^[+-][^+-]'` — that character is
-#: always `+` or `-`. Every TRUE statement of it carries the qualifier ("… AFTER the marker
-#: …"), so the ban is "no `after` between the phrase and its verdict". It is a shape ban and
-#: not another row: a re-wording that keeps the false claim still has to say the character IS
-#: `#` without qualifying it by the marker, and an honest re-wording keeps the qualifier.
+#: ⛔ THE SHAPE ARM, AND WHAT KEY IT ON. The false property claims the filter drops a line
+#: because a CHARACTER is `#`; the true one says the character **after the diff marker** is `#`.
+#: So the arm bans "`character` … is `#`" whenever the word **marker** does not appear in
+#: between — that is the property, not a spelling of it, and it is why this arm catches a
+#: RE-WORDED restatement (`first non-blank character is `#``) that no row of the tuple above
+#: matches (#13853 review round 17, P2-2; widened at round 18, which measured the escape).
+#: ⛔ DECLARED RESIDUAL, not a silent one (round 18, P2): the key is the WORD `marker`, this
+#: document's own vocabulary for the diff prefix. A writer who paraphrases the qualifier as
+#: well ("after the `+`/`-` prefix") gets a FALSE RED — the remedy is to name the marker, and
+#: the arm's message says so. Narrowing the key back to "after" re-opens the measured escape
+#: (`first non-blank character is `#`` passed 466 tests), which is the direction that fails
+#: OPEN, so the false-red direction is the one this arm accepts.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
-    r"first non-space character(?:(?!\bafter\b).){0,160}?is `#`", re.S)
+    r"character(?:(?!\bmarker\b).){0,160}?is `#`", re.S)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -2893,18 +2899,31 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
 
     # (1b) THE SHAPE of the property, not just the rows — see `_FALSE_FILTER_PROPERTY_RE`.
     assert _false_filter_property_restatements(bundle) == [], (
-        "05-verify.md states the `#`-only filter's drop test as 'the first non-space "
-        f"character is `#`' without the marker qualifier: {_false_filter_property_restatements(bundle)!r}. "
-        "Every line reaching that stage carries the diff marker, so that character is always "
-        "`+` or `-`; the qualifier is what makes the sentence true (#13853 review round 17, "
-        "P2-2)")
-    # ...and the shape arm must be able to FIRE. Measured against the merged document it is
-    # what the row list could not do: the same false property, re-worded.
-    assert _false_filter_property_restatements(
-        "… whose first non-space character is `#` — a comment …"
-    ) == ["first non-space character is `#`"], (
-        "the shape ban no longer matches the property it exists to retire, so a re-worded "
-        "restatement would pass it (#13853 review round 17, P2-2)")
+        "05-verify.md states the `#`-only filter's drop test as a character being `#` without "
+        f"naming the diff marker: {_false_filter_property_restatements(bundle)!r}. That "
+        "character is always `+` or `-` at that stage; the marker-qualified form is the true "
+        "one. If this is an honest paraphrase, name the marker (#13853 review round 17, P2-2; "
+        "round 18, P2)")
+    # ...and the shape arm must be able to FIRE, on every spelling of the false property the
+    # review MEASURED — the row list alone left the re-worded `non-blank` form green.
+    for probe, expected in (
+            ("… whose first non-space character is `#` — a comment …",
+             "character is `#`"),
+            ("… whose first non-blank character is `#` — a comment …",
+             "character is `#`"),
+            ("… whose first character after its leading spaces is `#` …",
+             "character after its leading spaces is `#`")):
+        assert _false_filter_property_restatements(probe) == [expected], (
+            "the shape ban no longer matches the property it exists to retire when it is "
+            f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
+            "restatement would pass it (#13853 review round 17, P2-2; round 18, P2)")
+    # ...and the QUALIFIER keeps an honest sentence legal, which is the half the round-18
+    # review measured as a false red: naming the marker in any wording exempts the sentence.
+    for exempt in ("… whose first non-space character **after that marker** is `#` …",
+                   "… whose first non-space character (ignoring the marker) is `#` …"):
+        assert _false_filter_property_restatements(exempt) == [], (
+            f"the shape ban reds an honest statement of the drop test ({exempt!r}) — the "
+            "qualifier is what makes it true (#13853 review round 18, P2)")
 
     # (2) CONTENT, not size: the tuple is pinned WHOLE. A loop over the module constant
     # iterates the MUTATED list, so deleting a row (or re-wording one by a character) left
