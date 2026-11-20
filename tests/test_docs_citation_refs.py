@@ -2048,7 +2048,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # real sentences in RECONCILE-A1-A2-A5.md, about a DIFFERENT command) were then refused.
     # This anchor is the `-- tortoise/` SHORTHAND FOR THAT DIFF, and the backticks are what
     # identifies it as a command spelling rather than a flag on any `git` invocation.
-    r"|\**`-- tortoise/`\**"
+    # ⛔ AND THE CLASS IS THE FILE'S OWN DECLARED ONE, NOT `\**` (#13802 review, round 19, P1 —
+    # MEASURED). Round 18 wrote `\**` here and at the `tortoise/` arm. That is a NARROWER class
+    # than the contract stated 80 lines above ("the tolerance is a `[*_`]{0,3}` class … written
+    # INLINE"): underscore emphasis is not asterisks, so `The _`tortoise/`_ set prints NOTHING`
+    # stayed GREEN. The backtick stays OUT of this class on purpose — the arm above measured that
+    # making the delimiters optional widens the anchor to ANY `-- tortoise/`, which refuses two
+    # true `git grep … -- tortoise/` sentences. Emphasis inside, delimiters literal.
+    r"|[*_]{0,3}`-- tortoise/`[*_]{0,3}"
     # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
     # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
     # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
@@ -2058,7 +2065,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # anchor, so `The **`tortoise/`** set prints NOTHING` and `**`-- tortoise/`** prints
     # NOTHING` were GREEN here while the detector read the second — the exact
     # "detector-read, ban-blind" shape, on the rail where this ban is the only arm)
-    r"|\**`?tortoise/`?\**\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
+    r"|[*_]{0,3}`?tortoise/`?[*_]{0,3}\s+[*_]{0,3}(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
     r"module\s+set|delta|changes?)(?:\s*\([^)]{0,90}\))?[^`]{0,40}?"
     # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
     # document states the answer WITHOUT repeating the command: "at THIS head the command
@@ -2079,7 +2086,15 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # head, returns NOTHING` were BOTH GREEN through this ban AND its sibling detector, in
     # the depth-1 configuration where the measured leg skips). Six tokens with optional
     # punctuation is still bounded: the POINTER and PAST-TENSE forms must reach no answer.
-    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}"
+    # ⛔ AND THE EMPHASIS CLASS IS FOLLOWED BY ITS OWN WHITESPACE (#13802 review, round 19, P1 —
+    # MEASURED). Ordered `\s*[*_`]{0,3}` and with no `\s*` after it, emphasis that is then
+    # followed by a space could not be crossed at all: `**`git diff --name-only
+    # origin/main...HEAD -- tortoise/`** prints NOTHING` and its `***` spelling were read by the
+    # sibling DETECTOR and refused by no arm in this checkout or at the base — the "detector-read,
+    # ban-blind" shape, on the one anchor where the detector is meant to be the companion. The
+    # pair is what crosses `**` + space; it cannot cross a word, so the over-block surface is
+    # unchanged.
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
     # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
@@ -2463,6 +2478,17 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff carries, at this head, no `tortoise/` path at all.",
         "This diff carries (measured at this head) no `tortoise/` path at all.",
         "`None` is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
+        # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
+        # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
+        # rather than on both sides of it, so: (a) the emphasis-then-space form — the one the
+        # sibling DETECTOR reads — was refused by no arm; (b) underlines and (c) emphasis on
+        # the NOUN after the anchor were outside the class entirely. (a) is the dangerous
+        # direction: detector-read and ban-blind is a refuted claim walking green.
+        f"**`{_cmd}`** prints NOTHING at this head.",
+        f"***`{_cmd}`*** prints NOTHING at this head.",
+        "The _`tortoise/`_ set prints NOTHING at this head.",
+        "The `tortoise/` **set** prints NOTHING at this head.",
         "`-- tortoise/` (run at this head) prints nothing",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
