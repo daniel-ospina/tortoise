@@ -1045,6 +1045,229 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
 
 #: The command whose output the `#7949` bundle's census paragraph quotes. Named here (never
 #: interpolated from a measurement) because the arm below is a TEXT ban.
+def _base_ref_absent_detail() -> str | None:
+    """Why THIS checkout cannot see `origin/main`, or ``None`` when it can.
+
+    A reading that cannot be taken is UNPROVABLE, never FALSE. The `test` job checks
+    out with `actions/checkout@v4` at its DEFAULT `fetch-depth: 1`
+    (`.github/workflows/python-ci.yml:968` has no `with:`; the file states the depth
+    itself at `:489`), which fetches ONLY the PR ref
+    (`refs/remotes/pull/<N>/merge`) — nothing maps `origin/main`. Measured in that
+    exact topology: `git show origin/main:docs/00_index.md` exits 128 with
+    `fatal: invalid object name 'origin/main'`, and
+    `git rev-parse --is-shallow-repository` prints `true`.
+
+    Failing there would red the REQUIRED `test` job on a CORRECT artifact in every
+    pull request in the repo — this file is `core`+`tier1`, so `select()` runs it in
+    every PR. That ruling is already recorded for this exact shape, and the shape below
+    is copied from it rather than invented: `tests/test_11739_quote_population_probe.py`
+    — *"a full clone of `main` (and CI, which checks out `fetch-depth: 1`) can resolve
+    neither. **Failing there would red the required `test` job permanently on a correct
+    artifact** (review F1) ... So the skip is keyed off what THIS checkout can see, read
+    from git rather than from the artifact."*
+    """
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "origin/main^{commit}"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+    except FileNotFoundError:  # no `git` on this host at all
+        return "`git` is not installed here, so no ref can be read"
+    if resolved.returncode == 0:
+        return None
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=REPO, capture_output=True, text=True, check=False).stdout.strip()
+    return (f"`origin/main` does not resolve in this checkout "
+            f"(shallow={shallow or 'UNKNOWN'})")
+
+
+def test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed():
+    """The doc attributed a `docs/00_index.md` cite re-point to THIS diff; it re-points none.
+
+    `05-verify.md` said, in the D5 cell and again in the file-table row, that this
+    repair re-points the capstone row's cite (`:21604` -> `:21679` -> `:21715`), and
+    that the ONE `docs/00_index.md` line in this diff IS that re-point. Measured at the
+    head that merged (#13746), both halves are `main`'s, not the branch's:
+
+        git show origin/main:docs/00_index.md | grep -o 'sdk[.]py:[0-9]*'
+        grep -o 'sdk[.]py:[0-9]*' docs/00_index.md
+        -> the SAME pair on both sides (`:21715`, `:28178`)
+        git show e679d22286:tortoise/sdk.py | cmp - tortoise/sdk.py
+        -> DIFFERS at line 45175, so the two blobs are NOT identical — the claim that
+           `cmp` prints nothing (round 8, P1) was FALSE. What carries the refutation is
+           the RANGE: `:21715` and `:28178` both sit before 45175
+
+    ⛔ Whether the file is in the residual at the head you merge is
+    `git diff --name-only origin/main...HEAD -- docs/00_index.md` and
+    `git rev-parse origin/main:docs/00_index.md HEAD:docs/00_index.md`, read THERE —
+    ⛔ **no answer is typed here, and an earlier cut of this paragraph did type one**,
+    which is the document's own defect class applied to the paragraph that names it
+    (typing the answer is true of the commit that typed it and false of the next). The
+    sentence was the document's own defect class — a typed head-bound figure — applied
+    to the document it lives in. It survived several review rounds for
+    the same reason the census green did: the D5 arms in
+    `test_7949_capstone_measure.py` scope to D5's OWN line, and this claim is in the
+    file-table section, so nothing read it.
+
+    NON-VACUITY, MEASURED: on the pre-fix document this arm reds on the FIRST entry
+    of `_ATTRIBUTION_PHRASES`, `re-pointing that row's `sdk.py` cite from` — present once in
+    `git show f6f202cf5c:…/05-verify.md`, and earlier in that text than the phrase an
+    earlier cut of this paragraph named. That named phrase (`and THAT shift is this
+    repair's, not main's`) does NOT reproduce: `origin/main` credits the move to
+    itself ("and THAT shift is `main`'s, not this repair's"), so it reads 0 there —
+    the arm was right and the paragraph was wrong (#13802 review, P2).
+    The prohibition is applied only where the measurement supports it: on a head whose
+    diff really does move a cite the attribution is legitimate and this leg stands
+    down, while the resolution leg — ordered ABOVE this arm so that it runs in the
+    depth-1 checkout too (`#13802` review, finding 3) — still has to hold. Where the
+    base ref cannot be read at all, the leg takes the UNCONDITIONAL direction rather
+    than reporting UNPROVABLE: a `pytest.skip` there would silence the only detector of
+    this PR's own defect class in the only job that gates merges (#13802 review, P1).
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    index = (DOCS / "00_index.md").read_text(encoding="utf-8")
+
+    # Every spelling in `_ATTRIBUTION_PHRASES` (module level, beside the live-diff
+    # claims it must pair with) asserts that THIS DIFF moved a cite in
+    # `docs/00_index.md`, so each is refused while this tree has no measurement that
+    # supports it — cite sets equal, or the base ref unreadable (#13802 review P1: the
+    # unconditional direction, not a skip).
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ARMS THAT NEED NO BASE REF, ORDERED FIRST ON PURPOSE (#13802 review, finding 3).
+    # Both read THIS tree and THIS document, so they are answerable in EVERY checkout.
+    # They stay ABOVE the two cite-set arms because those take the unconditional
+    # direction when the base is unreadable (`_base_ref_absent_detail`, #13802 review
+    # P1 — the inert-enforcer shape, `426d0c0c45`), and an arm that fails must fail on
+    # its own evidence, not on whether a later arm bailed out first.
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    # ⛔ HOISTED OUT OF THE SET-EQUALITY GUARD (#13802 review, finding 2 — FAIL-OPEN).
+    # Standing the prohibition down when the measurement supports the attribution is
+    # defensible; standing THIS requirement down is not. Executed only while the cite
+    # sets are EQUAL, it asserted nothing on the normal state of a branch that has not
+    # been re-based after `main` re-derived a row (measured at least four times:
+    # #13617/#13675, #13724, #13750, #13790 — and NOT #13786, which re-derived four
+    # `sdk.py` cites on the TEST side and moved no `docs/00_index.md` row, #13802 review
+    # round 5 P3) — i.e. exactly the heads where the
+    # reader most needs the command to be there. It is unconditional now.
+    assert ("git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md"
+            in doc), (
+        "05-verify.md no longer states the command that decides whether this diff "
+        "re-points a cite in `docs/00_index.md` — without it the sentence is "
+        "uncheckable at the head a reader merges, whatever the diff did "
+        "(#13746 review, round 3, P2; hoisted out of the set-equality guard by "
+        "#13802 review, finding 2)")
+
+    # A re-point's NEW side has to resolve in the file it lands in, whatever the diff
+    # did: the cites the document presents as the row's CURRENT values must name the
+    # content the sentence says they name, at this head.
+    # ⛔ SCOPED TO WHAT IT ACTUALLY GRADES (#13802 review, finding 2 — P2). This loop
+    # used to REQUIRE both cites to be present and to blame `05-verify.md` for
+    # "present[ing] them as the row's current value" — a claim the document explicitly
+    # refuses to make ("read its value ... at the head you merge, never from this
+    # sentence"), and a requirement that reds every PR the moment `main` re-derives that
+    # row again (the document records that happening four times). The invariant that IS
+    # the tree's: WHEREVER `docs/00_index.md` carries one of these cites, the line it
+    # names must be the content that cite is for. A row `main` has moved is then not a
+    # false accusation against this document — the cite is simply no longer there.
+    _sdk = (REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8").splitlines()
+    for _cite, _needle in (
+            ("sdk.py:21715", "_capture_stats_with_step_witness("),
+            ("sdk.py:28178", "dedup_reviewed IS NULL")):
+        if _cite not in index:
+            continue
+        _n = int(_cite.rsplit(":", 1)[-1])
+        assert _needle in _sdk[_n - 1], (
+            f"`docs/00_index.md` carries `{_cite}`, but `tortoise/sdk.py:{_n}` is "
+            f"{_sdk[_n - 1].strip()!r} — that cite does not name the content it is "
+            "for, so a reader who follows it lands on an unrelated line "
+            "(#13746 review, round 3, P2; scoped by #13802 review, finding 2)")
+
+    # ⛔ THE RETIRED SIDE OF THE SAME PAIR, AND IT NEEDS NO BASE REF EITHER (#13802
+    # review, P2 — the leg `main`'s deleted arm carried, measured open at the pre-fix head:
+    # injecting `sdk.py:21604` alongside the surviving `sdk.py:21715` left this suite green).
+    # A re-point moves a cite FORWARD, so the index carrying one of these again means the
+    # file was reverted or a stale figure was pasted back in — either way a reader follows a
+    # cite to the wrong line. If this reds on a deliberate revert, update `_RETIRED_INDEX_CITES`
+    # and say which head restored it; do not widen the tuple to "the current value".
+    _resurrected = [c for c in _RETIRED_INDEX_CITES if c in index]
+    assert not _resurrected, (
+        f"`docs/00_index.md` carries the RETIRED cite(s) {_resurrected!r} again, "
+        "alongside or instead of the value the row was re-pointed to. A re-point moves a "
+        "cite forward only, so this is either a revert or a pasted-back stale figure: a "
+        "reader following it lands on a line that does not name that row's content "
+        "(#13802 review, P2 — the absence leg `main`'s deleted arm carried, restored here)")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ARMS THAT NEED THE BASE REF (#13802 review, finding 3 — P1, blocking).
+    #
+    # ⛔ THIS READ USED TO FAIL CLOSED, AND THAT REDED THE REQUIRED `test` JOB IN
+    # EVERY PR IN THE REPO. `assert probe.returncode == 0` on
+    # `git show origin/main:docs/00_index.md` is unfailable-and-green on a full clone
+    # and unpassable on the depth-1 PR checkout `python-ci.yml` uses, so the fix for a
+    # documentation-claim defect broke the merge rail repo-wide — this file is
+    # `core`+`tier1`, and `select()` unions `tier1` into EVERY PR selection. Dropping
+    # the arm is NOT the repair (it is the only thing that measures the cite sets);
+    # raising the shared `test` job's checkout depth is not either (a full-history
+    # fetch on all 11 shards). Key it off what THIS checkout can see, per
+    # `_base_ref_absent_detail` and the `#11739` precedent it names.
+    # ─────────────────────────────────────────────────────────────────────────────
+    _absent = _base_ref_absent_detail()
+    # ⛔ NOT A `pytest.skip` (#13802 review, P1 — THE INERT-ENFORCER SHAPE). Every job
+    # that runs a suite checks out at `actions/checkout@v4`'s DEFAULT `fetch-depth: 1`
+    # (`python-ci.yml:968` is bare inside the `test` job; `post-merge-validation.yml`
+    # declares no `fetch-depth` at all — `grep -c fetch-depth` -> 0 — and its `:96`
+    # passes a `ref:` only, while `:222` is bare), so `origin/main` never resolves on the rail and a skip here means this arm
+    # asserts NOTHING in the only place the rail reads it. MEASURED on a real depth-1
+    # clone of this branch with the document's attribution flipped back to "and THAT
+    # shift is this repair's, not `main`'s`: `11 passed, 2 skipped` AT THAT HEAD —
+    # green, defect swallowed. ⛔ The counts are THAT head's, not this file's: this
+    # suite has grown since (a later round added arms), so re-run the probe rather
+    # than carrying a figure that was true once — the rule this row's own sibling in
+    # `config/ci-surfaces.yml` states, which is why that copy was deleted outright. The fallback is the UNCONDITIONAL direction instead — the same
+    # shape this file's own `config/ci-surfaces.yml` row now records for these two
+    # legs: with the base unreadable, NOTHING shows this diff moves a cite, so no
+    # attribution may be asserted. (The sibling `-- tortoise/` leg needs no base at
+    # all any more — it is a TEXT BAN, `#13802` review findings 1 and 2.) It keeps the file hermetic (its row
+    # promises "no network", so fetching a base ref inside the suite is not available
+    # to it) and the trade it buys is an OVER-BLOCK — a head whose diff really does
+    # move a cite would red in a depth-1 checkout — which outranks a false PASS.
+    if _absent is None:
+        probe = subprocess.run(
+            ["git", "show", "origin/main:docs/00_index.md"],
+            cwd=REPO, capture_output=True, text=True, check=False)
+        # `origin/main` RESOLVES here, so a failed read is no longer an environment
+        # fact — it is an artifact fault, and it still fails closed.
+        assert probe.returncode == 0, (
+            "`origin/main` resolves in this checkout, but `docs/00_index.md` cannot "
+            "be read at it — `git show origin/main:docs/00_index.md` exits "
+            f"{probe.returncode} ({probe.stderr.strip()!r}). That is an artifact "
+            "fault, not a shallow clone, so this arm fails closed "
+            "(#13802 review, finding 3)")
+        _main = sorted(re.findall(r"sdk\.py:(\d+)", probe.stdout))
+        _head = sorted(re.findall(r"sdk\.py:(\d+)", index))
+        _may_attribute = _main != _head
+        _basis = (
+            f"that file's cite set is IDENTICAL on `origin/main` and at this head "
+            f"({_head}) — no cite moves here, so no re-point is this diff's")
+    else:
+        _may_attribute = False
+        _basis = (
+            f"the base ref is UNPROVABLE in this checkout ({_absent}), so nothing "
+            "shows this diff moves a cite at all — the depth-1 `test` job is the "
+            "normal case, and an unmeasured premise may not carry an attribution")
+    if not _may_attribute:
+        for phrase in _ATTRIBUTION_PHRASES:
+            assert phrase not in doc, (
+                f"05-verify.md says this diff re-points a `docs/00_index.md` cite "
+                f"({phrase!r}), but {_basis}. State the command (`git diff -U0 "
+                "--word-diff=plain origin/main...HEAD -- docs/00_index.md`) and let "
+                "the reader re-derive it (#13746 review, round 3, finding 4; the "
+                "depth-1 fallback is the unconditional direction, #13802 review P1)")
+
+
 _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
 
 #: The ABBREVIATED subject the bundle uses for that same command, and a SUBJECT of arm
@@ -1159,13 +1382,19 @@ _TORTOISE_EMPTY_SPELLINGS = (
     "`-- tortoise/` returns NOTHING",
     "that command returns nothing for all three",
     "contributes no `tortoise/` path at all",
-    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW, and the
-    # reason is a live counterexample rather than taste: that exact string still occurs in
-    # the document exactly once, as a QUOTED RETRACTION (“‘this diff carries no `tortoise/`
-    # path’ — which the `--refresh` above made FALSE”). Retiring it would red the document
-    # for retracting a falsehood, i.e. the over-block this ledger already documents. The
-    # clause that ASSERTED it was rewritten to a structural statement (`#12943` landed on
-    # `main`, so it sits on both sides of the merge) that needs no reading of the set at all.
+    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW — for the
+    # OVER-BLOCK, not for a live occurrence: a QUOTED RETRACTION of that claim has to stay
+    # legal, because retiring the string would red a document for retracting a falsehood.
+    # ⚠️ AND THE COUNTEREXAMPLE THIS NOTE USED TO CITE IS GONE — measured, not assumed (#13802
+    # review, cycle 7, P2): it said "that exact string still occurs in the document exactly
+    # once, as a QUOTED RETRACTION", and at this head `grep -rn 'this diff carries no
+    # `tortoise/` path' docs/` returns NOTHING, while `git grep` at `origin/main` returns ONE
+    # — because THIS diff rewrote that retraction sentence (the ban began refusing the
+    # spelling it quoted). The carve-out therefore rests on the CLASS and not on an
+    # instance, and the note says which, so the next reader does not measure a stale witness.
+    # The clause that ASSERTED the claim was rewritten to a structural statement (`#12943`
+    # landed on `main`, so it sits on both sides of the merge) that needs no reading of the
+    # set at all.
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
 _TORTOISE_RETIRED_SPELLINGS = (
@@ -1254,6 +1483,72 @@ def _census_membership_verdicts(doc: str) -> list[str]:
     return [spelling for spelling in _TORTOISE_RETIRED_SPELLINGS if spelling in doc]
 
 
+def _census_agreement_verdict() -> int:
+    """The verdict `--check` prints, measured on the SAME path the verb takes.
+
+    ⛔ `census()` DEFAULT-ARGUMENTS the frozen `DEFAULT_PIVOT` (`census(pivot: int =
+    DEFAULT_PIVOT, ...)`), while the verb's `--check` path calls `census(sites[0])` with
+    `sites = lifetime_query_sites()`. Measuring `census()` therefore asserted agreement on a
+    path the named verb does not take. MEASURED (#13807 review round 7, P1): with the frozen
+    literal one line behind the tree, `_sweep(census())` -> `0` while
+    `_sweep(census(lifetime_query_sites()[0]))` -> `1` — the arm reported "agreement" over a
+    tree the verb it names reported as STALE, i.e. the false PASS the arm exists to refuse,
+    reproduced inside the arm. The shape `--check` refuses (more than one site) is refused
+    here rather than silently graded on the wrong pivot.
+
+    ⛔ NOT A STYLE CHOICE — a union merge resolution (`49fe860faa`) dropped this derivation
+    and restored the frozen call into the merged file, so the repair is pinned by
+    `test_the_agreement_arm_reads_the_derived_pivot_not_the_frozen_default` rather than
+    left to a reader of the diff.
+    """
+    from tools.hosted_api_cite_census import _sweep, census, lifetime_query_sites
+
+    _lifetime_sites = lifetime_query_sites()
+    assert len(_lifetime_sites) == 1, (
+        f"{len(_lifetime_sites)} `query(LIFETIME_MEMORY_QUERY)` sites in "
+        f"`tortoise/hosted_api.py` ({_lifetime_sites}). `--check` refuses to run on that "
+        "shape, so this arm cannot claim the verdict that verb prints "
+        "(#13807 review round 7, P1)")
+    return _sweep(census(_lifetime_sites[0]), refresh=False)
+
+
+def test_the_agreement_arm_reads_the_derived_pivot_not_the_frozen_default(monkeypatch):
+    """The agreement arm must measure the pivot `--check` DERIVES, not the frozen literal.
+
+    ⛔ NON-VACUITY IS THE POINT, so the probe does not assume which path is green: it
+    replaces `lifetime_query_sites` with a value one line away from `DEFAULT_PIVOT` and
+    records the pivot the arm actually passes to `census`. Both legs are required — (a) the
+    probe must SEPARATE the two paths, or the test would pass on an arm that ignores the
+    pivot, and (b) the arm must take the DERIVED one. Restoring `verdict = _sweep(census())`
+    reds (b), which is the regression the `49fe860faa` union resolution introduced.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    derived = census_mod.DEFAULT_PIVOT + 1
+    calls: list[int] = []
+    _real_census = census_mod.census
+
+    def _spy(pivot: int = census_mod.DEFAULT_PIVOT, *a, **k):
+        calls.append(pivot)
+        return _real_census(pivot, *a, **k)
+
+    monkeypatch.setattr(census_mod, "lifetime_query_sites", lambda *a, **k: [derived])
+    monkeypatch.setattr(census_mod, "census", _spy)
+    _census_agreement_verdict()
+
+    assert calls and calls[0] != census_mod.DEFAULT_PIVOT, (
+        "the probe did not separate the derived pivot from the frozen `DEFAULT_PIVOT` "
+        f"(the arm called `census` with {calls!r}), so this test could pass on an arm that "
+        "ignores the pivot entirely")
+    assert calls == [derived], (
+        "the agreement arm measured `census` with "
+        f"{calls!r}; `--check` derives the pivot via `lifetime_query_sites()` "
+        f"({derived!r} here), so an arm reading the frozen `DEFAULT_PIVOT` reports agreement "
+        "over a tree the verb it names reports as STALE — the false PASS the arm exists to "
+        "refuse (#13807 review round 7, P1; re-introduced by the `49fe860faa` union "
+        "resolution and pinned here)")
+
+
 def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
     """⛔ A document reported a checker's EXIT CODE as green while the checker was RED.
 
@@ -1307,29 +1602,18 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
           The shape class stays FINITE and the docstring above says so: a verb outside the
           list, or an answer carrying none of the listed words, is not detected.
     """
-    from tools.hosted_api_cite_census import _note_paths, _sweep, census, lifetime_query_sites
+    from tools.hosted_api_cite_census import _note_paths
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
 
-    # (a) AGREEMENT, measured in-process by the checker the document quotes.
-    # ⛔ THE PIVOT IS RE-DERIVED, BECAUSE `--check` RE-DERIVES IT (#13807 review round 7,
-    # P1 — MEASURED). `census()`'s default is the FROZEN `DEFAULT_PIVOT`; the verb's
-    # `--check` path calls `census(sites[0])` with `sites = lifetime_query_sites()` and is a
-    # SINGLE PASS (`main()` returns on the first `rc`, so only `--refresh` iterates — corrected
-    # in round 8, which is why this arm needs no loop). Measuring `census()` here therefore
-    # asserted agreement on a path `--check` does not take: MEASURED at `c2e8b42336`,
-    # `_sweep(census())` -> `0` while `_sweep(census(lifetime_query_sites()[0]))` -> `1`, so
-    # this arm reported "agreement" over a tree the verb it names reported as STALE —
-    # precisely the false PASS the arm exists to refuse, reproduced inside the arm. The shape
-    # `--check` refuses (more than one site) is refused here too rather than silently graded
-    # on the wrong pivot.
-    _lifetime_sites = lifetime_query_sites()
-    assert len(_lifetime_sites) == 1, (
-        f"{len(_lifetime_sites)} `query(LIFETIME_MEMORY_QUERY)` sites in `tortoise/hosted_api.py` "
-        f"({_lifetime_sites}). `--check` refuses to run on that shape, so this arm cannot "
-        "claim the verdict that verb prints (#13807 review round 7, P1)")
-    verdict = _sweep(census(_lifetime_sites[0]), refresh=False)
+    # (a) AGREEMENT, measured in-process by the checker the document quotes — ON THE PATH
+    # `--check` TAKES. See `_census_agreement_verdict`: `census()`'s default is the FROZEN
+    # `DEFAULT_PIVOT`, and measuring that compared the notes against themselves (#13807
+    # review round 7, P1). The derivation and its single-site refusal live in the helper so
+    # that `test_the_agreement_arm_reads_the_derived_pivot_not_the_frozen_default` can pin
+    # the pivot this arm actually passes.
+    verdict = _census_agreement_verdict()
     _green_claims = (
         "--check` exits 0",
         "--check` reports every stated figure `== measured`",
@@ -1437,6 +1721,97 @@ def test_the_bundle_does_not_report_a_census_verdict_it_did_not_measure():
             "uncheckable (#13489 review, P1)")
 
 
+    # (c) RETIRED SPELLINGS — the spellings measured FALSE against the tree. The arm below
+    # does NOT re-measure to decide which direction is refuted: it refuses the whole class,
+    # because a direction claim about that command is head-bound by construction.
+    # ⛔ MEASURED (#13746 review, finding 7): this list was five literals assuming a NON-EMPTY
+    # `-- tortoise/` set. `main`'s own `#13790` then re-took the same census figures,
+    # ⛔ and `#13786` is NOT in that chain (#13802 review, round 5, P3 — MEASURED): its file
+    # list is `tests/test_github_indexer.py` and `tortoise/indexer/github_indexer.py`, so it
+    # re-derived four `sdk.py` cites on the TEST side and touched no census figure.
+    # so at this head the command prints NOTHING and every one of those five spellings became
+    # the TRUE statement — the same class of error as the frozen sign this arm replaced
+    # (a guard that pins a MEASUREMENT has to READ it). The prohibition is therefore applied
+    # only where the measurement supports it.
+    # ⛔ THIS IS A TEXT BAN, NOT A MEASUREMENT (#13802 review, findings 1 and 2 — P1+P2).
+    # Two failures met in the version this replaces, and they were the same defect read
+    # from both sides. It MEASURED the diff and refused a spelling only where the set was
+    # non-empty, so: on the depth-1 PR checkout `python-ci.yml` uses (`origin/main`
+    # unresolvable) the probe exited rc=128, printed nothing, the set came back EMPTY and
+    # every spelling was `.continue`d over — the arm asserted NOTHING in the only job that
+    # gates merges (measured on a real `--depth 1` clone: GREEN, defect swallowed
+    # and silent) — while on a full clone whose diff DOES carry a `tortoise/` path it
+    # refused a sentence that was true at the head it was written for. A prohibition that
+    # depends on the diff is inert in one checkout and a false red in the other.
+    # So the prohibition is on the DOCUMENT'S TEXT: a direction claim about that command
+    # is head-bound by construction (the set moves whenever `main` lands the same
+    # re-derivation), which is this row's own thesis one table up. Naming the command and
+    # refusing the direction claim therefore holds in EVERY checkout, and needs no base.
+    _direction = [
+        m.group(0) for m in _TORTOISE_SET_DIRECTION_CLAIM.finditer(doc)]
+    assert not _direction, (
+        f"05-verify.md states the `-- tortoise/` set's DIRECTION ({_direction[0]!r}) — a "
+        "direction claim about that command is a head-bound figure: read it with "
+        f"`{_tortoise_cmd}` at the head you merge. State the command and let the reader "
+        "run it; a set named here rots the moment `main` lands the same re-derivation "
+        "(#13489 review, P1; text ban by #13802 review, findings 1 and 2)")
+    # ⛔ AND EVERY ANSWER THE SIBLING SHAPE DETECTOR KNOWS, NOT JUST THIS REGEX'S VERBS
+    # (#13802 review, round 4, P2 — MEASURED): at that round this regex named four answer
+    # FORMS while the sibling `_typed_answers_to_tortoise_cmd` named fourteen, and a
+    # refuted claim spelled with one of the other ten (`reports exactly two paths`,
+    # `carries no paths`, `lists one path`, …) was seen by NEITHER arm where it matters.
+    # ⛔ THOSE TWO COUNTS ARE HISTORY, NOT THIS HEAD'S (round 6 review, P3 — MEASURED): the
+    # regex has since been widened to the detector's whole VERB class, so `reports exactly
+    # two paths`, `lists one path`, `shows`/`names`/`includes`/`contains`/`has`/`=`/`:` and
+    # `outputs`/`→` all match it here. ⛔ ITS ANSWER CLASS IS NOT A STRICT SUBSET, and the
+    # earlier cut of this comment said it was: the example it gave is read by THIS regex too
+    # (`none` is one of its alternatives, measured), and the `config/ci-surfaces.yml` row for
+    # this file says the opposite of "subset" — **ZERO** detector-only tokens left. What holds
+    # is that the ban reads every emptiness / count / bare-verb answer the sibling detector
+    # does, `blank` included, so the detector is still asked separately for its DIRECTION
+    # LOGIC and its SUBJECT anchoring, never for a wider answer list
+    # (#13802 review round 10, P2: the correction re-made the very class it was correcting,
+    # against the row it named).
+    # ⛔ AND "ZERO" WAS AN ASSERTION UNTIL CYCLE 6 MEASURED IT FALSE (#13802 review, cycle 6,
+    # P1): three of the detector's OWN answer forms were read by it and by nothing here —
+    # `non empty` (the detector's class is `non[- ]?empty`, a SPACE spelling this pattern did
+    # not carry), a bare count word with no noun (`prints one`, `prints both`), and a bare
+    # `prints tortoise/`. On the `set`/deictic anchors, where this ban is the ONLY layer,
+    # each was a refuted claim no arm refused in ANY checkout — measured `ban=False` against a
+    # non-empty detector verdict, and the injected sentence stayed green. All three are read
+    # here now (witnesses below pin them), so the residue is a MEASUREMENT — `[]` over the
+    # detector's `_member`/`_empty` alphabet — rather than the claim it used to be.
+    # measured split (ZERO detector-only forms; `no files` and `no diff` are BAN-only).
+    # the sibling arm SKIPS once the base is unreadable (which is every job that gates a
+    # merge), and this regex did not match the verb. Measured on the depth-1 topology with
+    # `` `…-- tortoise/` reports exactly two paths `` injected: GREEN over a refuted
+    # membership claim. Both checks are TEXT-ONLY, so neither needs a base ref and neither
+    # can be skipped away; they are kept BESIDE each other because the regex knows the
+    # `-- tortoise/` shorthand and a bare verb, while the detector carries the direction
+    # LOGIC (`shows`/`names`/`includes`/`contains`/`has`/`=`/`:`) that decides whether an
+    # answer is a claim at all.
+    # ⛔ AND IN BOTH SPELLINGS OF THE COMMAND (#13802 review, round 5, P2 — MEASURED). The
+    # detector anchors on the FULL command, so the document's own shorthand —
+    # "`-- tortoise/` reports exactly two paths" — was seen by NEITHER arm: the regex did
+    # not then list `reports` (it does now, round 6), and the detector was asked only about
+    # the long form.
+    # MEASURED on the rail's topology (no `origin/main`): that injected shorthand stayed
+    # GREEN over a refuted claim, while the same claim in the long
+    # spelling reds. The second element carries its backticks ON PURPOSE: a bare
+    # "-- tortoise/" would also match inside the document's head-pinned historical command
+    # (`git diff --name-only origin/main...2a7f24e241 -- tortoise/`), and over-block the
+    # real document (measured). With them, only the shorthand spelling matches.
+    _typed_direction = [
+        _answer for _cmd in (_tortoise_cmd, "`-- tortoise/`")
+        for _answer, _claims_empty
+        in _typed_answers_to_tortoise_cmd(doc, _cmd)]
+    assert not _typed_direction, (
+        f"05-verify.md TYPES {_typed_direction[0]!r} as the answer to `{_tortoise_cmd}` — "
+        "a typed present-tense ANSWER to a head-bound measurement is the defect class this "
+        "arm exists for, and it is refused in EVERY checkout because the ban is on the "
+        "TEXT, not on a reading this clone may be unable to take (#13802 review, round 4, "
+        "P2). State the command and let the reader run it at the head they merge")
+
 class _Unmeasurable(RuntimeError):
     """A MEASURED reading could not be taken here, so its direction is UNKNOWN.
 
@@ -1446,6 +1821,38 @@ class _Unmeasurable(RuntimeError):
     docstring named a mechanism this file no longer has, which is how a description rots
     into a false claim about the code beside it.
     """
+
+
+def test_the_tortoise_set_text_ban_reads_the_bundle_documents():
+    """The shape ban must have a CALLER, or it enforces nothing (#13802 review, round 8, P1).
+
+    `_TORTOISE_SET_DIRECTION_CLAIM` was measured with exactly two call sites: its own
+    definition and the witness test over synthetic strings. No document text was ever passed
+    to it, so the class it declares was guarded by nothing — the inert-enforcer defect this
+    PR keeps naming, inside the arm written to remove it. Meanwhile `05-verify.md` shipped a
+    membership answer the ban would refuse and every live arm returned nothing for it.
+
+    This test is that caller: every `#7949` bundle document is read and matched. A hit is a
+    head-bound answer about the `-- tortoise/` set in a document being merged, and the fix is
+    the bundle's own rule — state the COMMAND, never the answer. A sentence that NAMES the
+    head it is about (a sha, or a `#PR`) is allowed by `_HeadBoundBan`, which is what keeps
+    historical and refuted-quote passages readable.
+    """
+    bundle = sorted((DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone").glob("*.md"))
+    bundle += sorted((DOCS / "evidence" / "7949-capstone").glob("*.md"))
+    assert len(bundle) >= 10, (
+        f"the glob found {len(bundle)} bundle documents — the ban is reading almost nothing, "
+        "so its silence would prove nothing")
+    _hits: list[str] = []
+    for _path in bundle:
+        _text = _path.read_text(encoding="utf-8")
+        for _m in _TORTOISE_SET_DIRECTION_CLAIM.finditer(_text):
+            _hits.append(f"{_path.name}: {_text[max(0, _m.start() - 60):_m.end()]!r}")
+    assert not _hits, (
+        "a bundle document types an answer about the `-- tortoise/` set, which is HEAD-BOUND "
+        f"and must be read from the command at the head being merged: {_hits}. State "
+        "`git diff --name-only origin/main...HEAD -- tortoise/` (or name the head the "
+        "reading was taken at) and delete the answer (#13802 review, rounds 7 and 8)")
 
 
 def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
@@ -2386,16 +2793,25 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
+    # ⛔ BOTH SPELLINGS ARE GRADED, because the two sides of the merge state the SAME
+    # re-point in different words and neither may lose its arm (#13802 merge): `main`
+    # writes it as "re-pointing that row's `sdk.py` cite from **`:OLD`** to **`:NEW`**",
+    # this branch writes it as "that row's cite moved **`:OLD`** → **`:NEW`**" — and the
+    # branch's attribution arm REFUSES the first spelling by name, because a gerund
+    # "re-pointing" reads as this repair's own act. Extending the matcher keeps the arm
+    # discriminating on the merged document (both ends named, new side resolvable, old
+    # side absent) instead of forcing one side's prose through the other's list.
     m = re.search(
         r"re-pointing that row's `sdk\.py` cite from \*\*`:(\d+)`\*\*.*?"
-        r"to \*\*`:(\d+)`\*\*",
+        r"to \*\*`:(\d+)`\*\*"
+        r"|that row's cite moved \*\*`:(\d+)`\*\* → \*\*`:(\d+)`\*\*",
         doc, re.S)
     assert m, (
-        "05-verify.md no longer states the index row's re-point as "
-        "`from **`:OLD`** ... to **`:NEW`**`. State it with both ends named, so this "
-        "arm can check the pair against the file the re-point lands in "
-        "(#13489 review, cycle 5)")
-    old, new = m.groups()
+        "05-verify.md no longer states the index row's re-point with both ends named "
+        "as `from **`:OLD`** ... to **`:NEW`**` (or `moved **`:OLD`** → **`:NEW`**`). "
+        "State it with both ends named, so this arm can check the pair against the file "
+        "the re-point lands in (#13489 review, cycle 5)")
+    old, new = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
     index = (DOCS / "00_index.md").read_text(encoding="utf-8")
     assert f"sdk.py:{new}" in index, (
         f"05-verify.md says the row's cite is re-pointed to `sdk.py:{new}`; "
@@ -2406,6 +2822,1375 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
         f"05-verify.md calls `sdk.py:{old}` the PRE-re-point value, but "
         f"`docs/00_index.md` still carries it — either the re-point did not happen "
         "or the pair is stale (#13489 review, cycle 5)")
+
+
+_TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3,6})")
+
+
+#: ⛔ A PROXIMITY WINDOW IS NOT A BINDING (#13802 review, round 12, P1 — MEASURED: with the
+#: window alone, `Per `#10215`, at this head the `tortoise/` set is empty.` was GREEN, and so
+#: was the same claim after any `#ref` within 80 characters — 21.5% of the guarded corpus
+#: sits inside that window). The head must be the head the claim is ABOUT, so the allowance
+#: accepts only two BOUND constructions inside ONE clause:
+#:
+#:   1. `at` / `on` / `in` / `as of` + a sha        -> "at `2584a86ec1` the command printed …"
+#:   2. a `#PR` (or sha) followed by an EVENT verb  -> "`#12943` adds `tortoise/cache_leg.py`"
+#:
+#: A copula is deliberately NOT an event verb: `#10215` shipped that; at this head …` is a
+#: claim about THIS head introduced by an unrelated citation, and round 12's counterexamples
+#: are all of that shape.
+#: ⛔ AND THE BINDING IS CASE-INSENSITIVE BECAUSE THE BAN IS (#13802, round 21 — MEASURED).
+#: `_TORTOISE_SET_DIRECTION_CLAIM` compiles `re.IGNORECASE` (its own contract: "FORMATTING IS
+#: NOT CONTENT … the form matched case-insensitively"), and these two constants did not — so
+#: the SAME sentence was refused when its binding was spelled at a sentence start, which is
+#: the most ordinary spelling of a named head in this corpus (`At `945817d22a`, the base this
+#: branch was re-derived on`). Measured in-process on the round-20 head:
+#:
+#:   "At `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> REFUSED
+#:   "at `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> allowed
+#:   "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all"          -> REFUSED
+#:
+#: That is a FALSE BLOCK on head-named history — the one direction this file's docstring
+#: forbids — and a contract inconsistency inside one module. The widening is only the CASE of
+#: the SAME bound constructions (the sha class accepts `[0-9A-F]`, which every git object id
+#: spelling allows), never a third construction: measured over all 855 `docs/**/*.md`, the ban's
+#: hit set is UNCHANGED by the flag (6 -> 6, 0 newly refused, 0 newly allowed, and the witness
+#: test above passes untouched), so no claim that was refused on its merits is now excused.
+#: NO LIVE VICTIM at the head this was written (0 case-only false blocks in the corpus) — this
+#: closes the class before the next historical sentence is written in the capitalised form.
+_TORTOISE_HEAD_BINDING_AT = re.compile(
+    r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE)
+
+
+_TORTOISE_HEAD_BINDING = re.compile(
+    r"(?:(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?"
+    # ⛔ AND THE `#PR` FORM REQUIRES ITS EVENT VERB TOO (round 13 review, P1 — MEASURED):
+    # without this group the alternative was satisfied by ANY `#NNN` followed by whitespace,
+    # so `Per `#10215` at this head the `tortoise/` set is empty.` — the pinned round-12
+    # must-red witness with ONE COMMA DELETED — was excused as a historical mention and the
+    # ban read green over it. The copula is still not an event verb (see above), which is
+    # exactly why `#10215` + ` at this head` must not bind.
+    r"|`?#\d{3,6}`?['’]?s?\s+(?:`?[0-9a-f]{7,40}`?\s+)?"
+    r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
+    r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b"
+    r"|`?[0-9a-f]{7,40}`?\s+"
+    r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
+    r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)",
+    # case as well as spelling — see the measurement on `_TORTOISE_HEAD_BINDING_AT` above
+    re.IGNORECASE)
+
+
+class _HeadBoundBan:
+    """The direction ban, minus HISTORICAL mentions, and minus FORMATTING.
+
+    A sentence that NAMES the head it is about is not a head-bound claim about the head you
+    merge: the document is allowed to say "`#10215`'s `8bc2fbed1` touches no `tortoise/`
+    file", and the witness list pins the past-tense form as MUST-NOT-REFUSE. A regex
+    lookbehind cannot express that (variable width), so the allowance is a post-filter on
+    the match's preceding window (#13802 review, P2 — measured: three named-head emptiness
+    sentences were refused by the unanchored verb-before-path alternative, one of them
+    already shipped in `docs/evidence/7949-capstone/README.md`).
+
+    ⛔ AND THE WINDOW ALONE WAS NOT ENOUGH (#13802 review, round 12, P1 — MEASURED): with a
+    bare 80-char proximity test, `Per `#10215`, at this head the `tortoise/` set is empty.`
+    was GREEN, and so was the same claim behind ANY `#ref` or sha within 80 characters —
+    21.5% of the guarded corpus sits inside that window, so the allowance covered a fifth of
+    the text it was supposed to be checking. The name must now BIND: `at`/`on`/`in` + a sha,
+    a `#PR` followed by an event verb (optionally through its `'s <sha>`), or a bare sha
+    followed by an event verb — read on the clause, because a clause boundary is exactly what
+    separates an unrelated citation from a claim about THIS head. A copula is not an event
+    verb: that is what the round-12 counterexamples all turn on.
+
+    ⛔ AND IT TOLERATES MARKDOWN EMPHASIS, BECAUSE ITS SIBLING DOES (#13802 review, cycle 7,
+    P1 — MEASURED). `_typed_answers_to_tortoise_cmd` strips `[`*_]` and matches
+    case-insensitively, and this file PINS that as the contract ("FORMATTING IS NOT CONTENT …
+    not 'one spelling of it'"). This ban did neither, so `Prints two paths`,
+    `` `prints` the two comment-only modules ``, `**prints** the two COMMENT-ONLY modules`,
+    `` prints `two` paths ``, `prints _two_ paths`, `prints Empty`/`Blank`/`Zero`/`Single`/
+    `Both`/`Comment-Only` were each read by the detector and refused by no arm — two
+    injected into `05-verify.md` stayed GREEN. The pattern now absorbs emphasis around the
+    VERB and before the ANSWER and compiles case-insensitively; the text itself is NOT
+    stripped, because the `[^`]` spans rely on backticks as delimiters (the `[*_`]{0,3}`
+    classes in the pattern below are the whole of the tolerance).
+    """
+
+    __slots__ = ("_rx",)
+
+    def __init__(self, rx):
+        self._rx = rx
+
+    def _claimed(self, m, text):
+        """Is this match about the head it names? Bound construction inside one clause."""
+        _window = text[max(0, m.start() - 90):m.end()]
+        # `at <sha>` binds across a comma (`at `2584a86ec1`, the `tortoise/` set was empty`),
+        # so it is read on the window; the attribution form is read on the clause, because
+        # `Per #10215, at this head …` cites a PR and then claims something about THIS head —
+        # exactly the false PASS round 12 measured.
+        if _TORTOISE_HEAD_BINDING_AT.search(_window):
+            return False
+        _seg = _window
+        _cut = max((_seg.rfind(ch) for ch in ".;:!?\n,"), default=-1)
+        if _cut >= 0:
+            _seg = _seg[_cut + 1:]
+        return not _TORTOISE_HEAD_BINDING.search(_seg)
+
+    def search(self, text):
+        for m in self._rx.finditer(text):
+            if self._claimed(m, text):
+                return m
+        return None
+
+    def findall(self, text):
+        return [m.group(0) for m in self._rx.finditer(text) if self._claimed(m, text)]
+
+    def finditer(self, text):
+        return (m for m in self._rx.finditer(text) if self._claimed(m, text))
+
+
+_TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
+    # ⛔ FORMATTING IS NOT CONTENT, AND THIS LINE IS THE CONTRACT, NOT A CONVENIENCE (#13802
+    # review, cycle 7, P1 — MEASURED). The sibling detector normalises before it matches —
+    # `low = re.sub(r"[`*_]", "", low)` and `flags=re.IGNORECASE` — and this file PINS that
+    # as required, not incidental (`FORMATTING IS NOT CONTENT … the form matched
+    # case-insensitively … not 'one spelling of it'`). This ban did neither, so eleven
+    # spellings the detector read were refused by no arm in any checkout — measured
+    # `ban=None` against a non-empty detector verdict, every one of them: `Prints two
+    # paths` (capital P), `**prints** the two COMMENT-ONLY modules` and
+    # `` `prints` the two comment-only modules `` (emphasis/backtick-wrapped verb),
+    # `prints `two` paths` and `prints _two_ paths` (wrapped answer), `prints Empty`,
+    # `prints Blank`, `prints Zero`, `prints Single`, `prints Both`, `prints Comment-Only`
+    # (capitalised answer). Two of them injected into `05-verify.md` left the suite GREEN.
+    # So the pattern absorbs emphasis around the VERB and BEFORE THE ANSWER and is compiled
+    # case-insensitively (the `[*_`]{0,3}` inline classes); the text itself is NOT stripped —
+    # the two command
+    # anchors keep their LITERAL backticks, because making them `?` widened the anchor to any
+    # `-- tortoise/` and refused two true `git grep … -- tortoise/` sentences in RECONCILE.
+    # ANCHOR — the command (long spelling or the `-- tortoise/` shorthand), the
+    # `tortoise/` SET, or the DEICTIC reference that names no command at all.
+    r"(?:(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    # ⛔ THE BACKTICKS HERE ARE LITERAL, NOT OPTIONAL (#13802 review, cycle 7 — MEASURED):
+    # making them `?` widened the anchor to ANY `-- tortoise/`, and `git grep -n … --
+    # tortoise/` → **8** / `git grep apply_hierarchy_edges -- tortoise/` → **two** (both
+    # real sentences in RECONCILE-A1-A2-A5.md, about a DIFFERENT command) were then refused.
+    # This anchor is the `-- tortoise/` SHORTHAND FOR THAT DIFF, and the backticks are what
+    # identifies it as a command spelling rather than a flag on any `git` invocation.
+    # ⛔ AND THE CLASS IS THE FILE'S OWN DECLARED ONE, NOT `\**` (#13802 review, round 19, P1 —
+    # MEASURED). Round 18 wrote `\**` here and at the `tortoise/` arm. That is a NARROWER class
+    # than the contract stated 80 lines above ("the tolerance is a `[*_`]{0,3}` class … written
+    # INLINE"): underscore emphasis is not asterisks, so `The _`tortoise/`_ set prints NOTHING`
+    # stayed GREEN. The backtick stays OUT of this class on purpose — the arm above measured that
+    # making the delimiters optional widens the anchor to ANY `-- tortoise/`, which refuses two
+    # true `git grep … -- tortoise/` sentences. Emphasis inside, delimiters literal.
+    r"|[*_]{0,3}`-- tortoise/`[*_]{0,3}"
+    # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
+    # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
+    # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
+    # the stated residual — "a noun outside both lists" — did not describe them)
+    # ⛔ AND EMPHASIS AROUND THE ANCHOR ITSELF (#13802 review, round 18, P1 — MEASURED: the
+    # pattern tolerated emphasis around the VERB and before the ANSWER but not around the
+    # anchor, so `The **`tortoise/`** set prints NOTHING` and `**`-- tortoise/`** prints
+    # NOTHING` were GREEN here while the detector read the second — the exact
+    # "detector-read, ban-blind" shape, on the rail where this ban is the only arm)
+    r"|[*_]{0,3}`?tortoise/`?[*_]{0,3}\s+[*_]{0,3}(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
+    r"module\s+set|delta|changes?)(?:\s*\([^)]{0,90}\))?[^`]{0,40}?"
+    # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
+    # document states the answer WITHOUT repeating the command: "at THIS head the command
+    # this clause prescribes returns NOTHING AT ALL (the diff carries no `tortoise/`
+    # path)". Neither anchor above sees it — measured in-process at that head, both
+    # detectors returned `[]` — so the ban declared a class closed while the document it
+    # guards still carried an instance of it. A POINTER that names the command is still
+    # allowed; this anchor matches only the deictic form, which carries no pointer.
+    r"|the command this clause prescribes)"
+    # ` there -> ` IS THE DOCUMENT'S OWN SPELLING, and a BOUNDED filler follows it so the
+    # verb one word further out ("`-- tortoise/` command returns NOTHING AT ALL") cannot
+    # slip through — measured green without this. Three words is the bound on purpose: the
+    # POINTER form ("… is the command that answers it at the head you merge") and the
+    # PAST-TENSE form must still reach no answer, and the witness test below pins both as
+    # MUST-NOT-REFUSE.
+    # ⛔ THE FILLER IS WIDER, AND ALLOWS A COMMA (#13802 review, P1 — MEASURED on a temp
+    # copy: `the `-- tortoise/` command at this head prints NOTHING` and `the set, at this
+    # head, returns NOTHING` were BOTH GREEN through this ban AND its sibling detector, in
+    # the depth-1 configuration where the measured leg skips). Six tokens with optional
+    # punctuation is still bounded: the POINTER and PAST-TENSE forms must reach no answer.
+    # ⛔ AND THE EMPHASIS CLASS IS FOLLOWED BY ITS OWN WHITESPACE (#13802 review, round 19, P1 —
+    # MEASURED). Ordered `\s*[*_`]{0,3}` and with no `\s*` after it, emphasis that is then
+    # followed by a space could not be crossed at all: `**`git diff --name-only
+    # origin/main...HEAD -- tortoise/`** prints NOTHING` and its `***` spelling were read by the
+    # sibling DETECTOR and refused by no arm in this checkout or at the base — the "detector-read,
+    # ban-blind" shape, on the one anchor where the detector is meant to be the companion. The
+    # pair is what crosses `**` + space; it cannot cross a word, so the over-block surface is
+    # unchanged.
+    # ⛔ AND THE FILLER ADMITS A PATH-BEARING TOKEN AND A LONGER RUN (#13802 review, round 26,
+    # P2 — MEASURED: the filler was `[\w-]+` x <=6, so a gap containing a `/`-bearing token
+    # (`at the head of origin/main`) or one longer than six words defeated it, and every one of
+    # those cells was DETECTOR-READ and BAN-BLIND — 600 of 11,220 swept cells. On the anchors
+    # where the measured leg skips (a shallow checkout, `:1122`), this ban is the only layer, so
+    # a detector-read/ban-blind spelling is a hole and not a narrowing. `/` is in the token class
+    # because `origin/main` is this repo's most ordinary path token; the run is bounded at eight.
+    # ⛔ AND THAT WIDENING COSTS AN OVER-BLOCK, DECLARED RATHER THAN CLAIMED AWAY (#13802 review,
+    # round 27, P2 — MEASURED GREEN at `180b95d07d` and RED here, so it is THIS change's): the
+    # peer's determiner/count arm accepts `the <count-noun>` with no count in it, so a
+    # path-bearing filler now carries the class into TRUE prose:
+    #   `` `-- tortoise/` prints the paths it printed yesterday. ``                 -> REFUSED (pre-existing)
+    #   `` `-- tortoise/` at the head of origin/main prints the same paths it printed before. `` -> REFUSED (NEW)
+    # Removing `a|an|the` from that arm un-refuses NOTHING — every must-refuse witness still
+    # fires with them gone (measured: 0 lost; the pinned sentence above survives on the
+    # `the\s+same` answer class, not on the determiners), so a narrowing is not a drive-by and
+    # would not buy the sentence back anyway. The trade is taken in the safe direction (something
+    # right is refused, not something wrong slips through), DECLARED here and pinned in the
+    # must-refuse tuple so a later tightening reds it instead of changing behaviour silently.
+    # Live cost today: zero — the corpus refusal set is the same six lines at `180b95d07d`, at
+    # the peer head and here. ⛔ NO COUNT IS TYPED FOR THE WITNESS TUPLE, ON PURPOSE: an earlier
+    # draft said "61 of the 192", the figure did not reproduce under any reading of "that arm",
+    # and 192 was the PARENT head's tuple length — the same typed-figure rot this file polices
+    # about itself, caught by #13802 review round 28, P3.
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
+    # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
+    # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
+    # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
+    # `:` forms — all of which `_typed_answers_to_tortoise_cmd` reads. That arm SKIPS
+    # once the base is unreadable, which is every job that gates a merge, so THIS list is
+    # what carries the class on the rail; a verb the detector knows and this pattern does
+    # not is a hole, not a narrowing.
+    r"(?:prints?|->|→|returns?|reports?|lists?|yields|carries|gives|shows?|names?|"
+    r"comes? back|resolves? to|answers? with|"
+    r"includes?|contains?|outputs?|has|holds?|answers?|resolves?|reveals?|reads?|touches?|"
+    r"is|are|was|were|remains?|stays?|[=:])\s*[*_`]{0,3}"
+    # ⛔ AND A PREPOSITION BETWEEN THE VERB AND THE ANSWER (`comes back WITH an empty
+    # list`, `resolves to ZERO`), measured GREEN before this line (#13802 review, round 7)
+    r"(?:(?:with|to|as|into|out|of)\s+)?"
+    # ⛔ AND THE QUANTIFIER AND THE COMMA-BOUNDED INSERTION BETWEEN THEM (#13802 review,
+    # round 10, P1 — MEASURED GREEN through ban, detector and ledger: `prints ONLY one
+    # path`, `has NO FEWER THAN two files`, `shows MORE THAN one path`, `prints, at this
+    # head, nothing`). Every quantifier here is in `_typed_answers_to_tortoise_cmd`'s OWN
+    # strip list, so a quantifier that detector removes and this bridge does not is a hole
+    # in the same sense the verb class was — and on the `set`/deictic anchor this ban is
+    # the only layer at all.
+    r"(?:(?:just|only|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|"
+    r"no\s+fewer\s+than|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both|"
+    # ⛔ AND THE DETECTOR'S OWN MODIFIER STRIP LIST (#13802 review, round 12, P1 — MEASURED:
+    # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
+    # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
+    r"now|still|actually|also)\s+)?"
+    # ⛔ AND ONE DASH IS AN INSERTION TOO (#13802, round 21 — `f0fea1ce1c` made the closing dash
+    # optional; the row claimed it, and `The `tortoise/` set prints — NOTHING` had been GREEN
+    # because the alternative demanded a CLOSING dash as well)
+    r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?\s*"
+    # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
+    # between the command and the verb, and `set (measured with `git diff …`) is empty`,
+    # were GREEN in BOTH arms while the comma and bare forms were refused)
+    r"(?:\([^)]{0,90}\)\s*)?"
+    # ⛔ AND THE VERB PARTICLE `back` (`gives back nothing`) (#13802 review, round 12, P2)
+    r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
+    # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
+    # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
+    # ⛔ AND A BACKTICK AFTER THE EMPHASIS (#13802 review, round 20, P1 — MEASURED: the verb's
+    # `[*_`]{0,3}` spends its budget on `**`, leaving the backtick that opens the answer
+    # unconsumed — `**prints** `NOTHING`` was GREEN while the detector read it, the
+    # detector-read/ban-blind shape again)
+    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_`]{0,3}"
+    # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
+    # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
+    # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
+    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entry|entries|"
+    r"modules?|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
+    # ⛔ AND THE SPACE SPELLING OF `non-empty` (#13802 review, cycle 6, P1 — MEASURED):
+    # the detector's own class is `non[- ]?empty`, so it reads `is non empty`; this
+    # pattern listed only the hyphen and closed spellings, so
+    # ``the `tortoise/` set is non empty`` was read by NO arm in ANY checkout — measured
+    # `ban=False det=[('prints non empty', False)]`. A token the detector reads and this
+    # bridge does not is the same hole the verb class was.
+    # ⛔ AND AN INDEFINITE ARTICLE BEFORE THE ANSWER (#13802 review, round 14, P1 — MEASURED:
+    # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320`, and the
+    # ban returned False for it; with the `set` anchor NEITHER arm read it, at a head where the
+    # real answer is `nothing`)
+    # ⛔ AND A DETERMINER FROM THE DETECTOR'S OWN STRIP LIST (#13802 review, round 15, P2 —
+    # MEASURED: `the` is in `_typed_answers_to_tortoise_cmd`'s determiner list at `:698` and
+    # NOT here, so `returns the empty set` was detector-read and ban-blind — and the ban is the
+    # only arm over 12 of the 13 bundle documents. `an empty set` was already carried; `the`
+    # is the same answer with a determiner the sibling strips.
+    # ⛔ AND EVERY DETERMINER THE DETECTOR STRIPS, NOT ONLY `a`/`an`/`the` (#13802 review, round 19,
+    # P2 — MEASURED: the detector strips determiners in a LOOP at `:698`
+    # (`the|a|an|its|this|that|those|these|just|only|still|now|actually|also|…`), while the two
+    # alternatives here carried only `a`/`an`/`the`. `returns its empty set` was therefore
+    # detector-read (`[('returns its empty set', True)]`) and BAN-BLIND, and `the`/`an`/`a`
+    # reaching the answer is the same answer with a determiner the sibling already strips. The
+    # shape is the detector's own — a REPEATED strip, so `those two files` and
+    # `just the empty set` are read the same way the detector reads them.
+    r"|(?:(?:the|THE|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|no\s+fewer\s+than)\s+)+"
+    r"(?:empty|EMPTY|non[- ]?empty|not[- ]empty|non[- ]?EMPTY)"
+    r"|(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
+    r"|exactly those two|exactly (?:one|two)"
+    r"|ONE module|TWO modules|one module|two modules|both modules"
+    r"|ONE path|TWO paths|one path|two paths|no module"
+    # ⛔ AND `both` WITH ANY NOUN, NOT ONLY `modules` (#13802 review, round 9, P1 — MEASURED
+    # GREEN on the `set`/deictic anchor, where this ban is the only layer: `both files`,
+    # `both paths` were read by nothing while `both modules` red)
+    r"|both\s+(?:files?|paths?|modules?|entries|diffs?|hits?)"
+    r"|(?:the\s+)?(?:one|two|three|four|five)\s+[\w-]+\s+modules"
+    r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?"
+    # ⛔ AND THE TAIL SPELLINGS 15 FRESHLY-INVENTED SENTENCES REACHED FOR (#13802 review,
+    # round 5, P1 — every one measured GREEN before this line existed): an empty list
+    # literal, `none`/`zero`, a counted FILE set (`holds exactly four files`), a named path
+    # after an unlisted verb (`answers with `tortoise/x.py``), and the diff-side paraphrase
+    # of the comment-only claim (`is this diff's own comment-only edits`).
+    r"|`?\[\]`?|none|None|zero|ZERO|nothing|Nothing|blank|BLANK"
+    # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7, P1 —
+    # each measured GREEN here while the detector read it; for the DEICTIC and `set` anchors
+    # this ban is the ONLY layer, because the detector anchors on a command token)
+    r"|(?:an?\s+)?(?:empty|blank|EMPTY)\s+(?:list|set|array|result|output)"
+    r"|(?:an?\s+)?single|SINGLE|\b\d+\b"
+    # ⛔ AND A COUNT WORD WITH NO NOUN AT ALL, AND A BARE `tortoise/` ANSWER
+    # (#13802 review, cycle 6, P1 — MEASURED, carried across the round-11 merge):
+    # the detector's `_member` reads a bare `one`/`two`/…/`ten`/`both` and a bare
+    # `tortoise/`, so those answers walked through green here on the `set` and
+    # deictic anchors, where this ban is the only layer.
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|both)"
+    r"(?=[\s.,;:!?)*_`]|$)"
+    r"|`?tortoise/`?(?=[\s.,;:!?)*_`]|$)"
+    # ⛔ AND THE SAME REPEATED-DETERMINER SHAPE ON THE COUNT ANSWER (#13802 review, round 19, P2 —
+    # MEASURED: `prints those two files` and `returns its two files` were detector-read and
+    # ban-blind, while the pinned sibling `prints both files` red — a ONE-WORD deletion from a
+    # pinned must-red witness. Swept 940 detector-read/ban-blind cells over
+    # determiner×count×noun×verb before the widening; 0 after.)
+    r"|(?:(?:the|THE|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|no\s+fewer\s+than)\s+)*"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|both|\d+|a|an|the)[*_`]{0,3}\s+"
+    # ⛔ `\d+` IS IN THAT GROUP BECAUSE THE ANSWER GROUP STARTS AFTER THE VERB (#13802 review,
+    # round 19, P2 — MEASURED): the bare-digit alternative is the separate `\b\d+\b` arm, which
+    # only fires when the digit sits DIRECTLY after the verb, so `returns its 2 files` and
+    # `returns those 2 files` were detector-read and ban-blind while `returns 2 files` red.
+    # ⛔ THE WHITESPACE IS REQUIRED, AND THAT IS THE WHOLE GUARD AGAINST A SUBSTRING MATCH
+    # (#13802 review, cycle 7 — MEASURED): with `\s*` on either side of the adjective, the
+    # word `narrow` in `its `-- tortoise/` sibling is the NARROWER measurement` matched as
+    # `nar` + `row` and the bundle document was refused — a false positive that the required
+    # space makes impossible. Emphasis stays optional; the SEPARATOR does not.
+    r"(?:[\w-]+[*_`]{0,3}\s+)?(?:files?|paths?|modules?|edits?|entry|entries|diffs?|hits?|"
+    r"records?|items?|rows?|lines?|changes?)"
+    r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
+    # ⛔ AND THE VERB-BEFORE-PATH PARAPHRASES that carry the answer as a NOUN PHRASE
+    # (`paths only as comment/docstring text`) — no verb after the anchor at all.
+    r"|paths?\s+only\s+as[^.]{0,60}"
+    # ⛔ AND THE NO-DIFFERENCE NOUN-COMPLEMENT (#13802 review, round 10, P2): the `set`
+    # ANCHOR reaches a verb, but `the `tortoise/` set is untouched` needs these words in the
+    # ANSWER class too — measured GREEN with only the bare-`tortoise/` alternative added.
+    r"|untouched|unchanged|unmodified|byte-identical|identical|the\s+same|no\s+code"
+    r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?)"
+    r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    # ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, round 13, P2 — MEASURED GREEN in all three
+    # arms: `Nothing is in the `tortoise/` set at this head.`, `Empty is what `-- tortoise/`
+    # prints at this head.`). Every arm here is verb-then-answer, so the same claim stated the
+    # other way round was read by nothing; this alternative requires the ANSWER to open a
+    # clause and the anchor to follow inside the same sentence, so ordinary prose that merely
+    # begins with "Nothing" is untouched.
+    r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`)"
+    # ⛔ AND THE "which N paths" SHAPE (#13802 review, P1 — MEASURED): the measured leg's own
+    # claim list carries `which two `tortoise/` paths this diff carries`, and this ban could
+    # not see it — an anchor-less membership question in the document's own idiom.
+    r"|which (?:one|two|three|four|five)\s+`?tortoise/[^`]*`?\s+paths?"
+    # E) ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, rounds 13 and 16 — MEASURED GREEN in all
+    # three arms, BOTH directions: `Nothing is in the `tortoise/` set at this head.`,
+    # `Empty is what `-- tortoise/` prints`, `Both files are what the `tortoise/` set holds`,
+    # `Two paths are what `-- tortoise/` prints`, `tortoise/x.py is what `-- tortoise/`
+    # returns`, `A non-empty set is what the `tortoise/` set is`). Every other alternative is
+    # verb-then-answer, so the same claim stated the other way round was read by nothing; this
+    # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
+    # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
+    # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
+    # ⛔ AND THE SENTENCE BOUNDARY TOLERATES EMPHASIS AFTER THE PUNCTUATION (#13802 review,
+    # round 26, P1 — MEASURED: `**At this head.** There are no files in the `tortoise/` set.`
+    # was GREEN because a bold span CLOSING the previous sentence puts `**` between the `.` and
+    # the space this branch required. `.` then `[*_`]{0,3}` then whitespace is the same sentence
+    # boundary the branch already reads; it crosses no word, so the over-block surface is
+    # unchanged (corpus 6 -> 6, measured).
+    r"|(?:(?:^|\n)[ \t]*(?:[-*+>]+|\d+[.)])?[ \t]*|[.;:!?][*_`]{0,3}\s)"
+    r"(?:[*_`]{0,3}(?:at|on|in)[*_`]{0,3}\s+"
+    r"(?:[*_`]{0,3}(?:this|the|that)[*_`]{0,3}\s+)?"
+    # ⛔ AND THE FRONTED ADVERBIAL IS A STRUCTURE, NOT A LIST OF SPELLINGS (#13802 review, round
+    # 23, P1 + P2 — MEASURED at `3b901efa84`). Round 22 closed the fronting hole with a bounded
+    # list (`at this head|at the head you merge|at this merge|…`) and that reproduced, on the
+    # element it had just added, the two defects this file has closed four times already:
+    #
+    # (a) NO FORMATTING TOLERANCE. Every other element in this ban absorbs `[*_`]{0,3}`, and the
+    #     contract at `:2047` is that formatting is NOT content. The fronted group sat BEFORE the
+    #     class, so it could never absorb emphasis, and the corpus's own house spelling walked:
+    #       `**At this head** there are no files in the `tortoise/` set.`   -> GREEN
+    #       `_At this head_ …`, `` `At this head` … ``, `At **this** head …`  -> GREEN
+    #       `At this head — there are no files in the `tortoise/` set.`     -> GREEN
+    #     The emphasised form is not invented, and the count is the MEASURED one (round 24, P2 —
+    #     the earlier sentence said "3 files" for a spelling that occurs ONCE): `grep -ro -F
+    #     '**At this head**' docs --include='*.md'` -> 1 occurrence, case-insensitively -> 4
+    #     in 4 files (`-i`; round 25, P2 — the earlier sentence said 3, and a THIRD number
+    #     survived at the witness block below, so the file disagreed with itself), e.g. `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md:216`.
+    #     The ban does not care about the case: it compiles IGNORECASE. And
+    #     the sibling detector reads none of them (`_typed_answers_to_tortoise_cmd -> []`), so
+    #     there was no second layer.
+    # (b) THE LIST'S STATED JUSTIFICATION WAS FALSE. "The spellings this corpus actually uses …
+    #     all already in the ban's own vocabulary" is refuted by the census: `on this head` 11x
+    #     (and `on` IS in the ban's vocabulary — `_TORTOISE_HEAD_BINDING_AT` carries `at|on|in`),
+    #     `at the head` 158x, `at this head` 331x. Thirteen of eighteen realistic fronted
+    #     spellings were still GREEN, `On this head …` among them (re-measured here, 13/18).
+    # ⚠️ AND THE STRUCTURE'S OWN RESIDUAL IS MEASURED, NOT ASSERTED (round 23): of the same
+    # eighteen spellings, THREE remain GREEN at this head — `at merge time`, `as of this head`
+    # and `at the head of this merge` — because none of them has the shape the class reads
+    # (preposition + determiner + … + `head`/`merge`). ⛔ ROUND 24 CUT THAT RESIDUAL FROM THREE TO
+    # TWO, AND ONE OF THE THREE WAS A REGRESSION RATHER THAN A RESIDUAL (MEASURED at
+    # `8f2f2ad25b`): `at merge time` was RED at `3b901efa84` — the round-22 bounded list carried
+    # `at\s+merge\s+time` — and the structural class DROPPED it, i.e. a capability left the
+    # guard silently and NO witness red, because that spelling was pinned nowhere. So the
+    # determiner above is now OPTIONAL and `time` is in the trailing group: `At merge time there
+    # are no files in the `tortoise/` set.` is RED here again, and pinned below. The residual is
+    # ONE spelling that still has no shape to read — `as of this head` (the preposition phrase `as
+    # of`) — and it is priced by LIVE VICTIMS, not word counts: it does not occur in `docs/`
+    # today, and the corpus scan below finds 0 new refusals and 0 lost ones. ⛔ `at the head of
+    # this merge` USED TO BE THE SECOND RESIDUAL AND IS NOT ONE ANY MORE (#13802 review, round
+    # 28, P3 — MEASURED: it is REFUSED from `f5ea75f1d3` onward by the `merg*` tail below, so a
+    # residual list that still names it UNDERSTATES the class, which is the same rot in the other
+    # direction).
+    # So the boundary is the STRUCTURE — a preposition the ban already treats as a head binder,
+    # an OPTIONAL determiner, up to two intervening words, then `head`/`merge` (optionally a
+    # trailing `head`, `time`, or `<pronoun> merge`) — case-insensitively (the ban's own flag),
+    # with the emphasis class on every token and the em/en-dash bridge the dash family already
+    # carries. Enumerating spellings is what failed; this reads the shape the spellings share.
+    # ⛔ AND THE CLAUSE OPENS ON A MARKDOWN PREFIX TOO (#13802 review, round 24, P2 — PRE-EXISTING
+    # at `3b901efa84`, closed here because this range's whole subject is the clause-opening
+    # shape): `^` is string-start only (no MULTILINE) and the old `\n` branch required the
+    # adverbial IMMEDIATELY after the newline, so a list item, a blockquote or an indented line
+    # defeated the entire family. ⛔ THE MARKER CLASS BUYS THE `)` ITEM AND NESTED QUOTES, NOT THE
+    # `.` ITEM (#13802 review, round 25, P2 — MEASURED, and the earlier sentence here claimed
+    # otherwise): `1. At this head …` was ALREADY refused before this anchor existed, because the
+    # item's own period satisfies the pre-existing `[.;:!?]\s` branch — so a witness built on
+    # `1.` pins nothing and the arm stays green even if `\d+[.)]` is narrowed to `\d+\.`
+    # (measured: the suite passes with that narrowing while `1)` and `10)` go GREEN). The forms
+    # this class actually adds are `1)`, `10)`, `-`, `*`, `+`, `>` and `>>`.
+    # 115 lines in `docs/` carry a `[-*+>] … at|on|in (this|the|that) … (head|merge)` shape
+    # today; the corpus scan below shows 0 of them is a direction claim, so the widening costs
+    # nothing live. ⚠️ SCOPED OUT DELIBERATELY, not an oversight: a HEADING (`## At this head …`),
+    # a bold label (`**Note:** At this head …`) and a table cell (`| At this head, … |`) are not
+    # clause openings this family models — no `docs/` line carries any of them with a direction
+    # claim, and matching a `|`-delimited cell would need a cell boundary model this ban does not
+    # have.
+    # ⛔ AND THAT INTERVENING RUN ADMITS A PATH-BEARING TOKEN, FOR THE SAME REASON ITS SIBLING
+    # FILLER DOES (#13802 review, round 27, P2 — MEASURED: with `[\w-]+`, `At the head of
+    # origin/main you are about to merge there are no files in the `tortoise/` set.` was GREEN
+    # while its un-fronted twin was RED — the parity the `merg*` tail now gives every other
+    # spelling, defeated by one `/`. The two arms read the SAME token class for the SAME reason:
+    # `origin/main` is this repo's most ordinary path token.)
+    # ⛔ AND THE INTERVENING RUN IS THE SAME EIGHT (#13802 review, round 28, P2 — MEASURED: the
+    # comment below claimed "the bound is now the SAME eight in both places" while this run was
+    # still `{0,3}`, so the parity broke again at a FOUR-token gap — `At the very top outer layer
+    # head of the branch you are about to merge …` GREEN against a RED twin. The bound is one
+    # constant across the three runs now (this one, and both branches of the tail), which is what
+    # makes the parity a property of the pattern rather than of one clause.)
+    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w/-]+[*_`]{0,3}\s+){0,8}"
+    # ⛔ AND THE HYPHENATED `merge-time` (#13802 review, round 25, P2 — MEASURED: `At merge-time
+    # there are no files in the `tortoise/` set.` was GREEN while its UN-FRONTED twin `There are
+    # no files in the `tortoise/` set at merge-time.` was RED — the same one-order-refused
+    # asymmetry rounds 13/16/21 closed, sitting inside the class this round widened.)
+    r"[*_`]{0,3}(?:head|merge)(?:[ -]time)?(?:['’]s)?(?![A-Za-z0-9])[*_`]{0,3}"
+    # ⛔ AND THE TRAILING SHAPE IS PRONOUN-GENERAL, NOT ONE PRONOUN (#13802 review, round 24,
+    # P2 — MEASURED at `8f2f2ad25b`): the literal `you\s+merge` refused `head you merge` and
+    # left `head we merge` / `head they merge` / `head one merge` GREEN in BOTH arms. `time`
+    # is here for the same reason (#13802 review, round 24, P1 — the structural class DROPPED
+    # `at merge time`, which the round-22 bounded list HAD caught: RED at `3b901efa84`, GREEN
+    # here before this line, i.e. a capability silently leaving the guard with no witness to
+    # red. That regression is why the determiner above is optional and `time` is below.)
+    # ⛔ AND ONE `<word> merge` WAS STILL ONE ALTERNATION, NOT A TAIL (#13802 review, round 26,
+    # P2 — MEASURED: `["-+]\s+merge` reads exactly ONE word before `merge`, so the FRONTED
+    # order stayed GREEN while its un-fronted twin was REFUSED in five grammatical shapes —
+    # `at the head you are merging` / `… you are about to merge` / `… to be merged` /
+    # `… you will merge` / `… post-merge` — the same one-order-refused asymmetry rounds
+    # 13/16/21/25 closed, one grammatical step further out. The tail is now a bounded TOKEN RUN
+    # ending in a `merg*` word, so every inflection (`merge`/`merging`/`merged`) and every
+    # adverbial form of the same claim is read by the shape rather than by a list.
+    # ⚠️ DECLARED RESIDUAL, MEASURED: a tail that carries NO `merg*` word — `at the head of the
+    # PR`, `at the head of this branch` — is still GREEN in the fronted order. A general
+    # any-word tail was CONSIDERED AND REJECTED: it is not a shape, it is "any phrase", and it
+    # would refuse ordinary prose (`At the head of the file, …`) that this file pins as
+    # MUST-NOT-REFUSE. Live victims measured: `grep -rIo 'head of the PR' docs | wc -l` -> 0,
+    # `grep -rIo 'head of this branch' docs | wc -l` -> 2 (neither is a direction claim — the
+    # count and the READING are stated separately, so a verifier re-running the command gets the
+    # number this comment prints); corpus hit set unchanged at 6.
+    # ⛔ AND THE RUN IS BOUNDED AT EIGHT, MATCHING FAMILY A (#13802 review, round 27, P2 —
+    # MEASURED: at `{0,4}` the parity the line above claims was still broken one step out —
+    # `At the head of the branch you are about to merge there are no files in the `tortoise/`
+    # set.` was GREEN while its un-fronted twin was RED, and the sibling detector reads neither
+    # (`[]`), so there was no second layer. The sentence above said "every adverbial form"; it
+    # said so while the bound was 4 and family A's filler (the `(?:\s+there)?` alternative) was
+    # 8, which is why the same five-token phrase was caught command-first and missed fronted. The
+    # bound is now the SAME eight in all three runs — the intervening one above and both tail
+    # branches — so the parity is a property of the pattern rather than a coincidence of one
+    # clause's bound (#13802 review, round 28, P2: the round-27 edit widened the token CLASS of
+    # the intervening run and left its BOUND at 3, which is exactly the gap this note closed).)
+    # ⛔ AND THE TAIL READS THE SAME TOKEN CLASS AS ITS TWO SIBLINGS (#13802 review, round 27,
+    # P2 — MEASURED: with `[\w-]+` here, `At the head of origin/main you are about to merge
+    # there are no files in the `tortoise/` set.` stayed GREEN while its un-fronted twin was RED —
+    # the LAST of the three runs in this family to learn that a `/` is a token character, and the
+    # one that kept the parity claim false after the other two were fixed.)
+    r"(?:\s+(?:(?:head|time)(?:\s+(?:[\w/-]+\s+){0,8}[\w/-]*merg\w*)?"
+    r"|(?:[\w/-]+\s+){0,8}[\w/-]*merg\w*)[*_`]{0,3})?"
+    # ⛔ AND EMPHASIS MAY WRAP THE ADVERBIAL'S OWN TRAILING PUNCTUATION (#13802 review, round 26,
+    # P1 — MEASURED: round 23 put `[*_`]{0,3}` on every TOKEN of the fronted group and declared
+    # the class closed under formatting, but the `,` / `:` / `.` / `—` that ENDS the adverbial had
+    # to sit OUTSIDE the emphasis. So the idiomatic markdown lead-in — the bundle's own house
+    # spelling, `**At this head:**` — was refused by no alternative:
+    #   `**At this head,** there are no files in the `tortoise/` set.`  -> GREEN
+    #   `**At this head:** …` · `_At this head,_ …` · `**At merge time,** …` -> GREEN
+    #   `**At this head —** …` · `**At this head.** There are …`              -> GREEN
+    # The sibling detector reads none of them (no command token), so there was no second layer.
+    # The closing emphasis is absorbed after the punctuation, which cannot cross a word.
+    r"\s*(?:[—–]\s*)?,?[*_`]{0,3}\s+)?"
+    # ⚠️ DECLARED OVER-BLOCK, MEASURED (round 23, P2): this prefix extends a PRE-EXISTING
+    # over-block into fronted prose — `At this head nothing in the `tortoise/` set is broken.`,
+    # `At this head none of the `tortoise/` files were touched.` and `At this head both files in
+    # `tortoise/` have docstrings.` are GREEN at `9024f2e5d0` and RED here, and their un-fronted
+    # twins were already RED. Corpus cost today: **zero** — the ban's hit set over all 855
+    # `docs/**/*.md` is 6 before and 6 after, set difference zero in both directions.
+    r"(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|both\s+(?:files?|paths?|modules?|entries)"
+    # ⛔ AND THE REPEATED-DETERMINER / `\d+` SHAPE THE VERB-FIRST ORDER GOT IN ROUND 19, ONE
+    # ORDER OVER (#13802 review, P2 — MEASURED at `180b95d07d`). Round 19 widened the
+    # verb-then-answer count answer to strip determiners in a LOOP and to carry `\d+`; this
+    # alternative kept the bare `(?:one|two|…|ten)\s+<noun>` head, so the SAME claim was
+    # refused in one order and GREEN in the other — the asymmetry rounds 13/16/21/25 each
+    # closed once, reappearing in the dimension round 19 had just closed:
+    #   RED    `` `-- tortoise/` prints those two files at this head. ``
+    #   GREEN  `` Those two files are what `-- tortoise/` prints at this head. ``
+    # SEVEN cells measured GREEN here while their verb-first twins red — `those`, `these`, `its`,
+    # `all`, `just`, `those 2`, and a bare `2`. `\d+` belongs here for round 19's own reason:
+    # the separate `\b\d+\b` arm fires only when the digit sits directly after the VERB, and
+    # this order puts it before the clause instead. The noun class, the optional MODIFIED noun
+    # (`the two comment-only modules`) and the determiner list are the verb-first group's, so
+    # the two orders cannot drift apart in this dimension either.
+    # ⛔ OVER-BLOCK IS NOT BOUNDED BY THE TAIL — MEASURED, AND THE EARLIER CLAIM HERE WAS FALSE
+    # (#13802 review, round 26, P2). The text this replaced said the widened forms "still have to
+    # reach `tortoise/` and then a subject-noun OR VERB", and that this kept
+    # `All six paths under `tortoise/` are covered by tests.` allowed because `are`/`under`/`were`
+    # are not in that list. The `under tortoise/` spelling IS still allowed — but the
+    # `in the `tortoise/` SET` spelling is not, because the tail's own anchor noun `set` (likewise
+    # `tree`, `directory`) satisfies it BEFORE any verb is reached, so the verb is never consulted.
+    # MEASURED at `3b8a38bdd0` (GREEN at `180b95d07d` -> RED here):
+    #   `These two files in the `tortoise/` set are the resolver and its test.`
+    #   `All six paths in the `tortoise/` set are covered by tests.`
+    #   `All six paths in the `tortoise/` tree are covered by tests.`
+    #   `Those two files in the `tortoise/` set are read by the resolver.`
+    #   `2 files in the `tortoise/` set were added by that PR.`
+    # while their bare-anchor twins (`in `tortoise/``, `under `tortoise/``) stay ALLOWED. So this
+    # widening BUYS the closing of the false-PASS cell and PAYS an over-block class it did not
+    # have; the file's own rule is that such a class is DECLARED rather than claimed away, so it
+    # is declared here with its examples. Corpus cost, measured over all 855 `docs/**/*.md`:
+    # 6 refusals before, 6 after, set difference 0 — no live victim, which is why this is a
+    # documented residual and not a blocker. ⛔ TIGHTENING IT WAS MEASURED AND REFUTED, NOT LEFT
+    # OPEN (#13802 review, round 27, P2): "require a verb, not a bare anchor noun, after the
+    # `tortoise/` reference" was implemented and measured at `c42c6cb4`. It closes four of the five
+    # sentences above, still refuses the fifth (`… set are read by the resolver`, because `reads?`
+    # is in the verb list), and OPENS a false PASS — `<N> <noun> in the `tortoise/` set at this
+    # head.` has no verb after the reference, so the SIZE of the diff's `tortoise/` set at this head
+    # walks green. That is the direction this file says costs more than an over-block (D5), so the
+    # over-block above is the cheaper side of the trade and the residual STAYS. Separating the two
+    # shapes needs a predicate-vs-locative model, not a one-line tail edit; the four spellings the
+    # tightening would green are therefore still refused, and the five membership claims it would
+    # allow are pinned MUST-RED in the witness test so the same edit cannot be landed silently.
+    # (Pre-existing and not this widening's doing: `Every file in the `tortoise/` set has a module
+    # docstring.` is refused at BOTH `180b95d07d` and this head — the shared tail, not this class.)
+    r"|(?:(?:the|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|no\s+fewer\s+than"
+    r"|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both)\s+)*"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|both|\d+)[*_`]{0,3}\s+"
+    r"(?:[\w-]+[*_`]{0,3}\s+)?"
+    # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
+    # MEASURED): `entries`, `diffs` and `edits` red in the VERB-THEN-ANSWER arm (`:2169` binds
+    # them) while `Six entries are what the `tortoise/` set holds at this head` stayed GREEN
+    # here — an asymmetry between the two orders of the same sentence, and one the row's own
+    # residual sentence did not cover, because these nouns are inside the ban's own lists.
+    r"(?:files?|paths?|modules?|entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
+    r"|(?:an?|the)\s+(?:empty|non[- ]?empty)"
+    # ⛔ AND THE `no <noun>` SPELLING IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+    # MEASURED at this head: `There are no files in the `tortoise/` set at this head.` is GREEN
+    # while its VERB-FIRST twin `The `tortoise/` set shows no changes at this head` is refused
+    # by the arm below — the same claim, two orders, one refused, which is exactly the
+    # asymmetry rounds 13 and 16 closed twice before). The noun class is the ban's OWN count
+    # class (`entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?`) plus the
+    # three shapes it spells out (`files?|paths?|modules?`), so the two orders cannot drift
+    # apart again. Bounded exactly like its siblings: the clause must OPEN with `no <noun>`,
+    # `tortoise/` must follow inside the same sentence, and a verb or subject-noun of the anchor
+    # list must follow THAT — so `No changes to `tortoise/` are needed` stays allowed (its
+    # `are` is not in the list), pinned in the must-not-refuse set below.
+    r"|no\s+(?:files?|paths?|modules?|entries|entry|edits?|diffs?|hits?|records?|items?|"
+    r"rows?|lines?|changes?))"
+    # ⚠️ DECLARED RESIDUAL, MEASURED (delta review of this widening): the QUOTE- and
+    # PAREN-wrapped answer (`The `tortoise/` set prints 'NOTHING' at this head.`, `… prints
+    # (NOTHING) at this head.`) is read by NEITHER arm — the emphasis class is `[*_`]`, and the
+    # sibling DETECTOR strips `[*_`]` but matches on a COMMAND token, so it reads none of them
+    # either. A gap in BOTH arms, not the detector-read/ban-blind asymmetry the rail must not
+    # carry; the live-victim scan over all 855 `docs/**/*.md` finds zero of either form.
+    # ⛔ AND THE ANCHOR MUST BE FOLLOWED BY THE VERB OR THE SUBJECT-NOUN (#13802 review, round
+    # 16 — MEASURED): without that, ordinary prose (`… it is transport only — nothing in
+    # `tortoise/``, `; `tortoise/x.py` was in an earlier cut`) matched the emptiness answer and
+    # the path answer with no claim behind it. A path is also dropped from the answer class
+    # here: `tortoise/x.py is what … returns` is prose this pattern cannot distinguish from a
+    # mention, and the row's own rule is that an over-block costs more than a false PASS.
+    # ⛔ A LOOKAHEAD, NOT `\b` (#13802 review, cycle 9, P2 — MEASURED): the answer class above
+    # ENDS with `` `?\[\]`? ``, and a word boundary cannot follow `` ` `` or `]` — so the `[]`
+    # branch was UNREACHABLE here. Measured: `` `-- tortoise/` prints `[]` at this head `` red
+    # in the verb-then-answer arm while `` `[]` is what `-- tortoise/` prints at this head ``
+    # was GREEN, i.e. the same claim in the two orders disagreed. `(?![A-Za-z0-9_])` is the
+    # boundary that is true after a word AND after punctuation, so both spellings are read.
+    r"(?![A-Za-z0-9_])[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
+    r"subtree|delta|changes?|holds|holds?|returns?|prints?|reports?|lists?|"
+    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?|"
+    # ⛔ AND THE LINK VERB THIS FAMILY WAS MISSING (#13802 review, P2 — MEASURED, and
+    # disclosed at `480c675313` as PRE-EXISTING and left: *"the same `[]`-unreachability
+    # survives in a SIBLING alternative … arm E's trailing verb list has no `has`"*).
+    # The answer-first order names the action with the LINKING verb, and this list carried
+    # no `has` while BOTH other families did (the general verb class above: `has|holds?`;
+    # the verb-before-path family: `carries|touches|has|holds|…`). ⛔ MEASURED, RE-DERIVED IN
+    # ROUND 22 (an earlier cut of this sentence published `42 of 210` on a stated
+    # `13-verb × 7-answer` grid, and 13 × 7 is 91, not 210 — a denominator the stated grid
+    # cannot produce): with the COMMAND anchor and `[]` as the answer, the answer-first order
+    # read NONE of the eight link verbs the other two families carry at `9024f2e5d0` — 8 of 8
+    # cells GREEN through this ban, with `_typed_answers_to_tortoise_cmd` returning `[]` for
+    # every one, so on the `set`/deictic anchor there was no second layer either, while the
+    # SAME claim in the verb-then-answer order red. A verb the other two families carry and
+    # this one does not is the same hole round 17 closed in the verb-before-path direction, so
+    # the list is now aligned with theirs.
+    # ⚠️ THE COPULAS STAY OUT, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT (#13802
+    # review, P2 — the general class carries `is|are|was|were|remains?|stays?` because there
+    # a copula is BOUNDED by the answer that follows it; at the END of this alternative there
+    # is nothing after the verb to bind it, so `is` would refuse `One path in `tortoise/` is
+    # deprecated.` and `Two paths in `tortoise/` are read by the resolver.` — ordinary prose
+    # about the tree, not a direction claim. That is the file's own trade, stated here rather
+    # than matched: an over-block costs more than a false PASS. ⛔ AND THE OVER-BLOCK CLASS IS
+    # MEASURED, NOT ASSERTED ABSENT (an earlier cut of this sentence said the added verbs buy
+    # "NOT a NEW over-block class", and round 22 measured that false): `have|had` are far more
+    # ordinary with a PLURAL subject than `holds`, so at head — GREEN at `9024f2e5d0`, RED now —
+    # `Both files in `tortoise/` have a module docstring.` and `Two paths in `tortoise/` have
+    # been updated.`, and the widened count-noun set does the same to `The `tortoise/` set has
+    # no lines longer than 88 characters.` That is the price of closing the false-PASS cell
+    # above, paid knowingly: the file's own trade. Measured over 855 `docs/**/*.md`: **0 new
+    # hits** (6 before, 6 after, set difference zero) and 0 over the 13 guarded bundle
+    # documents, so the cost is bought against prose nobody has written — every must-not-refuse
+    # form in the witness test stays GREEN.
+    r"has|have|had|comes? back|resolves?|reveals?|reads?|touches?)\b"
+    # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
+    # spellings measured GREEN): `this diff carries no `tortoise/` path at all`, `this diff
+    # touches no `tortoise/` file`, `the `tortoise/` set holds no path here`. Shape A cannot
+    # see any of these — it anchors on the COMMAND or on `the `tortoise/` set` and then
+    # needs a verb, while here the subject is the DIFF and the path comes AFTER the verb.
+    # This alternative matches only a LIMITING qualifier (`no`/`zero`/`only`) between the
+    # verb and the path, so an ordinary sentence ("this diff carries `tortoise/x.py`
+    # because …") is untouched.
+    r"|\b(?:carries|touches|has|holds|contains|includes|names|lists|reads|changes"
+    # ⛔ AND EVERY VERB THE REST OF THIS PATTERN CARRIES (#13802 review, round 17, P2 —
+    # MEASURED: with `reports|gives|outputs|shows|=|:|->|→`, `no `tortoise/hosted_api.py`` was
+    # detector-read and ban-blind, because this family's list was written separately from the
+    # general verb class above — a verb the generic class knows and THIS family does not is the
+    # same hole in the verb-before-path direction)
+    r"|is|are|gets|returns|yields|prints|adds|removes|edits|reports?|gives|outputs?|shows?"
+    r"|answers?|resolves?|reveals?|reads?|comes? back)"
+    # ⛔ WITH THE SAME INSERTION TOLERANCE FAMILY A CARRIES (#13802 review, round 18, P2 —
+    # MEASURED: `This diff carries, at this head, no `tortoise/` path at all` and
+    # `This diff carries (measured at this head) no …` were GREEN while the bare form red)
+    # ⛔ AND THE PREPOSITION BRIDGE AND THE DASH INSERTS, WHICH FAMILY A HAD AND THIS ONE DID
+    # NOT (#13802 review, round 21, P2 — MEASURED in-process at `9024f2e5d0`): the verb list
+    # above was widened to "every verb the rest of this pattern carries" and it then carried
+    # `resolves?`/`answers?`/`comes? back` WITHOUT the particle bridge family A pairs them with
+    # at its own `(?:(?:with|to|as|into|out|of)\s+)?`, so the natural spelling of the very verbs
+    # the round-17 widening added stayed GREEN through BOTH arms (`This diff resolves to no
+    # `tortoise/` path at all.` / `comes back with no …` / `answers with no …` -> ban-NONE), while
+    # family A's `resolves to ZERO` red. Family C also had no dash insert at all. The pre-fix
+    # readings are pinned as must-red witnesses in the test below, so this is measured rather
+    # than asserted. `\s*` before the qualifier is what lets the bridge's own trailing space be
+    # consumed — family A's post-insert tolerance is `\s*` for the same reason, and it cannot
+    # cross a word, so the over-block surface is unchanged (verified over all 855 docs).
+    r"\s*(?:(?:with|to|as|into|out|of)\s+)?"
+    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\)|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?"
+    r"\s*(?:no|zero|only)\s+`?tortoise/[^`]*`?"
+    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (the regex `\b` cannot anchor before
+    # `-` or `→`, which is why putting them in the list above left them blind — MEASURED, round 17)
+    r"|\s(?:=|:|->|→)\s+(?:no|zero|only)\s+`?tortoise/[^`]*`?"
+    r"(?:\s+(?:paths?|files?|modules?|edits?)\b)?"
+    r"|\b(?:carries|touches|has|holds|contains|includes|names|lists)\s+"
+    r"`?tortoise/[^`]*`?\s+(?:paths?|files?|modules?)\b"
+    # D) ⛔ AND THE NO-DIFFERENCE FAMILY (#13802 review, round 10, P2 — MEASURED GREEN).
+    # "`tortoise/` is untouched by this diff" passed this ban AND the sibling detector: the
+    # anchor needs `set|side|part`, and no answer form carries `untouched`/`unchanged`/
+    # `identical`/`byte-identical` — which is exactly how a writer states that the set is
+    # empty without saying `NOTHING`. The class the ban declares is "a direction claim
+    # about that command"; "untouched" IS that claim, so it belongs here rather than in a
+    # footnote limiting the ban's scope.
+    r"|`?tortoise/`?\s+(?:is|are|was|were|remains?|stays?)\s+(?:NOT\s+|not\s+)?"
+    r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)"
+    # ⛔ AND ITS TOKENS STAY CASE-SENSITIVE, ALONE IN THIS PATTERN (#13802 review, cycle 7 —
+    # MEASURED): they are pinned case-BY-case on purpose, and the compile is now
+    # `re.IGNORECASE` for the verb/answer alphabet — with the flag reaching this group,
+    # `It does **not** discharge A1: it is **transport only** — nothing in `tortoise/`
+    # consumes \`result["relations"]\`` (ordinary prose about a directory, not a direction
+    # claim) matched and `RECONCILE-A1-A2-A5.md` was refused. The scoped `(?-i:…)` is what
+    # keeps one compile from widening an alternative that opted out of it.
+    r"|(?:^|[.;:!?]\s|\n)(?:(?-i:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero)|`?\[\]`?)"
+    r"\b[^.\n]{0,60}?tortoise/",
+    # ⛔ CASE-INSENSITIVE, for the same reason and by the same measurement as the emphasis
+    # tolerance above: the detector compiles with `re.IGNORECASE`, and this file's own
+    # witness list pins `Prints two paths` as a must-red spelling. Compiled WITHOUT it, the
+    # ban refused none of the eleven capitalised/emphasis-wrapped forms measured at cycle 7
+    # (`Prints two paths`, `prints Empty`/`Blank`/`Zero`/`Single`/`Both`/`Comment-Only`, …),
+    # two of which kept `05-verify.md` GREEN when injected.
+    re.IGNORECASE))
+
+
+def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_verb_class():
+    """⛔ A PATTERN GUARD WITH NO WITNESS IS THE BLACKLIST IT REPLACED, ONE LEVEL UP.
+
+    The five-literal ban this replaced was measured leaking FOUR spellings the document had
+    actually used; the first cut of the PATTERN then leaked the whole MEMBERSHIP direction —
+    measured in a real `--depth 1` clone over an injected membership claim (the counts are
+    not typed here — they move whenever this file gains a test), while the emptiness form
+    red. On that checkout the measured sibling
+    SKIPS, so nothing else covered it. Every spelling below is pinned, in BOTH directions,
+    including the ` there -> ` form the document itself used to carry; the pointer and
+    past-tense forms are pinned as MUST-NOT-REFUSE, because refusing the document's own
+    pointer to the command is the same defect in the other direction
+    (#13795 review, note 5; #13802 merge round, finding 1).
+    """
+    _cmd = "git diff --name-only origin/main...HEAD -- tortoise/"
+    for _claimed in (
+        # emptiness
+        f"`{_cmd}` prints NO path at all",
+        f"`{_cmd}` prints NOTHING",
+        "`-- tortoise/` returns NOTHING",
+        "`tortoise/` set above is EMPTY",
+        f"neither is `{_cmd}`",
+        # membership
+        f"`{_cmd}` prints `tortoise/hosted_api.py`",
+        f"`{_cmd}` returns exactly those two",
+        f"`{_cmd}` returns ONE module",
+        # the answer one word further from the command — the document's own historical form
+        f"`{_cmd}` there -> `tortoise/activation_scorecard.py`",
+        # ⛔ AND EVERY VERB THE DETECTOR KNOWS BUT THE FIRST CUT OF THIS BAN DID NOT
+        # (merge-round review, P1 — measured in-process: all four were GREEN here while
+        # `_typed_answers_to_tortoise_cmd` read them as emptiness answers).
+        "`-- tortoise/` shows no path at all",
+        "`-- tortoise/` names no path at all",
+        "`-- tortoise/` has no path at all",
+        "`-- tortoise/` = empty",
+        # ⛔ AND THE FIVE THAT SHARED A WITNESS WITH ANOTHER ALTERNATIVE (#13802 review,
+        # round 8, P2 — MEASURED): deleting `includes?|contains?` left EVERY witness above
+        # still matching, and the only `[=:]` witness is satisfied by `=` alone; `outputs`
+        # and `→` were in the detector's list and not in this pattern's.
+        "`-- tortoise/` includes no path at all",
+        "`-- tortoise/` contains no path at all",
+        "`-- tortoise/` : empty",
+        "`-- tortoise/` outputs no path at all",
+        "`-- tortoise/` → `tortoise/a.py`",
+        # ⛔ THE FILLER'S AND ANCHOR'S OWN GAPS (#13802 review, P1 — all four were GREEN)
+        "`-- tortoise/` command at this head prints NOTHING",
+        "`-- tortoise/` command, at this head, returns NOTHING",
+        "the `-- tortoise/` set, at this head, prints NOTHING",
+        "which two `tortoise/` paths this diff carries",
+        # ⛔ THE NO-DIFFERENCE FAMILY (#13802 review, round 10, P2 — all four were GREEN):
+        # "the set is empty" stated as "untouched"/"unchanged"/"identical" instead.
+        "`tortoise/` is untouched by this diff",
+        "`tortoise/` remains unchanged",
+        "the `tortoise/` set is untouched",
+        "`tortoise/` is byte-identical to `main`",
+        # ⛔ AND THE SAME THREE WORDS THROUGH THE `set` ANCHOR (cycle-5 P2 — all GREEN):
+        # alternative D anchors on a BARE `tortoise/`, so it never sees the document's own
+        # dominant idiom, "the `tortoise/` set is …". Five of seven words reached the set
+        # anchor; these three did not.
+        "the `tortoise/` set is identical to `main`",
+        "the `tortoise/` set is the same on both sides",
+        "the `tortoise/` set carries no code",
+        # ⛔ AND THE FIFTEEN FRESHLY-INVENTED SPELLINGS A REVIEW ROUND MEASURED GREEN
+        # (#13802 review, round 5, P1): the verb-BEFORE-the-path family (no anchor at all),
+        # the `comes back` / `resolves to` / `answers with` verbs, the counted FILE set, the
+        # empty-list literal, and the diff-side paraphrase of the comment-only claim.
+        "this diff carries no `tortoise/` path at all",
+        "the `tortoise/` side of this diff is empty",
+        "`git diff --name-only origin/main...HEAD -- tortoise/` comes back empty",
+        "the `-- tortoise/` form answers with `tortoise/x.py`",
+        "the `tortoise/` set holds exactly four files",
+        "at THIS head the `tortoise/` set above is this branch's own comment/docstring-only edits",
+        # ⛔ AND THE NOUN-SYNONYM HOLE (#13802 review, round 6, P2 — MEASURED: a one-word
+        # edit, `path`->`files`/`diff`, put the refuted claim back GREEN in BOTH arms)
+        "`-- tortoise/` prints no files at all",
+        "`-- tortoise/` prints no diff",
+        # ⛔ AND THE `an empty list` / `single` / BARE-DIGIT tails (#13802 review, round 7,
+        # P1 — each measured GREEN while the detector read it; for the DEICTIC and `set`
+        # anchors this ban is the ONLY layer, the detector anchoring on a command token)
+        "the command this clause prescribes returns an empty list",
+        "the `tortoise/` set above is an empty list",
+        "`-- tortoise/` comes back with an empty list",
+        "`-- tortoise/` prints single path",
+        "`-- tortoise/` reports 0 paths",
+        # ⛔ AND `both`/`non-empty` WITH THE SET ANCHOR (#13802 review, round 9, P1 — all
+        # three measured GREEN through the ban AND the detector AND the spelling ledger)
+        "The `tortoise/` set prints both files at this head.",
+        "The `tortoise/` set is non-empty at this head.",
+        "At this head the `tortoise/` set holds both paths.",
+        # ⛔ AND A QUANTIFIER OR A COMMA-BOUNDED INSERTION BETWEEN THE VERB AND THE ANSWER
+        # (#13802 review, round 10, P1 — all four measured GREEN through ban, detector and
+        # ledger; every quantifier here is in the detector's own strip list)
+        "the `tortoise/` set prints only one path",
+        "the `tortoise/` set has no fewer than two files",
+        "the `tortoise/` set shows more than one path",
+        "the `tortoise/` set prints, at this head, nothing",
+        # ⛔ AND `six`..`ten` BOUND TO A NOUN THE `no …` ARM ALREADY CARRIED (#13802 review,
+        # round 10, P2 — `prints six entries` was GREEN while `prints six files` red)
+        "`-- tortoise/` prints six entries",
+        "`-- tortoise/` prints ten entries",
+        "`-- tortoise/` prints seven diffs",
+        "`-- tortoise/` prints blank",
+        # ⛔ AND `a single <noun>` — `single` behind an ARTICLE, plus the singular nouns the
+        # `entries` list did not carry (#13802 review, round 11, P1 — all measured GREEN, and
+        # on the SET anchor the detector returns NOTHING because it needs a command token)
+        "the `tortoise/` set prints a single entry",
+        "the `tortoise/` set holds a single record",
+        "the `tortoise/` set prints a single item",
+        "the `tortoise/` set prints a single row",
+        # ⛔ AND THE DETECTOR'S MODIFIER WORDS, THE PARTICLE, `no longer`, AND THE NO-DIFFERENCE
+        # VERBS ON THE SET ANCHOR (#13802 review, round 12 — 1260 of 1536 verb×modifier×answer
+        # cells were detector-only, and the set/deictic anchor saw NONE of them because the
+        # detector needs a command token)
+        "the `tortoise/` set prints now nothing",
+        "the `tortoise/` set is still empty",
+        "`-- tortoise/` gives back nothing",
+        "the `tortoise/` set is no longer empty",
+        "the `tortoise/` set remains unchanged",
+        "the `tortoise/` set stays untouched",
+        "the `tortoise/` side remains byte-identical to `main`",
+        # ⛔ AND THE THREE SENTENCES THE PROXIMITY WINDOW LET THROUGH (#13802 review, round 12,
+        # P1 — a head token anywhere within 80 chars neutralised the ban; 21.5% of the guarded
+        # corpus sits inside that window). Each is a claim about THIS head introduced by an
+        # unrelated citation.
+        "Per `#10215`, at this head the `tortoise/` set is empty.",
+        "`#10215` shipped that; at this head the `tortoise/` set prints NOTHING.",
+        "refs #13572 and #13746: the `tortoise/` set is empty at this head.",
+        # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS, THE PRONOUN BEFORE `back`, AND THE ANSWER-FIRST
+        # ORDER (#13802 review, round 13, P2 — each measured GREEN while the SAME verb and the
+        # SAME answer were refused on `set`: the noun set and the word order were the holes,
+        # not the vocabulary)
+        "The `tortoise/` diff is empty at this head.",
+        "The `tortoise/` files are empty at this head.",
+        "The `tortoise/` paths hold nothing at this head.",
+        "The `tortoise/` directory prints nothing at this head.",
+        "`-- tortoise/` gives us back nothing at this head.",
+        "Nothing is in the `tortoise/` set at this head.",
+        # ⛔ AND THE MEMBERSHIP DIRECTION IN THAT ORDER (#13802 review, round 16, P2 — the
+        # round-13 cut covered emptiness only, so these four were GREEN in both arms)
+        "Both files are what the `tortoise/` set holds at this head.",
+        "Two paths are what `-- tortoise/` prints at this head.",
+        # ⛔ the path answer is NOT pinned: a bare `tortoise/x.py` at a clause start is
+        # indistinguishable from a mention in ordinary prose (`; `tortoise/x.py` was in an
+        # earlier cut`), and the row's own rule is that an over-block costs more than a false
+        # PASS — so this ONE spelling of the membership direction stays a declared residual.
+        "A non-empty set is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE TWO FORMS THE SAME ALTERNATIVE COULD NOT SEE (#13802 review, cycle 9, P2 —
+        # each MEASURED GREEN here while its other order RED): `` `[]` `` never matched because a
+        # `\b` cannot follow `` ` `` or `]` (the boundary is a lookahead now), and the count
+        # nouns below `files?|paths?|modules?` were bound in the verb-then-answer arm and not in
+        # this one.
+        "`[]` is what `-- tortoise/` prints at this head",
+        "Six entries are what the `tortoise/` set holds at this head.",
+        "Two diffs are what the `tortoise/` diff carries.",
+        "Empty is what `-- tortoise/` prints at this head.",
+        # ⛔ AND THE INDEFINITE ARTICLE, AND THE PARENTHETICAL (#13802 review, round 14, P1+P2).
+        # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320` and
+        # the ban returned False for it; the parenthetical is the insertion the document's own
+        # idiom reaches for, and both comma and bare forms of the same sentence were refused.
+        "`-- tortoise/` returns a non-empty set",
+        "the `tortoise/` set returns a non-empty set",
+        # ⛔ AND THE DETERMINER `the` (#13802 review, round 15, P2 — detector-read, ban-blind)
+        "`-- tortoise/` returns the empty set at this head",
+        "`-- tortoise/` prints the empty list at this head",
+        "the `tortoise/` set holds the empty set at this head",
+        # ⛔ AND `no <path>` BEHIND EVERY VERB THE PATTERN CARRIES (#13802 review, round 17, P2 —
+        # MEASURED: `reports|gives|outputs|shows` and the symbol verbs `=`/`:`/`->`/`→` left
+        # `no `tortoise/hosted_api.py`` detector-read and ban-blind)
+        "`-- tortoise/` reports no `tortoise/hosted_api.py`",
+        "`-- tortoise/` gives no tortoise/",
+        "`-- tortoise/` -> no `tortoise/hosted_api.py`",
+        "`-- tortoise/` : no tortoise/",
+        # ⛔ AND EMPHASIS AROUND THE ANCHOR, AND INSERTIONS IN FAMILY C (#13802 review, round 18 —
+        # the pattern tolerated emphasis around the VERB and before the ANSWER but not around
+        # the ANCHOR, so `**`-- tortoise/`** prints NOTHING` was GREEN here while the detector
+        # read it; family C had none of family A's insertion tolerance)
+        "The **`tortoise/`** set prints NOTHING at this head.",
+        "**`-- tortoise/`** prints NOTHING at this head.",
+        "This diff carries, at this head, no `tortoise/` path at all.",
+        "This diff carries (measured at this head) no `tortoise/` path at all.",
+        "`None` is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE PRODUCTS THE ENUMERATED CLASSES MISSED (#13802 review, round 20 — emphasis
+        # on the VERB plus a backticked answer left the backtick unconsumed; the em dash is this
+        # corpus's own house punctuation for the same slot; and `There is …` puts a copula in
+        # front of the answer-first arm)
+        "`-- tortoise/` **prints** `NOTHING` at this head.",
+        "`-- tortoise/` **_prints_** `two` paths at this head.",
+        "The `-- tortoise/` set prints — at this head — NOTHING.",
+        "There is NOTHING in the `tortoise/` set at this head.",
+        # ⛔ AND THE SINGLE DASH, AND THE `no <noun>` SET THE BAN'S OWN COUNT CLASS CARRIES
+        # (#13802 review, round 21 — the dash alternative required a CLOSING dash, and the `no`
+        # alternative listed 5 of the 13 nouns its own count class lists)
+        "The `tortoise/` set prints — NOTHING at this head.",
+        # …in both dash spellings (the `[–]` half is the same insertion, pinned separately)
+        "The `tortoise/` set prints – NOTHING at this head.",
+        "The `tortoise/` set shows no changes at this head",
+        "The `tortoise/` set carries no edits at this head",
+        "The `tortoise/` set reports no rows at this head",
+        # ⛔ AND THE PARTICLE BRIDGE AND THE DASH IN THE VERB-BEFORE-THE-PATH FAMILY (#13802
+        # review, round 21, P2 — MEASURED at `9024f2e5d0`: the round-17 widening added
+        # `resolves?|answers?|comes? back` to family C's verb list but not the preposition bridge
+        # family A pairs them with, and family C had no dash insert at all, so all four strings
+        # below were GREEN through the ban AND the sibling detector. Non-vacuity: every one of
+        # them FAILS on the pre-fix code and passes here.)
+        "This diff resolves to no `tortoise/` path at all, at this head.",
+        "This diff comes back with no `tortoise/` file at this head.",
+        "This diff answers with no tortoise/ file at this head.",
+        "This diff carries — at this head — no `tortoise/` path at all.",
+        # ⛔ AND THE SAME CLAIM WITH THE ADVERBIAL FRONTED, WHICH IS THE CORPUS'S OWN HOUSE
+        # SPELLING (#13802 review, round 22, P1 — MEASURED at `20f01e1075`: moving `at this
+        # head` to the FRONT of the clause defeated the WHOLE answer-first family, in this ban
+        # AND in the sibling detector, so no second layer existed. Six of six fronted forms
+        # GREEN while every un-fronted twin above red — the same two-orders-one-refused
+        # asymmetry rounds 13, 16 and 21 closed three times already, which is why round 22 put
+        # the tolerance in the FAMILY PREFIX rather than in the newest branch.)
+        "At this head there are no files in the `tortoise/` set.",
+        "At this head, there are no entries in the `tortoise/` set.",
+        "At this head there is NOTHING in the `tortoise/` set.",
+        "At this head NOTHING is what `-- tortoise/` prints.",
+        "At the head you merge there are no files in the `tortoise/` set.",
+        # ⛔ AND THE SIXTH MEASURED FORM, WHICH ROUND 22 FIXED AND PINNED NOWHERE (#13802 round
+        # 23, P2: the comment above said "six of six" while the list held five — this form
+        # appeared only in that comment, so a later prefix edit could regress it silently).
+        "At this head two paths are what the `tortoise/` set holds.",
+        # ⛔ AND THE FORMATTING TOLERANCE ON THE ADVERBIAL ITSELF (#13802 round 23, P1 —
+        # MEASURED at `3b901efa84`: the fronted group sat BEFORE the `[*_`]{0,3}` class, so it
+        # could not absorb emphasis — the one form the corpus actually writes
+        # (`**At this head**` in 4 `docs/` files) walked GREEN, in this ban AND in the sibling
+        # detector. Formatting is not content: `:2047` is the contract.)
+        "**At this head** there are no files in the `tortoise/` set.",
+        "_At this head_ there are no files in the `tortoise/` set.",
+        "`At this head` there are no files in the `tortoise/` set.",
+        "At **this** head there are no files in the `tortoise/` set.",
+        "At this head — there are no files in the `tortoise/` set.",
+        # ⛔ AND THE PREPOSITION AND DETERMINERS THE BOUNDED LIST MISSED (#13802 round 23, P2 —
+        # MEASURED: `on this head` occurs 11x in `docs/` and `on` is ALREADY in the ban's own
+        # head-binding vocabulary; the round-22 list read 5 spellings and left 13 of 18
+        # realistic ones GREEN. The class is the STRUCTURE, so these need no new code — only
+        # the pin.)
+        "On this head there are no files in the `tortoise/` set.",
+        "At that head there are no files in the `tortoise/` set.",
+        "At the merge there are no files in the `tortoise/` set.",
+        "At this merge head there are no files in the `tortoise/` set.",
+        "In this head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE SHAPES ROUND 23's STRUCTURE STILL DID NOT READ (#13802 review, rounds 24-25
+        # — MEASURED at `8f2f2ad25b` in this ban AND in the sibling detector): the
+        # determiner-less temporal spelling the round-22 LIST caught and the structural class
+        # DROPPED (a regression, P1: RED at `3b901efa84` → GREEN at `8f2f2ad25b`), the
+        # `<pronoun> merge` shape for pronouns other than `you`, the hyphenated `merge-time`
+        # (Green while its un-fronted twin was RED), and the markdown list / blockquote /
+        # numbered-item / indented openings that the clause anchor could not reach.
+        # ⛔ AND `1.` IS NOT ONE OF THEM (round 25, P2 — the earlier comment claimed "every one
+        # GREEN at `8f2f2ad25b`" and that was FALSE for this string): `1. At this head …` was
+        # already refused before the new anchor existed, because the item's own period satisfies
+        # the pre-existing `[.;:!?]\s` branch. It is kept as a genuine must-red sentence, NOT as
+        # a witness of this change; `1)` and `10)` below are what pin the `\d+[.)]` class.
+        "At merge time there are no files in the `tortoise/` set.",
+        "At merge-time there are no files in the `tortoise/` set.",
+        "At the head we merge there are no files in the `tortoise/` set.",
+        "At the head they merge there are no files in the `tortoise/` set.",
+        "- At this head there are no files in the `tortoise/` set.",
+        "> At this head there are no files in the `tortoise/` set.",
+        ">> At this head there are no files in the `tortoise/` set.",
+        "1. At this head there are no files in the `tortoise/` set.",
+        "1) At this head there are no files in the `tortoise/` set.",
+        "10) At this head there are no files in the `tortoise/` set.",
+        "  At this head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+        # MEASURED GREEN at this head while every verb-first twin above was refused: the
+        # `no <noun>` branch existed only on the verb-then-answer side)
+        "There are no files in the `tortoise/` set at this head.",
+        "There are no entries in the `tortoise/` set at this head.",
+        "There are no changes in the `tortoise/` diff at this head.",
+        # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
+        # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
+        # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
+        # rather than on both sides of it, so: (a) the emphasis-then-space form — the one the
+        # sibling DETECTOR reads — was refused by no arm; (b) underlines and (c) emphasis on
+        # the NOUN after the anchor were outside the class entirely. (a) is the dangerous
+        # direction: detector-read and ban-blind is a refuted claim walking green.
+        # ⛔ AND THE ANSWER-FIRST LINK VERBS (#13802 review, P2). ⛔ CORRECTED IN ROUND 22:
+        # the first cut of this block claimed "every one GREEN at `9024f2e5d0`" and that was
+        # FALSE for six of the eight. Measured by ABLATION (delete exactly the added verbs
+        # `|has|have|had|comes? back|resolves?|reveals?|reads?|touches?` from the live pattern
+        # and recompile): `Two paths are what the `tortoise/` set has at this head.`, `… set had
+        # …`, `Nothing is what `-- tortoise/` reads …`, `Six entries are what the `tortoise/` diff
+        # reveals …`, `Both files are what the `-- tortoise/` set touches …` and `` `[]` is what
+        # the `tortoise/` set comes back with … `` ALL still red with the verbs gone — they were
+        # reaching family E's count/emptiness ANSWER branch plus the `set|diff` subject noun, so
+        # they never pinned the verb at all (a vacuous witness, which is the failure mode this
+        # file exists to refuse). Only the two COMMAND-anchored spellings actually pinned it.
+        # The block below is therefore every one of the eight added verbs, each on the COMMAND
+        # anchor, so each needs its own verb to fire: measured RED here, GREEN at `9024f2e5d0`,
+        # and GREEN again under the ablation — 8 of 8 (re-derived in round 22, not carried).
+        "`[]` is what `-- tortoise/` has at this head.",
+        "`[]` is what `-- tortoise/` have at this head.",
+        "`[]` is what `-- tortoise/` had at this head.",
+        "`[]` is what `-- tortoise/` comes back with at this head.",
+        "`[]` is what `-- tortoise/` resolves to at this head.",
+        "`[]` is what `-- tortoise/` reveals at this head.",
+        "`[]` is what `-- tortoise/` reads at this head.",
+        "`[]` is what `-- tortoise/` touches at this head.",
+        f"**`{_cmd}`** prints NOTHING at this head.",
+        f"***`{_cmd}`*** prints NOTHING at this head.",
+        "The _`tortoise/`_ set prints NOTHING at this head.",
+        "The `tortoise/` **set** prints NOTHING at this head.",
+
+        # ⛔ AND EVERY DETERMINER THE DETECTOR STRIPS (#13802 review, round 19, P2 — MEASURED:
+        # `_typed_answers_to_tortoise_cmd` strips determiners in a LOOP at `:698`, but this ban's
+        # count and emptiness answer groups carried only `a`/`an`/`the`, so `returns those two
+        # files` was detector-read (`[('returns those two files', False)]`) and ban-blind while
+        # the pinned sibling `prints both files` red — a ONE-WORD deletion from a must-red
+        # witness. Swept determiner x count x noun x verb: 940 detector-read/ban-blind cells,
+        # 0 after the widening, with 0 new refusals over the 855-doc corpus (6 before, 6 after).
+        # `\d+` is in the count group because the separate `\b\d+\b` arm only fires when the
+        # digit sits DIRECTLY after the verb, so `returns those 2 files` was blind too.
+        "`-- tortoise/` returns those two files at this head",
+        "the `tortoise/` set prints its two files at this head",
+        "`-- tortoise/` returns those 2 files at this head",
+        "`-- tortoise/` returns its empty set at this head",
+        "`-- tortoise/` (run at this head) prints nothing",
+        # ⛔ AND THE ANSWER-FIRST ORDER OF THE SAME DETERMINER CLASS (#13802 review, P2 —
+        # MEASURED at `180b95d07d`: every one of these was GREEN while its pinned verb-first
+        # twin directly above reds, i.e. round 19's widening reached ONE of the two orders).
+        # Non-vacuity: each FAILS on the pre-fix code — measured GREEN at `180b95d07d`, RED
+        # here — and `two files` stays as the control that reds at BOTH heads, so the block
+        # is not satisfied by the bare-count class the arm already had.
+        "Those two files are what `-- tortoise/` prints at this head.",
+        "These two files are what `-- tortoise/` prints at this head.",
+        "Its two files are what `-- tortoise/` prints at this head.",
+        "Just two files are what `-- tortoise/` prints at this head.",
+        "All six paths are what `-- tortoise/` prints at this head.",
+        "Those 2 files are what `-- tortoise/` prints at this head.",
+        "2 files are what `-- tortoise/` prints at this head.",
+        "The two comment-only modules are what `-- tortoise/` prints at this head.",
+        "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
+        # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
+        # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
+        # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
+        # layer, so each was a refuted claim that no arm refused).
+        "the `tortoise/` set is non empty at this head",
+        "the `tortoise/` set prints one",
+        "the `tortoise/` set holds both",
+        "`-- tortoise/` prints `tortoise/`",
+        # ⛔ AND THE ELEVEN CASE/EMPHASIS SPELLINGS THE DETECTOR READ AND THIS BAN DID NOT
+        # (#13802 review, cycle 7, P1 — every one MEASURED `ban=None` against a non-empty
+        # detector verdict, and two of them kept the suite GREEN when injected into
+        # `05-verify.md`). Formatting is not content: the detector strips `[`*_]` and
+        # matches case-insensitively, so each of these is the SAME claim as its plain form.
+        "`-- tortoise/` Prints two paths",
+        "`-- tortoise/` **prints** the two COMMENT-ONLY modules",
+        "`-- tortoise/` `prints` the two comment-only modules",
+        "the `tortoise/` set prints Empty",
+        "the `tortoise/` set prints Blank",
+        "the `tortoise/` set prints Zero",
+        "the `tortoise/` set prints Single",
+        "the `tortoise/` set prints Both",
+        "`-- tortoise/` prints `two` paths",
+        "`-- tortoise/` prints _two_ paths",
+        "`-- tortoise/` prints Comment-Only",
+        # ⛔ AND EMPHASIS MAY WRAP THE ADVERBIAL'S OWN TRAILING PUNCTUATION (#13802 review,
+        # round 26, P1 — every one MEASURED GREEN before the fix, and refused by no
+        # alternative: round 23 put the emphasis class on every TOKEN of the fronted group and
+        # read that as "closed under formatting", but the `,`/`:`/`.`/`—` ENDING the adverbial
+        # had to sit OUTSIDE the emphasis. These are the bundle's own house lead-in spellings
+        # (`**… measured at this head:**` is used 8x in `PRE-REGISTRATION.md`), and the
+        # sibling detector reads none of them, so there was no second layer.
+        "**At this head,** there are no files in the `tortoise/` set.",
+        "**At this head:** there are no files in the `tortoise/` set.",
+        "_At this head,_ there are no files in the `tortoise/` set.",
+        "**At merge time,** there are no files in the `tortoise/` set.",
+        "**At this head —** there are no files in the `tortoise/` set.",
+        "**At this head.** There are no files in the `tortoise/` set.",
+        # ⛔ AND THE GRAMMATICAL TAILS OF THE FRONTED ORDER (#13802 review, round 26, P2 —
+        # every one MEASURED `fronted=GREEN, unfronted=RED`, the one-order-refused asymmetry
+        # rounds 13/16/21/25 closed, one grammatical step out from the pinned
+        # `At the head we merge …`). The trailing group is a bounded token run ending in a
+        # `merg*` word, so these pin the SHAPE rather than another list of spellings.
+        "At the head you are merging there are no files in the `tortoise/` set.",
+        "At the head to be merged there are no files in the `tortoise/` set.",
+        "At the head post-merge there are no files in the `tortoise/` set.",
+        "At the time of the merge there are no files in the `tortoise/` set.",
+        "At this merge's head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE PARITY HOLDS AT THE BOUND, NOT ONLY BELOW IT (#13802 review, round 27, P2 —
+        # MEASURED: the tail's run was `{0,4}` and `[\w-]+`, so parity broke for a path-bearing
+        # token and for a run of five; `At the head of the branch you are about to merge …` was
+        # GREEN while its un-fronted twin was RED. Both runs now read the same eight-token,
+        # `/`-bearing class as family A, so the parity is a property of the two arms rather than
+        # a coincidence of their bounds. These two are the bound and the `/`, one each.)
+        "At the head of the branch you are about to merge there are no files in the `tortoise/` set.",
+        "At the head of origin/main you are about to merge there are no files in the `tortoise/` set.",
+        # ⛔ AND THE INTERVENING RUN'S OWN BOUND (#13802 review, round 28, P2 — MEASURED: the
+        # round-27 edit widened that run's TOKEN CLASS and left its BOUND at three, so the parity
+        # `:2927-2928` claims broke again at a four-token gap: `At the very top outer head of the
+        # branch you are about to merge …` was GREEN against its RED twin. All three runs — this
+        # one and both tail branches — are now the same eight, and this spelling pins the four.)
+        "At the very top outer head of the branch you are about to merge there are no files in the `tortoise/` set.",
+        # ⛔ AND THE FAMILY-A FILLER'S TWO BLIND SPOTS (#13802 review, round 26, P2 — MEASURED
+        # detector-read/ban-blind on 600 of 11,220 swept cells: a `/`-bearing token
+        # (`origin/main`) and a run longer than six words both defeated the filler, while the
+        # detector read the answer). On the anchors where the measured leg skips this ban is
+        # the only layer, so each is a hole rather than a narrowing.
+        f"`{_cmd}` at the head of origin/main prints NOTHING at this head.",
+        f"`{_cmd}` at the head you are about to merge prints NOTHING at this head.",
+        # ⛔ AND THE OVER-BLOCK THE `/` WIDENING BUYS, PINNED ON PURPOSE IN THE REFUSING
+        # DIRECTION (#13802 review, round 27, P2 — MEASURED `base=GREEN, HEAD=RED`: the peer's
+        # count arm accepts `the <count-noun>` with no count in it, so a path-bearing filler
+        # carries the class into TRUE prose). Pinned here so a later tightening reds this line
+        # and forces the declaration at the widening to be rewritten, instead of the behaviour
+        # changing silently while the suite stays green — the same trade, and the same pin, the
+        # peer's determiner widening already carries.
+        f"`{_cmd}` at the head of origin/main prints the same paths it printed before.",
+        # ⛔ AND THE DECLARED OVER-BLOCK, PINNED AS MUST-REFUSE ON PURPOSE (#13802 review, round 26,
+        # P2). `All six paths in the `tortoise/` set are covered by tests.` is TRUE prose and this
+        # ban REFUSES it: the determiner/count widening's tail is satisfied by its own anchor noun
+        # `set` before any verb is read, so the widening reaches a sentence it should not. It sits
+        # here so the trade is WITNESSED IN THE FAILING DIRECTION — a later tightening of the tail
+        # reds this line and forces the declaration at the widening to be rewritten, instead of the
+        # behaviour changing silently while the suite stays green (which is how this finding arose).
+        "All six paths in the `tortoise/` set are covered by tests.",
+        # ⛔ AND THE CELL THE RECORDED FOLLOW-UP MEASURABLY OPENS, WHICH IS WHY IT WAS NOT APPLIED
+        # (#13802 review, round 27, P2 — MEASURED, both directions, at `c42c6cb4`). The round-26
+        # lane recorded the tightening as "requiring a verb, not a bare anchor noun, after the
+        # `tortoise/` reference", and that was implemented here and MEASURED before it was
+        # rejected: it does close four of the five over-block sentences above (`… set are
+        # covered by tests`, `… set are the resolver`, `… set were added`, plus the `tree`
+        # spelling), leaves the fifth REFUSED (`… set are read by the resolver` — `reads?` is in
+        # the verb list), and turns the five MEMBERSHIP CLAIMS below GREEN, because a bare
+        # `<N> <noun> in the `tortoise/` set at this head` has no verb after the reference to
+        # reach. Those claims state the SIZE of the diff's `tortoise/` set at this head — the
+        # direction this file says costs more than an over-block (D5) — so the tightening is a
+        # REFUTED prescription, not an unfinished one: the over-block and that false PASS share
+        # one substring shape, and separating them needs a predicate-vs-locative model this ban
+        # does not have. Their polarity at `c42c6cb4` is RED and it must stay RED; each is pinned
+        # here so the next lane that tries the same one-line tightening reds the suite instead of
+        # landing it. Measured at the same head, the same five are GREEN under that tightening.
+        "Six paths in the `tortoise/` set at this head.",
+        "All six paths in the `tortoise/` set at this head.",
+        "Six entries in the `tortoise/` set at this head.",
+        "Two files in the `tortoise/` set, at this head.",
+        "Those two files in the `tortoise/` set at this head.",
+    ):
+        assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
+            f"the direction detector does not see {_claimed!r}, so that spelling of a "
+            "head-bound answer about the `-- tortoise/` set walks through green — measured, "
+            "and it is how the emptiness-only first cut leaked the whole membership "
+            "direction (#13802 merge round, finding 1)")
+    for _allowed in (
+        f"`{_cmd}` is the command that answers it at the head you merge",
+        "at `2584a86ec1` the command printed no path at all",
+        "read the set from `git diff --name-only origin/main...HEAD`",
+        # ⛔ AND THE HISTORICAL FORM MUST STILL BE ALLOWED (#13802 review, round 6, P2 —
+        # MEASURED: the unanchored verb-before-path alternative refused a named-head
+        # emptiness claim, and the bundle already ships one in README.md)
+        "`#10215`'s `8bc2fbed1` touches no `tortoise/` file at all",
+        # ⛔ AND ITS CAPITALISED SPELLINGS (#13802, round 21 — MEASURED: both were REFUSED at
+        # the round-20 head while the lowercase witnesses above were allowed, because the two
+        # binding constants were compiled without `re.IGNORECASE` while the ban itself is not
+        # — a sentence-initial `At `…`` is the corpus's own spelling and case is not content).
+        # Non-vacuity: the first two FAIL on the pre-fix code (`ban.findall` returns them).
+        "At `2584a86ec1` the `tortoise/` set was non-empty — five paths.",
+        "In `2584a86ec1` the `tortoise/` set was non-empty",
+        "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all",
+        # ⛔ AND THE `no <noun>` ANSWER-FIRST BOUND MUST NOT REFUSE ORDINARY PROSE (#13802
+        # review, round 21). The verb after the anchor is the bound: `are` is not in that list,
+        # so this sentence states no direction about the `-- tortoise/` set and stays allowed —
+        # the over-block pin for the widening above.
+        "No changes to `tortoise/` are needed for this row",
+        # ⛔ AND THE MUST-STAY-GREEN FORMS THE WIDENED CLASSES INHERITED (#13802 review, round
+        # 26, P3 — MEASURED: `8379b2cfec` and `180b95d07d` both reported "10 of 10
+        # must-stay-green prose forms still GREEN", and NEITHER string existed in this file:
+        # the tuple held 8 entries, none from the fronted/marker classes those rounds added. So
+        # the over-block claim rested on an in-process measurement nobody could re-run, and
+        # nothing would red if the next widening made a head adverb in ordinary prose refuse.
+        # These pin it: a head adverb that carries NO direction claim stays allowed, in a list
+        # item, an ordered item and a blockquote — the three clause openings the marker class
+        # adds — and each is a one-edit regression away from the ban's own vocabulary.
+        "- At the head of the file, the parser stops.",
+        "1. Note the merge base.",
+        "> At the head of the file, nothing is imported.",
+        # ⛔ AND THE OVER-BLOCK PINS FOR THE DETERMINER WIDENING (#13802 review, P2 —
+        # MEASURED GREEN at `180b95d07d` and GREEN here): a determiner + count + noun is
+        # ordinary English, so the widening is bounded by the TAIL — but ⛔ NOT BY A VERB ONLY
+        # (#13802 review, round 26, P2: this comment said the tail keeps these allowed because
+        # `are`/`under`/`were` are not in the anchor list, and that is FALSE for the
+        # `in the `tortoise/` set` spelling, where the tail's own anchor noun `set` satisfies it
+        # before any verb is read). What these four actually pin is the BARE-anchor spelling
+        # (`in `tortoise/``, `under `tortoise/``); the `in the `tortoise/` set|tree|directory`
+        # spelling is the DECLARED OVER-BLOCK, measured and stated at the widening itself. The
+        # corpus refusal set is 6 before and 6 after either way.
+        "Those two files in `tortoise/` are read by the resolver.",
+        "All six paths under `tortoise/` are covered by tests.",
+        "These three modules in `tortoise/` were touched by #12943.",
+        "2 files under `tortoise/` were added by that PR.",
+    ):
+        assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
+            f"the direction detector REFUSES {_allowed!r}, which states the command (or "
+            "records a PAST-tense reading at a named head) and asserts no current direction "
+            "— refusing it would over-block the document's own pointer, the same defect in "
+            "the other direction (#13795 review, note 5)")
+
+
+#: A `--numstat` figure is a head-bound number: `git diff --numstat origin/main...HEAD --
+#: docs/00_index.md` prints NOTHING at this head, so a document that types what it printed
+#: is refuted by the command it quotes beside the figure. The pre-fix document did exactly
+#: that at four clauses (#13802 review, finding 1 — the D5 row and the file-table section),
+#: so the pattern below is the armed detector for that defect class.
+_TYPED_INDEX_NUMSTAT = re.compile(
+    r"`git diff --numstat origin/main\.\.\.HEAD -- docs/00_index\.md`"
+    r"\s*(?:->|prints)\s*`\d+\s+\d+`"
+    # ⛔ THE SHORT FORM TOO (#13802 review, P2). The document's own spelling of this
+    # clause is "…and its `--numstat` form both print NOTHING", and a regex that knows
+    # only the long form walks straight past the figure that replaces `NOTHING` there —
+    # measured: `both print `1 1`` left both arms green.
+    r"|`--numstat`\s+form\s*(?:both\s+)?(?:prints?|print|returns?|reports?|shows?|"
+    r"gives?|lists?|names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND A BARE PRESENT-TENSE VERB ON THE `numstat` NOUN (#13802 merge round P2).
+    # `the numstat prints `3 3` here` is the same head-bound class and no alternative above
+    # saw it — measured: injected into the head document it left this arm GREEN, while the
+    # long form, the `--numstat` form and `both print` each red. The participle ("printing
+    # `1 1` at a head of its own") is HISTORY and stays allowed, which is why the verb here
+    # is present-tense only.
+    # the whole verb class, not three verbs: `and the numstat shows `1 1` here`,
+    # `and its `--numstat` form gives `1 1` here` and `and the numstat -> `1 1` here` were
+    # each measured GREEN at depth 1 (#13802 review, round 6)
+    r"|numstat[^`]{0,160}?(?:prints?|print|returns?|reports?|shows?|gives?|lists?|"
+    r"names?|->|\u2192)\s*`\d+\s+\d+`"
+    # ⛔ AND THE VERB WITHOUT THE COMMAND (#13802 review, round 3, P2). Three of the
+    # document's `both print NOTHING` clauses state the CURRENT reading without repeating
+    # `--numstat` beside it ("…its numstat printing `1 1` at a head of its own, and at
+    # THIS head both print NOTHING"), so keying the short form on the command's name
+    # missed them: rewriting THAT clause to `both print `1 1`` came back green. A `both
+    # print` followed by a typed pair is this class by construction; the HISTORICAL form
+    # ("printing `1 1` at a head of its own") is the participle, not this verb.
+    r"|\bboth print\s*`\d+\s+\d+`"
+    # ⛔ AND THE PAIR TYPED AFTER THE `--name-only` COMMAND — the spelling the document
+    # ACTUALLY USED, found by a fresh reviewer at the merge-round head (#13802 merge-round
+    # review, P2). Every alternative above keys on `--numstat`, the `numstat` noun, or a
+    # bare `both print`; the document instead wrote
+    # ``git diff --name-only origin/main...HEAD -- docs/00_index.md` prints
+    # `docs/00_index.md` and `1 1` `` — the identical head-bound numstat pair, and it walked
+    # through GREEN while this pattern's own header called itself the armed detector for
+    # that class. The doctrine this file states applies to the file itself: a guard may be
+    # narrow, but may not describe itself as complete.
+    # ⚠️ The verb is required and the span is bounded ON PURPOSE. An unbounded
+    # `command …`\d+ \d+`` alternative over-blocked two HISTORICAL quotes in this very
+    # document (the `for ONE cite` retraction and the `read THERE` pointer, each quoting a
+    # past head's pair a few characters later) — measured, and refusing a historical
+    # reading is the same defect in the other direction.
+    r"|`git diff --name-only origin/main\.\.\.HEAD -- docs/00_index\.md`\s*"
+    r"(?:both\s+)?(?:prints?|returns?|shows?|gives?|lists?|reports?|names?|->|\u2192|:|=)\s*"
+    r"(?:`[^`]{0,80}`\s*and\s*)?`\d+\s+\d+`"
+    # ⛔ AND THE DEICTIC FORM — `the command prints `docs/00_index.md` and `1 1``. The
+    # reviewer measured the arm GREEN on exactly this sentence (#13802 merge-round review,
+    # P2): the document names the command as "the command" a clause earlier and then types
+    # the pair, so no alternative above sees it. The shape is specific on purpose — the
+    # numstat pair is TWO NUMBERS and `docs/00_index.md` followed by such a pair is a typed
+    # numstat reading by construction, not an English coincidence.
+    r"|`docs/00_index\.md`\s*and\s*`\d+\s+\d+`")
+
+
+def test_the_document_types_no_numstat_figure_for_the_index_residual():
+    """⛔ The D5 row and the file-table rows typed `1 1` — refuted by their own command.
+
+    `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING at this
+    head, so a document that states what it `prints` is contradicted by the command it
+    quotes in the same clause. That is precisely the defect class this file exists to
+    catch — a typed head-bound figure — applied to the figure's own command, and it
+    survived the earlier rounds because each guard spelled its own phrase list instead
+    of recognizing the shape (#13802 review, finding 1).
+
+    NON-VACUITY, MEASURED — and ⛔ the census is NOT typed per line here, because this
+    comment is subject to the very rule it describes. An earlier cut of it said "FIVE
+    times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
+    this branch's range produces that census, and ⛔ **the figure the earlier cut typed was HEAD-BOUND, not false**:
+    with this same pattern it reproduces SIX matches across FIVE lines at `6238dde72a`
+    (`:102`, `:108`, `:114`, `:134`, `:143`) and at every head from there up to
+    `8bdd34c631^` (the blob is unchanged back to `9205cdc72c`, so those ancestors measure
+    the same 6/5 — the figure STARTS there, not at `6238dde72a`) — ⛔ and the WINDOW is
+    stated rather than left to "every head before"
+    (round 12 review, P2: that absolute was false — heads OLDER than the blob carry FEWER
+    of the clauses, `aeb4882c18` matching three lines and `f6f202cf5c` four, so a reviewer who
+    tested it on one of those would read the figure as unreproducible and "correct" a true
+    statement, which is how round 10 went wrong) — whose own commit (`fix(13728)`,
+    `#13728`/`#13845`) de-typed those clauses, and it measures ZERO from there and at
+    `origin/main` (`28ca66878d`). So a census is quoted WITH its head or not at all: the cut
+    that stood here typed it "at `origin/main`", a floating ref, which is the rule this
+    paragraph enforces everywhere else (round 10 review, P2 — and the first correction of it
+    blamed `#13807`, which landed on a file already at zero; both halves measured here).
+    Re-run the pattern at the head you are reviewing and read the map from that, rather than
+    trusting a figure written here
+    — which is the arm's whole thesis applied to its own docstring.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    typed = [m.group(0) for m in _TYPED_INDEX_NUMSTAT.finditer(doc)]
+    assert not typed, (
+        "05-verify.md TYPES the figure that `git diff --numstat origin/main...HEAD -- "
+        f"docs/00_index.md` printed ({typed[0]!r}). A numstat is a head-bound figure — "
+        "it is EMPTY at this head, so the clause is refuted by the very command quoted "
+        "beside it. State the command and let the reader re-derive the set "
+        "(#13802 review, finding 1)")
+
+
+def test_the_typed_numstat_detector_sees_every_spelling_and_only_typed_figures():
+    """⛔ THE ONLY ARM IN THIS FILE WITHOUT A WITNESS, AFTER BEING WRONG THREE TIMES.
+
+    Each earlier cut was found deficient by hand-injection alone — a five-literal list, then a
+    short form that missed `both print`, then a bare-verb class that missed `shows` / `gives` /
+    `->`. A pattern whose classes are never exercised is the blacklist it replaced, one level up;
+    its sibling has had a witness for three rounds for exactly that reason. MEASURED: replacing
+    this pattern with a never-matching one, or deleting the bare-verb alternative, reds HERE.
+    """
+    for _typed in (
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` -> `1 1`",
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints `1 1`",
+        "…and its `--numstat` form both print `1 1`",
+        "…and its `--numstat` form gives `1 1`",
+        "both print `1 1`",
+        "and the numstat shows `1 1` here",
+        "and the numstat returns `3 3` here",
+        "and the numstat -> `1 1` here",
+        # the spelling the merge-round reviewer found GREEN (#13802 merge-round review, P2):
+        # the pair is typed after the `--name-only` command, not after `--numstat`.
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints "
+        "`docs/00_index.md` and `1 1`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` prints `1 1`",
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` -> `3 3`",
+        # ── the DEICTIC spelling the reviewer measured GREEN (#13802 merge-round review, P2)
+        "at this head the command prints `docs/00_index.md` and `1 1`",
+        "prints `docs/00_index.md` and `1 1`",
+    ):
+        assert _TYPED_INDEX_NUMSTAT.search(_typed), (
+            f"the numstat detector does not see {_typed!r} — that spelling of a head-bound figure "
+            "walks through green, which is how each previous cut of this arm was found "
+            "(#13802 review, rounds 3, 6, 7 and 8)")
+    for _allowed in (
+        "its numstat printing `1 1` at a head of its own",
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING",
+        # a HISTORICAL quote of a past head's pair, sitting a few characters after the
+        # command — must stay allowed without a present-tense verb to bind it
+        # (#13802 merge-round review, P2: the unbounded cut of this alternative refused it).
+        "`git diff --name-only origin/main...HEAD -- docs/00_index.md` and "
+        "`git diff --numstat origin/main...HEAD -- docs/00_index.md`, read THERE: the "
+        "clause that stood here said the file WAS in the set with the numstat printing `1 1`",
+    ):
+        assert not _TYPED_INDEX_NUMSTAT.search(_allowed), (
+            f"the numstat detector REFUSES {_allowed!r}, which types no current figure — "
+            "refusing a historical reading is the same defect in the other direction")
 
 
 def _added_cite_tokens(diff_text: str) -> set[str]:
@@ -2463,29 +4248,248 @@ def _measured_index_word_diff(
 #: re-point claim is NOT detected, so the docstring below must not imply that it is. The
 #: shape match the sibling `-- tortoise/` detector uses is the right fix and is filed as a
 #: follow-up rather than smuggled into a docs PR.
+#: The spellings that assert THIS diff re-points a cite in `docs/00_index.md`. Each was
+#: measured FALSE at the head the arm below was written for (#13746 review, round 3,
+#: finding 4): at THAT head the file's one changed line was the `#12296` row's
+#: DESCRIPTION of its own `:27861` clause, and no `sdk.py:<n>` token moved.
+#:
+#: ⛔ PAST TENSE ON PURPOSE, AND THE READING CARRIES ITS HEAD (#13802 review, round 5,
+#: P3 — MEASURED): this paragraph used to state that clause in the PRESENT tense, and at
+#: this head `git diff --numstat origin/main...HEAD -- docs/00_index.md` prints NOTHING —
+#: the file has no changed line at all, because `main` absorbed both re-points before this
+#: branch was re-cut. The same file retracts the attribution a hundred lines below, so the
+#: two statements contradicted each other inside one file and this comment was the one
+#: rendered as truth beside the arm.
+#:
+#: ⛔ THIS SIDE IS A FINITE LITERAL LIST, AND IT SAYS SO (#13795 review, round 2,
+#: finding 3). Only the MEASUREMENT half of the arm reads the live diff; a re-worded
+#: re-point claim is NOT detected, so the docstring below must not imply that it is. The
+#: shape match the sibling `-- tortoise/` detector uses is the right fix and is filed as a
+#: follow-up rather than smuggled into a docs PR.
+#: The spellings the arm above refuses wherever this tree has NO measurement showing
+#: that this diff moves a cite (cite sets EQUAL, or the base ref unreadable —
+#: `#13802` review P1). ⛔ Kept beside `_INDEX_REPOINT_CLAIMS` on purpose: on a head
+#: whose cite sets DIFFER **and** whose base is readable, the arm above stands DOWN —
+#: legitimately, because the attribution may be true there — and the claims list is the
+#: only arm that still reads the document. So every phrase here must also be covered
+#: there, which `test_every_attribution_spelling_is_also_a_live_diff_claim` MEASURES
+#: rather than leaves to a reader. That arm exists because the pairing was
+#: hand-maintained four review rounds running (`#13802` review, finding 2, residual):
+#: the sixth phrase below had no counterpart at all, and the fourth had only the
+#: PREFIXED claim `this repair re-pointed it once more` — which a document saying only
+#: `re-pointed it once more` does not contain (the claims arm tests `claim in doc`, so
+#: coverage needs the claim to be a substring of the PHRASE, not the other way round).
+#:
+#: ⛔ THE PAIR-PINNING ARM THAT USED TO REQUIRE THE FIRST PHRASE IS DELIBERATELY NOT
+#: CARRIED (#13572/#13802 merge of `main`'s #13795). `main` kept
+#: `test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points`, whose first
+#: leg was `assert m` on `re-pointing that row's `sdk.py` cite from **`:OLD`** … to
+#: **`:NEW`**` — i.e. it REQUIRED the false attribution to exist in the document, so the
+#: sentence this PR deletes could not be deleted while that arm lived. It is replaced by a
+#: SCOPED current-value leg inside
+#: `test_the_cites_this_document_attributes_to_this_diff_are_measured_not_typed`, which
+#: checks the CONTENT a cite resolves to wherever the file carries that cite, instead of
+#: mandating a phrasing that attributes `main`'s move to this diff.
+#:
+#: ⛔ THE ABSENCE LEG IS RESTORED, AND `_RETIRED_INDEX_CITES` BELOW IS HOW (#13802
+#: review, P2 — measured). The deleted arm also asserted the OLD cite was ABSENT, and the
+#: merge that dropped it disclosed the hole without closing it: MEASURED at the pre-fix
+#: head, injecting `sdk.py:21604` into `docs/00_index.md` ALONGSIDE the surviving
+#: `sdk.py:21715` left the guard suite green (`18 passed`). The stated reason for not
+#: re-adding it — that "`main` re-deriving that row again is the normal case this PR exists
+#: to stop reding on" — does not hold for an ABSENCE assertion: a re-point moves a cite
+#: FORWARD (`:21556` -> `:21604` -> `:21679` -> `:21715`), so a legitimate head can only
+#: retire MORE of these, never restore one. Only a deliberate revert can, and a revert is a
+#: decision a guard should make a lane state explicitly.
+#:
+#: ⛔ WHY A TYPED LITERAL IS RIGHT HERE IN A FILE WHOSE THESIS IS "TYPE NO HEAD-BOUND
+#: ANSWER": these are not ANSWERS about the current head (which rot the moment `main`
+#: moves) — they are RETIRED values, each falsified by CONTENT and each carrying the PR
+#: that retired it. "The index does not carry this any more" is stable in exactly the way a
+#: current address is not.
+_RETIRED_INDEX_CITES = (
+    # the `#7949`/`#9080` capstone row's `sdk.py` receipt cite: #13551 `:21556`->`:21604`,
+    # #13755 `:21604`->`:21679`, #13750 `:21679`->`:21715`.
+    "sdk.py:21556", "sdk.py:21604", "sdk.py:21679",
+    # the `#12296` entity-verdict row's filter cite: #13551 `:28019`->`:28067`, then
+    # `b68883c11b` ->`:28142`, then #13724 ->`:28178`.
+    "sdk.py:28019", "sdk.py:28067", "sdk.py:28142",
+)
+
+
+#: ⛔ AND THAT IS STILL NARROWER THAN WHAT IT REPLACES — stated, not papered over (#13802
+#: merge round P2). The rest of what the deleted arm did is not restored: it DERIVED the
+#: old cite from the document's own `from **`:OLD`** … to **`:NEW`**` phrasing, which this
+#: PR deletes, so the pair is a fixed list here and a NEWLY retired cite is not caught
+#: until it is added above. The restoration lives in the arm that reads the document (not in
+#: a comment beside a deleted function), because a reader must be able to see WHY `main`'s
+#: arm is gone without diffing two heads.
+_ATTRIBUTION_PHRASES = (
+    "re-pointing that row's `sdk.py` cite from",
+    "and THAT shift is this repair",
+    "re-points it once more, to",
+    "re-pointed it once more",
+    "re-pointed that cite once more",
+    "for exactly ONE cite",
+)
+
+
 _INDEX_REPOINT_CLAIMS = (
     "this diff carries ONE `docs/00_index.md` change — the capstone row's",
     "it IS in the set, for ONE cite",
     "for exactly ONE cite",
     "THIS repair re-points it once more, to",
     "this repair re-pointed that cite once more",
+    # ⛔ The two the list above missed while the merged head still carried them
+    # (#13746 review, round 3, finding 4): both say the capstone row's cite move is
+    # THIS repair's, and the tree refutes both — ⛔ and `cmp` does NOT print nothing
+    # (round 8, P1, MEASURED): it differs at line 45175. What carries the refutation is
+    # the RANGE, not a whole-file identity: `:21715` and `:28178` both sit before 45175,
+    # and the live three-dot diff adds no `sdk.py:<n>` token.
+    "and THAT shift is this repair",
+    "this repair re-pointed it once more",
+    # ⛔ The two BARE spellings `_ATTRIBUTION_PHRASES` above carried with no counterpart
+    # here (#13802 review, finding 2, residual): on a head whose cite sets DIFFER and
+    # whose base is readable the attribution arm stands down, and without these entries
+    # the live-diff arm below
+    # did not know the phrasings either — so the attribution was covered by NEITHER arm,
+    # which is the fail-open Finding 2 names in its second form. Both are absent here.
+    "re-points it once more, to",
+    "re-pointed that cite once more",
+    # ⛔ The THIRD spelling with no counterpart (#13802 review, finding 2, residual — one
+    # instance over from the two above): on a head whose cite sets DIFFER and whose base
+    # is readable the `_attributions` arm stands down, and without this entry the
+    # live-diff arm below does not know this phrasing either, so the attribution is
+    # covered by NEITHER arm. Absent here, measured.
+    "re-pointing that row's `sdk.py` cite from",
+    # ⛔ The FOURTH, and the one the previous passes still missed (#13802 review, finding
+    # 2, residual — the same class, one instance over again). The bare phrase in
+    # `_ATTRIBUTION_PHRASES` had only the PREFIXED counterpart `this repair re-pointed it
+    # once more`, and that is not a counterpart for the purpose this list serves: the arm
+    # asks whether the CLAIM occurs in the document, so a document saying only
+    # `re-pointed it once more` contains no claim and escapes both arms on a diff-set
+    # head. Absent here, measured (`grep -cF` -> 0 at this head).
+    "re-pointed it once more",
 )
+
+
+def test_every_attribution_spelling_is_also_a_live_diff_claim():
+    """Every phrase the attribution arm refuses must ALSO be claimed-refutable.
+
+    ⛔ The two arms are not interchangeable. `_ATTRIBUTION_PHRASES` is executed only
+    where this tree has no measurement that supports an attribution (cite sets EQUAL, or
+    the base ref unreadable); on a head whose cite sets DIFFER **and** whose base is
+    readable it stands down — correctly, because the attribution may be true there — and
+    `_INDEX_REPOINT_CLAIMS` is the only arm that still reads the document. That state is
+    the normal one for a branch that has not been re-based after `main` re-derived a row
+    (`#13617`/`#13675`, `#13724`, `#13750`, `#13724`, `#13790`). A phrase present in the
+    first tuple and absent from the second is therefore covered by NEITHER arm there,
+    with no red row — the fail-open `#13802` review finding 2 names, repaired by hand
+    once per round (each pass adding only the instance in front of it).
+
+    The coverage relation is a CONTAINMENT one and its direction is the whole point: the
+    claims arm tests `claim in doc`, so a document containing only `PHRASE` is refused
+    only if some claim is a SUBSTRING OF THE PHRASE (`claim in phrase`). The prefixed
+    claim `this repair re-pointed it once more` does NOT cover the bare `re-pointed it
+    once more`, which is how the fourth instance survived the pass that added the
+    prefixed one — measured in-process against this head's document with the bare phrase
+    injected: the claims list selects `[]` and the arm asserts nothing.
+
+    NON-VACUITY, MEASURED: with the bare claim removed (the pre-fix state) this row reds
+    on exactly `['re-pointed it once more']`; with it, no phrase is uncovered. The row
+    needs no base ref, so it is live in the depth-1 checkout too — it is not one of the
+    arms that the unreadable-base fallback can stand down.
+    """
+    uncovered = [
+        phrase for phrase in _ATTRIBUTION_PHRASES
+        if not any(claim in phrase for claim in _INDEX_REPOINT_CLAIMS)
+    ]
+    assert not uncovered, (
+        "these phrasings assert that this diff re-points a `docs/00_index.md` cite and "
+        "are refused by the attribution arm wherever this tree has no measurement "
+        "supporting an attribution, but no `_INDEX_REPOINT_CLAIMS` entry is a SUBSTRING "
+        "of them — so on a head whose cite sets DIFFER and whose base is readable (where "
+        "that arm stands down) the attribution is covered by NEITHER arm and the row "
+        f"stays green: {uncovered}. Add the bare spelling to `_INDEX_REPOINT_CLAIMS` "
+        "(#13802 review, finding 2, residual)")
+
+
+#: ⛔ THE `#13724` / `#13750` ATTRIBUTION SWAP — the D5 chain with the two commits in the
+#: wrong roles (#13802 review, F2 — MEASURED at this head). The measured chain is
+#: `:21556` →#13551→ `:21604` →#13617/#13675 `+75`→ `:21679` →**#13724 `+36`**→ `:21715`,
+#: and `#13750` is the DOCUMENT re-point to `:21715` — it moves no `tortoise/` path at all:
+#:
+#:   git show aeb4882c18 --name-only --format='' | grep -c '^tortoise/'   -> 0     (#13750)
+#:   git show e679d22286 --stat --format='' -- tortoise/sdk.py            -> 46 +, 10 -   (#13724)
+#:   git show e679d22286^:tortoise/sdk.py | grep -n '"stats": _capture_stats_with_step_witness'  -> 21679
+#:   git show e679d22286:tortoise/sdk.py  | grep -n …same…              -> 21715  (the `+36`)
+#:   git show e679d22286 -- docs/00_index.md | grep 'sdk.py:'           -> 28142 -> 28178
+#:
+#: ⛔ A TEXT ban and not a measurement, for the reason the direction ban above states: those
+#: `git show`s need history the depth-1 `test` job does not have, so an arm keyed on them
+#: asserts NOTHING in the job that gates merges. The three spellings below are the ones that
+#: actually shipped and survived a merge inside this PR; a RE-WORDED swap is the documented
+#: residual, caught only by review.
+_PR_ATTRIBUTION_SWAP = (
+    "`#13750` (`aeb4882c18`) a further `+36`",
+    "`#13750` moved the anchor `+36`",
+    "`#13750`/`#13786`",
+)
+
+
+#: The corrected attribution that must STAY: a red row above must not be made green by
+#: deleting the clause, which would drop the chain's provenance instead of fixing its roles.
+_PR_ATTRIBUTION_CORRECT = "`#13724` (`e679d22286`) a further `+36`"
+
+
+def test_the_13724_13750_attribution_is_not_swapped_in_the_verify_doc():
+    """⛔ The sentence this PR exists to make true still gave `#13750` `#13724`'s `+36`.
+
+    F2 of the #13802 review, and it is the SECOND round in which the document disagreed
+    with the PR body on this pair — the body already said `#13724` `+36`, the shipped D5
+    cell did not. The tree refutes the swap in four commands (see `_PR_ATTRIBUTION_SWAP`),
+    and the module-level tuple records them because this arm cannot run them here.
+
+    NON-VACUITY, MEASURED: against the PRE-FIX document (`git show
+    ee699827b4:docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`) the first
+    and second entries hit the D5 cell and the third hits both `main`'s own
+    `#13750`/`#13786` clauses, so this arm reds on exactly three sites there; against the
+    fixed document all three are absent and `_PR_ATTRIBUTION_CORRECT` is present.
+    Re-measure the commands, never the sentence: a RE-WORDED swap passes this ban, which is
+    the stated residual.
+    """
+    doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+           / "05-verify.md").read_text(encoding="utf-8")
+    swapped = [spelling for spelling in _PR_ATTRIBUTION_SWAP if spelling in doc]
+    assert not swapped, (
+        f"05-verify.md carries the #13724/#13750 ATTRIBUTION SWAP ({swapped[0]!r}): "
+        "`#13750` (`aeb4882c18`) moves NO `tortoise/` path — it is the DOCUMENT re-point to "
+        "`:21715` — while the `+36` code move to `:21715`, and the `#12296` row's "
+        "re-derivation to `:28178`, are `#13724`'s (`e679d22286`). Re-derive with the four "
+        "commands on `_PR_ATTRIBUTION_SWAP` and state each role from them "
+        "(#13802 review, F2)")
+    assert _PR_ATTRIBUTION_CORRECT in doc, (
+        "05-verify.md no longer states the measured attribution "
+        f"{_PR_ATTRIBUTION_CORRECT!r} — deleting the clause is not a fix for the swap "
+        "above, it drops the chain's provenance. Restore it with its roles taken from "
+        "`git show e679d22286^|:tortoise/sdk.py` (#13802 review, F2)")
 
 
 def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff():
     """⛔ The doc said this diff's ONE `docs/00_index.md` line WAS a cite re-point.
 
-    It is not, and the command printed beside the claim refutes it: the arm MEASURES
-    `git diff --numstat origin/main...HEAD -- docs/00_index.md` and
-    `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` at the head it
-    is run against instead of freezing a figure, and the WORD DIFF is what decides — it moves no
+    It is not, and the commands printed beside the claim refute it: at `09f5c99afd`,
+    the head this was measured on, `git diff --name-only origin/main...HEAD --
+    docs/00_index.md` printed NOTHING (2-dot and 3-dot both empty there, and
+    `git rev-parse origin/main:docs/00_index.md HEAD:docs/00_index.md` printed the same
+    blob twice) — ⛔ re-run both at the head you merge: `main`'s own `#13824`
+    (`9205cdc72c`) moved that file after that head, so the pair is a MEASUREMENT there
+    and no id is typed here (#13802 review, round 8, P1), while
+    `git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` moves no
     `sdk.py:<n>` token in either direction (`grep -c 'sdk.py:21679' docs/00_index.md` ->
-    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). ⛔ **no numstat figure is
-    typed here (#13807 review, round 6)**: at the head the mistaken sentence was written
-    against it printed `1 1`, and at this head it prints NOTHING — `main`'s bundle merge
-    absorbed the two re-points this branch carried — which is this file's own thesis about
-    stored figures, applied to the paragraph that states it. The line it rewrites
-    is the `#12296` entity-verdict row's DESCRIPTION of its own `:27861` clause.
+    `0` here AND on `origin/main`; `sdk.py:21715` -> `1` on both). An earlier cut
+    attributed that residual to the `#12296` entity-verdict row's DESCRIPTION of its
+    own `:27861` clause; that edit is `origin/main`'s now.
 
     So "the `1 1` numstat IS this cite re-point" was the same defect class the last four
     review rounds kept finding, and it reached the rail because nothing read this
@@ -2498,11 +4502,12 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
     not an inert extractor; and on the pre-fix document the three surviving spellings
     are present with `moved` empty, so the loop reds on the first one.
 
-    ⛔ AND IT SKIPS WHEN THE DIFF CANNOT BE TAKEN (#13795 review, finding 2): the ONE leg
-    still shelling out to `git diff origin/main...HEAD` reports UNKNOWN on a failed read, so
-    the depth-1 `test` job skips this arm instead of reding a true claim. (It said "both
-    legs" until #13807 review round 4, finding 2: the `-- tortoise/` measurement it counted
-    as the second is GONE — this file's only `subprocess.run` call site is the one below.)
+    ⛔ AND A DIFF THAT CANNOT BE TAKEN IS UNKNOWN, NOT EMPTY (main's #13795 review,
+    finding 2 — `_measured_index_word_diff`), BUT THE ARM DOES NOT SKIP ON IT (#13802
+    review, P1). Both legs that shell out to `git diff origin/main...HEAD` now report
+    UNKNOWN rather than `set()`; where the read is UNKNOWN this leg still refuses a claim,
+    because every job that runs a suite is `fetch-depth: 1`, and a skip there asserts
+    nothing in the only job that gates the merge. Over-block, not false pass.
     """
     assert _added_cite_tokens("a [-sdk.py:21679-]{+sdk.py:21715+} b") == {"21715"}, (
         "_added_cite_tokens cannot read a word-diff patch that DOES move a cite, so the "
@@ -2513,15 +4518,26 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
             stderr="fatal: bad revision 'origin/main...HEAD'\n"))
     assert "128" in str(_raised.value), (
         "a failed `git diff` on `docs/00_index.md` is not reported as UNMEASURABLE with "
-        "its exit code, so the reason a skipped arm shows cannot distinguish a shallow "
+        "its exit code, so the reason a red row shows cannot distinguish a shallow "
         "clone from any other failed read (#13795 review, finding 2)")
+    # ⛔ AN UNREACHABLE MEASUREMENT TAKES THE UNCONDITIONAL DIRECTION, NOT A SKIP
+    # (#13802 review, P1 — the sister arm's `pytest.skip` was the same defect). This leg
+    # is the ONLY one that still reads the document on a head whose cite sets DIFFER, and
+    # every job that runs a suite checks out at `fetch-depth: 1`, so a skip here asserts
+    # nothing wherever the rail reads it. With the base unreadable, NOTHING shows the diff
+    # adds a `sdk.py:<n>` token — so an empty `moved` is not a measurement, and a claim may
+    # not be carried on it. The `_why` it builds names which case it is, so an UNPROVABLE
+    # reading is never passed off as a MEASURED one; the cost is an OVER-BLOCK on a head
+    # that really does move a cite, which outranks a false PASS.
     try:
         moved = _measured_index_word_diff()
-    except _Unmeasurable as exc:
-        pytest.skip(
-            f"`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` "
-            f"is unmeasurable here ({exc}), so whether this diff moves a cite is "
-            "UNKNOWN and this arm does not adjudicate against a failure")
+        _why = ("the live three-dot diff adds no such `sdk.py:<n>` token "
+                f"(added: {sorted(moved) or 'none'})")
+    except _Unmeasurable as _exc:
+        moved = set()
+        _why = (f"the live three-dot diff is UNPROVABLE here — `{_exc}`; "
+                f"{_base_ref_absent_detail() or 'the base ref resolves but has no merge base with HEAD in this clone — `git fetch origin main` alone does not fix that, the HISTORY is what is missing'}, so "
+                "nothing shows this diff adds a cite token at all")
 
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
@@ -2532,12 +4548,11 @@ def test_the_bundles_index_cite_re_point_claim_is_corroborated_by_the_live_diff(
         named = set(re.findall(r"`?:(\d+)`?", window))
         assert named & moved, (
             f"05-verify.md claims this diff re-points a `docs/00_index.md` cite "
-            f"({claim!r}) and names {sorted(named)}, but the live three-dot diff adds "
-            f"no such `sdk.py:<n>` token (added: {sorted(moved) or 'none'}). The "
-            "claim is refuted by the command the document prints beside it: read the "
-            "set from `git diff -U0 --word-diff=plain origin/main...HEAD -- "
-            "docs/00_index.md` at the head being merged, and state the command rather "
-            "than a head-bound pair (#13746 review, round 3, finding 4)")
+            f"({claim!r}) and names {sorted(named)}, but {_why}. The claim is refuted "
+            "by the command the document prints beside it: read the set from "
+            "`git diff -U0 --word-diff=plain origin/main...HEAD -- docs/00_index.md` "
+            "at the head being merged, and state the command rather than a head-bound "
+            "pair (#13746 review, round 3, finding 4)")
 
 
 if __name__ == "__main__":  # pragma: no cover
