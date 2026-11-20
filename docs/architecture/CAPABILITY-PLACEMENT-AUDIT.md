@@ -531,7 +531,7 @@ read resolves the node **through the edge** — `sdk.py:31343`
 (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) RETURN properties(p)`),
 `sdk.py:31325` (`MATCH (t:Tag) OPTIONAL MATCH (p:Point)-[:TAGGED]->(t) …` — the tag list with counts),
 `sdk.py:24305` (`MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) WHERE t.name IN $names`) /
-`mcp_server.py:11280` (`OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
+`mcp_server.py:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
 `sdk.py:24649` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
 addresses re-derived in this pass (#13879 review, P2: they were pin-head values from `ccb49741b2`,
 and the third of them had meanwhile drifted onto the address this document set now names as the
