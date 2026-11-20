@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (52 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (53 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -307,23 +307,6 @@ the same destructive path, one indirection further out.
 | **M2** `_cross_recall` published `recall: 1.0` over an EMPTY candidate list — the same "an empty answer is not a passed check" class `compare()`'s recall was already fixed for. A raised record leg answers `[]`, so its artifact rows read as PERFECT agreement over zero rows | read the code; `_cross_recall([], ["a"])` → `1.0` | `None` over an empty `a` (artifacts unaffected: every committed run's `a` is non-empty, and all five still replay bit-identically). Pinned by `test_an_empty_candidate_list_is_not_perfect_agreement` |
 | **M3** the corpus comment and this document's edge table said "the graph side gets its own graph" for the second-tenant rows. `seed_foreign_tenant()` exists only on `RecordStore` and `GraphStore.seed` skips every `tenant != "ours"` row — no second cypher graph is ever created | read the code | the comment and §2's row now say RECORD-ONLY and name the graph leg's tenancy behaviour as untested, rather than implying the edge was measured on both |
 
-### The two evidence errors this section exists to correct
-
-Both were in the **previous revision of this document**, and both are the
-`⚠️ CORRECTED`-marker failure mode: a correction that asserts a previous text
-was wrong while being wrong itself.
-
-1. §5 used to quote `--poison id` as `distance_delta=4.665`. The artifact holds
-   `4.665883013288408e-09` — **the exponent was dropped by the console's
-   95-character truncation**, so a 4.7e-09 AGREEMENT was presented as a 4.665
-   divergence. The quoted string appeared in no artifact.
-2. §5 used to quote `--poison order` as `distance_delta=0.896`, and it was: the
-   ids-only poison permuted `rec_ids` while `candidate_distances` stayed in
-   place, so `zip` paired id *i* with distance *j*. That 0.8967 was an artifact
-   of misalignment, not a measurement. `poison()` now operates on `(id,
-   distance)` pairs, and the reorder poison reports `distance_ok=True, delta
-   4.7e-09` (`test_a_reordered_poison_moves_the_distance_WITH_the_row`).
-
 ### Round 10: the guard read the string libpq parses, but not where each parser STOPS
 
 | finding | verified how | fix |
@@ -337,6 +320,24 @@ Mutants, each reddening exactly its own pin and nothing else: the `#` shape read
 `urlsplit().query` → **1 failed**; `app_role_dsn` rebuilt with `urlunsplit` → **1 failed**;
 `recall 1.0` for an empty leg → **1 failed**; the non-poisoned `unmeasured` block disabled →
 **1 failed**. Restored tree: **48 passed**.
+
+### Round 11: two more ways the guard read the string instead of libpq
+
+Landed on top of Round 10's fragment fix (the other lane's, merged here) from the
+same review. Both measured with libpq itself — `psql` prints the host it dials —
+and both are the same class: the guard answering a question about the STRING
+rather than about the CONNECTION.
+
+| finding | verified how | fix |
+|---|---|---|
+| **N1** libpq's conninfo grammar allows SPACES, TABS and NEWLINES around `=`, and single-quoted values. A `shlex` loop requiring `key=value` in ONE token cannot see `hostaddr = 203.0.113.9`, so a sibling loopback `host=` satisfied the guard | `psql` dialled **203.0.113.9** for `host=127.0.0.1 hostaddr = 203.0.113.9`, and again with a newline around `=` | the conninfo form is scanned with a keyword regex that allows whitespace around `=` and quoted values; a form naming no host still refuses (`RECORD_DSN_NO_HOST`). Pinned by reverting the regex to the one-token shape → **1 failed** |
+| **N2** libpq fills every option the conninfo leaves UNSET from `PGHOSTADDR`/`PGHOST`/`PGSERVICE`, and `hostaddr` is the address actually dialled. A PLAIN loopback DSN was therefore remote under `PGHOSTADDR=203.0.113.9` | `psql` dialled **203.0.113.9** for `postgresql://127.0.0.1/db` with `PGHOSTADDR` set — the ordinary, documented command | the environment is read by libpq's own precedence: a variable supplies an option only when the DSN left it unset. Pinned by ignoring `PGHOSTADDR` in that loop → **1 failed**; controls prove it is not a blanket block (a DSN's own `hostaddr=` beats the variable; a LOOPBACK value in the variable is fine; with the variable cleared the same DSNs are local again) |
+
+⛔ THE STRUCTURAL POINT, which is why four rounds of this guard are ONE lesson:
+each fix closed one indirection and the next review found the next one, because the
+guard kept re-deriving libpq's grammar. The question is **"what would
+`psycopg2.connect(dsn)` dial"**, not **"what does this string say"** — and answering
+it keeps needing libpq's own rules, not Python's.
 
 ## 6. Reproducing
 
@@ -367,7 +368,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **52 passed**.
+tests/test_vector_parity_13906.py -q` → **53 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
