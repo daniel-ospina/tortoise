@@ -16714,6 +16714,23 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "hosted_api",
         'max_nodes = org.get("max_points")',
     ),
+    # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
+    # review, P2). The I7 pair above closed this class for two anchors and left this
+    # equally bindable clause unbound: the row states `:45867` as CURRENT
+    # ("the same grep also hits `:45867`"), and REVERTING the re-derivation to the
+    # pre-fix `:45728` reddened NOTHING — measured at `4747fb570e` by the reviewer: the
+    # whole D5-reading set plus `tests/test_12184_shifted_cites.py` stayed at
+    # `20 passed`, which is the file's own documented failure mode (a number asserted as
+    # current may name prose, a comment or an unrelated statement indefinitely).
+    # Both parts were measured unique at that head: the regex matches the D5 row once,
+    # and the needle occurs in `sdk.py` once — so this pins the ADDRESS, not just a
+    # number that happens to sit on the line.
+    (
+        "the `sdk.py` import's OTHER hit",
+        r"the same grep also hits `:(?P<n>\d+)`",
+        "sdk",
+        "subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,",
+    ),
 )
 
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
