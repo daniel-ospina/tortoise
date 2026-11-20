@@ -3113,7 +3113,13 @@ def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
     )
 
 
-# ── The `fly-only:` category — a decision-backed exception, NOT a fail-open ────
+# ── The `fly-only:` category — a declared exception, NOT a fail-open ─────────
+#
+# ⛔ NOT "a decision-backed exception": #661 and #13209 carry recorded rulings,
+# but the shipped manifest also declares #13674 as a DECLARED GAP whose ruling is
+# still owed, so the category is no longer uniform and the adjective is false of
+# the set as a whole (#13814 review rounds 11-12; the same claim was removed from
+# the checker's summary line and its STALE message under the same rule).
 #
 # #661 is a CLOSED recorded decision: the registry-stream key must never enter
 # the GitHub trust boundary, so the ABSENCE of a version-control source IS the
