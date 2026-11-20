@@ -16534,10 +16534,13 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # it to its SUBJECT (#13809 review, cycle 4, P2). No glyph, case or spacing is
         # part of a fragment: `_d5_words` reduces each side to a word sequence.
         ("14471", "is a bare `#` comment marker"),
-        "measured at `origin/main`: `:14471` is a docstring line in "
-        "`tortoise/hosted_api.py` and a code line in `tortoise/sdk.py` — neither is a "
-        "comment marker (#13794 review, P2). Keep the half that IS true, and keep it "
-        "SCOPED: no cite TOKEN for that line **with the `hosted_api.py` prefix** exists on "
+        "measured at `origin/main`: `:14471` is a CODE line in `tortoise/sdk.py`, so `sdk.py`'s "
+        "half of that reading is refuted on its own. ⛔ The `hosted_api.py` half is NOT: that "
+        "line IS a bare `#` comment marker there (`git show origin/main:tortoise/hosted_api.py "
+        "| sed -n '14471p'` -> `    # population is BOUNDED, …`), which an earlier cut of this "
+        "row denied — so the reading is refused on the half that holds, not on both "
+        "(#13878 review). The SCOPED half stands: no cite TOKEN for that line **with the "
+        "`hosted_api.py` prefix** exists on "
         "`main` — while one WITHOUT that prefix does, in "
         "`docs/scoping/3863-surface-enumeration.json` — so a prefix-scoped grep is not a "
         "tree-wide count, which is the error the D5 row itself retracts (#13489 review, "
@@ -16552,8 +16555,8 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # the NUMBER is part of it, because without the number the predicate reds a true
         # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
         # restatement that drops the number is out of scope, which is a different claim.
-        ("45728", "a DIFFERENT call site"),
-        "measured at this head: `:45728` is a NAME in an import list "
+        ("45867", "a DIFFERENT call site"),
+        "measured at this head: `:45867` is a NAME in an import list "
         "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
         "prints (#13794 measurement, P2)",
@@ -16604,7 +16607,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 
     ⛔ MEASURED, which is why this is a pin and not a note: at `43438fbe31` the row said
     `origin/main`'s `:14471` is a bare `#` comment marker (it is a docstring line in one
-    file and code in the other), called `:45728` a "call site" (it is a name in an import
+    file and code in the other), called `:45867` a "call site" (it is a name in an import
     list), and asserted "the box is no longer shallow" (that clone reports `true`, and
     `git merge-base 2584a86ec1 origin/main` -> rc=1). No guard in the tree read any of
     the three, which is how they survived nine heads while the suite was green.
