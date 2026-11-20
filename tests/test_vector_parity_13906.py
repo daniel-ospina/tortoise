@@ -554,6 +554,76 @@ def test_an_unpoisoned_run_that_could_not_measure_is_not_a_divergence(
     monkeypatch.setattr(harness, "run", lambda _args: report)
     assert harness.main(argv) == 1, "a measured divergence must keep exit 1"
 
+def test_the_guard_answers_what_libpq_would_DIAL_not_what_this_string_says(
+        harness, monkeypatch):
+    """The third indirection of one class: parse like libpq, and read its env.
+
+    Three rounds each closed ONE indirection of this guard (the query string
+    overriding the authority, then `service=`/`pg_service.conf`). Round 11 found
+    three more, every one of them measured with libpq itself (`psql` names the
+    host it dials):
+
+        # a FRAGMENT to urlsplit, NOTHING to libpq — the query is live
+        postgresql://127.0.0.1:1/db#?hostaddr=203.0.113.9   -> 203.0.113.9
+        # libpq's conninfo grammar allows spaces/newlines around `=`
+        host=127.0.0.1 hostaddr = 203.0.113.9              -> 203.0.113.9
+        # and libpq fills UNSET options from the environment
+        PGHOSTADDR=203.0.113.9 + postgresql://127.0.0.1/db  -> 203.0.113.9
+
+    All three PASSED the guard (45/45 green) while a remote record was dialled —
+    the store `run()` seeds and `teardown()` deletes by `org_id`. The structural
+    answer is not a fourth special case: the guard now parses the QUERY with
+    libpq's rule (first `?` to end of string, `#` refused outright, spaces
+    allowed around `=` in conninfo) and applies `PGHOSTADDR`/`PGHOST`/`PGSERVICE`
+    by libpq's own precedence — a variable supplies an option only when the DSN
+    left it unset.
+    """
+    for var in ("PGHOSTADDR", "PGHOST", "PGSERVICE"):
+        monkeypatch.delenv(var, raising=False)
+
+    remote = (
+        # (a) the fragment
+        "postgresql://127.0.0.1:1/db#?hostaddr=203.0.113.9",
+        # (b) libpq's conninfo whitespace
+        "host=127.0.0.1 port=1 hostaddr = 203.0.113.9 dbname=db",
+        "host=127.0.0.1\nhostaddr\n=\n203.0.113.9 dbname=db",
+        "host=127.0.0.1 service = prod dbname=db",
+        # (c) the environment supplies what the DSN leaves unset
+        "postgresql://127.0.0.1:1/db",            # + PGHOSTADDR below
+        "host=127.0.0.1 port=1 dbname=db",        # + PGHOSTADDR below
+    )
+    for dsn in remote[:4]:
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act works
+
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.9")
+    for dsn in remote[4:]:
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)
+
+    # ⛔ AND IT IS NOT A BLANKET BLOCK. Three controls:
+    # 1. a DSN that SETS hostaddr beats the environment — libpq's precedence;
+    monkeypatch.setenv("PGHOSTADDR", "203.0.113.9")
+    harness._assert_local_record_dsn(
+        "postgresql://127.0.0.1:1/db?hostaddr=127.0.0.1", False)
+    # 2. a loopback value in the environment is fine;
+    monkeypatch.setenv("PGHOSTADDR", "127.0.0.1")
+    harness._assert_local_record_dsn("postgresql://127.0.0.1:1/db", False)
+    # 3. and with the variable gone, the same DSNs are local again.
+    monkeypatch.delenv("PGHOSTADDR")
+    for dsn in ("postgresql://127.0.0.1:1/db", "host=127.0.0.1 port=1 dbname=db",
+                "host='127.0.0.1' dbname=db"):
+        harness._assert_local_record_dsn(dsn, False)
+
+    # PGHOST is the same lever for a DSN that names NO host at all.
+    monkeypatch.setenv("PGHOST", "203.0.113.9")
+    with pytest.raises(harness.CannotRun):
+        harness._assert_local_record_dsn("postgresql:///db", False)
+
 
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
     """The misalignment the review caught: ids permuted, distances not.

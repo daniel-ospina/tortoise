@@ -72,6 +72,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import shlex
 import sys
 import time
@@ -586,93 +587,134 @@ def _split_host_list(value: str) -> list[str]:
     return out
 
 
-def _conninfo_hosts(dsn: str) -> list[str]:
-    """The `host`/`hostaddr`/`service` keywords of libpq's conninfo form."""
+#: libpq's conninfo grammar allows SPACES, TABS and NEWLINES around `=`, and
+#: single-quoted values. A `shlex` token loop that requires `key=value` in ONE
+#: token therefore cannot see `hostaddr = 203.0.113.9` — measured with libpq
+#: (`psql` dials 203.0.113.9 for `host=127.0.0.1 hostaddr = 203.0.113.9`).
+_CONNINFO_KV = re.compile(
+    r"""(?<![A-Za-z0-9_])(host|hostaddr|service)\s*=\s*(?:'((?:[^'\\]|\\.)*)'|(\S+))""",
+    re.IGNORECASE)
+
+
+def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
+    """(hosts, keys) named by libpq's whitespace conninfo form.
+
+    ⛔ THE GRAMMAR IS LIBPQ'S, NOT `shlex`'S. `key=value` in one whitespace
+    token is the common shape, not the grammar: spaces and newlines are legal
+    around `=`, and a backslash-escaped or single-quoted value is legal too. A
+    parser that misses a keyword does not merely under-report — it lets a
+    sibling loopback keyword satisfy the guard while a remote one is dialled.
+    """
     hosts: list[str] = []
-    try:
-        tokens = shlex.split(dsn)
-    except ValueError:  # unbalanced quoting: nothing proven, caller refuses
-        return hosts
-    for token in tokens:
-        key, sep, value = token.partition("=")
-        if sep and key in ("host", "hostaddr"):
-            hosts.extend(_split_host_list(value))
-        elif sep and key == "service" and value:
+    keys: set[str] = set()
+    for match in _CONNINFO_KV.finditer(dsn):
+        key = match.group(1).lower()
+        value = match.group(2) if match.group(2) is not None else (match.group(3) or "")
+        keys.add(key)
+        if key == "service" and value:
             # The host comes from pg_service.conf, which this harness cannot read
-            # before connecting — unknowable, so never loopback (`RECORD_DSN_SERVICE`).
+            # before connecting — unknowable, so never loopback.
             hosts.append(RECORD_DSN_SERVICE)
-    return hosts
+        elif key in ("host", "hostaddr"):
+            hosts.extend(_split_host_list(value))
+    return hosts, keys
+
+
+def _uri_hosts(dsn: str) -> tuple[list[str], set[str]]:
+    """(hosts, keys) named by libpq's URI form.
+
+    ⛔ `urlsplit` IS THE WRONG PARSER FOR A libpq URI, twice over:
+
+    * it treats `#…` as a FRAGMENT, while libpq has no fragment concept: libpq
+      parses from the FIRST `?` to the end of the string. So
+      `postgresql://127.0.0.1/db#?hostaddr=203.0.113.9` has an EMPTY query to
+      `urlsplit` and a LIVE `hostaddr` to libpq — measured: `psql` dials
+      203.0.113.9 while this function's caller returned only the authority.
+
+    ⛔ THE ANSWER IS TO SPLIT THE QUERY THE WAY LIBPQ DOES — first `?` to the end
+    of the string — rather than to refuse every `#`, which would also over-block
+    a legal DSN whose userinfo carries one. That split is what makes the
+    fragment-hidden query visible; the pinned mutant is reverting it to
+    `urlsplit(dsn).query`, which sees an empty query and passes the DSN.
+    """
+    hosts: list[str] = []
+    keys: set[str] = set()
+    base = dsn
+    if "?" in dsn:
+        base, _, query_string = dsn.partition("?")
+        # TWO PARSERS, TWO ANSWERS: Python ends the URL at `#`, libpq has no
+        # fragment concept. A `#` BEFORE the query means they disagree about
+        # where the authority ends, so the shape is refused, not resolved.
+        if "#" in base:
+            return [RECORD_DSN_AMBIGUOUS], set()
+        query = parse_qs(query_string)
+        for key in ("hostaddr", "host", "service"):
+            for value in query.get(key, []):
+                keys.add(key)
+                if key == "service" and value:
+                    hosts.append(RECORD_DSN_SERVICE)
+                else:
+                    hosts.extend(_split_host_list(value))
+        # libpq REJECTS an uppercase query key (`invalid URI query parameter`), so
+        # no dial happens — but the DSN is still not one to reason about: treat it
+        # as specifying the key so an environment value cannot slip in behind it.
+        for key in query:
+            if key.lower() in ("host", "hostaddr", "service"):
+                keys.add(key.lower())
+    authority = urlsplit(base)
+    if authority.hostname:
+        hosts.append(authority.hostname)
+        keys.add("host")
+    return hosts, keys
 
 
 def _record_dsn_hosts(dsn: str) -> list[str]:
-    """Every host libpq would DIAL from this DSN — by libpq's OWN precedence.
+    """Every host libpq would DIAL from this DSN — and from the PG* environment.
 
-    ⛔ THE AUTHORITY IS NOT THE ANSWER, and reading it alone is a FAIL-OPEN. In
-    libpq's URI form a ``host=``/``hostaddr=`` in the QUERY STRING overrides the
-    authority's host, and ``hostaddr`` names the address actually dialled
-    (``host`` is then used only for certificate verification and SNI). Measured
-    against libpq's own resolver (``PQconninfoParse``):
+    ⛔ THE QUESTION IS NOT "WHAT DOES THIS STRING SAY", it is "what would
+    `psycopg2.connect(dsn)` dial" — and THREE rounds of this guard have each
+    closed one indirection of that gap, every one of them measured with libpq
+    itself rather than read out of the docs:
 
-        postgresql://127.0.0.1/db?host=db.prod.example.com
-            -> host='db.prod.example.com'       (the query wins)
-        postgresql://127.0.0.1/db?hostaddr=203.0.113.9
-            -> hostaddr='203.0.113.9'           (the address dialled)
+    * a `host=`/`hostaddr=` in the URI QUERY overrides the authority
+      (`postgresql://127.0.0.1/db?host=db.prod.example.com`);
+    * `service=` / `PGSERVICE` hand the dial to `pg_service.conf`, whose
+      `hostaddr` this harness cannot read;
+    * the conninfo grammar allows SPACES around `=`, so `hostaddr = 203.0.113.9`
+      is a keyword that a one-token `key=value` parser cannot see;
+    * a `#` before the `?` is a FRAGMENT to `urlsplit` and NOTHING to libpq, so
+      the query it hides is live;
+    * and libpq fills every option the conninfo leaves UNSET from `PGHOSTADDR` /
+      `PGHOST` / `PGSERVICE` — so a plain loopback DSN is remote under
+      `PGHOSTADDR=203.0.113.9`.
 
-    so a DSN whose AUTHORITY is loopback still writes to a remote record — the
-    store ``run()`` seeds and ``teardown()`` deletes by ``org_id``. Every host
-    this returns must be loopback. The authority is INCLUDED even when a query
-    parameter overrides it: over-blocking costs an ``--allow-remote-writes``
-    flag, under-blocking costs a tenant's rows.
-
-    Returns ``[]`` when the DSN names no host at all — the caller refuses that
-    (``RECORD_DSN_NO_HOST``), it does not treat it as local.
-
-    ⛔ AND A ``service`` NAMES A HOST WE CANNOT SEE. ``host``/``hostaddr`` are not
-    the only ways libpq learns the address: ``parseServiceInfo`` fills every
-    option the conninfo left UNSET from ``pg_service.conf``, so ``service=prod``
-    on a loopback DSN dials whatever that entry's ``hostaddr`` is — and
-    ``PGSERVICE`` in the environment does the same for a DSN that never mentions
-    it. Measured with libpq itself (``psql`` names the host it tried, service file
-    with ``hostaddr=203.0.113.9``):
-
-        postgresql://127.0.0.1:1/db?service=prod                 -> dials 203.0.113.9
-        postgresql://127.0.0.1:1/db?host=127.0.0.1&service=prod   -> dials 203.0.113.9
-        postgresql://127.0.0.1:1/db  (PGSERVICE=prod in env)      -> dials 203.0.113.9
-
-    while this function returned ``['127.0.0.1']`` and the guard PASSED — the
-    same fail-open class as K1 on the same destructive path, and internally
-    inconsistent with the conninfo spelling (which was refused only because it
-    named no host). A ``service`` is therefore reported as ``RECORD_DSN_SERVICE``,
-    which no loopback predicate accepts.
+    Every host this returns must be loopback. `[]` means the DSN (and the
+    environment) name no host at all — the caller refuses that
+    (`RECORD_DSN_NO_HOST`); it does not treat it as local. A `#` in a URI, or a
+    conninfo that cannot be tokenised, is REFUSED the same way instead of
+    `#` is not special to libpq, and the URI branch splits the query by libpq's
+    rule (first `?` to end of string), so a query hidden behind a `#` is still
+    seen.
     """
-    hosts: list[str] = []
-    if "://" in dsn:
-        # ⛔ READ THE QUERY THE WAY LIBPQ DOES, not the way Python does. libpq has
-        # no FRAGMENT: it finds the parameters at the first `?` of the RAW string
-        # and keeps reading past anything Python would call a fragment. Reading
-        # `urlsplit(dsn).query` therefore DROPPED a query libpq still honours —
-        # `postgresql://127.0.0.1/db#?hostaddr=203.0.113.9` reached 203.0.113.9
-        # while this returned `['127.0.0.1']` — and a `#` anywhere before the `?`
-        # means the two parsers disagree about where the authority even ends, so
-        # that shape is refused instead of resolved one way.
-        head, sep, raw_query = dsn.partition("?")
-        if "#" in head:
-            return [RECORD_DSN_AMBIGUOUS]
-        parts = urlsplit(dsn)
-        query = parse_qs(raw_query) if sep else {}
-        if query.get("service") or os.environ.get("PGSERVICE"):
-            return [RECORD_DSN_SERVICE]
-        # `hostaddr` first: it is the address libpq dials, so naming it first in
-        # the refusal names the store the run would actually hit.
-        for key in ("hostaddr", "host"):
-            for value in query.get(key, []):
-                hosts.extend(_split_host_list(value))
-        if parts.hostname:
-            hosts.append(parts.hostname)
-    else:
-        if os.environ.get("PGSERVICE"):
-            return [RECORD_DSN_SERVICE]
-        hosts.extend(_conninfo_hosts(dsn))
+    try:
+        if "://" in dsn:
+            hosts, keys = _uri_hosts(dsn)
+        else:
+            hosts, keys = _conninfo_hosts(dsn)
+    except ValueError:  # nothing proven, so nothing waved through
+        return [RECORD_DSN_NO_HOST]
+    # ⛔ THE ENVIRONMENT, BY LIBPQ'S OWN PRECEDENCE: a `PG*` variable supplies an
+    # option only when the DSN left it UNSET. `PGHOSTADDR` is the address dialled,
+    # which is why it is the one that matters most and the one that was missing.
+    for key, value in (("hostaddr", os.environ.get("PGHOSTADDR")),
+                       ("host", os.environ.get("PGHOST")),
+                       ("service", os.environ.get("PGSERVICE"))):
+        if not value or key in keys:
+            continue
+        if key == "service":
+            hosts.append(RECORD_DSN_SERVICE)
+        else:
+            hosts.extend(_split_host_list(value))
     return hosts
 
 
