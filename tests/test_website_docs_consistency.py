@@ -1136,11 +1136,12 @@ def test_no_dead_issue_references_in_public_copy(page: Path) -> None:
 def test_docs_toc_anchors_all_resolve() -> None:
     """Every TOC entry on the docs page must land on a real id.
 
-    The FAQ half of this pin is below; `docs.html` never had one, and #14013 is
-    the first change that depends on it from OUTSIDE the page (`#13998`'s
-    capacity notices link to `/tortoise/docs#storage`). A TOC entry with no
-    target, or a section whose id was renamed under a notice that still points
-    at it, is a dead deep link for every reader arriving from that email.
+    The FAQ half of this pin is below; `docs.html` never had one. This is a
+    TOC⇄id CONSISTENCY pin, not the deep-link pin: it would stay green if the
+    `storage` section and its TOC entry were both removed or both renamed.
+    The deep link `/tortoise/docs#storage` is pinned by
+    `test_the_storage_section_is_the_notices_destination_and_is_advertised`
+    below, which names the anchor the notices ship (#14066 review, P2).
     """
     html = _read(DOCS)
     hrefs = set(re.findall(r'href="#([^"]+)"', html))
@@ -1176,9 +1177,20 @@ def _docs_section(anchor: str = "storage") -> str:
     A slice rather than the whole page: the vocabulary rule applies to what a
     reader arriving at the anchor meets, and holding the page's deliberately
     technical sections (`How it works`, the API reference) to it would be wrong.
+
+    ⛔ The anchor's absence is asserted BEFORE `str.index` is reached. A bare
+    `index` raises `ValueError`, which surfaces as an ERROR in the three tests
+    that call this helper and names no cause — the opposite of what a guard owes
+    a reader whose edit moved the section (#14066 review, P2).
     """
     html = _read(DOCS)
-    start = html.index(f'<h2 id="{anchor}">')
+    opening = f'<h2 id="{anchor}">'
+    assert opening in html, (
+        f"website/docs.html has no {opening}. `capacity_notice.STORAGE_DOCS_URL` "
+        f"(#13998) points at `/tortoise/docs#{anchor}`, so moving or renaming this "
+        f"section silently breaks the notices' link text."
+    )
+    start = html.index(opening)
     rest = html[start + 1:]
     end = rest.find("<h2 id=")
     return rest if end == -1 else rest[:end]
