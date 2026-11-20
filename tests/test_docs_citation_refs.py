@@ -989,8 +989,10 @@ _TORTOISE_EMPTY_SPELLINGS = (
     # the document exactly once, as a QUOTED RETRACTION (“‘this diff carries no `tortoise/`
     # path’ — which the `--refresh` above made FALSE”). Retiring it would red the document
     # for retracting a falsehood, i.e. the over-block this ledger already documents. The
-    # clause that ASSERTED it was rewritten to a structural statement (`#12943` landed on
-    # `main`, so it sits on both sides of the merge) that needs no reading of the set at all.
+    # clause that ASSERTED it is now a command reference, and the structural statement that
+    # briefly replaced it was itself DELETED — `05-verify.md`:147 records that "a line on both
+    # sides of a merge is still a line a diff can change" (#13853 review, P2: this comment
+    # used to praise that statement as needing NO reading of the set at all).
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
 _TORTOISE_RETIRED_SPELLINGS = (
