@@ -79,7 +79,7 @@ class _EdgeRefusingMcp:
         def _post(body: dict):
             tool = (body.get("params") or {}).get("name")
             self._n += 1
-            if tool in ("tortoise_create_edge", "tortoise_create_operator"):
+            if tool == "tortoise_create_edge":
                 return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
                     "structuredContent": {"error": "quota exceeded for operators",
                                           "code": "ERR_QUOTA"}}}, {})
@@ -745,7 +745,14 @@ def test_a_refused_edge_is_not_marked_as_written(tmp_path, monkeypatch, map_doc,
     assert filer.write_map(map_doc) == 1
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["failed"], "the refusal vanished"
-    assert not [m for m in state["written"] if m.startswith("edge:")]
+    # ⛔ ONLY THE STRUCTURAL EDGES, because `edge_marker` names both kinds and the
+    # operator arm has a DIFFERENT exit: a tool-level payload over a
+    # non-idempotent write is UNCONFIRMED, so its marker is deliberately KEPT
+    # (#13913 review round 13, pinned by the round-13 rows below).
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert structural, "no structural edges in the fixture"
+    assert not [m for m in state["written"] if m in structural], (
+        "a REFUSED structural edge was marked as written")
     capsys.readouterr()
 
 
@@ -1697,6 +1704,101 @@ def test_a_REFUSED_write_un_records_but_an_UNCLASSIFIED_one_does_not(
         "an UNCLASSIFIED exception retired the intent — the resume would re-issue "
         "a non-idempotent write")
     assert marker in on_disk["unconfirmed"], on_disk["unconfirmed"]
+
+
+# ── #13913 review round 13: a TOOL-LEVEL failure is POST-handler ─────────
+_SAFE_ERROR = {"content": [{"type": "text",
+                            "text": "_SafeError: boom inside the handler"}],
+               "isError": True}
+
+
+class _SafeErrorOnOperators(_RealMcp):
+    """The real classification, with a `_safe` failure for operator writes.
+
+    `mcp_server._safe` is "Call fn; return an `_SafeError` on exception instead of
+    raising" — it wraps the WHOLE SDK call, and `create_operator` lands the node
+    BEFORE the event emit / dirty-mark / cache-invalidate that can raise. So this
+    payload can arrive over a write that SUCCEEDED.
+    """
+
+    operator_posts = 0
+
+    def _post(self, body):
+        if (body.get("params") or {}).get("name") == "tortoise_create_operator":
+            type(self).operator_posts += 1
+            return 200, _SAFE_ERROR, {}
+        return 200, {"content": [{"type": "text", "text": "{}"}],
+                     "structuredContent": {"id": f"id{len(body)}"}}, {}
+
+
+def test_a_TOOL_LEVEL_failure_on_a_NON_IDEMPOTENT_door_is_an_UNKNOWN_outcome(
+        monkeypatch):
+    """`_SafeError` is not a pre-handler refusal, so it may not retire an intent.
+
+    `mcp_server._safe` wraps the WHOLE SDK call, and `create_operator` lands the
+    node BEFORE the event emit / dirty-mark / cache-invalidate that can raise, so
+    this payload can arrive over a write that SUCCEEDED. Reverting to a bare
+    `Refusal` re-issued all 51 operators on the resume — the door `continue`s past
+    a same-mechanism holder — and the run reported `all nodes and edges written`
+    over every operator priced twice (#10849).
+
+    Mutant: `raise Refusal(f"{tool} FAILED: {msg}")` with no `retry_safe` guard —
+    the first assertion reds.
+    """
+    mcp = _SafeErrorOnOperators("not-a-real-key")
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "create_operator" in str(excinfo.value), excinfo.value
+
+    # A REPEAT-SAFE door MAY treat the same payload as a refusal: a repeat
+    # converges there, so nothing is duplicated by re-issuing it.
+    safe = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(safe, "_post", lambda body: (200, _SAFE_ERROR, {}))
+    with pytest.raises(filer.Refusal):
+        safe.call("tortoise_create_point", {})
+
+    # ⛔ THE DISTINCTION THE GUARD RESTS ON: a PRE-handler refusal (the JSON-RPC
+    # envelope failed, so no handler ran) is still a refusal on a non-idempotent
+    # door — nothing can have landed.
+    pre = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(pre, "_post", lambda body: (
+        200, {"jsonrpc": "2.0", "id": body.get("id"),
+              "error": {"code": -32000, "message": "unauthorized"}}, {}))
+    with pytest.raises(filer.Refusal):
+        pre.call("tortoise_create_operator", {}, retry_safe=False)
+
+
+def test_a_TOOL_LEVEL_failure_does_not_REISSUE_the_operator_on_resume(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The consequence, on disk: the resume issues ZERO second operators.
+
+    Measured pre-fix: 51 operators landed and answered `_SafeError`; run 1 exited
+    1 with `written` holding no operator marker, and the resume issued 102
+    operator writes and printed `all nodes and edges written`.
+
+    Mutant: the bare `Refusal` — the resume re-issues and this reds.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _SafeErrorOnOperators)
+    _SafeErrorOnOperators.operator_posts = 0
+
+    first = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    on_disk = json.loads(state_path.read_text())
+    assert marker in on_disk["written"] and marker in on_disk["unconfirmed"], on_disk
+    seen_in_run_1 = _SafeErrorOnOperators.operator_posts
+    assert seen_in_run_1 >= 1
+
+    _SafeErrorOnOperators.operator_posts = 0
+    filer.write_map(map_doc)          # the resume
+    capsys.readouterr()
+    assert _SafeErrorOnOperators.operator_posts == 0, (
+        f"the resume re-issued {_SafeErrorOnOperators.operator_posts} operator "
+        "writes over intents that may already have landed (#10849)")
 
 
 def test_the_UNCONFIRMED_operator_report_names_its_remedy(

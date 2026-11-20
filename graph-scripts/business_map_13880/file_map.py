@@ -568,6 +568,20 @@ class Mcp:
                     # whole window proving the window is closed.
                     time.sleep(min(60, 10 * (attempt + 1)))
                     continue
+                # ⛔ A TOOL-LEVEL FAILURE IS NOT A PRE-HANDLER REFUSAL — it is
+                # `_safe`'s `_SafeError` (`mcp_server.py`: "Call fn; return an
+                # `_SafeError` on exception instead of raising"), which wraps the
+                # WHOLE SDK call. `create_operator` lands the node BEFORE the
+                # event emit / dirty-mark / cache-invalidate that can raise, so
+                # this payload can arrive over a write that SUCCEEDED. Retiring
+                # the intent here re-issued all 51 operators on the resume and
+                # the door did not stop it (`sdk.py`: a same-mechanism holder is
+                # `continue`d past), so the run reported `all nodes and edges
+                # written` over every operator priced twice (#10849) — measured
+                # with a real `Mcp.call` and a stubbed `_post` (#13913 review
+                # round 13). Only a repeat-safe door may treat it as a refusal.
+                if not retry_safe:
+                    raise UnknownOutcome(_unknown(tool, msg))
                 raise Refusal(f"{tool} FAILED: {msg[:400]}")
             return result
         raise UnknownOutcome(f"{tool}: gave up after 6 attempts")
