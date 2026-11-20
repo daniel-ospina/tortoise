@@ -842,6 +842,26 @@ class GraphStore:
 
 # ── the run ─────────────────────────────────────────────────────────────────
 
+def _require_index_arm(mechanisms: list[str], ready: bool) -> None:
+    """Refuse an "indexed" arm that did not answer via the index.
+
+    ⛔ A NAMED SEAM for the same reason `_scan_arm` is one: while this decision
+    was an inline `if` inside `run()`, no DB-free test could reach it, and
+    reintroducing the inert form `if ready and mechanisms != ["index"]` left
+    **35/35 green** (measured in review, round 6). That form was a real shipped
+    defect: when `wait_index_ready` TIMED OUT it returned `False`, the conjunct
+    was False, and the arm was then published as `run_vector_query HNSW` while
+    measuring the `#8429` scan fall-through — exit 0, PARITY, about the SCAN.
+    So `ready` decides the MESSAGE and never whether to refuse; the arm's own
+    reported mechanism decides that.
+    """
+    if mechanisms != ["index"]:
+        raise CannotRun(
+            f"cannot run: the indexed arm answered via {mechanisms} "
+            f"(index ready={ready}) — the indexed comparison is not measuring "
+            f"the index, so any parity it reports would be about the scan")
+
+
 def run(args) -> dict:
     rows = build_corpus(seed=args.seed, n_random=args.n_random)
     k = args.k
@@ -932,17 +952,9 @@ def run(args) -> dict:
             "mechanisms": mechanisms,
         }
         report["arms"]["graph_index"]["index_params"] = store.index_params()
-        # ⛔ `if ready and …` was an INERT GUARD in exactly the case it exists for:
-        # when `wait_index_ready` TIMED OUT it returned False, the conjunct was
-        # False, and the arm was then published as "run_vector_query HNSW" while
-        # measuring the `#8429` scan fall-through — exit 0, PARITY, about the
-        # scan. Readiness failing, or the arm falling back, both mean this is not
-        # the index arm. `ready` now decides the MESSAGE, never whether to refuse.
-        if mechanisms != ["index"]:
-            raise CannotRun(
-                f"cannot run: the indexed arm answered via {mechanisms} "
-                f"(index ready={ready}) — the indexed comparison is not measuring "
-                f"the index, so any parity it reports would be about the scan")
+        # ⛔ THE REFUSAL, through a named seam (`_require_index_arm`) so its
+        # inert form can be caught without a store — see the seam's docstring.
+        _require_index_arm(mechanisms, ready)
 
         # ── the efRuntime diagnostic ──────────────────────────────────────
         # Run ONLY when the default-arm recall is short: it exists to explain a
@@ -1096,6 +1108,17 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
     * ``graph_scan`` vs ``truth_cosine`` — the cosine/euclidean drift.
     """
     failures: list[str] = []
+    # ⛔ A FAILURE THAT IS AN ABSENCE OF MEASUREMENT IS NOT A DETECTION, and the
+    # falsifier's own proof depends on the difference. `poison_status` used to be
+    # `"POISON DETECTED" if not ok`, i.e. EVERY failure counted as a detection —
+    # including the cannot-measure failures this verdict already names. Measured
+    # in review: six entries each carrying `record_error` (a `VectorShortfall` on
+    # every query — exactly the #13911 shape) produced
+    # `poison: POISON DETECTED` / exit 1, byte-identical to a genuinely detected
+    # poison, from a run in which the poison was never exercised on a gated arm.
+    # These strings are collected into BOTH lists, so the status below can tell
+    # "the corruption was seen" from "the instrument could not look".
+    unmeasured: list[str] = []
     divergences = 0
     # ⛔ AN ORACLE SHORTER THAN `k` IS NOT A MEASUREMENT AT `k`, and `_validate_args`
     # is not the only place that has to say so. Its refusal counts the corpus
@@ -1114,10 +1137,12 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         q = entry["query"]
         truth_ids = entry.get("truth_cosine")
         if width is not None and truth_ids is not None and len(truth_ids) < width:
-            failures.append(
+            missing = (
                 f"{q}: the oracle served {len(truth_ids)} rows for --k {width} — "
                 f"the answer was compared over a SHORTER list than either leg "
                 f"was asked for, so a full-recall parity here measures no width")
+            failures.append(missing)
+            unmeasured.append(missing)
         # REQUIRED: the arm the migration is moving TO, against the metric the
         # record's index is built with.
         cmp_ = entry["record"]
@@ -1127,7 +1152,9 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         # value-level check with every DB-free pin still green (measured in
         # review). A required arm must be MEASURED and agree.
         if entry.get("record_error"):
-            failures.append(f"{q}: the record leg FAILED — {entry['record_error']}")
+            why = f"{q}: the record leg FAILED — {entry['record_error']}"
+            failures.append(why)
+            unmeasured.append(why)
         dist_ok = (cmp_.get("distance") or {}).get("ok")
         if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
                 or cmp_["recall"] is None or dist_ok is not True):
@@ -1156,21 +1183,48 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
     # the verdict, not only at the argument layer, or the next caller of `run()`
     # that skips validation inherits "zero measurements → green".
     if not report["queries"]:
-        failures.append("no queries were measured — an empty report is not parity")
+        why = "no queries were measured — an empty report is not parity"
+        failures.append(why)
+        unmeasured.append(why)
 
     ok = not failures
     if poisoned:
         # The falsifier: a poisoned run MUST fail. A poisoned run that reports
         # parity is a BLIND harness, and saying so is the only useful output it
-        # has — so the verdict is red either way (the run is never a pass), and
-        # `poison_status` records WHICH reading it produced.
-        status = ("POISON DETECTED" if not ok
-                  else "POISON NOT DETECTED — HARNESS BLIND")
-        return {"ok": False, "poison": poisoned,
-                "poison_status": status,
-                "failures": failures or [
-                    "poison produced no divergence — the comparison is blind"],
-                "informational": {"metric_divergence_ids_total": divergences}}
+        # has — so the verdict is red either way, and `poison_status` records
+        # WHICH reading it produced.
+        #
+        # ⛔ THREE READINGS, NOT TWO. "Detected" is a claim about the
+        # INSTRUMENT — this comparison CAN see this corruption — so it may only
+        # be minted by a failure that came from a MEASURED arm. A run whose only
+        # failures are cannot-measure ones saw nothing and must say so; folding
+        # it into "detected" is how a falsifier certifies itself from a run that
+        # never looked (and it is the reading the repro recipe in the README's
+        # §6 collapses: one `echo exit=$?` cannot tell the three apart, so the
+        # codes now differ too — see `main`).
+        detected = any(f for f in failures if f not in unmeasured)
+        if detected:
+            status = "POISON DETECTED"
+        elif failures:
+            status = ("POISON UNMEASURED — the run could not measure the arms "
+                      "the poison would have to move")
+        else:
+            status = "POISON NOT DETECTED — HARNESS BLIND"
+        verdict = {"ok": False, "poison": poisoned,
+                   "poison_status": status,
+                   "failures": failures or [
+                       "poison produced no divergence — the comparison is blind"],
+                   "informational": {"metric_divergence_ids_total": divergences}}
+        if not detected and failures:
+            # ⛔ PRESENT ONLY IN THE STATE IT DESCRIBES. `main` reads it to choose
+            # exit **2** (cannot run) over 1 (a comparison diverged), so a caller's
+            # exit code tells the three readings apart and not only the printed
+            # word. It is OMITTED from a measured run so the committed artifacts
+            # still replay bit-identically through this verdict — an always-present
+            # key would silently re-stale five pieces of evidence that no live
+            # re-run is needed to keep true.
+            verdict["unmeasured"] = True
+        return verdict
     return {"ok": ok, "failures": failures,
             "informational": {"metric_divergence_ids_total": divergences,
                               "metric_divergence_note":
@@ -1336,6 +1390,17 @@ def main(argv: list[str] | None = None) -> int:
     for f in v["failures"]:
         print(f"  FAIL {f}", file=sys.stderr)
     print("PARITY: FAILED", file=sys.stderr)
+    if v.get("unmeasured"):
+        # ⛔ THE FALSIFIER'S EXIT CODE IS EVIDENCE, so it must not conflate the
+        # three readings. `--poison` + exit **1** says "the corruption was SEEN on
+        # a measured arm"; exit **2** says "this run could not measure what the
+        # poison would have to move", which is the same class as every other
+        # cannot-run — and a repro loop that ticks `exit=1` as "confirmed" would
+        # otherwise certify the harness from a run that never looked.
+        print("cannot run: the poison was NOT measured (see the failures above) "
+              "— this run says nothing about the harness's blindness",
+              file=sys.stderr)
+        return 2
     return 1
 
 
