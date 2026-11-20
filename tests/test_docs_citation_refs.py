@@ -2270,7 +2270,27 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|(?:^|[.;:!?]\s|\n)"
+    # ⛔ AND A FRONTED TEMPORAL ADVERBIAL, WHICH IS THE CORPUS'S OWN HOUSE SPELLING (#13802
+    # review, round 22, P1 — MEASURED at `20f01e1075`). The clause anchor above was `^` or a
+    # sentence boundary, so moving the adverbial to the FRONT of the clause — the same words in
+    # the same order with one adverbial prepended — defeated the WHOLE family: measured GREEN in
+    # both arms (the sibling detector returned `[]` too, so there was no second layer):
+    #   `At this head there are no files in the `tortoise/` set.`            -> GREEN
+    #   `At this head, there are no entries in the `tortoise/` set.`        -> GREEN
+    #   `At this head there is NOTHING in the `tortoise/` set.`             -> GREEN
+    #   `At this head NOTHING is what `-- tortoise/` prints.`               -> GREEN
+    #   `At this head two paths are what the `tortoise/` set holds.`        -> GREEN
+    #   `At the head you merge there are no files in the `tortoise/` set.`  -> GREEN
+    # while every un-fronted twin above is refused. This is the same two-orders-one-refused
+    # asymmetry rounds 13, 16 and 21 closed three times before, so the fix belongs in the
+    # FAMILY PREFIX rather than in the newest branch. The class is a BOUNDED list of the
+    # spellings this corpus actually uses for the head you merge, all already in the ban's own
+    # vocabulary; a fronted adverbial OUTSIDE this list is the declared residual (stated, not
+    # matched — the same trade the other residuals carry).
+    r"(?:(?:at\s+this\s+head|at\s+the\s+head\s+you\s+merge|at\s+this\s+merge|"
+    r"at\s+the\s+merge\s+head|at\s+merge\s+time),?\s+)?"
+    r"(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
     # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
@@ -2319,26 +2339,33 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # survives in a SIBLING alternative … arm E's trailing verb list has no `has`"*).
     # The answer-first order names the action with the LINKING verb, and this list carried
     # no `has` while BOTH other families did (the general verb class above: `has|holds?`;
-    # the verb-before-path family: `carries|touches|has|holds|…`). Measured over a 13-verb ×
-    # 7-answer grid at `9024f2e5d0`: **42 of 210** answer-first cells were read by NEITHER
-    # this ban NOR the sibling detector (`_typed_answers_to_tortoise_cmd` → `[]` for every
-    # one of them, so on the `set`/deictic anchor there was no second layer either) —
-    # `` `[]` is what `-- tortoise/` has at this head. `` and its whole count-side family
-    # walked through green while the SAME claim in the verb-then-answer order red. A verb
-    # the other two families carry and this one does not is the same hole round 17 closed in
-    # the verb-before-path direction, so the list is now aligned with theirs.
+    # the verb-before-path family: `carries|touches|has|holds|…`). ⛔ MEASURED, RE-DERIVED IN
+    # ROUND 22 (an earlier cut of this sentence published `42 of 210` on a stated
+    # `13-verb × 7-answer` grid, and 13 × 7 is 91, not 210 — a denominator the stated grid
+    # cannot produce): with the COMMAND anchor and `[]` as the answer, the answer-first order
+    # read NONE of the eight link verbs the other two families carry at `9024f2e5d0` — 8 of 8
+    # cells GREEN through this ban, with `_typed_answers_to_tortoise_cmd` returning `[]` for
+    # every one, so on the `set`/deictic anchor there was no second layer either, while the
+    # SAME claim in the verb-then-answer order red. A verb the other two families carry and
+    # this one does not is the same hole round 17 closed in the verb-before-path direction, so
+    # the list is now aligned with theirs.
     # ⚠️ THE COPULAS STAY OUT, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT (#13802
     # review, P2 — the general class carries `is|are|was|were|remains?|stays?` because there
     # a copula is BOUNDED by the answer that follows it; at the END of this alternative there
     # is nothing after the verb to bind it, so `is` would refuse `One path in `tortoise/` is
     # deprecated.` and `Two paths in `tortoise/` are read by the resolver.` — ordinary prose
     # about the tree, not a direction claim. That is the file's own trade, stated here rather
-    # than matched: an over-block costs more than a false PASS. What the added verbs do NOT
-    # buy is a NEW over-block class — `One path in `tortoise/` holds a typo.` is refused at
-    # `9024f2e5d0` already, so the prose cost of `has` is one the class had paid for `holds`.
-    # Measured over 855 `docs/**/*.md`: **0 new hits** (6 before, 6 after, set difference
-    # zero) and 0 over the 13 guarded bundle documents; every must-not-refuse form in the
-    # witness test stays GREEN.
+    # than matched: an over-block costs more than a false PASS. ⛔ AND THE OVER-BLOCK CLASS IS
+    # MEASURED, NOT ASSERTED ABSENT (an earlier cut of this sentence said the added verbs buy
+    # "NOT a NEW over-block class", and round 22 measured that false): `have|had` are far more
+    # ordinary with a PLURAL subject than `holds`, so at head — GREEN at `9024f2e5d0`, RED now —
+    # `Both files in `tortoise/` have a module docstring.` and `Two paths in `tortoise/` have
+    # been updated.`, and the widened count-noun set does the same to `The `tortoise/` set has
+    # no lines longer than 88 characters.` That is the price of closing the false-PASS cell
+    # above, paid knowingly: the file's own trade. Measured over 855 `docs/**/*.md`: **0 new
+    # hits** (6 before, 6 after, set difference zero) and 0 over the 13 guarded bundle
+    # documents, so the cost is bought against prose nobody has written — every must-not-refuse
+    # form in the witness test stays GREEN.
     r"has|have|had|comes? back|resolves?|reveals?|reads?|touches?)\b"
     # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
     # spellings measured GREEN): `this diff carries no `tortoise/` path at all`, `this diff
@@ -2615,6 +2642,18 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff comes back with no `tortoise/` file at this head.",
         "This diff answers with no tortoise/ file at this head.",
         "This diff carries — at this head — no `tortoise/` path at all.",
+        # ⛔ AND THE SAME CLAIM WITH THE ADVERBIAL FRONTED, WHICH IS THE CORPUS'S OWN HOUSE
+        # SPELLING (#13802 review, round 22, P1 — MEASURED at `20f01e1075`: moving `at this
+        # head` to the FRONT of the clause defeated the WHOLE answer-first family, in this ban
+        # AND in the sibling detector, so no second layer existed. Six of six fronted forms
+        # GREEN while every un-fronted twin above red — the same two-orders-one-refused
+        # asymmetry rounds 13, 16 and 21 closed three times already, which is why round 22 put
+        # the tolerance in the FAMILY PREFIX rather than in the newest branch.)
+        "At this head there are no files in the `tortoise/` set.",
+        "At this head, there are no entries in the `tortoise/` set.",
+        "At this head there is NOTHING in the `tortoise/` set.",
+        "At this head NOTHING is what `-- tortoise/` prints.",
+        "At the head you merge there are no files in the `tortoise/` set.",
         # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
         # MEASURED GREEN at this head while every verb-first twin above was refused: the
         # `no <noun>` branch existed only on the verb-then-answer side)
@@ -2628,17 +2667,28 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # sibling DETECTOR reads — was refused by no arm; (b) underlines and (c) emphasis on
         # the NOUN after the anchor were outside the class entirely. (a) is the dangerous
         # direction: detector-read and ban-blind is a refuted claim walking green.
-        # ⛔ AND THE ANSWER-FIRST LINK VERBS (#13802 review, P2 — every one GREEN at
-        # `9024f2e5d0` and RED here; the `[]`/`has` cell is the one the `480c675313` review
-        # disclosed as pre-existing and left, the rest are the same grid)
+        # ⛔ AND THE ANSWER-FIRST LINK VERBS (#13802 review, P2). ⛔ CORRECTED IN ROUND 22:
+        # the first cut of this block claimed "every one GREEN at `9024f2e5d0`" and that was
+        # FALSE for six of the eight. Measured by ABLATION (delete exactly the added verbs
+        # `|has|have|had|comes? back|resolves?|reveals?|reads?|touches?` from the live pattern
+        # and recompile): `Two paths are what the `tortoise/` set has at this head.`, `… set had
+        # …`, `Nothing is what `-- tortoise/` reads …`, `Six entries are what the `tortoise/` diff
+        # reveals …`, `Both files are what the `-- tortoise/` set touches …` and `` `[]` is what
+        # the `tortoise/` set comes back with … `` ALL still red with the verbs gone — they were
+        # reaching family E's count/emptiness ANSWER branch plus the `set|diff` subject noun, so
+        # they never pinned the verb at all (a vacuous witness, which is the failure mode this
+        # file exists to refuse). Only the two COMMAND-anchored spellings actually pinned it.
+        # The block below is therefore every one of the eight added verbs, each on the COMMAND
+        # anchor, so each needs its own verb to fire: measured RED here, GREEN at `9024f2e5d0`,
+        # and GREEN again under the ablation — 8 of 8 (re-derived in round 22, not carried).
         "`[]` is what `-- tortoise/` has at this head.",
-        "Two paths are what the `tortoise/` set has at this head.",
-        "`[]` is what the `tortoise/` set had at this head.",
-        "Nothing is what `-- tortoise/` reads at this head.",
-        "Six entries are what the `tortoise/` diff reveals at this head.",
-        "Both files are what the `-- tortoise/` set touches at this head.",
-        "One path is what `-- tortoise/` resolves at this head.",
-        "`[]` is what the `tortoise/` set comes back with at this head.",
+        "`[]` is what `-- tortoise/` have at this head.",
+        "`[]` is what `-- tortoise/` had at this head.",
+        "`[]` is what `-- tortoise/` comes back with at this head.",
+        "`[]` is what `-- tortoise/` resolves to at this head.",
+        "`[]` is what `-- tortoise/` reveals at this head.",
+        "`[]` is what `-- tortoise/` reads at this head.",
+        "`[]` is what `-- tortoise/` touches at this head.",
         f"**`{_cmd}`** prints NOTHING at this head.",
         f"***`{_cmd}`*** prints NOTHING at this head.",
         "The _`tortoise/`_ set prints NOTHING at this head.",
