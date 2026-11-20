@@ -925,9 +925,22 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
+**The cut this branch (#13337, `fix/12943-cache-projection-residual`) makes — ONE non-Cypher door
+call and TWO scanned files, and no Cypher statement at all.** Re-cut by RUNNING the tool on the tree
+**merged with `origin/main` `f392bb67d5`**, never by arithmetic on the markers. `tortoise/cache_graph.py`
+is new and carries no statement text: its `get_control_plane().query("graphs", select=…, filters=…)`
+is the one non-Cypher door call, so `non_cypher_door_calls` 262→**263**, `files_scanned` 302→**304**,
+and `ast_door_calls` 1580→**1581** (= 1318 + 263). `sites` **1318**, `unresolved` **103**,
+`candidates` **586**, `files` **100**, `partial` **318** and every shape are unchanged — nothing in
+this change is a query, so the migration metric §0 is about does not move.
+⚠️ **The second scanned file is `main`'s, not this branch's.** `#14011` (PR #14065, main
+`ac57b2d38a`) added `tortoise/usage_signal.py` and did not re-cut this doc, so `--check` was already
+reporting `files_scanned: doc=302 tool=303` on `main` before this branch merged it. One re-cut carries
+both, which is why a paragraph for one change explains two files.
+
 <!-- cypher-inventory:sites = 1318 -->
 <!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 302 -->
+<!-- cypher-inventory:files_scanned = 304 -->
 <!-- cypher-inventory:unresolved = 103 -->
 <!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
@@ -947,8 +960,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 103 -->
-<!-- cypher-inventory:non_cypher_door_calls = 262 -->
-<!-- cypher-inventory:ast_door_calls = 1580 -->
+<!-- cypher-inventory:non_cypher_door_calls = 263 -->
+<!-- cypher-inventory:ast_door_calls = 1581 -->
 <!-- cypher-inventory:partial = 318 -->
 
 ---

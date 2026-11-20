@@ -29,14 +29,32 @@ WHAT THIS FILE PINS, in order:
    ``hosted_api._assert_graph_owned`` makes), then the registry spelling — and
    the third one is LABELLED, so a verdict computed on an assumed coordinate can
    never read like one computed on a read one.
-2. **The verbs no longer REFUSE for a missing flag.** ``record-reconcile`` and
-   ``record-restore`` required ``--cache-graph`` because guessing opened an empty
-   graph and graded a coherent cache divergent. A fact exists now, so the flag is
-   optional; the refusal that remains is *"nothing could answer"*.
+2. **The verbs no longer REFUSE simply because the flag is missing.**
+   ``record-reconcile`` and ``record-restore`` required ``--cache-graph`` because
+   guessing opened an empty graph and graded a coherent cache divergent. A fact
+   exists now, so where a fact ANSWERS the flag is optional — and where nothing
+   answers, BOTH verbs still refuse (``record-reconcile``: no verdict on an
+   assumed coordinate, the ``#13337`` ruling; ``record-restore``: it wipes). The
+   refusal that remains is *"nothing could answer"*, and it names the spelling it
+   would have used instead of being blind.
 3. **The end-to-end acceptance #13337 states**: a tenant written through an
    ORG-WIDE credential reconciles ``clean`` on the name the control plane holds
    for it, with no ``--cache-graph`` — and the derived spelling is still
    ``divergent``, which is why the two are reported with different sources.
+
+⛔ **WHAT IS COVERED STORE-FREE, AND WHAT IS NOT — declared, not implied.** The
+coordinate PLUMBING is asserted on every run, with no stores: the declaration's
+source order, the control-plane read's filters, both verbs' derived-arm refusals
+(including the whitespace-only flag that used to reach the wipe path), the
+disagreement WARNING, the ``cache_graph``/``cache_graph_source`` fields in the
+``--json`` payload, and the one line that hands the fact to ``record-restore``'s
+composition (spied). ⚠️ **The two ``_both_stores()`` legs are the residual:** they
+need BOTH a Postgres record and a FalkorDB, and NO CI job provisions both —
+``test-record-postgres`` exports a record DSN and no ``TORTOISE_DB_URI`` (its
+explicit comment says so, and its leg gate FAILS on any skip, #9551), while the
+sharded ``test`` job arms a graph and no record DSN. So the cross-store equality
+(``missing_in_cache: 0`` on the read name) executes on a lane that has both
+stores and nowhere else; the plumbing that would break it is covered above.
 
 ⛔ What is NOT here, named so the absence is visible: the write path does not
 gain a control-plane read (a per-write lookup would put a network call on the hot
@@ -152,11 +170,30 @@ def test_the_control_plane_read_answers_NONE_when_the_control_plane_is_off(
 
     ⛔ It must not RAISE and must not guess: this function is called by two CLI
     verbs whose contract is "no verdict" (exit 2), not "exception" (exit 1).
+
+    ⛔ DISCRIMINATING, not merely green (#14068 review): asserting ``None`` alone
+    could not tell the ENABLED-CHECK from the broad ``except Exception`` beneath
+    it — deleting the guard let ``get_control_plane()`` raise and the swallow
+    still answered ``None``. ⚠️ A spy that RAISES cannot fix that either: the
+    swallow catches ``AssertionError`` too. So the spy RECORDS the call and the
+    row asserts it was never made — measured under the mutant that deletes
+    ``if not is_supabase_enabled(): return None``: RED.
     """
     from tortoise import supabase_control
 
+    calls: list[str] = []
+
+    def _record(*_a, **_k):
+        calls.append("asked")
+        raise RuntimeError("a disabled control plane must not be asked")
+
     monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+    monkeypatch.setattr(supabase_control, "get_control_plane", _record)
     assert namespace_from_control_plane("orgA", "g_1") is None
+    assert calls == [], (
+        "the client was constructed although the control plane is DISABLED — a "
+        "disabled control plane is not a failed one, and the guard is what "
+        f"says so ({calls})")
 
 
 def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does():
@@ -192,10 +229,7 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     assert seen["filters"] == [("id", "eq", "g_1"), ("org_id", "eq", "orgA")]
 
 
-# ── 2. the verbs stop refusing for the missing flag ──────────────────────────
-
-
-def _reconcile_args(cache_graph=None):
+def _reconcile_args(cache_graph=None) -> argparse.Namespace:
     return argparse.Namespace(
         db="docker://localhost:6379",
         record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
@@ -208,42 +242,191 @@ def _reconcile_args(cache_graph=None):
     )
 
 
-def test_record_reconcile_no_longer_refuses_for_a_missing_cache_graph(
-        monkeypatch, capsys):
-    """RED before this change: the verb exited 2 with ``--cache-graph is
-    required`` and compared NOTHING.
+# ── 2. the verbs' refusal now turns on the DECLARATION ──────────────────────
 
-    The shape under test is a self-host with no control plane, so the coordinate
-    is the labelled derivation — the run must still happen, and the operator must
-    be told the name was assumed. The record read is stubbed to fail because this
-    leg is about WHICH REFUSAL fires, not about Postgres.
+
+# ⛔ ``_reconcile_args`` and the store-free helpers (``_stub_psycopg2``,
+# ``_no_control_plane``, ``_restore_args``, ``_fake_control_plane``) are declared
+# above, next to each other on purpose: a row that inherited the BOX's ambient
+# control plane would pass here and fail where one is configured.
+
+
+def test_record_reconcile_REFUSES_an_ASSUMED_coordinate(monkeypatch, capsys):
+    """⛔ #13337's RULING, KEPT: no verdict on an assumed coordinate.
+
+    "*The shipped refusal ... (`--cache-graph` has no derived default, with the
+    reason spelled out) is** correct and must stay **: guessing would make an
+    empty graph read as `divergent`, i.e. a wrong verdict instead of no
+    verdict.*" A stderr note does not reach the consumer — a scheduler keys on
+    the EXIT CODE, so grading the derived spelling and exiting 3 IS the false
+    divergence the issue was filed about.
+
+    What the fact arm buys is the flag becoming optional WHERE A FACT EXISTS;
+    this row is the other side of that line. The refusal must also stay
+    DISTINGUISHABLE from the old blanket one: it names the spelling it would
+    have used and both conventions, and it says UNKNOWN, not zero.
     """
-    import types
+    _no_control_plane(monkeypatch)
+    _stub_psycopg2(monkeypatch)
 
-    stub = types.ModuleType("psycopg2")
+    code = cli._cmd_record_reconcile(_reconcile_args(cache_graph=None))
+    captured = capsys.readouterr()
+
+    assert code == 2, "an assumed coordinate is NO VERDICT, never a graded one"
+    assert "DERIVED" in captured.err, captured.err
+    assert "org_orgrepro_grepro" in captured.err, (
+        f"the refusal must name the spelling it would have used: {captured.err}")
+    assert "org_<org_id>" in captured.err, captured.err
+    assert "org_<org_id>_<graph_id>" in captured.err, captured.err
+    assert "UNKNOWN, not zero" in captured.err, captured.err
+    assert "--cache-graph is required" not in captured.err, (
+        "the old BLANKET flag refusal must not be what fires: the flag is "
+        f"optional when a fact answers ({captured.err})")
+
+
+def test_a_WHITESPACE_only_cache_graph_is_NOT_a_stated_name(
+        monkeypatch, capsys):
+    """⛔ `--cache-graph "   "` IS NOT A STATED NAME — and it used to skip BOTH
+    messages and grade the assumed coordinate silently (#14068 review).
+
+    The declaration STRIPS the stated value (``cache_graph.py``), so a
+    whitespace-only flag lands on the DERIVED arm while the raw argument is
+    truthy — the shape ``--journal "$UNSET_VAR"`` takes, which this repo
+    designs for by refusing rather than dropping it as uninformed. Both verbs
+    must therefore gate on ``declared.source``, never on ``args.cache_graph``.
+    """
+    _no_control_plane(monkeypatch)
+    _stub_psycopg2(monkeypatch)
+
+    code = cli._cmd_record_reconcile(_reconcile_args(cache_graph="   "))
+    captured = capsys.readouterr()
+
+    assert code == 2, f"a blank flag is not a name: {captured.err}"
+    assert "DERIVED" in captured.err, (
+        f"a blank stated name must not go silent: {captured.err}")
+
+
+def test_record_reconcile_ACCEPTS_a_missing_flag_once_a_FACT_answers(
+        monkeypatch, capsys):
+    """THE HALF THAT CHANGES: with a fact answering, the flag is optional.
+
+    Store-free: the run gets PAST the name and fails at the record read, which
+    is the proof that the flag was no longer the blocker — and that no note or
+    warning fires when nothing was assumed and nothing was contradicted.
+    """
+    _stub_psycopg2(monkeypatch)
+
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        code = cli._cmd_record_reconcile(_reconcile_args(cache_graph=None))
+    finally:
+        _restore_control_plane(table)
+    captured = capsys.readouterr()
+
+    assert code == 2, "still no verdict — but for the RECORD, not the name"
+    assert "record is unreadable" in captured.err, captured.err
+    assert "DERIVED" not in captured.err, (
+        f"the name was READ, so nothing was assumed: {captured.err}")
+    assert "WARNING" not in captured.err, captured.err
+
+
+def test_record_reconcile_WARNS_when_a_STATED_name_disagrees_with_the_FACT(
+        monkeypatch, capsys):
+    """⛔ STORE-FREE on purpose (#14068 review finding 8).
+
+    The disagreement WARNING was pinned ONLY inside a ``_both_stores()`` leg, so
+    it had no assertion on any merge gate. A stated name is a fact and is never
+    overridden — but a wrong coordinate is a wrong verdict, so the mismatch is
+    the one case the verb must not grade silently.
+    """
+    _stub_psycopg2(monkeypatch)
+
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        code = cli._cmd_record_reconcile(
+            _reconcile_args(cache_graph="org_orgrepro_grepro"))
+    finally:
+        _restore_control_plane(table)
+    captured = capsys.readouterr()
+
+    assert code == 2, "no record here, so still no verdict"
+    assert "WARNING: --cache-graph" in captured.err, captured.err
+    assert "org_orgrepro_grepro" in captured.err, captured.err
+    assert "org_orgrepro" in captured.err, (
+        f"the warning must name the fact it disagrees with: {captured.err}")
+
+
+def test_the_VERDICT_carries_the_coordinate_and_its_source(monkeypatch, capsys):
+    """⛔ STORE-FREE (#14068 review finding 8): a divergence count is a statement
+    about ONE cache graph, so the payload must carry the coordinate and whether it
+    was READ or assumed.
+
+    The comparison is stubbed (this row is about the PAYLOAD, not the stores);
+    everything from the declaration read to the printed JSON runs as shipped.
+    """
+    import json as _json
 
     class _Conn:
         def close(self):
             return None
 
-    def _connect(*a, **k):
-        raise OSError("no database here")
+    class _Proj:
+        g = object()
 
-    stub.connect = _connect
+        def close(self):
+            return None
+
+    class _Result:
+        not_hot = 0
+        checked = 3
+
+        def as_dict(self):
+            return {"verdict": "clean", "checked": 3, "divergent": 0,
+                    "missing_in_cache": 0, "extra_in_cache": 0,
+                    "field_mismatches": 0, "exit": 0}
+
+        def verdict(self):
+            return "clean"
+
+    import types
+
+    import tortoise.cache_projection as cp
+    import tortoise.projection as proj_mod
+    import tortoise.record_reconcile as rr
+    import tortoise.residency as residency
+
+    stub = types.ModuleType("psycopg2")
+    stub.connect = lambda *a, **k: _Conn()
     monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.setattr(cp, "read_record_view", lambda *_a, **_k: {})
+    monkeypatch.setattr(proj_mod.FalkorProjection, "from_uri",
+                        staticmethod(lambda *_a, **_k: _Proj()))
+    monkeypatch.setattr(residency, "read_declaration", lambda _g: None)
+    monkeypatch.setattr(rr, "scan_cache_view", lambda *_a, **_k: types.SimpleNamespace(
+        view={}, placed={}))
+    monkeypatch.setattr(rr, "record_key_map", lambda _v: {})
+    monkeypatch.setattr(rr, "reconcile_record_and_cache",
+                        lambda *_a, **_k: _Result())
+    monkeypatch.setattr(rr, "log_result", lambda _r: "record == cache")
 
-    code = cli._cmd_record_reconcile(_reconcile_args(cache_graph=None))
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        code = cli._cmd_record_reconcile(_reconcile_args(cache_graph=None))
+    finally:
+        _restore_control_plane(table)
     captured = capsys.readouterr()
 
-    assert "--cache-graph is required" not in captured.err, (
-        "the flag is optional now — a fact exists, so a missing flag is no "
-        f"longer a refusal: {captured.err}")
-    assert "DERIVED" in captured.err, (
-        f"a derived coordinate must be LABELLED, not silent: {captured.err}")
-    assert code == 2, "the record being unreachable is still no-verdict (2)"
+    assert code == 0, captured.err
+    payload = _json.loads(captured.out)
+    assert payload["cache_graph"] == "org_orgrepro", payload
+    assert payload["cache_graph_source"] == SOURCE_CONTROL_PLANE, payload
+    assert payload["missing_in_cache"] == 0, payload
 
 
-def test_record_restore_STILL_refuses_when_the_name_would_be_DERIVED(
+def test_record_restore_REFUSES_when_the_name_would_be_DERIVED(
         monkeypatch, capsys):
     """⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB.
 
@@ -253,23 +436,11 @@ def test_record_restore_STILL_refuses_when_the_name_would_be_DERIVED(
     the spelling it would have used, so the flag is one read away instead of a
     guess the operator has to make blind.
     """
-    import types
-
-    stub = types.ModuleType("psycopg2")
-
-    def _connect(*a, **k):
-        raise OSError("no database here")
-
-    stub.connect = _connect
-    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    _no_control_plane(monkeypatch)
+    _stub_psycopg2(monkeypatch)
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
 
-    args = argparse.Namespace(
-        db="docker://localhost:6379",
-        record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
-        org="orgrepro", graph="grepro", cache_graph=None,
-        limit=None, allow_empty=False, json=True)
-    code = cli._cmd_record_restore(args)
+    code = cli._cmd_record_restore(_restore_args(cache_graph=None))
     captured = capsys.readouterr()
 
     assert code == 2, "a destructive verb must refuse on an assumed coordinate"
@@ -279,38 +450,98 @@ def test_record_restore_STILL_refuses_when_the_name_would_be_DERIVED(
     assert "Nothing was restored" in captured.err, captured.err
 
 
-def test_record_restore_ACCEPTS_the_name_once_a_FACT_answers(monkeypatch, capsys):
-    """The half that changes: with the control plane answering, the SAME run does
-    not refuse for the missing flag — it proceeds to the record and fails THERE
-    (this box has no Postgres), which is the proof that the flag is no longer the
-    blocker."""
+def test_record_restore_REFUSES_a_WHITESPACE_only_cache_graph(
+        monkeypatch, capsys):
+    """⛔ THE REFUSAL ITSELF WAS DEFEATED BY `--cache-graph "   "` (#14068).
+
+    The gate read the RAW argument, so a whitespace-only value (the shape
+    ``--cache-graph "$UNSET_VAR"`` takes) skipped the derived-arm refusal and
+    handed the DERIVED spelling to ``FalkorProjection.from_uri`` /
+    ``restore_from_record_view`` — a wipe against a coordinate nobody stated.
+    Gating on ``declared.source`` closes it.
+    """
+    _no_control_plane(monkeypatch)
+    _stub_psycopg2(monkeypatch)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+
+    code = cli._cmd_record_restore(_restore_args(cache_graph="   "))
+    captured = capsys.readouterr()
+
+    assert code == 2, (
+        f"a blank flag must not reach the wipe path: {captured.err}")
+    assert "Nothing was restored" in captured.err, captured.err
+    assert "org_orgrepro_grepro" in captured.err, captured.err
+
+
+def test_record_restore_HANDS_THE_FACT_to_the_composition(monkeypatch, capsys):
+    """⛔ THE WIRING, ASSERTED (#14068 review finding 5).
+
+    ``args.cache_graph = declared.name`` is the one line that carries the
+    control-plane fact into the DESTRUCTIVE verb, and it ran before the record
+    read — so every store-free row exited 2 at the stubbed driver and DELETING
+    that line left them all green. This row spies on both sinks and asserts the
+    coordinate the composition is handed, and that the target is STATED before
+    anything is opened or deleted.
+    """
+    class _Conn:
+        def close(self):
+            return None
+
+    class _Proj:
+        def close(self):
+            return None
+
+    class _Outcome:
+        def as_dict(self):
+            return {"restored": 1}
+
     import types
 
+    import tortoise.cache_projection as cp
+    import tortoise.projection as proj_mod
+    import tortoise.record_restore as rrestore
+
+    seen: dict = {}
+
+    class _FakeProjection:
+        @staticmethod
+        def from_uri(uri, *, graph_name=None):
+            seen["from_uri"] = graph_name
+            return _Proj()
+
+    def _restore(view, *, org_id, graph_id, cache_graph, project,
+                 allow_empty=False, limit=None, scope=""):
+        seen["composition"] = cache_graph
+        return _Outcome()
+
     stub = types.ModuleType("psycopg2")
-
-    def _connect(*a, **k):
-        raise OSError("no database here")
-
-    stub.connect = _connect
+    stub.connect = lambda *a, **k: _Conn()
     monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.setattr(cp, "read_record_view", lambda *_a, **_k: {})
+    monkeypatch.setattr(proj_mod, "FalkorProjection", _FakeProjection)
+    monkeypatch.setattr(rrestore, "refuse_unrestorable_source",
+                        lambda *_a, **_k: None)
+    monkeypatch.setattr(rrestore, "restore_from_record_view", _restore)
+    monkeypatch.setattr(rrestore, "log_result", lambda _o: "restored 1")
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
 
     table: dict = {}
     _fake_control_plane("org_orgrepro", table)
     try:
-        args = argparse.Namespace(
-            db="docker://localhost:6379",
-            record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
-            org="orgrepro", graph="grepro", cache_graph=None,
-            limit=None, allow_empty=False, json=True)
-        code = cli._cmd_record_restore(args)
+        code = cli._cmd_record_restore(_restore_args(cache_graph=None))
     finally:
         _restore_control_plane(table)
     captured = capsys.readouterr()
 
-    assert code == 2, "still no verdict — but for the RECORD, not the flag"
-    assert "--cache-graph is required" not in captured.err, captured.err
-    assert "record is unreadable" in captured.err, captured.err
+    assert code == 0, captured.err
+    assert seen["from_uri"] == "org_orgrepro", (
+        "the READ name is what must be opened — not the derived spelling "
+        f"and not None: {seen}")
+    assert seen["composition"] == "org_orgrepro", seen
+    assert "note: restoring into cache graph 'org_orgrepro' (control_plane)" \
+        in captured.err, (
+            "a destructive run must state WHICH coordinate it wipes, and how it "
+            f"was resolved, before it wipes: {captured.err}")
 
 
 # ── 3. the end-to-end acceptance (both stores; SKIPS without them) ───────────
@@ -413,6 +644,43 @@ def _restore_control_plane(table: dict) -> None:
 
     supabase_control.is_supabase_enabled = table["is_supabase_enabled"]
     supabase_control.get_control_plane = table["get_control_plane"]
+
+
+def _no_control_plane(monkeypatch) -> None:
+    """The self-host shape, STATED rather than inherited from the box's env.
+
+    A row that trusted the ambient absence of ``SUPABASE_URL`` would pass here
+    and fail on a box that has one — and the derived arm is exactly what these
+    rows are about.
+    """
+    from tortoise import supabase_control
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+
+
+def _stub_psycopg2(monkeypatch) -> None:
+    """A driver that cannot reach a record: every row below stops there. """
+    import types
+
+    stub = types.ModuleType("psycopg2")
+
+    def _connect(*a, **k):
+        raise OSError("no database here")
+
+    stub.connect = _connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+
+
+def _restore_args(cache_graph=None, **over) -> argparse.Namespace:
+    args = argparse.Namespace(
+        db="docker://localhost:6379",
+        record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
+        org="orgrepro", graph="grepro", cache_graph=cache_graph,
+        limit=None, allow_empty=False, json=True)
+    for k, v in over.items():
+        setattr(args, k, v)
+    return args
+
 
 def _org_wide_write(monkeypatch, org: str, graph_id: str, namespace: str,
                     *, event: bool) -> None:
