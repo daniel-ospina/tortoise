@@ -3099,9 +3099,9 @@ def _d5_blank_count_expression() -> str:
     # `len(blank_prescriptions) == 1` GREEN while the SENTENCE prescribes a WIDER command, and
     # `found[0]` — the expression actually executed below — is then never checked against the
     # class at all. Measured at `280c1899c7`: widen the sentence to `^[+-]` and append a
-    # `^\+$` decoy, and NEITHER of the two files that pin this bundle
-    # (`tests/test_docs_citation_refs.py`, `tests/test_7949_capstone_measure.py`) reds,
-    # while the row's own sentence
+    # `^\+$` decoy, and the 447 tests that `tests/test_docs_citation_refs.py` +
+    # `tests/test_7949_capstone_measure.py` collect (423 + 24, re-measured with
+    # `--collect-only -q` at that head) stayed green, while the row's own sentence
     # ("… and ONLY that class: it does not count the sign-opening one (`++i`, `--counter`,
     # `+- 2)`)") became FALSE. With this assertion the same two-edit mutant reds HERE.
     assert _D5_BLANK_CLASS_EXPR_RE.fullmatch(found[0]), (

@@ -6852,7 +6852,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
     # prints `:28067` six times and it is still not what the clause says. The live value — and
-    # the one the pin row above asserts — is `:28395`. (`:28141`/`:28142` are the `def` and signature lines, which is a
+    # the one the pin row above asserts — is `:28395`. (`:28358`/`:28359` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
     # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
     # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
@@ -16495,7 +16495,7 @@ def test_the_D5_row_is_still_one_table_row():
     """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `265` reds instead of leaving four comments behind (a
+    any commit moving the line off `269` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
