@@ -2668,14 +2668,19 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     / **refuted**, and the section count moved 5/7/0 → 4/7/1. Nothing bounded duplicates —
     the count guard checks only for MISSING row numbers (#8930 review, round 3, P1).
     ⛔ The MEASURED example above was taken on row 21 (`tortoise_annotate_operator`); the
-    fixture is row 14 since #12901's final batch. NOT because row 21's members were
-    privatised — row 14's are equally private (`_assess_source`, `_set_source_tier`) — but
-    because ONLY `tortoise_assess_source` and `tortoise_set_source_tier` are rendered as
-    DISPUTED rows, so only THEIR cells' members can make the artifact state "*(no approved
-    row names it)*". Measured with the body guards off: truncating row 21 changes 0 artifact
-    lines, row 14 changes 15 — so the discriminator is D4 dispute-set membership, and a
-    fixture moved on the privatisation test alone would mutate nothing observable (#13899
-    review, P2; #13965).
+    fixture is row 14 since #12901's final batch. What decides whether a truncation is
+    OBSERVABLE is D4 dispute-set membership — §D4 renders only DISPUTED rows, so only THEIR
+    cells' members can make the artifact state "*(no approved row names it)*" — and that is
+    the same batch's second effect rather than an independent fact: privatising row 21's
+    methods re-pointed their registry `sdk_method` to `_annotate_operator` /
+    `_mitigate_operator`, spellings no beta-doc disposition row cites, so those tools stopped
+    being CITED and therefore stopped being DISPUTED. Privacy of the SDK `def` is not the test
+    (row 14's are private too — `_assess_source`, `_set_source_tier`, which still cite because
+    their bindings were never re-pointed); the RE-POINT is, and it is why privatising a
+    disputed method can silently take its cell out of the artifact (#13965 review, P2).
+    Measured with the body guards off: truncating row 21 changes 0 artifact lines, row 14
+    changes 15 — and restoring the pre-#12901 bindings puts `tortoise_annotate_operator` and
+    `tortoise_mitigate_operator` back in the disputed set (2 rows -> 4).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2821,10 +2826,12 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     mutation with the round-3 guards disabled: `menu["manage_source_trust"]` is `lineno == 24`
     with members `{"manage_source_trust", "set_source_tier"}`. The shape is the same on row 21
     before #12901's final batch and on row 14 since; only the surviving member differs.
-    Renumbering hides it from the missing-number check too, so before the fix
-    the ONLY thing that fired was the anonymous row count ("only 22 approved rows parsed") —
-    a diagnostic that names no row and states no cause, on a document that is otherwise
-    shaped perfectly (#8930 review, round 3, P1; prose corrected in #13965).
+    Renumbering leaves the count at 23, so no count bound can see the repeat, and the only
+    complaint left is the anonymous MISSING-NUMBER one — "approved row number(s) 14 are
+    missing", parsed 23 rows numbered 1-24 — which names a number but not the cause, on a
+    document that is otherwise shaped perfectly (#8930 review, round 3, P1; prose corrected
+    in #13965, where the sentence quoted a count message — "only 22 approved rows parsed" —
+    that this fixture cannot produce: 23 rows parse).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
