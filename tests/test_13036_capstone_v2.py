@@ -69,7 +69,13 @@ read needs:
 * one topic OBJECT plus a ``decision`` Point ``aboutObject``-linked to it (for the
   ``check_confidence(topic=...)`` arm, which resolves the topic as an ENTITY and
   walks that edge — a Point carrying a ``topic=`` PROPERTY is not a topic),
-* one calibrated claim (for the ``check_confidence(claim_id=...)`` happy path).
+* one calibrated claim (for the ``check_confidence(claim_id=...)`` happy path),
+* one orphan ``useCase`` (a live chain point with no parent JTBD, so the
+  ``structure_check`` validator has a violation to REPORT — without it that arm's
+  correct answer is ``[]`` and it pins nothing),
+* one ingested bundle (so ``list_knowledge(kind='batch')`` and ``list_batches``
+  read a real batch id back; an unseeded batch set carries no payload at all over
+  this transport, which is indistinguishable from a broken seam).
 
 Assertions read these ids back out of the answers. A payload is "correct" when it
 contains the thing we seeded — not when it is merely non-empty.
@@ -78,11 +84,21 @@ UNDRIVEN TOOLS ARE RECORDED, NEVER PASSED
 =========================================
 
 Four live tools refuse at the tenant HTTP transport by design (filesystem-walk and
-provisioning vectors). They cannot be driven through this fixture, so they are
-listed in ``UNDRIVEN`` with the reason, and ``test_every_live_tool_is_accounted_for``
-asserts the union covers the registry exactly. A tool added without a case fails
-that test — the surface cannot grow silently past this row. An ``UNDRIVEN`` entry
-is **not** a pass, and this file does not claim those tools' payloads.
+provisioning vectors). They cannot be driven for a PAYLOAD through this fixture, so
+they are listed in ``UNDRIVEN`` with the reason, and
+``test_every_live_tool_is_accounted_for`` asserts the union covers the registry
+exactly. A tool added without a case fails that test — the surface cannot grow
+silently past this row. An ``UNDRIVEN`` entry is **not** a pass, and this file does
+not claim those tools' payloads.
+
+⛔ "Cannot be driven" is a claim about the TRANSPORT, so it is MEASURED, not
+asserted from a registry row (`#13886` r6, F1). Each entry carries a valid probe in
+``_UNDRIVEN_PROBE_ARGS`` and ``test_every_undriven_tool_is_REFUSED_by_the_tenant_
+door`` drives it, expecting the ``-32004`` HTTP-exclusion refusal — the same shape
+the ``dream_health`` section gap already had. The accounting test binds the set in
+BOTH directions (``UNDRIVEN ⊆ http_policy=False``), because the pre-r6 bind ran one
+way only: a tool whose row flipped to ``http_policy=True`` stayed in ``UNDRIVEN``,
+became servable over HTTP, and every assertion in this file stayed green.
 
 THIS SUITE WAS PROVEN ABLE TO FAIL (mutation record)
 ====================================================
@@ -132,6 +148,11 @@ tests assert COUNTS and IDS rather than "no error":
   ``recompute``, and a ``topic`` arm whose empty answer was a SEED-shape mismatch
   recorded as a measurement). Both are fixed in the round whose record sits at
   ``ARM_GAPS``, and only now is this claim true of the code.
+  ⛔ It was ALSO false of ``issue_insight``, which asserted two key NAMES until
+  the r6 round: ``{"has_prior": False, "data_points": []}`` passed it. It now
+  asserts the seeded claim inside ``data_points`` — so read the sentence as "every
+  arm here reads seeded content out of its own shape", which is what the code now
+  does, rather than as a claim about when it became true.
 * ``source_reliability`` used ``out.get("url", <seed>)``, whose default made a
   payload MISSING the field pass. It now has no default.
 * ``create_edge``, ``write_question``, ``record_decision`` and ``ingest`` asserted
@@ -161,6 +182,36 @@ row's to decide, and are recorded instead of absorbed:
   the topic as an ENTITY and reads the ``decision`` Points ``aboutObject``-linked to
   it, so the seed now carries that shape and the payload is asserted as that chain
   — the earlier entry measured a seed defect, not the arm.)
+
+A SECOND REVIEW ROUND (r6) — what it changed
+============================================
+
+Six more of the same class, each fixed here and each MEASURED before the fix:
+
+* ``_tool_payload`` manufactured the answer it was supposed to distinguish. Zero
+  content blocks + no ``structuredContent`` + ``isError: false`` became ``[]``, and
+  a bare-string refusal became a ``{"_text": …}`` dict — so a broken seam could
+  satisfy an empty-collection arm, and a TEXT refusal could satisfy a dict arm.
+  The transport helper now returns an explicit ``_NoPayload`` sentinel (neither a
+  list nor a dict) and a ``_PlainText`` ``str`` subclass, and the one arm that
+  really answers nothing (``get_entity(type='governance')``) asserts that wire
+  shape instead of the helper's fallback.
+* ``UNDRIVEN`` was prose: nothing drove the four excluded tools, and the
+  ``http_policy`` bind ran one way. Both directions are asserted now, and each
+  entry is PROBED for its ``-32004`` refusal.
+* Four arms asserted a shape and stopped: ``check_structure`` (an empty list),
+  ``review_link_candidates`` (two key names), ``check_connection`` (`{}` is a
+  dict) and ``graph_set_recording`` (``graph_id == graph_id``, i.e. `None ==
+  None`). Each now reads seeded content out of its own payload — the seed grew an
+  orphan ``useCase`` for the chain validator to report by rule.
+* The ``mode=`` tables answered only to themselves. Both are now bound to the
+  product's own tuples (``TortoiseSDK.SEARCH_KNOWLEDGE_MODES`` and
+  ``mcp_server._RECALL_MODES``), the same bind the ``section=`` table already had,
+  so a mode the product adds reds this file instead of going unmeasured.
+* The documented ambient flake was mitigated for ONE tool while every arm was
+  exposed to it. The transport wait bound is now widened once, in the fixture, for
+  every arm; the ``sources_state`` projection stub stays for what it actually is —
+  that tool's own control-plane dependency.
 """
 
 from __future__ import annotations
@@ -199,6 +250,18 @@ UNDRIVEN: dict[str, str] = {
     "tortoise_refresh_confidence":
         "UNDRIVEN — excluded from tenant HTTP by design: the 4-tool refresh family "
         "is served by the hosted REST API / stdio lane, not the tenant MCP door.",
+}
+
+#: The arguments each `UNDRIVEN` tool is PROBED with, so "it cannot be driven
+#: here" is MEASURED per tool rather than asserted from the registry row (#13886
+#: r6, F1). Each probe is a VALID request for its tool, so the only thing that
+#: can refuse it is the transport guard this file credits with the refusal — a
+#: malformed probe would "refuse" for the wrong reason and prove nothing.
+_UNDRIVEN_PROBE_ARGS: dict[str, dict] = {
+    "tortoise_org_create": {"name": "capstone-undriven-team"},
+    "tortoise_index_sources_from_directory": {"directory": "/tmp"},
+    "tortoise_mine_knowledge_from_directory": {"directory": "/tmp"},
+    "tortoise_refresh_confidence": {},
 }
 
 #: Per-ARM gaps inside a tool that is otherwise driven. A tool can be DRIVEN and
@@ -244,18 +307,64 @@ def _parse_sse_json(r):
     return r.json()
 
 
+class _NoPayload:
+    """An answer that carried no payload at all: no content block, no
+    ``structuredContent``, and ``isError`` false.
+
+    ⛔ It is deliberately NEITHER a ``list`` NOR a ``dict``. The pre-r6 helper
+    returned ``[]`` for this case, which made the *broken seam* answer identical
+    to the *empty-but-correct collection* the arms assert — the helper created
+    the collision its own docstring said it prevented (`#13886` r6, F2). A
+    sentinel that satisfies no collection assertion cannot do that.
+
+    ``result`` is kept so an arm can assert the WIRE shape it observed
+    (``isError is False``) instead of asserting the helper's opinion of it.
+    """
+
+    __slots__ = ("result",)
+
+    def __init__(self, result):
+        self.result = result
+
+    def __repr__(self):
+        return f"<_NoPayload isError={self.result.get('isError')!r}>"
+
+
+class _PlainText(str):
+    """A NON-JSON tool answer — the handler returned a bare string, so FastMCP
+    serves it as ``content[0].text`` verbatim (a refusal's wording, e.g.
+    ``deletion``'s token errors).
+
+    A ``str`` SUBCLASS on purpose: the pre-r6 helper returned
+    ``{"_text": text}``, and that dict satisfied ``isinstance(out, dict)`` plus
+    ``"error" not in out`` — so a *text* refusal could pass a *structured-payload*
+    arm (`#13886` r6, F2). A string can satisfy neither.
+    """
+
+
+def _text_of(out):
+    """The refusal WORDING of a non-JSON answer, or the JSON rendering of a
+    structured one — what the two `deletion` token cases read."""
+    if isinstance(out, str):
+        return str(out)
+    return json.dumps(out, default=str)
+
+
 def _tool_payload(body):
     """The PAYLOAD is ``content[0]``; later blocks are appended disclosures.
 
     Same rule as ``tests/test_mcp_http.py::_tool_result``: joining every block
     turns a write into ``{"text": …}`` once a disclosure block appears (#10084).
 
-    An EMPTY collection is served as ``content: []`` with the value carrying in
-    ``structuredContent.result`` — measured on ``list_knowledge(kind='batch')``
-    against an unseeded batch set. Without that fallback the payload reads as the
-    raw envelope and an empty-but-correct answer is indistinguishable from a
-    broken seam, which would make the assertion vacuous in exactly the case it
-    exists to pin.
+    An EMPTY collection is served EITHER as ``content: [{"text": "[]"}]`` or as
+    ``content: []`` with the value carrying in ``structuredContent.result`` —
+    BOTH measured on this surface (``graph_overview(section='tags')`` takes the
+    first shape, ``check_structure`` the second). A response that carries NEITHER
+    (measured: ``get_entity(type='governance')`` over a Point that owns nothing,
+    and ``list_knowledge(kind='batch')`` against an unseeded batch set) is
+    ``_NoPayload``, NOT ``[]`` — see the sentinel. Those two arms are driven
+    against SEEDED content instead, so neither has to tell an empty answer from
+    a missing one.
     """
     result = (body or {}).get("result", {}) or {}
     if isinstance(result, dict) and "content" in result:
@@ -265,17 +374,15 @@ def _tool_payload(body):
             try:
                 return json.loads(text)
             except ValueError:
-                return {"_text": text}
+                return _PlainText(text)
         structured = result.get("structuredContent")
         if isinstance(structured, dict) and "result" in structured:
             return structured["result"]
-        # An empty SEQUENCE renders as zero content blocks: FastMCP emits
-        # `content: []` and, for some handlers, no `structuredContent` at all —
-        # measured on `list_knowledge(kind='batch')` and on `list_batches`
-        # against an unseeded batch set. Reading that as the envelope would make
-        # an empty-but-correct answer indistinguishable from a broken seam.
+        # Zero content blocks and no structuredContent: the answer carried no
+        # payload. Say THAT (see `_NoPayload`) rather than manufacturing the
+        # empty collection an empty-value arm wants to see.
         if not blocks and not result.get("isError"):
-            return []
+            return _NoPayload(result)
     return result
 
 
@@ -309,7 +416,29 @@ def seeded(tmp_path, monkeypatch):
     from starlette.routing import Mount
     from starlette.testclient import TestClient
 
+    from tortoise import mcp_auth as _mcp_auth
     from tortoise.mcp_server import create_http_app
+
+    # ── the ambient red this row must not inherit (#13886 r6, F6) ───────────
+    # ``mcp_server._await_under_mcp_wait_bound`` spends
+    # ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s — a MODULE CONSTANT with no env
+    # knob ON PURPOSE, ``mcp_auth.py:792``: once a caller codes to the number a
+    # silent env change is a client-visible contract change). This fixture
+    # provisions an org, mints a key and makes a dozen transport calls PER TEST,
+    # so on a contended box a dispatch can breach the bound, and the refusal then
+    # describes the ENVIRONMENT rather than the payload this row exists to assert.
+    # MEASURED as a red in a full-file run of this module:
+    #
+    #     transport wait bound (10s) exceeded: MCP tools/call tortoise_manage_sources
+    #
+    # A payload row that reds on ambient load pins nothing, so the bound is
+    # widened FOR THIS MODULE's tests only. Both seams read the constant at CALL
+    # time (``mcp_server.py:1680``/``:2994``), so a scoped attribute patch reaches
+    # them, and every clamp derived from it only ever REDUCES. ⛔ This is the
+    # UNIFORM half of the mitigation — it covers every arm, which is what the r6
+    # review found missing when the only mitigation was the one tool-specific
+    # projection stub below.
+    monkeypatch.setattr(_mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 60.0)
 
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     db = str(tmp_path / "capstone.db")
@@ -357,6 +486,28 @@ def seeded(tmp_path, monkeypatch):
     sdk.create_event("capstone session", eventKind="AgentSession",
                      session_id=s["session"], agent_name="capstone")
 
+    # ── the `structure_check` seed ────────────────────────────────────────
+    # `check_structure` runs the product-strategy chain validators, and against
+    # a graph holding no chain kinds its CORRECT report is `[]` — so the arm was
+    # proven only to answer a list (`#13886` r6, F3). One live `useCase` with no
+    # parent JTBD is exactly the shape the `orphan_use_case` rule reports, which
+    # is what lets the assertion below read a VIOLATION back out instead of
+    # asserting an empty answer.
+    s["use_case"] = sdk.create_point(
+        "useCase",
+        "An orphaned capstone useCase, seeded so the chain validator has "
+        "something to report.")["id"]
+
+    # ── the `batch` seed ──────────────────────────────────────────────────
+    # `list_knowledge(kind='batch')` and `list_batches` against an UNSEEDED
+    # batch set carry no payload at all over this transport (measured), which is
+    # the same wire shape as a broken seam. A real ingest gives both arms an id
+    # to read back, so neither assertion has to accept an empty answer.
+    s["batch"] = sdk.ingest({
+        "points": [{"content": "An ingested capstone batch point.",
+                     "kind": "statement"}],
+    })["batch_id"]
+
     # ── transport ───────────────────────────────────────────────────────────
     app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                           _registry_sdk=reg)
@@ -396,6 +547,13 @@ def sources_state(monkeypatch):
     ``disable`` -> ``list`` round trip below stays a real round trip through the
     tool's own write and the tool's own projection. What is removed is the
     ambient dependency (the registry probe's latency), not the assertion.
+
+    ⛔ This is NOT the ambient-flake mitigation any more (`#13886` r6, F6): it is
+    specific to ``manage_sources``'s own control-plane read, and it left every
+    other graph-reading arm exposed to the transport wait bound. That red is now
+    handled once, for every arm, by the `seeded` fixture — see the bound patch
+    there. Keeping the two separate is the point: this stub is about the tool's
+    dependency, the fixture patch is about the ENVIRONMENT.
     """
     from tortoise import hosted_api
 
@@ -489,6 +647,12 @@ def test_undriven_entries_name_a_mechanism():
     for name, reason in UNDRIVEN.items():
         assert reason.startswith("UNDRIVEN — "), name
         assert len(reason) > 60, f"{name}: reason must name the mechanism"
+    # …and every entry must carry a probe, or its refusal is never measured
+    # (`#13886` r6, F1): a new UNDRIVEN entry with no probe would otherwise be
+    # the pre-r6 state again — prose, with nothing driving it.
+    assert set(_UNDRIVEN_PROBE_ARGS) == set(UNDRIVEN), (
+        "UNDRIVEN entries and probe arguments disagree — every entry needs a "
+        f"probe: {sorted(set(UNDRIVEN) ^ set(_UNDRIVEN_PROBE_ARGS))}")
 
 
 def test_every_http_excluded_tool_is_accounted_for():
@@ -499,6 +663,12 @@ def test_every_http_excluded_tool_is_accounted_for():
     This is the registry-to-file binding: the reviewer's finding was that
     `_DRIVEN_BY_TEST` is hand-typed prose. Binding it to `http_policy` makes the
     registry itself the authority for which tools the transport may serve.
+
+    ⛔ BOTH DIRECTIONS (`#13886` r6, F1). The pre-r6 test only asserted
+    `declared_excluded − UNDRIVEN − DISAGREEMENTS == ∅` and
+    `driven_excluded ⊆ DISAGREEMENTS`, so an `UNDRIVEN` tool whose row flipped to
+    `http_policy=True` stayed green: it was servable over HTTP and still read as
+    "cannot be driven here". The subset below is that missing direction.
     """
     declared_excluded = {t.name for t in TOOL_REGISTRY if not t.http_policy}
     unrecorded = declared_excluded - set(UNDRIVEN) - set(HTTP_POLICY_DISAGREEMENTS)
@@ -511,6 +681,38 @@ def test_every_http_excluded_tool_is_accounted_for():
     assert driven_excluded <= set(HTTP_POLICY_DISAGREEMENTS), (
         "tool(s) driven over HTTP while the registry declares http_policy=False, "
         f"with no recorded disagreement: {sorted(driven_excluded)}")
+    # …and the OTHER direction: every UNDRIVEN tool must actually BE declared
+    # off the tenant HTTP surface. Without this, flipping one row to
+    # `http_policy=True` leaves the tool servable AND unmeasured.
+    assert set(UNDRIVEN) <= declared_excluded, (
+        "UNDRIVEN tool(s) the registry declares SERVABLE over tenant HTTP — the "
+        "entry is stale: either drive it (and drop the entry) or fix the "
+        f"http_policy row: {sorted(set(UNDRIVEN) - declared_excluded)}")
+
+
+@pytest.mark.parametrize("name", sorted(_UNDRIVEN_PROBE_ARGS))
+def test_every_undriven_tool_is_REFUSED_by_the_tenant_door(seeded, name):
+    """Each `UNDRIVEN` entry is DRIVEN once, expecting the transport refusal.
+
+    This is the half the file already applied to the `dream_health` section gap
+    (`test_the_dream_health_gap_is_the_measured_refusal`): "could not drive it"
+    is a claim about the TRANSPORT, and a claim is measured, not asserted from a
+    registry row. Without it, dropping a handler's `_http_excluded_error()`
+    guard makes the tool answer a real (and unasserted) payload over HTTP while
+    every accounting test above stays green — the silent un-coverage these rows
+    exist to prevent (`#13886` r6, F1).
+
+    The refusal is asserted by CODE (`-32004`) and by its wording, not by
+    "an error came back": a different refusal would mean the tool refused for a
+    reason this entry does not name."""
+    door, _s, _ = seeded
+    status, out = door.call(name, _UNDRIVEN_PROBE_ARGS[name])
+    assert status == 200
+    text = json.dumps(out, default=str)
+    assert "-32004" in text, (
+        f"{name} is recorded UNDRIVEN but the tenant door did not answer the "
+        f"HTTP-exclusion refusal: {out!r}")
+    assert "not available over HTTP" in text, out
 
 
 def test_recorded_disagreements_explain_themselves():
@@ -589,17 +791,27 @@ class TestGetReturnsSeededNode:
         assert out.get("id") == s["claim"], out
         assert out.get("content", "").startswith("The capstone V2 lane")
 
-    def test_governance_arm_returns_no_owned_entities_for_a_point(self, seeded):
+    def test_governance_arm_answers_no_payload_for_a_point(self, seeded):
         """`type='governance'` answers the entities a Subject OWNS. The seed's
-        claim is a Point owned by nobody, so the correct payload is an EMPTY
-        LIST — asserted as that value, not as "something non-None came back"."""
+        claim is a Point owned by nobody, so the arm answers NOTHING — and over
+        the wire that is `content: []` with NO `structuredContent` and
+        `isError: false` (MEASURED here), a DIFFERENT wire shape from the empty
+        COLLECTIONS below (`list_batches` / `check_structure` carry
+        `structuredContent.result: []`).
+
+        ⛔ Asserting `out == []` here asserted the transport HELPER's fallback,
+        not the tool (`#13886` r6, F2): the fallback returned `[]` for that exact
+        shape, so a broken seam read as a correct empty answer. The assertion is
+        now the observed wire shape — and it still reds if the arm starts
+        answering rows (the payload becomes a real list)."""
         door, s, _ = seeded
         status, out = door.call("tortoise_get_entity",
                                 {"id": s["claim"], "type": "governance"})
         assert status == 200
-        assert out == [], (
-            "a Point owns no entities, so the governance arm must answer []; "
-            f"got {out!r}")
+        assert isinstance(out, _NoPayload), (
+            "a Point owns no entities, so the governance arm must answer no "
+            f"payload; got {out!r}")
+        assert out.result.get("isError") is False, out
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -649,14 +861,19 @@ class TestListKnowledgeKinds:
         assert 0.0 <= float(out["reliability"]) <= 1.0, out
         assert out.get("cache") in {"fresh", "recomputed", "miss"}, out
 
-    def test_batch_kind_answers_a_collection(self, seeded):
-        """No batch was seeded, so the CORRECT payload is an empty collection —
-        asserted as a collection, so a `None`/error regression still fails."""
-        door, _s, _ = seeded
+    def test_batch_kind_reads_the_seeded_batch(self, seeded):
+        """`kind='batch'` is a LIST arm. An UNSEEDED batch set renders as
+        ``content: []`` with NO ``structuredContent`` (MEASURED), which is the
+        same wire shape as a broken seam — so the arm is driven against a real
+        seeded batch instead, and the assertion is the batch's own id. Asserting
+        "a collection came back" could not tell the two apart (`#13886` r6, F2)."""
+        door, s, _ = seeded
         status, out = door.call("tortoise_list_knowledge", {"kind": "batch"})
         assert status == 200
         rows = out.get("results") if isinstance(out, dict) else out
-        assert isinstance(rows, (list, tuple)), out
+        assert isinstance(rows, (list, tuple)) and rows, out
+        assert s["batch"] in {row.get("batch_id") for row in rows
+                              if isinstance(row, dict)}, out
 
     def test_namespace_kind_answers_the_pack_namespaces(self, seeded):
         door, _s, _ = seeded
@@ -697,7 +914,36 @@ class TestListKnowledgeKinds:
 # 3 — SEARCH returns the seeded claim
 # ══════════════════════════════════════════════════════════════════════════
 
+#: The `mode=` table: every value the container dispatches on, with the SHAPE
+#: its own arm answers. It is the parametrize TABLE itself, and it answers to the
+#: PRODUCT's own tuple (`TortoiseSDK.SEARCH_KNOWLEDGE_MODES`) via
+#: `test_the_search_mode_table_is_the_products_mode_set` — the same anti-silence
+#: bind the `section=` table carries. Without that bind the table answers only to
+#: itself: drop a row, or let the product add a seventh mode, and nothing reds
+#: while the file claims "every advertised `mode=` is driven" (`#13886` r6, F5).
+_SEARCH_MODE_ASSERTIONS: dict[str, str] = {
+    "hybrid": "claim",
+    "full_text": "claim",
+    "entry_points": "claim",
+    "tag": "tag_envelope",
+    "sessions": "session",
+    "issue_insight": "insight",
+}
+
+
 class TestSearchReturnsSeededClaim:
+
+    def test_the_search_mode_table_is_the_products_mode_set(self):
+        """`driven == TortoiseSDK.SEARCH_KNOWLEDGE_MODES`, exactly.
+
+        The table is hand-typed, so without this bind it can silently disagree
+        with the product it claims to cover — a new mode would have no case and
+        the file would still say "every advertised `mode=` is driven", and a
+        deleted row would keep its `_DRIVEN_BY_TEST` credit."""
+        assert set(_SEARCH_MODE_ASSERTIONS) == set(
+            TortoiseSDK.SEARCH_KNOWLEDGE_MODES), (
+            "the search `mode=` table and the product's own mode set disagree: "
+            f"{sorted(set(_SEARCH_MODE_ASSERTIONS) ^ set(TortoiseSDK.SEARCH_KNOWLEDGE_MODES))}")
 
     def test_search_knowledge_hybrid_finds_the_seeded_claim(self, seeded):
         door, s, _ = seeded
@@ -707,14 +953,7 @@ class TestSearchReturnsSeededClaim:
         assert isinstance(out, list) and out, out
         assert s["claim"] in _ids(out), out
 
-    @pytest.mark.parametrize("mode,assertion", [
-        ("hybrid", "claim"),
-        ("full_text", "claim"),
-        ("entry_points", "claim"),
-        ("tag", "tag_envelope"),
-        ("sessions", "session"),
-        ("issue_insight", "insight"),
-    ])
+    @pytest.mark.parametrize("mode,assertion", sorted(_SEARCH_MODE_ASSERTIONS.items()))
     def test_each_search_mode_returns_ITS_OWN_payload(self, seeded, mode,
                                                      assertion):
         """Every advertised `mode=` is driven AND its payload asserted.
@@ -729,6 +968,14 @@ class TestSearchReturnsSeededClaim:
             # No tag is seeded, so this arm's correct answer is the empty
             # ENVELOPE — asserted by its keys and total, not by non-emptiness.
             args["tag"] = "capstone-no-such-tag"
+        if mode == "issue_insight":
+            # That arm matches a WOULD-BE issue against the graph, and its
+            # relevance gate drops a one-token overlap: measured, `query=
+            # 'capstone'` alone answers `has_prior: false` with no rows, because
+            # the gate needs a measured belief or >= 2 shared tokens. The title
+            # below shares three tokens with the seeded claim, which is what puts
+            # the seed INSIDE the payload instead of asserting an empty set.
+            args["title"] = "capstone V2 lane proves payloads"
         status, out = door.call("tortoise_search_knowledge", args)
         assert status == 200
         assert not (isinstance(out, dict) and "unknown mode" in str(
@@ -749,7 +996,18 @@ class TestSearchReturnsSeededClaim:
                                      if isinstance(r, dict)}, (mode, out)
         elif assertion == "insight":
             assert isinstance(out, dict), (mode, out)
-            assert "has_prior" in out and "data_points" in out, (mode, out)
+            assert out.get("has_prior") is True, (
+                "the insight arm answered 'no prior work' over a graph that "
+                f"carries the seeded claim: {out}")
+            points = out.get("data_points")
+            assert isinstance(points, list) and points, (mode, out)
+            # ⛔ key PRESENCE was the whole assertion before r6 (`#13886` F4,
+            # and the same finding in the previous round): `{"has_prior": False,
+            # "data_points": []}` satisfied it. The seeded content has to be IN
+            # the rows, or the arm is proven to answer, not to answer correctly.
+            assert any("capstone V2 lane" in str(dp.get("content") or "")
+                       for dp in points if isinstance(dp, dict)), (
+                f"the insight rows do not carry the seeded claim: {out}")
 
     def test_search_finds_the_seeded_claim(self, seeded):
         door, s, _ = seeded
@@ -1061,7 +1319,7 @@ class TestWritesAreReadableBack:
         status, out = door.call("tortoise_delete",
                                 {"id": s["claim2"], "confirmation": token})
         assert status == 200
-        assert "different item" in str(out.get("_text") or out), out
+        assert "different item" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim2"], "type": "point"})
         assert still.get("id") == s["claim2"], still
@@ -1075,8 +1333,7 @@ class TestWritesAreReadableBack:
                                 {"id": s["claim"],
                                  "confirmation": "not-a-token"})
         assert status == 200
-        assert "not a deletion confirmation token" in str(
-            out.get("_text") or out), out
+        assert "not a deletion confirmation token" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim"], "type": "point"})
         assert still.get("id") == s["claim"], still
@@ -1305,11 +1562,12 @@ class TestGraphOverviewSections:
         assert status == 200
         # An ERROR envelope is a dict, so a bare isinstance check would accept
         # `{"error": …}` for every dict-shaped arm. This parametrized type check
-        # is the ONLY assertion for `structure_check` (the one WRAP `list[dict]`
-        # member) — and for no other arm: `tags` asserts its exact empty value
-        # (`out == []`), and taxonomy / structure / pointkinds / status / sources /
-        # namespaces / graphs / topics / health / stale / validate_domain / audit
-        # each have a content test below that reads the seeded graph back out.
+        # is a SHAPE gate, never the whole assertion: every member of the table
+        # has a content test below that reads the seeded graph back out —
+        # `structure_check` included (`test_structure_check_section_reports_the_
+        # seeded_orphan`), which is what the r6 review found missing when this
+        # comment admitted the type check was that arm's ONLY assertion
+        # (`#13886` F3).
         assert not (isinstance(out, dict) and "error" in out), (
             f"section={section!r} answered an error envelope: {out!r}")
         assert isinstance(out, expected), (
@@ -1351,6 +1609,21 @@ class TestGraphOverviewSections:
         _status, out = door.call("tortoise_graph_overview",
                                 {"section": "tags"})
         assert out == [], out
+
+    def test_structure_check_section_reports_the_seeded_orphan(self, seeded):
+        """The container's `section='structure_check'` arm is the same read as
+        `tortoise_check_structure`, and it is the one WRAP member of the table —
+        so the type gate above proved only that it answers a list (`#13886` r6,
+        F3). The seeded orphan `useCase` must be in it."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_graph_overview",
+                                {"section": "structure_check"})
+        assert status == 200
+        assert isinstance(out, list), out
+        by_id = {r.get("id"): r for r in out if isinstance(r, dict)}
+        assert s["use_case"] in by_id, (
+            f"the seeded orphan useCase is not in the section report: {out}")
+        assert by_id[s["use_case"]].get("type") == "orphan_use_case", out
 
     def test_structure_section_counts_the_seeded_operator(self, seeded):
         """The seeded IMPL operator must be visible here — that is the arm's
@@ -1460,7 +1733,42 @@ class TestGraphOverviewSections:
 # 6 — CONFIDENCE: each argument-arm
 # ══════════════════════════════════════════════════════════════════════════
 
+#: The `mode=` values the `recall=True` arm dispatches on, and which assertion
+#: shape drives each. Bound to the CONTAINER's own tuple
+#: (`mcp_server._RECALL_MODES`) by the bind test below — the table does not
+#: answer to itself (`#13886` r6, F5).
+_RECALL_MODE_SHAPES: dict[str, str] = {
+    "state": "state_family",
+    "gaps": "state_family",
+    "custom": "state_family",
+    "subgraph": "subgraph",
+}
+
+#: The three state-family modes share ONE payload assertion; `subgraph` has its
+#: own shape. Derived from the table so the two cannot drift apart.
+_RECALL_STATE_FAMILY = tuple(
+    mode for mode, shape in _RECALL_MODE_SHAPES.items()
+    if shape == "state_family")
+
+
 class TestConfidenceArms:
+
+    def test_the_recall_mode_table_is_the_containers_mode_set(self):
+        """`driven == mcp_server._RECALL_MODES`, exactly.
+
+        Same anti-silence bind as the `section=` and search `mode=` tables
+        (`#13886` r6, F5): the recall cases below answer only to themselves, so a
+        mode the container adds — or one this file drops — was invisible, while
+        the refusal case below asserts the served set from the CONTAINER's own
+        message. `_RECALL_MODES` is the tuple that message is built from
+        (`mcp_server.py:5637`), so binding to it makes the two agree by
+        construction rather than by hand.
+        """
+        from tortoise import mcp_server as ms
+
+        assert set(_RECALL_MODE_SHAPES) == set(ms._RECALL_MODES), (
+            "the recall `mode=` table and the container's own mode set disagree: "
+            f"{sorted(set(_RECALL_MODE_SHAPES) ^ set(ms._RECALL_MODES))}")
 
     def test_default_arm_lists_confidence_for_the_seeded_points(self, seeded):
         door, s, _ = seeded
@@ -1570,7 +1878,7 @@ class TestConfidenceArms:
         assert 0.0 <= float(posterior["mean"]) <= 1.0, posterior
         assert float(posterior["variance"]) >= 0.0, posterior
 
-    @pytest.mark.parametrize("mode", ["state", "gaps", "custom"])
+    @pytest.mark.parametrize("mode", _RECALL_STATE_FAMILY)
     def test_recall_arm_answers_the_seeded_claim(self, seeded, mode):
         """`recall=True` is the arm the retired ``tortoise_recall`` door retires
         INTO — the container names it in its own dispatch set
@@ -1716,11 +2024,29 @@ class TestRelationshipsAndRemainingReads:
         assert got.get("id") == mit["id"], got
 
     def test_review_link_candidates_answers_both_directions(self, seeded):
-        door, _s, _ = seeded
+        """`add` is a LIST OF CANDIDATES, so a key-presence check proves only
+        that the envelope exists (`#13886` r6, F3). The seeded claim pair is
+        semantically related and unconnected, so the arm must PROPOSE it: an
+        endpoint of an `add` row is the seeded claim, and that row names the
+        relation it suggests. `prune` stays empty — nothing superseded is
+        seeded — and is asserted as the list a crash would break."""
+        door, s, _ = seeded
         status, out = door.call("tortoise_review_link_candidates", {})
         assert status == 200
         assert isinstance(out, dict), out
-        assert "add" in out and "prune" in out, out
+        add = out.get("add")
+        assert isinstance(add, list) and add, out
+        endpoints = {member for row in add if isinstance(row, dict)
+                     for member in (row.get("from"), row.get("to"))}
+        assert s["claim2"] in endpoints, (
+            "the seeded unconnected pair is not proposed by the link-candidate "
+            f"read: {out}")
+        proposed = [row for row in add if isinstance(row, dict)
+                    and s["claim2"] in (row.get("from"), row.get("to"))]
+        assert proposed, out
+        assert all(row.get("suggested_relation") for row in proposed), out
+        assert isinstance(out.get("prune"), list), out
+        assert out["prune"] == [], out
 
     def test_events_poll_returns_the_seeded_journal(self, seeded):
         door, s, _ = seeded
@@ -1757,41 +2083,75 @@ class TestRelationshipsAndRemainingReads:
         assert all(isinstance(r, dict) for r in out), out
         assert all("namespace" in r for r in out), out
 
-    def test_list_batches_answers_a_collection(self, seeded):
-        door, _s, _ = seeded
+    def test_list_batches_answers_the_seeded_batch(self, seeded):
+        """Asserting `rows == []` proved only that nothing was seeded. The
+        fixture now ingests a real bundle, so the receipt's batch id must be IN
+        the listing — an arm that dropped its rows, or served someone else's,
+        reds here (`#13886` r6)."""
+        door, s, _ = seeded
         status, out = door.call("tortoise_list_batches", {})
         assert status == 200
         rows = out.get("results") if isinstance(out, dict) else out
-        assert isinstance(rows, (list, tuple)), out
-        assert rows == [], out
+        assert isinstance(rows, (list, tuple)) and rows, out
+        assert s["batch"] in {row.get("batch_id") for row in rows
+                              if isinstance(row, dict)}, out
 
     def test_check_connection_reports_the_seeded_graph(self, seeded):
-        door, _s, _ = seeded
+        """`isinstance(out.get("graph"), dict)` passes on `{}` (`#13886` r6, F3),
+        so the resolved graph must NAME what the fixture provisioned: the
+        storage graph is `org_<org_id>` and the namespace is the org the seeder
+        opened."""
+        door, s, _ = seeded
         status, out = door.call("tortoise_check_connection", {})
         assert status == 200
         assert out.get("connected") is True, out
-        assert isinstance(out.get("graph"), dict), out
+        graph = out.get("graph")
+        assert isinstance(graph, dict), out
+        assert graph.get("name") == f"org_{s['org']}", out
+        assert graph.get("namespace") == s["org"], out
 
-    def test_check_structure_answers_a_report(self, seeded):
-        """No epistemic gates are seeded, so the correct report is EMPTY —
-        asserted as the list the door returns, so a crash/None fails."""
-        door, _s, _ = seeded
+    def test_check_structure_reports_the_seeded_orphan(self, seeded):
+        """`check_structure` runs the product-strategy chain validators, so the
+        CORRECT report against a graph holding no chain kinds is `[]` — and
+        asserting that empty list proved only that the arm answers A LIST
+        (`#13886` r6, F3). The seed carries one live `useCase` with no parent
+        JTBD, so the report must NAME that rule and that node. A validator that
+        stopped running, or one that flagged the wrong node, reds here."""
+        door, s, _ = seeded
         status, out = door.call("tortoise_check_structure", {})
         assert status == 200
         assert isinstance(out, list), out
-        assert out == [], out
+        by_id = {r.get("id"): r for r in out if isinstance(r, dict)}
+        assert s["use_case"] in by_id, (
+            "the seeded orphan useCase is not in the chain report: " f"{out}")
+        assert by_id[s["use_case"]].get("type") == "orphan_use_case", out
+        assert "no parent JTBD" in str(
+            by_id[s["use_case"]].get("message") or ""), out
 
     def test_graph_set_recording_round_trips_BOTH_ways(self, seeded):
         """A one-way check passes on a hardcoded `{"recording": True}` payload;
-        flipping it is what makes this a round trip."""
+        flipping it is what makes this a round trip.
+
+        ⛔ `graph_id == graph_id` was the whole second assertion before r6
+        (`#13886` F3), and `None == None` satisfies it. This key names no bound
+        graph, so the DOCUMENTED fallback is the org DEFAULT graph — the value
+        `default` — and that is what the field must carry. The unknown-graph arm
+        is driven too, so the id is proven to be RESOLVED rather than echoed
+        back unchecked."""
         door, _s, _ = seeded
         _status, on = door.call("tortoise_graph_set_recording",
                                 {"recording": True})
         assert on.get("recording") is True, on
+        assert on.get("graph_id") == "default", on
         _status, off = door.call("tortoise_graph_set_recording",
                                 {"recording": False})
         assert off.get("recording") is False, off
-        assert off.get("graph_id") == on.get("graph_id"), (on, off)
+        assert off.get("graph_id") == "default", off
+        _status, unknown = door.call("tortoise_graph_set_recording",
+                                     {"recording": True,
+                                      "graph_id": "capstone-no-such-graph"})
+        assert unknown.get("status") == 404, unknown
+        assert "graph" in str(unknown.get("error") or "").lower(), unknown
 
     def test_manage_sources_lists_the_configured_sources(self, seeded,
                                                          sources_state):
