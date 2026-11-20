@@ -59,6 +59,15 @@ from tortoise import monitoring
 #: interval of every assertion so a pass cannot be a coincidence.
 SLOW_START_S = 0.40
 
+#: Start cost simulated by the LOOP-STARVATION row, separated from the bound that
+#: row asserts (review round 2, P2 note 5). One constant cannot do both jobs: the
+#: BOUND must tolerate a scheduling stall on a loaded CI box (this PR measured
+#: ~0.5 s stalls on a saturated one), while the COST must stay far enough above
+#: the bound that the mutant's single gap is unmistakable. At `SLOW_START_S` for
+#: both, the mutant lands on the threshold — 0.40 s of block against a 0.40 s
+#: bound — which is the one reading that can pass VACUOUSLY.
+STARVED_START_S = 1.0
+
 
 def _slow_thread_start(monkeypatch, seconds: float = SLOW_START_S):
     """Make every ``Thread.start()`` cost ``seconds``, as it does under load.
@@ -112,10 +121,21 @@ def test_a_probe_start_does_not_starve_the_event_loop(monkeypatch):
 
     Pre-fix, ``HealthProbe.run()`` -> ``begin()`` -> ``_start_locked()`` ->
     ``Thread.start()`` blocks the loop for the whole start cost, so the ticker
-    records a single gap equal to ``SLOW_START_S``. After the fix the wait is
-    paid on the starter worker and the loop never misses its 5 ms turn.
+    records a single gap of ``STARVED_START_S`` (1.0 s). After the fix the wait
+    is paid on the starter worker and the loop keeps its 5 ms turn.
+
+    ⛔ THE BOUND IS ``SLOW_START_S`` (0.40 s), NOT HALF OF IT (review round 2,
+    P2 note 5). The row defends against a loop block, so its bound has to
+    tolerate the scheduling stall of a loaded CI box — the same load that makes
+    ``Thread.start()`` cost 0.49 s p50 by this PR's own measurement — while
+    still being far below the mutant. It was ``SLOW_START_S / 2`` = 0.20 s,
+    i.e. inside the noise it is measuring. The three numbers are now separated:
+    mutant gap 1.0 s, bound 0.40 s, tick 0.005 s. RESIDUAL, stated rather than
+    implied: a stall longer than 0.40 s would still flake this row, which is
+    inherent to any wall-clock assertion in a required lane; 0.40 s of
+    tolerance is the honest ceiling before the row stops discriminating.
     """
-    _slow_thread_start(monkeypatch)
+    _slow_thread_start(monkeypatch, seconds=STARVED_START_S)
     _fresh_starter()
 
     probe = monitoring.HealthProbe(
@@ -139,10 +159,11 @@ def test_a_probe_start_does_not_starve_the_event_loop(monkeypatch):
         return max_gap
 
     max_gap = asyncio.run(scenario())
-    assert max_gap < SLOW_START_S / 2, (
-        f"the event loop was blocked for {max_gap:.3f}s by a {SLOW_START_S:.2f}s "
-        "Thread.start() — a probe start is being paid ON THE LOOP, which is "
-        "exactly what inflates another request's `pre_handler` (#10893)")
+    assert max_gap < SLOW_START_S, (
+        f"the event loop was blocked for {max_gap:.3f}s by a "
+        f"{STARVED_START_S:.2f}s Thread.start() (bound {SLOW_START_S:.2f}s) — a "
+        "probe start is being paid ON THE LOOP, which is exactly what inflates "
+        "another request's `pre_handler` (#10893)")
 
 
 def test_a_budgeted_read_keeps_its_budget_while_a_probe_starts(monkeypatch):

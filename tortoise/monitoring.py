@@ -5777,11 +5777,21 @@ class HealthProbe:
         """Pure in-memory view — the /health read path (#2850 item 2).
 
         Returns the last known probe result (or an honest "no result yet" /
-        "stale" verdict) WITHOUT waiting for anything: no I/O, no thread
-        hand-off, no lock held across a submit, no await. It returns in
-        microseconds and therefore CANNOT queue behind a stalled DB, a
-        saturated executor, or another caller — which is the whole point of
-        decoupling liveness from work.
+        "stale" verdict) WITHOUT waiting for anything: no I/O, no await, and no
+        wait for a thread. It returns in microseconds and therefore CANNOT
+        queue behind a stalled DB, a saturated executor, or another caller —
+        which is the whole point of decoupling liveness from work.
+
+        ⛔ The one thing this call can START is a probe, and since #10893 that
+        is a HAND-OFF, not a thread start (review round 2, P2 note 3: this
+        docstring used to promise "no thread hand-off, no lock held across a
+        submit" two sentences before describing exactly that hand-off).
+        ``begin()`` submits the worker's ``Thread.start`` to the process-wide
+        probe starter — so what this call pays is a bounded, non-blocking
+        ``submit()`` — and yes, ``_cv`` is held across it, which is why the
+        ``submit`` must never block: it queues onto a bounded backlog and
+        returns an already-failed future when that backlog is full.
+        ``peek()`` (the ``/healthz`` path) starts nothing at all.
 
         ``begin(if_stale=True)`` is still called, and that is deliberate: it
         is non-blocking (worst case it hands the ONE bounded single-flight probe
