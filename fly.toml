@@ -421,12 +421,17 @@ kill_timeout = 30
   R2_SECRET_ACCESS_KEY = ""
   R2_BUCKET = ""
   # ── #4126 secret-provenance: non-secret CONFIG, version-controlled here ────
-  # These three were Fly SECRETS with no managing source — the recorded debt in
+  # The three below WERE #4126's recorded debt in
   # `.github/scripts/fly-managed-secrets.txt`. A non-secret config value belongs
-  # in version control, so it lives here and is declared `fly-toml-env` there.
-  # The deploy then no longer needs a secret for any of them, and the provenance
-  # gate fails a `fly-toml-env` declaration whose name is still a Fly secret
-  # (a Fly secret SHADOWS `[env]`) — so the two states cannot come apart.
+  # in version control, so they live here and are declared `fly-toml-env` there;
+  # the deploy then needs no secret for any of them, and the gate fails a
+  # `fly-toml-env` declaration whose name is still a Fly secret (a Fly secret
+  # SHADOWS `[env]`), so the two states cannot come apart.
+  # The FOURTH value below arrived differently — an UNDECLARED Fly secret,
+  # recorded NOWHERE (that absence is exactly what the gate refused, on every
+  # deploy since at least 2026-11-19T19:47Z), tracked in #13923 rather than
+  # #4126. For it "the deploy needs no secret" becomes true only once that
+  # secret is unset.
   #
   # ⛔ THE VALUES ARE CARRIED OVER FROM THE LIVE FLY SECRETS, NOT FROM
   # `.env.example`. TORTOISE_MANUAL_LINKING_ENABLED is `1` in production while
@@ -439,6 +444,43 @@ kill_timeout = 30
   TORTOISE_CONTROL_PLANE = "supabase"
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
+  # ── #13923 — the embedder WARM-UP switch, carried at its LIVE value ───────
+  # Production runs `0` (measured on the machine: `printenv`). This entry does
+  # NOT settle the value — it carries the live value across, behaviour-
+  # preserving. Flipping it is an operator/owner call, not a correction of it.
+  # ⚠️ THE PREMISE FOR `0` IS DATED, AND IT SUPPORTS TWO DIFFERENT SENTENCES.
+  # `0` was set while the ~196 s cold load could not fit; the deploy that applies
+  # THIS entry carries #13674's fix (a 300 s LOAD bound under a 420 s grace), so a
+  # FLIPPED flag would pay that cost BEFORE traffic instead of on the first
+  # request that needs an embedding.
+  # At `0` (this entry) the cost is still paid by the FIRST REQUEST THAT NEEDS AN
+  # EMBEDDING — a read, or one of the opt-in `bounded=True` write folds; it is not
+  # reads-only — and a REQUEST still cannot absorb it: it blocks. So: do not
+  # restate "the load cannot complete" as a present fact (it fits its LOAD bound
+  # now), and do not call the pre-warm a no-op — `entrypoint.sh` bans that claim
+  # and restates it as "skipping this MOVES the cost, it does not remove it"
+  # (#13674 review F3).
+  # The switch gates the WARM-UP surface — `EmbeddingModel.get()` on the REQUEST
+  # path is deliberately NOT gated — but `0` ALSO selects the request-path bounds:
+  # `await_write_ready_reason` / `await_read_ready_reason` return None at `0`
+  # (#13224 / #13528), so a cold read — or a `bounded=True` write fold — blocks
+  # the whole load instead of taking its own leg's degradation: a keyword-only
+  # read, or a row written WITHOUT a vector. (An UNBOUNDED record-truth write
+  # blocks at either value, by design #5004; the flag moves only the reads and
+  # the bounded folds.) ONE declaration gates the whole WARM-UP surface —
+  # `entrypoint.sh::_prewarm_embedder`, `EmbeddingModel.start_warm_up` (+
+  # `warm_up`) at SDK engine init, and the hosted lifespan pre-warm, whose
+  # earlier flag-blindness is #7809 — so a flip arms all three.
+  # ⛔ `0` HERE IS THE LIVE VALUE, NOT `.env.example`'s default — see the ⛔ above;
+  # do NOT "fix" it to match `.env.example`.
+  # ⛔ Moving it off the Fly secret is route (b) of the #4126 block in
+  # `.github/scripts/fly-managed-secrets.txt`: a Fly secret SHADOWS `[env]`, so
+  # the gate is RED on this name until the shadow is unset, and the ORDER is
+  # load-bearing (merged entry → dispatch of the merged commit with the PER-RUN
+  # bypass → wait for the Deploy step → unset → verify BOTH). Unsetting FIRST
+  # leaves the flag absent (default true) and every boot then pays ~196 s.
+  # Follow that block; do not improvise from this comment. Tracked in #13923.
+  TORTOISE_EMBEDDER_WARMUP = "0"
   # ── #10794 — the CONSENT KEY SET's rotation knob, versioned ───────────────
   # `CONSENT_TOKEN_CURRENT_KID` names which kid in `CONSENT_TOKEN_KEYS` MINTS; unset/empty
   # resolves to the FIRST kid in the set (declared order), so the ordinary rotation is one
