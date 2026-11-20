@@ -303,6 +303,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "sdk.py:15787", _SDK, 15787, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
+    # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
+    # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
+    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
+    # because the header's enumeration names them and promises exactly that.
+    (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
+    (_AUDIT, "hosted_backup.py:1316", _HB, 1316, 'MATCH (n) RETURN labels(n), properties(n)'),
+    (_AUDIT, "hosted_backup.py:1517", _HB, 1517, 'MATCH (n) RETURN labels(n), properties(n)'),
     # --- #14043 review, finding 2 (the FINAL-head review): five addresses this revision writes in its
     # new §2.2 `:Source` reader row and in row 13 had NO pin and no occurrence count, so the next merge
     # that inserted into `tortoise/session_source_prose_migration.py` would have moved all five with
@@ -474,6 +481,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15787'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
+    # §2.6's re-pointed row: `:892` is written twice (the row, and the header's enumeration that promises it is
+    # pinned), the other two once each. The count is what reds a re-point at any of them.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:892'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:1316'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:1517'): 1,
     # #14043 review (P2, `hosted_backup.py` file-scoped drift): `hosted_backup.py:844` is now TWO sites,
     # and both are deliberate. §2.7's `:GraphEventMeta` row carries the statement; §2.6's rule sentence
     # must NAME the same address, because its claim is "all three of which §2.7 cites" — a cross-reference
@@ -610,9 +622,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "132 of this document's 229",
-        "dedupes the **342** as-written spellings to 229 — **113**",
-        "342 written spellings → 229 pairs → 113 collisions → 132 drifters of the 229",
+        "134 of this document's 231",
+        "dedupes the **345** as-written spellings to 231 — **114**",
+        "345 written spellings → 231 pairs → 114 collisions → 134 drifters of the 231",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1115,7 +1127,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # moved them with nothing red. That is the failure mode the four rows above exist to stop, and
     # §2.7's own note (file-scoped drift is "either fixed everywhere or trusted nowhere") is why the
     # file's remaining unpinned sites are closed in the same commit.
-    assert len(_PINS) == 77
+    assert len(_PINS) == 80
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
