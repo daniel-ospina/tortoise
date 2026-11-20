@@ -59,9 +59,18 @@ ever notified, stamped only after the provider accepts. A high-water mark rather
 than one column per threshold, because two independent markers let the emails
 land OUT OF ORDER (a 100 % notice, then a stale 80 % pass emailing "at 80 %"
 afterwards); with a mark the send is legal only when `threshold > mark`, so the
-sequence is monotone by construction. The stamp is a compare-and-swap on the
-value this pass read (:func:`claim_notice`), so two processes cannot interleave
-into a lower mark, and the provider Idempotency-Key
+**LEDGER** is monotone by construction. ⛔ THE INBOX IS NOT — the two are not the
+same claim, and only the first one is structural (#14038 review cycle 2). The send
+precedes the stamp (send-then-stamp is what makes a failure retryable), so two
+CONCURRENT passes can both read `mark=None`, both pass the re-read, and deliver in
+the wrong order — "at 100 %" then "at 80 %". The pre-send re-read (:func:`notify_account`)
+narrows that to one round trip; it does not close it, and closing it would need a
+pre-send reservation (a stamp-first protocol with a compensating unset), which is
+recorded on the PR rather than improvised here. Reachable only with N>1 workers,
+which `hosted_api.assert_multi_worker_admissible` refuses, and with the gauge
+moving ≥20 pp between two near-simultaneous reads. The stamp itself is a
+compare-and-swap on the value this pass read (:func:`claim_notice`), so two
+processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
 survives a crash between send and stamp.
 
@@ -528,6 +537,11 @@ def claim_notice(cp, org_id: str, threshold: int,
 #: something false and burn the one notice it can ever get (#14038 review, P2 —
 #: found independently by two reviewers). #1853's suspension is the same class:
 #: the org's calls 403 but its inbox is still open to us.
+#:
+#: ⛔ ONE RAW SELECT, and the two failure directions are DIFFERENT (#14038 review
+#: cycle 2): `storage_notice_pct` and `deleted_at` must FAIL CLOSED (an unreadable
+#: ledger must not re-send; a deletion column is never additive — see
+#: `_ACCOUNT_DRIFT_SOFT`), while `suspended_at` is tier 0015 and must DEGRADE.
 _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
                    "suspended_at")
 
@@ -647,9 +661,12 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             # account is reported, loudly and by name, and nothing is sent until
             # the migration applies (see the migration's deploy-order note).
             logger.error(
-                "capacity notice: the ledger row for team %s is unreadable "
-                "(%s) — no notice will be sent for this account until the "
-                "storage_notice_pct migration has applied",
+                "capacity notice: the account row for team %s is unreadable "
+                "(%s) — nothing is sent for this account. `suspended_at` already "
+                "degrades on its own (0015, additive — read_account retries "
+                "without it), so what is left is a FAIL-CLOSED column: the "
+                "ledger storage_notice_pct (20261120000001) or the base "
+                "deleted_at.",
                 org_id, type(e).__name__)
             return {"status": "notice-mark-unavailable", "org_id": org_id}
     if account is None:

@@ -1326,24 +1326,28 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
     `hosted_api` builds two ladders in two different endpoint functions; an
     `ImportFrom` anywhere in the module satisfies a module-wide check while the
     OTHER endpoint raises `NameError` on a schema-drift read — the one path that
-    is already degraded. Resolved per enclosing function here.
+    is already degraded.
+
+    ⛔ THE SCOPES MUST BE SEPARATE, or this guard is vacuous — measured, not
+    assumed (#14038 review cycle 2): the first revision built `module_bound` with
+    `ast.walk(tree)`, which descends INTO function bodies, so a function-local
+    import counted as module-level and the per-function arm could never fire. The
+    reviewer deleted `_ORG_ADDITIVE_TIERS` from `_session_user_org`'s import block
+    and every ladder guard stayed green over a real `NameError`. Module scope is
+    now taken from `_enclosing_functions` (a node whose enclosing function is 0 is
+    module level, so an import nested in `try:`/`if TYPE_CHECKING:` still counts),
+    and `_ladder_import_problems` is the general resolver this row is one case of.
     """
     problems: list[str] = []
     checked = 0
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
         tree = _parse(path)
-        # MODULE SCOPE ONLY. `owners` reports 0 for any node that is not inside a
-        # function, so a module-level import nested in `try:`/`if TYPE_CHECKING:`
-        # still counts. Taken with `ast.walk` alone the set ALSO collects the
-        # function-local imports below, so `module_bound | per_function[...]`
-        # could never narrow and deleting one endpoint's import stayed green.
         owners = _enclosing_functions(path)
         module_bound = {alias.name
                         for node in ast.walk(tree)
                         if isinstance(node, ast.ImportFrom)
                         for alias in node.names
                         if owners.get(node.lineno, 0) == 0}
-        # ...or DEFINED at module level (`supabase_control` owns the tuple).
         module_bound |= {t.id
                          for node in tree.body
                          if isinstance(node, (ast.Assign, ast.AnnAssign))
@@ -1452,6 +1456,39 @@ def _ladder_import_problems(tree: ast.Module,
                     f"{label}:{node.lineno} {scope_name} uses {node.id} "
                     "without binding it")
     return problems, checked
+
+
+def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
+    """The mutation that proved the FIRST guard vacuous must red THIS one.
+
+    #14038 review cycle 2 measured it: `module_bound` was built by walking the
+    whole tree, function bodies included, so deleting one of `hosted_api`'s two
+    `_ORG_ADDITIVE_TIERS` imports left every ladder guard green — over a real
+    `NameError` on the schema-drift path. A guard nobody can prove can fail is a
+    comment with a `def`, so this plants that exact shape in a throwaway module
+    and requires the resolver to NAME the unbound use and only that one.
+    """
+    fake = tmp_path / "fake_module.py"
+    fake.write_text(
+        "from somewhere import OTHER\n"
+        "\n"
+        "\n"
+        "def outer():\n"
+        "    return _orgs_row_fail_soft(select=1, additive_tiers=list(\n"
+        "        _ORG_ADDITIVE_0015_TIER))\n"
+        "\n"
+        "\n"
+        "def sibling():\n"
+        "    from somewhere import _ORG_ADDITIVE_0015_TIER\n"
+        "    return _orgs_row_fail_soft(select=1, additive_tiers=list(\n"
+        "        _ORG_ADDITIVE_0015_TIER))\n")
+    problems, checked = _ladder_import_problems(_parse(fake), str(fake))
+    assert checked >= 2, f"only {checked} tier loads found — the fixture broke"
+    assert len(problems) == 1, (
+        "the sibling's import must leave the OTHER function's use unbound; "
+        f"got {problems}")
+    assert "outer" in problems[0], problems
+    assert "sibling" not in problems[0], problems
 
 
 def test_every_ladder_module_imports_the_tiers_it_names():

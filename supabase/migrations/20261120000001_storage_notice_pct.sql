@@ -23,9 +23,16 @@
 -- a lagging pass email "at 80 %" AFTER the 100 % notice has gone out — the
 -- out-of-order case the copy makes unacceptable — because each marker is
 -- checked on its own. With a high-water mark the only legal send is
--- `threshold > mark`, so the sequence is monotone by construction, and an
--- account that jumps from 60 % to 105 % between passes gets the 100 % notice
--- alone (no second email in the same pass).
+-- `threshold > mark`, so the LEDGER is monotone by construction, and an account
+-- that jumps from 60 % to 105 % between passes gets the 100 % notice alone (no
+-- second email in the same pass).
+--
+-- ⛔ THE INBOX IS NOT THE LEDGER. The send precedes the stamp (so a failure stays
+-- retryable), so two CONCURRENT passes can both read NULL, both pass the pre-send
+-- re-read, and deliver 100 % then 80 %. The re-read narrows that to one round trip
+-- and the Idempotency-Key below dedupes only the SAME threshold; closing the order
+-- window needs a pre-send reservation, which is a design decision recorded on the
+-- PR, not a property this column gives you (#14038 review cycle 2).
 --
 -- The stamp is a compare-and-swap on the value the caller READ
 -- (`set_org_storage_notice_pct`, rowcount-gated: `WHERE id AND
