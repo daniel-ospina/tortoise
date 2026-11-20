@@ -75,6 +75,23 @@ is visible instead of silent.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first, and an UNATTRIBUTED failure is the harm
+# #5128 was filed for. Same shape as the sibling census (tools/edge_census.py,
+# tools/backfill_graph_turns.py); the guard must be the first statement after the
+# docstring and `import sys`, which tests/test_entry_point_python_guard.py pins for
+# every tools/ entry point. MEASURED: the pre-guard tool redded that corpus pin for
+# BOTH of its cases (parametrised over tools/*.py), which is what made #13919 a
+# PR-introduced failure rather than a main baseline red.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_4211_session_hierarchy.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_4211_session_hierarchy.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -82,7 +99,6 @@ import json
 import math
 import os
 import shutil
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -393,8 +409,17 @@ def _open_embedded(path: Path):
     registration (#1005), which is what makes the close in ``measure_store`` reachable.
     """
     from tortoise import FalkorDB
+    from tortoise.projection import _bounded_server_socket_kwargs
 
-    return FalkorDB(str(path))
+    # ⛔ A read bound, from the product's ONE resolver — splatted INLINE because
+    # `tests/test_bounded_raw_clients_3065.py` reads the CALL's keywords (#3065/#8118):
+    # ``falkordb`` defaults ``socket_timeout=None`` and hands it to redis-py
+    # explicitly, so an unbounded handle parks this arm in ``recv()`` forever against
+    # a stalled engine — alive, 0% CPU, printing nothing — which for a tool whose
+    # contract is "measure and change nothing" is indistinguishable from a slow answer.
+    # Residue of the same PR: this site and the one in ``_open_live`` were the two
+    # offenders that redded the tool-surface inventory at #13919.
+    return FalkorDB(str(path), **_bounded_server_socket_kwargs())
 
 
 def measure_store(db_path: str, graph_name: str) -> dict:
@@ -462,9 +487,16 @@ def _parse_uri(uri: str) -> dict:
 
 def _open_live(uri: str):
     from falkordb import FalkorDB
+
+    from tortoise.projection import _bounded_server_socket_kwargs
+
     spec = _parse_uri(uri)
+    # Same bound, same reason as ``_open_embedded`` — and the same resolver, so an
+    # operator's ``TORTOISE_DB_SOCKET_TIMEOUT`` reaches this arm instead of being
+    # re-derived here (#3065's defect: every site spelling its own socket policy).
     return FalkorDB(host=spec["host"], port=spec["port"],
-                    password=spec["password"] or None), spec
+                    password=spec["password"] or None,
+                    **_bounded_server_socket_kwargs()), spec
 
 
 def _redact_uri(uri: str) -> str:
