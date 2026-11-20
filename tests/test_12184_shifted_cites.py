@@ -842,8 +842,24 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     # — a case this function grades as a plain problem STRING — instead died on an assertion from a
     # resolution the caller never needed, so the graded message became a crash (`#14010` final review,
     # finding 3).
-    two_span = _two_span_pairs(text, repo)
-    extra_pairs = len(pairs | two_span) - len(pairs)
+    # ⛔ A resolution failure here is GRADED, never raised. `_resolve_path`'s ambiguity check is an
+    # `AssertionError`, and it fires on exactly the documents this function exists to REPORT — a header
+    # re-measured against a tree where a cite moved. Raising turns a graded verdict into a traceback AND
+    # takes every other arm's finding with it, which is the same class as the two missing-sentence states
+    # fixed just above, one state further on (`#14010` round-6 review, finding 2: the measurement landed
+    # below the `_TRIPLE`/`_QUADRUPLE` returns but still above `if not alt`).
+    try:
+        two_span: set[tuple[str, int]] | None = _two_span_pairs(text, repo)
+    except AssertionError as exc:
+        problems.append(
+            "the two-code-span form cannot be resolved against this tree, so the counts that depend on it "
+            f"are NOT graded: {exc}"
+        )
+        two_span = None
+    # ⛔ `None`, not `set()`: the alternative basis is `published_pairs + extra_pairs`, so a zero fallback
+    # would report a FIGURE this guard never measured — the false-figure class `#13599` finding 1 punished,
+    # in the opposite direction. Every arm that reads it below is skipped while it is unknown.
+    extra_pairs = None if two_span is None else len(pairs | two_span) - len(pairs)
     if tuple(map(int, triple.groups())) != (spellings, len(pairs), collisions):
         problems.append(
             f"the header publishes spellings/pairs/collisions {triple.groups()}, but this file MEASURES "
@@ -894,7 +910,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # `_SPELLING`, so the count it adds is a property of THIS document and moves when the document does.
         # A hard-coded `+1` here enforced "one pair" while the document wrote four — the comparator became
         # the thing that was wrong, and it red on correct text the moment the document was measured.
-        if alt_pairs != published_pairs + extra_pairs:
+        if extra_pairs is not None and alt_pairs != published_pairs + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_pairs} pairs, but this document writes {extra_pairs} "
                 f"pair(s) in the two-code-span form the one-token basis resolves but does not count, so "
@@ -909,7 +925,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
         # three-mention agreement arm cannot reach the alternative basis, because the document publishes
         # `123` in that sentence alone, so there is no second mention to agree with.
-        if not drifters <= alt_drifters <= drifters + extra_pairs:
+        if extra_pairs is not None and not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
                 f"{drifters} — its {extra_pairs} added pair(s) can add at most {extra_pairs} drifter(s) and "
@@ -934,7 +950,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
             "dropped, and neither this message nor `_TWO_SPAN_TOTAL` can tell which: re-point the pattern "
             "against how the count is published now, do not delete this arm"
         )
-    elif _as_int(total.group(1)) != len(two_span):
+    elif two_span is not None and _as_int(total.group(1)) != len(two_span):
         problems.append(
             f"the header says it writes {total.group(1)} pairs as two code spans, but this document "
             f"MEASURES {len(two_span)}"
@@ -947,7 +963,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
             "sentence was reworded or dropped: re-point `_TWO_SPAN_NEW` against how it is published now, "
             "do not delete this arm"
         )
-    elif _as_int(uncounted.group(1)) != extra_pairs:
+    elif extra_pairs is not None and _as_int(uncounted.group(1)) != extra_pairs:
         problems.append(
             f"the header says `{uncounted.group(1)} of them` are not counted by the one-token rule, but "
             f"this document MEASURES {extra_pairs} of its {len(two_span)} two-code-span pairs as "
@@ -1294,6 +1310,48 @@ def test_the_two_span_count_mutant_always_lands_on_the_count_arm() -> None:
         assert value >= 0, f"the mutant for a stated {stated} is negative: {value}"
 
 
+def test_the_accepted_numeral_class_is_pinned_by_literals_not_by_the_table_it_derives() -> None:
+    r"""The spelled vocabulary the two sentences may state a count in, pinned WITHOUT deriving it.
+
+    ⛔ Every other row that touches this class derives its iteration set from `_NUMERALS`, and the two
+    not-found messages derive their examples from the same table — so those rows can only ever AGREE with
+    whatever the table says. They could not report the round-4 fix being reverted: truncating
+    `_SPELLED_NUMERALS` back to the pre-fix ceiling of `ten` left all six new rows GREEN (measured,
+    `#14010` round-6 review, finding 1), which would reinstate the `#13599` false-absence class silently —
+    a correct `writes eleven pairs as two code spans` reported as a MISSING sentence.
+
+    The expectations here are LITERALS on purpose: `zero`/`none` because an honest re-measurement can find
+    nothing left to disclose, `one` because it is the only count that takes the singular verb, and
+    `eleven`/`twenty` because they are past the ceiling the defect stopped at. Narrowing the vocabulary
+    now reds by name (`eleven`), and widening it still extends the derived sweep beside this test.
+    """
+    for spelling, value in (
+        ("zero", 0),
+        ("none", 0),
+        ("one", 1),
+        ("ten", 10),
+        ("eleven", 11),
+        ("twenty", 20),
+    ):
+        pair, verb = ("pair", "is") if value == 1 else ("pairs", "are")
+        total = _TWO_SPAN_TOTAL.search(f"the header writes {spelling} {pair} as two code spans")
+        assert total is not None and total.group(1) == spelling, (
+            f"`{spelling}` is a count this header may state as a word, but `_TWO_SPAN_TOTAL` does not read "
+            "it — the pattern's ceiling and `_NUMERALS` have come apart again; a correct sentence would be "
+            "graded as a missing one"
+        )
+        uncounted = _TWO_SPAN_NEW.search(
+            f"{spelling} of them {verb} resolved but not counted by the one-token rule"
+        )
+        assert uncounted is not None and uncounted.group(1) == spelling, (
+            f"`{spelling}` is a count this header may state as a word, but `_TWO_SPAN_NEW` does not read it"
+        )
+        assert _as_int(spelling) == value, (
+            f"the patterns read `{spelling}` but `_as_int` grades it {_as_int(spelling)}, not {value} — the "
+            "grader and the patterns are one vocabulary or they are a defect"
+        )
+
+
 def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() -> None:
     r"""A header whose `_TRIPLE`/`_QUADRUPLE` sentence moved gets its problem STRING, not an assertion.
 
@@ -1315,6 +1373,47 @@ def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() 
         f"`AssertionError` out of `_resolve_path` instead means the two-code-span measurement is running "
         f"before the early returns that own this state; got {problems!r}"
     )
+
+
+def test_a_two_span_cite_that_does_not_resolve_is_graded_not_raised() -> None:
+    r"""A header whose two-code-span cite no longer resolves gets a problem STRING, not a traceback.
+
+    ⛔ `_two_span_pairs` resolves every written path through `_resolve_path`, whose ambiguity check is an
+    `AssertionError`, and a header re-measured against a tree where a cite moved is EXACTLY the state this
+    function exists to grade. The call was moved below the `_TRIPLE`/`_QUADRUPLE` early returns (`#14010`
+    final review, finding 3) but still ran above `if not alt`, so a header that had also lost the
+    alternative-basis sentence — a state graded as a plain problem two arms away — died on the cite instead
+    (`#14010` round-6 review, finding 2). The resolution failure is caught and GRADED now, and the arms
+    that would need its value are skipped rather than fed a zero: `extra_pairs` is `None` (unknown), not
+    `0` (a figure this guard never measured), which is what keeps the count comparisons from publishing a
+    wrong number (the `#13599` finding-1 class, opposite direction).
+
+    NON-VACUOUS: with the `try`/`except` removed this test does not fail an assertion — it ERRORS out of
+    `_figure_problems`, which is the defect stated as a red.
+    """
+    document = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(document)
+    total = _TWO_SPAN_TOTAL.search(body)
+    alt = _ALT_BASIS.search(body)
+    assert total is not None and alt is not None, "the shipped document must carry both sentences mutated here"
+    # Keep every OTHER sentence intact (so the `_TRIPLE`/`_QUADRUPLE` early returns do not own this state,
+    # and the alternative-basis arm is reached), and move the two-code-span cite onto a path that resolves
+    # to no file at all.
+    text = document.replace(
+        total.group(0), "writes six pairs as two code spans and cites `no_such_module_zzz.py` `:1`", 1
+    )
+    problems = _figure_problems(text)
+    unresolved = [p for p in problems if "cannot be resolved against this tree" in p]
+    assert unresolved, (
+        "a header whose two-code-span cite resolves to no file must come back as a graded problem; an "
+        f"`AssertionError` out of `_resolve_path` means the comparator crashes on the state it grades. "
+        f"got {problems!r}"
+    )
+    assert "no_such_module_zzz.py" in unresolved[0], (
+        f"the graded problem must NAME the cite that did not resolve: {unresolved[0]!r}"
+    )
+    measured = [p for p in problems if "MEASURES" in p and "two code spans" in p]
+    assert not measured, f"an unresolvable two-span count must not be graded against a fallback figure: {measured!r}"
 
 
 def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
@@ -1354,7 +1453,7 @@ def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
         assert arm.search(document) is not None, "the shipped document must carry the sentence mutated here"
         mutated = arm.sub(sentence, document, count=1)
         assert mutated != document
-        assert (REPO / _AUDIT) and arm.search(mutated) is None, (
+        assert arm.search(mutated) is None, (
             f"the {frame!r} frame must be GONE from the mutated document — {arm.pattern!r} still matches, so "
             "the substitution landed on a different sentence"
         )
