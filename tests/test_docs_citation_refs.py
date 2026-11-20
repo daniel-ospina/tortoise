@@ -3705,7 +3705,7 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     class (measured `2` on the 4-line probe) — so that spelling was read as an expression of some
     OTHER class. (The `^[+\-]$` this sentence used to pair with it is NOT an equivalent:
     measured `3` on the 6-line probe — `+`, `-`, a lone
-    `\`, blank, `++`, `--`, the probe every count below uses — it is a SUPERSET, and that list
+    `\`, blank, `++`, `--`, the probe the spelling bullets below use — it is a SUPERSET, and that list
     rejected it too, which is why it appears in the rejection bullets below and not here; pairing
     the two made a TRUE statement about `^(\+|-)$` carry a FALSE one about `^[+\-]$` (#14026 P2.)
     Two consequences, both measured: a second blank-class
@@ -3741,7 +3741,15 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
 
     What it does NOT decide is stated at the assertion that uses it: a regex equivalent to this
     class but spelled differently (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised —
-    a declared residual, not a claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED
+    a declared residual, not a claim of closure. ⛔ AND ONE OVER-RECOGNITION SURVIVES, ALSO
+    DECLARED (#14026 review note — MEASURED): `^(-|+)$` is graded as this class while
+    `grep -cE '^(-|+)$'` REFUSES the command outright (`Unmatched ( or \`, rc 2), so it counts
+    nothing at all — a row prescribing it reds on its own returncode guard, not here. It is not
+    repaired because grep's accept/refuse here is positional and order-dependent rather than a
+    property of the branches: `^(+|-)$`, the SAME two branches the other way round, runs and
+    counts `2` (measured, with a `+ at start of expression` warning), so "a branch starting with a
+    quantifier is not a literal" would refuse a spelling this file accepts. ⛔ A LONE SIGN IS NOT
+    THIS CLASS, AND IS REJECTED
     (#13995 review round 10,
     P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
     false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
@@ -4244,9 +4252,10 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "(#13995 review round 10, P2)")
 
     # ⛔ …AND FOUR SPELLINGS THAT LOOK EQUIVALENT ARE NOT, EACH MEASURED (#13995 review
-    # round 11, P2). The predicate graded all four of these spellings as the class while this file's
-    # own docstring said two of them counted something else — the "state what you measured" rule
-    # (#1469-1470), failed in code rather than in prose this time. Probe for every number below:
+    # round 11, P2). The predicate graded all four of these spellings as the class, and this file's
+    # own docstring called two of them ACCEPTED EQUIVALENCES — so the "state what you measured"
+    # rule (#1469-1470) failed in the prose and in the code at once, and the false claim agreed
+    # with the false PASS. Probe for every number below:
     # a file holding `+`, `-`, a lone `\`, a blank line, `++`, `--`.
     for not_the_class, why in (
         ("^[+\\-]$", "counts 3, not 2: a backslash INSIDE a bracket is a LITERAL member "
@@ -4298,6 +4307,22 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             f"a prescription spelled {not_the_class!r} must not be GRADED as a BLANK-class "
             "count — as a second prescription it would leave the `== 1` arm GREEN while the row "
             "carried an instrument that does not count this class (#14026 review, P2)")
+
+    # ⛔ ONE OVER-RECOGNITION SURVIVES AND IS PINNED AS A DECLARED RESIDUAL, not left as an
+    # implication of the loops above (#14026 review note). `^(-|+)$` IS graded as this class while
+    # `grep -cE '^(-|+)$'` refuses the command outright — `Unmatched ( or \`, rc 2 (measured) — so
+    # it counts nothing, and a row prescribing it reds on the count command's own returncode guard
+    # rather than shipping a wrong GREEN. The predicate is deliberately NOT tightened here: grep's
+    # accept/refuse on these two spellings is positional, not a property of the branches —
+    # `^(+|-)$`, the same two branches in the other order, RUNS and counts `2` (measured) — so any
+    # rule that refuses one refuses a spelling this file accepts. This assertion exists so the
+    # residual is STATED; if the predicate is ever repaired, it reds here and the docstring at
+    # `_d5_counts_the_blank_class` must be corrected in the same commit (#1469-1470).
+    assert _d5_counts_the_blank_class("^(-|+)$") is True, (
+        "the declared residual `^(-|+)$` is no longer GRADED as the blank class. That may be an "
+        "improvement — but the docstring at `_d5_counts_the_blank_class` names it as the one "
+        "over-recognition this predicate still makes, so update that docstring in the same commit "
+        "instead of leaving a false statement beside the code (#14026 review note)")
 
 
 def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
