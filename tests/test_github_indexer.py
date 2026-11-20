@@ -3295,7 +3295,31 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `tortoise/sdk.py` again (+150 above the second insertion point, +195 below it). The four
     # rows above are the values MEASURED on that merged tree; every one is read from its own
     # pinned FIRST-line text, never from the previous row plus a guessed offset.
-    ("sdk.py", 55787, 55789): (
+    #
+    # ⛔ RE-DERIVED ONCE MORE at `bd020ff45b` on the OTHER side of this PR (#13937 — frozen
+    # `main` red, measured on a bare `main` checkout with no PR diff applied), by the same
+    # method and NOT by the delta: `sdk.py` moved under every row, `+150` above
+    # `update_knowledge` and `+195` below it, so this is TWO regions and a single offset
+    # would have re-pinned the wrong function. Each address was found by searching its own
+    # pinned FIRST-line text (and, for the arm, its own LAST-line text `continue`) at the
+    # tree that carries that row: `55742-55744` (the non-scalar refusal), `55894-55903`
+    # (the un-supersede arm), `56343` (the per-label `SET n += $props`, which occurs once
+    # while bare `SET n += $props` occurs 40×) and `22779-22954` (`update_knowledge`, its
+    # end again located as the function's own last line `return
+    # self._update_entity_any(id, **props)`, whose other occurrence is a different door's).
+    # `if (_np_dead == [_SUPERSEDED_STATUS]` occurs TWICE, so that row is located by its
+    # `continue` terminator and not by its start text. The `+150` / `+195` pair is the
+    # consistency check on a measurement, never its input.
+    # ⛔ THE MERGE of those two derivations is where this block could have rotted, so the
+    # reconciliation is stated rather than left to the diff: on the tree this PR merges
+    # (`origin/main`), `#13899`/`#13626` moved `sdk.py` again and EVERY `bd020ff45b` figure
+    # above now lands on the wrong line — `55742`->`55774` (+32), `55894`->`55926` (+32),
+    # `56343`->`56420` (+77) and `22779`->`22801` (+22). Three different deltas on four
+    # rows is the whole argument against adopting either side's block wholesale, and why
+    # each row below was re-found by its own pinned text on the MERGED tree. The historical
+    # paragraphs are kept because they record real measurements of real trees; the pin
+    # table is what resolves HERE.
+    ("sdk.py", 55774, 55776): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55939, 55948): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
     ("sdk.py", 22814, 22989): (

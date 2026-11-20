@@ -32,7 +32,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
 | `test_the_collision_clause_of_at_parity_stands_alone` | each `at_parity` clause has its OWN falsifier | the `render_collision == 0` clause is deleted and only `graph_only` refuses |
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
-| `test_the_fourth_legs_container_arm_asks_the_whole_family` | the fourth stop-arm leg asks the WHOLE `_CONTAINER_CALLS` family (pair and pair-WITH-EXTRAS), and the redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records is a MEASUREMENT, never a licence to subtract | a local name tuple or a subtraction returns (silent: two family names answer, four skip), or leg 1/leg 3 stops answering a wrapper the record says they read |
+| `test_the_fourth_legs_container_arm_asks_the_whole_family` | the fourth stop-arm leg asks the WHOLE `_CONTAINER_CALLS` family (pair and pair-WITH-EXTRAS), and the redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records is a MEASUREMENT, never a licence to subtract | a local name tuple or a subtraction returns (silent: two family names answer, four skip), or **leg 3** stops answering a wrapper the record says it reads — leg 1 is a DUPLICATE at this seam (measured: 0 rows answer leg 1 and not leg 3), so no mutant that REMOVES or WEAKENS leg 1 can redden this test (strengthening it to answer a sole-decider row does, at `assert upstream is False`) and it is disclosed, not named as a guard |
 | `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
 | `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` | `_upsert_source` persists a caller `embedding` via `SET n += $extra` | the name is dropped from `:Source`'s population on a static-clause count, letting a strip run into a live writer |
 | `test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied` | **#13796** — the gate is MEASURABLE from a fresh process | the stripper asks without its own denominator/tenant, so every label answers *unproved* while parity holds |
@@ -1590,6 +1590,14 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     assert "tortoise.hosted_backup::restore_graph" in writers
     assert "tortoise.projection.entities::_upsert_event" in writers
     # The five `:Event` writers that are NOT folds — the population the fold map alone misses.
+    # ⛔ THE SDK NAMES HERE ARE THE REGISTER'S SEAMS, NOT THE RETIRED PUBLIC METHODS.
+    # `#13899` privatised `ingest_corpus` to `sdk.py::_ingest_corpus` and moved the register
+    # entry with it (`tortoise/embed_writer_register.py`, the `RECOGNISED_PRODUCER` row whose
+    # reason quotes `self._session_embedding(...)`); this loop kept the public spelling and so
+    # asserted a name that no longer exists — measured red on `main` at `ef1d6f7561`, where
+    # `_writers_for("Event")` contains `tortoise.sdk::_ingest_corpus` and not this id. Name the
+    # seam the register names: `ingest_corpus` is retired (#12901), so a pin on it cannot be
+    # satisfied by any repair, only by resurrecting a method the retirement removed.
     for outside in ("tortoise.sdk::_session_event_write",
                     "tortoise.sdk::_embedding_repair_attempt",
                     "tortoise.sdk::_event_raw_write_door",
@@ -10068,8 +10076,28 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
       would answer here for two names and skip the other four with nothing reddening;
     * the redundancy the record claims still HOLDS WHERE IT WAS MEASURED, and is asserted NOT to
       hold for the sole-decider class — so a later lane cannot cite the record as cover for those
-      rows. Thin leg 1 or leg 3 and the first half reddens instead of the record quietly
-      describing a set of legs that no longer read those wrappers.
+      rows. Thin leg 3 and the first half reddens instead of the record quietly describing a set
+      of legs that no longer read those wrappers. ⛔ **Leg 1 cannot redden THIS test by REMOVAL or
+      WEAKENING** (measured at `f2e5e3a98f`: over this 60-row sample `leg1 AND NOT leg3` is 0 rows —
+      leg 1 is a subset of leg 3 here — so deleting leg 1 outright moves `upstream` nowhere and
+      this test stays green). ⛔⛔ **THAT IS A FACT ABOUT THIS TEST, NOT ABOUT THE SUITE — do not
+      widen it.** Leg 1 is a disjunct of the `upstream = (… or …)` expression below, so a mutant
+      that STRENGTHENS leg 1 to answer a sole-decider row reddens its `assert upstream is False`;
+      and removing leg 1 is caught by a DIFFERENT test in this same file — measured at this head,
+      leg 1 disabled on `tools.strip_graph_entity_vectors` reddens
+      `test_the_stop_arm_must_not_store_the_vector` with `a STOP ARM THAT STORES certified the
+      writer`, on the plain-pair stop arm `props |= [("embedding", _encode(ev))]` that leg 1
+      alone refuses. So leg 1 is a duplicate AT THE FAMILY SEAM, not an unwitnessed leg: scope
+      this paragraph to the family test or it becomes the "protection nothing can redden" claim
+      this whole file exists to remove.
+      ⛔ Both cites in this paragraph are by CONSTRUCT, not by line number, on purpose: an earlier
+      revision pinned `:9990` / `:9994` and both were wrong within one commit (a string fragment
+      and a blank line) — see `tests/test_12184_shifted_cites.py`, written for exactly that
+      false-correction shape. Do not re-pin them.
+      The assertions below ask `leg1 OR leg3` on purpose — the record is about the redundancy, not
+      about a leg — and the record says so rather than naming leg 1 as a guard it cannot be.
+      Repairing the asymmetry would mean deleting leg 1, which is the one direction this file
+      forbids.
 
     ⛔ THE BASELINE IT IS MEASURED AGAINST, stated correctly (the review of `085c815866` caught
     the earlier sentence being false): at the merge base `e3f894b31b` the arm ALREADY asked the
@@ -10089,10 +10117,22 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
         # the class the review's counterexample was made of. Leaving it out of the sample is what
         # made `0 of 30` look like a licence.
         '[("embedding", _encode(ev), 1)]',
-        # …and two extras spellings NO leg answers at source level (the produced key is not the
-        # property by any reading these rules make) — kept in the sample so the redundancy claim
-        # is measured over them too rather than silently skipped; their end-to-end rows live in
-        # `test_the_stop_arm_must_not_store_the_vector`.
+        # …and two extras spellings NO leg answers at source level — one whose KEY is the property
+        # but whose VALUE is a bare constant (`[("embedding", 1, 1)]`), one whose produced key is
+        # not the property (`[(1, "embedding", _encode(ev))]`). ⛔ Do not reduce both to one reason:
+        # the key is not what rules the first out (measured at this head, `[("embedding",
+        # _encode(ev), 1)]` and `[("embedding", 1, 1)]` carry the same key and leg 3 answers only
+        # the live-valued one) — its constant `v[1]` is. Kept in the sample so the redundancy
+        # claim is measured over them too rather than silently skipped. Neither is a store —
+        # measured: `[("embedding", 1, 1)]` yields `{'embedding': 1}` (the property IS the key;
+        # its VALUE is a constant), and `[(1, "embedding", _encode(ev))]` yields `{1: 'embedding'}`
+        # (key `1`, value not the vector). ⛔ THEY HAVE NO END-TO-END ROW EITHER: an earlier revision
+        # of this comment pointed at `test_the_stop_arm_must_not_store_the_vector` as the home of
+        # their end-to-end rows, which is false for both — measured at this head, that test spells
+        # `[(1, "embedding", _encode(ev))]` NOWHERE, and its one `("embedding", 1, 1)` sits in a
+        # `for k, _i in iter(...)` destructuring, not the `{v[0]: v[1]}` pair this sample asks
+        # about. The pointer is DELETED rather than corrected: a pointer a reader cannot follow is
+        # the defect this block exists to remove.
         '[("embedding", 1, 1)]',
         '[(1, "embedding", _encode(ev))]',
     )
@@ -10148,10 +10188,18 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
                 continue
             assert upstream is True, (
                 f"`{name}({inner})` is answered by the FOURTH leg and by nothing upstream — the "
-                f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding: "
-                f"leg 1 or leg 3 lost a wrapper it read, or the record is stale and must be "
-                f"corrected before anyone quotes it again. (A real store is still REFUSED here, "
-                f"so nothing certifies — this is the record's guard, not a fail-open.)"
+                f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding. "
+                f"⛔ THIS RED IS NOT DIAGNOSTIC: do not read it as blaming one leg, and do not "
+                f"treat what follows as a closed list. It fires whenever `upstream` came back "
+                f"False while the arm answers, and that has more than one cause — leg 3 can stop "
+                f"answering a wrapper it read; a recogniser BOTH upstream legs consult can stop "
+                f"naming the key (measured at this head: `_names_property_key` forced off "
+                f"reddens HERE, on a PLAIN row, with the arm untouched); or the FOURTH leg can "
+                f"WIDEN to answer a row nothing upstream answers (measured: an arm-only widening "
+                f"reddens HERE with no upstream leg touched). The one thing this red DOES "
+                f"establish is that leg 1 is not the cause — it is a DUPLICATE at this seam, "
+                f"measured 0 rows where leg 1 answers and leg 3 does not. A real store is still "
+                f"REFUSED, so nothing certifies: this is the record's guard, not a fail-open."
             )
 
 

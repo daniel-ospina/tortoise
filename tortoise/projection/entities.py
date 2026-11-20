@@ -109,7 +109,7 @@ def _derived_mirror_required(entity_type: str) -> bool:
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
     `sdk::_event_raw_write_door`, `sdk::_session_event_write`,
-    `sdk::_embedding_repair_attempt`, `sdk::ingest_corpus`,
+    `sdk::_embedding_repair_attempt`, `sdk::_ingest_corpus`,
     `session_indexer::main` and `hosted_backup::restore_graph` all write the same
     derived `embedding` property, so each must ask the SAME predicate — the one
     `record_vector.mirror_required` owns — and each has the same reason to survive an
