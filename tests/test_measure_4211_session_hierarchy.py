@@ -1860,3 +1860,42 @@ def test_c7_a_journal_of_unparseable_records_is_a_zero_shape_not_a_measurement(
     empty = tmp_path / "nothing"
     empty.mkdir()
     assert "skipped" in mod.measure_corpus(str(empty))
+
+
+# ── #13919 review cycle 8 ───────────────────────────────────────────────────
+def test_c8_a_ledger_sentence_about_a_QUERY_matches_the_query_it_describes():
+    """C8 (P2): the ledger stated the opposite of the artifact's own `queries` block.
+
+    The note for `sessions_with_gt1_aboutObject_edge` claimed its published 0 was the
+    EDGE reading, while every arm's recorded Cypher for that key is
+    `WITH s, count(DISTINCT o) AS c` — the OBJECT reading. That told a reader the #12244
+    double-wire question was measured and answered 0, when `count(r)` was never run, so
+    it shipped false comfort about a write-bug class inside the ledger whose stated job
+    is to stop exactly that. Nothing caught it: the calibration pin treats the ledger as
+    an opaque blob (`json.dumps(...)` for key-name membership only).
+
+    This pin DERIVES which reading a key's recorded Cypher is, and requires the ledger's
+    sentence about that key to use the same word — so a hand-edit either way is red.
+    """
+    receipt = _receipt()
+    ledger = json.dumps(receipt.get("post_measurement_revision") or {})
+    assert "sessions_with_gt1_aboutObject_edge" in ledger, (
+        "the ledger must name this key, because the artifact does not answer the "
+        "double-wire question")
+
+    for arm in ("store", "writer", "live"):
+        cypher = receipt["arms"][arm]["queries"]["sessions_with_gt1_aboutObject_edge"]
+        # Which reading IS this Cypher? Derive it, never assume it.
+        is_object_reading = "count(DISTINCT o)" in cypher
+        is_edge_reading = "count(r)" in cypher
+        assert is_object_reading != is_edge_reading, (
+            f"{arm}: the recorded Cypher is neither a clear edge nor a clear object "
+            f"reading: {cypher}")
+        if is_object_reading:
+            # …then the ledger must not call the published value the EDGE reading.
+            assert "is the EDGE reading" not in ledger, (
+                f"{arm}: the recorded Cypher is `count(DISTINCT o)` (the OBJECT "
+                "reading), and the ledger calls the published 0 the EDGE reading — a "
+                "reader would take the #12244 double-wire question as answered")
+            assert "is the OBJECT reading" in ledger, (
+                f"{arm}: the ledger must say which reading this artifact actually took")
