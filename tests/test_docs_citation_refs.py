@@ -2784,8 +2784,10 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: whose own text opens with `#` (measured: `tortoise/ranking.py`'s `graph_boost` docstring
 #: carries such a line). An empty result therefore proves that every changed line WHICH
 #: REACHED STAGE 2 opens with `#`; it cannot prove those lines are comments, and it says
-#: nothing at all about a blank-line-only change — stage 1 drops an added line that is just
-#: `+`/`-` and any added line whose content itself opens with `+`/`-` (measured:
+#: nothing at all about a blank-line-only change — stage 1 drops a line that is just
+#: `+`/`-` and any line whose first character after the marker is `+`/`-`, ADDED OR REMOVED
+#: alike (`--counter` is a removed line and stage 1 drops it just the same): the marker is one
+#: character and the test is on the NEXT one, so the class is direction-blind (measured:
 #: `printf '%s\n' '+' '++i' '--counter' | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`
 #: is silent while the input holds three changed lines). That was the over-claim that TWO
 #: separate sentences of the D5 cell made — and the second one was not among the three the
@@ -2807,6 +2809,13 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: SHAPE in the spellings the pattern below covers. It does NOT close the class: the declared
 #: escapes at the pattern are real, and the sentence that used to sit here ("the property cannot
 #: come back in different words") was itself the over-claim round 19 reded.
+#: ⛔ AND ONE ROW IS A PRONOUN BINDING, not a description of the filter's output: the companion
+#: measurement beside the filter was described as "the command that counts them" — the nearest
+#: antecedent being the TWO `+`/`-` sign classes stage 1 drops — while the command it named
+#: (`grep -cE '^\+$'`) counts ONE of them (blank ADDED lines) and misses the sign-opening class
+#: and the blank REMOVED line alike. A reader following it over a blank-removed-only diff read
+#: `0` and concluded nothing was there, which is the false negative this whole cell exists to
+#: stop, so the class is banned the same way its siblings are (#13956 review, P2).
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
     "drops exactly the lines whose first non-space character is `#`",
@@ -2815,6 +2824,13 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "both out",
     "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
     "comment",
+    "a docstring line whose content opens with anything else passes both stages and "
+    "prints",
+    "a docstring or code line whose content opens with anything else WOULD appear in "
+    "its output",
+    # The companion measurement's object, not the filter's: `grep -cE '^\+$'` counts blank
+    # ADDED lines only, so "them" (the two sign classes) is a count it cannot produce.
+    "is the command that counts them at YOUR head",
 )
 
 #: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
@@ -3031,6 +3047,87 @@ def _comment_filter(payload: str, include: str, exclude: str) -> str:
         capture_output=True, text=True, check=False).stdout
 
 
+#: The count command the D5 cell prescribes for the blank-line class, as the cell spells it.
+#: The EXPRESSION is read out of the document and executed, never re-spelled here: the claim
+#: under test is what `grep` does with the expression THAT SENTENCE carries (#13956 review, P2).
+_D5_BLANK_COUNT_RE = re.compile(
+    r"`git diff origin/main\.\.\.HEAD \\\| grep -cE '(?P<expr>[^']+)'` is the command "
+    r"that counts the BLANK ones at YOUR head")
+
+
+#: ANY `grep -c…` prescription in the bundle, whatever command prefix and whatever sentence
+#: follows it, plus the shape that makes a prescription BLANK-class. Keying "exactly one" on
+#: the COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
+#: this row already prescribes `git diff origin/main...HEAD -- tortoise/` five times, so a
+#: second BLANK-class command written that way left the count GREEN while the row carried two
+#: prescriptions — the retired, narrower one among the ungraded ones — and, in the other
+#: direction, it redded a legitimately different command of the same shape
+#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
+#: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
+#: `+`/`-` lines.
+_D5_ANY_COUNT_EXPR_RE = re.compile(r"grep -c[A-Za-z]* '([^']+)'")
+_D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
+
+
+def _d5_blank_count_expression() -> str:
+    """The blank-line count expression as `05-verify.md` states it.
+
+    Loud on zero or many — and MANY is checked TWICE, because "a second command" has two
+    spellings that fail differently: a second copy of the SENTENCE arm (5) grades (the
+    anchored pattern), and a second BLANK-CLASS PRESCRIPTION worded or prefixed differently
+    (the expression-shaped count). Zero would make every assertion below vacuous — an inert
+    arm of exactly the kind (3) refuses for the ledger rows — and MANY would silently grade
+    the first of two prescriptions, which is how a cell ends up asserting one command while
+    its reader follows another.
+    """
+    bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+              / "05-verify.md").read_text(encoding="utf-8")
+    prescriptions = _D5_ANY_COUNT_EXPR_RE.findall(bundle)
+    blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    assert len(blank_prescriptions) == 1, (
+        f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
+        f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
+        "them while a reader follows another")
+    found = _D5_BLANK_COUNT_RE.findall(bundle)
+    assert len(found) == 1, (
+        "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
+        f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
+    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE; THIS ONE BINDS THE
+    # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
+    # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
+    # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
+    # `len(blank_prescriptions) == 1` GREEN while the SENTENCE prescribes a WIDER command, and
+    # `found[0]` — the expression actually executed below — is then never checked against the
+    # class at all. Measured at `280c1899c7`: widen the sentence to `^[+-]` and append a
+    # `^\+$` decoy, and the whole 447-test suite stayed green while the row's own sentence
+    # ("… and ONLY that class: it does not count the sign-opening one (`++i`, `--counter`,
+    # `+- 2)`)") became FALSE. With this assertion the same two-edit mutant reds HERE.
+    assert _D5_BLANK_CLASS_EXPR_RE.fullmatch(found[0]), (
+        f"05-verify.md's BLANK-line sentence prescribes {found[0]!r} at this head, which is not "
+        "the BLANK class the row names — so the document tells the reader to count a wider "
+        "class than the one it claims to count. A decoy BLANK-class prescription elsewhere in "
+        "the bundle keeps the count above green, which is why the EXECUTED expression has to "
+        "be bound to the class here (#13956 review, P2)")
+    return found[0]
+
+
+def _blank_line_count(diff: str) -> int:
+    """The document's blank-line count command, executed on `diff`.
+
+    Same discipline as `_comment_filter`, and the reason this arm is not a text ban: the
+    text ban for this class cannot see a VALUE change under a stable spelling — the rot this
+    cell records for constants ("a symbol can keep its NAME and change its VALUE"). Running
+    the expression the sentence carries is what reds when the instrument narrows while the
+    wording stays.
+    """
+    out = subprocess.run(
+        ["grep", "-cE", _d5_blank_count_expression()], input=diff,
+        capture_output=True, text=True, check=False)
+    assert out.returncode in (0, 1), (
+        f"grep refused the document's own expression: {out.stderr!r}")
+    return int(out.stdout.strip() or 0)
+
+
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
     """The `#`-only grep was described as something the filter cannot be (#13853 round 16).
 
@@ -3216,6 +3313,11 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "rules both out",
         "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
         "comment",
+        "a docstring line whose content opens with anything else passes both stages and "
+        "prints",
+        "a docstring or code line whose content opens with anything else WOULD appear in "
+        "its output",
+        "is the command that counts them at YOUR head",
     ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
@@ -3452,6 +3554,40 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(invisible), (
             f"the per-head-verdict ban misses {invisible!r} — an invisible format character or a "
             "compatibility lookalike must be folded (#13948 review rounds 30-31)")
+
+    # (5) THE COUNT COMMAND ITSELF, executed (#13956 review, P2). The cell names the class it
+    # drops as "a diff line that is just `+` or `-`", and prescribes a count for it. The
+    # spelling that stood at `a03c1dd163e` matched only blank ADDED lines: over a diff whose
+    # only change is a blank REMOVED line it printed `0`, which is precisely the false
+    # negative this cell exists to prevent ("a blank-line-ONLY change is invisible to it").
+    # Arm (1) bans the WORDING that said so; this arm holds the instrument, because a regex
+    # can narrow under a correct sentence and no text ban can see that.
+    assert _blank_line_count("+\n") == 1, (
+        "the document's count command no longer counts a blank ADDED line")
+    assert _blank_line_count(" a\n-\n b\n") == 1, (
+        "the document's count command does not count a blank REMOVED line, which is half "
+        "the class the cell names (\"a diff line that is just `+` or `-`\") and the shape "
+        "the superseded spelling read as `0` (#13956 review, P2)")
+    # ⛔ TWO ASSERTIONS WERE DELETED HERE (#13956 review round 7, P3; then round 8, P2 raised
+    # the SECOND one and was right about the reason — measured below):
+    #  • `_blank_line_count("+\n-\n") == 2` was a strict CONSEQUENCE of the two assertions above
+    #    — a `grep -c` counts LINES, so any expression that counts a blank `+` and a blank `-`
+    #    returns 2, and under `^\+$` the REMOVED-line assertion above reds first. Its intent is
+    #    still held, direction by direction, by those two.
+    #  • `_blank_line_count("++i\n--counter\n+- 2)\n") == 0` was DELETED ON A REASON THAT WAS
+    #    FALSE: round 7 claimed no mutation could reach it because the class gate would raise
+    #    its loud ZERO first. Round 8 measured the two-edit mutant — widen the SENTENCE to
+    #    `^[+-]`, append a `^\+$` decoy elsewhere in the bundle — and found the whole suite GREEN
+    #    with this line REINSTATED it reds alone (`assert 3 == 0`) while the two directional
+    #    assertions stay green. So it WAS reachable; what was actually missing was the BINDING
+    #    in `_d5_blank_count_expression()` that the executed expression is the BLANK-class one.
+    #    That binding now exists (see its assertion above), so the sentence's expression is
+    #    provably exactly-one-character and NO mutation can make this line the one that reds:
+    #    a widened sentence reds the binding first. The deleted line's intent is therefore held
+    #    at the root, where the decoy path is closed too — not merely restated here.
+    # ⛔ A dead assertion is not free: it reads as coverage the tree does not have. But neither is
+    # a deleted one that was not dead — which is why the second deletion was re-measured and its
+    # justification replaced with the binding rather than with an argument.
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():

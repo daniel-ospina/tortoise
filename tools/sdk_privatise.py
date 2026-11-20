@@ -197,7 +197,20 @@ SWEEP_NAMES = 66
 #: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
-SWEEP_RESIDUE = (11794, "d26b6f638a612643")
+#: ⛔ RE-CUT AGAIN onto `origin/main` `6fbd96f270` → (11804, "e0c67cf6a5e97d20"), MEASURED with
+#: `--repin` on THIS tree. The value is the same one `origin/main` observes on its OWN tree
+#: (`uv run python tools/sdk_privatise.py --repin` in a clean checkout of `6fbd96f270` prints
+#: `(11804, 'e0c67cf6a5e97d20')`), so NONE of the rows below the previous pin are this PR's:
+#: the four typed references this lane exists to fix were already re-pointed on `main` by
+#: `#13973` (`tests/test_13826_write_gate.py` calls `_ingest_corpus` at `6fbd96f270`, and this
+#: PR's diff no longer touches that file at all), so `typed references still pointing at a
+#: public name: 0` on both sides. The +10 over `main`'s own pin of 11794 are the BASE's, from
+#: the merges that landed while this PR waited (`#13914`, `#13950`, `#13972`-era); they are not
+#: enumerated here, because a row list taken from another head is the D5 rot this repo forbids
+#: (`docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`, deviation D5). ⛔ The
+#: practical effect is that `main`'s `--check` is RED on its own tree at `6fbd96f270` and this
+#: re-cut turns it green; re-derive the pair with `--repin`, never by arithmetic on the last one.
+SWEEP_RESIDUE = (11804, "e0c67cf6a5e97d20")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
