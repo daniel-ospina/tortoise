@@ -26,8 +26,19 @@ named test goes RED):
 * **Fold an unserved key in as "coldest"** →
   ``test_unserved_keys_are_not_returned_as_coldest`` RED — that would re-impose
   creation recency, the policy the owner's criterion replaces.
+* **Treat an UNDATED serve as the oldest** →
+  ``test_an_undated_entry_sorts_warmest`` RED — one bad ``at`` would send the
+  hottest node to the front of the eviction queue.
 * **Read a capped stream as a quiet one** → ``test_a_capped_stream_is_reported``
-  RED — the failure mode §7's "different artifact" rule exists to prevent.
+  RED — the failure mode §7's "different artifact" rule exists to prevent. The
+  door must also REFUSE: ``test_a_capped_counter_refuses_to_order``.
+* **Order a POOLED roll-up** → ``test_a_pooled_rollup_refuses_to_order`` RED —
+  one tenant's node would look hot because another tenant read it.
+* **Report an empty stream as a fresh arming** →
+  ``test_an_empty_stream_is_not_a_confident_zero`` RED — after a `copytruncate`
+  every node is "unserved" and the caller silently reverts to creation recency.
+* **Accept a checkpoint that disables its own prefix check** (``head_len = 0``) →
+  ``test_a_forged_checkpoint_cannot_disable_the_prefix_check`` RED.
 """
 
 from __future__ import annotations
@@ -114,7 +125,7 @@ def test_a_row_without_its_contract_key_is_named_not_absorbed(stream: Path) -> N
 
     got = usage_signal.refresh(stream)
 
-    assert list(got.entries) == [("Source", "https://b")]
+    assert [e.key for e in got.entries.values()] == ["https://b"]
     assert got.unresolved_skips == 1
 
 
@@ -269,7 +280,7 @@ def test_a_truncated_stream_forces_a_cold_replay(stream: Path) -> None:
     got = usage_signal.refresh(stream)
 
     assert got.replayed is True
-    assert list(got.entries) == [("Point", "new")]
+    assert [e.key for e in got.entries.values()] == ["new"]
 
 
 def test_a_torn_tail_is_folded_exactly_once(stream: Path) -> None:
@@ -429,8 +440,8 @@ def test_pruning_bounds_the_rollup_and_names_the_watermark(stream: Path) -> None
     now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
     got = usage_signal.refresh(stream, now=now, window_days=2)
 
-    assert ("Point", "ancient") not in got.entries
-    assert ("Point", "recent") in got.entries
+    assert got.entry("Point", "ancient") is None
+    assert got.entry("Point", "recent") is not None
     assert got.pruned == 1
     assert got.pruned_before == _at(1)
 
@@ -497,20 +508,18 @@ def test_ordering_matches_the_ledgers_own_record(
     )
 
     got = usage_signal.refresh(stream)
-    signal_order = sorted(
-        (_stamp(got.last_served(label, key)), got.serve_count(label, key), key)
-        for label, key in got.coldest_first()
-    )
+    # ⛔ COMPARE THE EMITTED ORDER, not a sorted multiset. Wrapping both sides in
+    # `sorted(...)` makes the assertion blind to order — the exact property under
+    # test — while reading as if it pinned it.
+    emitted = [
+        (_stamp(got.last_served(lbl, key)), got.serve_count(lbl, key), key)
+        for lbl, key in got.coldest_first()
+    ]
 
-    assert signal_order == from_ledger, (
+    assert emitted == from_ledger, (
         "the counter's ordering disagrees with the instrument's own record of the "
         "same search pattern"
     )
-    # …and the ORDER the counter hands the scorer is that same ranking.
-    assert [
-        (_stamp(got.last_served(lbl, key)), got.serve_count(lbl, key), key)
-        for lbl, key in got.coldest_first()
-    ] == signal_order
 
 
 def _stamp(value: str | None) -> float:
@@ -523,44 +532,78 @@ def _stamp(value: str | None) -> float:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+#: Package roots a serve counter may never import. A residency signal that can
+#: reach one of these can write to the store it is bounding — the write
+#: amplification `#14011` exists to avoid — so the reachability itself is banned.
+_FORBIDDEN_GRAPH_ROOTS = (
+    "falkordb",
+    "redis",
+    "tortoise.manager",
+    "tortoise.graph_connection",
+    "tortoise.sdk",
+)
+
+
+def _imports_of(source: str) -> set[str]:
+    """Every module this source imports, RELATIVE IMPORTS RESOLVED.
+
+    ⛔ The resolution is the whole point. An earlier version of this guard walked
+    `ast.ImportFrom` with `node.module` truthy and compared the leftover string,
+    so `from . import manager` (module is None) was SKIPPED and
+    `from .graph_connection import get_connection` recorded `.graph_connection`,
+    which matched nothing in the forbidden set. Both spellings are the ones this
+    package actually uses (`from . import read_ledger`,
+    `from .config import resolve_db_path`), so the guard passed on the exact
+    regression it existed for.
+    """
+    import ast
+
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None:
+                found.add(
+                    node.module if node.level == 0 else f"tortoise.{node.module}"
+                )
+            elif node.level:
+                # `from . import x` — resolve each alias under the package.
+                found.update(f"tortoise.{alias.name}" for alias in node.names)
+    return found
+
+
 def test_no_graph_dependency() -> None:
     """The signal must not be able to reach a graph client, even by accident.
 
     A `last_searched_at` property written on every search is write amplification
     into the very store the window exists to bound (#14011), so this module is
-    required to have no graph in reach at all — an import is the only way it
-    could get one.
+    required to have no graph in reach at all — an import is the only way it could
+    get one. The import forms checked include the relative spellings this package
+    actually uses; see `_imports_of`.
     """
-    forbidden = {
-        "falkordb",
-        "redis",
-        "tortoise.graph_connection",
-        "tortoise.manager",
-        "tortoise.sdk",
-    }
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
-    top_level = {
-        line.split()[1].split(".")[0]
-        for line in source.splitlines()
-        if line.startswith(("import ", "from ")) and " import " not in line
+    imported = _imports_of(source)
+    offending = {
+        name
+        for name in imported
+        for root in _FORBIDDEN_GRAPH_ROOTS
+        if name == root or name.startswith(root + ".")
     }
-    # Relative imports (`from .x import y`) are inside the package; the point of
-    # the guard is that none of them is a STORE client.
-    assert "falkordb" not in top_level
-    assert "redis" not in top_level
-
-    import ast
-
-    imported: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            imported.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module if node.level == 0 else "." + node.module)
-    assert not (imported & forbidden), (
-        f"usage_signal imports a graph client: {sorted(imported & forbidden)} — a "
-        f"residency signal may never write to the store it is bounding"
+    assert not offending, (
+        f"usage_signal imports a graph client: {sorted(offending)} — a residency "
+        f"signal may never write to the store it is bounding"
     )
+
+
+def test_the_no_graph_guard_catches_relative_imports() -> None:
+    """The guard itself is pinned — it was defeated once by import spelling."""
+    assert _imports_of("from . import manager\n") == {"tortoise.manager"}
+    assert _imports_of("from .graph_connection import get\n") == {
+        "tortoise.graph_connection"
+    }
+    assert _imports_of("import redis\n") == {"redis"}
+    assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
@@ -595,3 +638,253 @@ def test_refresh_never_raises_when_the_stream_disappears_mid_flight(
 
     assert got.stale is True
     assert got.error is not None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The bound made OBSERVABLE — "incremental" is a measurement, not a claim
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_an_idle_refresh_folds_no_bytes_and_rewrites_no_checkpoint(stream: Path) -> None:
+    """A refresh with nothing appended does NO fold work.
+
+    The reading reports the work it did, so a later "simplify by replaying the
+    whole stream" refactor is visible instead of invisible — and a per-pass
+    scorer does not pay O(entries) for an idle call.
+    """
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    usage_signal.refresh(stream)
+    ckpt = usage_signal.checkpoint_path(stream)
+    before = ckpt.stat().st_mtime_ns
+
+    idle = usage_signal.refresh(stream)
+
+    assert idle.bytes_folded == 0
+    assert idle.lines_folded == 0
+    assert idle.serves_folded == 0
+    assert ckpt.stat().st_mtime_ns == before, "an idle refresh rewrote the checkpoint"
+
+
+def test_incremental_folds_only_the_new_bytes(stream: Path) -> None:
+    """⛔ THE BOUND, AS A NUMBER. A full replay cannot pass this.
+
+    `replayed` is about whether a checkpoint EXISTED and `lines_read` is
+    cumulative — neither can distinguish an incremental fold from a rebuild from
+    byte 0. `bytes_folded`/`lines_folded` are this refresh's own work.
+    """
+    for hour in range(1, 11):
+        _serve(stream, "Point", [f"p{hour}"], at=_at(hour))
+    first = usage_signal.refresh(stream)
+    assert first.bytes_folded == stream.stat().st_size, "the cold fold read the whole file"
+
+    _serve(stream, "Point", ["p99"], at=_at(11))
+    second = usage_signal.refresh(stream)
+
+    assert second.bytes_folded == len(stream.read_bytes()) - first.offset
+    assert second.lines_folded == 1
+    assert second.serves_folded == 1
+    assert second.lines_read == first.lines_read + 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The failures that must be IMPOSSIBLE to consume silently
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_capped_counter_refuses_to_order(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ THE DOOR, not just the flag. A frozen counter must evict NOTHING.
+
+    `capped` being reported is not enough: a caller that forgets to read it gets
+    an ordering over a counter that stopped recording, in which every
+    recently-served node has aged into "cold" — the pass then deletes the hottest
+    nodes in the cache. Returning nothing evicts nothing, which is the safe
+    direction; the caller loses throughput, never data.
+    """
+    monkeypatch.setenv(usage_signal.USAGE_MAX_BYTES_ENV, "400")
+    usage_signal._warned.clear()
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    for hour in range(2, 30):
+        _serve(stream, "Point", [f"p{hour}"], at=_at(hour % 24))
+
+    got = usage_signal.refresh(stream)
+
+    assert got.capped is True
+    assert got.orderable is False
+    assert got.coldest_first() == []
+    assert "STOPPED recording" in (got.refusal_reason() or "")
+
+
+def test_an_empty_stream_is_not_a_confident_zero(stream: Path) -> None:
+    """The `copytruncate` shape: the file exists, records nothing, looks healthy.
+
+    Without this, after a rotation every candidate is "unserved", the caller falls
+    back to creation recency — the policy the owner's criterion replaces — while
+    the reading reports no error at all.
+    """
+    stream.write_text("", encoding="utf-8")
+
+    got = usage_signal.refresh(stream)
+
+    assert got.stale is True
+    assert got.error == "empty stream"
+    assert got.orderable is False
+    assert got.coldest_first() == []
+
+
+def test_a_forged_checkpoint_cannot_disable_the_prefix_check(stream: Path) -> None:
+    """⛔ A checkpoint that says `head_len = 0` must be a CACHE MISS.
+
+    `_state_matches_stream` short-circuits when there is no consumed prefix, so a
+    per-field-valid checkpoint claiming `head_len = 0` alongside a real `offset`
+    would silently disable the ONLY check that catches an in-place, same-size
+    replacement — and the old fold would be merged onto the new file's content and
+    reported as current.
+    """
+    _serve(stream, "Point", ["p1", "p2"], at=_at(1))
+    usage_signal.refresh(stream)
+
+    ckpt = usage_signal.checkpoint_path(stream)
+    payload = json.loads(ckpt.read_text(encoding="utf-8"))
+    assert payload["head_len"] > 0
+    payload["head_len"] = 0
+    ckpt.write_text(json.dumps(payload), encoding="utf-8")
+    stream.write_text(
+        stream.read_text(encoding="utf-8").replace("p1", "q1"), encoding="utf-8"
+    )
+
+    got = usage_signal.refresh(stream)
+
+    assert got.replayed is True
+    assert got.last_served("Point", "p1") is None
+    assert got.serve_count("Point", "q1") == 1
+
+
+def test_an_undated_entry_sorts_warmest(stream: Path) -> None:
+    """⛔ "UNKNOWN TIME" IS NOT "OLDEST". One bad `at` must not evict a hot node.
+
+    An entry with a count but no parseable stamp is KNOWN to have been served; its
+    recency is unknown. Sorting it first is the module's own stated worst case —
+    the eviction pass deletes the hottest node in the cache — reachable from a
+    single hand-edited or foreign-written line.
+    """
+    _serve(stream, "Point", ["old"], at=_at(1))
+    _serve(stream, "Point", ["fresh"], at=_at(9))
+    with open(stream, "a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"at": "not-a-time", "event": "serve", "label": "Point", "key": "just_served"}
+            )
+            + "\n"
+        )
+
+    got = usage_signal.refresh(stream)
+
+    assert got.undated_serves == 1
+    assert [k for _lbl, k in got.coldest_first()] == ["old", "fresh", "just_served"]
+    # …and it is NOT lumped in with the coordinates this counter has no opinion on.
+    assert [e.key for e in got.undated_entries()] == ["just_served"]
+    assert "just_served" not in got.unserved_keys(["just_served"])
+
+
+def test_a_pooled_rollup_refuses_to_order(stream: Path) -> None:
+    """⛔ Two tenants in one roll-up must not be ordered together.
+
+    On one shared graph two tenants' ``(Point, id)`` pairs collide, so a pooled
+    ordering scores one tenant's node on another tenant's reads — a node looks hot
+    because a stranger read it, which keeps the wrong node resident.
+    """
+    _serve(stream, "Point", ["shared"], at=_at(1))
+    usage_signal.record_serves(
+        "Point", [{"id": "other"}], at=_at(9), path=stream, tenant_id="org-2"
+    )
+
+    pooled = usage_signal.refresh(stream)
+    assert pooled.pooled is True
+    assert pooled.tenants == 2
+    assert pooled.coldest_first() == []
+    assert "tenant" in (pooled.refusal_reason() or "")
+
+    # …and one partition at a time is orderable.
+    one = usage_signal.refresh(stream, tenant="org-2")
+    assert one.pooled is False
+    assert one.coldest_first() == [("Point", "other")]
+    assert one.serve_count("Point", "shared") == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The funnel wiring — a hook nothing drives is a hook that gets lost
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_the_funnel_hook_is_off_by_default(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag off ⇒ one env lookup and NOTHING written (the response is identical)."""
+    from tortoise import sdk
+
+    monkeypatch.delenv(usage_signal.USAGE_FLAG_ENV, raising=False)
+    monkeypatch.setenv(usage_signal.USAGE_PATH_ENV, str(stream))
+
+    sdk._usage_record("Point", [{"id": "p1"}])
+
+    assert not stream.exists()
+
+
+def test_the_funnel_hook_records_served_rows(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tortoise import sdk
+
+    monkeypatch.setenv(usage_signal.USAGE_FLAG_ENV, "1")
+    monkeypatch.setenv(usage_signal.USAGE_PATH_ENV, str(stream))
+
+    sdk._usage_record("Point", [{"id": "p1"}, {"id": "p2"}])
+
+    got = usage_signal.refresh(stream)
+    assert sorted(e.key for e in got.entries.values()) == ["p1", "p2"]
+
+
+def test_a_candidate_pool_is_never_counted_as_a_serve(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ The `_record_reads` guard, exercised rather than inspected.
+
+    The FTS funnel fetches pools with ``_record_reads=False``. Counting a pool as
+    served would mark a node the caller never saw as USED — the flattering
+    direction, and the reason ``_usage_record_served`` exists as a named,
+    testable step instead of a line inside a closure.
+    """
+    from tortoise import sdk
+
+    monkeypatch.setenv(usage_signal.USAGE_FLAG_ENV, "1")
+    monkeypatch.setenv(usage_signal.USAGE_PATH_ENV, str(stream))
+
+    sdk._usage_record_served("Point", [{"id": "pooled_only"}], False)
+    assert not stream.exists(), "a candidate POOL was recorded as a serve"
+
+    sdk._usage_record_served("Point", [{"id": "served"}], True)
+    got = usage_signal.refresh(stream)
+    assert [e.key for e in got.entries.values()] == ["served"]
+
+
+def test_the_shared_ledger_hook_also_feeds_the_counter(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 14 `_ledger_record` call sites are covered by ONE hook.
+
+    If someone deletes the counter's call from `_ledger_record`, that is 14
+    recorded read paths silently losing their serve signal — this is the test
+    that notices.
+    """
+    from tortoise import sdk
+
+    monkeypatch.setenv(usage_signal.USAGE_FLAG_ENV, "1")
+    monkeypatch.setenv(usage_signal.USAGE_PATH_ENV, str(stream))
+    monkeypatch.delenv("TORTOISE_READ_LEDGER", raising=False)
+
+    sdk._ledger_record("Point", [{"id": "p1"}], kind="lookup")
+
+    got = usage_signal.refresh(stream)
+    assert [e.key for e in got.entries.values()] == ["p1"]

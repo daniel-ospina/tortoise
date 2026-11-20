@@ -13536,7 +13536,7 @@ def _read_stored_number(value, default):
         return default
 
 
-def _usage_record(label: str, rows: "list[dict] | None") -> None:
+def _usage_record(label: str, rows: list[dict] | None) -> None:
     """#14011: feed the window-local USAGE counter (a serve, not a measurement).
 
     ⛔ **THIS IS NOT THE READ LEDGER, AND THE DIFFERENCE IS A RECORDED DECISION.**
@@ -13568,6 +13568,20 @@ def _usage_record(label: str, rows: "list[dict] | None") -> None:
         usage_signal.record_serves(label, rows)
     except Exception:  # pragma: no cover — belt and braces; the module swallows too
         return
+
+
+def _usage_record_served(label: str, rows: list[dict] | None, record_reads: bool) -> None:
+    """Record SERVED rows only — ⛔ never a candidate POOL.
+
+    Extracted from the FTS funnel so the guard is TESTABLE rather than a line
+    inside a closure nothing can reach. A POOL is a set the caller never saw: the
+    funnel fetches it with ``_record_reads=False``, and counting one as a serve
+    would mark a node the caller never saw as USED — the flattering direction for
+    a residency score, which is what makes a node look hot and keeps it resident.
+    """
+    if not record_reads:
+        return
+    _usage_record(label, rows)
 
 
 def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
@@ -46446,13 +46460,12 @@ class TortoiseSDK:
                     returned=len(rows or ()),
                 )
             # #14011: the serve counter observes the same event, into its own
-            # artifact. ⛔ Outside the ledger block above, because that block is
-            # skipped entirely when the measurement flag is off — the two flags
-            # arm independently. ⛔ It DOES respect `_record_reads`: a candidate
-            # POOL is not a serve, and counting one would mark a node the caller
-            # never saw as used (the flattering direction for a residency score).
-            if _record_reads:
-                _usage_record(label, rows)
+            # artifact (`SEARCH-ARCHITECTURE.md` §7 — the ledger is a measurement
+            # and may not be a product input). ⛔ Outside the ledger block above,
+            # because that block is skipped entirely when the measurement flag is
+            # off: the two flags arm independently. `_record_reads` is threaded
+            # through so a candidate POOL is never counted as a serve.
+            _usage_record_served(label, rows, _record_reads)
             return rows
 
         def _with_claim_class(rows: list[dict],

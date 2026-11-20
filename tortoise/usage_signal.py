@@ -5,19 +5,19 @@ The owner's eviction criterion (`#13989`, 2026-11-20, verbatim):
 > *"2 criteria should be recency of usage (searched), not recency of creation."*
 
 Nothing in the tree could answer it. This module is that answer: a per-graph
-roll-up of ``(label, key) -> (last served ts, serve count)``, derived from an
-append-only serve stream, with a **bounded incremental** fold so a query never
-replays the whole history.
+roll-up of ``(tenant, label, key) -> (last served ts, serve count)``, derived
+from an append-only serve stream, with a **bounded incremental** fold so a query
+never replays the whole history.
 
 ⛔ WHY THIS IS NOT `tortoise/read_ledger.py` — READ THIS BEFORE "SIMPLIFYING" IT
 ================================================================================
 
 The read ledger already records reads and already folds them to a per-key
 ``read_count`` / ``last_read_at``. Reusing it is the obvious move and it is
-**forbidden by a recorded decision**, in two places:
+**forbidden by a recorded decision**, in two places.
 
 `docs/architecture/SEARCH-ARCHITECTURE.md` §7, policy row *"window-local touch
-counters + admission control"*::
+counters + admission control"* (verified at this head, line 580)::
 
     ⚠️ The counter is WINDOW-LOCAL cache state — a different artifact from
     `tortoise/read_ledger.py`. That ledger is TENANT-WIDE and is explicitly not a
@@ -28,68 +28,81 @@ counters + admission control"*::
 `docs/architecture/STORAGE-ARCHITECTURE.md` §17.4.6, closing the §3-deviation
 paragraph: *"it would be a violation if any product decision read it."*
 
-**The decision is right, and the reason is a failure mode, not ceremony.** The
-ledger's size bound is tuned for a MEASUREMENT window: at
-``TORTOISE_READ_LEDGER_MAX_BYTES`` it writes one ``capped`` line and **stops
-recording**. If an eviction pass scored off it, the moment the ledger capped the
-counter would freeze, every recently-served node would age into "cold", and the
-pass would evict **the hottest nodes in the cache** — a measurement bound
-silently promoted into a correctness parameter. So this module owns its own
-artifact, with its own bound, whose ONE purpose is this policy input. §7 asks
-for exactly that: *window-local cache state*.
+So this module owns its own artifact, with its own bound, whose ONE purpose is
+this policy input. §7 asks for exactly that: *window-local cache state*. Neither
+the writer nor the reader here ever opens a ledger file.
 
-**What the ledger IS used for here: as the instrument that validates this
-counter.** :mod:`tests.test_usage_signal` replays a scripted search pattern
-through both and requires the orderings to agree
-(:func:`tests.test_usage_signal.test_ordering_matches_the_ledgers_own_record`).
-That is ``#14011``'s "matches the ledger's own record of that pattern" — the
-instrument checking the counter, which is what an instrument is for. Neither the
-writer nor the reader of this module ever opens a ledger file.
+⚠️ **A bounded stream can freeze, here as in the ledger — and that is why the
+DOOR fails closed.** ``USAGE_MAX_BYTES`` stops recording exactly the way the
+ledger's bound does. The difference is what happens to a consumer: this module's
+ordering door (:meth:`UsageReading.coldest_first`) **refuses to order a capped
+or pooled counter at all**, so a frozen counter evicts *nothing* — the safe
+direction — instead of ranking live nodes as cold and evicting the hottest ones.
+A fold that merely reported a number would reproduce the hazard; refusing at the
+door is what removes it.
+
+WHAT THE LEDGER *IS* USED FOR HERE: as the instrument that validates this
+counter. ``tests/test_usage_signal.py::test_ordering_matches_the_ledgers_own_record``
+replays a scripted search pattern through both and requires the orderings to
+agree — ``#14011``'s own "matches the ledger's own record of that pattern". That
+is an instrument checking a counter, which is what an instrument is for; §7
+forbids the reverse direction (the product reading the ledger).
 
 WHAT A "SERVE" IS
 =================
 
-One line per returned row, written in ONE ``O_APPEND`` batch per read (the same
-discipline as the ledger, and for the same measured reason: a per-event
+One line per returned row, written in ONE ``O_APPEND`` batch per read (the
+ledger's own measured discipline, and for the same reason: a per-event
 open/write/close is ~610 µs, i.e. 5 ms on a ten-row read — an instrument that
 slows the path it measures). A serve is recorded at the **funnel that hands rows
 to a caller**, so what it counts is *"this node was in an answer somebody saw"*,
 which is the question the policy asks. ``get_point`` is deliberately NOT a
 recording site, for the ledger's own reason: the write paths read through it, so
-counting it would mark written-but-never-read nodes as served (the flattering
-direction for a residency score — a node looks hot because it was created).
+counting it would mark written-but-never-read nodes as served — a node would
+look hot because it was created.
 
-⛔ NO WRITE TOUCHES A NODE. The signal lives in a file beside the store, never
-in the graph: a ``last_searched_at`` property written on every search is write
+⛔ NO WRITE TOUCHES A NODE. The signal lives in a file beside the store, never in
+the graph: a ``last_searched_at`` property written on every search is write
 amplification into the very store the window exists to bound. This module
-imports no graph client and opens no connection — ``test_no_graph_dependency``
-pins that.
+imports no graph client and opens no connection —
+``test_no_graph_dependency`` pins that, and pins it against the import spellings
+this package actually uses.
+
+TENANCY — the coordinate has THREE parts, not two
+=================================================
+``(tenant, label, key)``. The ledger carries a tenant for a measured reason
+(§17.4.6: *"a hosted process serving many tenants would otherwise write every
+event under ``tenant = None``"*), and it matters MORE here, because this artifact
+is the product input: on one shared graph, two tenants' ``(Point, id)`` pairs
+would otherwise pool, and one tenant's eviction would be scored on a stranger's
+traffic — a node looks hot because somebody else read it, which is the flattering
+direction. So the tenant is recorded on the event, and a reading that sees more
+than one partition **refuses to order** (``pooled``) rather than pooling.
 
 DERIVED, NEVER AUTHORITATIVE
 ============================
-
 The stream is the record of what was served; the checkpoint is a **cache of a
 fold**, and it may be deleted at any time. ``refresh`` then replays the stream
-from zero and produces the same reading — that is the invariant
+from zero and produces the same reading — the invariant
 ``test_incremental_equals_cold_replay`` and
-``test_restart_survives_on_the_checkpoint_alone`` hold it to. Nothing downstream
-may treat a reading as a fact about the store; it is a fact about *this file*,
-carrying its own window, its own offset and its own truncation flag.
+``test_restart_survives_on_the_checkpoint_alone`` hold it to.
 
 ⚠️ **AN EMPTY READING IS NOT "NOTHING IS HOT".** A freshly armed signal reports
 ``served_total == 0`` because nothing has been *observed* yet, not because
-nothing was used. Everything here that can be empty says so with its window and
-its counters rather than reporting a confident zero — the same rule
-``read_ledger`` states for the first report of a new ledger.
+nothing was used. A missing stream, an EMPTY stream (a `copytruncate` rotation
+mid-window) and an unpartitioned read all say so on the reading's face — with its
+window (``observed_from``) and its counters — rather than reporting a confident
+zero. ``test_an_empty_stream_is_not_a_confident_zero`` is that guard: without it,
+after a rotation every node is "unserved", the caller falls back to creation
+recency, and the reading still looks healthy.
 
 FAIL DIRECTION
 ==============
-
 A read never fails because the signal did. Every write failure is swallowed and
-warned once; ``refresh`` returns the last good checkpoint (marked ``stale``) or
-an empty reading rather than raising into the caller that wanted a search
-result. A checkpoint that cannot be read is a CACHE MISS, not an error: the
-stream is replayed from cold.
+warned once; ``refresh`` returns the last good reading (marked ``stale``) or an
+empty one rather than raising into the caller that wanted a search result. A
+checkpoint that cannot be read is a CACHE MISS, not an error: the stream is
+replayed from cold.
 
 OFF BY DEFAULT, AND OFF MEANS NOT IMPORTED
 ==========================================
@@ -126,24 +139,23 @@ USAGE_FLAG_ENV = "TORTOISE_USAGE_SIGNAL"
 #: so two graphs on one host do not pool into one counter.
 USAGE_PATH_ENV = "TORTOISE_USAGE_SIGNAL_PATH"
 
-#: The stream's size bound. On the bound it writes one `capped` line and stops.
-#: ⚠️ Deliberately its OWN variable, not the ledger's: this bound is a policy
-#: input's freshness horizon, and sharing the measurement's would couple two
-#: artifacts whose bounds answer different questions (§7).
+#: The stream's size bound. On the bound it writes one `capped` line and stops —
+#: and the ordering door then REFUSES (see the module docstring): a frozen counter
+#: must evict nothing, never rank live nodes as cold.
 USAGE_MAX_BYTES_ENV = "TORTOISE_USAGE_SIGNAL_MAX_BYTES"
 DEFAULT_MAX_BYTES = 16 * 1024 * 1024
 
 #: Optional trailing window for the ROLL-UP (not for the stream). ``None`` —
-#: the default — keeps every entry, so ``serve_count`` is exact. Set it and
-#: an entry whose last serve is older than the window is dropped and reported
-#: only as ``pruned_before``: its exact count is gone, its recency is bounded.
-#: That trade is opt-in because the scorer it feeds scores RECENCY, and a
-#: bounded "not served since <watermark>" answers that; an exact count does not
-#: need to survive beyond the window for this policy.
+#: the default — keeps every entry, so ``serve_count`` is exact. Set it and an
+#: entry whose last serve is older than the window is dropped and reported only
+#: as ``pruned_before``: its exact count is gone, its recency is bounded. Opt-in,
+#: because the scorer consumes RECENCY and a bounded "not served since
+#: <watermark>" answers that.
 USAGE_WINDOW_DAYS_ENV = "TORTOISE_USAGE_SIGNAL_WINDOW_DAYS"
 
 EVENT_SERVE = "serve"
 EVENT_CAPPED = "capped"
+EVENT_UNRESOLVED = "unresolved"
 
 #: Checkpoint format version. A checkpoint written by another version is IGNORED
 #: (replayed from cold), never migrated: it is a cache, and a cache that cannot
@@ -163,19 +175,23 @@ MAX_LINE_BYTES = 4096
 #: ⛔ The fingerprint length is FIXED, not the current offset (or every refresh
 #: would compare a longer prefix against a shorter stored digest and replay from
 #: cold for ever). A stream shorter than this fingerprints its whole self and
-#: stores the length it used (`_State.head_len`), which stays comparable because
+#: stores the length it used (``_State.head_len``), which stays comparable because
 #: the stream is APPEND-ONLY.
 HEAD_FINGERPRINT_BYTES = 8192
 
+#: The tenant filter's "every partition" sentinel. Distinct from ``None``, which
+#: names the ledger's own single namespace (a self-hosted instance).
+ALL_TENANTS = "\x00all-tenants"
+
 _warned: set[str] = set()
+
+#: Re-entrancy guard for one process; the cross-process lock is `_file_lock`.
+_REFRESH_LOCK = threading.Lock()
 
 #: The events the LAST `_append_many` kept (i.e. not dropped for size or
 #: encoding). `record_serves` needs them to report how many of ITS caller's rows
 #: provably reached the file — the intended count is not the delivered one.
 _LAST_KEPT = threading.local()
-
-#: Re-entrancy guard for one process; the cross-process lock is `_file_lock`.
-_REFRESH_LOCK = threading.Lock()
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -191,6 +207,21 @@ def enabled() -> bool:
     This is the same predicate for callers that already imported it.
     """
     return is_truthy(os.environ.get(USAGE_FLAG_ENV))
+
+
+def tenant() -> str | None:
+    """The tenancy partition an event belongs to (the request's org, else none).
+
+    ⛔ **Reuses the ledger's own resolver on purpose.** It is a pure function of
+    the env override and the auth contextvar — not a read of that artifact — and
+    sharing it means the two writers partition a hosted process the SAME way. A
+    second implementation is how ``tenant = None`` came to be written for every
+    event of a multi-tenant deployment (§17.4.6), which pools tenants and biases
+    a score in the flattering direction.
+    """
+    from . import read_ledger
+
+    return read_ledger.tenant()
 
 
 def _store_tag() -> str:
@@ -251,7 +282,7 @@ def _window_days() -> float | None:
     except ValueError:
         # ⛔ A MISTYPED WINDOW IS NOT "NO WINDOW". A typo'd pruning bound that
         # degrades to "keep everything" silently un-bounds the roll-up, which is
-        # the quiet direction; the reading reports the refusal instead.
+        # the quiet direction; the warning names the refusal.
         _warn_once(
             "window",
             "usage signal: %s=%r is not a day count — the roll-up is running "
@@ -302,9 +333,9 @@ def row_key(label: str, row: Mapping[str, Any]) -> str | None:
     contract (``Point``/``Subject``/``Object`` -> ``id`` since ``#9881``,
     ``Event -> eventId``, ``Source -> url``) is the record's, and a second
     implementation of it here would drift — the ledger's own docstring names a
-    pair of readers that "could drift and nothing here would notice". Sharing
-    it is also what makes the equivalence test meaningful: both artifacts key
-    rows the same way, so the only thing compared is the ORDERING.
+    pair of readers that "could drift and nothing here would notice". Sharing it
+    is also what makes the equivalence test meaningful: both artifacts key rows
+    the same way, so the only thing compared is the ORDERING.
 
     A ``None`` is a row the contract cannot address. It is NOT a serve of some
     fallback key — inventing one would score a node that was never returned.
@@ -400,21 +431,20 @@ def _append_many(records: Iterable[Mapping[str, Any]], *, path: Path) -> int:
         blob = "".join(lines).encode()
         # ⛔ THE BATCH ITSELF COUNTS against the bound (the ledger's own lesson:
         # checking only the pre-write size lets one batch cross the bound with no
-        # marker at all). The bound is a ceiling on EVENTS, so the marker line
-        # may sit a few dozen bytes over it — the marker is what makes the
-        # truncation audible, and an inaudible one is the failure this module
-        # refuses.
+        # marker at all). The bound is a ceiling on EVENTS, so the marker line may
+        # sit a few dozen bytes over it — the marker is what makes the truncation
+        # audible, and an inaudible one is the failure this module refuses.
         if size >= cap or size + len(blob) > cap:
             # The decision reads the FILE's tail, never a process latch: a
-            # rotated stream that caps AGAIN must say so again, or the second
-            # stop is silent and `refresh` reports `capped: false` over a file it
+            # rotated stream that caps AGAIN must say so again, or the second stop
+            # is silent and `refresh` reports `capped: false` over a file it
             # truncated.
             if not _tail_is_capped(target):
                 fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 with os.fdopen(fd, "ab") as fh:
                     # A torn final line with no newline would make the marker
-                    # unparseable AND corrupt it — the guarantee failing exactly
-                    # in the case it exists for.
+                    # unparseable AND corrupt it — the guarantee failing exactly in
+                    # the case it exists for.
                     if size and not _tail_ends_with_newline(target):
                         fh.write(b"\n")
                     fh.write(
@@ -433,9 +463,10 @@ def _append_many(records: Iterable[Mapping[str, Any]], *, path: Path) -> int:
                     )
             _warn_once(
                 "capped",
-                "usage signal %s: reached its %d B bound — no further serves "
-                "are recorded (rotate it or raise %s); the scorer must read the "
-                "reading's `capped` flag, not a shrinking counter",
+                "usage signal %s: reached its %d B bound — no further serves are "
+                "recorded (rotate it or raise %s). The ordering door REFUSES a "
+                "capped counter, so eviction stops rather than ranking live nodes "
+                "as cold.",
                 target,
                 cap,
                 USAGE_MAX_BYTES_ENV,
@@ -502,18 +533,21 @@ def record_serves(
     *,
     at: str | None = None,
     path: Path | None = None,
+    tenant_id: str | None = None,
 ) -> int:
     """Record a returned row-set as SERVED, in ONE append. Returns keys recorded.
 
-    Called from the serve funnel only when the flag is on. ``rows`` are the
-    dicts the funnel hands a caller, so what is recorded is exactly what was
-    surfaced — not a candidate pool, and not the stock.
+    Called from the serve funnel only when the flag is on. ``rows`` are the dicts
+    the funnel hands a caller, so what is recorded is exactly what was surfaced —
+    not a candidate pool, and not the stock.
 
-    A row the identity contract cannot address is SKIPPED (it is not served
-    under a fallback key). That is a hole in the counter, and the reading names
-    it (``unresolved_skips``) rather than absorbing it.
+    A row the identity contract cannot address is SKIPPED (it is not served under
+    a fallback key), and the skip is COUNTED so ``refresh`` can report the hole.
     """
     stamp = at or _now()
+    # Same rule the ledger's own writers use: `tenant_id=None` means "resolve it
+    # from the request context", and an unauthenticated context resolves to None.
+    who = tenant_id if tenant_id is not None else tenant()
     events: list[dict[str, Any]] = []
     unresolved = 0
     for row in rows or ():
@@ -530,12 +564,15 @@ def record_serves(
                 "event": EVENT_SERVE,
                 "label": label,
                 "key": key,
+                "tenant": who,
             }
         )
     if unresolved:
         # File-level, not per-row: a count is all this counter keeps, and the
         # count is what makes the hole visible in `refresh`.
-        events.append({"at": stamp, "event": "unresolved", "n": unresolved})
+        events.append(
+            {"at": stamp, "event": EVENT_UNRESOLVED, "n": unresolved, "tenant": who}
+        )
     if not events:
         return 0
     written = _append_many(events, path=path or usage_path())
@@ -556,8 +593,9 @@ def record_serves(
 
 @dataclass(frozen=True)
 class UsageEntry:
-    """One ``(label, key)`` coordinate and what the stream observed about it."""
+    """One ``(tenant, label, key)`` coordinate and what the stream observed."""
 
+    tenant: str | None
     label: str
     key: str
     last_served_at: str | None
@@ -568,8 +606,14 @@ class UsageEntry:
     def served(self) -> bool:
         return self.serve_count > 0
 
+    @property
+    def dated(self) -> bool:
+        """Is this entry's recency KNOWN? (an undated serve cannot place itself)"""
+        return self.last_served_at is not None
+
     def as_dict(self) -> dict[str, Any]:
         return {
+            "tenant": self.tenant,
             "label": self.label,
             "key": self.key,
             "last_served_at": self.last_served_at,
@@ -588,6 +632,9 @@ class _State:
     source_ino: int | None = None
     head_sha: str | None = None
     head_len: int = 0
+    #: The tenant filter this fold was built under. A checkpoint built for one
+    #: partition may not be incrementally extended under another.
+    partition: str | None = None
     lines_read: int = 0
     lines_skipped: int = 0
     served_total: int = 0
@@ -596,20 +643,20 @@ class _State:
     capped: bool = False
     pruned: int = 0
     pruned_before: str | None = None
-    #: ``"label\tkey"`` -> [last, first, count]. On DISK this is a list of
-    #: arrays (see `_serialise`), so a key containing any byte round-trips.
-    entries: dict[str, list[Any]] = field(default_factory=dict)
+    #: Every partition the stream has been seen to carry, bounded (all we need
+    #: is "more than one"). Serialised as a sorted list.
+    tenants: set[str | None] = field(default_factory=set)
+    #: The earliest event `at` the STREAM contains — the fact that says a
+    #: rotation restarted the window while the history is gone.
+    observed_from: str | None = None
+    #: ``(tenant, label, key)`` -> ``[last, first, count]``.
+    entries: dict[Any, list[Any]] = field(default_factory=dict)
 
-    @staticmethod
-    def ident(label: str, key: str) -> str:
-        return f"{label}\t{key}"
-
-    def apply(self, label: str, key: str, at: str | None) -> None:
-        ident = self.ident(label, key)
-        slot = self.entries.get(ident)
+    def apply(self, coord: Any, at: str | None) -> None:
+        slot = self.entries.get(coord)
         parsed = _stamp(at) is not None
         if slot is None:
-            self.entries[ident] = [at if parsed else None, at if parsed else None, 1]
+            self.entries[coord] = [at if parsed else None, at if parsed else None, 1]
             return
         slot[2] += 1
         if parsed:
@@ -618,26 +665,26 @@ class _State:
             if slot[1] is None or _stamp_cmp(at, slot[1]) < 0:
                 slot[1] = at
 
-    def prune(self, before: datetime) -> None:
-        """Drop entries whose last serve is older than `before` (bounded memory).
+    def prune(self, before: datetime) -> bool:
+        """Drop entries last served before `before`. Returns whether any went.
 
-        ⛔ A PRUNED ENTRY LOSES ITS COUNT, and the reading says so: it is
-        reported only as "not served since ``pruned_before``". That is enough
-        for a RECENCY score (which is what consumes this) and it is honest
-        about what was dropped — silently keeping a decayed count would be a
-        number the stream no longer supports.
+        ⛔ A PRUNED ENTRY LOSES ITS COUNT, and the reading says so: it is reported
+        only as "not served since ``pruned_before``". That is enough for a
+        RECENCY score (which is what consumes this) and it is honest about what
+        was dropped — silently keeping a decayed count would be a number the
+        stream no longer supports.
         """
-        dropped: list[str] = []
+        dropped: list[Any] = []
         watermark: str | None = None
-        for ident, slot in self.entries.items():
+        for coord, slot in self.entries.items():
             last = slot[0]
             last_dt = _stamp(last) if isinstance(last, str) else None
             if last_dt is not None and last_dt < before:
-                dropped.append(ident)
+                dropped.append(coord)
                 if watermark is None or _stamp_cmp(last, watermark) > 0:
                     watermark = last
-        for ident in dropped:
-            del self.entries[ident]
+        for coord in dropped:
+            del self.entries[coord]
         if dropped:
             self.pruned += len(dropped)
             if watermark is not None and (
@@ -645,6 +692,7 @@ class _State:
                 or _stamp_cmp(watermark, self.pruned_before) > 0
             ):
                 self.pruned_before = watermark
+        return bool(dropped)
 
 
 @dataclass(frozen=True)
@@ -652,13 +700,14 @@ class UsageReading:
     """The usage signal as of one fold — DERIVED, never authoritative.
 
     Every field is here so a consumer cannot quote a bare ordering: a score
-    computed over a capped stream, or over a window that started five minutes
-    ago, must be quotable-with-its-caveat or not quoted at all.
+    computed over a capped stream, over a pooled set of tenants, or over a window
+    that started five minutes ago must be quotable-with-its-caveat or not quoted
+    at all.
     """
 
     source: str
     as_of: str
-    entries: Mapping[tuple[str, str], UsageEntry]
+    entries: Mapping[Any, UsageEntry]
     served_total: int
     pruned: int
     pruned_before: str | None
@@ -670,42 +719,112 @@ class UsageReading:
     offset: int
     replayed: bool
     stale: bool
+    #: This refresh's own work — the BOUND, observable. A refresh that replayed
+    #: the whole stream would report ``bytes_folded`` equal to the file size, so a
+    #: future "simplify by replaying" refactor cannot pass as unchanged.
+    bytes_folded: int = 0
+    lines_folded: int = 0
+    serves_folded: int = 0
+    observed_from: str | None = None
     window_started: str | None = None
+    tenants: int = 0
+    pooled: bool = False
     error: str | None = None
+
+    # ── honesty ────────────────────────────────────────────────────────────
+
+    @property
+    def orderable(self) -> bool:
+        """May a scorer order this reading at all? (fail-closed when it may not)
+
+        ``False`` for a CAPPED counter (frozen — ordering it would rank live
+        nodes as cold and evict the hottest), for a POOLED one (more than one
+        tenant's traffic in one roll-up — ordering it scores one tenant on
+        another's reads), and for a STALE one (no stream).
+        """
+        return not (self.capped or self.pooled or self.stale)
+
+    def refusal_reason(self) -> str | None:
+        """Why :attr:`orderable` is False, in words a caller can log."""
+        if self.stale:
+            return f"no usable counter ({self.error or 'stale'})"
+        if self.capped:
+            return (
+                "the stream reached its size bound and STOPPED recording — a frozen "
+                "counter ages every served node into 'cold', so ordering it would "
+                "evict the hottest nodes in the cache"
+            )
+        if self.pooled:
+            return (
+                f"{self.tenants} tenant partition(s) are folded together — order one "
+                f"tenant at a time (`refresh(tenant=...)`), or a node looks hot "
+                f"because a different tenant read it"
+            )
+        return None
+
+    def staleness_seconds(self, now: datetime | None = None) -> float | None:
+        """How far behind the stream this reading is, or ``None`` if unknown."""
+        ref = now or datetime.now(UTC)
+        if ref.tzinfo is None:
+            ref = ref.replace(tzinfo=UTC)
+        parsed = _stamp(self.as_of)
+        return (ref - parsed).total_seconds() if parsed is not None else None
 
     # ── the door the scorer uses ───────────────────────────────────────────
 
-    def entry(self, label: str, key: str) -> UsageEntry | None:
-        return self.entries.get((label, key))
+    def entry(
+        self, label: str, key: str, *, tenant: str | None = None
+    ) -> UsageEntry | None:
+        """The entry for one coordinate in ONE partition.
 
-    def last_served(self, label: str, key: str) -> str | None:
-        got = self.entry(label, key)
+        ``tenant`` defaults to ``None`` — the unpartitioned namespace a
+        self-hosted instance writes, and what a single-org deployment resolves to
+        when there is no request context. A POOLED reading must name its partition:
+        :meth:`coldest_first` refuses one, and picking an entry across partitions
+        would score a node on another tenant's traffic.
+        """
+        return self.entries.get((tenant, label, key))
+
+    def last_served(
+        self, label: str, key: str, *, tenant: str | None = None
+    ) -> str | None:
+        got = self.entry(label, key, tenant=tenant)
         return got.last_served_at if got is not None else None
 
-    def serve_count(self, label: str, key: str) -> int:
-        got = self.entry(label, key)
+    def serve_count(
+        self, label: str, key: str, *, tenant: str | None = None
+    ) -> int:
+        got = self.entry(label, key, tenant=tenant)
         return got.serve_count if got is not None else 0
 
-    def recency_key(self, label: str, key: str) -> tuple[float, int, str]:
-        """``(last_served_epoch, serve_count, key)`` — COLDEST FIRST when sorted.
+    def recency_key(
+        self, label: str, key: str, *, tenant: str | None = None
+    ) -> tuple[float, int, str] | None:
+        """``(last_served_epoch, serve_count, key)`` — smallest = COLDEST.
 
-        This is an ORDERING, not a score. The residency policy (``#13989``:
-        usage recency plus a class booster for ``Object``/``Subject``/``Source``)
-        composes this with its own terms; the module deliberately does not embed
-        a formula, because the formula is policy and its home is not here.
+        Returns ``None`` when this counter has **no opinion** about the
+        coordinate (never served since the signal was armed). ⛔ ``None`` is not
+        the same as "cold": a node written a minute ago has no signal, and
+        ranking it coldest would re-impose creation recency — the policy the
+        owner's criterion replaces.
 
-        A key with no observed serve sorts BEFORE every served key (``-inf``):
-        "never served since the signal was armed" is the coldest reading there
-        is. ⚠️ That includes a node created a minute ago, which is why
-        :meth:`coldest_first` keeps unserved keys in their own bucket and lets
-        the caller decide — see its docstring.
+        An entry with a COUNT but no parseable time (an undated serve) sorts at
+        ``+inf``, i.e. WARMEST: it is known to have been served and its recency
+        is unknown, so the safe reading is "do not evict this". Ranking it
+        coldest is the module's stated worst case reachable from one bad ``at``.
+
+        This is an ORDERING, not a score. The residency policy (``#13989``: usage
+        recency plus a class booster for ``Object``/``Subject``/``Source``)
+        composes it with its own terms; the module deliberately embeds no
+        formula, because the formula is policy and its home is not here.
         """
-        got = self.entry(label, key)
-        if got is None or got.last_served_at is None:
-            return (float("-inf"), 0, key)
-        parsed = _stamp(got.last_served_at)
-        epoch = parsed.timestamp() if parsed is not None else float("-inf")
-        return (epoch, got.serve_count, key)
+        got = self.entry(label, key, tenant=tenant)
+        if got is None:
+            return None
+        parsed = _stamp(got.last_served_at) if got.last_served_at else None
+        if parsed is None:
+            return (float("inf"), got.serve_count, key)
+        return (parsed.timestamp(), got.serve_count, key)
 
     def coldest_first(
         self,
@@ -718,29 +837,40 @@ class UsageReading:
         ``cache_evictor.evict`` takes a ``Selector`` whose job is to return
         candidates "ordered cold-first by whatever policy the caller owns"
         (``#10976``). This is the usage-recency term of that ordering, and it is
-        stable: ties on ``last_served_at`` fall to the lower ``serve_count``,
+        stable: ties on the last served time fall to the lower ``serve_count``,
         then to the key string, so two runs over the same stream agree exactly.
 
         ``label`` narrows to one population (the evictor sweeps ONE licensed
         population per pass). ``keys`` narrows to a candidate set.
 
-        ⛔ **UNSERVED KEYS ARE NOT RETURNED.** A coordinate the counter has
-        never seen is not "the coldest thing" — it is "this signal has no
-        opinion", and a newly-written node is the commonest case. Folding them
-        in would make this module evict brand-new data, i.e. exactly the
-        creation-recency policy the owner's criterion replaces. The unmapped
-        candidates are available as :meth:`unserved_keys`, so the caller applies
-        its own tie-break (the present one is creation recency) rather than
+        ⛔ **REFUSES A READING IT MAY NOT ORDER, and refuses by returning
+        NOTHING.** :attr:`orderable` False (capped, pooled, stale) yields ``[]``
+        plus a :meth:`refusal_reason` — an empty pass evicts nothing, which is
+        the safe direction; the alternative is ranking a frozen counter and
+        deleting the hottest nodes. A caller that ignores the refusal loses
+        throughput, never data.
+
+        ⛔ **UNSERVED KEYS ARE NOT RETURNED.** A coordinate the counter has never
+        seen is not "the coldest thing" — it is "this signal has no opinion", and
+        a newly-written node is the commonest case. Folding them in would make
+        this module evict brand-new data, i.e. exactly the creation-recency policy
+        the owner's criterion replaces. They are available as
+        :meth:`unserved_keys`, so the caller applies its own tie-break rather than
         inheriting one from here.
         """
+        if not self.orderable:
+            return []
         wanted = set(keys) if keys is not None else None
         rows: list[tuple[tuple[float, int, str], tuple[str, str]]] = []
-        for lbl, key in self.entries:
+        for who, lbl, key in self.entries:
             if label is not None and lbl != label:
                 continue
             if wanted is not None and key not in wanted:
                 continue
-            rows.append((self.recency_key(lbl, key), (lbl, key)))
+            order = self.recency_key(lbl, key, tenant=who)
+            if order is None:  # pragma: no cover — the key came from `entries`
+                continue
+            rows.append((order, (lbl, key)))
         rows.sort(key=lambda pair: pair[0])
         return [coord for _order, coord in rows]
 
@@ -752,20 +882,14 @@ class UsageReading:
     ) -> list[str]:
         """Which of `candidates` this signal has no opinion about (any label)."""
         if label is None:
-            seen = {key for (_lbl, key) in self.entries}
+            seen = {key for (_t, _lbl, key) in self.entries}
         else:
-            seen = {key for (lbl, key) in self.entries if lbl == label}
+            seen = {key for (_t, lbl, key) in self.entries if lbl == label}
         return [key for key in candidates if key not in seen]
 
-    # ── honesty ────────────────────────────────────────────────────────────
-
-    def staleness_seconds(self, now: datetime | None = None) -> float | None:
-        """How far behind the stream this reading is, or ``None`` if unknown."""
-        ref = now or datetime.now(UTC)
-        if ref.tzinfo is None:
-            ref = ref.replace(tzinfo=UTC)
-        parsed = _stamp(self.as_of)
-        return (ref - parsed).total_seconds() if parsed is not None else None
+    def undated_entries(self) -> list[UsageEntry]:
+        """Entries known to be served but not placeable in time (sort WARMEST)."""
+        return [e for e in self.entries.values() if not e.dated]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -781,19 +905,29 @@ class UsageReading:
             "undated_serves": self.undated_serves,
             "unresolved_skips": self.unresolved_skips,
             "offset": self.offset,
+            "bytes_folded": self.bytes_folded,
+            "lines_folded": self.lines_folded,
+            "serves_folded": self.serves_folded,
             "replayed": self.replayed,
             "stale": self.stale,
+            "observed_from": self.observed_from,
             "window_started": self.window_started,
+            "tenants": self.tenants,
+            "pooled": self.pooled,
+            "orderable": self.orderable,
+            "refusal": self.refusal_reason(),
             "error": self.error,
         }
+
+
+# ── checkpoint (a CACHE of a fold) ─────────────────────────────────────────
 
 
 def _serialise(state: _State) -> dict[str, Any]:
     """The checkpoint's on-disk form. An ARRAY per entry, so keys round-trip."""
     entries: list[list[Any]] = []
-    for ident, slot in state.entries.items():
-        label, _, key = ident.partition("\t")
-        entries.append([label, key, slot[0], slot[1], slot[2]])
+    for (tenant, label, key), slot in state.entries.items():
+        entries.append([tenant, label, key, slot[0], slot[1], slot[2]])
     return {
         "version": CHECKPOINT_VERSION,
         "offset": state.offset,
@@ -802,6 +936,7 @@ def _serialise(state: _State) -> dict[str, Any]:
         "source_ino": state.source_ino,
         "head_sha": state.head_sha,
         "head_len": state.head_len,
+        "partition": state.partition,
         "lines_read": state.lines_read,
         "lines_skipped": state.lines_skipped,
         "served_total": state.served_total,
@@ -810,6 +945,9 @@ def _serialise(state: _State) -> dict[str, Any]:
         "capped": state.capped,
         "pruned": state.pruned,
         "pruned_before": state.pruned_before,
+        "tenants": sorted(t for t in state.tenants if t is not None)
+        + ([None] if None in state.tenants else []),
+        "observed_from": state.observed_from,
         "entries": entries,
     }
 
@@ -817,19 +955,37 @@ def _serialise(state: _State) -> dict[str, Any]:
 def _deserialise(payload: Any) -> _State | None:
     """Rebuild a checkpoint, or ``None`` when it cannot be trusted.
 
-    ⛔ EVERY FIELD IS VALIDATED. A hand-edited or truncated checkpoint is a
-    CACHE MISS, not a crash and not a half-applied state: returning a partial
-    state would make the incremental fold start from an offset the entries do
-    not describe, which is the one way this module could produce a WRONG
-    ordering instead of an empty one.
+    ⛔ EVERY FIELD IS VALIDATED, INCLUDING THE ONE CROSS-FIELD INVARIANT the
+    prefix check depends on: ``head_len == min(offset, HEAD_FINGERPRINT_BYTES)``.
+    A version-1 checkpoint whose fields are each individually valid but which
+    says ``head_len = 0`` makes ``_state_matches_stream`` short-circuit and
+    disable prefix verification entirely — the only check that catches an
+    in-place, same-size replacement. Verified: without that invariant, editing
+    only the checkpoint's ``head_len`` merged a replaced stream's history onto
+    the old fold and reported it as current.
+
+    Returning a partial state would make the incremental fold start from an
+    offset the entries do not describe — the one way this module could produce a
+    WRONG ordering instead of an empty one.
     """
     if not isinstance(payload, dict):
         return None
     if payload.get("version") != CHECKPOINT_VERSION:
         return None
     try:
+        offset = int(payload["offset"])
+        head_len = int(payload.get("head_len") or 0)
+        if offset < 0 or head_len < 0:
+            return None
+        if offset and head_len != min(offset, HEAD_FINGERPRINT_BYTES):
+            return None
+        if not offset and head_len:
+            return None
+        partition = payload.get("partition")
+        if partition is not None and not isinstance(partition, str):
+            return None
         state = _State(
-            offset=int(payload["offset"]),
+            offset=offset,
             source_size=int(payload.get("source_size") or 0),
             source_dev=(
                 int(payload["source_dev"]) if payload.get("source_dev") is not None else None
@@ -840,7 +996,8 @@ def _deserialise(payload: Any) -> _State | None:
             head_sha=(
                 str(payload["head_sha"]) if payload.get("head_sha") is not None else None
             ),
-            head_len=int(payload.get("head_len") or 0),
+            head_len=head_len,
+            partition=partition,
             lines_read=int(payload.get("lines_read") or 0),
             lines_skipped=int(payload.get("lines_skipped") or 0),
             served_total=int(payload.get("served_total") or 0),
@@ -853,18 +1010,32 @@ def _deserialise(payload: Any) -> _State | None:
                 if payload.get("pruned_before") is not None
                 else None
             ),
+            observed_from=(
+                str(payload["observed_from"])
+                if payload.get("observed_from") is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
-    if state.offset < 0 or state.head_len < 0:
+    if state.offset and state.head_sha is None:
         return None
+    raw_tenants = payload.get("tenants")
+    if not isinstance(raw_tenants, list):
+        return None
+    for who in raw_tenants:
+        if who is not None and not isinstance(who, str):
+            return None
+        state.tenants.add(who)
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return None
     for row in entries:
-        if not (isinstance(row, list) and len(row) == 5):
+        if not (isinstance(row, list) and len(row) == 6):
             return None
-        label, key, last, first, count = row
+        who, label, key, last, first, count = row
+        if who is not None and not isinstance(who, str):
+            return None
         if not isinstance(label, str) or not isinstance(key, str):
             return None
         if last is not None and not isinstance(last, str):
@@ -875,7 +1046,7 @@ def _deserialise(payload: Any) -> _State | None:
             n = int(count)
         except (TypeError, ValueError):
             return None
-        state.entries[_State.ident(label, key)] = [last, first, n]
+        state.entries[(who, label, key)] = [last, first, n]
     return state
 
 
@@ -895,10 +1066,9 @@ def _load_checkpoint(target: Path) -> _State | None:
 def _save_checkpoint(target: Path, state: _State) -> bool:
     """Write the checkpoint ATOMICALLY. Returns False when it could not be kept.
 
-    ⛔ `os.replace` on a sibling temp file: a partial checkpoint read back by
-    the next `refresh` would be deserialised as a MISS (correct) but a partial
-    write that replaced a GOOD checkpoint would throw away fold progress on
-    every crash. The rename is the atomic step.
+    ⛔ `os.replace` on a sibling temp file: a partial write that replaced a GOOD
+    checkpoint would throw away fold progress on every crash. The rename is the
+    atomic step; a lost write degrades to a cache miss, never to a partial state.
     """
     tmp = target.with_suffix(target.suffix + f".tmp{os.getpid()}")
     try:
@@ -921,10 +1091,9 @@ def _file_lock(target: Path) -> Iterator[None]:
     """Serialise concurrent roll-ups across PROCESSES (a no-op if unavailable).
 
     A missed lock does not corrupt anything — the fold is a pure function of a
-    stream prefix, so the loser of a race simply re-does work — but two
-    processes writing the checkpoint concurrently WOULD interleave offsets. The
-    lock is best-effort: a filesystem without `flock` falls through rather than
-    failing the read.
+    stream prefix, so the loser of a race simply re-does work — but two processes
+    writing the checkpoint concurrently WOULD interleave offsets. Best-effort: a
+    filesystem without `flock` falls through rather than failing the read.
     """
     handle = None
     try:
@@ -952,7 +1121,7 @@ def _file_lock(target: Path) -> Iterator[None]:
 
 
 def _head_sha(target: Path, nbytes: int) -> str | None:
-    """sha256 of the stream's first `nbytes` bytes (``None`` for a zero-length prefix)."""
+    """sha256 of the stream's first `nbytes` bytes (``None`` if unreadable/short)."""
     if nbytes <= 0:
         return None
     try:
@@ -961,13 +1130,23 @@ def _head_sha(target: Path, nbytes: int) -> str | None:
     except OSError:  # pragma: no cover
         return None
     if len(head) < nbytes:
-        # The stream is shorter than the prefix it was fingerprinted over — it
-        # was truncated. A short read is not a partial match.
+        # The stream is shorter than the prefix it was fingerprinted over — it was
+        # truncated. A short read is not a partial match.
         return None
     return hashlib.sha256(head).hexdigest()
 
 
-def _empty_reading(target: Path, *, replayed: bool, stale: bool, error: str | None) -> UsageReading:
+def _stream_exists(target: Path) -> bool:
+    """Does the stream exist? An unreadable `stat` is a NO, never a raise."""
+    try:
+        return target.exists()
+    except OSError:  # pragma: no cover — a vanished mount / permission change
+        return False
+
+
+def _empty_reading(
+    target: Path, *, replayed: bool, stale: bool, error: str | None
+) -> UsageReading:
     return UsageReading(
         source=str(target),
         as_of=_now(),
@@ -994,18 +1173,22 @@ def _to_reading(
     replayed: bool,
     stale: bool,
     window_started: str | None,
+    bytes_folded: int = 0,
+    lines_folded: int = 0,
+    serves_folded: int = 0,
     error: str | None = None,
 ) -> UsageReading:
-    entries: dict[tuple[str, str], UsageEntry] = {}
-    for ident, slot in state.entries.items():
-        label, _, key = ident.partition("\t")
-        entries[(label, key)] = UsageEntry(
+    entries: dict[Any, UsageEntry] = {}
+    for (who, label, key), slot in state.entries.items():
+        entries[(who, label, key)] = UsageEntry(
+            tenant=who,
             label=label,
             key=key,
             last_served_at=slot[0],
             first_served_at=slot[1],
             serve_count=int(slot[2]),
         )
+    named = {t for t in state.tenants if t is not None}
     return UsageReading(
         source=str(target),
         as_of=_now(),
@@ -1021,24 +1204,40 @@ def _to_reading(
         offset=state.offset,
         replayed=replayed,
         stale=stale,
+        bytes_folded=bytes_folded,
+        lines_folded=lines_folded,
+        serves_folded=serves_folded,
+        observed_from=state.observed_from,
         window_started=window_started,
+        # One namespace is not "pooled": a self-hosted instance writes
+        # `tenant = None` and a single-org deployment writes one id. It is the
+        # SECOND distinct partition that makes an ordering score one tenant on
+        # another's traffic.
+        tenants=len(named) + (1 if None in state.tenants else 0),
+        pooled=len(state.tenants) > 1,
         error=error,
     )
 
 
-def _consume(state: _State, chunk: bytes) -> None:
+def _consume(state: _State, chunk: bytes, *, partition: str | None) -> tuple[int, int]:
     """Fold a byte chunk of NEW stream bytes into `state`, in FILE ORDER.
 
-    Only COMPLETE lines are consumed by the caller (it cuts at the last
-    newline), so a torn tail is re-read next time rather than lost.
+    Returns ``(lines_folded, serves_folded)`` for THIS chunk — the bound, made
+    observable so "incremental" is a measurement rather than a claim.
+
+    Only COMPLETE lines are consumed (the caller cuts at the last newline), so a
+    torn tail is re-read next time rather than lost.
     """
+    folded = 0
+    serves = 0
     for raw in chunk.split(b"\n"):
         line = raw.strip()
         if not line:
             continue
-        # A line that is not whole (the caller's cut should prevent it) or not
-        # JSON is COUNTED, never silently dropped: a torn line is a LOST serve,
-        # and a counter that hides its losses reads as complete.
+        folded += 1
+        # A line that is not whole (the caller's cut should prevent it) or not JSON
+        # is COUNTED, never silently dropped: a torn line is a LOST serve, and a
+        # counter that hides its losses reads as complete.
         try:
             ev = json.loads(line)
         except ValueError:
@@ -1050,11 +1249,25 @@ def _consume(state: _State, chunk: bytes) -> None:
         state.lines_read += 1
         kind = ev.get("event")
         if kind == EVENT_CAPPED:
-            # FILE-level, exactly like the ledger's marker: this file stopped
-            # recording, and the reading must say so for the rest of its life.
+            # FILE-level, exactly like the ledger's marker, and handled BEFORE the
+            # partition filter: the marker carries no tenant (it is the FILE that
+            # stopped), so filtering first would report a capped stream as quiet to
+            # anyone reading one partition — the truncation this module exists to
+            # refuse.
             state.capped = True
             continue
-        if kind == "unresolved":
+        at_any = ev.get("at")
+        if isinstance(at_any, str) and at_any and (
+            state.observed_from is None or _stamp_cmp(at_any, state.observed_from) < 0
+        ):
+            state.observed_from = at_any
+        who = ev.get("tenant")
+        if who is not None and not isinstance(who, str):
+            who = None
+        if partition != ALL_TENANTS and who != partition:
+            continue
+        state.tenants.add(who)
+        if kind == EVENT_UNRESOLVED:
             with contextlib.suppress(TypeError, ValueError):
                 state.unresolved_skips += int(ev.get("n") or 0)
             continue
@@ -1065,38 +1278,56 @@ def _consume(state: _State, chunk: bytes) -> None:
         if not isinstance(label, str) or not isinstance(key, str) or not label or not key:
             state.lines_skipped += 1
             continue
-        at = ev.get("at")
-        # `served_total` counts EVERY serve event folded (dated and undated) —
-        # it is the "has anything been observed" guard, so it must not understate
+        coord = (who, label, key)
+        # `served_total` counts EVERY serve event folded (dated and undated) — it
+        # is the "has anything been observed" guard, so it must not understate
         # usage. `undated_serves` is its NAMED SUBSET: a serve that happened but
-        # cannot be placed in time. Such a serve is still counted (the counter
-        # must not lose it) but it may NOT move `last_served_at` to an unknown
-        # instant — a fabricated time is worse than an old one, because the
-        # scorer would act on it.
+        # cannot be placed in time. Such a serve is still counted (the counter must
+        # not lose it) but it may NOT move `last_served_at` to an unknown instant —
+        # a fabricated time is worse than an old one, because the scorer acts on
+        # it. It sorts WARMEST for the same reason (`recency_key`).
         state.served_total += 1
-        if _stamp(at) is None:
+        serves += 1
+        if _stamp(at_any) is None:
             state.undated_serves += 1
-            state.apply(label, key, None)
+            state.apply(coord, None)
             continue
-        state.apply(label, key, at)
+        state.apply(coord, at_any)
+    return folded, serves
 
 
-def _stream_exists(target: Path) -> bool:
-    """Does the stream exist? An unreadable `stat` is a NO, never a raise.
+def _state_matches_stream(
+    state: _State, target: Path, st: os.stat_result, *, partition: str | None
+) -> bool:
+    """Is this checkpoint a fold of THIS stream's consumed prefix? (see refresh)
 
-    `Path.exists()` propagates `OSError` (a vanished mount, a permission change),
-    and this function is on a path whose contract is "never raises into the
-    caller" — a signal read may not take down a search.
+    Four independent checks, each of which alone would miss a real rotation: the
+    partition the fold was built under, the device/inode pair (a replaced file),
+    the size (a truncated one), and the head fingerprint over a FIXED prefix
+    length (an inode RECYCLED by `rm` + recreate — the size check would pass if
+    the new file happened to be longer).
     """
-    try:
-        return target.exists()
-    except OSError:  # pragma: no cover — a vanished mount / permission change
+    if state.partition != partition:
         return False
+    if state.source_dev is not None and st.st_dev != state.source_dev:
+        return False
+    if state.source_ino is not None and st.st_ino != state.source_ino:
+        return False
+    if st.st_size < state.offset:
+        return False
+    if state.head_len == 0:
+        # Nothing was consumed, so there is no prefix to compare — the size and
+        # inode checks above are the whole test.
+        return True
+    if state.head_sha is None:
+        return False
+    return _head_sha(target, state.head_len) == state.head_sha
 
 
 def refresh(
     path: Path | None = None,
     *,
+    tenant: str | None = ALL_TENANTS,
     now: datetime | None = None,
     window_days: float | None = None,
     force: bool = False,
@@ -1104,19 +1335,26 @@ def refresh(
     """Bring the roll-up up to date and return the reading. NEVER raises.
 
     **Bounded, incrementally.** One call reads only the bytes appended since the
-    last checkpoint (``state.offset`` → EOF) and never the whole stream. A read
-    of the signal is therefore O(new events), not O(history) — the constraint
-    ``#14011`` states as *"a bounded roll-up, so a read never replays the whole
-    ledger"*.
+    last checkpoint (``state.offset`` → EOF) and never the whole stream; the work
+    it did is reported as :attr:`UsageReading.bytes_folded` /
+    ``lines_folded`` / ``serves_folded``, so "incremental" is a measurement and a
+    refactor that reintroduced a full replay would be visible. When nothing was
+    appended the fold does nothing and the checkpoint is not rewritten.
 
     **Recomputed from cold when it must be.** The checkpoint is a cache. It is
     discarded and the stream replayed from zero when it is missing, unreadable,
-    written by another :data:`CHECKPOINT_VERSION`, or when the stream is not the
-    one it was built from — a different device/inode, a shorter file (truncated
-    or rotated), or a fingerprint mismatch on the consumed prefix (an inode
-    recycled by ``rm`` + recreate). Replay must produce the SAME reading as the
-    incremental path; that is the invariant the tests hold it to, and it is what
-    makes the signal derived rather than authoritative.
+    written by another :data:`CHECKPOINT_VERSION`, built under a different
+    ``tenant`` filter, or when the stream is not the one it was built from — a
+    different device/inode, a shorter file (truncated or rotated), or a
+    fingerprint mismatch on the consumed prefix (an inode recycled by ``rm`` +
+    recreate). Replay must produce the SAME reading as the incremental path; that
+    is the invariant the tests hold it to, and it is what makes the signal derived
+    rather than authoritative.
+
+    ``tenant`` defaults to :data:`ALL_TENANTS`, which folds every partition and
+    then reports ``pooled`` when it saw more than one — so the ordering door
+    refuses rather than scoring one tenant on another's traffic. Pass a specific
+    id (or ``None`` for the unpartitioned namespace) to order one tenant.
 
     ``window_days`` prunes entries whose last serve is older than the window,
     bounding the roll-up's memory. ``None`` (default) keeps every entry, so
@@ -1144,16 +1382,25 @@ def refresh(
             st = target.stat()
         except OSError as e:  # pragma: no cover — a stat race
             return _empty_reading(target, replayed=True, stale=True, error=str(e))
+        if st.st_size == 0:
+            # ⛔ A PRESENT-BUT-EMPTY STREAM IS ALSO NOT A READING. This is the
+            # `copytruncate` shape: the file exists, records nothing, and every
+            # candidate is "unserved" — so the caller falls back to creation
+            # recency while the reading looks healthy. It is indistinguishable from
+            # "just armed" unless it says so, and it says so here.
+            return _empty_reading(target, replayed=True, stale=True, error="empty stream")
 
         state: _State | None = None if force else _load_checkpoint(ckpt)
         replayed = False
-        if state is not None and not _state_matches_stream(state, target, st):
+        if state is not None and not _state_matches_stream(
+            state, target, st, partition=tenant
+        ):
             # The stream is not the one this checkpoint describes. A cache built
             # over a different prefix is worse than no cache: it would fold new
             # bytes onto another file's history.
             state = None
         if state is None:
-            state = _State()
+            state = _State(partition=tenant)
             replayed = True
         start = state.offset
 
@@ -1164,70 +1411,73 @@ def refresh(
         except OSError as e:  # pragma: no cover — an unreadable stream
             return _empty_reading(target, replayed=replayed, stale=True, error=str(e))
 
+        # ⛔ A ROTATION BETWEEN THE `stat` AND THE `open` WOULD MERGE TWO FILES:
+        # the bytes would come from the new file while `source_dev/source_ino`
+        # describe the old one. It self-heals next refresh, but the reading
+        # returned BY THIS CALL must not mix them — that is the outcome the
+        # rotation checks exist to prevent. Re-stat after the read.
+        try:
+            after = target.stat()
+        except OSError as e:  # pragma: no cover
+            return _empty_reading(target, replayed=replayed, stale=True, error=str(e))
+        if (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino):
+            state = _State(partition=tenant)
+            replayed = True
+            start = 0
+            try:
+                with open(target, "rb") as fh:
+                    chunk = fh.read()
+            except OSError as e:  # pragma: no cover
+                return _empty_reading(target, replayed=True, stale=True, error=str(e))
+            st = after
+
         # ⛔ CONSUME ONLY COMPLETE LINES. A torn tail (a crash mid-write, or a
         # writer whose batch we raced) is left UNCONSUMED, so the next refresh
-        # re-reads it once it is whole — and is folded exactly once, not zero
-        # times and not twice.
+        # re-reads it once it is whole — and is folded exactly once, not zero times
+        # and not twice.
         cut = chunk.rfind(b"\n")
         whole = chunk[: cut + 1] if cut >= 0 else b""
+        lines_folded = 0
+        serves_folded = 0
         if whole:
-            _consume(state, whole)
+            lines_folded, serves_folded = _consume(state, whole, partition=tenant)
             state.offset = start + len(whole)
-        state.source_size = st.st_size
-        state.source_dev = st.st_dev
-        state.source_ino = st.st_ino
-        # A FIXED-length prefix (see HEAD_FINGERPRINT_BYTES): the stream is
-        # append-only, so the consumed prefix can never change without the file
-        # being replaced.
-        state.head_len = min(state.offset, HEAD_FINGERPRINT_BYTES)
-        state.head_sha = _head_sha(target, state.head_len)
+        pruned_now = False
         if window is not None:
-            state.prune(ref - timedelta(days=window))
-        saved = _save_checkpoint(ckpt, state)
+            pruned_now = state.prune(ref - timedelta(days=window))
+        # An idle refresh — no new bytes and nothing pruned — leaves the checkpoint
+        # alone: rewriting the whole entry map on a no-op made a per-pass scorer pay
+        # O(entries) for nothing.
+        if whole or pruned_now or replayed:
+            state.source_size = st.st_size
+            state.source_dev = st.st_dev
+            state.source_ino = st.st_ino
+            # A FIXED-length prefix (see HEAD_FINGERPRINT_BYTES): the stream is
+            # append-only, so the consumed prefix can never change without the file
+            # being replaced.
+            state.head_len = min(state.offset, HEAD_FINGERPRINT_BYTES)
+            state.head_sha = _head_sha(target, state.head_len)
+            _save_checkpoint(ckpt, state)
         return _to_reading(
             state,
             target,
             replayed=replayed,
-            # An unsaved checkpoint is not a wrong READING — this one is exact
-            # for the bytes consumed. It is only "the next refresh redoes work".
-            # `stale` stays False; `checkpoint_kept` would be a separate fact and
-            # is not worth a field the scorer could misread.
             stale=False,
             window_started=window_started,
-            error=None if saved else "checkpoint not persisted",
+            bytes_folded=len(whole),
+            lines_folded=lines_folded,
+            serves_folded=serves_folded,
         )
 
 
-def _state_matches_stream(state: _State, target: Path, st: os.stat_result) -> bool:
-    """Is this checkpoint a fold of THIS stream's consumed prefix? (see refresh)
-
-    Three independent checks, each of which alone would miss a real rotation:
-    the device/inode pair catches a replaced file, the size catches a truncated
-    one, and the head fingerprint catches an inode RECYCLED by `rm` + recreate
-    (the size check would pass if the new file happens to be longer).
-    """
-    if state.source_dev is not None and st.st_dev != state.source_dev:
-        return False
-    if state.source_ino is not None and st.st_ino != state.source_ino:
-        return False
-    if st.st_size < state.offset:
-        return False
-    if state.head_len == 0:
-        # Nothing was consumed, so there is no prefix to compare — the size and
-        # inode checks above are the whole test.
-        return True
-    if state.head_sha is None:
-        return False
-    return _head_sha(target, state.head_len) == state.head_sha
-
-
 def reading(*, path: Path | None = None, now: datetime | None = None) -> UsageReading:
-    """The current signal. A convenience alias for :func:`refresh` (read-only).
+    """The current signal. A convenience alias for :func:`refresh`.
 
-    There is deliberately no cached in-process reading: the stream is appended
-    by a DIFFERENT process on the hosted path, so an in-process cache would age
+    There is deliberately no cached in-process reading: the stream is appended by
+    a DIFFERENT process on the hosted path, so an in-process cache would age
     silently. ``refresh`` costs one ``stat`` plus the bytes since the last
-    checkpoint, i.e. nothing when nothing was served.
+    checkpoint — no fold work and no checkpoint rewrite when nothing was served,
+    and its cost is linear in the new bytes when something was.
     """
     return refresh(path, now=now)
 
@@ -1246,16 +1496,21 @@ def _main(argv: list[str] | None = None) -> int:
         "derived from the serve stream, with its window and its truncation state.",
     )
     ap.add_argument("--stream", default=None, help="serve stream (default: env path)")
+    ap.add_argument(
+        "--tenant",
+        default=None,
+        help="order ONE tenant partition (required when the stream holds several)",
+    )
     ap.add_argument("--label", default=None, help="only this label")
     ap.add_argument("--top", type=int, default=20, help="rows to print (default 20)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
     target = Path(a.stream) if a.stream else usage_path()
-    got = refresh(target)
+    got = refresh(target, tenant=a.tenant) if a.tenant is not None else refresh(target)
     if a.json:
         print(json.dumps(got.as_dict(), indent=2))
-        return 0 if got.served_total or got.entries else 2
+        return 0 if got.orderable and got.served_total else 2
     print(f"stream           : {got.source}")
     print(f"as of            : {got.as_of}")
     if got.error:
@@ -1264,18 +1519,21 @@ def _main(argv: list[str] | None = None) -> int:
         f"serves folded    : {got.served_total:,} over {len(got.entries):,} "
         f"coordinate(s)"
     )
+    if got.observed_from:
+        print(f"stream observes  : from {got.observed_from}  (a rotation restarts this)")
     if got.window_started:
-        print(f"window           : {got.window_started} → {got.as_of}")
+        print(f"pruning window   : {got.window_started} → {got.as_of}")
     if got.pruned:
         print(
             f"pruned           : {got.pruned:,} entr(ies) last served at or before "
-            f"{got.pruned_before} (dropped by {USAGE_WINDOW_DAYS_ENV}) — their "
-            f"exact counts are gone, their recency is bounded"
+            f"{got.pruned_before} (dropped by {USAGE_WINDOW_DAYS_ENV}) — their exact "
+            f"counts are gone, their recency is bounded"
         )
     if got.undated_serves:
         print(
             f"⚠️ undated       : {got.undated_serves:,} serve(s) carry no parseable "
-            f"`at` — counted, but they cannot move a last-served time"
+            f"`at` — counted, sorted WARMEST (unknown time is not 'oldest'), and they "
+            f"cannot move a last-served time"
         )
     if got.unresolved_skips:
         print(
@@ -1284,30 +1542,29 @@ def _main(argv: list[str] | None = None) -> int:
         )
     if got.lines_skipped:
         print(
-            f"⚠️ {got.lines_skipped:,} unreadable line(s) skipped of "
-            f"{got.lines_read + got.lines_skipped:,} — the counter is INCOMPLETE"
+            f"⚠️ {got.lines_skipped:,} unreadable line(s) skipped — the counter is "
+            f"INCOMPLETE"
         )
-    if got.capped:
-        print(
-            "⛔ the stream reached its size bound and stopped recording — this "
-            "counter is TRUNCATED, not quiet. Do not score residency from it: a "
-            "frozen counter ages every served node into 'cold'."
-        )
+    if got.refusal_reason():
+        print(f"⛔ NOT ORDERABLE : {got.refusal_reason()}")
     if not got.served_total:
         print(
-            "⚠️ no serves folded yet — an armed-but-quiet signal measures nothing. "
-            "This is a MEASUREMENT WINDOW, not a finding about the corpus."
+            "⚠️ no serves folded yet — an armed-but-quiet signal measures nothing. This "
+            "is a MEASUREMENT WINDOW, not a finding about the corpus."
         )
         return 2
     order = got.coldest_first(a.label)
     shown = order[: max(0, a.top)]
     print(f"\ncoldest first ({len(shown)} of {len(order):,}):")
+    by_coord: dict[tuple[str, str], UsageEntry] = {}
+    for candidate in got.entries.values():
+        by_coord.setdefault((candidate.label, candidate.key), candidate)
     for label, key in shown:
-        got_entry = got.entry(label, key)
+        got_entry = by_coord.get((label, key))
         if got_entry is None:  # pragma: no cover — coldest_first only yields entries
             continue
         print(
-            f"  {label:<10} {key[:48]:<48} "
+            f"  {label:<10} {key[:44]:<44} "
             f"last={got_entry.last_served_at} n={got_entry.serve_count}"
         )
     return 0
