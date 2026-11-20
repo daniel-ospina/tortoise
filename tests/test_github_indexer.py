@@ -3227,8 +3227,10 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # that was about to be committed. `entities.py` used to keep this branch's values
     # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
     # status latch, so the whole block moved together and is re-derived here again
-    # (`+30` against the pre-`#13971` numbers, measured by resolving every pinned
-    # first/last line, not applied as an offset); `sdk.py` moves for both sides each
+    # (`+59` against `origin/main`'s numbers — `git diff --numstat origin/main...HEAD --
+    # tortoise/projection/entities.py` -> `61  2` — resolved line by line, never applied as an
+    # offset; the pin TABLE's own keys were only `+30` off, because the last re-derivation of
+    # this block was two commits stale when this PR re-measured it); `sdk.py` moves for both sides each
     # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a

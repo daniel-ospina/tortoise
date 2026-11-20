@@ -321,17 +321,21 @@ SWEEP_NAMES = 66
 #: that measured it; only THIS pin is this tree's.
 #:
 #: RE-CUT AGAIN → (11833, "c115acaf5bbb4163"), +2 over the (11831, …) measured at the merge
-#: `027d9b3cd69` (`origin/main` `a296e6741e5`), and both are the SAME shape: a citation PIN ROW that
-#: quotes the statement it pins, in `tests/test_github_indexer.py`. The sweep counts the quoted
-#: `.query(` in that string literal under its `string 'query' on untyped receiver` row, so a pin row
-#: added for an `entities.py` citation moves this number without a receiver appearing anywhere.
-#: Measured by bisection on this branch, one head at a time with `--repin`, never by arithmetic:
-#: `027d9b3cd69` → 11831 · `3f3db6a3df2` → 11831 · `8f7dadd61d8` → 11832 (its
-#: `("entities.py", 6444, 6449): ("row = self.g.query(", ").result_set"),`) · `1cb0eccf53a` → 11833
-#: (its `("entities.py", 6449, 6454)` row, same quoted text). ⛔ This is the DECLARED shape, not a
-#: relaxation: both rows are `tests/` strings, no SDK-holding receiver is added, and the typed-reference
-#: count is `0` on this tree, measured. The alternative — a pin table that may not quote the line it
-#: pins — would force every citation row to lose its evidence so a name-based sweep stays quiet.
+#: `027d9b3cd69` (`origin/main` `a296e6741e5`), and the rows are the SEED-DOOR pins added for
+#: `#13899`'s repair, in `tests/test_onboarding_seed.py`. Measured by bisection on this branch, one
+#: head at a time with `--repin`, never by arithmetic: `027d9b3cd69` → 11831 · `3f3db6a3df2` → 11831 ·
+#: `8f7dadd61d8` → 11832 · `1cb0eccf53a` → 11833. The rows across `3f3db6a3df2` → `1cb0eccf53a`,
+#: measured with the tool's own `--check` row dump (not inferred): `surface.create_edge` ABSENT → **2**,
+#: `surface.create_subject` 6 → **7**, and `urlsplit(str(r.url)).query` 1 → **0** — net **+2**. All
+#: three are ordinary-word receivers on objects no typing can decide (a seed surface, a URL result),
+#: which is the declared allowance this pin exists to make visible; no SDK-holding receiver is added
+#: and the typed-reference count is `0` on this tree, measured.
+#: ⛔ CORRECTION (this block's first version named a DIFFERENT cause and was refuted by measurement
+#: before it merged): it claimed two citation PIN ROWS in `tests/test_github_indexer.py` quoting
+#: `row = self.g.query(` had been counted. They cannot be — `_STRING_PLAIN` (`^([A-Za-z_][A-Za-z0-9_]*)$`)
+#: only admits a BARE identifier and the row is emitted in the `getattr/setattr/hasattr` branch, so a
+#: pin row emits no residue at all (measured: a file holding only that row → `{}`), and that file's
+#: residue set is identical on both sides of the move.
 #: `main`'s own block, kept as the history of the -1:
 #: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
 #: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
