@@ -2137,12 +2137,13 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     `tortoise/why.py:200` (`live.KIND_PROPERTIES`' scope note, `kind_expression`'s
     docstring, `_entity_label`'s record of the derived map) — the first move whose
     point is a WIDENING rather than a retirement — and **#12434**'s `:Document`
-    retirement prose in `tortoise/mcp_server.py:4430`, the seventh, whose point IS
+    retirement prose in `tortoise/mcp_server.py:4477`, the seventh, whose point IS
     a retirement — and **#12915**'s (`#4282` Phase 2, lane B) `record_decision`
-    docstring at `tortoise/sdk.py:37144` and `_file_human_approval`'s `:37186`
+    docstring at `tortoise/sdk.py:37461` and `_file_human_approval`'s `:37503`
     (the `:4382` address both copies carried is DELETED, as are `:36687,36718` in the document's copy and `:36676,36718` here,
-    re-measured: `mcp_server.py:4382` is a BLANK line, the prose is at `:4430`;
-    the two `:Document` docstring lines are `:37144` / `:37186`), the eighth, whose `Args:` block for
+    re-measured: `mcp_server.py:4382` is the
+    ``# prop named "error" must not suppress the onboarding observation.`` comment, the prose is at `:4477`;
+    the two `:Document` docstring lines are `:37461` / `:37503`), the eighth, whose `Args:` block for
     `artifact_id` names the retired label to state the D10 rule — and **#13447**'s
     `tortoise/derived_embedding.py:3`, the ninth: the seam module's opening paragraph
     spells the five labels it spans, which is prose naming the retired label to state a
