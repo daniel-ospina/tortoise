@@ -576,6 +576,56 @@ def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.tmp")) == []
 
 
+@pytest.mark.parametrize(("mutate", "expect"), [
+    (lambda d: d["subjects"][0].update(subjectKind="not-a-kind"),
+     "not in core §5"),
+    (lambda d: d["subjects"].append(dict(d["subjects"][0])), "duplicate ref"),
+    (lambda d: d["events"][0].update(content="x" * 1001), "> 1000 chars"),
+    (lambda d: d["points"][0].update(content="x" * 1001), "> 1000 chars"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(op="MAYBE"),
+     "not a mechanism"),
+    (lambda d: next(e for e in d["edges"]
+                    if "op" in e and e.get("label")).update(label="suports"),
+     "not in the Layer-2 semantics vocabulary"),
+])
+def test_each_VALIDATE_leg_2_actually_refuses(map_doc, mutate, expect):
+    """Six more `validate()` legs had NO row: each could be disabled, green.
+
+    Measured pre-fix: `pass` on any of them left 102 passed. The SEMANTICS leg is
+    not cosmetic — the door WARN-NOT-BLOCKS an out-of-vocabulary `semantics`
+    (`undeclared_relation`, #7852) and `--verify` cannot read the word back, so it
+    is the ONLY gate between a Layer-2 typo and a filed operator: measured with
+    the leg disabled, a label typo'd to `suports` passed `validate()`, was sent,
+    and the run printed `all nodes and edges written` with rc 0 (#13913 review
+    round 18).
+
+    Mutant: `pass` on that leg's `errs.append` — its own case reds.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    mutate(bad)
+    errs = filer.validate(bad)
+    assert [e for e in errs if expect in e], (expect, errs)
+
+
+def test_the_LAYER2_and_MECHANISM_vocabularies_are_the_SHIPPED_ones():
+    """`SEMANTICS` and `OP_TYPES` are read from the source, not transcribed.
+
+    `DIRECTIONS` had this pin and these two did not. A drifted transcription here
+    refuses a surface-LEGAL write (a validator bug) or admits an out-of-vocabulary
+    one (a filed operator with an unreadable meaning) — the same class as the
+    `STRUCTURAL_RELS` lag (#13913 review round 18).
+
+    Mutant: any hand-edited entry in either literal.
+    """
+    from tortoise.ep import MECHANISM_REL_TYPES
+    from tortoise.pack_registry import SEMANTICS_VALUES
+
+    got_semantics, want_semantics = filer.SEMANTICS, set(SEMANTICS_VALUES)
+    got_mechanics, want_mechanics = filer.OP_TYPES, set(MECHANISM_REL_TYPES)
+    assert got_semantics == want_semantics, got_semantics ^ want_semantics
+    assert got_mechanics == want_mechanics, got_mechanics ^ want_mechanics
+
+
 def test_validate_refuses_an_undeclared_object_kind(map_doc):
     """A kind neither core nor an installed pack declares is refused.
 
@@ -890,6 +940,41 @@ def test_an_UNBOUND_endpoint_is_recorded_as_a_failure(tmp_path, monkeypatch, map
     assert [f for f in state["failed"] if "unbound endpoint" in f], state["failed"]
     assert marker not in state["written"], "an unattempted edge was marked as written"
     assert "unbound endpoint" in err, err
+
+
+def test_an_EMPTY_200_body_is_an_UNKNOWN_outcome(monkeypatch):
+    """A 200 with no payload has no tool result to read, so it is UNCONFIRMED.
+
+    Mutant: `if not payload:` → `if False:` — the call falls through to
+    `payload.get("result")` on `None` and raises `AttributeError`, an
+    unclassified exception (#13913 review round 18).
+    """
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", lambda _b: (200, None, {}))
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "empty response" in str(excinfo.value), excinfo.value
+
+
+def test_a_WAIT_BUDGET_refusal_is_retried_TWICE_on_a_repeat_safe_door(monkeypatch):
+    """A degraded data plane does not heal inside one call; the docstring says two retries.
+
+    Mutant: `if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 2:`
+    → `if False:` — one POST then a failure (#13913 review round 18).
+    """
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+
+    def _post(_b):
+        posts.append(1)
+        return 200, {"content": [{"type": "text", "text": "wait budget exceeded"}],
+                     "isError": True}, {}
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+    with pytest.raises(filer.Refusal):
+        mcp.call("tortoise_create_point", {})
+    assert len(posts) == 3, f"a repeat-safe write retried {len(posts) - 1} time(s)"
 
 
 def test_direction_of_is_the_DOOR_s_resolver_not_a_transcription(monkeypatch):
@@ -1384,6 +1469,40 @@ def test_a_5xx_or_429_ERROR_ENVELOPE_is_not_a_refusal(monkeypatch, status):
         mcp.call("tortoise_create_operator", {}, retry_safe=False)
     assert "UNKNOWN" in str(excinfo.value), excinfo.value
     assert len(posts) == 1, f"a non-idempotent write was POSTed {len(posts)} times"
+
+
+def test_a_REAL_HTTPError_honours_the_Retry_After_HEADER(monkeypatch):
+    """`urlopen` reports EVERY non-2xx as `HTTPError`, so the `_post` unpack never runs there.
+
+    The status arm dereferenced `headers`, which was bound only on the `_post`
+    path: on a real `HTTPError(504)` the call raised `UnboundLocalError` — one
+    POST, no retry, no `state.json` (measured end-to-end) — which is EXACTLY the
+    5xx path the `Retry-After` handling exists for, and the one the PR documents
+    meeting (#13913 review round 18). The pure helper's row did not catch it,
+    because the CALL SITE was never driven.
+
+    Mutant: `headers = dict(exc.headers or {})` removed — `UnboundLocalError`
+    instead of the retry.
+    """
+    import io
+
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+    slept = []
+
+    def _post(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError(
+            "https://example.invalid", 504, "Gateway Timeout",
+            {"Retry-After": "3"}, io.BytesIO(b'{"error": "upstream timeout"}'))
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda s: slept.append(s))
+    with pytest.raises(filer.UnknownOutcome):
+        mcp.call("tortoise_create_point", {})
+    assert len(posts) == 6, posts          # the retry loop ran
+    assert slept[:1] == [3.0], slept       # the server's own back-off, not a guess
+    assert all(3.0 <= s <= 120 for s in slept), slept
 
 
 def test_a_RETRY_AFTER_HEADER_is_the_back_off_when_the_body_names_none(monkeypatch):
