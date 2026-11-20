@@ -626,7 +626,18 @@ class Mcp:
             err = (payload or {}).get("error")
             if err:
                 retry_after = _body_retry_after(payload)
-                if retry_after:
+                # ⛔ `is not None`, NOT TRUTHINESS — this decides LANDED-NESS, not
+                # just how long to wait, and `0` is a legal "retry now". With a
+                # truthiness test, `retry_after: 0` (also `-5`, `"0"`, which
+                # `_seconds_or_none` clamps to `0.0`) fell past this arm to the
+                # `Refusal` below, so a may-have-landed write was declared a
+                # DEFINITE REFUSAL — `write_once` then retired the intent, its
+                # marker sat in neither `written` nor `unconfirmed`, and the resume
+                # re-issued 51 non-idempotent operators over endpoints the door said
+                # "the work may still complete" for: the #10849 EP double-count, and
+                # a fail-OPEN measured at #13950 review round 7. Absent advice is
+                # still a refusal; present-but-zero is not.
+                if retry_after is not None:
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
                     if not retry_safe:
@@ -638,15 +649,14 @@ class Mcp:
                     # (#13950 review round 2, measured: 6 posts, 6 sleeps against
                     # every other arm's 6 and 5).
                     if attempt < 5:
-                        # ⛔ THE SAME 1 s FLOOR THE STATUS ARM APPLIES. Fractional
-                        # seconds are legal server advice, and this arm honoured
-                        # them literally: measured at #13950 review round 5,
-                        # `retry_after: 0.001` still produced 6 posts in ~15 ms on
-                        # a 2xx error envelope — the retry storm the floor exists
-                        # to prevent, on a channel the first fix did not cover.
-                        # The value is truthy at this point, so the `0` path is
-                        # untouched.
-                        time.sleep(min(120, max(1.0, retry_after)))
+                        # ⛔ THE SAME 1 s FLOOR THE STATUS ARM APPLIES, and the
+                        # same ramp for a non-positive value — `Retry-After: 0`
+                        # must not become a hammer either. Fractional seconds are
+                        # legal server advice and this arm honoured them literally:
+                        # measured at #13950 review round 5, `retry_after: 0.001`
+                        # still produced 6 posts in ~15 ms on a 2xx envelope.
+                        time.sleep(min(120, max(1.0, retry_after)) if retry_after
+                                   else min(60, 5 * (attempt + 1)))
                         continue
                     raise UnknownOutcome(
                         f"{tool}: retry_after {retry_after:g}s after 6 attempts — "
@@ -952,9 +962,18 @@ def write_map(doc: dict) -> int:
     # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
     # statement about what was on disk BEFORE this run, so it reads that.
     failed_before: list[str] = list(st.get("failed") or [])
-    # ⛔ THE MAY-HAVE-LANDED LINES, COLLECTED WHERE THE TYPE IS KNOWN. See the
-    # comment on this list's declaration below (#13950 review round 4).
-    unknown_failures: list[str] = []
+    # ⛔ EACH CLASS IS COLLECTED WHERE IT IS KNOWN, AT ITS APPEND SITE — never
+    # re-derived from the prose afterwards. Prose is a second definition of the
+    # class, and a server controls part of it: a `mechanism_mismatch` message that
+    # quotes another class's text, or a non-boolean `created` whose value contains
+    # one, made ONE line match two classes — measured at #13950 review round 7 as
+    # two headings with mutually exclusive remedies for the same 51 lines. The
+    # append site cannot drift from itself, so the buckets are disjoint by
+    # construction rather than by a `-` between two string sets.
+    unknown_failures: list[str] = []     # may have landed (exception TYPE)
+    unbound_failures: list[str] = []     # no id for a declared endpoint
+    declined_failures: list[str] = []    # the door answered created != True
+    mismatch_failures: list[str] = []    # landed, but with the wrong mechanism
 
     # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
     # taken on trust. The pre-fix run recorded every item's own name/url/content
@@ -1211,6 +1230,7 @@ def write_map(doc: dict) -> int:
             # only in `state.json` is one an operator reads about after the run
             # has already reported what it did (#13913 review round 17).
             failures.append(f"{marker}: unbound endpoint {e['from']}/{e['to']}")
+            unbound_failures.append(failures[-1])
             print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         try:
@@ -1229,6 +1249,7 @@ def write_map(doc: dict) -> int:
                     # stored is not the one the meaning declares, so the
                     # judgement is filed INVERTED and only a re-filing fixes it.
                     failures.append(f"{marker}: {mismatch}")
+                    mismatch_failures.append(failures[-1])
                     # ⛔ PRINTED, like every other failure class: this arm and the
                     # two below are the ONLY producers of a `failed` line, and the
                     # other two print. Silently appending left the `mismatch` arm's
@@ -1284,6 +1305,7 @@ def write_map(doc: dict) -> int:
                         f"{marker}: create_edge returned created="
                         f"{got.get('created')!r} — the edge was NOT written, so "
                         "it is NOT marked; the endpoints it names may not exist")
+                    declined_failures.append(failures[-1])
                     print(f"  !! {failures[-1]}", file=sys.stderr)
                     continue
             mark(marker)
@@ -1317,20 +1339,14 @@ def write_map(doc: dict) -> int:
     # GATE AND THE EXIT SUMMARY. Each pattern is anchored on `": <class text>"`
     # because the marker is followed by FIXED-POSITION module text — whereas a
     # generic-`except` line ENDS with `{exc}`, arbitrary server or exception text.
-    # The may-have-landed class is a TYPE (see the append sites), and it is
-    # computed FIRST so the three prose classes can SUBTRACT it: a difference makes
-    # the buckets disjoint by construction, whatever a server puts in an exception
-    # message. Anchoring the prose on `": <class text>"` narrows the overlap but
-    # cannot close it — a door that quotes `": mechanism_mismatch — "` inside an
-    # error string reaches `_unknown`'s reason and then the generic-`except` line
-    # verbatim (#13950 review round 5, measured: `-1 edge(s) NOT written` plus two
-    # contradictory remedies for one line).
+    # ⛔ SCOPED TO THIS RUN'S OWN LINES (`& set(failures)`), because these lists
+    # are also the gate's input and a carried line is reported by the carried
+    # heading. The lists are the AUTHORITY on class — the prose is only ever read
+    # for the identifier before the first `": "`.
     unknown = set(unknown_failures) & set(failures)
-    declined = {f for f in failures
-                if ": create_edge returned created=" in f} - unknown
-    unbound = {f for f in failures if ": unbound endpoint " in f} - unknown
-    mismatched = {f for f in failures
-                  if ": mechanism_mismatch — " in f} - unknown
+    declined = set(declined_failures) & set(failures)
+    unbound = set(unbound_failures) & set(failures)
+    mismatched = set(mismatch_failures) & set(failures)
     if carried or declined or unbound or mismatched:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
@@ -1383,6 +1399,12 @@ def write_map(doc: dict) -> int:
                   file=sys.stderr)
         for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
+        # ⛔ SAY WHEN THE LIST IS TRUNCATED. Without this the heading's count and
+        # the printed lines disagree silently: a resume carrying 12 unresolved
+        # markers printed `12 marker(s) …` over exactly 10 `!` lines and nothing
+        # said two were missing (#13950 review round 7, measured).
+        if len(repeated) > 10:
+            print(f"  … and {len(repeated) - 10} more", file=sys.stderr)
         if not repeated:
             # ⛔ THE DECLINED CLASS HAS NO MARKER, so it must not be told one
             # exists — the sentence directly above says "NO marker exists", and a
@@ -1463,11 +1485,10 @@ def write_map(doc: dict) -> int:
         # thing `retry_safe=False` exists to prevent) (#13950 review round 3).
         mismatched_n = len(mismatched)
         unknown_n = len(unknown)
-        # ⛔ A SET DIFFERENCE, NEVER ARITHMETIC: the buckets are disjoint by
-        # construction, and a difference cannot report a NEGATIVE count if a line
-        # ever matches two classifiers again — it just leaves the line in the
-        # NOT-written bucket, which is the fail-closed direction (#13950 review
-        # round 5).
+        # ⛔ A SET DIFFERENCE, NEVER ARITHMETIC: the classes are collected at their
+        # append sites, so they are disjoint by construction and this cannot report
+        # a NEGATIVE count. A line that somehow matched two classes would stay in
+        # the NOT-written bucket, which is the fail-closed direction.
         unwritten_n = len(set(failures) - mismatched - unknown)
         parts = []
         if unwritten_n:
