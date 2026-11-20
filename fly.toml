@@ -444,7 +444,7 @@ kill_timeout = 30
   TORTOISE_CONTROL_PLANE = "supabase"
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
-  # ── #13923 — the embedder WARM-UP switch, carried at its LIVE value ───────
+  # ── #13923 — the embedder WARM-UP switch, carried at its MEASURED value ───
   # Production ran `0` when it was MEASURED on the machine (`printenv`, during the
   # #13923 investigation, before this entry existed). ⛔ Do not restate that as an
   # unrecorded present-tense fact and do not invent a fresh figure: the route
@@ -476,8 +476,9 @@ kill_timeout = 30
   # `entrypoint.sh::_prewarm_embedder`, `EmbeddingModel.start_warm_up` (+
   # `warm_up`) at SDK engine init, and the hosted lifespan pre-warm, whose
   # earlier flag-blindness is #7809 — so a flip arms all three.
-  # ⛔ `0` HERE IS THE LIVE VALUE, NOT `.env.example`'s default — see the ⛔ above;
-  # do NOT "fix" it to match `.env.example`.
+  # ⛔ `0` HERE IS THE MEASURED VALUE, NOT `.env.example`'s default — see the ⛔
+  # above for why it is stated as a measurement, not as a standing fact; do NOT
+  # "fix" it to match `.env.example`.
   # ⛔ Moving it off the Fly secret is route (b) of the #4126 block in
   # `.github/scripts/fly-managed-secrets.txt`: a Fly secret SHADOWS `[env]`, so
   # the gate is RED on this name until the shadow is unset, and the ORDER is

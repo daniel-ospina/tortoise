@@ -63,7 +63,8 @@ _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
 #: (7 at `e3f894b31b`, 8 with #13926). ⛔ So a count here is HISTORY, never a standing
 #: claim: state the rule, not the total.
 #: `LIVE_NAMES` is fixture data for the tests below and is never compared against
-#: the real manifest; the pin that matters is `deliberate test change`, not coverage.
+#: the real manifest; what is pinned is that a manifest edit is a DELIBERATE test
+#: change, not that this tuple covers the audited set.
 LIVE_NAMES = ("TORTOISE_CONTROL_PLANE", "TORTOISE_REAUTH_WINDOW_SECONDS",
               "TORTOISE_MANUAL_LINKING_ENABLED")
 
