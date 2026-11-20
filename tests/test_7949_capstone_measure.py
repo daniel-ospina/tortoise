@@ -6598,7 +6598,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
         # hold EXACTLY from that START, which is how the figures below were re-derived rather
         # than nudged — a uniform +84 on both ends, and the offsets re-measured rather than
-        # assumed. The span at the PREVIOUS head, `:15262-15339`, no longer contains the
+        # assumed. The span before `c3309ec656`'s +66, `:15262-15339`, no longer contains the
         # `nodes_used` read at all (`grep -c 'nodes_used = await asyncio.to_thread'` over those
         # lines -> 0), which is why carrying it would have been a false pin.
         # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`
