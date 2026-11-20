@@ -2780,8 +2780,13 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
     THE FIX IS NOT IN THE GUARD — the guard is right, and it is the only thing
     that kept the record honest while both allocators existed. The fix is to
     remove the SECOND allocator: while the record owns the ordinal, the write path
-    must not append to the JSONL at all. Then there is one number space, the file
-    becomes an export (written only by an explicit export job), concurrent writers
+    must not append to the JSONL at all. Then there is one number space, writing
+    the file becomes OPTIONAL (nothing on the write path depends on it) and — on a
+    cut-over graph — the file is a FROZEN PREFIX rather than an export: it stops at
+    the cutover instant, and no exporter exists (`event_id`/`initiated_by`/
+    `projection_version` have no column, so a line rendered from the record would
+    be a different journal; §A7.8 item 6 and §A7.5.6's drainer are unbuilt).
+    ⛔ Do not describe it as "an export" until they are. Concurrent writers then
     serialise on a real database transaction, and the truncation class of failure
     disappears because nothing numbers off the file.
 

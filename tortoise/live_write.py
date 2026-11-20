@@ -120,8 +120,15 @@ case: `record.ok: false`, `status: degraded`, and a stream of
 cut over and armed it does not append at all — ONE number space, the counter's.
 Consequences, all of them intended:
 
-* the JSONL stops growing (it is an EXPORT from here on, produced by an
-explicit export job, not by the write path);
+* the JSONL stops growing — and it becomes OPTIONAL, not yet an EXPORT. Nothing
+  on the write path depends on the file any more, so writing it is a policy
+  question; but nothing WRITES it either (there is no drainer, and
+  `event_id`/`initiated_by`/`projection_version` have no column, so a line
+  rendered from the record would be a different journal — see
+  `docs/evidence/14002-record-only-journal/README.md` §5). On a cut-over graph
+  the file is a FROZEN PREFIX: it stops at the cutover instant and keeps
+  whatever it had. Say that, not "export", until §A7.8 item 6 and a drainer
+  (§A7.5.6) exist;
 * `position_divergence` is unreachable on the production path, while the guard
   itself is untouched — it still refuses every disagreeing ordinal a direct
   caller hands it;
