@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-13788-1795133508-p765236-150dedcf",
+  "_sha": "0aed4281e26366cf7131e749f535cce50230b21a",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-13788.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/13629-inert-arm-record"
+    },
+    {
+      "kind": "sha",
+      "value": "fc5e67cc498c83a43f37fe7bfbf08c4bee5f5ae5"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-13788"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 9982,
+  "ended_at": 1795143490,
+  "exit_code": 0,
+  "heartbeat_at": 1795143490,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-13788-1795133508-p765236-150dedcf",
+  "lease_until": 1795180090,
+  "pid": 765236,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795133508,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-13788",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-13788"
+}
