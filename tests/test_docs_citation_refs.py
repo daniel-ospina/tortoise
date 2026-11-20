@@ -2102,7 +2102,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # …and a no-verb run is BOUNDED, which is all this row claims — it is NOT LINEAR, and
     # `_GAP_UNIT`'s block records the five points that say so: at every `[` the closing unit scans
     # to the end and fails, and a run of `[` is ~n such starts, so the run is ~n^2 (#13921 review,
-    # finding 3: this line said LINEAR 1,300 lines from a paragraph that says NOT LINEAR). ⛔ IT IS
+    # finding 3: this line said LINEAR while the block it points at says NOT LINEAR — named, not
+    # cited by line number, because the distance this sentence used to give had already rotted
+    # inside this PR, the same correction as the `[^note]` row below). ⛔ IT IS
     # ONE SCAN PER START, NOT TWO: the second was `_OPEN_BRACKET`'s lookahead and it is gone — an
     # inert construct, deleted, which nearly HALVED this cost — the ONE copy of that figure lives
     # beside `_OPEN_BRACKET` above; do not restate it here. `7557a52cf5` measured the earlier
