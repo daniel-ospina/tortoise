@@ -1252,7 +1252,11 @@ class TestRunnerWiring:
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
         alerts = _capture_alert(monkeypatch)
-        monkeypatch.setattr(mcp, "_enforce_quota", lambda resource: None)
+        # ⛔ THE STUB MIRRORS THE DOOR'S SIGNATURE, keyword-only `truth_carried` included
+        # (#13829 added it to `_quota_gated`'s call and `lambda resource:` then raised
+        # TypeError on every `_quota_gated` write — a stale stub reads as a test defect, so
+        # the `**kw` is what keeps this arm measuring the no-org rule it names).
+        monkeypatch.setattr(mcp, "_enforce_quota", lambda resource, **kw: None)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
@@ -1290,7 +1294,7 @@ class TestRunnerWiring:
         import tortoise.mcp_auth as mcp_auth
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
-        monkeypatch.setattr(mcp, "_enforce_quota", lambda resource: None)
+        monkeypatch.setattr(mcp, "_enforce_quota", lambda resource, **kw: None)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default="org-M"))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
