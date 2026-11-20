@@ -397,6 +397,19 @@ surfaces:
   # `test_11892_health_quota.py` above. No `durations:` row is required: the file is
   # already in a fast surface, which is what the ENTRY RULE keys on.
   - test_13084_ram_cap.py            # #13084: dual: core
+  # #13829: the derived cache's cap at the FOLD instead of the door. DUAL-REGISTERED
+  # with `core` (where the row above it in this file's `core:` block sits) for the
+  # reason the #13084 row directly above gives, measured here too: the file drives
+  # `quota.enforce_org_limit`/`enforce_allowances` through the gate, and
+  # `tortoise/quota.py` is an EXACT `api` SOURCE_PATTERN that REPLACES the `core`
+  # fallback in `select()` — `--changed-files tortoise/quota.py` returned
+  # `surfaces: ["api"]` with this file ABSENT, i.e. a diff to the seam the
+  # `truth_carried` passthrough lives in would not run the tests for it. The `core`
+  # arm covers `allowance_gate.py`/`live_write.py` (no SOURCE_PATTERN);
+  # `mcp_server.py` and `sdk.py` are SHARED_MODULES, so their own diff forces the
+  # FULL matrix and selects this file either way. DB-FREE: doubles and the gate's
+  # own `meters=` seam.
+  - test_13829_cache_cap_at_fold.py  # #13829: dual: core
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -3575,6 +3588,24 @@ surfaces:
   # DB-free: the journal, the record and the cache are doubles; no DSN, no graph,
   # no model.
   - test_13331_live_write.py
+  # #13829: the derived cache's cap at the FOLD instead of the write door — the
+  # gate's two arms (`truth_carried`), the `CacheFoldDenial` the chokepoint
+  # consumes, and the narrowness of the `derived_layer` declaration.
+  # `core` for the same measured reason as the row above: the subjects
+  # (`tortoise/allowance_gate.py`, `tortoise/live_write.py`) have no
+  # `SOURCE_PATTERNS` entry, so a diff to the gate's arm or the fold's
+  # consumption collects this file only through a `core` row. ⛔
+  # `tortoise/mcp_server.py` and `tortoise/sdk.py` ARE claimed by other surfaces,
+  # so the door half of this file also needs the `core` fallback that a diff to
+  # `quota.py`/`allowance_gate.py` resolves to — `--changed-files` on either of
+  # those -> `['core']`.
+  # ⛔ NO CASE COUNT IN THIS COMMENT: derive it
+  # (`grep -c '^def test_' tests/test_13829_cache_cap_at_fold.py`) — a literal
+  # goes stale the moment a test is added, which the row above records happening.
+  # DB-FREE: the journal, the record and the cache fold are doubles, the meter is
+  # the gate's own `meters=` seam, and the door halves are SOURCE-order pins via
+  # `inspect.getsource`. No DSN, no graph, no model.
+  - test_13829_cache_cap_at_fold.py
   # #13034: the ONE currency rule (lifecycle word AND position axis) and its
   # five consumers. `core` for the same reason as the rows above —
   # `tortoise/live.py`, `tortoise/pipeline.py` and
