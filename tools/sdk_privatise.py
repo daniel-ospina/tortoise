@@ -291,7 +291,17 @@ SWEEP_NAMES = 66
 #: review, P2). Name the call site by its TEXT; the text is the durable fact.
 #: `typed references still pointing at a public name: 0` on this tree says no typed site replaced it.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11821, "abf4a5c65f380206")
+#: RE-CUT UP 11821 → (11828, "8796b279232593bd") by the #13998 lane, and the direction is the one
+#: that NEEDS the reading rather than the arithmetic: a residue that GROWS can be a new reference
+#: shape, which is exactly what the pin exists to refuse (`x.query` on an ordinary-word receiver is
+#: invisible to a typed-reference count). Read first, then re-pin. The seven rows are `cp.query` on
+#: a control-plane CLIENT, all of them introduced here: `capacity_notice.read_account` /
+#: `claim_notice` (2), and the tests' `_ColumnBlindCP` / fake-plane probes (5). None of them is a
+#: SDK accessor — `cp` is `supabase_control`'s PostgREST client, not `TortoiseSDK` — and
+#: `--check` on this tree still reports `typed references still pointing at a public name: 0`, so no
+#: typed site became an untyped one; seven NEW write/read calls did, which the count cannot
+#: distinguish. Re-cut with `--repin` on THIS tree, never by arithmetic on the last pin.
+SWEEP_RESIDUE = (11828, "8796b279232593bd")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
