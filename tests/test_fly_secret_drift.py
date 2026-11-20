@@ -1835,11 +1835,17 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     workflow can assign but nothing declares) fails HERE — in review — instead
     of hard-blocking the deploy in CI.
 
-    The exit code is derived from the manifest, not pinned: `unmanaged` names NO
-    managing source, so the gate FAILS while any remains and the same test goes
-    green the moment the last one is retired — without an edit here. What IS
-    pinned is that the recorded debt is the ONLY problem: any STALE/UNDECLARED
-    violation on the shipped artifacts is a real defect.
+    ⛔ The exit code IS pinned now, and the policy is NOT "any violation fails":
+    `open_route_b` (defined at :1904) records the route-(b) transitions that are OPEN,
+    and for a name in it a `STALE DECLARATION` carrying the `which shadows [env]`
+    clause is tolerated and the code pinned to 1 — with a withheld-shadow control
+    that must come back 0, so the two fixtures cannot collapse into one run. Every
+    OTHER `STALE`/`UNDECLARED` on the shipped artifacts still fails here. ⛔ Do NOT
+    restore the older shape (`assert "STALE DECLARATION" not in r.stdout`): that is
+    what made this suite green over a shadowed state the deploy gate refuses
+    (measured: rc=0 with the assertion, rc=1 with the shadow), which is the false
+    PASS this file exists to prevent. `unmanaged` debt is still derived, not pinned:
+    the recorded set is what must stay empty.
     """
     sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
     import importlib.util
@@ -1877,11 +1883,48 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # same name shadows `[env]` — the gate reports that as STALE), so the fixture
     # must not seed those names. Seeding every declared name modelled the pre-fix
     # state and would make this test assert a violation that no longer exists.
+    #
+    # ⛔ ...EXCEPT the name whose route-(b) transition is STILL OPEN, which is why
+    # this fixture carries it. `TORTOISE_EMBEDDER_WARMUP` IS a live Fly secret
+    # today: the `fly-toml-env` declaration and the `[env]` value are merged while
+    # the secret is unset LAST, after `[env]` is on the machine (#13923, the
+    # manifest's "ORDER MATTERS" block). Excluding it modelled the state AFTER the
+    # unset — a production state that does not exist yet — so the suite read GREEN
+    # over a state the gate REFUSES, which is exactly the false PASS that let a
+    # merged branch claim it had unblocked deploys (#13941 owner direction check,
+    # measured: RC=0 without the shadow, RC=1 with it). A fixture that assumes the
+    # transition away cannot certify the change that depends on it, so it is seeded
+    # and its verdict is pinned BY NAME instead of asserted away.
+    #
+    # ⛔ The tolerated name comes from THIS RECORDED SET, not from the fixture seed.
+    # Keyed to the seed it was vacuous: seeding a different `fly-toml-env` name moved the
+    # tolerance with it and the mutant passed, tolerating a shadow nobody recorded as the
+    # open interval (measured). The set names the issue that carries each transition, so a
+    # second open route-(b) cannot appear here without being written down.
+    open_route_b = {"TORTOISE_EMBEDDER_WARMUP": "#13923"}
+    for name in open_route_b:
+        assert declared.get(name) == "fly-toml-env", (
+            f"{name} is recorded here as an OPEN route-(b) transition but this manifest "
+            f"declares it {declared.get(name)!r}"
+            + (
+                " — i.e. it is no longer declared at all, so the emergency switch "
+                f"lost its provenance line; restore `{name} fly-toml-env`, with "
+                f"`{name} = \"0\"` in fly.toml [env]. "
+                if declared.get(name) is None
+                else ". "
+            )
+            + "A transition that is not declared `fly-toml-env` has nothing left to "
+            "unset, so this arm would be pinning a state the branch does not ship — "
+            "re-read the manifest before editing either. ⛔ Removing the lever on "
+            "purpose is a DIFFERENT change and not this assertion's to block: delete "
+            "the [env] row AND this declaration in ONE merged change, and drop this "
+            "name from `open_route_b` here together with its withheld-shadow "
+            "control, or the two fixtures collapse into one run."
+        )
+    living = [n for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
     real_secrets = _fixture(
         "real-manifest-names.json",
-        json.dumps(
-            [{"name": n} for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
-        ),
+        json.dumps([{"name": n} for n in [*living, *open_route_b]]),
     )
     r = _run(
         real_secrets,
@@ -1907,8 +1950,77 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         # pinned out of the way.
         extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
     )
-    assert "STALE DECLARATION" not in r.stdout, r.stdout
+    # ⛔ NOT `assert "STALE DECLARATION" not in r.stdout` while the shadow is live:
+    # that assertion is what made the suite green over a state the deploy gate
+    # refuses. What this test is entitled to require is narrower and mechanical —
+    # a STALE violation is tolerated ONLY for the recorded open transition, only
+    # with its shadow clause, and only as the BYPASSABLE exit 1 (an exit 2 can
+    # never be bypassed, so it must not pass for any state). Every other kind of
+    # violation on the shipped artifacts is still a defect and still fails here.
+    # ⛔ THE TOLERANCE HAS NO EXPIRY: nothing here can observe the live Fly app, so a
+    # production `secrets unset` changes nothing in this file. When #13923's step 3
+    # lands, DELETE this entry from `open_route_b` AND the
+    # `r.returncode != control.returncode` control TOGETHER — emptying the set alone
+    # makes the subject and the control the SAME fixture, so the control reds with a
+    # message that would push a maintainer to weaken the very check the false PASS
+    # was fixed with. Until then the suite models the open transition on purpose.
     assert "UNDECLARED" not in r.stdout, r.stdout
+    stale = [line for line in r.stdout.splitlines() if "STALE DECLARATION" in line]
+    # ⛔ IDENTITY, not a substring: the gate prints the name in single quotes, and a
+    # family name already exists in this tree (`TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S`),
+    # so `n in line` would tolerate an unrecorded `…_GRACE_S` shadow as if it were this one.
+    foreign = [line for line in stale if not any(f"'{n}'" in line for n in open_route_b)]
+    assert not foreign, (
+        "the shipped artifacts carry a STALE declaration for a name that is not the open "
+        f"route-(b) transition — that is a real defect, not the recorded interval:\n{foreign}"
+    )
+    if stale:
+        # ONE assert, because there is one predicate. The message carries BOTH diagnoses,
+        # because the other state it can meet — `not an assigned key in fly.toml's [env]
+        # table`, i.e. the `[env]` row was deleted — is a real state with a real fix, not a
+        # renamed gate message, and it reds HERE first (measured: deleting that row never
+        # reaches a later membership assert, which is why none is re-asserted below).
+        assert "which shadows [env]" in stale[0], (
+            "the tolerated STALE for the open transition is no longer the shadow refusal, so "
+            "this test would tolerate a DIFFERENT breakage of the same name. Two states reach "
+            "here: (a) the gate RENAMED its message — re-derive it from the gate and update the "
+            "runbook, do not widen this; (b) it says `not an assigned key in fly.toml's [env] "
+            "table`, which means the `[env]` ROW IS GONE — restore "
+            "`TORTOISE_EMBEDDER_WARMUP = \"0\"` in fly.toml [env].\n"
+            f"{stale[0]}"
+        )
+        assert r.returncode == 1, (
+            f"the open transition must be the BYPASSABLE exit 1, not {r.returncode} — an exit 2 "
+            "cannot be bypassed, so a deploy would be hard-blocked rather than transitioned"
+        )
+    # Non-vacuity: the arm above must be able to tell the two states apart. With the
+    # shadow withheld the SAME fixture must come back CLEAN (exit 0, no STALE), so a
+    # gate that stopped sampling the secret list — or a fixture edit that dropped it —
+    # reds here instead of passing this test's tolerances silently.
+    without_shadow = _fixture(
+        "real-manifest-names-no-shadow.json",
+        json.dumps([{"name": n} for n in living]),
+    )
+    control = _run(
+        without_shadow,
+        manifest=REAL_MANIFEST,
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+        extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
+    )
+    # `returncode == 0` is the WHOLE control predicate: the gate prints a violation line only
+    # inside the branch that returns 1, so a separate "no STALE in stdout" assert could never
+    # fire (it lived here until review round 9 — the same dead-assert class this file deletes
+    # elsewhere). If a future gate ever prints without counting, add the belt WITH a comment
+    # saying that is what it is.
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert r.returncode != control.returncode, (
+        "the two fixtures must produce DIFFERENT verdicts, or every arm above is vacuous. "
+        "If `open_route_b` was just emptied because the transition landed, delete THIS "
+        "control with it — the subject and the control are the same fixture then, and a "
+        "weaker control is not the fix."
+    )
     # #4126's seven recorded-debt names, pinned by KIND so a revert to
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
     # hard-blocking the deploy in CI.
@@ -2044,89 +2156,49 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         "route its OVERRIDES marker names and refuses — would re-introduce a "
         "deploy-set value"
     )
-    # ── #13674: the embedder warm-up's EMERGENCY SWITCH ──────────────────────
-    # `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites = THREE warm-up surfaces
-    # (`tortoise/embeddings.py::start_warm_up` gated at `:1361`; the HOSTED
-    # lifespan pre-warm `tortoise/hosted_api.py::_lifespan` at `:3225-3235` — the
-    # consumer that runs on the deployed box this declaration unblocks; and the
-    # boot pre-warm `entrypoint.sh:432`) PLUS TWO readiness bounds
-    # (`::await_write_ready_reason` `:1466`, #13224; `::await_read_ready_reason`
-    # `:1592`, #13528).
-    # ⛔ Count in the right UNIT: three warm-up surfaces + two readiness bounds =
-    # five read SITES. "FIVE warm-up surfaces" is wrong (the withdrawn #13814
-    # review P2 — this comment said THREE warm-up surfaces and was CORRECT, in a
-    # different unit), and "THREE read sites" omits the bound pair.
-    # The two bound readers are NOT cosmetic: with the flag off each returns
-    # `None` immediately (`:1466-1470`, `:1592-1593`), so the WRITE and READ
-    # paths fall back to the synchronous in-request load — part of what flipping
-    # the switch chooses. Production RAN
-    # it at `0` while the embedder could not load, which is what makes it a live
-    # operator switch and not a deploy-set value (#13674 Scope item 3: "`TORTOISE_EMBEDDER_WARMUP=0`
-    # is the *emergency* switch it is, not the steady state"; the merged fix
-    # #13692 records the production state verbatim at `entrypoint.sh:427-430`).
-    #
-    # Pinned by KIND and by DIRECTION for the reason #13209 above is: each wrong
-    # route is one plausible "helpful" edit away.
-    #   * `gh-secret:` would have the deploy set it — an emergency switch a deploy
-    #     overwrites is not out of band, and no such GitHub secret exists today,
-    #     so the declaration would also fail this same gate as ABSENT;
-    #   * `fly-toml-env` would VERSION today's value into `fly.toml [env]`, which
-    #     freezes the emergency setting into every deploy and is the opposite of
-    #     #13674's objective (production warm-up ON) — the operator step that
-    #     returns the shipped default would need a code change instead;
-    #   * `unmanaged` is the #4126 defect the gate exists to refuse.
-    # ⚠️ MEASURED WHICH ASSERTION REDS FIRST — each mutant below was applied ALONE
-    # and restored, at this head, not reasoned from the source. Two of the three
-    # are the FIRST red; the third is a BELT and is stated as one, so a future
-    # reader does not count three independent surfaces where there are two.
-    #   * kind    (`fly-only:#13674` -> `unmanaged`) -> REDS on the `declared[...]
-    #     == "fly-only:#13674"` assertion immediately below (`AssertionError:
-    #     unmanaged`).
-    #   * payload (`TORTOISE_EMBEDDER_WARMUP: ${{ secrets.… }}` added to
-    #     `deploy-hosted.yml`'s propagation env, at the `TURNSTILE_SECRET_KEY`
-    #     indent) -> REDS on the `not in workflow_refs` assertion below, naming
-    #     this switch. So that direction IS independently guarded.
-    #   * `[env]` (`TORTOISE_EMBEDDER_WARMUP = "1"` added to `fly.toml`) -> the
-    #     `not in env_keys` assertion below is NOT the first red: the GATE refuses
-    #     that shape (`STALE DECLARATION … is an assigned key in fly.toml's [env]
-    #     table`, `check-fly-secret-drift.py:1393-1398`), so this test reds earlier
-    #     on `assert "STALE DECLARATION" not in r.stdout`. Kept anyway — the reason
-    #     the #13209 `workflow_secret_refs` belt above is kept: the gate and this
-    #     file are different readers, and a divergence in either should red HERE.
+
+    # ── #13674 / #13926: the embedder warm-up's EMERGENCY SWITCH ──────────────
+    # The route is `fly-toml-env` (route (b) of the #4126 block): the value is
+    # version-controlled in `fly.toml [env]` and the manifest names that source,
+    # so a flip is a merged change. ⛔ NOT `fly-only:` — that token is RESERVED for
+    # a permanent out-of-band secret with a recorded ruling, and #13926 rejected it
+    # for exactly this reason. Pinned in both directions, because each wrong route
+    # is one plausible "helpful" edit away:
+    #   * deleting the declaration, or moving it back to `fly-only:`/`unmanaged` — BOTH
+    #     are refused by the `open_route_b` guard ABOVE, which is the live one and
+    #     carries both diagnoses (including the removal path). It runs FIRST, so a
+    #     separate membership assert below it could never be the thing that reds —
+    #     two of them lived here until review round 5, dead, with messages that could
+    #     never print. Do not reintroduce a second route assert: extend that guard.
     embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
-    # Split from the equality below on purpose: without it the missing-declaration
-    # case is a bare `KeyError: 'TORTOISE_EMBEDDER_WARMUP'` with no diagnosis, which
-    # reads as a broken test rather than as the removed declaration it is — the same
-    # defect this file repairs for `_region_marker` (#13814 review round 9). It is
-    # the FIRST red of a `fly-only:` revert, and the manifest's block quotes it, so
-    # its wording is part of that operator procedure.
-    fly_only_declared = sorted(n for n, s in declared.items() if s.startswith("fly-only:"))
-    assert embedder_warmup in declared, (
-        "TORTOISE_EMBEDDER_WARMUP is no longer declared at all, so the emergency "
-        "switch lost its provenance line — restore `TORTOISE_EMBEDDER_WARMUP "
-        "fly-only:#13674` (or, if the lever is being removed, carry the revert in "
-        "ONE change with `fly secrets unset`, its DECLARED GAP paragraph and the "
-        "reviewer entry point's count). The manifest declares "
-        f"{len(fly_only_declared)} `fly-only:` name(s): {fly_only_declared}"
-    )
-    assert declared[embedder_warmup] == "fly-only:#13674", declared[embedder_warmup]
+    # ⛔ The `[env]`-row membership is NOT re-asserted here. `env_keys` is computed by the
+    # same `fly_toml_env_keys` the gate's `fly-toml-env` arm uses, so a deleted `[env]` row
+    # reds FIRST as the tolerance's `not an assigned key` refusal (which now carries the
+    # restore instruction) — an assert here could never be the one that fires, and that is
+    # the dead-assert class review round 5 removed a few lines above this comment.
     assert embedder_warmup not in workflow_refs, (
-        "TORTOISE_EMBEDDER_WARMUP must stay OUT of the deploy payload — it is the "
-        "emergency switch an operator flips on the box (#13674)"
+        "TORTOISE_EMBEDDER_WARMUP must stay OUT of the deploy payload — a value "
+        "the deploy sets is not version-controlled config and not an emergency "
+        "switch (#13674)"
     )
-    assert embedder_warmup not in env_keys, (
-        "TORTOISE_EMBEDDER_WARMUP is versioned in fly.toml [env], so it is NOT "
-        "out-of-band any more — REVERT the [env] entry: versioning today's value "
-        "freezes the emergency setting into every deploy, which is the opposite "
-        "of #13674's objective"
-    )
+
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
-    assert r.returncode == 0, r.stdout + r.stderr
+    # ⛔ The shipped artifacts' exit code FOLLOWS the open transition, and it is the
+    # point of the shape above: while the shadow is live the deploy gate refuses this
+    # name (exit 1, bypassable only by a per-run input), so a branch that merges this
+    # route before the `[env]`-then-unset order is PERFORMED AND VERIFIED cannot claim
+    # it unblocked deploys — the claim is now measured here instead of asserted in a
+    # PR body over a fixture that omitted the live secret (#13941 owner direction
+    # check). The day this entry leaves `open_route_b` this asserts 0 — it does not
+    # happen by itself.
+    assert r.returncode == (1 if stale else 0), r.stdout + r.stderr
 
 
 # ── The #13674 line citations (#13814) ───────────────────────────────────────
-# TWO artifacts cite `embeddings.py` BY LINE — the manifest's #13674 block and
-# the runbook's operator section — so a merge that grows that module silently
+# ONE artifact still cites `embeddings.py` BY LINE — the runbook's operator
+# section. It used to be two: the manifest's `#13674` block carried the same
+# numbers until #13926 took that name to route (b) and the deleted block took
+# them with it (see SCOPE below) — so a merge that grows that module silently
 # turns a cite into a pointer at unrelated code while every sentence around it
 # still reads as true. Measured: the origin/main integration that brought #13819
 # inserted 102 lines into and deleted 11 from `tortoise/embeddings.py`
@@ -2135,9 +2207,19 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
 # other check in CI reads a line number, and a reader who follows one lands
 # nowhere.
 #
-# Both copies are pinned by the same checker below. Pinning only the manifest
-# would be the fail-open this PR keeps paying for: the suite stays green while
-# the OPERATOR-facing copy — the one read mid-incident — rots silently.
+# That copy is pinned by the checker below, and it is the one that needed the pin
+# most: it is written for an OPERATOR under incident pressure, and no other check
+# in CI reads a line number out of it — so without this pin it rots silently
+# while the suite stays green.
+#
+# ⛔ SCOPE AFTER #13926. The manifest's copy is no longer declared by THIS PR: the
+# name went to `fly-toml-env` (route (b), `fly.toml [env]`) and the manifest's own
+# route-(b) block now documents it, so its cites are that change's to mind. What
+# remains pinned here is the RUNBOOK's operator section — the copy an operator
+# reads mid-incident, which nothing else in CI reads a line number from. The
+# checker is artifact-parameterized (`_reader_citations(artifact=…)`) precisely so
+# re-pointing it at another artifact, or at the manifest again, is a marker change
+# rather than a second implementation.
 
 _READER_CITE_RE = re.compile(r"`(?::|(?:tortoise/)?[a-z_]+\.(?:py|sh):)(\d+)(?:-(\d+))?`")
 #: What a cited line has to contain to be the thing the citation says it is. The
@@ -2148,19 +2230,21 @@ _READER_NEEDLE = {
     "entrypoint.sh": "TORTOISE_EMBEDDER_WARMUP",
 }
 #: A numbered reader entry STARTS a new claim, so its symbol is its own. Two
-#: spellings, because the two artifacts are: the manifest's `#   1. …` inside a
-#: comment block, and the runbook's `> 1. …` inside a blockquote. The ordinal is
-#: CAPTURED, because the prose below binds its range cites to it.
+#: spellings are tolerated — a `#   1. …` comment block (the manifest's old copy, gone
+#: with the `fly-only:#13674` block) and a `> 1. …` blockquote (the runbook, the only
+#: copy left). The ordinal is CAPTURED, because the prose below binds its range cites
+#: to it.
 _READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
-#: The sentence that ENDS the numbered claims in both artifacts: the prose after
-#: it names no function, so nothing in it may inherit reader 5's symbol.
-#: Markdown emphasis is stripped before matching — the runbook bolds
-#: "**function names**", the manifest shouts "FUNCTION NAMES".
+#: The sentence that ENDS the numbered claims in the runbook (its manifest twin went
+#: with the `fly-only:#13674` block this change deletes): the prose after it names no
+#: function, so nothing in it may inherit reader 5's symbol. Markdown emphasis is
+#: stripped before matching — the runbook bolds "**function names**".
 _READER_SYMBOL_RESET_RE = re.compile(
     r"function names? (?:above )?are the invariant", re.IGNORECASE
 )
 #: The sentence that names, BY ORDINAL, which readers a pair of range cites below
-#: belongs to — the manifest says "Readers 2 and 3", the runbook "Number 2 and 3".
+#: belongs to — the runbook says "Number 2 and 3" (the manifest's "Readers 2 and 3" copy
+#: went with the block this change deletes).
 #: Without this the ranges could only be needle-checked, and the needle passes a
 #: range re-pinned onto ANY flag-reading line, the wrong reader included.
 _READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s+(\d+)")
@@ -2259,13 +2343,13 @@ _READER_ORDINAL_GROUP_CLAIM_RE = re.compile(
 def _resolver_definition_span() -> tuple[int, int]:
     """1-based (first, last) line of the flag resolver's own definition.
 
-    DERIVED FROM THE SOURCE, never written as a literal here: both artifacts tell a
+    DERIVED FROM THE SOURCE, never written as a literal here: the runbook tells a
     maintainer that "the line numbers are a convenience and they move whenever
     `embeddings.py` grows — re-pin them on a merge", so a hard-coded tuple turns
     that documented maintenance step into a FALSE RED (#13814 review round 7: a
-    correct re-pin after a 5-line insertion reddened, while the runbook copy — which
-    names the function inline — passed, so the two copies could no longer be
-    re-pinned together as the block instructs).
+    correct re-pin after a 5-line insertion reddened here while the runbook copy —
+    which names the function inline — passed; the manifest's parallel copy, which is
+    what made the asymmetry confusing, went with this change).
     """
     body = (REPO_ROOT / "tortoise" / "embeddings.py").read_text()
     # `ast`, not indentation heuristics: the span must be the function's OWN body,
@@ -2503,11 +2587,15 @@ def _reader_citations(
         f"actually cites): {misdirected}. The entries were reordered or renumbered under "
         f"sentences that still describe the old reader"
     )
-    # Non-vacuity, PER ARTIFACT: the two artifacts bind identity differently, so the
-    # requirement is passed in by the caller that knows which sentences its copy carries
-    # (the runbook states `Number 4 … the production pre-warm`; the manifest names each
-    # entry's file inline and binds 2/3 with `Readers 2 and 3`). Without this, deleting
-    # the binding sentence silently removes the only check on number reuse.
+    # Non-vacuity, PER ARTIFACT: identity is bound by DIFFERENT sentences, so the
+    # requirement is passed in by the caller that knows which sentences its copy carries.
+    # The runbook states `Number 4 … the production pre-warm` and binds 2/3 with
+    # `Number 2 and 3`; the manifest's copy (which named each entry's file inline and
+    # bound 2/3 with `Readers 2 and 3`) went with the `fly-only:#13674` block this change
+    # deletes, so the parameter stays at ONE caller on purpose — a future artifact must
+    # pass `identity_claims_required` for itself rather than inherit the runbook's arm.
+    # Without it, deleting the binding sentence silently removes the only check on
+    # number reuse.
     assert claims or not identity_claims_required, (
         f"{artifact}: the section no longer says which reader sits at which NUMBER (the "
         f"'Number N is …' sentence, or a '<class> (N, M)' group), so nothing binds entry "
@@ -2534,7 +2622,9 @@ def _reader_citations(
     # Non-vacuity, and it is the whole point: if that sentence is deleted or
     # reworded the ranges silently fall back to the needle-only check, which
     # passes a range re-pinned onto ANY flag-reading line — the wrong reader
-    # included. Both artifacts carry the sentence, so both must bind two ranges.
+    # included. The one artifact this runs for (the runbook; the manifest's
+    # `#13674` block and its copy went with #13926 / this change) carries the
+    # sentence, so it must bind two ranges.
     assert ordinal_bound == 2, (
         f"{artifact}: the sentence naming the range cites' readers by ordinal bound "
         f"{ordinal_bound} of them, not 2 — reworded, or the ranges moved off it? A range "
@@ -2550,18 +2640,18 @@ def _reader_citations(
     # unbound, because the block names no reader for `:40-50` anywhere.
     unbound = {(fname, lo, hi) for fname, lo, hi, sym in cites if sym is None}
     # ⛔ The resolver's span is DERIVED from the `def`, not pinned as a literal here:
-    # a literal would make the documented re-pin (both artifacts say the numbers move
-    # when `embeddings.py` grows) a false red, and would pin the manifest's copy harder
-    # than the runbook's — which names the function inline — so the two copies could not
-    # be re-pinned together (#13814 review round 7). What the invariant keeps is the
+    # a literal would make the documented re-pin (the runbook says the numbers move
+    # when `embeddings.py` grows) a false red (#13814 review round 7). What the
+    # invariant keeps is the
     # property that matters: a cite naming no reader must land in the RESOLVER, so
     # re-pointing it at another reader's gate line still reds.
     resolver_lo, resolver_hi = _resolver_definition_span()
     # Non-vacuity for the ceiling below: with NO cite resolving to the resolver the
     # `outside` check passes on an empty set, so a block that lost its resolver cite
-    # altogether would read clean. The two artifacts reach it differently — the
-    # manifest with a BARE span (unbound) and the runbook with the function named
-    # inline (bound) — so the floor is presence, not unboundedness.
+    # altogether would read clean. The runbook — the only artifact left with these
+    # cites — names the function inline (bound), while the manifest's copy carried a
+    # BARE span (unbound) until #13926/this change removed it, so the floor is
+    # presence, not unboundedness.
     resolver_cites = sorted(
         (fname, lo, hi)
         for fname, lo, hi, _sym in cites
@@ -2618,8 +2708,9 @@ def _region_marker(
 
     A bare `next(...)` raises `StopIteration` — a red with no diagnosis, which reads as
     a broken test rather than as "the region this guard slices is gone, re-pin the
-    marker". The runbook arm has always raised a named `AssertionError`; this mirrors
-    it for the manifest (measured, round 7).
+    marker". The runbook arm has always raised a named `AssertionError`, and it is this
+    helper's ONLY caller since #13926 / this change deleted the manifest's `#13674`
+    block — keep the failure NAMED here, or a re-pin reads as a broken test.
     """
     index = next((i for i in range(after, len(lines)) if marker in lines[i]), None)
     if index is None:
@@ -2631,37 +2722,13 @@ def _region_marker(
     return index
 
 
-def _embedder_warmup_reader_citations() -> list[tuple[str, int, int, str | None]]:
-    """The cites in the MANIFEST's #13674 block (the inventory a reviewer reads).
-
-    Starts at the block's FIRST line, not at the numbered list: the block opens by
-    restating the resolver's span, and a slice that began below it left that cite
-    unparsed — so the block's own claim that the test "re-reads every cite above"
-    was false for the one cite at the top of it (measured, round 7: deleting it was
-    green). Two occurrences of the same span are one set element below, so the
-    widening costs nothing.
-    """
-    lines = REAL_MANIFEST.read_text().splitlines()
-    start = _region_marker(
-        lines, "the embedder warm-up's EMERGENCY SWITCH", "the manifest", "the #13674 block"
-    )
-    # Past the numbered list AND the two range cites below it.
-    end = _region_marker(
-        lines,
-        "Two records in the tree understate the set",
-        "the manifest",
-        "the end of the #13674 block (the 'Two records …' paragraph)",
-        after=start,
-    )
-    return _reader_citations(lines, start, end, "the manifest")
-
-
 def _embedder_warmup_runbook_citations() -> list[tuple[str, int, int, str | None]]:
-    """The cites in the RUNBOOK's operator section — the second, unguarded copy.
+    """The cites in the RUNBOOK's operator section — the copy an operator reads.
 
     Same numbers, same readers, read mid-incident by an operator instead of a
-    reviewer — which is why the manifest's pin alone was not enough: the merge
-    that moved `embeddings.py` moved BOTH copies, and only one of them red.
+    reviewer — that is why this copy needs its own pin: the merge that moved
+    `embeddings.py` moved every copy at once, and a pin on one artifact reds while
+    the others rot silently.
 
     The region stops at `**When to flip it.**`: everything above it cites a flag
     READER, everything below it cites the cold-load timing (`embeddings.py:894`,
@@ -2695,9 +2762,13 @@ def _assert_every_citation_reads_the_flag(
 ) -> None:
     """Every cite must land on code that reads the flag, in the function named.
 
-    Shared by the manifest and runbook tests deliberately: the two artifacts
-    carry the SAME numbers, and a second, slightly different checker is how two
-    copies drift apart while both look pinned.
+    Kept as ONE checker for every artifact that carries these readers: they hold
+    the SAME numbers, and a second, slightly different checker is how two copies
+    drift apart while both look pinned. Since #13926 the runbook's operator
+    section is the only artifact pinned through it — the manifest's copy went with
+    its `#13674` block (see SCOPE at the top of this section) — but the parameter
+    stays, so re-pointing it at another artifact is a marker change rather than a
+    second implementation.
     """
     # Non-vacuity: a parser that found nothing would clear every assertion below.
     assert len(cites) >= 8, f"{artifact}: the reader list's citations could not be read: {cites}"
@@ -2731,182 +2802,31 @@ def _assert_every_citation_reads_the_flag(
         )
 
 
-def test_the_manifest_list_intro_cites_the_resolver_it_names():
-    """The sentence that gives the numbered list its subject must carry the span.
-
-    The block opens by restating the resolver's span, so "does the block cite the
-    resolver SOMEWHERE" is satisfied by that opening line alone: deleting the span
-    from `… is the resolver's DEFINITION; the readers are:` then stayed green while
-    the pointer a reader follows BEFORE the numbered list was gone (measured, round
-    7 — the same review round that found the note's own prose supplying the cite).
-
-    The runbook reaches the same information with the function named inline on the
-    line above its count, so this arm is the manifest's: the sentence here SAYS the
-    span is the definition, and a sentence that says so must name it. The permitted
-    span is derived from the `def` at check time, never written here.
-    """
-    lines = REAL_MANIFEST.read_text().splitlines()
-    start = _region_marker(
-        lines, "the embedder warm-up's EMERGENCY SWITCH", "the manifest", "the #13674 block"
-    )
-    end = _region_marker(
-        lines,
-        "Two records in the tree understate the set",
-        "the manifest",
-        "the end of the #13674 block",
-        after=start,
-    )
-    intro = [ln for ln in lines[start:end] if "is the resolver's DEFINITION" in ln]
-    assert intro, (
-        "the manifest no longer has the sentence that gives the numbered list its subject "
-        "(… is the resolver's DEFINITION; the readers are:) — this guard is slicing a "
-        "region it no longer recognises, so re-pin its marker"
-    )
-    resolver_lo, resolver_hi = _resolver_definition_span()
-    spans = [
-        (int(match.group(1)), int(match.group(2) or match.group(1)))
-        for line in intro
-        for match in _READER_CITE_RE.finditer(line)
-    ]
-    assert any(lo >= resolver_lo and hi <= resolver_hi for lo, hi in spans), (
-        f"the sentence introducing the numbered list no longer cites the resolver's span. "
-        f"That line is the pointer a reader follows BEFORE the list, so it must carry "
-        f"`embeddings.py:{resolver_lo}-{resolver_hi}` (derived from the `def` at check "
-        f"time). Cites on it: {spans}"
-    )
-
-
-def test_the_embedder_warmup_citations_resolve_to_the_flag_readers():
-    """#13814: every cited line in the MANIFEST block MUST read the flag.
-
-    A line number is the one claim in this list that cannot be right by
-    accident — the cited line either reads `TORTOISE_EMBEDDER_WARMUP` or it does
-    not. Re-pinning is a one-line edit; finding the stale one after a deploy is
-    not.
-    """
-    _assert_every_citation_reads_the_flag(
-        _embedder_warmup_reader_citations(), ".github/scripts/fly-managed-secrets.txt"
-    )
-
-
 def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
-    """The runbook carries the SAME line cites as the manifest — and no pin.
+    """The runbook's operator section cites the flag's readers BY LINE — pin them.
 
     #13814 pinned the manifest copy (NAME↔NUMBER, mutation-proved) and left the
     operator section's copy unguarded, so the next merge that grows
-    `tortoise/embeddings.py` reds the manifest and silently rots the runbook —
+    `tortoise/embeddings.py` red the manifest and silently rotted the runbook —
     the copy an operator reads mid-incident, when the flag has to be flipped on
     the box. Measured at the head before this test: `:1361` / `:1466` / `:1592`
     are cited in both artifacts, and only the manifest's three were read by any
     test.
 
+    ⛔ After #13926 the manifest's copy is route (b)'s to mind (the manifest's
+    block is `fly-toml-env`, not a `fly-only:` entry), and THIS arm is the one
+    that remains: the runbook is the operator surface, and nothing else in CI
+    reads a line number out of it.
+
     The brief's own recorded defect class — "guards that cannot be reddened" —
-    is why this is a restore of an existing check to a SECOND artifact rather
-    than a new predicate: the numbers, the needle and the NAME↔NUMBER binding
-    are the same three, and the mutants that red the manifest arm red this one.
+    is why this arm is written as the same three properties (the numbers, the
+    needle and the NAME↔NUMBER binding) on the ONE artifact left: #13926 took
+    the name to route (b), this change's `fly-only:` block went with it, and the
+    manifest's copy plus `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
+    went with that block. The mutants that used to red that arm red this one.
     """
     _assert_every_citation_reads_the_flag(
         _embedder_warmup_runbook_citations(), "docs/infra-runbook.md"
-    )
-
-
-def test_the_citation_guard_note_is_not_itself_a_citation():
-    """The paragraph that DESCRIBES this guard must not be read BY it.
-
-    The note below the numbered list sits inside the region the two arms above
-    slice, and the parser has no way to tell documentation from a claim: a span
-    written into that prose in the colon form becomes a cite like any other. That
-    is not hypothetical — it happened in the commit that added the note (`#13814`
-    review round 7), where the paragraph's own example supplied the resolver cite,
-    so DELETING the operative one from the block's opening sentence left the whole
-    suite green while the block still claimed to point at the definition.
-
-    Prose is the wrong place for this to be caught by counting, so the property is
-    stated directly: the note block contains no citation at all. Its own rule
-    sentence — "describe a span without the colon form" — is now enforced instead
-    of advised.
-    """
-    lines = REAL_MANIFEST.read_text().splitlines()
-    start = _region_marker(
-        lines, "re-reads every cite above", "the manifest", "the citation-guard note"
-    )
-    end = _region_marker(
-        lines,
-        "'s operator section carries the SAME numbers",
-        "the manifest",
-        "the end of the citation-guard note",
-        after=start,
-    )
-    note = "\n".join(lines[start:end])
-    # Non-vacuity: a slice that found the wrong lines would pass this trivially.
-    assert "cite" in note and "colon form" in note, (
-        f"the citation-guard note was not found where this test slices — it reads {note!r}"
-    )
-    found = sorted(m.group(0) for m in _READER_CITE_RE.finditer(note))
-    assert not found, (
-        "the paragraph that documents this guard writes a line span in the COLON form, "
-        "so the parser reads it as a citation — the note then satisfies the pin it is "
-        "describing, and deleting the block's real cite stays green. Describe the span "
-        f"as 'lines N-M' instead. Cites found in the note: {found}"
-    )
-
-
-#: The sibling record the block cites as UNDERSTATING the read set. It is the
-#: only cite in the #13674 block that is not a flag reader, so the reader-citation
-#: guards above cannot cover it — and it rotted under a merge before (see the
-#: test's docstring). Cited as `tests/<file>.py:<lo>` or `:<lo>-<hi>`.
-_SIBLING_RECORD_CITE_RE = re.compile(
-    r"`tests/test_13674_embedder_load_bound_and_reclaim\.py:(\d+)(?:-(\d+))?`"
-)
-REAL_SIBLING_RECORD = REPO_ROOT / "tests" / "test_13674_embedder_load_bound_and_reclaim.py"
-
-
-def test_the_understated_record_citation_resolves_to_its_own_claim():
-    """#13814: the block's sibling-record cite MUST land on the sentence it quotes.
-
-    `.github/scripts/fly-managed-secrets.txt` says a sibling test *"asserts
-    'exactly' four — omitting reader 3, and naming `warm_up`"*. That is a claim
-    ABOUT a line in another file, and it is the one cite in the block the reader
-    guards cannot see: the cited lines do not read the flag, so
-    `test_the_embedder_warmup_citations_resolve_to_the_flag_readers` excludes it.
-
-    It rotted exactly as the reader cites did. `origin/main`'s `#13819` follow-up
-    grew that test file 1248 → 1432 lines and carried the sentence to `:1148`,
-    leaving the block pointing at `:964-965` — a comment header for a DIFFERENT
-    class — while the words around it still read as true. Nothing in CI reads a
-    line number, so the pre-merge cite was green everywhere and wrong in the
-    tree the PR lands in.
-
-    The assertion is the quoted CLAIM, not the number: the cited lines must say
-    the flag `gates exactly` its readers and must still name `warm_up` (the
-    non-reader the block contrasts against). A re-pin onto any other span of
-    that file drops the claim and reds.
-    """
-    text = REAL_MANIFEST.read_text()
-    cites = _SIBLING_RECORD_CITE_RE.findall(text)
-    assert len(cites) == 1, (
-        "the #13674 block must cite the sibling record exactly once — found "
-        f"{len(cites)} cite(s) in the manifest, so either the citation was "
-        "dropped (the understatement it records then goes unstated) or it was "
-        "duplicated"
-    )
-    lo = int(cites[0][0])
-    hi = int(cites[0][1] or lo)
-    body = REAL_SIBLING_RECORD.read_text().splitlines()
-    assert hi <= len(body), (
-        f"the block cites {REAL_SIBLING_RECORD.name}:{lo}-{hi}, but the file has "
-        f"only {len(body)} lines — the cite past the end cannot resolve"
-    )
-    cited = "\n".join(body[lo - 1:hi])
-    assert "gates exactly" in cited, (
-        f"{REAL_SIBLING_RECORD.name}:{lo}-{hi} is cited as the record that "
-        "understates the read set, but those lines do not carry that claim. "
-        f"Cited lines: {cited!r}"
-    )
-    assert "warm_up" in cited, (
-        f"{REAL_SIBLING_RECORD.name}:{lo}-{hi} is cited as naming `warm_up` (the "
-        "reader that never reads the flag), and the cited lines do not name it: "
-        f"{cited!r}"
     )
 
 
@@ -3115,11 +3035,14 @@ def test_probe_block_and_manifest_gh_secret_names_are_in_lockstep():
 
 # ── The `fly-only:` category — a declared exception, NOT a fail-open ─────────
 #
-# ⛔ NOT "a decision-backed exception": #661 and #13209 carry recorded rulings,
-# but the shipped manifest also declares #13674 as a DECLARED GAP whose ruling is
-# still owed, so the category is no longer uniform and the adjective is false of
-# the set as a whole (#13814 review rounds 11-12; the same claim was removed from
-# the checker's summary line and its STALE message under the same rule).
+# ⛔ NOT "a decision-backed exception", and not because of any one member: this
+# checker is SHAPE ONLY and hermetic, so it can neither read the issue a ref names
+# nor know whether a ruling exists. Every member the shipped manifest declares does
+# carry one (#661, #13209), but "all of them today" is not something THIS layer can
+# verify, and its summary line is printed on a GREEN run — the word would then be an
+# unverified claim in the one place an operator looks for the verdict (#13814 review
+# rounds 8, 11-12; the same word was removed from the summary line and the STALE
+# message under that rule).
 #
 # #661 is a CLOSED recorded decision: the registry-stream key must never enter
 # the GitHub trust boundary, so the ABSENCE of a version-control source IS the
@@ -3168,12 +3091,12 @@ def test_fly_only_declaration_is_accepted_for_a_live_unassigned_secret():
         manifest=_fly_only_manifest("manifest-fly-only.txt", _FLY_ONLY_LINE),
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    # ⛔ NOT "decision-backed": the shipped manifest declares one `fly-only:` member
-    # whose ruling does NOT exist yet (`#13674`, a declared gap), so a summary that
-    # counts every `fly-only:` name as decision-backed prints a false statement on
-    # a GREEN run — the one line an operator reads to learn the gate passed. The
-    # checker is SHAPE ONLY and hermetic by design (it never reads an issue), so it
-    # must not claim the decision half at all (#13814 review round 8, P2).
+    # ⛔ NOT "decision-backed": a summary that counts every `fly-only:` name as
+    # decision-backed asserts a fact this layer cannot check — the checker is SHAPE
+    # ONLY and hermetic by design (it never reads an issue) — on a GREEN run, which
+    # is the one line an operator reads to learn the gate passed (#13814 review
+    # round 8, P2). The decision half belongs to a reviewer, and the manifest's
+    # entry-point paragraph routes them to it.
     assert "1 fly-only" in r.stdout, r.stdout
 
 
@@ -3544,12 +3467,18 @@ def _reviewer_entry_point() -> str:
     # push of this probe. Same fail-closed behaviour: `None` when the heading is
     # gone.
     #
-    # ⛔ The heading must be the BLOCK'S OWN line, not a prose mention of it. The
-    # gap paragraph and the #13674 block both refer to this paragraph BY NAME, and
-    # a containment match takes the FIRST mention — which slices a note instead of
-    # the entry point and then reports that the entry point names no `fly-only:`
-    # member at all. Measured while fixing #13814's review: adding one note that
-    # named the paragraph cost a full failure of
+    # ⛔ The heading must be the BLOCK'S OWN line, not a prose mention of it. A
+    # prose note that names this paragraph is a MENTION, and a containment match
+    # takes the FIRST one — which slices a note instead of the entry point and
+    # then reports that the entry point names no `fly-only:` member at all. Two
+    # such notes lived in this manifest (the `DECLARED GAP` paragraph and the
+    # `#13674` entry block, both deleted BY #13941's dedupe — #13926 had already taken
+    # the name to route (b), and that block landed on top of it 7 minutes later, which
+    # is what produced the duplicate),
+    # so the artifact carries no live example — the anchor stays because the next
+    # note written above this block re-creates the trap. Measured while fixing
+    # #13814's review: adding one note that named the paragraph cost a full
+    # failure of
     # `test_the_reviewer_entry_point_names_every_fly_only_member` (all three names
     # reported missing). The same trap was fixed for `_declared_gap_paragraph`'s
     # anchor in the commit that reconciled the two P2 fixes; this is the twin the
@@ -3614,10 +3543,9 @@ def _declared_gap_paragraph() -> str:
     rather than a line range that drifts under every edit above it. The heading is
     matched as `⚠️ <COUNT> DECLARED GAP(S)` at the start of the stripped line —
     `re.match` is start-anchored, so a prose line that merely CONTAINS "ONE
-    DECLARED GAP" still does not anchor — rather than on `DECLARED GAP` alone: the
-    RESERVED paragraph above refers to "a DECLARED GAP", so the bare phrase would
-    anchor this reader INSIDE the contract paragraph and silently read the wrong
-    block. ⛔ The COUNT is part of the anchor, not the literal `ONE`: a correctly
+    DECLARED GAP" still does not anchor — rather than on `DECLARED GAP` alone. ⛔ The
+    COUNT is part of the anchor, not the literal `ONE` — that part stands on its own: a
+    correctly
     declared second gap heads its paragraph `⚠️ TWO DECLARED GAPS`, and pinning
     `ONE` made that artifact red while demanding a gap it had already declared
     (#13814 review rounds 10-11).
@@ -3627,11 +3555,15 @@ def _declared_gap_paragraph() -> str:
     paragraph exists only while a gap does.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
-    # The heading must OPEN its line, not merely contain the phrase: the manifest's
-    # own `#13674` entry block REFERS to this paragraph by name (`… the `ONE DECLARED GAP`
-    # paragraph above …`), and a containment match would anchor the reader inside that
-    # block the moment the real paragraph is deleted — which is exactly the stale-removal
-    # case this reader exists to report, so a containment match would make it pass.
+    # The heading must OPEN its line, not merely contain the phrase: a prose note
+    # that NAMES this paragraph (the `#13674` entry block did — `… the `ONE DECLARED
+    # GAP` paragraph above …`) would let a containment match anchor the reader
+    # inside that note the moment the real paragraph is deleted — which is exactly
+    # the stale-removal case this reader exists to report, so a containment match
+    # would make it pass. Both that block and the paragraph are gone now — deleted by
+    # #13941's dedupe, NOT by #13926: the block landed 7 minutes AFTER #13926 merged,
+    # which is exactly how the duplicate got in,
+    # so the line anchor is what makes this reader report the absence instead.
     #
     # ⛔ THE COUNT IS PART OF THE ANCHOR, not the literal `ONE`. Pinning `⚠️ ONE
     # DECLARED GAP` made a CORRECTLY declared SECOND gap invisible: measured (#13814
@@ -3828,8 +3760,12 @@ def test_the_reserved_member_paragraph_names_every_fly_only_member():
 def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
     """A `fly-only:` precondition is a CONTRACT; a contract is not amended to fit a member.
 
-    `#13814` declares a third `fly-only:` member whose ruling does not exist yet.
-    The way to declare that is a GAP named against an UNCHANGED rule. The way not
+    `#13814` declared a third `fly-only:` member whose ruling did not exist yet.
+    That member is HISTORY, not shipped state: #13926 took the name to route (b) and
+    this change deleted the member and its `⚠️ ONE DECLARED GAP` paragraph, so the
+    manifest declares TWO `fly-only:` members and this arm now runs with an EMPTY gap
+    set — it still asserts the rule's sentence, which is the point.
+    The way to declare a gap is a GAP named against an UNCHANGED rule. The way not
     to declare it is to re-word the rule into a status report — which is what this
     file said at `d63e5a9e8e`, *"THREE members are declared below, and their
     rulings do NOT all exist yet"*, replacing `origin/main`'s *"each with its own
@@ -3869,10 +3805,13 @@ def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
     # is not met ("…each with its own recorded ruling. Not all of the members'
     # rulings exist yet."). The rule's words are then still there while the
     # paragraph states the rule is already false — the same unfalsifiable state, and
-    # the assertion above passes it. The manifest's own note already promises this
-    # arm ("the sentence must be present UNQUALIFIED (a 'not yet recorded' qualifier
-    # inside it REDS)"); this is the check behind that promise. Measured on this
-    # tree: that wording passes the assertion above and reds only here.
+    # the assertion above passes it. This arm enforces the sentence's QUALIFICATION
+    # directly — and no manifest prose promises it any more, because THIS change deleted
+    # the note that used to ("the sentence must be present UNQUALIFIED …"; it lived in the
+    # `ONE DECLARED GAP` paragraph of the `fly-only:#13674` block, which landed seven
+    # minutes AFTER #13926 merged — #13926 never touched it), so do not re-derive the
+    # contract from a citation that is gone: the check IS the contract. Measured on
+    # this tree: that wording passes the assertion above and reds only here.
     #
     # Several spellings, because the defect is the SPEECH ACT (the paragraph
     # conceding that the precondition is not met), not one string — a guard that knew
@@ -3937,12 +3876,19 @@ def test_the_reviewer_entry_point_names_every_fly_only_member():
     )
 
 
-#: The two violation LEADERS a `fly-only:` revert can meet. They are the SEARCH
-#: KEYS for the runbook's quotes, never the whole assertion: the test below also
-#: drives the real gate for each order and requires the quote to be a prefix of
-#: the message that run ACTUALLY prints (#13814 review P2-2 — a leader occurs many
-#: times in the checker, so a leader-only pin cannot see a renamed message).
-_FLY_ONLY_REMOVAL_REDS = ("UNDECLARED —", "STALE DECLARATION —")
+#: The two violation LEADERS an operator meets while moving this name between its
+#: sources. They are the SEARCH KEYS for the runbook's quotes, never the whole
+#: assertion: the test below also drives the real gate for each state and requires
+#: the quote to be a prefix of the message that run ACTUALLY prints (#13814 review
+#: P2-2 — a leader occurs many times in the checker, so a leader-only pin cannot
+#: see a renamed message).
+#:
+#: ⛔ The pair is `fly-toml-env`'s, NOT `fly-only:`'s: #13926 declared this name
+#: `fly-toml-env` (route (b), `fly.toml [env]` + the manifest line) and explicitly
+#: rejected the `fly-only:` token for it, so the states a reader meets are the ones
+#: that route can produce — a live Fly secret shadowing `[env]`, and the
+#: declaration gone while that secret is still live.
+_WARMUP_REVERT_REDS = ("UNDECLARED —", "STALE DECLARATION —")
 
 
 def _embedder_warmup_runbook_section() -> str:
@@ -3950,7 +3896,7 @@ def _embedder_warmup_runbook_section() -> str:
 
     Sliced by HEADINGS, not by a line range: the runbook is appended to by other
     changes, so a numeric range here would be stale on the next merge — the exact
-    defect class `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
+    defect class `test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
     exists to catch.
     """
     lines = REAL_RUNBOOK.read_text().splitlines()
@@ -3967,10 +3913,10 @@ def _embedder_warmup_runbook_section() -> str:
     return "\n".join(lines[heading:end])
 
 
-def _fly_only_removal_red_states() -> dict[str, str]:
-    """The EXACT violation the real gate prints for each half of a `fly-only:` revert.
+def _warmup_revert_red_states() -> dict[str, str]:
+    """The EXACT violation the real gate prints for each state of this name.
 
-    Driven END-TO-END through `check-fly-secret-drift.py`, one fixture per order,
+    Driven END-TO-END through `check-fly-secret-drift.py`, one fixture per state,
     because a message is identified by more than its leader: `#13814` review P2-2
     measured that reading only the LEADER out of the source cannot show what an
     operator will see, and both leaders are non-unique in the checker (11x
@@ -3983,12 +3929,14 @@ def _fly_only_removal_red_states() -> dict[str, str]:
     sentence an operator can never see.
     """
     name = "TORTOISE_EMBEDDER_WARMUP"
-    # Order 1: the declaration stands, the Fly secret is gone -> STALE DECLARATION.
-    declared_absent = _run(
-        _secrets_file(_ALL_DECLARED, "removal-declared-absent.json"),
-        manifest=_fly_only_manifest("removal-declared-absent.txt", f"{name}  fly-only:#13674\n"),
+    # State 1: declared `fly-toml-env`, an assigned [env] key, AND still a Fly
+    # secret -> the shadow refusal (the state #13923's transition is IN).
+    shadowed = _run(
+        _secrets_file([*_ALL_DECLARED, name], "warmup-shadowed.json"),
+        manifest=_fixture("warmup-shadowed.txt", _MANIFEST + f"{name}  fly-toml-env\n"),
+        toml=_fixture("warmup-shadowed.toml", _FLY_TOML + f'  {name} = "0"\n'),
     )
-    # Order 2: the declaration is gone, the Fly secret is still live -> UNDECLARED.
+    # State 2: the declaration is gone, the Fly secret is still live -> UNDECLARED.
     undeclared_manifest = Path(tempfile.mkdtemp(prefix="fly-secret-drift-undeclared-")) / (
         "fly-managed-secrets.txt"
     )
@@ -4000,7 +3948,7 @@ def _fly_only_removal_red_states() -> dict[str, str]:
 
     emitted: dict[str, str] = {}
     for proc, leader in (
-        (declared_absent, "STALE DECLARATION —"),
+        (shadowed, "STALE DECLARATION —"),
         (live_undeclared, "UNDECLARED —"),
     ):
         assert proc.returncode == 1, proc.stdout + proc.stderr
@@ -4023,14 +3971,14 @@ def _fly_only_removal_red_states() -> dict[str, str]:
     return emitted
 
 
-#: The IDENTIFIERS each half's runbook quote must carry, on top of the leader.
+#: The IDENTIFIERS each state's runbook quote must carry, on top of the leader.
 #: A leader alone IS a prefix of the emitted message, so a prefix assertion on its
 #: own accepts a quote reduced to the bare leader — after which both gate bodies can
 #: be reworded with the suite still green (#13814 review round 6, reproduced). These
 #: are the three things the operator needs in order to act on the message: WHICH
-#: variable, WHICH issue ref it is declared against, and WHICH file to edit.
-_FLY_ONLY_REMOVAL_QUOTE_TOKENS = {
-    "STALE DECLARATION —": ("TORTOISE_EMBEDDER_WARMUP", "fly-only:#13674"),
+#: variable, which SOURCE it is declared against, and WHICH file to edit.
+_WARMUP_REVERT_QUOTE_TOKENS = {
+    "STALE DECLARATION —": ("TORTOISE_EMBEDDER_WARMUP", "fly-toml-env"),
     "UNDECLARED —": ("TORTOISE_EMBEDDER_WARMUP", "fly-managed-secrets.txt"),
 }
 
@@ -4039,7 +3987,7 @@ def _runbook_quoted_red_states(section: str) -> dict[str, str]:
     """The verbatim violation text the runbook quotes, per half of the revert."""
     quotes: dict[str, str] = {}
     for line in section.splitlines():
-        for leader in _FLY_ONLY_REMOVAL_REDS:
+        for leader in _WARMUP_REVERT_REDS:
             if leader in quotes:
                 continue
             match = re.search("`(" + re.escape(leader) + "[^`]*)`", line)
@@ -4048,15 +3996,26 @@ def _runbook_quoted_red_states(section: str) -> dict[str, str]:
     return quotes
 
 
-def test_the_fly_only_removal_guidance_names_both_red_states():
-    """Removing a `fly-only:` lever is RED in EITHER order, so the runbook must name both.
+def test_the_warmup_revert_guidance_names_both_red_states():
+    """The two states a move between this name's sources can be RED in, and the runbook must name both.
 
-    The gate holds both halves of the exception: the declaration goes stale once
-    the secret is gone (`STALE DECLARATION`), and the secret is undeclared once
-    the declaration is (`UNDECLARED`). An operator who splits the revert across
-    two changes is therefore red in the window between them WHICHEVER step comes
-    first — and the previous text named only the first, so the second order's
-    failure read as "the revert broke something" (#13674, measured on the issue).
+    The gate holds both halves of the `fly-toml-env` declaration: while the live
+    Fly secret shadows `[env]` the declaration describes a source that loses
+    (`STALE DECLARATION`), and if the declaration is deleted while the secret is
+    still live the name is undeclared (`UNDECLARED`). An operator who splits a
+    revert across two changes meets the second in the window between them — and
+    the previous text named only the first, so that order's failure read as
+    "the revert broke something" (#13674, measured on the issue).
+
+    ⛔ Not "red in EITHER order", which this docstring asserted until review
+    round 2 and which is FALSE on this route: with the `fly-toml-env`
+    declaration standing, UNSETTING the secret is GREEN on this name
+    (`fly.toml [env]` alone satisfies the declaration — measured, three states,
+    against the shipped manifest / `fly.toml` / workflow). That order is
+    prescribed by the manifest's route-(b) block for a BEHAVIOURAL reason (flag
+    unset ⇒ warm-up ON ⇒ ~196 s of extra boot per boot until a deploy applies
+    `[env]`, #13926), so no red here catches it and this guard must not claim
+    one does. The runbook says the same thing in the same place.
 
     The runbook's quotes are bound to the gate's ACTUAL output, end-to-end, so this
     cannot stay green while it quotes a sentence the gate no longer prints. THREE
@@ -4073,24 +4032,31 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
     """
     section = _embedder_warmup_runbook_section()
     # Non-vacuity: a section read that picked up the wrong region must not pass.
-    assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
-
-    quoted = _runbook_quoted_red_states(section)
-    missing = [leader for leader in _FLY_ONLY_REMOVAL_REDS if leader not in quoted]
-    assert not missing, (
-        "the runbook's `fly-only:` removal guidance names only some of the red states a "
-        "revert can meet. A two-step revert is red in EITHER order, so naming one leaves "
-        f"the other reading as a regression rather than as the expected interval: missing {missing}"
+    # BODY-ONLY marker, deliberately: the section always CONTAINS the name (it is in
+    # the heading the slice starts at), so a name-based "non-vacuity" check could
+    # never fail. This sentence exists only in the body.
+    assert "Number 4 is the one an operator is most likely to miss" in section, (
+        "the section reader found the wrong region — the body marker is gone"
     )
 
-    emitted = _fly_only_removal_red_states()
-    for leader in _FLY_ONLY_REMOVAL_REDS:
+    quoted = _runbook_quoted_red_states(section)
+    missing = [leader for leader in _WARMUP_REVERT_REDS if leader not in quoted]
+    assert not missing, (
+        "the runbook's `fly-toml-env` red-state guidance names only some of the red "
+        "states a move between this name's sources can meet. The SECOND is the "
+        "declaration deleted while the Fly secret is still live (`UNDECLARED`) — "
+        "naming one leaves the other reading as a regression: "
+        f"missing {missing}"
+    )
+
+    emitted = _warmup_revert_red_states()
+    for leader in _WARMUP_REVERT_REDS:
         # ⛔ A prefix is satisfied by the LEADER ALONE, so the prefix relation cannot
         # be the whole binding: the quote must still name the variable, and the
         # issue ref / the file an operator has to act on. Without this, an edit that
         # reduces both quotes to the bare leader lets every gate body be reworded
         # with the suite green (#13814 review round 6).
-        absent = [tok for tok in _FLY_ONLY_REMOVAL_QUOTE_TOKENS[leader] if tok not in quoted[leader]]
+        absent = [tok for tok in _WARMUP_REVERT_QUOTE_TOKENS[leader] if tok not in quoted[leader]]
         assert not absent, (
             f"the runbook's {leader!r} quote no longer identifies what the operator has to "
             f"act on: {absent} missing. A quote reduced to the leader still PREFIXES the "
@@ -4106,7 +4072,7 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
         # above are the first two clauses, so a quote ending right after them prefixes
         # the emitted message and passes both arms — leaving the STATING clause (what
         # state the name is in) free to be reworded under a green suite. Measured, round
-        # 7: truncating the STALE quote at `fly-only:#13674` AND rewording the gate's
+        # 7: truncating the STALE quote at its declaration token AND rewording the gate's
         # whole tail was 142 passed. The emitted message's first `;`-delimited clause is
         # the condition; the quote must cover it. (The REMEDY lives in the clause after
         # the `;` and is not claimed here — an earlier version of this comment said it
@@ -4118,6 +4084,196 @@ def test_the_fly_only_removal_guidance_names_both_red_states():
             f"in. Quote at least through {state_clause!r}."
             f"\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
         )
+
+
+def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
+    """#13941: the transition is the requirement, and the LANDING is its precondition — both in the runbook.
+
+    The direction check on #13941 recorded, on the PR, that the route-(b) state is
+    exit-1 by construction while the Fly secret lives — and a PR comment is exactly
+    the artifact the next lane does NOT read. The failure mode is measured, not
+    hypothetical: the branch's evidence block once reported green because its
+    fixture omitted the live name.
+
+    ⛔ The requirement is NOT "do not land this before the unset", which is what this
+    docstring and the sentence it pinned said until review round 3 — that reading is
+    inverted. `main`'s duplicate pair is exit **2**, which NO bypass reaches
+    (`deploy-hosted.yml:743` gates RC=1 only), so the transition's own step 2 (a
+    release carrying `[env]`) cannot run until the duplicate is gone (#13923:
+    *"Steps 2-4 are blocked until the duplicate is removed"*). The landing is the
+    precondition OF the transition; what must not be read as done is the exit-1
+    state it lands in.
+
+    So both halves are stated in the runbook's operator section and pinned here: a
+    future edit that drops either sentence reds instead of quietly re-authorising
+    "merge it and the release train is fine".
+    """
+    section = _embedder_warmup_runbook_section()
+    # Non-vacuity: a section read that picked up the wrong region must not pass.
+    # BODY-ONLY marker, deliberately: the section always CONTAINS the name (it is in
+    # the heading the slice starts at), so a name-based "non-vacuity" check could
+    # never fail. This sentence exists only in the body.
+    assert "Number 4 is the one an operator is most likely to miss" in section, (
+        "the section reader found the wrong region — the body marker is gone"
+    )
+    assert "the transition must be PERFORMED AND VERIFIED" in section, (
+        "the runbook no longer states that the route-(b) transition must be performed and "
+        "verified — without it the exit-1 state reads as the finished repair."
+    )
+    assert "PRECONDITION of the transition" in section, (
+        "the runbook no longer states that removing the duplicate is the PRECONDITION of "
+        "the transition. Without it the section reads as 'do not land this until the "
+        "unset', which is inverted: exit-2 has NO bypass, so no deploy can carry `[env]` "
+        "to the box while the duplicate stands (#13923 steps 2-4)."
+    )
+    assert "not the green one" in section, (
+        "the runbook no longer warns that the landed state is the BYPASSABLE class and "
+        "not a green one — the exact misreading the three measured exit codes exist for."
+    )
+
+
+#: The clause this entry ADDS for the live-secret state — the sentence #13941's review round
+#: closed the value question with. Pinned as a NAME (not re-typed at the assert) so the arm and
+#: its mutation probe cannot drift apart: a probe holding its own copy of the literal would keep
+#: reddening after the arm was narrowed, or stop reddening after it was widened.
+#:
+#: ⛔ It must not be satisfied by the entry's OTHER `SHADOWS` sentences. The slice already
+#: contains "A Fly secret of this name SHADOWS `[env]`" (carried unchanged from `main`), so an
+#: `or "SHADOWS" in entry` disjunct let this PR's whole added sentence be DELETED with the arm
+#: still green — measured, not argued (#13941 review; the probe
+#: `test_the_shadow_clause_arm_reds_on_the_sentence_it_names` now reds for it).
+_WARMUP_SHADOW_CLAUSE = "the value and `[env]` is SHADOWED"
+
+
+def _embedder_warmup_manifest_entry() -> str:
+    """The manifest's `TORTOISE_EMBEDDER_WARMUP` entry, its heading line through its declaration.
+
+    Sliced by the entry's own opening line and its declaration line, NOT by a
+    numeric range — the manifest is edited above this entry by other changes, and
+    a range here would silently read a different block (the same defect class
+    `_embedder_warmup_runbook_section` documents for the runbook).
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    heading = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("# TORTOISE_EMBEDDER_WARMUP —")),
+        None,
+    )
+    if heading is None:
+        raise AssertionError(
+            "the manifest has no `# TORTOISE_EMBEDDER_WARMUP — …` entry heading — the "
+            "probe is stale, and a stale probe would pass vacuously"
+        )
+    declaration = next(
+        (
+            i
+            for i in range(heading + 1, len(lines))
+            if lines[i].split()[:1] == ["TORTOISE_EMBEDDER_WARMUP"]
+        ),
+        None,
+    )
+    if declaration is None:
+        raise AssertionError(
+            "the `TORTOISE_EMBEDDER_WARMUP` entry block never reaches its declaration "
+            "line — the probe is stale, and a stale probe would pass vacuously"
+        )
+    return "\n".join(lines[heading : declaration + 1])
+
+
+def test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact():
+    """`0` is what was MEASURED at the move — not what `[env]` supplies today.
+
+    #13941's cross-lane note asked for this line to be owned by the PR that lands
+    the direction, and the reviewer recorded it as the last present-tense survivor
+    of the block (`fly.toml` had already been corrected to call the same value a
+    measurement). The claim is load-bearing, not cosmetic: while the live Fly
+    secret of this name exists it SHADOWS `[env]`, so the sentence "the `[env]`
+    value is the LIVE one" is FALSE in exactly the state the operator reads the
+    block in — and step 4 of the route-(b) block above tells them to verify the
+    value rather than assume it. A present-tense claim beside that instruction is
+    the one sentence that can let them skip the verification (#13938's stated risk:
+    a carried value that diverged from the secret's would flip the boot pre-warm
+    off while the entry still claimed to be behaviour-preserving).
+
+    ⛔ The absence arm reads the WHOLE manifest, not just this entry, so the claim
+    cannot come back in a neighbouring note either; and it is asserted on the
+    pre-fix text, where it is present, so this arm is not vacuous.
+    """
+    entry = _embedder_warmup_manifest_entry()
+    # Non-vacuity: an empty or declaration-only slice would satisfy every arm below
+    # while binding nothing, so the slice must actually span the commentary AND end
+    # on the declaration it annotates.
+    assert entry.rstrip().endswith("fly-toml-env"), (
+        "the entry slice does not reach the declaration line it annotates — the reader "
+        f"is stale and these arms would bind nothing:\n{entry}"
+    )
+    assert "MEASURED at the move" in entry, (
+        "the entry no longer states that `0` was a MEASUREMENT taken at the move, which "
+        "is what keeps it from being read as the value `[env]` supplies today"
+    )
+    assert _WARMUP_SHADOW_CLAUSE in entry, (
+        "the entry no longer says that the live Fly secret supplies the value and `[env]` "
+        "is SHADOWED — without it `0` reads as in force while the secret is the source "
+        "(#13938's divergence risk). The entry's pre-existing sentence that says a secret "
+        "of this name shadows `[env]` is NOT a substitute: it predates this change and "
+        "says which route the entry takes, not that the value the operator reads is the "
+        "secret's."
+    )
+    standing = "is the LIVE one"
+    assert standing not in REAL_MANIFEST.read_text(), (
+        f"the manifest asserts {standing!r} in the present tense. While a Fly secret of "
+        "this name is live IT supplies the value, so the sentence is false in the state "
+        "the operator reads this block in, and step 4 above tells them to verify rather "
+        "than assume. State it as the value measured at the move (#13941 review)."
+    )
+
+
+def _manifest_with_the_warmup_shadow_clause_dropped() -> str:
+    """The real manifest with the entry's added shadow clause replaced by a weaker sentence.
+
+    The mutation is the one the arm NAMES — the sentence that says the live secret supplies
+    the value — and it deliberately leaves every other `SHADOWS` occurrence in place, because
+    that is exactly the shape the old `or` disjunct could not see. A missing clause raises
+    rather than returning an unmutated manifest, which would make the probe vacuous.
+    """
+    text = REAL_MANIFEST.read_text()
+    replacement = "the value and `[env]` is what the app reads"
+    mutated = text.replace(_WARMUP_SHADOW_CLAUSE, replacement)
+    assert _WARMUP_SHADOW_CLAUSE not in mutated, (
+        f"the manifest no longer contains {_WARMUP_SHADOW_CLAUSE!r} — the mutation anchor "
+        "is stale, so this probe would pass vacuously"
+    )
+    return mutated
+
+
+def test_the_shadow_clause_arm_reds_on_the_sentence_it_names(monkeypatch):
+    """The shadow arm must red when the sentence it names is dropped (#13941 review).
+
+    The review's finding, reproduced before it was believed: at the pre-fix head the arm read
+    `assert "SHADOWED" in entry or "SHADOWS" in entry`, and the entry's slice also spans
+    `main`'s pre-existing "A Fly secret of this name SHADOWS `[env]`" line — so deleting this
+    PR's entire sentence left the arm GREEN. An arm that cannot see the mutation it names is
+    a false PASS, which is the class this file's other probes exist to close.
+
+    This drives the REAL arm against the real manifest with that one clause changed, so the
+    widening cannot come back without this reding. The untouched arm is asserted green in
+    `test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact` above, so the
+    pair cannot be satisfied by reddening every entry.
+    """
+    module = sys.modules[__name__]
+    control = _fixture(
+        "manifest-warmup-shadow-clause-dropped.txt",
+        _manifest_with_the_warmup_shadow_clause_dropped(),
+    )
+    monkeypatch.setattr(module, "REAL_MANIFEST", control)
+    try:
+        test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact()
+    except AssertionError:
+        return
+    raise AssertionError(
+        "the entry's added shadow sentence was dropped and the arm stayed GREEN — the "
+        "assertion is not pinning the clause it names (#13941 review: an `or \"SHADOWS\"` "
+        "disjunct is satisfied by the entry's pre-existing sentence)"
+    )
 
 
 def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):
