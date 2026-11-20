@@ -595,8 +595,12 @@ def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
     so the declines are appended BEFORE the first mismatch save — which is what
     makes this deterministic rather than order-dependent.
 
-    Mutant: compute `carried` from `(st.get("failed") or [])` again — this reds
-    on the header.
+    Mutant: `carried`'s snapshot and the `reobserved` filter are REDUNDANT —
+    either alone prevents the mislabel — so mutating either ONE stays green
+    (measured both ways at #13950 review round 36: 133 passed each). Remove BOTH
+    (compute `carried` from `st["failed"]` AND drop the filter) and the original
+    bug is back: this row reds, together with
+    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`.
     """
     state_path = tmp_path / "state.json"
 
@@ -718,7 +722,10 @@ def test_the_LAYER2_and_MECHANISM_vocabularies_are_the_SHIPPED_ones():
 
     Mutants, each measured RED: (a) delete the `try:` import leg — `_SHIPPED_*` is
     then unbound, so this raises `AttributeError` instead of passing; (b) add a
-    word to either fallback literal — the `^` message names it.
+    word to either fallback literal — the `== set(...)` pins at the end name it
+    via `^`. ⛔ (b) ONLY reds because those pins exist: the identity pins above
+    cannot see a fallback drift while the import resolves, because the literals
+    are then unreachable — which is why the literal pins are separate.
     """
     from tortoise.ep import MECHANISM_REL_TYPES
     from tortoise.pack_registry import SEMANTICS_VALUES
@@ -734,18 +741,15 @@ def test_the_LAYER2_and_MECHANISM_vocabularies_are_the_SHIPPED_ones():
     got_mechanics, want_mechanics = filer.OP_TYPES, set(MECHANISM_REL_TYPES)
     assert got_semantics == want_semantics, got_semantics ^ want_semantics
     assert got_mechanics == want_mechanics, got_mechanics ^ want_mechanics
-    # ⛔ AND PIN THE OBJECTS, NOT THE VALUES. Comparing the SETS alone is a
-    # tautology in the live case (`SEMANTICS` IS `set(_SHIPPED_SEMANTICS)`) and
-    # cannot fail in the dead case either (the fallback equals the shipped set) —
-    # measured: `_FALLBACK_SEMANTICS` + "funds" passed, and an import that cannot
-    # resolve also passed. The identity pins make a deleted or shadowed import a
-    # FAILURE instead of a silent fallback (#13950 review round 32).
-    assert filer._SHIPPED_SEMANTICS is SEMANTICS_VALUES, (
-        "SEMANTICS is not reading the shipped source — the import failed or was "
-        "shadowed, and the literal fallback is standing in for it")
-    assert filer._SHIPPED_OP_TYPES is MECHANISM_REL_TYPES, (
-        "OP_TYPES is not reading the shipped source — the import failed or was "
-        "shadowed, and the literal fallback is standing in for it")
+    # ⛔ AND PIN THE FALLBACK LITERALS, NOT THEIR VALUES. While the import
+    # resolves these are UNREACHABLE, so nothing above can see them drift: a
+    # drifted transcription passed every assertion in this row (#13950 review
+    # round 32) and adding a word to one passed too (round 36). They are what a
+    # standalone box validates an offline map against, so they get their own pins.
+    assert want_semantics == filer._FALLBACK_SEMANTICS, (
+        want_semantics ^ filer._FALLBACK_SEMANTICS)
+    assert want_mechanics == filer._FALLBACK_OP_TYPES, (
+        want_mechanics ^ filer._FALLBACK_OP_TYPES)
 
 
 def test_validate_refuses_an_undeclared_object_kind(map_doc):
@@ -2060,15 +2064,18 @@ def test_an_UNCLASSIFIED_exception_is_NAMED_and_never_summarised_NOT_written(
 def test_a_RETRY_AFTER_HTTP_DATE_is_honoured_on_the_header_channel(monkeypatch):
     """RFC 9110 §10.2.3: `Retry-After = HTTP-date / delay-seconds`, BOTH accepted.
 
-    `_seconds_or_none` takes numbers and numeric strings only, so the header form
-    `Retry-After: Fri, 31 Dec 1999 23:59:59 GMT` — the RFC's own example — went to
-    `None`, the `or` fell to the body, and then to the client's 5 s ramp: the
-    server's advice was dropped on the channel this PR adds, with no raise and no
-    note (#13950 review round 31).
+    `_seconds_or_none` USED TO take numbers and numeric strings only, so the
+    header form `Retry-After: Fri, 31 Dec 1999 23:59:59 GMT` — the RFC's own
+    example — went to `None`, the `or` fell to the body, and then to the client's
+    5 s ramp: the server's advice was dropped on the channel this PR adds, with no
+    raise and no note (#13950 review round 31). It now falls back to
+    `_http_date_seconds` on a non-numeric string.
 
-    Mutant (measured RED): `_retry_after_seconds` → `_seconds_or_none(value)`
-    unconditionally (the pre-fix shape). The 42 s date then reads `None` and the
-    sleeps are `[5, 10, 15, 20, 25]`.
+    Mutant (measured RED): remove the `_http_date_seconds` fallback inside
+    `_seconds_or_none` (the `except` arm returns `None`) — the 42 s date then
+    reads `None` and the sleeps are `[5, 10, 15, 20, 25]`. ⛔ NOT a mutant:
+    `_retry_after_seconds` → `_seconds_or_none(value)` unconditionally, which IS
+    its body now, so it is a no-op (round 36 measured it green).
     """
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))

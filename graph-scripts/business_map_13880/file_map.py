@@ -1042,6 +1042,18 @@ def write_map(doc: dict) -> int:
     # an 11-mismatched + 9-declined run with `failed: []` on disk: it printed
     # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
     # statement about what was on disk BEFORE this run, so it reads that.
+    #
+    # ⛔ AND THIS SNAPSHOT IS REDUNDANT WITH THE `reobserved` FILTER BELOW, which
+    # is WHY NEITHER IS INDIVIDUALLY PINNED: either one alone prevents the
+    # mislabel, so mutating this line or that filter SEPARATELY leaves the suite
+    # green (measured both ways at #13950 review round 36 — 133 passed each), and
+    # only removing BOTH reproduces the bug and reds
+    # `test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run` plus
+    # `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`. Kept
+    # as a pair deliberately: the snapshot expresses the QUESTION (what was on
+    # disk before this run), the filter expresses the PRINT rule (a marker this
+    # run re-observed is reported under its own heading), and the two answer
+    # different questions that happen to coincide here.
     failed_before: list[str] = list(st.get("failed") or [])
     # ⛔ THERE IS NO SECOND LIST OF MAY-HAVE-LANDED LINES. The class rides as a
     # TAG beside each line (`_fail`), assigned where the type is known; a parallel
