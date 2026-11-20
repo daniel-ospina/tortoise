@@ -4132,6 +4132,19 @@ def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
     )
 
 
+#: The clause this entry ADDS for the live-secret state — the sentence #13941's review round
+#: closed the value question with. Pinned as a NAME (not re-typed at the assert) so the arm and
+#: its mutation probe cannot drift apart: a probe holding its own copy of the literal would keep
+#: reddening after the arm was narrowed, or stop reddening after it was widened.
+#:
+#: ⛔ It must not be satisfied by the entry's OTHER `SHADOWS` sentences. The slice already
+#: contains "A Fly secret of this name SHADOWS `[env]`" (carried unchanged from `main`), so an
+#: `or "SHADOWS" in entry` disjunct let this PR's whole added sentence be DELETED with the arm
+#: still green — measured, not argued (#13941 review; the probe
+#: `test_the_shadow_clause_arm_reds_on_the_sentence_it_names` now reds for it).
+_WARMUP_SHADOW_CLAUSE = "the value and `[env]` is SHADOWED"
+
+
 def _embedder_warmup_manifest_entry() -> str:
     """The manifest's `TORTOISE_EMBEDDER_WARMUP` entry, its heading line through its declaration.
 
@@ -4197,9 +4210,13 @@ def test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact():
         "the entry no longer states that `0` was a MEASUREMENT taken at the move, which "
         "is what keeps it from being read as the value `[env]` supplies today"
     )
-    assert "SHADOWED" in entry or "SHADOWS" in entry, (
-        "the entry no longer says that the live Fly secret SHADOWS `[env]` — without it "
-        "`0` reads as in force while the secret is the source (#13938's divergence risk)"
+    assert _WARMUP_SHADOW_CLAUSE in entry, (
+        "the entry no longer says that the live Fly secret supplies the value and `[env]` "
+        "is SHADOWED — without it `0` reads as in force while the secret is the source "
+        "(#13938's divergence risk). The entry's pre-existing sentence that says a secret "
+        "of this name shadows `[env]` is NOT a substitute: it predates this change and "
+        "says which route the entry takes, not that the value the operator reads is the "
+        "secret's."
     )
     standing = "is the LIVE one"
     assert standing not in REAL_MANIFEST.read_text(), (
@@ -4207,6 +4224,55 @@ def test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact():
         "this name is live IT supplies the value, so the sentence is false in the state "
         "the operator reads this block in, and step 4 above tells them to verify rather "
         "than assume. State it as the value measured at the move (#13941 review)."
+    )
+
+
+def _manifest_with_the_warmup_shadow_clause_dropped() -> str:
+    """The real manifest with the entry's added shadow clause replaced by a weaker sentence.
+
+    The mutation is the one the arm NAMES — the sentence that says the live secret supplies
+    the value — and it deliberately leaves every other `SHADOWS` occurrence in place, because
+    that is exactly the shape the old `or` disjunct could not see. A missing clause raises
+    rather than returning an unmutated manifest, which would make the probe vacuous.
+    """
+    text = REAL_MANIFEST.read_text()
+    replacement = "the value and `[env]` is what the app reads"
+    mutated = text.replace(_WARMUP_SHADOW_CLAUSE, replacement)
+    assert _WARMUP_SHADOW_CLAUSE not in mutated, (
+        f"the manifest no longer contains {_WARMUP_SHADOW_CLAUSE!r} — the mutation anchor "
+        "is stale, so this probe would pass vacuously"
+    )
+    return mutated
+
+
+def test_the_shadow_clause_arm_reds_on_the_sentence_it_names(monkeypatch):
+    """The shadow arm must red when the sentence it names is dropped (#13941 review).
+
+    The review's finding, reproduced before it was believed: at the pre-fix head the arm read
+    `assert "SHADOWED" in entry or "SHADOWS" in entry`, and the entry's slice also spans
+    `main`'s pre-existing "A Fly secret of this name SHADOWS `[env]`" line — so deleting this
+    PR's entire sentence left the arm GREEN. An arm that cannot see the mutation it names is
+    a false PASS, which is the class this file's other probes exist to close.
+
+    This drives the REAL arm against the real manifest with that one clause changed, so the
+    widening cannot come back without this reding. The untouched arm is asserted green in
+    `test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact` above, so the
+    pair cannot be satisfied by reddening every entry.
+    """
+    module = sys.modules[__name__]
+    control = _fixture(
+        "manifest-warmup-shadow-clause-dropped.txt",
+        _manifest_with_the_warmup_shadow_clause_dropped(),
+    )
+    monkeypatch.setattr(module, "REAL_MANIFEST", control)
+    try:
+        test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact()
+    except AssertionError:
+        return
+    raise AssertionError(
+        "the entry's added shadow sentence was dropped and the arm stayed GREEN — the "
+        "assertion is not pinning the clause it names (#13941 review: an `or \"SHADOWS\"` "
+        "disjunct is satisfied by the entry's pre-existing sentence)"
     )
 
 
