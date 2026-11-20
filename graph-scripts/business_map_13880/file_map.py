@@ -502,9 +502,17 @@ class Mcp:
                             _unknown(tool, f"HTTP {code} body unreadable: "
                                      f"{read_exc}")) from read_exc
                     if attempt == 5:
-                        raise RuntimeError(
-                            f"{tool}: transport died reading the error body — "
-                            f"{read_exc}") from read_exc
+                        # ⛔ AN UNCLASSIFIED `RuntimeError` HERE IS NOT A "NOT
+                        # WRITTEN": the request was SENT and the status line came
+                        # back, so only the body died. `write_once` catches
+                        # `UnknownOutcome` (and `Refusal`) by TYPE, so the intent
+                        # was already kept — but the exit summary read the prose
+                        # and called it "NOT written", contradicting the ledger
+                        # (#13950 review round 4). `_unknown` is what makes the
+                        # line and the type agree.
+                        raise UnknownOutcome(
+                            _unknown(tool, f"HTTP {code} body unreadable: "
+                                     f"{read_exc}")) from read_exc
                     time.sleep(min(60, 5 * (attempt + 1)))
                     continue
                 try:
@@ -524,7 +532,13 @@ class Mcp:
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, exc)) from exc
                 if attempt == 5:
-                    raise RuntimeError(f"{tool}: transport died — {exc}") from exc
+                    # ⛔ SAME REASON AS THE UNREADABLE-BODY ARM ABOVE: a transport
+                    # death after the request was sent may have LANDED, which is
+                    # what keeps the intent recorded — so the type must say so
+                    # too, or the summary reads it as "NOT written" (#13950
+                    # review round 4).
+                    raise UnknownOutcome(
+                        _unknown(tool, f"transport died — {exc}")) from exc
                 time.sleep(min(60, 5 * (attempt + 1)))
                 continue
 
@@ -564,22 +578,20 @@ class Mcp:
                     # no longer speak for a non-2xx at all.
                     wait = (_retry_after_seconds(headers)
                             or _body_retry_after(payload))
-                    # ⛔ A NON-POSITIVE VALUE IS TREATED AS NO USABLE ADVICE,
-                    # DELIBERATELY — not as an accident of truthiness. The guard
-                    # is the `if wait else` below (there is no separate clamping
-                    # line: an earlier cut had one and a mutant showed it was
-                    # DEAD, so it is gone). `Retry-After: 0` legally means "retry
-                    # now", and honouring it literally turns this six-attempt loop
-                    # into six back-to-back POSTs at a door that has just answered
-                    # 429/503: a server-controlled value must not be able to make
-                    # the client hammer. So a `0` from the higher-precedence
-                    # channel is dropped to the next channel (the body) and the
-                    # ramp is the fallback — the conservative reading, which waits
-                    # LONGER than advised and never shorter, and never busy-loops
-                    # (#13950 review round 3 measured the `0` case; the bounded
-                    # over-wait is the accepted trade, stated here so the next
-                    # reader does not "fix" the truthiness into a hammer).
-                    time.sleep(min(120, wait) if wait else min(60, 5 * (attempt + 1)))
+                    # ⛔ A POSITIVE WAIT IS FLOORED AT 1 s, AND A NON-POSITIVE ONE
+                    # IS NO USABLE ADVICE. Both halves are deliberate, and neither
+                    # is an accident of truthiness. `Retry-After: 0` legally means
+                    # "retry now" and fractional seconds are legal too, so honouring
+                    # the value literally lets a server drive SIX back-to-back POSTs
+                    # at itself — measured at #13950 review round 4: a
+                    # `Retry-After: 0.001` produced 6 posts in **14.5 ms**, exactly
+                    # the retry storm an earlier comment here claimed could not
+                    # happen. The floor keeps the server's intent (wait roughly what
+                    # it asked) while bounding the hammer; a `0` falls through to
+                    # the next channel and then to the ramp, which waits LONGER than
+                    # advised and never shorter.
+                    wait = min(120, max(1.0, wait)) if wait else None
+                    time.sleep(wait if wait else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
                 # body is not a JSON-RPC `result`, so `_refusal` found nothing
@@ -621,7 +633,8 @@ class Mcp:
                     f"{tool} refused: HTTP {code} — the write did not land "
                     f"({json.dumps(payload)[:200]})")
             if not payload:
-                raise UnknownOutcome(f"{tool}: empty response (HTTP {code})")
+                raise UnknownOutcome(f"{tool}: empty response (HTTP {code}) — "
+                                     "the write is UNCONFIRMED")
             result = payload.get("result", payload)
             # A `result` that is not a tool result at all (a 4xx JSON body such
             # as {"message": "Unauthorized"}) is a FAILURE, not a success: the
@@ -702,20 +715,16 @@ class Refusal(RuntimeError):
     """
 
 
-# ⛔ THE SPELLINGS THIS MODULE'S OWN UNKNOWN/UNCONFIRMED RAISES PRODUCE — ONE
-# definition, read by the exit summary. `Refusal` vs `UnknownOutcome` is this
-# module's central distinction, and the summary must not bucket a
-# MAY-HAVE-LANDED write as "not written": that invites a re-issue of a
-# non-idempotent `create_operator` over endpoints that may already be joined,
-# which is #10849's EP double-count. Three raise sites spell it three ways, so
-# the list is named rather than inlined — a NEW raise site must add its spelling
-# here instead of silently falling into the not-written bucket (#13950 review
-# round 3, which caught the first cut matching only two of the three).
-_UNKNOWN_OUTCOME_MARKERS = (
-    "outcome UNKNOWN",       # `_unknown(...)`
-    "outcome UNCONFIRMED",   # the `already(...) and marker in pending` arm
-    "write is UNCONFIRMED",  # `UnknownOutcome` raised by `Mcp.call`
-)
+# ⛔ THE MAY-HAVE-LANDED CLASS IS IDENTIFIED BY EXCEPTION **TYPE**, NOT BY PROSE.
+# The module's central distinction is `Refusal` (nothing landed, the intent may be
+# retired) vs `UnknownOutcome` (may have landed, the intent STAYS), and prose is a
+# second definition of it that drifts: an earlier cut classified the exit summary
+# by matching substrings, and measured at #13950 review round 4 it missed TWO of
+# the module's own raise sites — `empty response (HTTP 200)` and both
+# exhausted-transport arms — so 51 non-idempotent writes whose intents the ledger
+# had correctly KEPT were summarised `51 edge(s) NOT written`, the state that
+# invites hand-editing `written` (#10849's double-count). A new raise site cannot
+# drift out of a type test.
 
 
 def _unknown(tool: str, reason: object) -> str:
@@ -919,6 +928,9 @@ def write_map(doc: dict) -> int:
     # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
     # statement about what was on disk BEFORE this run, so it reads that.
     failed_before: list[str] = list(st.get("failed") or [])
+    # ⛔ THE MAY-HAVE-LANDED LINES, COLLECTED WHERE THE TYPE IS KNOWN. See the
+    # comment on this list's declaration below (#13950 review round 4).
+    unknown_failures: list[str] = []
 
     # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
     # taken on trust. The pre-fix run recorded every item's own name/url/content
@@ -1161,6 +1173,11 @@ def write_map(doc: dict) -> int:
                     "marker from `unconfirmed` in state.json, KEEP it in `written`, "
                     "and delete the matching line from `failed`; if it is absent, "
                     "delete it from `written` (and its `failed` line) and re-run.")
+                # ⛔ THE ONE MAY-HAVE-LANDED LINE THAT CARRIES NO EXCEPTION: this
+                # arm re-observes an intent a PREVIOUS run left unconfirmed, so
+                # there is no `exc` to test. Every other such line is classified
+                # in the generic `except` below, by TYPE (#13950 review round 4).
+                unknown_failures.append(failures[-1])
                 print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
@@ -1249,6 +1266,11 @@ def write_map(doc: dict) -> int:
         except Exception as exc:  # recorded in `failures`, never swallowed
             failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
                             f"{e['from']}->{e['to']}: {exc}")
+            # ⛔ BY TYPE, NOT BY PROSE: an `UnknownOutcome` may have LANDED, and
+            # the summary must say so rather than "not written" (#13950 review
+            # round 4).
+            if isinstance(exc, UnknownOutcome):
+                unknown_failures.append(failures[-1])
             print(f"  !! {failures[-1]}", file=sys.stderr)
     # ⛔ A RESUME MUST NOT ERASE A DIAGNOSIS IT DID NOT RE-OBSERVE. `failed` was
     # overwritten unconditionally, so a run that resolved nothing but also failed
@@ -1406,8 +1428,10 @@ def write_map(doc: dict) -> int:
         # endpoints that may already be joined (#10849's EP double-count, the very
         # thing `retry_safe=False` exists to prevent) (#13950 review round 3).
         mismatched_n = sum(1 for f in failures if "mechanism_mismatch" in f)
-        unknown_n = sum(1 for f in failures
-                        if any(m in f for m in _UNKNOWN_OUTCOME_MARKERS))
+        # ⛔ A SET INTERSECTION, not a count of the collected list: a line can be
+        # collected once and a marker can appear in `failures` more than once
+        # across retries, and the two counts must describe the SAME list.
+        unknown_n = len(set(unknown_failures) & set(failures))
         unwritten_n = len(failures) - mismatched_n - unknown_n
         parts = []
         if unwritten_n:
