@@ -137,7 +137,7 @@ class _Env:
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(graph_name=graph_name)
         try:
-            sdk.create_point("statement", content=f"{label} content")
+            sdk._create_point("statement", content=f"{label} content")
         finally:
             sdk.close()
 

@@ -773,7 +773,7 @@ class TestWorkItemFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "TASK-42", objectKind="dev:issue")
-            sdk.create_event("card done", "pm:cardCompleted",
+            sdk._create_event("card done", "pm:cardCompleted",
                              object="TASK-42", endedAt="2026-08-18")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) "
@@ -815,7 +815,7 @@ class TestWorkItemFold:
 
             def _served(include_superseded: bool = False) -> set[str]:
                 return {
-                    o["content"] for o in sdk.recall_state(
+                    o["content"] for o in sdk._recall_state(
                         kind="dev:issue", limit=10, object_centric=True,
                         include_superseded=include_superseded)
                     if o.get("entity_type") == "object"}
@@ -824,7 +824,7 @@ class TestWorkItemFold:
                 "the fixture must be served as CURRENT before the fold, or this "
                 "row would pass on an unrelated exclusion")
 
-            sdk.create_event("done", "pm:cardCompleted", object="the card")
+            sdk._create_event("done", "pm:cardCompleted", object="the card")
 
             assert "the card" not in _served(), (
                 "a card folded to the TERMINAL stage `done` is still served as "
@@ -840,14 +840,14 @@ class TestWorkItemFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "the bug", objectKind="dev:issue")
-            sdk.create_event("opened", "github.issue.open", object="the bug")
+            sdk._create_event("opened", "github.issue.open", object="the bug")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) "
                 "RETURN o.status, o.pipelineStageId, o.isClosed",
                 params={"n": "the bug"}).result_set
             assert rows and tuple(rows[0][1:]) == ("in_progress", False), rows
             assert rows[0][0] is None, rows
-            sdk.create_event("closed", "github.issue.closed", object="the bug")
+            sdk._create_event("closed", "github.issue.closed", object="the bug")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) "
                 "RETURN o.status, o.pipelineStageId, o.isClosed",
@@ -857,7 +857,7 @@ class TestWorkItemFold:
             # …and the REOPEN fold clears the durable close, which is the reason
             # the closing fold targets a terminal STAGE and not the lifecycle
             # word `deprecated` (that ending is final; a stage is reopenable).
-            sdk.create_event("reopened", "github.issue.reopened",
+            sdk._create_event("reopened", "github.issue.reopened",
                              object="the bug")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) "
@@ -892,7 +892,7 @@ class TestWorkItemFold:
                 "id": _oid(sdk, "TASK-9"), "name": "TASK-9",
                 "supersedes_by": "TASK-9-v2"})
             # completed family first — pre-fix this SET clobbers → completed.
-            sdk.create_event("closed", "github.issue.closed", object="TASK-9")
+            sdk._create_event("closed", "github.issue.closed", object="TASK-9")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status",
                 params={"n": "TASK-9"}).result_set
@@ -900,7 +900,7 @@ class TestWorkItemFold:
                 "github.issue.closed clobbered superseded status -> "
                 f"{rows[0][0] if rows else 'MISSING'}")
             # in_progress family — pre-fix this SET clobbers → in_progress.
-            sdk.create_event("reopened", "github.issue.reopened",
+            sdk._create_event("reopened", "github.issue.reopened",
                              object="TASK-9")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status",
@@ -920,7 +920,7 @@ class TestWorkItemFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "the live bug", objectKind="dev:issue")
-            sdk.create_event("reopened", "github.issue.reopened",
+            sdk._create_event("reopened", "github.issue.reopened",
                              object="the live bug")
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.pipelineStageId",
@@ -960,7 +960,7 @@ class TestWorkItemFold:
                     "MATCH (o:Object {name:$n}) SET o.status = $s",
                     params={"n": name, "s": status})
                 for ev_kind in ("github.issue.closed", "github.issue.reopened"):
-                    sdk.create_event("e", ev_kind, object=name)
+                    sdk._create_event("e", ev_kind, object=name)
                     rows = sdk._get_proj().g.query(
                         "MATCH (o:Object {name:$n}) "
                         "RETURN o.status, o.pipelineStageId",
@@ -997,7 +997,7 @@ class TestReadSide:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "the strategy", objectKind="core:strategy")
-            hits = sdk.tortoise_fts_query("the strategy", kind="core:strategy",
+            hits = sdk._tortoise_fts_query("the strategy", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "seeded object must be retrievable (kind-scoped)"
             # #9974 R1: the hit's `status` is a LIVENESS decoration, rendered
@@ -1007,7 +1007,7 @@ class TestReadSide:
 
             sdk.create_entity("object", "the tactic", objectKind="core:strategy",
                               status="draft")
-            hits = sdk.tortoise_fts_query("the tactic", kind="core:strategy",
+            hits = sdk._tortoise_fts_query("the tactic", kind="core:strategy",
                                           entity_type="object", limit=5)
             assert hits, "the draft object must be retrievable"
             assert hits[0]["status"] == "draft", hits[0]
@@ -1022,11 +1022,11 @@ class TestReadSide:
             sdk._get_proj()._fold_object_superseded({
                 "id": _oid(sdk, "old-strategy"), "name": "old-strategy",
                 "supersedes_by": "new-strategy"})
-            default = [o["content"] for o in sdk.recall_state(
+            default = [o["content"] for o in sdk._recall_state(
                 kind="core:strategy", limit=10, object_centric=True)
                 if o.get("entity_type") == "object"]
             assert "old-strategy" not in default, "superseded object must be filtered"
-            with_all = [o["content"] for o in sdk.recall_state(
+            with_all = [o["content"] for o in sdk._recall_state(
                 kind="core:strategy", limit=10, object_centric=True,
                 include_superseded=True)
                 if o.get("entity_type") == "object"]
@@ -1052,14 +1052,14 @@ class TestReadSide:
                     "MATCH (o:Object {name:$n}) SET o.status=$st",
                     params={"n": name, "st": st})
             terminal_names = {f"obj-{s}" for s in OBJECT_TERMINAL_STATUSES}
-            default = {o["content"] for o in sdk.recall_state(
+            default = {o["content"] for o in sdk._recall_state(
                 kind="core:strategy", limit=20, object_centric=True)
                 if o.get("entity_type") == "object"}
             assert "obj-live" in default
             assert not (default & terminal_names), (
                 "terminal Objects leaked into the default view: "
                 f"{default & terminal_names}")
-            with_all = {o["content"] for o in sdk.recall_state(
+            with_all = {o["content"] for o in sdk._recall_state(
                 kind="core:strategy", limit=20, object_centric=True,
                 include_superseded=True)
                 if o.get("entity_type") == "object"}
@@ -1106,9 +1106,9 @@ def _records(journal) -> list[dict]:
 def _make_carrier_entity(sdk, label: str, name: str) -> str:
     """Create the Object/Subject a carrier write will target; return its id."""
     if label == "Subject":
-        sdk.create_subject(name, "core:organization")
+        sdk._create_subject(name, "core:organization")
     else:
-        sdk.create_object(name, "core:strategy")
+        sdk._create_object(name, "core:strategy")
     row = _carrier_row(sdk, label, name)
     assert row, f"fixture did not create {label} {name!r}"
     return row[0]
@@ -1262,12 +1262,12 @@ class TestLifecycleCarrierCoherence:
         try:
             before = len(_records(journal))
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.create_object("eta", "core:strategy", supersededBy="eta-v2")
+                sdk._create_object("eta", "core:strategy", supersededBy="eta-v2")
             assert _carrier_row(sdk, "Object", "eta") is None, (
                 "a refused create_object(props={'supersededBy': ...}) minted "
                 "the node anyway")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.create_subject("eta-subj", "core:organization",
+                sdk._create_subject("eta-subj", "core:organization",
                                    supersededBy="eta-v3")
             assert _carrier_row(sdk, "Subject", "eta-subj") is None
             assert len(_records(journal)) == before, (
@@ -1275,10 +1275,10 @@ class TestLifecycleCarrierCoherence:
 
             # …and the EXISTING-node route the MERGE opens is closed too: a
             # re-create by NAME of a live node cannot smuggle the carrier in.
-            sdk.create_object("eta", "core:strategy")
+            sdk._create_object("eta", "core:strategy")
             live_row = _carrier_row(sdk, "Object", "eta")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.create_object("eta", "core:strategy", supersededBy="eta-v2")
+                sdk._create_object("eta", "core:strategy", supersededBy="eta-v2")
             assert _carrier_row(sdk, "Object", "eta") == live_row, (
                 "the ON-MATCH re-create wrote the carrier onto the live node")
 
@@ -1287,13 +1287,13 @@ class TestLifecycleCarrierCoherence:
             # BOTH spellings onto it and the create door must refuse both.
             snake_before = len(_records(journal))
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.create_object("eta", "core:strategy",
+                sdk._create_object("eta", "core:strategy",
                                   superseded_by="eta-v2")
             assert _carrier_row(sdk, "Object", "eta") == live_row, (
                 "the ON-MATCH re-create smuggled the carrier in under the "
                 "snake spelling")
             with pytest.raises(ValueError, match="lifecycle CARRIER"):
-                sdk.create_subject("eta-subj", "core:organization",
+                sdk._create_subject("eta-subj", "core:organization",
                                    superseded_at="2026-01-01T00:00:00Z")
             assert _carrier_row(sdk, "Subject", "eta-subj") is None, (
                 "a refused create_subject(superseded_at=...) minted the node")
@@ -1301,7 +1301,7 @@ class TestLifecycleCarrierCoherence:
                 "a refused snake-spelling create appended journal records")
 
             # A BORN-superseded create names the status and stays writable.
-            sdk.create_object("eta2", "core:strategy", status="superseded",
+            sdk._create_object("eta2", "core:strategy", status="superseded",
                               supersededBy="eta2-v2",
                               supersededAt="2026-01-01T00:00:00Z")
             row = _carrier_row(sdk, "Object", "eta2")
@@ -2162,7 +2162,7 @@ class TestNonScalarStatus12869:
         sdk = TortoiseSDK(str(tmp_path / "t12869c.db"))
         try:
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("phi", "core:strategy", status=bad)
+                sdk._create_object("phi", "core:strategy", status=bad)
             assert _carrier_row(sdk, "Object", "phi") is None, (
                 "a refused create left a node behind — a refusal must not cost "
                 "a write (#9287/#10192)")
@@ -2186,7 +2186,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869r.db"))
         try:
-            sdk.create_object("rho", "core:strategy")
+            sdk._create_object("rho", "core:strategy")
             oid = _carrier_row(sdk, "Object", "rho")[0]
             with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(oid, status=["live"])
@@ -2239,12 +2239,12 @@ class TestNonScalarStatus12869:
         try:
             # …at the CREATE door: refused, and nothing lands.
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("drop-create", "core:strategy", status=bad)
+                sdk._create_object("drop-create", "core:strategy", status=bad)
             assert _carrier_row(sdk, "Object", "drop-create") is None, (
                 "a refused create left a node behind — a refusal must not cost a "
                 "write (#9287/#10192)")
             # …and at the UPDATE door: refused, and the row is untouched.
-            sdk.create_object("drop-update", "core:strategy")
+            sdk._create_object("drop-update", "core:strategy")
             oid = _carrier_row(sdk, "Object", "drop-update")[0]
             sdk.update_knowledge(oid, status="live")
             assert _carrier_row(sdk, "Object", "drop-update")[1] == "live"
@@ -2277,9 +2277,9 @@ class TestNonScalarStatus12869:
         sdk = TortoiseSDK(str(tmp_path / "t12869merge.db"))
         try:
             # (a) a live id-carrying holder: the ordinary MERGE
-            sdk.create_object("held", "core:strategy")
+            sdk._create_object("held", "core:strategy")
             before = _carrier_row(sdk, "Object", "held")
-            sdk.create_object("held", "core:strategy", status="live")
+            sdk._create_object("held", "core:strategy", status="live")
             assert _carrier_row(sdk, "Object", "held") == before, (
                 "the re-create changed the merged row — the status was supposed "
                 f"to be dropped: {_carrier_row(sdk, 'Object', 'held')} != {before}")
@@ -2291,7 +2291,7 @@ class TestNonScalarStatus12869:
                 "CREATE (n:Object {name:'noid', objectKind:'core:strategy'})")
             assert _carrier_row(sdk, "Object", "noid")[0] is None, (
                 "the fixture is supposed to be an id-LESS holder")
-            sdk.create_object("noid", "core:strategy", status="live")
+            sdk._create_object("noid", "core:strategy", status="live")
             adopted = _carrier_row(sdk, "Object", "noid")
             assert adopted[0], (
                 "the adopt path did not stamp an id — it is the shape this arm "
@@ -2316,7 +2316,7 @@ class TestNonScalarStatus12869:
                     "MATCH (n:Object) RETURN count(n)").result_set[0][0]
             before = count()
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("never-made", "core:strategy", status=bad)
+                sdk._create_object("never-made", "core:strategy", status=bad)
             assert count() == before, (
                 "a REFUSED create left a node behind — a refusal must not cost "
                 "a write (#9287/#10192)")
@@ -2341,7 +2341,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869repair.db"))
         try:
-            sdk.create_object("wrecked", "core:strategy")
+            sdk._create_object("wrecked", "core:strategy")
             oid = _carrier_row(sdk, "Object", "wrecked")[0]
             sdk._get_proj().g.query(
                 "MATCH (n:Object {id:$i}) SET n.status = $s",
@@ -2389,10 +2389,10 @@ class TestNonScalarStatus12869:
         sdk = TortoiseSDK(str(tmp_path / "t12869np.db"))
         try:
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("np-obj", "core:strategy",
+                sdk._create_object("np-obj", "core:strategy",
                                   status=np.int64(5))
             assert _carrier_row(sdk, "Object", "np-obj") is None
-            sdk.create_object("np-obj2", "core:strategy")
+            sdk._create_object("np-obj2", "core:strategy")
             oid = _carrier_row(sdk, "Object", "np-obj2")[0]
             with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(oid, status=np.int64(7))
@@ -2470,7 +2470,7 @@ class TestNonScalarStatus12869:
                 "the validator admitted a value the door refuses — the two "
                 "authorities disagree")
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("dict-ok", "core:strategy", status={"a": 1})
+                sdk._create_object("dict-ok", "core:strategy", status={"a": 1})
             # ⛔ AND THE VALIDATOR'S PREDICATE IS THE DOOR'S, NOT THE OR (#12869
             # review round 4, P3). This arm asked
             # `_is_persistable_prop_value(_mint) or _value_ok(_mint)`, so a value
@@ -2488,7 +2488,7 @@ class TestNonScalarStatus12869:
                  "status": ("a\x00b",)}]}), (
                 "the validator admitted a bundle the door refuses")
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("tuple-ok", "core:strategy", status=("a\x00b",))
+                sdk._create_object("tuple-ok", "core:strategy", status=("a\x00b",))
             assert _carrier_row(sdk, "Object", "tuple-ok") is None, (
                 "a refused create left a node behind")
         finally:
@@ -2536,12 +2536,12 @@ class TestNonScalarStatus12869:
         try:
             # (a) create door
             with pytest.raises(ValueError, match="CONFLICTING status write"):
-                sdk.create_object("pair-obj", "core:strategy",
+                sdk._create_object("pair-obj", "core:strategy",
                                   **{"status": None, KHash("status"): ["live"]})
             assert _carrier_row(sdk, "Object", "pair-obj") is None, (
                 "a refused conflicting create left a node behind")
             # (b) update door — sends the pair at an EXISTING row
-            sdk.create_object("pair-obj2", "core:strategy", status="live")
+            sdk._create_object("pair-obj2", "core:strategy", status="live")
             oid = _carrier_row(sdk, "Object", "pair-obj2")[0]
             with pytest.raises(ValueError, match="CONFLICTING status write"):
                 sdk.update_knowledge(oid, **{"status": "live",
@@ -2624,7 +2624,7 @@ class TestNonScalarStatus12869:
 
         sdk = TortoiseSDK(str(tmp_path / "t12869hash.db"))
         try:
-            sdk.create_object("dead-h", "core:strategy", status="superseded")
+            sdk._create_object("dead-h", "core:strategy", status="superseded")
             oid = _carrier_row(sdk, "Object", "dead-h")[0]
             with pytest.raises(ValueError, match="is TERMINAL for a :Object"):
                 sdk.update_knowledge(oid, status=UnhashableStr("live"))
@@ -2633,7 +2633,7 @@ class TestNonScalarStatus12869:
             # …and a HASHABLE subclass is still a word (no over-refusal).
             class Fine(str):
                 pass
-            sdk.create_object("live-h", "core:strategy")
+            sdk._create_object("live-h", "core:strategy")
             oid2 = _carrier_row(sdk, "Object", "live-h")[0]
             sdk.update_knowledge(oid2, status=Fine("archived"))
             assert _carrier_row(sdk, "Object", "live-h")[1] == "deprecated", (
@@ -2785,7 +2785,7 @@ class TestNonScalarStatus12869:
                "stronly": StrOnly("x")}[payload_kind]
         sdk = TortoiseSDK(str(tmp_path / f"t12869merge-{payload_kind}.db"))
         try:
-            sdk.create_object("held", "core:strategy")
+            sdk._create_object("held", "core:strategy")
             before = _carrier_row(sdk, "Object", "held")
             extra = ({"status": None, KHash("status"): ["live"]}
                      if key is None else {key: ["live"]})
@@ -2803,7 +2803,7 @@ class TestNonScalarStatus12869:
             with pytest.raises(
                     ValueError,
                     match=r"must be a plain string|CONFLICTING status write"):
-                sdk.create_object("held", "core:strategy", **extra)
+                sdk._create_object("held", "core:strategy", **extra)
             assert _carrier_row(sdk, "Object", "held") == before, (
                 "a renderer-only status LANDED on the merge path — the row is "
                 f"now unaddressable: {_carrier_row(sdk, 'Object', 'held')}")
@@ -2831,7 +2831,7 @@ class TestNonScalarStatus12869:
             sdk._get_proj().g.query(
                 "CREATE (n:Object {name:'adoptme', objectKind:'core:strategy'})")
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("adoptme", "core:strategy",
+                sdk._create_object("adoptme", "core:strategy",
                                   **{KHash("status"): ["live"]})
             adopted = _carrier_row(sdk, "Object", "adoptme")
             # ⛔ #11824 S0 refuses at the DOOR, before `resolve_or_mint` — so on
@@ -2871,7 +2871,7 @@ class TestNonScalarStatus12869:
             # — the divergence this test exists to prevent is closed even earlier
             # than it asked for.
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("acme2", "core:organization",
+                sdk._create_object("acme2", "core:organization",
                                   **{RStr("x"): ["live"]})
             assert sdk._get_proj().g.query(
                 "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 0, (
@@ -2882,10 +2882,10 @@ class TestNonScalarStatus12869:
             # an Object-or-Subject row holding the list.
             with pytest.raises(ValueError,
                                match=r"must be a plain string|Invalid status"):
-                sdk.create_object("acme3", "core:organization",
+                sdk._create_object("acme3", "core:organization",
                                   status=["live"])
             # …and a legal word still goes to the Subject layer.
-            sdk.create_object("acme4", "core:organization", status="live")
+            sdk._create_object("acme4", "core:organization", status="live")
             assert sdk._get_proj().g.query(
                 "MATCH (n:Subject) RETURN count(n)").result_set[0][0] == 1
         finally:
@@ -2934,7 +2934,7 @@ class TestNonScalarStatus12869:
             _journal = Path(str(tmp_path / "t12869adopt2.jsonl"))
             _before = len(_journal.read_text().splitlines()) if _journal.exists() else 0
             with pytest.raises(ValueError, match="CONFLICTING status write"):
-                sdk.create_object("noid-b", "core:strategy",
+                sdk._create_object("noid-b", "core:strategy",
                                   **{"status": None, KHash("status"): ["live"]})
             adopted = _carrier_row(sdk, "Object", "noid-b")
             assert adopted[0] is None, (
@@ -2958,7 +2958,7 @@ class TestNonScalarStatus12869:
             # — no id stamped, nothing stored — and it is a `ValueError`, not the
             # encoder's `TypeError`.
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("noid-a", "core:strategy", status=b"live")
+                sdk._create_object("noid-a", "core:strategy", status=b"live")
             enc = _carrier_row(sdk, "Object", "noid-a")
             assert enc[0] is None, (
                 "the ADOPT stamp landed even though the call was REFUSED — a "
@@ -2971,7 +2971,7 @@ class TestNonScalarStatus12869:
             #     the arm that pins the create door's decision NOT to pass
             #     `journals`: re-adding it reds here (MEASURED).
             with pytest.raises(ValueError, match="must be a plain string"):
-                sdk.create_object("enc-fresh", "core:strategy", status=b"live")
+                sdk._create_object("enc-fresh", "core:strategy", status=b"live")
             fresh = _carrier_row(sdk, "Object", "enc-fresh")
             assert fresh is None, (
                 "a refused create left a node behind — a refusal must not cost "
@@ -3000,7 +3000,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869s.db"))
         try:
-            sdk.create_object("sigma", "core:strategy")
+            sdk._create_object("sigma", "core:strategy")
             oid = _carrier_row(sdk, "Object", "sigma")[0]
             sdk._get_proj().g.query(
                 "MATCH (n:Object {id:$i}) SET n.status = $s",
@@ -3060,11 +3060,11 @@ class TestNonScalarStatus12869:
             # silently becoming a vocabulary) is answered by that being a RECORDED
             # decision now, not an accident of a type test.
             with pytest.raises(ValueError, match="not a lifecycle word for :Object"):
-                sdk.create_object("upsilon-word", "core:strategy", status="banana")
+                sdk._create_object("upsilon-word", "core:strategy", status="banana")
             assert _carrier_row(sdk, "Object", "upsilon-word") is None, (
                 "the refused create left a node behind")
             # …and the LEGAL words still store, which is the half that must not regress.
-            sdk.create_object("upsilon-legal", "core:strategy", status="live")
+            sdk._create_object("upsilon-legal", "core:strategy", status="live")
             assert _carrier_row(sdk, "Object", "upsilon-legal")[1] == "live"
             oid = _carrier_row(sdk, "Object", "upsilon-legal")[0]
             with pytest.raises(ValueError, match="not a lifecycle word for :Object"):
@@ -3098,7 +3098,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869n.db"))
         try:
-            sdk.create_object("chi", "core:strategy")
+            sdk._create_object("chi", "core:strategy")
             oid = _carrier_row(sdk, "Object", "chi")[0]
             sdk.update_knowledge(oid, status="live")
             assert _carrier_row(sdk, "Object", "chi")[1] == "live"
@@ -3121,7 +3121,7 @@ class TestNonScalarStatus12869:
 
         sdk = TortoiseSDK(str(tmp_path / "t12869w.db"))
         try:
-            sdk.create_object("psi", "core:strategy", status=Word("live"))
+            sdk._create_object("psi", "core:strategy", status=Word("live"))
             assert _carrier_row(sdk, "Object", "psi")[1] == "live"
             oid = _carrier_row(sdk, "Object", "psi")[0]
             sdk.update_knowledge(oid, status=Word("archived"))
@@ -3152,7 +3152,7 @@ class TestNonScalarStatus12869:
             # WORD, which the arm below pins.
             with pytest.raises(ValueError, match="must be a plain string"):
                 sdk.update_knowledge(sid, status=["live"])
-            pid = sdk.create_point(content="a probe point", kind="statement")
+            pid = sdk._create_point(content="a probe point", kind="statement")
             pid = pid["id"] if isinstance(pid, dict) else pid
             with pytest.raises(ValueError, match="Invalid status"):
                 sdk.update_knowledge(pid, status=["live"])
@@ -3182,7 +3182,7 @@ class TestNonScalarStatus12869:
         """
         sdk = TortoiseSDK(str(tmp_path / "t12869u2.db"))
         try:
-            sdk.create_object("alpha", "core:strategy")
+            sdk._create_object("alpha", "core:strategy")
             oid = _carrier_row(sdk, "Object", "alpha")[0]
             sdk.update_knowledge(oid, status="superseded", supersededBy="alpha2",
                               supersededAt="2026-01-01T00:00:00Z")
@@ -3297,7 +3297,7 @@ class TestNonScalarStatus12869:
             #     `!r` (MEASURED, and that is how a first cut of this test was
             #     caught passing for the wrong reason).
             with pytest.raises(ValueError) as ei:
-                sdk.create_object(RaisingReprStr("rr-amb"), "core:strategy",
+                sdk._create_object(RaisingReprStr("rr-amb"), "core:strategy",
                                   **{"status": None,
                                      KHash("status"): ["live"]})
             assert "RaisingReprStr" in str(ei.value), (
@@ -3309,7 +3309,7 @@ class TestNonScalarStatus12869:
 
             # …and the same raise's message is unchanged for an ordinary `str`
             # target (no over-correction: the helper still renders real ids).
-            sdk.create_object("rr-amb2", "core:strategy", status="live")
+            sdk._create_object("rr-amb2", "core:strategy", status="live")
             amb_id = _carrier_row(sdk, "Object", "rr-amb2")[0]
 
             # (c) `_refuse_non_string_object_status`, the TYPE arm — the SAME
@@ -3345,7 +3345,7 @@ class TestNonScalarStatus12869:
             #     `_np_safe_repr`. Reachable only from the row shape it names:
             #     a non-scalar already on the row, which only a raw Cypher
             #     producer / a replay / a pre-fix SDK can create.
-            sdk.create_object("rr-stored", "core:strategy", status="live")
+            sdk._create_object("rr-stored", "core:strategy", status="live")
             stored_id = _carrier_row(sdk, "Object", "rr-stored")[0]
             sdk._get_proj().g.query(
                 "MATCH (n:Object {id:$i}) SET n.status = $s",
@@ -3389,7 +3389,7 @@ class TestNonScalarStatus12869:
             #     rendering key) DOES route and reach this raise — that claim is
             #     the SECOND half of this arm, executed rather than asserted.
             with pytest.raises(ValueError) as ei:
-                sdk.create_subject(RaisingReprStr("rr-subj-amb"),
+                sdk._create_subject(RaisingReprStr("rr-subj-amb"),
                                    "core:organization",
                                    **{"status": None,
                                       KHash("status"): "live"})
@@ -3422,7 +3422,7 @@ class TestNonScalarStatus12869:
             #     the Object door's guard — which is the vacuous shape this note
             #     warns about, arriving from the other side.
             with pytest.raises(ValueError) as ei:
-                sdk.create_object(RaisingReprStr("rr-subj-route"),
+                sdk._create_object(RaisingReprStr("rr-subj-route"),
                                   "core:organization",
                                   **{"status": "live",
                                      KHash("status"): "archived"})
@@ -3495,7 +3495,7 @@ class TestNonScalarStatus12869:
                 pass
 
             with pytest.raises(ValueError) as ei:
-                sdk.create_object("rr-name", "core:strategy",
+                sdk._create_object("rr-name", "core:strategy",
                                   status=_BoomInt(123))
             # ⛔ THE CLASS-NAME AXIS, pinned at the site that now answers this
             # shape: `#11824 S0`'s door renders the class name through its own
@@ -3793,9 +3793,9 @@ class TestAbsentStatusRendering:
         surface's own guard rather than a restatement of the helper's.
         """
         sdk = TortoiseSDK(str(tmp_path / "g.db"))
-        created = sdk.create_object("statusless-object", objectKind="core:strategy")
+        created = sdk._create_object("statusless-object", objectKind="core:strategy")
         oid = (created.get("node") or created)["id"]
-        res = sdk.recall_subgraph(oid, depth=1)
+        res = sdk._recall_subgraph(oid, depth=1)
         nodes = {n["id"]: n for n in res["nodes"]}
         node = nodes[oid]
         assert node["type"] == "object", node

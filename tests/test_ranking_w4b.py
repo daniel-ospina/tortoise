@@ -610,17 +610,17 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
     """
     # #10121: the CONTESTED twin holds the LOWER ulid, so the recency/id DESC
     # tie-break puts it LAST on the page — the end the boost must lift.
-    hot = sdk.create_point("statement", _TWIN_CONTENT)
+    hot = sdk._create_point("statement", _TWIN_CONTENT)
     time.sleep(0.002)  # cross an ulid() millisecond boundary — see docstring
-    calm = sdk.create_point("statement", _TWIN_CONTENT)
+    calm = sdk._create_point("statement", _TWIN_CONTENT)
     assert hot["id"] < calm["id"], (
         f"the contested twin must hold the LOWER ULID (#10121's tie is "
         f"recency-then-id DESC, so the LOWEST id lands last — the 0 end of "
         f"every span assertion reads that way round): hot {hot['id']} vs calm "
         f"{calm['id']} — regenerate the fixture rather than re-deriving the "
         f"numbers")
-    cc = sdk.create_point("statement", counter_content)
-    cc_parity = sdk.create_point(
+    cc = sdk._create_point("statement", counter_content)
+    cc_parity = sdk._create_point(
         "statement", "regional weather fronts shift whole bird populations")
     proj = sdk._get_proj()
     for pid, a, b in [(calm["id"], 9.0, 1.0), (hot["id"], 0.9, 0.1)]:
@@ -647,8 +647,8 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
             params={"id": pid, "a": a, "b": b},
         )
     # NAND operators: counter-claim -> contested twin; parity point -> calm.
-    sdk.create_operator("NAND", cc["id"], [hot["id"]], direction="unidirectional")
-    sdk.create_operator("NAND", cc_parity["id"], [calm["id"]], direction="unidirectional")
+    sdk._create_operator("NAND", cc["id"], [hot["id"]], direction="unidirectional")
+    sdk._create_operator("NAND", cc_parity["id"], [calm["id"]], direction="unidirectional")
     return calm["id"], hot["id"], cc["id"]
 
 
@@ -659,7 +659,7 @@ def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monk
     means; they are never contested, never boosted)."""
     calm, hot, _cc = _seed_twin_conflict(
         ranked_sdk, "zebra finch flocking behavior is social, not migratory")
-    obj = ranked_sdk.create_object("zebra finch habitat", "concept")
+    obj = ranked_sdk._create_object("zebra finch habitat", "concept")
     proj = ranked_sdk._get_proj()
     proj.g.query(
         "MATCH (p:Point {id:$id}) MATCH (o:Object {id:$oid}) "
@@ -667,7 +667,7 @@ def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monk
         params={"id": hot, "oid": obj["id"]},
     )
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
-    out = ranked_sdk.recall_state("zebra finch social behavior", limit=20)
+    out = ranked_sdk._recall_state("zebra finch social behavior", limit=20)
     recs = {r["id"]: r.get("recall_ranking", {}) for r in out}
     assert hot in recs and calm in recs
     assert recs[hot]["w4_contested_boost"] == W4_CONTESTED_BOOST
@@ -723,7 +723,7 @@ def test_integration_conflict_relevant_query_outranks_twin(
     calm_off = by_off[calm]["final_score"]
 
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
-    results = ranked_sdk.tortoise_fts_query(
+    results = ranked_sdk._tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph")
     ids = [r["id"] for r in results]
     assert hot in ids and calm in ids
@@ -766,7 +766,7 @@ def _run_fts_graph(sdk, flag_on: bool, monkeypatch=None):
         monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
     else:
         os.environ.pop("TORTOISE_W4_ENRICHMENT", None)
-    return sdk.tortoise_fts_query(
+    return sdk._tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph")
 
 
@@ -808,7 +808,7 @@ def test_integration_fused_path_applies_contested_boost(
     off = _run_fts_graph(ranked_sdk, flag_on=False)
     by_off = {r["id"]: r for r in off}
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
-    results = ranked_sdk.tortoise_fts_query(
+    results = ranked_sdk._tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph")
     by_id = {r["id"]: r for r in results}
     assert hot in by_id and calm in by_id, (
@@ -967,7 +967,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
         return DEFAULT_SIMILARITY_WEIGHT * (ns[calm] - ns[hot])
 
     # ── The shipped default page, retrieved through the fused path ────────
-    res = ranked_sdk.tortoise_fts_query(query, limit=10, order_by="graph")
+    res = ranked_sdk._tortoise_fts_query(query, limit=10, order_by="graph")
     assert {r.get("match_source") for r in res} == {"rrf"}, (
         "this test is about the FUSED read; it must not degrade to single-leg")
     by_id = {r["id"]: r for r in res}
@@ -980,7 +980,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
     # saying the SDK's own limit=2 read does not hold both twins.  Assert the
     # premise: if it ever does, the constructed page is no longer the honest
     # stand-in for a 2-row read.
-    res2 = ranked_sdk.tortoise_fts_query(query, limit=2, order_by="graph")
+    res2 = ranked_sdk._tortoise_fts_query(query, limit=2, order_by="graph")
     assert not {hot, calm} <= {r["id"] for r in res2}, (
         f"the comment says the SDK's own limit=2 read does not hold both "
         f"twins; it now does ({[r['id'] for r in res2]}) — re-derive the "
@@ -1173,7 +1173,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
     # both ends of the span (the third row lands in the middle), so it buys
     # nothing over the 2-row page — which is why the requirement is flat to
     # 1.4286 and only falls at limit>=4.
-    res3 = ranked_sdk.tortoise_fts_query(query, limit=3, order_by="graph")
+    res3 = ranked_sdk._tortoise_fts_query(query, limit=3, order_by="graph")
     assert {r.get("match_source") for r in res3} == {"rrf"}, (
         "the limit=3 row of the comment is a FUSED-read measurement")
     three_req, three_hot, three_calm, three_ids = required_cb(
@@ -1331,7 +1331,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
         f"({ten_headroom:.4f}) — outside the headroom it could not flip it")
     with monkeypatch.context() as patched:
         patched.setattr("tortoise.ranking.W4_CONTESTED_BOOST", modest)
-        flipped = ranked_sdk.tortoise_fts_query(query, limit=10, order_by="graph")
+        flipped = ranked_sdk._tortoise_fts_query(query, limit=10, order_by="graph")
     fby = {r["id"]: r["graph_ranking"] for r in flipped}
     assert hot in fby and calm in fby, "FIXTURE NOT REACHED: a twin is off the page"
     assert fby[hot]["w4_contested_boost"] == modest, "the modest raise did not apply"
@@ -1363,7 +1363,7 @@ def test_integration_boost_requirement_is_bounded_by_the_page(
     def _flips_at(value: float) -> bool:
         with monkeypatch.context() as patched:
             patched.setattr("tortoise.ranking.W4_CONTESTED_BOOST", value)
-            got = ranked_sdk.tortoise_fts_query(query, limit=10, order_by="graph")
+            got = ranked_sdk._tortoise_fts_query(query, limit=10, order_by="graph")
         ids = [r["id"] for r in got]
         assert hot in ids and calm in ids, (
             f"FIXTURE NOT REACHED at cb={value}: a twin is off the page")
@@ -1454,7 +1454,7 @@ def test_integration_w4_enrich_false_suppresses_boost_with_flag_on(ranked_sdk, m
         ranked_sdk, "zebra finch flocking behavior is social, not migratory")
     off = _run_fts_graph(ranked_sdk, flag_on=False)
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
-    on_optout = ranked_sdk.tortoise_fts_query(
+    on_optout = ranked_sdk._tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph", w4_enrich=False)
     assert [r["id"] for r in off] == [r["id"] for r in on_optout]
     for r_off, r_opt in zip(off, on_optout):  # noqa: B905

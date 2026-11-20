@@ -448,7 +448,7 @@ def test_the_door_refuses_a_statement_outside_its_label(statement: str) -> None:
 
 
 @pytest.mark.parametrize("statement", [
-    # The four literal statements `tortoise/sdk.py::ingest_corpus` passes, built with the real
+    # The four literal statements `tortoise/sdk.py::_ingest_corpus` passes, built with the real
     # helpers so the shape is the product's, not a paraphrase of it.
     "MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
     + "SET e += $props, " + set_embedding_clause("e"),

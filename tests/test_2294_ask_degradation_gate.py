@@ -145,9 +145,9 @@ def test_invalidate_point_surfaces_flag_on_terminal_inclusive_hits(
     terminal-inclusive read carries ``outdated=True`` so the gate can fire."""
     sdk = sdk_factory()
     try:
-        old = sdk.create_point("statement", "The office is in Chicago.")
-        new = sdk.create_point("statement", "The office moved to the suburbs.")
-        sdk.invalidate_point(old["id"], new["id"])
+        old = sdk._create_point("statement", "The office is in Chicago.")
+        new = sdk._create_point("statement", "The office moved to the suburbs.")
+        sdk._invalidate_point(old["id"], new["id"])
 
         # The write is flag-only: status is NOT stamped on this path.
         row = sdk._get_proj().g.query(
@@ -156,11 +156,11 @@ def test_invalidate_point_surfaces_flag_on_terminal_inclusive_hits(
         assert row[0] == "live" and bool(row[1]) is True
 
         # Default read: excluded (the exclusion already honoured the flag).
-        default_hits = sdk.tortoise_fts_query("Chicago office", limit=20)
+        default_hits = sdk._tortoise_fts_query("Chicago office", limit=20)
         assert all(h.get("id") != old["id"] for h in default_hits)
 
         # Terminal-inclusive read: present, and the flag rides the hit.
-        hits = sdk.tortoise_fts_query("Chicago office", limit=20,
+        hits = sdk._tortoise_fts_query("Chicago office", limit=20,
                                       include_terminal=True)
         hit = next((h for h in hits if h.get("id") == old["id"]), None)
         assert hit is not None, "invalidated point must be visible when opted in"
@@ -183,10 +183,10 @@ def test_supersede_point_surfaces_status_and_flag(sdk_factory, force_sparse_tfid
     halves reach the hit, so the gate fired here even before the fix."""
     sdk = sdk_factory()
     try:
-        old = sdk.create_point("statement", "My gym was downtown.")
-        new = sdk.create_point("statement", "My gym is now uptown.")
-        sdk.supersede_point(old["id"], new["id"])
-        hits = sdk.tortoise_fts_query("downtown gym", limit=20,
+        old = sdk._create_point("statement", "My gym was downtown.")
+        new = sdk._create_point("statement", "My gym is now uptown.")
+        sdk._supersede_point(old["id"], new["id"])
+        hits = sdk._tortoise_fts_query("downtown gym", limit=20,
                                       include_terminal=True)
         hit = next((h for h in hits if h.get("id") == old["id"]), None)
         assert hit is not None

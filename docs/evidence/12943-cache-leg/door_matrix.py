@@ -275,7 +275,7 @@ def _write_sdk(org: str, graph_id: str, ns: str, name: str) -> dict:
         # argument — `_get_proj().graph_name` is the projection's own answer.
         target = sdk._get_proj().graph_name
         sdk._bind_record_tenant(org, graph_id)
-        sdk.create_object(name, objectKind="goal")
+        sdk._create_object(name, objectKind="goal")
     finally:
         sdk.close()
     return {"cache_target": target}
@@ -303,7 +303,7 @@ def _write_data_sdk(org: str, graph_id: str, ns: str, name: str) -> dict:
         sdk = hosted_api._data_sdk(_org_dict(org, graph_id, ns))
         try:
             target = sdk._get_proj().graph_name
-            sdk.create_object(name, objectKind="goal")
+            sdk._create_object(name, objectKind="goal")
         finally:
             sdk.close()
     finally:
@@ -326,7 +326,7 @@ def _write_data_sdk_orgwide(org: str, graph_id: str, ns: str, name: str) -> dict
         sdk = hosted_api._data_sdk(_org_dict(org, None, None))
         try:
             target = sdk._get_proj().graph_name
-            sdk.create_object(name, objectKind="goal")
+            sdk._create_object(name, objectKind="goal")
         finally:
             sdk.close()
     finally:
@@ -408,7 +408,7 @@ def _write_script_orglevel(org: str, graph_id: str, ns: str, name: str) -> dict:
     try:
         target = sdk._get_proj().graph_name
         sdk._bind_record_tenant(org, graph_id)
-        sdk.create_object(name, objectKind="goal")
+        sdk._create_object(name, objectKind="goal")
     finally:
         sdk.close()
     return {"cache_target": target}
@@ -427,7 +427,7 @@ def _write_misroute(org: str, graph_id: str, ns: str, name: str) -> dict:
     try:
         target = sdk._get_proj().graph_name
         sdk._bind_record_tenant(org, graph_id)
-        sdk.create_object(name, objectKind="goal")
+        sdk._create_object(name, objectKind="goal")
     finally:
         sdk.close()
     return {"cache_target": target, "tenant_graph_id": graph_id}

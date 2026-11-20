@@ -844,14 +844,16 @@ def test_the_alias_forms_discovery_still_cannot_see_are_named(tmp_path):
     # calls the seam, so it owes (and carries) no declaration. Re-derived from the instrument here
     # rather than trusted from the prose.
     shape_note = probe.UNDECIDABLE_WRITE_SHAPES["map-merge (`SET n += $p`)"]
-    for instance in ("_update_entity", "update_point"):
+    for instance in ("_update_entity", "_update_point"):
         assert instance in shape_note, (
             f"the map-merge blind-spot note names no {instance} — a live instance a reader of the "
             f"row cannot find is the #11398 defect: {shape_note!r}")
-    assert not register.is_declared("tortoise.sdk::update_point"), (
+    # #12901 FINAL batch: `update_point` was PRIVATISED (`_update_point`); the writer the
+    # claim is ABOUT is the same body, so the key moves with it.
+    assert not register.is_declared("tortoise.sdk::_update_point"), (
         "a `gated` writer owes no declaration, and declaring one would misreport WHERE its vector "
         "lands as an outside-gate judgement")
-    assert probe.embedding_writers()["tortoise.sdk::update_point"]["kind"] == "gated", (
+    assert probe.embedding_writers()["tortoise.sdk::_update_point"]["kind"] == "gated", (
         "the second map-merge instance is only dispositioned as 'gated, declared nowhere' while it "
         "classes that way — re-derive it instead of asserting the sentence")
     assert "UNDECIDABLE_WRITE_SHAPES" in (register.__doc__ or ""), (
@@ -1560,8 +1562,8 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     "tortoise.sdk::_session_event_write": (
         "tortoise/sdk.py", "_session_event_write",
         '"MERGE (e:Event {eventId:$eid}) "', frozenset({"Event"})),
-    "tortoise.sdk::ingest_corpus": (
-        "tortoise/sdk.py", "ingest_corpus",
+    "tortoise.sdk::_ingest_corpus": (
+        "tortoise/sdk.py", "_ingest_corpus",
         '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
     "tortoise.session_indexer::main": (
         "tortoise/session_indexer.py", "main",

@@ -105,7 +105,7 @@ def main() -> int:
                 "MERGE (s:Source {url:$u}) SET s.contentHash=$h",
                 params={"u": source_url, "h": "hash-7951-probe"},
             )
-            first = sdk.create_point("statement", "a journal-first claim",
+            first = sdk._create_point("statement", "a journal-first claim",
                                      tags=["alpha"], extractedFrom=source_url)
             pid = first["id"]
         finally:
@@ -161,7 +161,7 @@ def main() -> int:
 
             type(proj2.g).query = spy_query2
             try:
-                sdk2.create_point("statement", "a claim whose cache write fails")
+                sdk2._create_point("statement", "a claim whose cache write fails")
             except Exception as exc:  # the failure is the point of the probe
                 print(f"failed cache write raised:        {type(exc).__name__}")
             type(proj2.g).query = real_query2

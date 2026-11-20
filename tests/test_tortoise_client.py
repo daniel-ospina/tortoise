@@ -106,13 +106,13 @@ class TestQueryPriorResearch:
 
     def test_returns_existing_claims_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point(
+        sdk._create_point(
             "competitor-analysis", "El Dato competes with OpenTable", authoredBy="research-skill"
         )
-        sdk.create_point(
+        sdk._create_point(
             "competitor-analysis", "Competitor X has 20% market share", authoredBy="research-skill"
         )
-        sdk.create_point("statement", "Unrelated claim", authoredBy="other")
+        sdk._create_point("statement", "Unrelated claim", authoredBy="other")
         sdk.close()
 
         results = tortoise_client.query_prior_research("competitor-analysis")
@@ -124,7 +124,7 @@ class TestQueryPriorResearch:
 
     def test_returns_claims_by_kind_match(self):
         sdk = _fresh_sdk()
-        sdk.create_point("decision", "Deploy FalkorDB in production", authoredBy="research-skill")
+        sdk._create_point("decision", "Deploy FalkorDB in production", authoredBy="research-skill")
         sdk.close()
 
         results = tortoise_client.query_prior_research("decision")
@@ -133,7 +133,7 @@ class TestQueryPriorResearch:
 
     def test_empty_when_no_match(self):
         sdk = _fresh_sdk()
-        sdk.create_point("statement", "Something else", authoredBy="test")
+        sdk._create_point("statement", "Something else", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_prior_research("nonexistent-domain")
@@ -231,13 +231,13 @@ class TestVisionPoints:
 
     def test_query_visions_filters_by_kind(self):
         sdk = _fresh_sdk()
-        sdk.create_point(
+        sdk._create_point(
             "vision",
             "El Dato will be the OS for restaurant discovery",
             authoredBy="define-vision-skill",
             confidence=0.6,
         )
-        sdk.create_point("statement", "Not a vision", authoredBy="test")
+        sdk._create_point("statement", "Not a vision", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_existing_visions()
@@ -247,8 +247,8 @@ class TestVisionPoints:
 
     def test_query_visions_all(self):
         sdk = _fresh_sdk()
-        sdk.create_point("vision", "Vision A", authoredBy="test")
-        sdk.create_point("vision", "Vision B", authoredBy="test")
+        sdk._create_point("vision", "Vision A", authoredBy="test")
+        sdk._create_point("vision", "Vision B", authoredBy="test")
         sdk.close()
 
         results = tortoise_client.query_existing_visions()
@@ -354,9 +354,9 @@ class TestGracefulDegradation:
         can never drift from the caught classes."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk:
-            mock_sdk.return_value.query.side_effect = exc("DB unreachable")
-            mock_sdk.return_value.create_point.side_effect = exc("DB unreachable")
-            mock_sdk.return_value.summarize_structure.side_effect = exc("DB unreachable")
+            mock_sdk.return_value._query.side_effect = exc("DB unreachable")
+            mock_sdk.return_value._create_point.side_effect = exc("DB unreachable")
+            mock_sdk.return_value._summarize_structure.side_effect = exc("DB unreachable")
             assert tortoise_client.query_prior_research("competitor-analysis") == []
             assert tortoise_client.query_existing_strategies() == []
             assert tortoise_client.query_existing_visions() == []
@@ -990,10 +990,10 @@ class TestGracefulDegradation:
         from the SDK propagates to the caller."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk:
-            mock_sdk.return_value.query.side_effect = TypeError("bug")
+            mock_sdk.return_value._query.side_effect = TypeError("bug")
             with pytest.raises(TypeError):
                 tortoise_client.query_prior_research("competitor-analysis")
-            mock_sdk.return_value.create_point.side_effect = TypeError("bug")
+            mock_sdk.return_value._create_point.side_effect = TypeError("bug")
             with pytest.raises(TypeError):
                 tortoise_client.write_strategy_points([{"content": "x"}])
 
@@ -1032,13 +1032,13 @@ class TestGracefulDegradation:
         once, then propagates."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk, patch("time.sleep") as sleep_mock:
-            mock_sdk.return_value.create_point.side_effect = TypeError("boom")
+            mock_sdk.return_value._create_point.side_effect = TypeError("boom")
             with pytest.raises(TypeError):
                 tortoise_client.write_strategy_points([{"content": "a"}])
         assert sleep_mock.call_args_list == []
 
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk, patch("time.sleep") as sleep_mock:
-            mock_sdk.return_value.create_point.side_effect = [
+            mock_sdk.return_value._create_point.side_effect = [
                 sqlite3.OperationalError("database is locked"),
                 TypeError("boom"),
             ]
@@ -1053,7 +1053,7 @@ class TestGracefulDegradation:
         limitation; callers should retry with idempotency in mind)."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk:
-            mock_sdk.return_value.create_point.side_effect = [
+            mock_sdk.return_value._create_point.side_effect = [
                 {"id": "1", "pointKind": "strategy"},
                 redis_exc.ConnectionError("DB unreachable"),
             ]
@@ -1066,7 +1066,7 @@ class TestGracefulDegradation:
         (100ms/200ms schedule documented in _create_with_retry)."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk, patch("time.sleep") as sleep_mock:
-            mock_sdk.return_value.create_point.side_effect = [
+            mock_sdk.return_value._create_point.side_effect = [
                 sqlite3.OperationalError("database is locked"),
                 sqlite3.OperationalError("database is locked"),
                 {"id": "1", "pointKind": "strategy"},
@@ -1081,7 +1081,7 @@ class TestGracefulDegradation:
         embedded lock error class IS in the tuple) — no raw traceback."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk, patch("time.sleep"):
-            mock_sdk.return_value.create_point.side_effect = sqlite3.OperationalError(
+            mock_sdk.return_value._create_point.side_effect = sqlite3.OperationalError(
                 "database is locked"
             )
             assert tortoise_client.write_strategy_points([{"content": "a"}]) == []
@@ -1131,7 +1131,7 @@ class TestGracefulDegradation:
         self._clear_db_env()
         os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
         os.environ["TORTOISE_DB_PATH"] = "/tmp/ignored.db"
-        with patch.object(TortoiseSDK, "summarize_structure", return_value={"nodes": 0}):
+        with patch.object(TortoiseSDK, "_summarize_structure", return_value={"nodes": 0}):
             result = tortoise_client.status()
         assert result["available"] is True
         assert result["db_uri"] == "docker://localhost:1"
@@ -1165,7 +1165,7 @@ class TestGracefulDegradation:
         not unavailability — available stays True with an error chain."""
         self._clear_db_env()
         with patch("tortoise.sdk.TortoiseSDK") as mock_sdk:
-            mock_sdk.return_value.summarize_structure.side_effect = TypeError("bug")
+            mock_sdk.return_value._summarize_structure.side_effect = TypeError("bug")
             result = tortoise_client.status()
         assert result["available"] is True
         assert result["chain_status"]["error"] == "query failed"

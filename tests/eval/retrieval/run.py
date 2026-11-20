@@ -188,7 +188,7 @@ def _rerank_fused(
     stub_projection=None,
 ) -> list[tuple[str, float]]:
     """#1348 fused_rerank arm: fuse → truncate to limit → rerank (production
-    order ``sdk.py::TortoiseSDK.tortoise_fts_query``). Input tuples (pid, rrf_score) become
+    order ``sdk.py::TortoiseSDK._tortoise_fts_query``). Input tuples (pid, rrf_score) become
     result dicts carrying scores.rrf (the GraphRanker similarity contract).
 
     stub_projection: for the positive-control arm — a duck-typed projection
@@ -1313,7 +1313,7 @@ def _run_with_sdk(args, sdk) -> dict:
             "strategies populate (population_counts self-declare authority). "
             "fused key is the k=60 alias (gate compat).",
             "#1348 fused_rerank arm: fuse -> truncate to limit -> rerank "
-            "(production order TortoiseSDK.tortoise_fts_query); "
+            "(production order TortoiseSDK._tortoise_fts_query); "
             "corpus-variant enhanced "
             "seeds topic-correlated EP (n.confidence + edges, no new nodes); "
             "oracle-proxy = query-conditioned positive control (stub "

@@ -165,8 +165,8 @@ def _graph_with_corpus() -> tuple[object, dict[str, str]]:
     _SDKS.append(sdk)
     ids: dict[str, str] = {}
     for i, content in enumerate(TOPIC_DOCS):
-        ids[f"topic{i}"] = sdk.create_point("statement", content)["id"]
-    ids["target"] = sdk.create_point("statement", TARGET_DOC)["id"]
+        ids[f"topic{i}"] = sdk._create_point("statement", content)["id"]
+    ids["target"] = sdk._create_point("statement", TARGET_DOC)["id"]
     return sdk._get_proj().g, ids
 
 
@@ -388,7 +388,7 @@ class TestReadPath:
         monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
         sdk, _target = _e2e_sdk()
         trace: list[dict] = []
-        hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
+        hits = sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
         assert hits, "guard: the read must return rows"
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
                    for e in trace), (
@@ -421,7 +421,7 @@ class TestReadPath:
             "assertion below cannot tell them apart")
 
         trace: list[dict] = []
-        hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
+        hits = sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
         assert all(e.get("mechanism") != LEXICAL_MECHANISM_BM25
                    for e in trace), (
             "the BM25 arm must not run when TORTOISE_BM25_LEXICAL=0 opts "
@@ -531,7 +531,7 @@ class TestReadPath:
         from tortoise import retrieval_metering
         tally = retrieval_metering.arm(org_id=None)
         _before = tally.legs.get("fts", 0)
-        off = sdk.tortoise_fts_query(QUERY, limit=10)
+        off = sdk._tortoise_fts_query(QUERY, limit=10)
         off_fts_runs = tally.legs.get("fts", 0) - _before
         off_ids = [h["id"] for h in off]
         assert target in off_ids, (
@@ -540,7 +540,7 @@ class TestReadPath:
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         _before = tally.legs.get("fts", 0)
         on_trace: list[dict] = []
-        on = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=on_trace)
+        on = sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=on_trace)
         on_ids = [h["id"] for h in on]
 
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
@@ -602,14 +602,14 @@ class TestReadPath:
         _SDKS.append(sdk)
         for content in ("the release notes", "the rollout plan",
                         "the invoice summary"):
-            sdk.create_point("statement", content)
+            sdk._create_point("statement", content)
 
         query = "the"
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
-        off = sdk.tortoise_fts_query(query, limit=5)
+        off = sdk._tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
-        on = sdk.tortoise_fts_query(query, limit=5, leg_trace=on_trace)
+        on = sdk._tortoise_fts_query(query, limit=5, leg_trace=on_trace)
 
         assert off and on, ("guard against a vacuous comparison: the shipped "
                             "scorer finds the stopword documents")
@@ -640,14 +640,14 @@ class TestReadPath:
             namespace=f"bm25_no_{os.urandom(6).hex()}")
         _SDKS.append(sdk)
         for content in TOPIC_DOCS:
-            sdk.create_point("statement", content)
+            sdk._create_point("statement", content)
 
         query = "zebra xylophone"
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
-        off = sdk.tortoise_fts_query(query, limit=5)
+        off = sdk._tortoise_fts_query(query, limit=5)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         on_trace: list[dict] = []
-        on = sdk.tortoise_fts_query(query, limit=5, leg_trace=on_trace)
+        on = sdk._tortoise_fts_query(query, limit=5, leg_trace=on_trace)
 
         assert off, "guard: the dense leg answers this query on this fixture"
         # The arm must actually be WIRED for this test to say anything: an
@@ -680,11 +680,11 @@ class TestReadPath:
 
         monkeypatch.setenv("TORTOISE_FUSION_WEIGHTS", '{"vector": 1.5, "fts": 50}')
         unbounded = [(h["id"], h["similarity"])
-                     for h in sdk.tortoise_fts_query(QUERY, limit=10)]
+                     for h in sdk._tortoise_fts_query(QUERY, limit=10)]
 
         monkeypatch.setenv("TORTOISE_FUSION_WEIGHTS", '{"vector": 1.5, "fts": 1.0}')
         clamped = [(h["id"], h["similarity"])
-                   for h in sdk.tortoise_fts_query(QUERY, limit=10)]
+                   for h in sdk._tortoise_fts_query(QUERY, limit=10)]
 
         assert unbounded and clamped, "guard: both reads must return rows"
         assert unbounded == clamped, (
@@ -712,13 +712,13 @@ class TestReadPath:
             namespace=f"bm25_zd_{os.urandom(6).hex()}")
         _SDKS.append(sdk)
         for content in TOPIC_DOCS_END_TO_END:
-            sdk.create_point("statement", content)
-        target = sdk.create_point("statement", TARGET_DOC)["id"]
+            sdk._create_point("statement", content)
+        target = sdk._create_point("statement", TARGET_DOC)["id"]
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         monkeypatch.setenv("TORTOISE_FUSION_WEIGHTS", '{"vector": 0}')
 
         trace: list[dict] = []
-        hits = sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
+        hits = sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=trace)
         assert hits, "guard: the read must return rows to compare"
         assert hits[0]["id"] != min(h["id"] for h in hits), (
             "guard: the target must not be the lowest id, or id order would "
@@ -757,14 +757,14 @@ class TestReadPath:
         control_trace: list[dict] = []
         # ruff F841: the call's EFFECT is `control_trace`, asserted below — the
         # return value is not read here.
-        sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
+        sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
         assert not [e for e in control_trace
                     if e.get("mechanism") == LEXICAL_MECHANISM_BM25], (
             "guard: gate OFF must never claim a BM25 lexical entry")
 
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         arm_trace: list[dict] = []
-        sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=arm_trace)
+        sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=arm_trace)
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
                    and e.get("count") for e in arm_trace), (
             "guard (control): without an expansion flag the arm DOES run on "
@@ -774,11 +774,11 @@ class TestReadPath:
                       {"entity_key_expansion": True}):
             monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
             off = [(h["id"], h["similarity"])
-                   for h in sdk.tortoise_fts_query(QUERY, limit=10, **lever)]
+                   for h in sdk._tortoise_fts_query(QUERY, limit=10, **lever)]
             monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
             on_trace: list[dict] = []
             on = [(h["id"], h["similarity"])
-                  for h in sdk.tortoise_fts_query(
+                  for h in sdk._tortoise_fts_query(
                       QUERY, limit=10, leg_trace=on_trace, **lever)]
             assert not [e for e in on_trace
                         if e.get("mechanism") == LEXICAL_MECHANISM_BM25], (
@@ -813,7 +813,7 @@ class TestReadPath:
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
 
         control_trace: list[dict] = []
-        control = sdk.tortoise_fts_query(QUERY, limit=10,
+        control = sdk._tortoise_fts_query(QUERY, limit=10,
                                          leg_trace=control_trace)
         assert control, "guard: the un-floored read answers on this fixture"
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
@@ -826,7 +826,7 @@ class TestReadPath:
         monkeypatch.setenv("TORTOISE_VECTOR_MIN_SIMILARITY", "0.999")
         floored_trace: list[dict] = []
         floored = [(h["id"], h["similarity"])
-                   for h in sdk.tortoise_fts_query(
+                   for h in sdk._tortoise_fts_query(
                        QUERY, limit=10, leg_trace=floored_trace)]
         assert any(e.get("reason") == "below_relevance_floor"
                    for e in floored_trace), (
@@ -841,7 +841,7 @@ class TestReadPath:
         # arm changes nothing about it (not the ids, not the fused scores).
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off_floored = [(h["id"], h["similarity"])
-                       for h in sdk.tortoise_fts_query(QUERY, limit=10)]
+                       for h in sdk._tortoise_fts_query(QUERY, limit=10)]
         assert floored and floored == off_floored, (
             "a floored read must be exactly the gate-off floored read; "
             f"off={off_floored}, on={floored}")
@@ -867,7 +867,7 @@ class TestReadPath:
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
 
         control_trace: list[dict] = []
-        sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
+        sdk._tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
                    for e in control_trace), (
             "guard (control): on the embedded lane the arm runs; "
@@ -876,7 +876,7 @@ class TestReadPath:
         proj = sdk._get_proj()
         monkeypatch.setattr(proj, "_is_embedded", False, raising=False)
         server_trace: list[dict] = []
-        server = sdk.tortoise_fts_query(QUERY, limit=10,
+        server = sdk._tortoise_fts_query(QUERY, limit=10,
                                         leg_trace=server_trace)
         assert server, ("guard: the shipped legs still answer when the lane is "
                         "reported as the server lane")
@@ -919,12 +919,12 @@ class TestReadPath:
             namespace=f"bm25_cap_{os.urandom(6).hex()}")
         _SDKS.append(sdk)
         for content in TOPIC_DOCS_END_TO_END:
-            sdk.create_point("statement", content)
-        target = sdk.create_point("statement", TARGET_DOC)["id"]
+            sdk._create_point("statement", content)
+        target = sdk._create_point("statement", TARGET_DOC)["id"]
 
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
         off = [(h["id"], h["similarity"])
-               for h in sdk.tortoise_fts_query(QUERY, limit=10)]
+               for h in sdk._tortoise_fts_query(QUERY, limit=10)]
         assert off and off[0][0] != target, (
             f"guard: the shipped read ranks the record down; got {off}")
 
@@ -940,7 +940,7 @@ class TestReadPath:
         monkeypatch.setattr(search_engine, "run_bm25_query",
                             lambda *a, **kw: _capped(1000, *a, **kw))
         control = [(h["id"], h["similarity"])
-                   for h in sdk.tortoise_fts_query(
+                   for h in sdk._tortoise_fts_query(
                        QUERY, limit=10, leg_trace=control_trace)]
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
                    and e.get("count") for e in control_trace), (
@@ -954,7 +954,7 @@ class TestReadPath:
         monkeypatch.setattr(search_engine, "run_bm25_query",
                             lambda *a, **kw: _capped(1, *a, **kw))
         tight = [(h["id"], h["similarity"])
-                 for h in sdk.tortoise_fts_query(
+                 for h in sdk._tortoise_fts_query(
                      QUERY, limit=10, leg_trace=tight_trace)]
         declined = [e for e in tight_trace
                     if e.get(LEXICAL_DECLINED_KEY)]
@@ -985,11 +985,11 @@ class TestReadPath:
             os.path.join(tempfile.mkdtemp(prefix="bm25_8488_num_"), "t.db"),
             namespace=f"bm25_num_{os.urandom(6).hex()}")
         _SDKS.append(sdk)
-        sdk.create_point("statement", "invoice ticket 4032 paid")
+        sdk._create_point("statement", "invoice ticket 4032 paid")
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
 
         default_trace: list[dict] = []
-        default = sdk.tortoise_fts_query("4032", limit=5,
+        default = sdk._tortoise_fts_query("4032", limit=5,
                                          leg_trace=default_trace)
         assert default, "guard: the shipped leg answers a raw numeric query"
         assert not [e for e in default_trace
@@ -999,7 +999,7 @@ class TestReadPath:
             f"trace={default_trace}")
 
         opted_trace: list[dict] = []
-        opted = sdk.tortoise_fts_query("4032", limit=5, keep_numeric=True,
+        opted = sdk._tortoise_fts_query("4032", limit=5, keep_numeric=True,
                                        leg_trace=opted_trace)
         assert opted, "guard: the opt-in read must return rows"
         # ``count`` is the load-bearing half: ``_record`` writes the mechanism
@@ -1079,8 +1079,8 @@ class TestDeclineIsNotAReadDegradation:
             namespace=f"bm25_decline_{os.urandom(6).hex()}")
         _SDKS.append(sdk)
         for content in TOPIC_DOCS_END_TO_END:
-            sdk.create_point("statement", content)
-        sdk.create_point("statement", TARGET_DOC)
+            sdk._create_point("statement", content)
+        sdk._create_point("statement", TARGET_DOC)
         monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
         return sdk
 
@@ -1112,7 +1112,7 @@ class TestDeclineIsNotAReadDegradation:
         self._declining(monkeypatch)
         sink: dict = {}
         trace: list[dict] = []
-        rows = sdk.tortoise_fts_query(QUERY, limit=10, read_status_out=sink,
+        rows = sdk._tortoise_fts_query(QUERY, limit=10, read_status_out=sink,
                                       leg_trace=trace)
         assert rows, "guard: the shipped legs must still answer this read"
         assert [e for e in trace if e.get(LEXICAL_DECLINED_KEY)], (
@@ -1467,9 +1467,9 @@ def _e2e_sdk() -> tuple[TortoiseSDK, str]:
     db_path = os.path.join(tempfile.mkdtemp(prefix="bm25_8488_e2e_"), "t.db")
     sdk = TortoiseSDK(db_path, namespace=f"bm25_e2e_{os.urandom(6).hex()}")
     _SDKS.append(sdk)
-    target = sdk.create_point("statement", TARGET_DOC)["id"]
+    target = sdk._create_point("statement", TARGET_DOC)["id"]
     for content in TOPIC_DOCS_END_TO_END:
-        sdk.create_point("statement", content)
+        sdk._create_point("statement", content)
     return sdk, target
 
 

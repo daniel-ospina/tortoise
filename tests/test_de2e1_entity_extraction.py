@@ -414,7 +414,7 @@ def test_de2e1_ingest_then_mine_mines_standalone_indexed_corpus():
     sdk = TortoiseSDK(os.path.join(tmp, "ing.db"))
     try:
         # standalone ingest — indexes the session Event, mines nothing
-        ingest = sdk.ingest_corpus(corpus, eventKind="AgentSession",
+        ingest = sdk._ingest_corpus(corpus, eventKind="AgentSession",
                                    extract_metadata=False)
         assert ingest["ingested"] == 1, f"standalone ingest: {ingest}"
         g = sdk._get_proj().g

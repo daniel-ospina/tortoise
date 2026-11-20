@@ -570,7 +570,7 @@ def test_a_scratch_journal_keeps_the_turns_in_the_graph_and_the_read_backs_it(
         "RETURN t.id ORDER BY t.id").result_set] == ["scratch_t0"], (
         "a scratch-journal capture must put its turn in the graph")
 
-    detail = sdk.get_session("scratch") or {}
+    detail = sdk._get_session("scratch") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == ["scratch_t0"], (
         "a record that answered EMPTY for a session whose turns are in the "
         "graph blanked the transcript (#10000 P0-3)")
@@ -639,7 +639,7 @@ def test_a_partially_refused_capture_is_served_from_both_stores(
     # UNION, so the stand-in accepts it and ignores it.
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
                         lambda self, sid, **kw: (landed_only, False))
-    detail = sdk.get_session("split") or {}
+    detail = sdk._get_session("split") or {}
     assert [t["id"] for t in detail.get("turn_points", [])] == [
         "split_t0", "split_t1"], (
         "the split transcript was served from ONE store: the record's landed "
@@ -854,7 +854,7 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
                         lambda self, sid, **kw: (short, False))
     with pytest.raises(RecordUnavailable):
-        sdk.get_session("sdk-short")
+        sdk._get_session("sdk-short")
 
     # …and the agreement direction: an armed APPEND leaves the record holding
     # the whole run while `turn_count` is the last WINDOW — the record's own
@@ -871,7 +871,7 @@ def test_a_short_record_answer_is_refused_by_the_sdk_door_too(sdk, monkeypatch):
         turn_count=2, kind=record_read.TurnAnswer.COMPLETE, reason="turn rows")
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_record_turn_answer",
                         lambda self, sid, **kw: (whole, False))
-    detail = sdk.get_session("sdk-append")
+    detail = sdk._get_session("sdk-append")
     assert len(detail["turn_points"]) == 4, detail["turn_points"]
     assert detail["turns"] == 4, (
         "the SDK published the WINDOW length above the transcript it serves: "
@@ -930,7 +930,7 @@ def test_the_sdk_door_does_not_serve_an_unverified_copy_on_a_record_outage(
     monkeypatch.setattr("tortoise.record_serve.open_record", _unreachable)
 
     # (a) the copy agrees with the session's count: served, with its own length.
-    detail = sdk.get_session("outage-whole") or {}
+    detail = sdk._get_session("outage-whole") or {}
     assert [t["id"] for t in detail["turn_points"]] == [
         "outage-whole_t0", "outage-whole_t1"], (
         "an outage stopped serving a graph copy that AGREES with the session's "
@@ -939,7 +939,7 @@ def test_the_sdk_door_does_not_serve_an_unverified_copy_on_a_record_outage(
 
     # (b) the copy cannot be proven complete: refused, never published as whole.
     with pytest.raises(RecordUnavailable):
-        sdk.get_session("outage-short")
+        sdk._get_session("outage-short")
 
 
 def test_the_write_op_meter_counts_the_sessions_turns_not_turn_nodes(sdk):
@@ -2932,7 +2932,7 @@ def test_a_record_with_no_account_is_not_narrated_as_a_divergence(
                             lambda self, sid, **kw: (answer, False))
         caplog.clear()
         with caplog.at_level(logging.DEBUG):
-            detail = sdk.get_session("noacct") or {}
+            detail = sdk._get_session("noacct") or {}
         return detail, [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     no_account = record_read.TurnAnswer(

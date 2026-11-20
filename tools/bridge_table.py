@@ -2332,6 +2332,13 @@ def render(
             + " — the row is not refuted either; it rests on beta alone and is genuinely"
             " owner-open."
         )
+    # ⛔ EXACTLY ONE BLANK LINE BEFORE THE HEADING. Each finding bullet above ends with a
+    # trailing `""` of its own, so appending another here produced TWO consecutive blank
+    # lines when any bullet was emitted — `MD012` in the rendered doc, which is a GENERATED
+    # file: the fix belongs here, not in the markdown (`docs` job, measured on #13899 after
+    # the `#12901` batch made three of these bullets fire at once).
+    while out and not out[-1].strip():
+        out.pop()
     out += [
         "",
         "**The approved row itself, for each disputed row that has one** (whole table row, by",

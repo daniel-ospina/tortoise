@@ -35,7 +35,7 @@ def sdk():
     """Fresh SDK on isolated embedded test graph."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_121_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None
+    s._test_guard = lambda: None
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -64,35 +64,35 @@ class TestOperatorEntityType:
 
     def test_search_operators_by_label(self, sdk):
         """Operators searchable by their semantic label."""
-        sdk.create_point("statement", "feature-a")
-        sdk.create_point("statement", "need-b")
-        feat = sdk.create_point("statement", "feature-x")
-        need = sdk.create_point("statement", "need-y")
-        op = sdk.create_operator("IMPL", feat["id"], [need["id"]], label="addresses")
+        sdk._create_point("statement", "feature-a")
+        sdk._create_point("statement", "need-b")
+        feat = sdk._create_point("statement", "feature-x")
+        need = sdk._create_point("statement", "need-y")
+        op = sdk._create_operator("IMPL", feat["id"], [need["id"]], label="addresses")
         assert op.get("id")
 
-        results = sdk.tortoise_fts_query("addresses", entity_type="operator")
+        results = sdk._tortoise_fts_query("addresses", entity_type="operator")
         assert isinstance(results, list)
 
     def test_search_operator_by_op_type(self, sdk):
         """Operators filterable by op_type."""
-        a = sdk.create_point("statement", "a")
-        b = sdk.create_point("statement", "b")
-        sdk.create_operator("IMPL", a["id"], [b["id"]], label="addresses")
+        a = sdk._create_point("statement", "a")
+        b = sdk._create_point("statement", "b")
+        sdk._create_operator("IMPL", a["id"], [b["id"]], label="addresses")
         # #12067: a pair carries at most ONE mechanism, so the NAND operator gets
         # its own pair — this test is about the op_type filter, not the closure.
-        c = sdk.create_point("statement", "c")
-        d = sdk.create_point("statement", "d")
-        sdk.create_operator("NAND", c["id"], [d["id"]], label="opposes")
+        c = sdk._create_point("statement", "c")
+        d = sdk._create_point("statement", "d")
+        sdk._create_operator("NAND", c["id"], [d["id"]], label="opposes")
 
-        results = sdk.tortoise_fts_query("", entity_type="operator")
+        results = sdk._tortoise_fts_query("", entity_type="operator")
         assert isinstance(results, list)
 
     def test_operator_validation(self, sdk):
         """entity_type='operator' is accepted in validation."""
         # Should not raise ValueError for 'operator'
         try:
-            sdk.tortoise_fts_query("x", entity_type="operator", limit=1)
+            sdk._tortoise_fts_query("x", entity_type="operator", limit=1)
             assert True
         except ValueError as e:
             if "entity_type" in str(e):
@@ -119,7 +119,7 @@ class TestSourceEntityType:
         """entity_type='source' search works."""
         sdk.register_source("https://example.com/doc2", sourceKind="T2",
                           name="Source Doc 2")
-        results = sdk.tortoise_fts_query("Source Doc 2", entity_type="source", limit=5)
+        results = sdk._tortoise_fts_query("Source Doc 2", entity_type="source", limit=5)
         assert isinstance(results, list)
 
     def test_tortoise_create_source_mcp_exists(self, sdk):

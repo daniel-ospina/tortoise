@@ -156,14 +156,14 @@ def test_a_tenant_write_cannot_place_the_row(tmp_path) -> None:
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
     try:
         with pytest.raises(ValueError, match="cache_tier"):
-            sdk.create_point("statement", "a claim that must stay visible",
+            sdk._create_point("statement", "a claim that must stay visible",
                              cache_tier=RECORD_ONLY_TIER)
-        point = sdk.create_point("statement", "a claim that must stay visible")
+        point = sdk._create_point("statement", "a claim that must stay visible")
         assert sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) RETURN p.cache_tier",
             params={"i": point["id"]}).result_set == [[None]]
         with pytest.raises(ValueError, match="cache_tier"):
-            sdk.update_point(point["id"], cache_tier="graph")
+            sdk._update_point(point["id"], cache_tier="graph")
     finally:
         sdk.close()
 

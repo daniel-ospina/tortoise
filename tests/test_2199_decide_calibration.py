@@ -83,8 +83,8 @@ def _set_raw_baseline(sdk, pid: str, alpha: float, beta: float,
 
 class TestDecisionPartsBornLive:
     def test_option_without_status_is_live_with_system_default(self, sdk):
-        p = sdk.create_point("option", "Option A")
-        pt = sdk.get_point(p["id"])
+        p = sdk._create_point("option", "Option A")
+        pt = sdk._get_point(p["id"])
         assert pt["status"] == "live", "decide part must be born live (#2199)"
         assert pt["baseline_set"] is True
         # default prior 'medium' = Beta(3,1), mean 0.75 (knock-on decision 2)
@@ -94,16 +94,16 @@ class TestDecisionPartsBornLive:
 
     def test_all_decide_kinds_born_live_with_explicit_baseline(self, sdk):
         for kind in ("option", "criterion", "evidence", "decision"):
-            p = sdk.create_point(kind, f"{kind} content")
-            pt = sdk.get_point(p["id"])
+            p = sdk._create_point(kind, f"{kind} content")
+            pt = sdk._get_point(p["id"])
             assert pt["status"] == "live", kind
             assert pt["baseline_set"] is True, kind
             assert pt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT, kind
 
     def test_explicit_draft_status_keeps_manual_control(self, sdk):
         """Explicit status= keeps the pre-#2199 posture — no auto-default."""
-        p = sdk.create_point("option", "Staged option", status="draft")
-        pt = sdk.get_point(p["id"])
+        p = sdk._create_point("option", "Staged option", status="draft")
+        pt = sdk._get_point(p["id"])
         assert pt["status"] == "draft"
         assert pt.get("baseline_set") in (None, False)
 
@@ -113,9 +113,9 @@ class TestDecisionPartsBornLive:
         filing a sourced decide part live — it must stay inherit-eligible so a
         tiered source's belief is applied at EP time, never frozen at the flat
         medium default). Born-live-without-status is the ONLY auto path."""
-        p = sdk.create_point("option", "Sourced live option", status="live",
+        p = sdk._create_point("option", "Sourced live option", status="live",
                              extractedFrom="https://docs.example/tiered")
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
         assert pt["status"] == "live"
         assert pt.get("baseline_set") in (None, False)
         assert pt.get("baseline_source") is None
@@ -126,7 +126,7 @@ class TestDecisionPartsBornLive:
             params={"url": "https://docs.example/tiered"},
         )
         sdk._apply_source_inheritance(recency_decay=1.0)
-        assert sdk.get_point(p["id"])["baseline_source"] == \
+        assert sdk._get_point(p["id"])["baseline_source"] == \
             BASELINE_SOURCE_INHERITED
 
     def test_statement_without_status_is_live_no_default(self, sdk):
@@ -135,8 +135,8 @@ class TestDecisionPartsBornLive:
         statement created without an explicit status is live; an explicit
         status="draft" is still honoured (see TestExplicitDraftIsHonoured1088
         in tests/test_sdk.py)."""
-        p = sdk.create_point("statement", "Plain claim")
-        pt = sdk.get_point(p["id"])
+        p = sdk._create_point("statement", "Plain claim")
+        pt = sdk._get_point(p["id"])
         assert pt["status"] == "live"
         assert pt.get("baseline_set") in (None, False)
 
@@ -174,9 +174,9 @@ class TestIngestAutoPreservesDecideBaseline:
                 {"from": "plain", "to": "opt", "operator": "IMPL"},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         opt_id, plain_id = res["ids"]["points"]
-        opt = sdk.get_point(opt_id)
+        opt = sdk._get_point(opt_id)
         assert opt["status"] == "live", "a decide-part target is exempt (#7856)"
         assert opt["baseline_set"] is True
         assert opt["ep_alpha"] == 3
@@ -184,7 +184,7 @@ class TestIngestAutoPreservesDecideBaseline:
         assert opt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
         # The non-decide-part item is the connection SOURCE, so under auto
         # it gets no injected status — born live per the #1088 ruling.
-        assert sdk.get_point(plain_id)["status"] == "live"
+        assert sdk._get_point(plain_id)["status"] == "live"
 
 
 # ── Custom override → set-by-author (indicator 2) ─────────────────
@@ -198,8 +198,8 @@ class TestCustomCredibility:
         so gold -> 3 + weak body. The ladder word is still kept on the
         ``credibility`` property and the provenance token is unchanged.
         """
-        p = sdk.create_point("criterion", "Security", credibility="gold")
-        pt = sdk.get_point(p["id"])
+        p = sdk._create_point("criterion", "Security", credibility="gold")
+        pt = sdk._get_point(p["id"])
         assert pt["status"] == "live"
         assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert pt["ep_beta"] == 1
@@ -214,12 +214,12 @@ class TestCustomCredibility:
         land at 0.5238, below the unlabelled 0.75). Provenance still differs: an
         explicit word is set-by-author, the no-word default system-default.
         """
-        p = sdk.create_point("option", "Opt", credibility="medium")
-        pt = sdk.get_point(p["id"])
+        p = sdk._create_point("option", "Opt", credibility="medium")
+        pt = sdk._get_point(p["id"])
         assert pt["ep_alpha"] == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert pt["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
-        d = sdk.create_point("option", "Opt with no word")
-        dt = sdk.get_point(d["id"])
+        d = sdk._create_point("option", "Opt with no word")
+        dt = sdk._get_point(d["id"])
         assert (dt["ep_alpha"], dt["ep_beta"]) == (3, 1)
         assert dt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
         # the owner ruling: a labelled claim is never weaker than an unlabelled one
@@ -229,37 +229,37 @@ class TestCustomCredibility:
         """All ladder spellings stay ACCEPTED and validated — they now all
         weigh the same weak body ADDED to the decide default (CHANGED: main
         pinned T2 -> 3, low -> 2; the first #398 pass replaced the default)."""
-        p_t = sdk.create_point("evidence", "via T2", credibility="T2")
-        p_n = sdk.create_point("evidence", "via 3", credibility=3)
+        p_t = sdk._create_point("evidence", "via T2", credibility="T2")
+        p_n = sdk._create_point("evidence", "via 3", credibility=3)
         for p in (p_t, p_n):
-            assert sdk.get_point(p["id"])["ep_alpha"] == pytest.approx(
+            assert sdk._get_point(p["id"])["ep_alpha"] == pytest.approx(
                 3.0 + AUTHOR_ASSERTION_WEAK_PC)
 
     def test_unknown_word_fails_loud_before_any_write(self, sdk):
         """A typo'd ladder word raises — never the pre-#2199 silent Beta(1,1)."""
         with pytest.raises(ValueError, match="Unknown credibility"):
-            sdk.create_point("option", "Broken", credibility="very-sure")
+            sdk._create_point("option", "Broken", credibility="very-sure")
         # Nothing was created (validation happens before the node write).
-        summary = sdk.calibrate_summary()
+        summary = sdk._calibrate_summary()
         assert all("Broken" not in (i.get("content") or "") for i in summary)
 
     def test_set_point_baseline_rejects_old_spellings(self, sdk):
-        p = sdk.create_point("statement", "claim")
+        p = sdk._create_point("statement", "claim")
         with pytest.raises(ValueError, match="2199_baseline_source_rename"):
-            sdk.set_point_baseline(p["id"], 3, 1, source="explicit")
+            sdk._set_point_baseline(p["id"], 3, 1, source="explicit")
         with pytest.raises(ValueError, match="2199_baseline_source_rename"):
-            sdk.set_point_baseline(p["id"], 3, 1, source="inherited")
+            sdk._set_point_baseline(p["id"], 3, 1, source="inherited")
         with pytest.raises(ValueError, match="2199_baseline_source_rename"):
-            sdk.set_point_baseline(p["id"], 3, 1, source="garbage-token")
+            sdk._set_point_baseline(p["id"], 3, 1, source="garbage-token")
 
 
 # ── calibrate_summary shows provenance (indicator 3) ──────────────
 
 class TestCalibrateSummaryProvenance:
     def test_auto_default_visible_in_summary(self, sdk):
-        auto = sdk.create_point("option", "Auto default option")
-        manual = sdk.create_point("statement", "Author claim", credibility="high")
-        rows = {i["id"]: i for i in sdk.calibrate_summary()}
+        auto = sdk._create_point("option", "Auto default option")
+        manual = sdk._create_point("statement", "Author claim", credibility="high")
+        rows = {i["id"]: i for i in sdk._calibrate_summary()}
         auto_row = rows[auto["id"]]
         assert auto_row["calibrated"] is True
         assert auto_row["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
@@ -270,31 +270,31 @@ class TestCalibrateSummaryProvenance:
 
     def test_inherited_baseline_provenance_visible(self, sdk):
         url = "https://doi.org/10.2199/inherit"
-        p = sdk.create_point("statement", "Sourced claim", extractedFrom=url)
+        p = sdk._create_point("statement", "Sourced claim", extractedFrom=url)
         sdk._get_proj().g.query(
             "MATCH (s:Source {url:$url}) SET s.credibilityTier='T1'",
             params={"url": url},
         )
         sdk._apply_source_inheritance(recency_decay=1.0)
-        rows = {i["id"]: i for i in sdk.calibrate_summary()}
+        rows = {i["id"]: i for i in sdk._calibrate_summary()}
         row = rows[p["id"]]
         assert row["baseline_source"] == BASELINE_SOURCE_INHERITED
         assert "inherited from its source" in row["provenance"]
 
     def test_legacy_tokenless_baseline_renders_as_set_by_author(self, sdk):
         """Pre-token baseline_set=true rows (2x2 mapping) → author-set copy."""
-        p = sdk.create_point("statement", "Legacy")
+        p = sdk._create_point("statement", "Legacy")
         _set_raw_baseline(sdk, p["id"], 9.0, 1.0, source=None)
-        rows = {i["id"]: i for i in sdk.calibrate_summary()}
+        rows = {i["id"]: i for i in sdk._calibrate_summary()}
         row = rows[p["id"]]
         assert row["calibrated"] is True
         assert "stated by the author" in row["provenance"]
 
     def test_legacy_token_row_with_old_spelling_surfaced(self, sdk):
         """Un-migrated 'explicit'/'inherited' rows surface the fix path."""
-        p = sdk.create_point("statement", "Unmigrated")
+        p = sdk._create_point("statement", "Unmigrated")
         _set_raw_baseline(sdk, p["id"], 5.0, 1.0, source="explicit")
-        rows = {i["id"]: i for i in sdk.calibrate_summary()}
+        rows = {i["id"]: i for i in sdk._calibrate_summary()}
         row = rows[p["id"]]
         assert "2199_baseline_source_rename.py" in row["provenance"]
 
@@ -303,9 +303,9 @@ class TestCalibrateSummaryProvenance:
 
 class TestBaselineSourceRenameMigration:
     def test_migration_renames_legacy_tokens(self, sdk):
-        ex = sdk.create_point("statement", "was explicit")
-        inh = sdk.create_point("statement", "was inherited")
-        sd = sdk.create_point("option", "was system-default")  # new token
+        ex = sdk._create_point("statement", "was explicit")
+        inh = sdk._create_point("statement", "was inherited")
+        sd = sdk._create_point("option", "was system-default")  # new token
         _set_raw_baseline(sdk, ex["id"], 5.0, 1.0, source="explicit")
         _set_raw_baseline(sdk, inh["id"], 6.0, 1.0, source="inherited")
 
@@ -315,15 +315,15 @@ class TestBaselineSourceRenameMigration:
         moved = _migration.rename_legacy(proj)
         assert moved == {"explicit": 1, "inherited": 1}
         assert _migration.count_legacy(proj) == 0
-        assert sdk.get_point(ex["id"])["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
-        assert sdk.get_point(inh["id"])["baseline_source"] == BASELINE_SOURCE_INHERITED
+        assert sdk._get_point(ex["id"])["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
+        assert sdk._get_point(inh["id"])["baseline_source"] == BASELINE_SOURCE_INHERITED
         # system-default (new value, no deployed data) is untouched
-        assert sdk.get_point(sd["id"])["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
+        assert sdk._get_point(sd["id"])["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
         # Baselines themselves survive the rename
-        assert sdk.get_point(ex["id"])["ep_alpha"] == 5.0
+        assert sdk._get_point(ex["id"])["ep_alpha"] == 5.0
 
     def test_migration_rerun_is_noop(self, sdk):
-        ex = sdk.create_point("statement", "was explicit")
+        ex = sdk._create_point("statement", "was explicit")
         _set_raw_baseline(sdk, ex["id"], 5.0, 1.0, source="explicit")
         proj = sdk._get_proj()
         _migration.rename_legacy(proj)
@@ -339,29 +339,29 @@ class TestDocumentedDecideFlowFirstTry:
         """Exactly the skill's 7-step protocol — NO promote, NO set_point_baseline."""
         # 1-2. Create the nodes (options/criteria/findings; no status passed —
         # the documented decide flow does not stage drafts).
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
-        crit = sdk.create_point("criterion", "Security")
-        finding = sdk.create_point("evidence", "A is secure")
+        opt_a = sdk._create_point("option", "Option A")
+        opt_b = sdk._create_point("option", "Option B")
+        crit = sdk._create_point("criterion", "Security")
+        finding = sdk._create_point("evidence", "A is secure")
         # 4-5. Wire edges.
-        op1 = sdk.create_operator("IMPL", crit["id"], [opt_a["id"]])
-        sdk.create_operator("IMPL", finding["id"], [opt_a["id"]])
-        sdk.create_operator("NAND", finding["id"], [opt_b["id"]])
+        op1 = sdk._create_operator("IMPL", crit["id"], [opt_a["id"]])
+        sdk._create_operator("IMPL", finding["id"], [opt_a["id"]])
+        sdk._create_operator("NAND", finding["id"], [opt_b["id"]])
         # 5. Mitigate an operator (relevance: criterion TRUE but matters LESS).
-        sdk.mitigate_operator(op1["id"], "Security weighs less here", 0.30)
+        sdk._mitigate_operator(op1["id"], "Security weighs less here", 0.30)
         return {"opt_a": opt_a, "opt_b": opt_b}
 
     def test_flow_ranks_first_try_with_calibration_gate_on(self, sdk):
         pts = self._build_documented_decision(sdk)
         # Every part is live + explicitly baselined — the graph is calibrated
         # after the DOCUMENTED steps alone.
-        assert sdk.get_point(pts["opt_a"]["id"])["status"] == "live"
-        summary = sdk.calibrate_summary()
+        assert sdk._get_point(pts["opt_a"]["id"])["status"] == "live"
+        summary = sdk._calibrate_summary()
         uncalibrated = [i for i in summary if not i["calibrated"]
                         and i.get("status") != "draft"]
         assert uncalibrated == [], f"documented flow left uncalibrated: {uncalibrated}"
         # EP with the fail-closed gate ON — no CalibrationError, no chores.
-        result = sdk.compute_confidence(
+        result = sdk._compute_confidence(
             anchors=[pts["opt_a"]["id"], pts["opt_b"]["id"]],
             require_calibration=True)
         assert result["converged"] is True
@@ -372,19 +372,19 @@ class TestDocumentedDecideFlowFirstTry:
 
     def test_mitigation_baselined_no_calibration_error(self, sdk):
         """A mitigated operator produces a calibrated live mitigation point."""
-        opt = sdk.create_point("option", "Option A")
-        finding = sdk.create_point("evidence", "Supports A")
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
-        mit = sdk.mitigate_operator(op["id"], "Overstated", 0.2)
-        pt = sdk.get_point(mit["id"])
+        opt = sdk._create_point("option", "Option A")
+        finding = sdk._create_point("evidence", "Supports A")
+        op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
+        mit = sdk._mitigate_operator(op["id"], "Overstated", 0.2)
+        pt = sdk._get_point(mit["id"])
         assert pt["baseline_set"] is True
         assert pt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
         assert (pt["ep_alpha"], pt["ep_beta"]) == (3, 1)
         # idempotent re-mitigation with an author belief re-baselines
-        mit2 = sdk.mitigate_operator(op["id"], "Actually very weak", 0.15,
+        mit2 = sdk._mitigate_operator(op["id"], "Actually very weak", 0.15,
                                      credibility="low")
         assert mit2["id"] == mit["id"]
-        pt2 = sdk.get_point(mit["id"])
+        pt2 = sdk._get_point(mit["id"])
         assert pt2["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
         # CHANGED ASSERTION (pre-existing, main): the word ADDS to the
         # mitigation's #2199 system default Beta(3,1) rather than replacing it
@@ -399,9 +399,9 @@ class TestDocumentedDecideFlowFirstTry:
         """Re-mitigating a PRE-#2199 mitigation (live statement, no baseline)
         stamps the system default so the documented first-run EP never trips
         the fail-closed CalibrationError on legacy graphs (P2-2 review)."""
-        opt = sdk.create_point("option", "Option A")
-        finding = sdk.create_point("evidence", "Supports A")
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        opt = sdk._create_point("option", "Option A")
+        finding = sdk._create_point("evidence", "Supports A")
+        op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
         # Simulate a legacy mitigation point with NO baseline.
         proj = sdk._get_proj()
         from tortoise.ids import ulid as _ulid
@@ -416,20 +416,20 @@ class TestDocumentedDecideFlowFirstTry:
             "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
             params={"mid": mid, "oid": op["id"]},
         )
-        assert sdk.get_point(mid).get("baseline_set") in (None, False)
-        healed = sdk.mitigate_operator(op["id"], "Updated reason", 0.2)
+        assert sdk._get_point(mid).get("baseline_set") in (None, False)
+        healed = sdk._mitigate_operator(op["id"], "Updated reason", 0.2)
         assert healed["id"] == mid
-        pt = sdk.get_point(mid)
+        pt = sdk._get_point(mid)
         assert pt["baseline_set"] is True
         assert pt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
         assert (pt["ep_alpha"], pt["ep_beta"]) == (3, 1)
 
     def test_mitigate_unknown_credibility_fails_loud(self, sdk):
-        opt = sdk.create_point("option", "Option A")
-        finding = sdk.create_point("evidence", "Supports A")
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        opt = sdk._create_point("option", "Option A")
+        finding = sdk._create_point("evidence", "Supports A")
+        op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
         with pytest.raises(ValueError, match="Unknown credibility"):
-            sdk.mitigate_operator(op["id"], "x", 0.2, credibility="nope")
+            sdk._mitigate_operator(op["id"], "x", 0.2, credibility="nope")
 
 
 # ── CalibrationError stays loud where a live point has no baseline ─
@@ -439,29 +439,29 @@ class TestGenuinelyUncalibratedStillFailsLoud:
         """Document-extracted claims with an untiered source keep the #344
         fail-closed gate + the source-tier suggestion (unchanged behavior)."""
         url = "https://docs.example/untiered"
-        p = sdk.create_point("statement", "Claim from a doc", status="live",
+        p = sdk._create_point("statement", "Claim from a doc", status="live",
                              extractedFrom=url)
-        summary = sdk.calibrate_summary()
+        summary = sdk._calibrate_summary()
         row = next(i for i in summary if i["id"] == p["id"])
         assert row["calibrated"] is False
         assert "untiered" in row["suggestion"]
         with pytest.raises(CalibrationError, match="uncalibrated"):
-            sdk.compute_confidence(require_calibration=True)
+            sdk._compute_confidence(require_calibration=True)
 
     def test_live_evidence_kind_without_baseline_not_auto_saved(self, sdk):
         """The system-default applies ONLY to decide-part kinds created through
         the decide tooling. A statement created live without credibility or a
         tiered source is still the engine's genuine no-baseline case."""
-        sdk.create_point("statement", "uncalibrated live", status="live")
+        sdk._create_point("statement", "uncalibrated live", status="live")
         with pytest.raises(CalibrationError):
-            sdk.compute_confidence(require_calibration=True)
+            sdk._compute_confidence(require_calibration=True)
         # And the escape hatch still exists (author belief) — no doc drift.
         sdk2_db = os.path.join(tempfile.mkdtemp(prefix="tt_2199b_"), "t.db")
         s2 = TortoiseSDK(sdk2_db)
         try:
-            s2.create_point("statement", "calibrated live", status="live",
+            s2._create_point("statement", "calibrated live", status="live",
                             credibility="medium")
-            res = s2.compute_confidence(require_calibration=True)
+            res = s2._compute_confidence(require_calibration=True)
             assert res["converged"] is True
         finally:
             s2.close()

@@ -33,7 +33,7 @@ def _change_feed_off(monkeypatch):
 
 def test_create_point_emits_graph_event(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "hello events")
+    p = sdk._create_point("statement", "hello events")
     proj = sdk._get_proj()
     evs = _events(proj)
     assert len(evs) == 1
@@ -45,8 +45,8 @@ def test_create_point_emits_graph_event(sdk_factory, tmp_path):
 
 def test_dedup_create_does_not_emit(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "dedup me", dedup=True)
-    sdk.create_point("statement", "dedup me", dedup=True)  # returns existing
+    sdk._create_point("statement", "dedup me", dedup=True)
+    sdk._create_point("statement", "dedup me", dedup=True)  # returns existing
     assert len(_events(sdk._get_proj())) == 1
 
 
@@ -93,20 +93,20 @@ def test_read_dedups_duplicate_event_ids(sdk_factory, tmp_path):
 
 def test_all_mutations_emit(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    s = sdk.create_point("statement", "src")
-    t = sdk.create_point("statement", "tgt")
-    op = sdk.create_operator("IMPL", s["id"], [t["id"]])
-    sdk.retract_point(t["id"])
-    old = sdk.create_point("statement", "old")
-    new = sdk.create_point("statement", "new")
-    sdk.supersede_point(old["id"], new["id"])
+    s = sdk._create_point("statement", "src")
+    t = sdk._create_point("statement", "tgt")
+    op = sdk._create_operator("IMPL", s["id"], [t["id"]])
+    sdk._retract_point(t["id"])
+    old = sdk._create_point("statement", "old")
+    new = sdk._create_point("statement", "new")
+    sdk._supersede_point(old["id"], new["id"])
     # #2488/#2498: the invalidate emitter needs its OWN pair now — a repeat
     # invalidate on the superseded `old` is rejected by the shared lifecycle
     # guard (outdated=true is itself terminal).
-    inv_old = sdk.create_point("statement", "inv-old")
-    inv_new = sdk.create_point("statement", "inv-new")
-    sdk.invalidate_point(inv_old["id"], inv_new["id"])
-    sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+    inv_old = sdk._create_point("statement", "inv-old")
+    inv_new = sdk._create_point("statement", "inv-new")
+    sdk._invalidate_point(inv_old["id"], inv_new["id"])
+    sdk._annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
     types = [e["type"] for e in _events(sdk._get_proj())]
     assert types.count("PointAdded") == 6  # src, tgt, old, new, inv-old, inv-new
     assert "OperatorAdded" in types and "PointRetracted" in types
@@ -117,14 +117,14 @@ def test_all_mutations_emit(sdk_factory, tmp_path):
 def test_content_edit_emits_nothing(sdk_factory, tmp_path):
     """plan-review P1: update_point non-status edits do NOT emit."""
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "before")
-    sdk.update_point(p["id"], content="after")
+    p = sdk._create_point("statement", "before")
+    sdk._update_point(p["id"], content="after")
     assert [e["type"] for e in _events(sdk._get_proj())] == ["PointAdded"]
 
 
 def test_event_nodes_have_zero_relationships(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    sdk.create_point("statement", "isolated")
+    sdk._create_point("statement", "isolated")
     proj = sdk._get_proj()
     assert proj.g.query("MATCH (e:GraphEvent)-[r]-() RETURN count(r)").result_set[0][0] == 0
 
@@ -132,13 +132,13 @@ def test_event_nodes_have_zero_relationships(sdk_factory, tmp_path):
 def test_event_nodes_invisible_to_domain_queries(sdk_factory, tmp_path):
     """plan-review P2: get_point, search, and domain-label counts exclude events."""
     sdk = sdk_factory(tmp_path)
-    p = sdk.create_point("statement", "visible")
+    p = sdk._create_point("statement", "visible")
     proj = sdk._get_proj()
     ev = _events(proj)[0]
     assert proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 1
-    assert len(sdk.query()) == 1
-    assert sdk.get_point(ev["event_id"]) == {}  # {} per get_point missing contract
-    hits = sdk.tortoise_fts_query("visible", limit=50)  # search scans Points only
+    assert len(sdk._query()) == 1
+    assert sdk._get_point(ev["event_id"]) == {}  # {} per get_point missing contract
+    hits = sdk._tortoise_fts_query("visible", limit=50)  # search scans Points only
     hit_ids = {h["id"] for h in hits}
     assert p["id"] in hit_ids
     assert ev["event_id"] not in hit_ids
@@ -173,7 +173,7 @@ def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
         try:
             with _sdk_lock:
                 s = sdk_factory(tmp_path)
-            s.create_point("statement", f"c{i}")
+            s._create_point("statement", f"c{i}")
             per_worker.append([e["seq"] for e in _events(s._get_proj())])
         except Exception as e:  # pragma: no cover
             errors.append(e)
@@ -215,7 +215,7 @@ def test_seq_is_monotonic_under_concurrency_live_falkor():
     # before the threads race (next_seq is a server-side atomic MERGE).
     warm = TortoiseSDK(namespace="test_live_seq")
     assert warm._db_uri, "live test must resolve the URI backend (not embedded)"
-    warm.create_point("statement", "warmup")
+    warm._create_point("statement", "warmup")
     warm.close()
 
     errors, per_worker = [], []
@@ -223,7 +223,7 @@ def test_seq_is_monotonic_under_concurrency_live_falkor():
     def worker(i):
         try:
             s = TortoiseSDK(namespace="test_live_seq")
-            s.create_point("statement", f"live-c{i}")
+            s._create_point("statement", f"live-c{i}")
             per_worker.append([e["seq"] for e in _events(s._get_proj())])
             s.close()
         except Exception as e:  # pragma: no cover
@@ -608,14 +608,14 @@ def test_exhausted_allocator_never_reuses_a_seq_on_emit(sdk_factory, tmp_path):
     from tortoise.event_store import MAX_SEQ
 
     sdk = sdk_factory(tmp_path, ensure_schema=True)
-    sdk.create_point("statement", "before the ceiling")
+    sdk._create_point("statement", "before the ceiling")
     proj = sdk._get_proj()
     before = [(e["seq"], e["event_id"]) for e in event_store.read_after(proj, 0)]
     assert before, "the fixture must really emit an event"
 
     _set_counter(proj, MAX_SEQ)
     try:
-        sdk.create_point("statement", "at the ceiling")  # mutation continues
+        sdk._create_point("statement", "at the ceiling")  # mutation continues
 
         assert [(e["seq"], e["event_id"])
                 for e in event_store.read_after(proj, 0)] == before, (

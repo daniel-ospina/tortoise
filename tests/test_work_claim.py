@@ -188,7 +188,7 @@ def test_sdk_store_refuses_a_target_that_resolved_to_the_embedded_file():
     class EmbeddedSDK:
         _db_uri = None
 
-        def query(self, **_kw):
+        def _query(self, **_kw):
             return []
 
     with pytest.raises(wc.StoreUnanswerable) as excinfo:

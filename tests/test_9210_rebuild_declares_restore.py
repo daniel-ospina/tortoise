@@ -456,14 +456,14 @@ def _seed_prewipe_state(sdk, events):
     what makes the run a REAL `rebuild_all` (the wipe happens and the replay
     re-creates the node the batch link and the CONTAINS edge point at).
     """
-    created = sdk.create_point("statement", "journaled, so the replay is real",
+    created = sdk._create_point("statement", "journaled, so the replay is real",
                               tags=["journaled-tag"])
     pid = created["id"] if isinstance(created, dict) else created
     # A journaled `:Subject` is the `onboards` edge's endpoint: the replay
     # re-creates it (`SubjectAdded`), so the edge's `MATCH` has something to
     # bind — the restore of a snapshot edge against a minted endpoint would be
     # a different write than the one this test pins.
-    subject = sdk.create_subject("org owner")
+    subject = sdk._create_subject("org owner")
     sid = subject["id"] if isinstance(subject, dict) else subject
     proj = sdk._get_proj()
     g = proj.g
@@ -870,7 +870,7 @@ def test_the_journal_engines_watermark_stays_disclosed_as_deferred(tmp_path,
 
     sdk, events = _mk_sdk(tmp_path)
     try:
-        sdk.create_point("statement", "the watermark carries across a rebuild")
+        sdk._create_point("statement", "the watermark carries across a rebuild")
         proj = sdk._get_proj()
         seen = _record_authorizations(monkeypatch)
 

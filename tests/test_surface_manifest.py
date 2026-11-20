@@ -952,7 +952,12 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   own `_manifest()`/`_caller_lists()`), and the arm below is a `>=` — so 25 would have left
 #:   the very two-row allowance this history paragraph exists to forbid. The conflict between
 #:   the two sides' numbers was settled by that measurement, not by picking a side.
-COMPARABLE_CALLER_ROWS_FLOOR = 27
+#:   27 -> 7 on 2026-11-19 (#12901 FINAL batch): twenty of the two-sided rows were `sdk:` rows the
+#:   batch privatised, so they left the manifest with their methods. Re-derived on the merged
+#:   manifest the same way — `_caller_lists(_manifest())` reads **7** here, and the arm is `>=`,
+#:   so 27 would have left a twenty-row allowance: exactly the hole this floor forbids. A small
+#:   floor is honest; a floor carried from a surface that no longer exists is not.
+COMPARABLE_CALLER_ROWS_FLOOR = 7
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -2390,8 +2395,6 @@ def test_no_SDK_row_is_classed_unreachable_while_its_own_row_names_an_agent_path
     whose own text named a CLI verb. A count derived by hand is a prediction until
     something executes it; this test executes the agreement.
     """
-    from tortoise.sdk import TortoiseSDK
-
     doc = yaml.safe_load((ROOT / "config" / "surface-manifest.yml").read_text())
     sdk = [r for r in doc["rows"] if str(r["name"]).startswith("sdk:")]
     assert sdk, "no SDK rows found"
@@ -2416,8 +2419,19 @@ def test_no_SDK_row_is_classed_unreachable_while_its_own_row_names_an_agent_path
         for r in doc["rows"]
         if not str(r["name"]).startswith("sdk:") and r.get("sdk_method")
     }
+    # ⛔ THE DECLARED SPELLING AND THE ROW NAME ARE TWO VOCABULARIES SINCE #12901. The batch
+    # privatised 66 methods, so a tool row now declares `_query` where the `sdk:` row is
+    # `sdk:query` (two of them took `_name__svc` to avoid shadowing an existing helper). This
+    # arm must still ask the question it was written for — "is agent-reachability UNDER-derived,
+    # so that rows a tool really binds read as no-caller-found?" — so it normalises the declared
+    # spelling back to the surface name and compares against the rows that exist. Comparing raw
+    # would count private names against public rows and red on the vocabulary, not the defect.
+    def _surface_name(method: str) -> str:
+        return method.removesuffix("__svc").lstrip("_")
+
+    bound_rows = {_surface_name(m) for m in declared_bindings}
     assert by_class["agent-reachable"] >= len(
-        {m for m in declared_bindings if hasattr(TortoiseSDK, m)}
+        {m for m in bound_rows if f"sdk:{m}" in {str(r["name"]) for r in sdk}}
     ), (
         "agent-reachable fell below the declared-binding count; the CLI and tool-handler legs are "
         f"not being derived (got {by_class['agent-reachable']})"
@@ -2915,7 +2929,11 @@ def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     """
     recorded = {(rf["response"], rf["field"]) for rf in _manifest()["response_fields"]}
     # main's half — landed by #7852 W1, present only in main's copy of the block.
-    assert ("sdk:create_operator", "direction_basis") in recorded
+    # ⛔ The SDK twin of this row (`sdk:create_operator`) is GONE as of #12901's final batch:
+    # the endpoint it anchored left the public surface (`_create_operator`), so the record now
+    # rides the tool that still emits the key — the SAME #7852 W1 write path. The union-merge
+    # property this test protects is unchanged; only the carrier is, and the tool row is the one
+    # a reader can still act on.
     assert ("tortoise_create_operator", "direction_basis") in recorded
     # the branch's half — must not be dropped in the other direction.
     assert ("tortoise_create_entity", "advisories") in recorded
@@ -2923,8 +2941,8 @@ def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     # the collapsed view the render/check tools see must carry both sides into the doc.
     rendered = RENDERED.read_text(encoding="utf-8")
     for response, field in (
-        ("sdk:create_operator", "direction_basis"),
         ("tortoise_create_operator", "direction_basis"),
+        ("tortoise_create_entity", "advisories"),
     ):
         assert f"| `{response}` | `{field}` |" in rendered, (
             f"the union-merge survivor lost {response}/{field} from the rendered list"
@@ -4874,7 +4892,7 @@ def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monk
     sm = _load_manifest_tool()
     doc = _manifest()
     doc["response_fields"] = [
-        {"response": "volunteer_context", "field": "x", "emitted_when": "always"}
+        {"response": "get_entity", "field": "x", "emitted_when": "always"}
     ]
     monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "sdk-anchored.yml"))
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
@@ -5552,7 +5570,12 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # that had no `def` were implemented. The LIVE count rises, which no earlier line in
     # this comment chain does — every other move was a removal. The off-surface 66 does not
     # move: an implemented approved name is not surplus (105 − 39 approved-and-live = 66).
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 105
+    # 105 -> 39 on 2026-11-19 (#12901 FINAL batch): the 66 off-surface methods were privatised
+    # in one batch, so the class now carries exactly the 39 approved METHOD rows (the 40th
+    # approved row is the `Tortoise(...)` entry point, a class and not a method). This is the
+    # pin moving the OTHER way for once — 39 is the target-side number, and both instruments
+    # (the live class and the manifest's derived `sdk_public_methods`) read it.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 39
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

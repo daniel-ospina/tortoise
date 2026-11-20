@@ -87,9 +87,9 @@ def _build_noise_store(sdk, *, noise: int = 12,
     graph = sdk._get_proj().g
     noise_ids = []
     for i in range(noise):
-        p = sdk.create_point("statement", f"noise alpha bravo charlie {i}")
+        p = sdk._create_point("statement", f"noise alpha bravo charlie {i}")
         noise_ids.append(p["id"])
-    gold = sdk.create_point("statement", gold_content)
+    gold = sdk._create_point("statement", gold_content)
     graph.query("MATCH (n:Point) REMOVE n.embedding")
     for pid in noise_ids:
         _set_embedding(graph, pid, _NOISE)
@@ -110,9 +110,9 @@ def test_default_has_no_floor(tmp_path, stub_embedder):
     sdk = _sdk(tmp_path)
     try:
         graph = sdk._get_proj().g
-        p = sdk.create_point("statement", "noise alpha bravo charlie")
+        p = sdk._create_point("statement", "noise alpha bravo charlie")
         _set_embedding(graph, p["id"], _NOISE)
-        hits = sdk.tortoise_fts_query("quantum flux capacitor calibration",
+        hits = sdk._tortoise_fts_query("quantum flux capacitor calibration",
                                       entity_type="point", limit=10)
         assert [h["id"] for h in hits] == [p["id"]]
         assert hits[0]["match_source"] == "vector"
@@ -131,9 +131,9 @@ def test_real_relevant_pair_survives_by_default(tmp_path, stub_embedder):
     sdk = _sdk(tmp_path)
     try:
         graph = sdk._get_proj().g
-        gold = sdk.create_point("statement", "Elixir side projects")
+        gold = sdk._create_point("statement", "Elixir side projects")
         _set_embedding(graph, gold["id"], _GOLD)
-        hits = sdk.tortoise_fts_query("which language for coding",
+        hits = sdk._tortoise_fts_query("which language for coding",
                                       entity_type="point", limit=10)
         assert gold["id"] in [h["id"] for h in hits], (
             "a real relevant semantic hit at cosine 0.536 must survive at the "
@@ -154,7 +154,7 @@ def test_floor_enabled_unrelated_query_returns_empty(tmp_path, stub_embedder,
     sdk = _sdk(tmp_path)
     try:
         _build_noise_store(sdk)
-        hits = sdk.tortoise_fts_query("quantum flux capacitor calibration",
+        hits = sdk._tortoise_fts_query("quantum flux capacitor calibration",
                                       entity_type="point", limit=10)
         assert hits == [], (
             "with the floor enabled an unrelated query must not be answered "
@@ -173,7 +173,7 @@ def test_floor_enabled_relevant_captured_turn_within_limit_10(
     sdk = _sdk(tmp_path)
     try:
         gold_id = _build_noise_store(sdk)
-        hits = sdk.tortoise_fts_query("embedder absent on runners",
+        hits = sdk._tortoise_fts_query("embedder absent on runners",
                                       entity_type="point", limit=10)
         ids = [h["id"] for h in hits]
         assert gold_id in ids, (
@@ -193,7 +193,7 @@ def test_floor_enabled_leg_trace_declares_the_floor(tmp_path, stub_embedder,
     try:
         _build_noise_store(sdk)
         trace: list = []
-        hits = sdk.tortoise_fts_query("quantum flux capacitor calibration",
+        hits = sdk._tortoise_fts_query("quantum flux capacitor calibration",
                                       entity_type="point", limit=10,
                                       leg_trace=trace)
         assert hits == []
@@ -213,9 +213,9 @@ def test_floor_env_zero_is_off(tmp_path, stub_embedder, monkeypatch):
     sdk = _sdk(tmp_path)
     try:
         graph = sdk._get_proj().g
-        p = sdk.create_point("statement", "noise alpha bravo charlie")
+        p = sdk._create_point("statement", "noise alpha bravo charlie")
         _set_embedding(graph, p["id"], _NOISE)
-        hits = sdk.tortoise_fts_query("quantum flux capacitor calibration",
+        hits = sdk._tortoise_fts_query("quantum flux capacitor calibration",
                                       entity_type="point", limit=10)
         assert [h["id"] for h in hits] == [p["id"]]
     finally:
@@ -294,9 +294,9 @@ def test_purge_tool_matches_residue_and_spares_genuine(tmp_path, stub_embedder):
 
     sdk = _sdk(tmp_path)
     try:
-        sdk.create_point("statement", "guard-remove-test")
-        sdk.create_point("statement", "test point")
-        genuine = sdk.create_point("statement", "Premise Labs inbound intake")
+        sdk._create_point("statement", "guard-remove-test")
+        sdk._create_point("statement", "test point")
+        genuine = sdk._create_point("statement", "Premise Labs inbound intake")
         found = find_residue(sdk._get_proj().g)
         ids = {f["id"] for f in found}
         assert len(found) == 2
@@ -312,7 +312,7 @@ def test_purge_tool_expect_guard_aborts_before_deleting(tmp_path, stub_embedder)
     db = str(tmp_path / "4028.db")
     sdk = _sdk(tmp_path)
     try:
-        sdk.create_point("statement", "guard-remove-test")
+        sdk._create_point("statement", "guard-remove-test")
     finally:
         sdk.close()
 
@@ -334,7 +334,7 @@ def test_purge_tool_dry_run_deletes_nothing(tmp_path, stub_embedder):
 
     sdk = _sdk(tmp_path)
     try:
-        sdk.create_point("statement", "guard-remove-test")
+        sdk._create_point("statement", "guard-remove-test")
         report = purge(sdk, apply=False)
         assert report["found"] == 1 and report["deleted"] == 0
         # still there

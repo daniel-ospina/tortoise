@@ -838,7 +838,7 @@ def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
 
     sdk = TortoiseSDK(str(tmp_path / "preread.db"))
     try:
-        pid = sdk.create_point(
+        pid = sdk._create_point(
             "statement", "a claim the pre-read must find")["id"]
         proj = sdk._get_proj()
         proxy = _AbortOnce(proj.g, "RETURN DISTINCT")

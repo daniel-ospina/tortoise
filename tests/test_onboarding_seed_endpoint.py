@@ -684,9 +684,9 @@ class TestDigestExcludesDemo:
                 "#8290: the demo Session must not appear in the captured-"
                 f"sessions list — got {_ids!r}")
             # ...and the SDK read (the third door) agrees
-            assert _make_sdk(namespace=org_id).get_session(demo_sid) is None, (
+            assert _make_sdk(namespace=org_id)._get_session(demo_sid) is None, (
                 "#8290: TortoiseSDK.get_session must not serve the demo Session")
-            assert _make_sdk(namespace=org_id).get_session(_real_sid) is not None, (
+            assert _make_sdk(namespace=org_id)._get_session(_real_sid) is not None, (
                 "#8290 non-vacuity: the SDK read must still serve a REAL session")
             # ── #8290 review: the SDK read has TWO lanes, and the FIRST one
             # serves a raw `AgentSession` Event by session_id/sessionId. The
@@ -705,10 +705,10 @@ class TestDigestExcludesDemo:
                 "CREATE (e:Event {eventId:$eid, eventKind:'AgentSession', "
                 "session_id:$sid, sessionId:$sid, name:'indexed'})",
                 eid=f"ev_{uuid.uuid4().hex[:12]}", sid=_real_event_sid)
-            assert _make_sdk(namespace=org_id).get_session(demo_sid) is None, (
+            assert _make_sdk(namespace=org_id)._get_session(demo_sid) is None, (
                 "#8290: an AgentSession Event must not re-open the demo id — "
                 "the guard belongs on get_session's entry, before that arm")
-            assert _make_sdk(namespace=org_id).get_session(_real_event_sid) is not None, (
+            assert _make_sdk(namespace=org_id)._get_session(_real_event_sid) is not None, (
                 "#8290 non-vacuity: the AgentSession Event arm must still "
                 "serve a REAL indexed session")
             # ...but the digest count EXCLUDES them — still 0

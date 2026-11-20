@@ -126,8 +126,8 @@ def test_ingest_dedups_repeated_ref(make_sdk):
     repeated = make_sdk("repeated")
     singular = make_sdk("singular")
 
-    res_rep = repeated.ingest(_bundle(["p2", "p2"]))
-    res_sing = singular.ingest(_bundle(["p2"]))
+    res_rep = repeated._ingest(_bundle(["p2", "p2"]))
+    res_sing = singular._ingest(_bundle(["p2"]))
 
     assert res_rep["created"]["connections"] == 1
     assert res_rep["deduped"]["connections"] == 0
@@ -167,9 +167,9 @@ def test_reingest_repeated_ref_is_an_exact_dedup(make_sdk):
     sdk = make_sdk("reingest")
     bundle = _bundle(["p2", "p2"])
 
-    first = sdk.ingest(bundle)
+    first = sdk._ingest(bundle)
     oid = first["ids"]["connections"][0]
-    second = sdk.ingest(bundle)
+    second = sdk._ingest(bundle)
 
     assert second["deduped"]["connections"] == 1, second
     assert second["created"]["connections"] == 0, second["created"]
@@ -190,7 +190,7 @@ def test_ingest_dedups_same_node_pair(make_sdk):
     bundle = _bundle(["p2", "p3"],
                      extra_points=[{"ref": "p3", "kind": "statement",
                                     "content": "two"}])  # same content as p2
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
 
     # the fixture is load-bearing: both items really did fold onto one id
     assert res["ids"]["refs"]["p2"] == res["ids"]["refs"]["p3"], res["ids"]["refs"]
@@ -212,9 +212,9 @@ def test_direct_route_repeated_ref_not_multi_item(make_sdk):
         return {"entities": [{"ref": "o1", "type": "object", "name": "Obj One"},
                              {"ref": "o2", "type": "object", "name": "Obj Two"}]}
 
-    rep = repeated.ingest({**_objects(), "connections": [
+    rep = repeated._ingest({**_objects(), "connections": [
         {"from": "o1", "to": ["o2", "o2"], "operator": "IMPL"}]})
-    sing = singular.ingest({**_objects(), "connections": [
+    sing = singular._ingest({**_objects(), "connections": [
         {"from": "o1", "to": "o2", "operator": "IMPL"}]})
 
     assert _edge_counts(repeated) == (1, 0), _edge_counts(repeated)
@@ -269,11 +269,11 @@ def test_duplicate_edge_operator_is_never_completed_by_position(make_sdk):
     operator became malformed and was then permanently adopted by a
     resubmission."""
     sdk = make_sdk("self_support_absorb")
-    p1 = sdk.create_point(kind="statement", content="one")["id"]
-    p2 = sdk.create_point(kind="statement", content="two")["id"]
-    op = sdk.create_operator("composedOf", p1, [p1])
+    p1 = sdk._create_point(kind="statement", content="one")["id"]
+    p2 = sdk._create_point(kind="statement", content="two")["id"]
+    op = sdk._create_operator("composedOf", p1, [p1])
 
-    sdk.ingest({"connections": [
+    sdk._ingest({"connections": [
         {"from": p1, "to": [p2], "operator": "composedOf"}]})
 
     slots = _operator_input_slots(sdk, op["id"], op_type="hasPart")
@@ -294,9 +294,9 @@ def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
     same mis-report ``test_reingest_repeated_ref_is_an_exact_dedup`` prevents
     for the duplicate-target case."""
     sdk = make_sdk("repeated_source_slot")
-    a = sdk.create_point(kind="statement", content="one")["id"]
-    b = sdk.create_point(kind="statement", content="two")["id"]
-    sdk.create_operator("IMPL", a, [a])  # the self-support shape
+    a = sdk._create_point(kind="statement", content="one")["id"]
+    b = sdk._create_point(kind="statement", content="two")["id"]
+    sdk._create_operator("IMPL", a, [a])  # the self-support shape
 
     assert sdk._find_operator("IMPL", [a, a])["kind"] == "exact", (
         "the dedup KEY must be the DISTINCT input list — a slot list makes the "
@@ -307,9 +307,9 @@ def test_find_operator_key_is_a_set_for_the_repeated_source_slot(make_sdk):
     bundle = {"points": [{"ref": "q1", "kind": "statement", "content": "same"},
                          {"ref": "q2", "kind": "statement", "content": "same"}],
               "connections": [{"from": "q1", "to": ["q2"], "operator": "IMPL"}]}
-    first = sdk.ingest(bundle)
+    first = sdk._ingest(bundle)
     oid = first["ids"]["connections"][0]
-    second = sdk.ingest(bundle)
+    second = sdk._ingest(bundle)
 
     assert second["deduped"]["connections"] == 1, second
     assert second["created"]["connections"] == 0, second["created"]
@@ -349,9 +349,9 @@ def test_self_support_operator_with_extra_target_mints_its_own_arity(make_sdk):
     (``test_legacy_duplicate_graph_still_dedups``).
     """
     sdk = make_sdk("self_support_extra_target")
-    a = sdk.create_point(kind="statement", content="one")["id"]
-    b = sdk.create_point(kind="statement", content="two")["id"]
-    op = sdk.create_operator("IMPL", a, [a, b])
+    a = sdk._create_point(kind="statement", content="one")["id"]
+    b = sdk._create_point(kind="statement", content="two")["id"]
+    op = sdk._create_operator("IMPL", a, [a, b])
 
     slots = _operator_input_slots(sdk, op["id"])
     assert [(i, t) for i, t in slots] == [(0, a), (1, a), (2, b)], slots
@@ -363,7 +363,7 @@ def test_self_support_operator_with_extra_target_mints_its_own_arity(make_sdk):
     # …but the 3-slot request that CAN be spelled still finds it
     assert sdk._find_operator("IMPL", [a, a, b])["kind"] == "exact"
 
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": a, "to": [b], "operator": "IMPL"}]})
 
     assert res["created"]["connections"] == 1, res
@@ -412,7 +412,7 @@ def test_exact_arm_prefers_the_SHAPE_the_request_spelled(make_sdk):
                           {"ref": "q3", "kind": "statement", "content": "other"}],
                "connections": [{"from": "q1", "to": ["q3"],
                                 "operator": "IMPL"}]}
-    first = sdk.ingest(bundle)
+    first = sdk._ingest(bundle)
     q1 = first["ids"]["refs"]["q1"]
     q3 = first["ids"]["refs"]["q3"]
     legacy = first["ids"]["connections"][0]
@@ -425,7 +425,7 @@ def test_exact_arm_prefers_the_SHAPE_the_request_spelled(make_sdk):
     assert _operator_input_slots(sdk, legacy) == [(0, q1), (1, q3), (2, q3)]
 
     # the shape the request can spell, minted AFTER the legacy one
-    self_support = sdk.create_operator("IMPL", q1, [q1, q3])["id"]
+    self_support = sdk._create_operator("IMPL", q1, [q1, q3])["id"]
     assert _operator_input_slots(sdk, self_support) == \
         [(0, q1), (1, q1), (2, q3)]
     assert legacy != self_support
@@ -448,7 +448,7 @@ def test_exact_arm_prefers_the_SHAPE_the_request_spelled(make_sdk):
                            {"ref": "q3", "kind": "statement", "content": "other"}],
                "connections": [{"from": "q1", "to": ["q2", "q3"],
                                 "operator": "IMPL"}]}
-    res = sdk.ingest(spelled)
+    res = sdk._ingest(spelled)
     assert res["deduped"]["connections"] == 1, res
     assert res["created"]["connections"] == 0, res["created"]
     assert res["ids"]["connections"] == [self_support], res["ids"]
@@ -480,7 +480,7 @@ def test_absorb_never_completes_an_inexpressible_request(make_sdk):
                          {"ref": "q3", "kind": "statement", "content": "other"}],
               "connections": [{"from": "q1", "to": ["q2", "q3"],
                                "operator": "IMPL"}]}
-    first = sdk.ingest(bundle)
+    first = sdk._ingest(bundle)
     oid = first["ids"]["connections"][0]
     assert first["ids"]["refs"]["q1"] == first["ids"]["refs"]["q2"], first["ids"]
     g = sdk._get_proj().g
@@ -488,7 +488,7 @@ def test_absorb_never_completes_an_inexpressible_request(make_sdk):
     g.query("MATCH (o:Point {id:$o})-[r:IMPL]->(t) WHERE r.idx > 0 DELETE r",
             params={"o": oid})
 
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
 
     assert "operator_absorb_completed" not in \
         [w.split(":", 1)[0] for w in res["warnings"]], res["warnings"]
@@ -516,9 +516,9 @@ def test_clean_operator_is_not_adopted_by_a_wider_request(make_sdk):
     a 2-input factor. It must mint its own 3-slot operator instead.
     """
     sdk = make_sdk("wider_request")
-    q1 = sdk.create_point(kind="statement", content="same")["id"]
-    q3 = sdk.create_point(kind="statement", content="other")["id"]
-    narrow = sdk.create_operator("IMPL", q1, [q3])
+    q1 = sdk._create_point(kind="statement", content="same")["id"]
+    q3 = sdk._create_point(kind="statement", content="other")["id"]
+    narrow = sdk._create_operator("IMPL", q1, [q3])
     assert [(i, t) for i, t in _operator_input_slots(sdk, narrow["id"])] == \
         [(0, q1), (1, q3)]
 
@@ -532,7 +532,7 @@ def test_clean_operator_is_not_adopted_by_a_wider_request(make_sdk):
                          {"ref": "r3", "kind": "statement", "content": "other"}],
               "connections": [{"from": "r1", "to": ["r2", "r3"],
                                "operator": "IMPL"}]}
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
 
     assert res["ids"]["refs"]["r1"] == res["ids"]["refs"]["r2"], res["ids"]
     assert res["created"]["connections"] == 1, res
@@ -566,10 +566,10 @@ def test_idx_less_operator_is_not_adopted(make_sdk):
     clean 2-slot operator.
     """
     sdk = make_sdk("idx_less")
-    a = sdk.create_point(kind="statement", content="one")["id"]
-    b = sdk.create_point(kind="statement", content="two")["id"]
-    c = sdk.create_point(kind="statement", content="three")["id"]
-    op = sdk.create_operator("IMPL", a, [b, c])
+    a = sdk._create_point(kind="statement", content="one")["id"]
+    b = sdk._create_point(kind="statement", content="two")["id"]
+    c = sdk._create_point(kind="statement", content="three")["id"]
+    op = sdk._create_operator("IMPL", a, [b, c])
     g = sdk._get_proj().g
     # simulate an `idx`-LESS residual: no `idx` 0 (source) slot at all, and the
     # excess slot repeats a TARGET — 3 typed edges over 2 distinct endpoints,
@@ -597,7 +597,7 @@ def test_idx_less_operator_is_not_adopted(make_sdk):
         "duplicate TARGET, so the carve-out must not fire")
 
     # …and the ingest spelling mints its own clean operator instead of adopting it
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": b, "to": [c], "operator": "IMPL"}]})
     assert res["created"]["connections"] == 1, res
     assert res["deduped"]["connections"] == 0, res
@@ -619,12 +619,12 @@ def test_crash_partial_still_absorbs_a_repeated_target(make_sdk):
     an ``operator_absorb_completed`` payload of ``:1``.
     """
     sdk = make_sdk("crash_partial_repeated")
-    a = sdk.create_point(kind="statement", content="one")["id"]
-    b = sdk.create_point(kind="statement", content="two")["id"]
-    op = sdk.create_operator("IMPL", a, [])  # the crash remnant: source slot only
+    a = sdk._create_point(kind="statement", content="one")["id"]
+    b = sdk._create_point(kind="statement", content="two")["id"]
+    op = sdk._create_operator("IMPL", a, [])  # the crash remnant: source slot only
     assert _operator_input_slots(sdk, op["id"]) == [(0, a)]
 
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": a, "to": [b, b], "operator": "IMPL"}]})
 
     assert res["deduped"]["connections"] == 1, res
@@ -653,12 +653,12 @@ def test_absorb_reports_the_writes_it_makes(make_sdk):
     the §3.2 key-8 payload needs; it is not a behaviour change anyone can
     observe, and it should not be cited as one."""
     sdk = make_sdk("absorb_count")
-    a = sdk.create_point(kind="statement", content="one")["id"]
-    b = sdk.create_point(kind="statement", content="two")["id"]
-    c = sdk.create_point(kind="statement", content="three")["id"]
-    sdk.create_operator("IMPL", a, [b])           # crash partial: {a, b} of {a, b, c}
+    a = sdk._create_point(kind="statement", content="one")["id"]
+    b = sdk._create_point(kind="statement", content="two")["id"]
+    c = sdk._create_point(kind="statement", content="three")["id"]
+    sdk._create_operator("IMPL", a, [b])           # crash partial: {a, b} of {a, b, c}
 
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": a, "to": [b, c], "operator": "IMPL"}]})
 
     done = [w for w in res["warnings"] if w.startswith("operator_absorb_completed")]
@@ -675,10 +675,10 @@ def test_create_operator_dedups_repeated_target(make_sdk):
     """``sdk.create_operator(op, a, [b, b])`` — the primitive cannot
     double-write, so no door (MCP, extraction, `decide`, battery) can."""
     sdk = make_sdk("primitive")
-    a = sdk.create_point(kind="statement", content="one")
-    b = sdk.create_point(kind="statement", content="two")
+    a = sdk._create_point(kind="statement", content="one")
+    b = sdk._create_point(kind="statement", content="two")
 
-    op = sdk.create_operator("IMPL", a["id"], [b["id"], b["id"]])
+    op = sdk._create_operator("IMPL", a["id"], [b["id"], b["id"]])
 
     assert _edge_counts(sdk) == (2, 2), _edge_counts(sdk)
     slots = _operator_input_slots(sdk, op["id"])
@@ -692,9 +692,9 @@ def test_create_operator_keeps_self_support_shape(make_sdk):
     (``idx`` 0 and 1 over one id, pinned by
     ``tests/test_6871_operator_input_set.py``) and must keep both edges."""
     sdk = make_sdk("self_support")
-    a = sdk.create_point(kind="statement", content="one")
+    a = sdk._create_point(kind="statement", content="one")
 
-    op = sdk.create_operator("IMPL", a["id"], [a["id"]])
+    op = sdk._create_operator("IMPL", a["id"], [a["id"]])
 
     slots = _operator_input_slots(sdk, op["id"])
     assert [i for i, _ in slots] == [0, 1], slots
@@ -710,9 +710,9 @@ def test_replay_parity_deduped(tmp_path):
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "journal.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
-        a = sdk.create_point(kind="statement", content="one")
-        b = sdk.create_point(kind="statement", content="two")
-        sdk.create_operator("IMPL", a["id"], [b["id"], b["id"]])
+        a = sdk._create_point(kind="statement", content="one")
+        b = sdk._create_point(kind="statement", content="two")
+        sdk._create_operator("IMPL", a["id"], [b["id"], b["id"]])
         assert _edge_counts(sdk) == (2, 2), _edge_counts(sdk)
 
         journal = [json.loads(line) for line in
@@ -748,9 +748,9 @@ def test_legacy_duplicate_graph_still_dedups(make_sdk):
     ``test_self_support_operator_with_extra_target_mints_its_own_arity``).
     """
     sdk = make_sdk("legacy")
-    a = sdk.create_point(kind="statement", content="one")
-    b = sdk.create_point(kind="statement", content="two")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    a = sdk._create_point(kind="statement", content="one")
+    b = sdk._create_point(kind="statement", content="two")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]])
     # simulate the pre-#9750 writer: a second typed + INPUT edge over one target
     sdk._get_proj().g.query(
         "MATCH (o:Point {id:$o}), (t:Point {id:$t}) "
@@ -758,7 +758,7 @@ def test_legacy_duplicate_graph_still_dedups(make_sdk):
         params={"o": op["id"], "t": b["id"]})
     assert _edge_counts(sdk) == (3, 3), _edge_counts(sdk)
 
-    res = sdk.ingest({"connections": [
+    res = sdk._ingest({"connections": [
         {"from": a["id"], "to": [b["id"]], "operator": "IMPL"}]})
 
     assert res["deduped"]["connections"] == 1, res["created"]
@@ -776,7 +776,7 @@ def test_self_edge_guard_not_weakened(make_sdk):
 
     sdk = make_sdk("self_edge")
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest(_bundle(["p1", "p1"]))
+        sdk._ingest(_bundle(["p1", "p1"]))
     assert "self-edge" in str(exc.value), str(exc.value)
     assert _edge_counts(sdk) == (0, 0), _edge_counts(sdk)
 
@@ -793,7 +793,7 @@ def test_distinct_targets_unchanged(make_sdk):
         {"ref": "p3", "kind": "statement", "content": "three"},
         {"ref": "p4", "kind": "statement", "content": "four"},
     ])
-    res = sdk.ingest(bundle)
+    res = sdk._ingest(bundle)
 
     assert _edge_counts(sdk) == (4, 4), _edge_counts(sdk)
     slots = _operator_input_slots(sdk, res["ids"]["connections"][0])

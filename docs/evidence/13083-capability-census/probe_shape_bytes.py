@@ -274,16 +274,16 @@ def main() -> int:
             topics=["storage", "placement"], summary="A summary of the source.",
             domain="platform", documentKind="report", project="kept-13083",
             provenance_spans=[{"start": 0, "end": 120}], about_entities=["13083-object-1"])
-        sdk.create_event("13083-event-1", "Deployment",
+        sdk._create_event("13083-event-1", "Deployment",
                          participants=["alice", "bob"],
                          startedAt="2026-11-17T00:00:00+00:00",
                          aboutObject="13083-object-1", note="event note",
                          classification_level="internal",
                          keywords=["deploy", "storage"])
-        sdk.create_object("13083-object-1", objectKind="artifact",
+        sdk._create_object("13083-object-1", objectKind="artifact",
                           title="Object title")
-        sdk.create_subject("13083-subject-1", subjectKind="person")
-        sdk.create_point("statement", "the shape census claim", project="kept-13083")
+        sdk._create_subject("13083-subject-1", subjectKind="person")
+        sdk._create_point("statement", "the shape census claim", project="kept-13083")
 
         after = _used_memory(g)
         census = _nodes_by_label(g)

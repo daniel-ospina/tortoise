@@ -618,7 +618,7 @@ class ConversationMiner:
                         # report; a non-closure `ValueError` still propagates
                         # exactly as before.
                         try:
-                            sdk.create_operator("NAND", pid, [prior_id],
+                            sdk._create_operator("NAND", pid, [prior_id],
                                                 promote_source=False)
                         except ValueError as _exc:
                             if "mechanism set is CLOSED" not in str(_exc):
@@ -1299,7 +1299,7 @@ def mine_corpus_with_sdk(
             pre_indexed.add(rel)
         files.append(fp)
 
-    ingest = sdk.ingest_corpus(
+    ingest = sdk._ingest_corpus(
         directory, eventKind="AgentSession", extract_metadata=False,
         progress_file=progress_file,
     )

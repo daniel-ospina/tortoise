@@ -1485,7 +1485,7 @@ def test_rebuild_all_preserves_onboarding_state(graph):
     restores the link; the `:Subject` itself is journaled).
     """
     events, sdk = graph
-    anchor = sdk.create_subject("Org Anchor 4641",
+    anchor = sdk._create_subject("Org Anchor 4641",
                                 subjectKind="organisation")
     _write_onboarding_state(sdk, "org-a", fork="build",
                             steps=("harness-connected", "first-points-filed"),
@@ -2041,7 +2041,7 @@ def test_leftover_sidecar_does_not_destroy_a_live_anchor(graph):
     """
     events, sdk = graph
     _write_journal(events, [])
-    anchor = sdk.create_subject("Leftover Anchor 4641",
+    anchor = sdk._create_subject("Leftover Anchor 4641",
                                 subjectKind="organisation")
     _write_onboarding_state(sdk, "org-lo", fork="build",
                             subject_id=anchor["id"])

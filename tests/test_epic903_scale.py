@@ -338,7 +338,7 @@ class TestFullModeCapAtTopOfRange:
                 return real(*a, **kw)
 
             monkeypatch.setattr(dreamer, "dream_all", _capped)
-            r = sdk.dream(mode="full")
+            r = sdk._dream(mode="full")
             assert set(r.keys()) == {
                 "mode", "batches", "total_affected", "converged_all",
                 "budget_used", "coverage", "scanned_count",

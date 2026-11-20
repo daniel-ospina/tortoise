@@ -157,18 +157,18 @@ def test_update_point_writes_and_records_under_the_armed_guard(
     leave a `PointRevised`.
     """
     sdk = armed_sdk
-    pid = sdk.create_point("statement", "apply-first update_point")["id"]
+    pid = sdk._create_point("statement", "apply-first update_point")["id"]
 
     before = _records_since(sdk).count("PointRevised")
-    sdk.update_point(pid, confidence=0.42)
+    sdk._update_point(pid, confidence=0.42)
     assert _records_since(sdk).count("PointRevised") == before + 1, (
         "the revision's record did not land")
-    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.42)
+    assert sdk._get_point(pid)["confidence"] == pytest.approx(0.42)
 
     # The promote arm: guarded write first, record after it (#8830/#7951 2b).
-    draft = sdk.create_point("statement", "apply-first promote", status="draft")["id"]
-    sdk.update_point(draft, status="live")
-    assert sdk.get_point(draft)["status"] == "live", (
+    draft = sdk._create_point("statement", "apply-first promote", status="draft")["id"]
+    sdk._update_point(draft, status="live")
+    assert sdk._get_point(draft)["status"] == "live", (
         "the declared apply-first door must not be refused at its guarded SET")
 
 
@@ -193,26 +193,26 @@ def test_create_operator_writes_and_records_under_the_armed_guard(
         armed_sdk, enforced, force_sparse_tfidf):
     """`create_operator`: CREATE the node + edges first, `OperatorAdded` after."""
     sdk = armed_sdk
-    src = sdk.create_point("statement", "operator source")["id"]
-    tgt = sdk.create_point("statement", "operator target")["id"]
+    src = sdk._create_point("statement", "operator source")["id"]
+    tgt = sdk._create_point("statement", "operator target")["id"]
 
     before = _records_since(sdk).count("OperatorAdded")
-    created = sdk.create_operator("IMPL", src, [tgt], label="causes")
+    created = sdk._create_operator("IMPL", src, [tgt], label="causes")
     assert _records_since(sdk).count("OperatorAdded") == before + 1, (
         "the operator's record did not land")
-    assert sdk.get_point(created["id"])["is_operator"] is True
+    assert sdk._get_point(created["id"])["is_operator"] is True
 
 
 def test_create_direct_edge_writes_and_records_under_the_armed_guard(
         armed_sdk, enforced, force_sparse_tfidf):
     """`create_direct_edge`: the MERGE first, its record after."""
     sdk = armed_sdk
-    src = sdk.create_point("statement", "direct edge source")["id"]
-    tgt = sdk.create_point("statement", "direct edge target")["id"]
+    src = sdk._create_point("statement", "direct edge source")["id"]
+    tgt = sdk._create_point("statement", "direct edge target")["id"]
 
     journal = Path(sdk._journal_path_for_test)
     before = journal.read_text() if journal.exists() else ""
-    out = sdk.create_direct_edge("IMPL", src, tgt, confidence=0.7)
+    out = sdk._create_direct_edge("IMPL", src, tgt, confidence=0.7)
     assert out["created"] is True
     after = journal.read_text() if journal.exists() else ""
     assert after != before, (
@@ -224,14 +224,14 @@ def test_delete_point_and_delete_entity_write_and_record_under_the_armed_guard(
         armed_sdk, enforced, force_sparse_tfidf):
     """The two hard deletes: cache-first by decision, record after a landed destroy."""
     sdk = armed_sdk
-    pid = sdk.create_point("statement", "apply-first delete_point")["id"]
+    pid = sdk._create_point("statement", "apply-first delete_point")["id"]
     before = _records_since(sdk).count("EntityMutated")
-    assert sdk.delete_point(pid) is True
+    assert sdk._delete_point(pid) is True
     assert _records_since(sdk).count("EntityMutated") == before + 1
 
     obj = sdk.create_entity("object", "apply-first delete_entity")["node"]["id"]
     before = _records_since(sdk).count("EntityMutated")
-    assert sdk.delete_entity(obj) is True
+    assert sdk._delete_entity__svc(obj) is True
     assert _records_since(sdk).count("EntityMutated") == before + 1
 
 
@@ -493,9 +493,9 @@ def test_the_ep_invalidation_doors_clear_and_record_under_the_armed_guard(
     from tortoise.ep import TortoiseEP
 
     sdk = armed_sdk
-    src = sdk.create_point("statement", "ep door source")["id"]
-    tgt = sdk.create_point("statement", "ep door target")["id"]
-    sdk.create_operator("IMPL", src, [tgt], label="ep-door")
+    src = sdk._create_point("statement", "ep door source")["id"]
+    tgt = sdk._create_point("statement", "ep door target")["id"]
+    sdk._create_operator("IMPL", src, [tgt], label="ep-door")
     proj = sdk._get_proj()
 
     def seed_messages() -> None:

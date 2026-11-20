@@ -77,7 +77,7 @@ def _corr(proj, old_id: str, new_id: str) -> int:
 
 
 def _point_state(sdk, pid: str) -> dict:
-    p = sdk.get_point(pid) or {}
+    p = sdk._get_point(pid) or {}
     return {k: p.get(k) for k in
             ("status", "outdated", "validTo", "expiredAt")}
 
@@ -92,10 +92,10 @@ def test_superseded_point_stays_superseded_after_rebuild(sup):
     rebuild. Status + outdated flag + bi-temporal window stamps + CORRECTS
     edge survive the JSONL wipe+replay."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    succ = sdk.create_point("statement", "successor A'", status="live",
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    succ = sdk._create_point("statement", "successor A'", status="live",
                             valid_from="2026-01-01T00:00:00+00:00")["id"]
-    sdk.supersede_point(a, succ)
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre = _point_state(sdk, a)
     assert pre["status"] == "superseded"
@@ -114,11 +114,11 @@ def test_supersede_chain_each_link_stays_superseded(sup):
     """A→B→C chain: BOTH superseded links re-fold independently (each event
     folds its own target) — A superseded by B, B superseded by C, C live."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    sdk.supersede_point(a, b)
-    sdk.supersede_point(b, c)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    sdk._supersede_point(a, b)
+    sdk._supersede_point(b, c)
     proj = sdk._get_proj()
     pre = {pid: _point_state(sdk, pid)["status"] for pid in (a, b, c)}
     assert pre == {a: "superseded", b: "superseded", c: "live"}
@@ -142,11 +142,11 @@ def test_operator_edge_repoints_to_successor_on_rebuild(sup):
     zero semantic edges incident to A, successor holds the transferred
     IMPL edge, idx preserved."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.create_operator("IMPL", a, [b])
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._create_operator("IMPL", a, [b])
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre_old = _sem_edges(proj, a)
     pre_new = _sem_edges(proj, succ)
@@ -168,13 +168,13 @@ def test_operator_edge_repoints_through_chain_to_final_successor(sup):
     intermediate terminal B). The operator's OTHER input X is untouched in
     both live and rebuild (only the superseded A edge transfers)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    x = sdk.create_point("statement", "X", status="live")["id"]
-    sdk.create_operator("IMPL", a, [x])
-    sdk.supersede_point(a, b)
-    sdk.supersede_point(b, c)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    x = sdk._create_point("statement", "X", status="live")["id"]
+    sdk._create_operator("IMPL", a, [x])
+    sdk._supersede_point(a, b)
+    sdk._supersede_point(b, c)
     proj = sdk._get_proj()
     pre_x = _sem_edges(proj, x)
     pre_c = _sem_edges(proj, c)
@@ -199,12 +199,12 @@ def test_direct_edge_repoints_and_keeps_attrs_on_rebuild(sup):
     edge survives at the successor with confidence/weight/label attrs, and
     zero direct edges remain incident to the superseded A (E2E-11.6)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.create_direct_edge("IMPL", a, b, confidence=0.8, weight=0.5,
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._create_direct_edge("IMPL", a, b, confidence=0.8, weight=0.5,
                            label="supports")
-    sdk.supersede_point(a, succ)
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     attrs_pre = proj.g.query(
         "MATCH (p:Point {id:$id})-[r:IMPL]->(x) "
@@ -228,13 +228,13 @@ def test_direct_edge_chain_resolves_to_final_successor(sup):
     successor A2 (order-independent collapse), not leave the intermediate
     A1 edge (phantom)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    a1 = sdk.create_point("statement", "A1", status="live")["id"]
-    a2 = sdk.create_point("statement", "A2", status="live")["id"]
-    sdk.create_direct_edge("IMPL", a, b)
-    sdk.supersede_point(a, a1)
-    sdk.supersede_point(a1, a2)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    a1 = sdk._create_point("statement", "A1", status="live")["id"]
+    a2 = sdk._create_point("statement", "A2", status="live")["id"]
+    sdk._create_direct_edge("IMPL", a, b)
+    sdk._supersede_point(a, a1)
+    sdk._supersede_point(a1, a2)
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     assert not _direct_edges(proj, a)
@@ -251,12 +251,12 @@ def test_already_decided_operator_stays_attached_to_superseded_prior(sup):
     duplicate — its edge must stay on the superseded prior (live supersede
     skips it; rebuild pass-2b must too)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "prior A", status="live")["id"]
-    succ = sdk.create_point("statement", "kept A'", status="live")["id"]
-    sdk.create_operator(
+    a = sdk._create_point("statement", "prior A", status="live")["id"]
+    succ = sdk._create_point("statement", "kept A'", status="live")["id"]
+    sdk._create_operator(
         "IMPL", succ, [a], label="alreadyDecided",
         direction="unidirectional")
-    sdk.supersede_point(a, succ)
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre = _sem_edges(proj, a)
     assert pre, "alreadyDecided edge should point at the prior live"
@@ -272,11 +272,11 @@ def test_operator_created_after_supersede_keeps_terminal_link(sup):
     The re-point is order-faithful (OperatorAdded seq vs PointSuperseded
     seq): a post-supersede operator must NOT be dragged to the successor."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
-    sdk.create_operator("IMPL", a, [b])
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
+    sdk._create_operator("IMPL", a, [b])
     proj = sdk._get_proj()
     pre = _sem_edges(proj, a)
     assert pre, "post-supersede operator edge should point at old live"
@@ -291,12 +291,12 @@ def test_rebuild_is_idempotent_for_supersession_state(sup):
     """Indicator 4: rebuild → rebuild converges — the second replay leaves
     the graph identical to the first (fold + re-point idempotent)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.create_operator("IMPL", a, [b])
-    sdk.create_direct_edge("IMPL", a, b)
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._create_operator("IMPL", a, [b])
+    sdk._create_direct_edge("IMPL", a, b)
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     snapshot1 = {
@@ -323,12 +323,12 @@ def test_id_reuse_double_supersede_no_parallel_edges(sup):
     final) so rebuild does not mint a parallel duplicate operator edge
     (double EP weight) or a ghost CORRECTS pair."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    s1 = sdk.create_point("statement", "S1", status="live")["id"]
-    s2 = sdk.create_point("statement", "S2", status="live")["id"]
-    op = sdk.create_operator("IMPL", a, [b])["id"]
-    sdk.supersede_point(a, s1)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    s1 = sdk._create_point("statement", "S1", status="live")["id"]
+    s2 = sdk._create_point("statement", "S2", status="live")["id"]
+    op = sdk._create_operator("IMPL", a, [b])["id"]
+    sdk._supersede_point(a, s1)
     # The SDK terminal guard blocks a live second supersede of the same old
     # id, so journal the second fold directly the way a raw id-reusing
     # producer would (a second PointSuperseded event naming the SAME id).
@@ -336,7 +336,7 @@ def test_id_reuse_double_supersede_no_parallel_edges(sup):
     import json
     with open(events / "events.jsonl", "a") as fh:
         line = {
-            "event_id": sdk.ulid(), "ts": datetime.datetime.now(
+            "event_id": sdk._ulid(), "ts": datetime.datetime.now(
                 datetime.UTC).isoformat(),
             "type": "PointSuperseded", "initiated_by": "sdk",
             "projection_version": 2, "id": a, "new_id": s2,
@@ -423,12 +423,12 @@ def test_extracted_from_transfer_parity_chain(sup):
     the edge on the transitively-final successor (E2E-11.6 mirror for the
     structural family)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live",
+    a = sdk._create_point("statement", "A", status="live",
                          extractedFrom="https://ex.test/s1")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    sdk.supersede_point(a, b)
-    sdk.supersede_point(b, c)
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    sdk._supersede_point(a, b)
+    sdk._supersede_point(b, c)
     proj = sdk._get_proj()
     pre_c = _struct_edges(proj, c)
     assert pre_c == {("extractedFrom", "https://ex.test/s1")}, \
@@ -461,15 +461,15 @@ def test_about_edge_follows_successor_after_second_rebuild(sup):
     about edge follows the successor AND old X carries no about edge after
     the 2nd rebuild (the only lane where 2b sees live about edges)."""
     _, events, sdk = sup
-    sdk.create_subject("ParitySubj", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("ParitySubj", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["ParitySubj"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     assert _struct_edges(proj, x) == {("aboutSubject", "ParitySubj")}, \
         "rebuild 1 should resurrect X's aboutSubject edge"
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     assert not _struct_edges(proj, x)
     assert _struct_edges(proj, succ) == {("aboutSubject", "ParitySubj")}
     _rebuild(sdk, events)
@@ -490,15 +490,15 @@ def test_no_self_edge_guard_delete_only_descriptor(sup):
     on every rebuild; without the descriptor nothing removes it). Assert
     both live and post-rebuild states."""
     _, events, sdk = sup
-    y = sdk.create_point("statement", "Y content", status="live",
+    y = sdk._create_point("statement", "Y content", status="live",
                          name="SelfTarget")["id"]
-    x = sdk.create_point("statement", "X about Y", status="live",
+    x = sdk._create_point("statement", "X about Y", status="live",
                          aboutEntities=["SelfTarget"])["id"]
     proj = sdk._get_proj()
     # live id-targeted aboutPoint edge X→Y (create_about_edge wires by id)
     assert proj.create_about_edge(x, y, "aboutPoint")
     assert _struct_edges(proj, x) == {("aboutPoint", "SelfTarget")}
-    sdk.supersede_point(x, y)
+    sdk._supersede_point(x, y)
     # LIVE assertions: guard fired — old edge deleted, NO self-edge on Y
     assert not _struct_edges(proj, x), "X's aboutPoint edge should be deleted"
     assert not _struct_edges(proj, y), (
@@ -534,12 +534,12 @@ def test_no_self_edge_guard_covers_every_duplicate_successor_node(sup):
     """
     _, events, sdk = sup
     y = "pt_dup_successor_7822"
-    sdk.create_point("statement", "dup Y first", status="live", id=y,
+    sdk._create_point("statement", "dup Y first", status="live", id=y,
                      name="DupTarget")
-    sdk.create_point("statement", "dup Y second", status="live", id=y)
+    sdk._create_point("statement", "dup Y second", status="live", id=y)
     # aboutEntities gives old's snapshot a name to re-mint on pass-2, so the
     # delete-only descriptor's replay delete-leg is actually exercised.
-    x = sdk.create_point("statement", "X about Y", status="live",
+    x = sdk._create_point("statement", "X about Y", status="live",
                          aboutEntities=["DupTarget"])["id"]
     proj = sdk._get_proj()
     proj.g.query(
@@ -547,7 +547,7 @@ def test_no_self_edge_guard_covers_every_duplicate_successor_node(sup):
         "CREATE (x)-[:aboutPoint]->(t)", params={"x": x, "y": y})
     assert _about_edges(proj, x) == 2, "premise: an edge to EACH successor node"
 
-    sdk.supersede_point(x, y)
+    sdk._supersede_point(x, y)
 
     assert _about_edges(proj, x) == 0, "old X's aboutPoint edges are deleted"
     assert _self_about_edges(proj, y) == 0, (
@@ -571,15 +571,15 @@ def test_no_self_edge_guard_chain_delete_keys_direct_successor(sup):
     itself superseded it ALSO follows the succ map to Z — old X ends clean,
     Y has no self-edge, Z is unaffected."""
     _, events, sdk = sup
-    y = sdk.create_point("statement", "Y content", status="live",
+    y = sdk._create_point("statement", "Y content", status="live",
                          name="ChainTarget")["id"]
-    x = sdk.create_point("statement", "X about Y", status="live",
+    x = sdk._create_point("statement", "X about Y", status="live",
                          aboutEntities=["ChainTarget"])["id"]
-    z = sdk.create_point("statement", "Z content", status="live")["id"]
+    z = sdk._create_point("statement", "Z content", status="live")["id"]
     proj = sdk._get_proj()
     assert proj.create_about_edge(x, y, "aboutPoint")
-    sdk.supersede_point(x, y)
-    sdk.supersede_point(y, z)   # direct successor Y now superseded → Z
+    sdk._supersede_point(x, y)
+    sdk._supersede_point(y, z)   # direct successor Y now superseded → Z
     assert not _struct_edges(proj, x)
     assert not _struct_edges(proj, y)
     assert not _struct_edges(proj, z)
@@ -598,12 +598,12 @@ def test_mixed_operator_and_structural_transfer_replays(sup):
     extractedFrom edge (2b): rebuild replays both — successor holds the IMPL
     (from its operator) AND the extractedFrom edge; old X is clean of both."""
     _, events, sdk = sup
-    x = sdk.create_point("statement", "X", status="live",
+    x = sdk._create_point("statement", "X", status="live",
                          extractedFrom="https://ex.test/mixed")["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
-    tgt = sdk.create_point("statement", "T", status="live")["id"]
-    sdk.create_operator("IMPL", x, [tgt])
-    sdk.supersede_point(x, succ)
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
+    tgt = sdk._create_point("statement", "T", status="live")["id"]
+    sdk._create_operator("IMPL", x, [tgt])
+    sdk._supersede_point(x, succ)
     proj = sdk._get_proj()
     pre_sem = _sem_edges(proj, succ)
     pre_struct = _struct_edges(proj, succ)
@@ -622,17 +622,17 @@ def test_two_sources_share_one_target_both_survive(sup):
     dedupe key (src, edge_type, resolved-target-id) keeps BOTH — per-src
     keys never collapse; each successor holds its own about edge."""
     _, events, sdk = sup
-    sdk.create_subject("SharedSubj", "org")
-    x1 = sdk.create_point("statement", "X1", status="live",
+    sdk._create_subject("SharedSubj", "org")
+    x1 = sdk._create_point("statement", "X1", status="live",
                           aboutEntities=["SharedSubj"])["id"]
-    x2 = sdk.create_point("statement", "X2", status="live",
+    x2 = sdk._create_point("statement", "X2", status="live",
                           aboutEntities=["SharedSubj"])["id"]
-    s1 = sdk.create_point("statement", "S1", status="live")["id"]
-    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    s1 = sdk._create_point("statement", "S1", status="live")["id"]
+    s2 = sdk._create_point("statement", "S2", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)  # resurrect X1/X2 about edges
-    sdk.supersede_point(x1, s1)
-    sdk.supersede_point(x2, s2)
+    sdk._supersede_point(x1, s1)
+    sdk._supersede_point(x2, s2)
     _rebuild(sdk, events)
     assert _struct_edges(proj, s1) == {("aboutSubject", "SharedSubj")}
     assert _struct_edges(proj, s2) == {("aboutSubject", "SharedSubj")}
@@ -645,16 +645,16 @@ def test_multi_target_same_rel_not_collapsed_by_descriptor_id(sup):
     keyed on (src, edge_type, RESOLVED node id), never descriptor id, so
     both edges survive to the successor."""
     _, events, sdk = sup
-    sdk.create_subject("SubjOne", "org")
-    sdk.create_subject("SubjTwo", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("SubjOne", "org")
+    sdk._create_subject("SubjTwo", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["SubjOne", "SubjTwo"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     assert len(_struct_edges(proj, x)) == 2, \
         "X should resurrect BOTH aboutSubject edges"
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     _rebuild(sdk, events)
     assert _struct_edges(proj, succ) == {("aboutSubject", "SubjOne"),
                                          ("aboutSubject", "SubjTwo")}, \
@@ -673,14 +673,14 @@ def test_about_document_title_keyed_resolution(sup):
     so the rebuild re-creates the document ``:Source`` from the SDK's own
     record — no fixture-supplied line is needed."""
     _, events, sdk = sup
-    sdk.create_document("DocTitleOnly", "report")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_document("DocTitleOnly", "report")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["DocTitleOnly"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     assert _struct_edges(proj, x) == {("aboutDocument", "DocTitleOnly")}
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     _rebuild(sdk, events)
     assert _struct_edges(proj, succ) == {("aboutDocument", "DocTitleOnly")}
     assert not _struct_edges(proj, x)
@@ -699,12 +699,12 @@ def test_name_less_about_point_target_skipped_at_emission(sup):
     carry `name` if a producer set it) has no replayable key: emission SKIPS
     the descriptor (no crash); live transfer still moves the edge."""
     _, events, sdk = sup
-    w = sdk.create_point("statement", "W nameless", status="live")["id"]
-    x = sdk.create_point("statement", "X", status="live")["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    w = sdk._create_point("statement", "W nameless", status="live")["id"]
+    x = sdk._create_point("statement", "X", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     assert proj.create_about_edge(x, w, "aboutPoint")
-    r = sdk.supersede_point(x, succ)
+    r = sdk._supersede_point(x, succ)
     assert r["edges_transferred"] >= 1
     descs = _descriptors(events)
     assert not [d for d in descs if d.get("edge_type") == "aboutPoint"], \
@@ -719,8 +719,8 @@ def test_url_less_source_target_skipped_at_emission(sup):
     replayable: emission skips the descriptor — no crash, live transfer still
     runs (zero regression: those edges die at rebuild today anyway)."""
     _, events, sdk = sup
-    x = sdk.create_point("statement", "X", status="live")["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    x = sdk._create_point("statement", "X", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     # raw Source keyed only by id + raw extractedFrom edge (never journaled)
     proj.g.query("CREATE (s:Source {id:'raw-src-1'})")
@@ -730,7 +730,7 @@ def test_url_less_source_target_skipped_at_emission(sup):
         "MATCH (x:Point {id:$x}), (s) WHERE ID(s) = $sid "
         "MERGE (x)-[:extractedFrom]->(s)",
         params={"x": x, "sid": src_id})
-    r = sdk.supersede_point(x, succ)
+    r = sdk._supersede_point(x, succ)
     assert r["edges_transferred"] >= 1
     descs = _descriptors(events)
     assert not [d for d in descs
@@ -769,8 +769,8 @@ def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
     the wrong reason.
     """
     _, events, sdk = sup
-    x = sdk.create_point("statement", "X", status="live")["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    x = sdk._create_point("statement", "X", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     # journaled provenance :Source — no documentKind (not a document)
     sdk.register_source("https://x/5265-prov", "github")
@@ -779,7 +779,7 @@ def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
         "MATCH (x:Point {id:$x}), (s:Source {url:'https://x/5265-prov'}) "
         "MERGE (x)-[:aboutDocument]->(s)", params={"x": x})
 
-    r = sdk.supersede_point(x, succ)
+    r = sdk._supersede_point(x, succ)
     assert r["edges_transferred"] >= 1
     descs = [d for d in _descriptors(events)
              if d.get("edge_type") == "aboutDocument"]
@@ -807,14 +807,14 @@ def test_structural_replay_is_idempotent_across_rebuilds(sup):
     """rebuild → rebuild converges: the second replay leaves the structural
     edges identical to the first (delete-leg + MERGE create idempotent)."""
     _, events, sdk = sup
-    sdk.create_subject("IdemSubj", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("IdemSubj", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          extractedFrom="https://ex.test/idem",
                          aboutEntities=["IdemSubj"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     _rebuild(sdk, events)
     snap1 = {"old": _struct_edges(proj, x), "succ": _struct_edges(proj, succ)}
     _rebuild(sdk, events)
@@ -833,14 +833,14 @@ def test_structural_id_reuse_duplicate_descriptor_dedupe(sup):
     edge_type, resolved node identity) — no parallel edge on the final
     successor — and the old-side delete-leg still runs for the duplicate."""
     _, events, sdk = sup
-    sdk.create_subject("ReuseSubj", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("ReuseSubj", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["ReuseSubj"])["id"]
-    s1 = sdk.create_point("statement", "S1", status="live")["id"]
-    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    s1 = sdk._create_point("statement", "S1", status="live")["id"]
+    s2 = sdk._create_point("statement", "S2", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)  # resurrect X's about edge
-    sdk.supersede_point(x, s1)
+    sdk._supersede_point(x, s1)
     # Duplicate the FIRST fold's descriptor (a raw id-reusing producer's
     # second PointSuperseded journals the transfer again) — append the raw
     # fold + a byte-identical descriptor.
@@ -850,13 +850,13 @@ def test_structural_id_reuse_duplicate_descriptor_dedupe(sup):
                       if d.get("edge_type") == "aboutSubject")
     with open(events / "events.jsonl", "a") as fh:
         fold2 = {
-            "event_id": sdk.ulid(), "ts": datetime.datetime.now(
+            "event_id": sdk._ulid(), "ts": datetime.datetime.now(
                 datetime.UTC).isoformat(),
             "type": "PointSuperseded", "initiated_by": "sdk",
             "projection_version": 2, "id": x, "new_id": s2,
         }
         dup_desc = {k: v for k, v in first_desc.items()}
-        dup_desc["event_id"] = sdk.ulid()
+        dup_desc["event_id"] = sdk._ulid()
         fh.write(json.dumps(fold2) + "\n")
         fh.write(json.dumps(dup_desc) + "\n")
     _rebuild(sdk, events)
@@ -880,9 +880,9 @@ def test_resolver_stub_mint_equivalence_for_absent_entities(sup):
     Source url → Source stub (title=url, sourceKind='document'). One create
     path (edges.py _mint_subject_stub/_mint_source_stub) for live + replay."""
     _, events, sdk = sup
-    x = sdk.create_point("statement", "X", status="live",
+    x = sdk._create_point("statement", "X", status="live",
                          extractedFrom="https://eq.test/absent-src")["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     # Live wiring for the aboutSubject edge: a Subject that exists ONLY live
     # (raw — never journaled, so the rebuild cannot re-create it) + direct
@@ -900,7 +900,7 @@ def test_resolver_stub_mint_equivalence_for_absent_entities(sup):
         params={"xi": x_row[0][0]})
     assert _struct_edges(proj, x) == {("extractedFrom", "https://eq.test/absent-src"),
                                       ("aboutSubject", "AbsentSubj")}
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     # Wipe the raw entities so replay must RE-MINT the stubs (they are not
     # journaled — pass-2 resurrection + the descriptor resolver both recreate
     # them from the key).
@@ -932,16 +932,16 @@ def test_dual_label_name_collision_label_scoped_resolution(sup):
     lands on the Subject, the same-name Object is untouched. Auto-detect
     (_create_about_edges) would have attached to whatever matched first."""
     _, events, sdk = sup
-    sdk.create_subject("Collide", "org")
-    sdk.create_object("Collide", "artifact")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("Collide", "org")
+    sdk._create_object("Collide", "artifact")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["Collide"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)
     assert _struct_edges(proj, x) == {("aboutSubject", "Collide")}, \
         "live auto-detect is Subject-first; fixture must hold"
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     _rebuild(sdk, events)
     assert _struct_edges(proj, succ) == {("aboutSubject", "Collide")}
     subj = proj.g.query(
@@ -965,15 +965,15 @@ def test_pre_fix_journal_boundary_resurrection_persists(sup):
     old's pass-2 resurrection persists (rebuild does NOT repair pre-existing
     graphs; #2500-style backfill is out of scope). Pins the boundary."""
     _, events, sdk = sup
-    sdk.create_subject("BoundarySubj", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("BoundarySubj", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["BoundarySubj"])["id"]
-    succ = sdk.create_point("statement", "X'", status="live")["id"]
+    succ = sdk._create_point("statement", "X'", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)  # resurrect X's about edge (live, pre-fix shape)
     # Journal a pre-fix-style supersede: strip every DirectEdgeRepoint
     # descriptor the (fixed) supersede would have emitted.
-    sdk.supersede_point(x, succ)
+    sdk._supersede_point(x, succ)
     import json as _json
     kept, stripped = [], 0
     with open(events / "events.jsonl") as fh:
@@ -1009,7 +1009,7 @@ def test_delete_leg_skips_live_recreated_src(sup):
     """
     _, events, sdk = sup
     s = "https://parity.example/doc"
-    x = sdk.create_point("statement", "X", status="live",
+    x = sdk._create_point("statement", "X", status="live",
                          extractedFrom=s)["id"]
     # Simplest id-reuse stand-in: X is LIVE at replay (no supersede fold ran).
     # Emit a structural descriptor whose src is the LIVE X (stale descriptor
@@ -1017,13 +1017,13 @@ def test_delete_leg_skips_live_recreated_src(sup):
     # Fresh PointAdded for X (rebuild materializes X live from this snapshot).
     with open(events / "events.jsonl", "a") as fh:
         fh.write(json.dumps({
-            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "event_id": sdk._ulid(), "ts": datetime.now(UTC).isoformat(),
             "type": "PointAdded", "initiated_by": "raw-producer",
             "projection_version": 2,
             "point": {"id": x, "kind": "statement", "content": "X",
                       "status": "live", "extractedFrom": s}})+"\n")
         fh.write(json.dumps({
-            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "event_id": sdk._ulid(), "ts": datetime.now(UTC).isoformat(),
             "type": "DirectEdgeRepoint", "initiated_by": "raw-producer",
             "projection_version": 2,
             "src": x, "tgt": s, "target_label": "Source",
@@ -1075,15 +1075,15 @@ def test_a_cycle_with_a_descriptor_per_hop_loses_the_edge_at_rebuild(sup):
     together with the ONTOLOGY residual and `record_projection`'s (c).
     """
     _, events, sdk = sup
-    sdk.create_subject("CycleSubj", "org")
-    x = sdk.create_point("statement", "X", status="live",
+    sdk._create_subject("CycleSubj", "org")
+    x = sdk._create_point("statement", "X", status="live",
                          aboutEntities=["CycleSubj"])["id"]
-    y = sdk.create_point("statement", "Y", status="live")["id"]
-    z = sdk.create_point("statement", "Z", status="live")["id"]
+    y = sdk._create_point("statement", "Y", status="live")["id"]
+    z = sdk._create_point("statement", "Z", status="live")["id"]
     proj = sdk._get_proj()
     _rebuild(sdk, events)  # pass-2 materializes X's snapshot edge
     assert _struct_edges(proj, x) == {("aboutSubject", "CycleSubj")}
-    sdk.supersede_point(x, y)  # hop 1 — the only hop a live writer accepts
+    sdk._supersede_point(x, y)  # hop 1 — the only hop a live writer accepts
     assert _struct_edges(proj, y) == {("aboutSubject", "CycleSubj")}
     # Hops 2 and 3 are FABRICATED: the live writer refuses the closing hop, so
     # `z -> y` (and therefore the whole cycle) cannot come from a live journal.
@@ -1121,10 +1121,10 @@ def test_apply_replay_folds_supersede(sup):
     'superseded' — asserted as the literal live status, not something read
     back from the replay it is testing."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    succ = sdk.create_point("statement", "successor A'", status="live",
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    succ = sdk._create_point("statement", "successor A'", status="live",
                             valid_from="2026-01-01T00:00:00+00:00")["id"]
-    sdk.supersede_point(a, succ)
+    sdk._supersede_point(a, succ)
     pre = _point_state(sdk, a)
     _apply_replay(sdk, events)
     post = _point_state(sdk, a)
@@ -1143,11 +1143,11 @@ def test_apply_replay_folds_the_supersede_belief_decay(sup):
     apply()-based replay must decay the claim to the vacuous posterior, or
     the restored Point keeps a frozen promoted posterior."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    succ = sdk._create_point("statement", "successor A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
     _apply_replay(sdk, events)
-    decayed = sdk.get_point(a)
+    decayed = sdk._get_point(a)
     assert decayed["confidence"] == 0.5, (
         f"belief decay not folded by the apply() arm: {decayed.get('confidence')}")
     assert decayed["posterior_alpha"] == 1.0
@@ -1159,9 +1159,9 @@ def test_apply_replay_matches_rebuild_all_on_supersede(sup):
     the shared ``_fold_point_restamp`` dispatch is what keeps them from
     drifting."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "old A", status="live")["id"]
-    succ = sdk.create_point("statement", "successor A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "old A", status="live")["id"]
+    succ = sdk._create_point("statement", "successor A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
     live = _point_state(sdk, a)
     assert live["status"] == "superseded"
 
@@ -1180,7 +1180,7 @@ def test_apply_replay_keeps_a_live_point_live(sup):
     stays live across the apply() arm — the fix must not fold anything onto
     an ordinary claim."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "never touched", status="live")["id"]
+    a = sdk._create_point("statement", "never touched", status="live")["id"]
     _apply_replay(sdk, events)
     post = _point_state(sdk, a)
     assert post["status"] == "live"
@@ -1196,15 +1196,15 @@ def test_apply_replay_shares_rebuild_all_selection_on_double_supersede(sup):
     cannot ghost beside the final ``S2→A``. Folding every terminalizer inline
     would re-introduce that ghost on the recovery path."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    s1 = sdk.create_point("statement", "S1", status="live")["id"]
-    s2 = sdk.create_point("statement", "S2", status="live")["id"]
-    sdk.supersede_point(a, s1)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    s1 = sdk._create_point("statement", "S1", status="live")["id"]
+    s2 = sdk._create_point("statement", "S2", status="live")["id"]
+    sdk._supersede_point(a, s1)
     # A second fold for the SAME old id — the SDK's terminal guard refuses a
     # live second supersede, so journal it the way a raw producer would.
     with open(events / "events.jsonl", "a") as fh:
         fh.write(json.dumps({
-            "event_id": sdk.ulid(), "ts": datetime.now(UTC).isoformat(),
+            "event_id": sdk._ulid(), "ts": datetime.now(UTC).isoformat(),
             "type": "PointSuperseded", "initiated_by": "raw-producer",
             "projection_version": 2, "id": a, "new_id": s2,
         }) + "\n")
@@ -1253,7 +1253,7 @@ def test_apply_replay_refuses_when_a_fold_matches_no_point(sup, caplog):
     from tortoise.projection.nonfolded import NonFoldedEventsError
 
     _, events, sdk = sup
-    sdk.create_point("statement", "kept", status="live")
+    sdk._create_point("statement", "kept", status="live")
     EventLog(str(events / "events.jsonl")).append(
         {"type": "PointSuperseded", "id": "never-created-id",
          "new_id": "also-never-created", "event_id": "ghost-1",
@@ -1273,8 +1273,8 @@ def test_apply_one_record_folds_a_terminalizer(sup):
     unwired engine uses. Also pins that a ``PointSuperseded`` with no ``new_id``
     neither folds nor decays."""
     _, _events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    s = sdk.create_point("statement", "S", status="live")["id"]
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    s = sdk._create_point("statement", "S", status="live")["id"]
     proj = sdk._get_proj()
     # #7951 §17.1: a hand-built journal record folded directly is a REPLAY.
     with _replay_write_scope():
@@ -1287,12 +1287,12 @@ def test_apply_one_record_folds_a_terminalizer(sup):
 
     # An inapplicable supersede (no successor) must not decay the target — the
     # guard runs BEFORE the belief half on the one-record default.
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    before = (sdk.get_point(c) or {}).get("confidence")
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    before = (sdk._get_point(c) or {}).get("confidence")
     with _replay_write_scope():
         proj.apply({"type": "PointSuperseded", "id": c})
-    assert (sdk.get_point(c) or {}).get("confidence") == before
-    assert sdk.get_point(c)["status"] == "live"
+    assert (sdk._get_point(c) or {}).get("confidence") == before
+    assert sdk._get_point(c)["status"] == "live"
 
 
 def _synthesize_journal(path, entries) -> None:
@@ -1315,14 +1315,14 @@ def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
 
     _, events, sdk = sup
     for promote_type in ("PointPromoted", "OperatorPromoted"):
-        b = sdk.create_point("statement", f"B {promote_type}",
+        b = sdk._create_point("statement", f"B {promote_type}",
                              status="draft")["id"]
-        c = sdk.create_point("statement", f"C {promote_type}",
+        c = sdk._create_point("statement", f"C {promote_type}",
                              status="live")["id"]
         added_c = next(
             e for e in EventLog(str(events / "events.jsonl")).read_all()
             if e.get("type") == "PointAdded" and e["point"]["id"] == c)
-        snap = dict(sdk.get_point(b))
+        snap = dict(sdk._get_point(b))
         snap["status"] = "live"
         ts = "2026-01-01T00:00:00+00:00"
         # A DEDICATED log dir: the sdk's own journal still holds the
@@ -1331,10 +1331,10 @@ def test_apply_replay_matches_rebuild_all_when_a_promote_is_the_only_record(
         synth_dir = events.parent / f"synth-{promote_type}"
         synth_dir.mkdir()
         _synthesize_journal(synth_dir / "events.jsonl", [
-            {"event_id": sdk.ulid(), "ts": ts, "type": "PointSuperseded",
+            {"event_id": sdk._ulid(), "ts": ts, "type": "PointSuperseded",
              "initiated_by": "raw-producer", "projection_version": 2,
              "id": b, "new_id": c},
-            {"event_id": sdk.ulid(), "ts": ts, "type": promote_type,
+            {"event_id": sdk._ulid(), "ts": ts, "type": promote_type,
              "initiated_by": "raw-producer", "projection_version": 2,
              "point": snap},
             added_c,
@@ -1373,19 +1373,19 @@ def test_apply_replay_routes_a_type_in_point_terminalizer_through_the_plan(
     folds EVERY terminalizer and re-introduces the ghost ``CORRECTS`` the
     canonicalization exists to prevent."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    s1 = sdk.create_point("statement", "S1", status="live")["id"]
-    s2 = sdk.create_point("statement", "S2", status="live")["id"]
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    s1 = sdk._create_point("statement", "S1", status="live")["id"]
+    s2 = sdk._create_point("statement", "S2", status="live")["id"]
     base = EventLog(str(events / "events.jsonl")).read_all()
     synth_dir = events.parent / "synth-type-in-point"
     synth_dir.mkdir()
     ts = "2026-01-01T00:00:00+00:00"
     _synthesize_journal(synth_dir / "events.jsonl", [
         *base,
-        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+        {"event_id": sdk._ulid(), "ts": ts, "initiated_by": "raw-producer",
          "projection_version": 2,
          "point": {"type": "PointSuperseded", "id": a, "new_id": s1}},
-        {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+        {"event_id": sdk._ulid(), "ts": ts, "initiated_by": "raw-producer",
          "projection_version": 2,
          "point": {"type": "PointSuperseded", "id": a, "new_id": s2}},
     ])
@@ -1419,14 +1419,14 @@ def test_apply_replay_matches_rebuild_all_on_a_nested_terminalizer_payload(
     do, or it silently drops a fold both engines otherwise land — and emits a
     FALSE fold-miss warning naming the target it could not see."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
     base = EventLog(str(events / "events.jsonl")).read_all()
     synth_dir = events.parent / "synth-nested"
     synth_dir.mkdir()
     _synthesize_journal(synth_dir / "events.jsonl", [
         *base,
-        {"event_id": sdk.ulid(), "ts": "2026-01-01T00:00:00+00:00",
+        {"event_id": sdk._ulid(), "ts": "2026-01-01T00:00:00+00:00",
          "type": "PointSuperseded", "initiated_by": "raw-producer",
          "projection_version": 2, "point": {"id": a, "new_id": b}},
     ])
@@ -1658,13 +1658,13 @@ def test_rebuild_does_not_read_a_fold_as_the_delete_recreate(sup):
     ``3 > 2`` applies the dead incarnation's confidence to the new one.
     """
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A")["id"]
+    a = sdk._create_point("statement", "A")["id"]
     ts = "2026-01-01T00:00:00+00:00"
     synth_dir = events.parent / "synth-fold-after-delete"
     synth_dir.mkdir()
 
     def _rec(type_, **kw):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": type_, **kw}
 
@@ -1688,7 +1688,7 @@ def test_rebuild_does_not_read_a_fold_as_the_delete_recreate(sup):
     proj = sdk._get_proj()
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.rebuild_all(str(synth_dir), confirm_destructive=True)
-    got = sdk.get_point(a) or {}
+    got = sdk._get_point(a) or {}
     # ⛔ The existence assertion is not decoration: a rebuild that produced NO
     # node makes `got` the empty dict, `got.get("confidence")` None, and
     # `None != 0.99` TRUE — so the comparison below would pass on the exact
@@ -1739,7 +1739,7 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
     proj = sdk._get_proj()
 
     def _added(pid):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointAdded",
                 "point": {"id": pid, "label": "statement", "content": pid,
@@ -1761,7 +1761,7 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
         synth_dir.mkdir()
         _synthesize_journal(synth_dir / "events.jsonl", [
             _added("a"),
-            {"event_id": sdk.ulid(), "ts": ts, "initiated_by": "raw-producer",
+            {"event_id": sdk._ulid(), "ts": ts, "initiated_by": "raw-producer",
              "projection_version": 2, **term},
             _added(successor),
         ])
@@ -1769,7 +1769,7 @@ def test_terminalizer_successor_created_later_folds_the_same_on_every_engine(
         def _observable(successor=successor):
             return (_point_state(sdk, "a"),
                     _corr(proj, "a", successor),
-                    (sdk.get_point("a") or {}).get("confidence"))
+                    (sdk._get_point("a") or {}).get("confidence"))
 
         # rebuild_all (trailing sweep) — the reference value.
         proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1811,10 +1811,10 @@ def test_supersede_then_revision_does_not_end_at_the_supersede_ts(sup):
     from tortoise.consistency import recover_from_log
 
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    sdk.supersede_point(a, b)
-    sdk.update_point(a, content="REVISED-AFTER-SUPERSEDE")
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    sdk._supersede_point(a, b)
+    sdk._update_point(a, content="REVISED-AFTER-SUPERSEDE")
     records = EventLog(str(events / "events.jsonl")).read_all()
     sup_ts = next(e["ts"] for e in records
                   if e.get("type") == "PointSuperseded")
@@ -1866,24 +1866,24 @@ def test_deferred_corrects_sweep_does_not_resurrect_a_deleted_successor(sup):
     proj = sdk._get_proj()
 
     def _added(pid):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointAdded",
                 "point": {"id": pid, "label": "statement", "content": pid,
                           "status": "live"}}
 
     def _supersede():
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointSuperseded", "id": "a", "new_id": "s2",
                 "valid_to": ts, "expired_at": ts}
 
     deleters = {
-        "EntityMutated": {"event_id": sdk.ulid(), "ts": ts,
+        "EntityMutated": {"event_id": sdk._ulid(), "ts": ts,
                           "initiated_by": "raw-producer",
                           "projection_version": 2, "type": "EntityMutated",
                           "op": "delete", "id": "s2", "label": "Point"},
-        "PointsMerged": {"event_id": sdk.ulid(), "ts": ts,
+        "PointsMerged": {"event_id": sdk._ulid(), "ts": ts,
                          "initiated_by": "raw-producer",
                          "projection_version": 2, "type": "PointsMerged",
                          "merge_ids": ["s2"]},
@@ -1933,7 +1933,7 @@ def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
     proj = sdk._get_proj()
 
     def _added(pid):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointAdded",
                 "point": {"id": pid, "label": "statement", "content": pid,
@@ -1954,7 +1954,7 @@ def test_terminalizer_successor_field_is_type_scoped_on_every_engine(sup):
     for i, (term, candidates) in enumerate(
             (shapes[0:2], shapes[2:4], shapes[4:6])):
         entries = [_added("a")] + [_added(c) for c in candidates]
-        entries.append({"event_id": sdk.ulid(), "ts": ts,
+        entries.append({"event_id": sdk._ulid(), "ts": ts,
                         "initiated_by": "raw-producer",
                         "projection_version": 2, **term})
         synth_dir = events.parent / f"synth-type-scoped-{i}"
@@ -2021,26 +2021,26 @@ def test_promote_materialized_target_successor_later_folds_on_every_engine(
                  "content": pid, "status": "live", "confidence": 0.9}
         if op:
             point["operator"] = {"op_type": "IMPL"}
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "OperatorPromoted" if op else "PointPromoted",
                 "point": point}
 
     def _added(pid):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointAdded",
                 "point": {"id": pid, "label": "statement", "content": pid,
                           "status": "live", "confidence": 0.9}}
 
     def _supersede(a, b):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointSuperseded", "id": a, "new_id": b,
                 "valid_to": ts, "expired_at": ts}
 
     def _invalidate(a, x):
-        return {"event_id": sdk.ulid(), "ts": ts,
+        return {"event_id": sdk._ulid(), "ts": ts,
                 "initiated_by": "raw-producer", "projection_version": 2,
                 "type": "PointInvalidated", "id": a, "corrected_by": x,
                 "valid_to": ts, "expired_at": ts}
@@ -2064,7 +2064,7 @@ def test_promote_materialized_target_successor_later_folds_on_every_engine(
         _synthesize_journal(synth_dir / "events.jsonl", records)
 
         def _observable(successor=successor):
-            p = sdk.get_point("b") or {}
+            p = sdk._get_point("b") or {}
             return (p.get("status"), p.get("outdated"), p.get("validTo"),
                     p.get("expiredAt"), _corr(proj, "b", successor))
 
@@ -2128,11 +2128,11 @@ def test_operator_input_mirror_repoints_on_rebuild(sup):
     OLD), so pass-2b must move it back — else live and rebuilt diverge and the
     successor's support chain is empty post-rebuild."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A source", status="live")["id"]
-    t = sdk.create_point("statement", "target", status="live")["id"]
-    sdk.create_operator("IMPL", a, [t])
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "A source", status="live")["id"]
+    t = sdk._create_point("statement", "target", status="live")["id"]
+    sdk._create_operator("IMPL", a, [t])
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre_old = _input_edges(proj, a)
     pre_new = _input_edges(proj, succ)
@@ -2149,13 +2149,13 @@ def test_operator_input_mirror_follows_a_chain(sup):
     """A→B→C: the INPUT mirror lands on the FINAL live successor after
     rebuild, never on the intermediate terminal B."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    t = sdk.create_point("statement", "t", status="live")["id"]
-    sdk.create_operator("IMPL", a, [t])
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    c = sdk.create_point("statement", "C", status="live")["id"]
-    sdk.supersede_point(a, b)
-    sdk.supersede_point(b, c)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    t = sdk._create_point("statement", "t", status="live")["id"]
+    sdk._create_operator("IMPL", a, [t])
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    c = sdk._create_point("statement", "C", status="live")["id"]
+    sdk._supersede_point(a, b)
+    sdk._supersede_point(b, c)
     proj = sdk._get_proj()
     pre_c = _input_edges(proj, c)
     assert pre_c, "live: the mirror must end on C"
@@ -2171,11 +2171,11 @@ def test_alreadydecided_input_mirror_stays_on_rebuild(sup):
     """#1080 carve-out parity: an alreadyDecided operator's INPUT mirror stays
     on the superseded prior live AND post-rebuild."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    t = sdk.create_point("statement", "t", status="live")["id"]
-    sdk.create_operator("IMPL", a, [t], label="alreadyDecided")
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    t = sdk._create_point("statement", "t", status="live")["id"]
+    sdk._create_operator("IMPL", a, [t], label="alreadyDecided")
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre = _input_edges(proj, a)
     assert pre
@@ -2200,12 +2200,12 @@ def test_idxless_mitigation_edge_survives_rebuild(sup):
     `MERGE {idx:null}` before this fix; it is recorded on #5048, not treated as
     new here."""
     _, events, sdk = sup
-    s = sdk.create_point("statement", "s", status="live")["id"]
-    t = sdk.create_point("statement", "t", status="live")["id"]
-    op = sdk.create_operator("IMPL", s, [t])
-    mit = sdk.mitigate_operator(op["id"], "no control", 0.3)
-    succ = sdk.create_point("statement", "new context", status="live")["id"]
-    sdk.supersede_point(mit["id"], succ)
+    s = sdk._create_point("statement", "s", status="live")["id"]
+    t = sdk._create_point("statement", "t", status="live")["id"]
+    op = sdk._create_operator("IMPL", s, [t])
+    mit = sdk._mitigate_operator(op["id"], "no control", 0.3)
+    succ = sdk._create_point("statement", "new context", status="live")["id"]
+    sdk._supersede_point(mit["id"], succ)
     proj = sdk._get_proj()
 
     def _mitigated_by(pid):
@@ -2267,17 +2267,17 @@ def test_flag_less_operator_edge_stays_on_the_successor_across_the_replay(sup):
     ``op_type`` on replay — is a separate, pre-existing defect filed on its own.
     """
     _, events, sdk = sup
-    a = sdk.create_point("statement", "A", status="live")["id"]
-    b = sdk.create_point("statement", "B", status="live")["id"]
-    succ = sdk.create_point("statement", "A'", status="live")["id"]
-    op = sdk.create_operator("IMPL", a, [b])
+    a = sdk._create_point("statement", "A", status="live")["id"]
+    b = sdk._create_point("statement", "B", status="live")["id"]
+    succ = sdk._create_point("statement", "A'", status="live")["id"]
+    op = sdk._create_operator("IMPL", a, [b])
     # The legacy / migrated operator shape #10195's population widening covers:
     # ``op_type`` present, the boolean flag dropped by a migration / raw write.
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
         params={"id": op["id"]})
 
-    sdk.supersede_point(a, succ)
+    sdk._supersede_point(a, succ)
     proj = sdk._get_proj()
     pre_old = _canonical_operator_edges(proj, a)
     pre_new = _canonical_operator_edges(proj, succ)

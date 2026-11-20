@@ -20,11 +20,11 @@ def sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_tax_test_"), "test.db")
     sdk = TortoiseSDK(db_path)
     # Seed: Points with different contexts/kinds
-    sdk.create_point("statement", "S1")
-    sdk.create_point("decision", "D1")
-    sdk.create_point("observation", "O1")
-    sdk.create_point("hypothesis", "H1")
-    sdk.create_point("goal", "G1")  # no context
+    sdk._create_point("statement", "S1")
+    sdk._create_point("decision", "D1")
+    sdk._create_point("observation", "O1")
+    sdk._create_point("hypothesis", "H1")
+    sdk._create_point("goal", "G1")  # no context
     yield sdk
     sdk.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -166,10 +166,10 @@ class TestListPointKinds:
         assert isinstance(result, list)
 
     def test_counts_by_kind(self, sdk):
-        sdk.create_point("strategy", "strat one")
-        sdk.create_point("strategy", "strat two")
-        sdk.create_point("research", "research one")
-        sdk.create_point("research", "research two")
+        sdk._create_point("strategy", "strat one")
+        sdk._create_point("strategy", "strat two")
+        sdk._create_point("research", "research one")
+        sdk._create_point("research", "research two")
         result = sdk.graph_overview("pointkinds")
         kinds = {r["kind"]: r["count"] for r in result}
         assert kinds["strategy"] == 2
@@ -192,7 +192,7 @@ class TestListTopics:
         assert "error" in result
 
     def test_entity_without_neighbors(self, sdk):
-        p = sdk.create_point("statement", "loner")
+        p = sdk._create_point("statement", "loner")
         result = sdk.graph_overview("topics", entity_id=p["id"])
         assert result["id"] == p["id"]
         assert result["pointKind"] == "statement"
@@ -200,11 +200,11 @@ class TestListTopics:
         assert result["neighborCounts"] == {}
 
     def test_entity_with_neighbors(self, sdk):
-        a = sdk.create_point("statement", "A")
-        b = sdk.create_point("decision", "B")
-        c = sdk.create_point("observation", "C")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("NAND", a["id"], [c["id"]])
+        a = sdk._create_point("statement", "A")
+        b = sdk._create_point("decision", "B")
+        c = sdk._create_point("observation", "C")
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("NAND", a["id"], [c["id"]])
 
         result = sdk.graph_overview("topics", entity_id=a["id"])
         assert result["id"] == a["id"]

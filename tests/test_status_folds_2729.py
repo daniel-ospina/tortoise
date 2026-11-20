@@ -564,7 +564,7 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "AI-1", objectKind="venture:actionItem")
-            sdk.create_event("AI-1 done", "venture:actionItemCompleted",
+            sdk._create_event("AI-1 done", "venture:actionItemCompleted",
                              object="AI-1")
             assert _object_stage(sdk, "AI-1") == "done"
             assert _object_status(sdk, "AI-1") is None, \
@@ -576,7 +576,7 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "T1", objectKind="venture:tranche")
-            sdk.create_event("T1 released", "venture:disbursement",
+            sdk._create_event("T1 released", "venture:disbursement",
                              object="T1")
             assert _object_stage(sdk, "T1") == "released"
         finally:
@@ -587,7 +587,7 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "T2", objectKind="venture:tranche")
-            sdk.create_event("closed", "github.issue.closed", object="T2")
+            sdk._create_event("closed", "github.issue.closed", object="T2")
             # #9974 R1: a status-less birth stores NO status; "the connector
             # fold did not relabel it" is now `is None` (absent READS live), and
             # a written `live` would mean something DID write.
@@ -601,12 +601,12 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "the bug", objectKind="dev:issue")
-            sdk.create_event("opened", "github.issue.open", object="the bug")
+            sdk._create_event("opened", "github.issue.open", object="the bug")
             # #11824 S0: the connector words are POSITIONS (design §3.2), so the
             # built-in fold advances the CORE work-item stage — it no longer
             # writes `Object.status` at all.
             assert _object_stage(sdk, "the bug") == "in_progress"
-            sdk.create_event("closed", "github.issue.closed", object="the bug")
+            sdk._create_event("closed", "github.issue.closed", object="the bug")
             assert _object_stage(sdk, "the bug") == "done"
             assert _object_status(sdk, "the bug") is None
         finally:
@@ -618,7 +618,7 @@ class TestFoldBehaviour:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "TASK-42", objectKind="dev:issue")
-            sdk.create_event("done", "pm:cardCompleted", object="TASK-42")
+            sdk._create_event("done", "pm:cardCompleted", object="TASK-42")
             assert _object_stage(sdk, "TASK-42") == "done"
         finally:
             sdk.close()
@@ -663,7 +663,7 @@ class TestFoldBehaviour:
                 f"RETURN count(o)").result_set[0][0]
             assert before == 1, "the fresh card must read as CURRENT"
 
-            sdk.create_event("done", "pm:cardCompleted", object="CARD-END")
+            sdk._create_event("done", "pm:cardCompleted", object="CARD-END")
             assert _object_stage(sdk, "CARD-END") == "done"
             assert _object_status(sdk, "CARD-END") is None
 
@@ -696,7 +696,7 @@ class TestFoldBehaviour:
             sdk._get_proj()._fold_object_superseded(
                 {"id": node_id(sdk, "Object", "T3"), "name": "T3",
                  "supersedes_by": "T3-v2"})
-            sdk.create_event("released", "venture:disbursement", object="T3")
+            sdk._create_event("released", "venture:disbursement", object="T3")
             assert _object_status(sdk, "T3") == "superseded"
         finally:
             sdk.close()
@@ -710,7 +710,7 @@ class TestFoldBehaviour:
             sdk.create_entity("object", "not-an-action-item",
                               objectKind="dev:issue")
             with caplog.at_level(logging.WARNING):
-                sdk.create_event("done", "venture:actionItemCompleted",
+                sdk._create_event("done", "venture:actionItemCompleted",
                                  object="not-an-action-item")
             assert any("status_fold_unapplied" in r.getMessage()
                        for r in caplog.records)
@@ -734,7 +734,7 @@ class TestFormWidenedDispatch:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "B1", objectKind="tranche")
-            sdk.create_event("B1 released", "disbursement", object="B1")
+            sdk._create_event("B1 released", "disbursement", object="B1")
             assert _object_stage(sdk, "B1") == "released"
         finally:
             sdk.close()
@@ -743,7 +743,7 @@ class TestFormWidenedDispatch:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "B2", objectKind="tranche")
-            sdk.create_event("B2 released", "venture:disbursement", object="B2")
+            sdk._create_event("B2 released", "venture:disbursement", object="B2")
             assert _object_stage(sdk, "B2") == "released"
         finally:
             sdk.close()
@@ -752,7 +752,7 @@ class TestFormWidenedDispatch:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "B3", objectKind="venture:tranche")
-            sdk.create_event("B3 released", "disbursement", object="B3")
+            sdk._create_event("B3 released", "disbursement", object="B3")
             assert _object_stage(sdk, "B3") == "released"
         finally:
             sdk.close()
@@ -765,7 +765,7 @@ class TestFormWidenedDispatch:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "B4", objectKind="tranche")
-            sdk.create_event("closed", "github.issue.closed", object="B4")
+            sdk._create_event("closed", "github.issue.closed", object="B4")
             assert _object_status(sdk, "B4") is None  # #9974 R1: not written
             # …on BOTH axes: S0's connector fold writes a stage, so "not
             # relabelled" must assert the stage stayed unset too.
@@ -777,10 +777,10 @@ class TestFormWidenedDispatch:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "B5", objectKind="VENTURE:TRANCHE")
-            sdk.create_event("B5 released", "Venture:Disbursement", object="B5")
+            sdk._create_event("B5 released", "Venture:Disbursement", object="B5")
             assert _object_stage(sdk, "B5") == "released"
             sdk.create_entity("object", "B6", objectKind="Tranche")
-            sdk.create_event("closed", "github.issue.closed", object="B6")
+            sdk._create_event("closed", "github.issue.closed", object="B6")
             assert _object_status(sdk, "B6") is None  # #9974 R1: not written
             assert _object_stage(sdk, "B6") is None
         finally:
@@ -856,7 +856,7 @@ class TestExtractionPipelineFold:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "ISSUE", objectKind="dev:issue")
-            sdk.create_event("opened", "github.issue.open",
+            sdk._create_event("opened", "github.issue.open",
                              about_entities=["ISSUE"])
             assert _object_status(sdk, "ISSUE") is None  # #9974 R1: not written
         finally:
@@ -899,7 +899,7 @@ class TestOwnershipSurvivesRegistryOutage:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "O1", objectKind="venture:tranche")
-            sdk.create_event("closed", "github.issue.closed", object="O1")
+            sdk._create_event("closed", "github.issue.closed", object="O1")
             assert _object_status(sdk, "O1") is None  # #9974 R1: not written
         finally:
             sdk.close()
@@ -923,7 +923,7 @@ class TestFoldQueryTypeSafety:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "N1", objectKind=5)
-            sdk.create_event("closed", "github.issue.closed", object="N1")
+            sdk._create_event("closed", "github.issue.closed", object="N1")
             assert _object_stage(sdk, "N1") == "done"
         finally:
             sdk.close()
@@ -932,7 +932,7 @@ class TestFoldQueryTypeSafety:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "N2", objectKind=["a", "b"])
-            sdk.create_event("closed", "github.issue.closed", object="N2")
+            sdk._create_event("closed", "github.issue.closed", object="N2")
             assert _object_stage(sdk, "N2") == "done"
         finally:
             sdk.close()
@@ -943,7 +943,7 @@ class TestFoldQueryTypeSafety:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "N3", objectKind=5)
-            sdk.create_event("released", "venture:disbursement", object="N3")
+            sdk._create_event("released", "venture:disbursement", object="N3")
             assert _object_status(sdk, "N3") is None  # #9974 R1: not written
             # The write itself landed (the Event exists) rather than raising
             # and losing the whole write.
@@ -986,7 +986,7 @@ class TestMultiPackEventKeySharing:
         try:
             sdk.create_entity("object", "X1", objectKind="a:thing")
             with caplog.at_level(logging.WARNING):
-                sdk.create_event("done", "thingDone", object="X1")
+                sdk._create_event("done", "thingDone", object="X1")
             assert _object_status(sdk, "X1") == "a-done"
             assert not any("status_fold_unapplied" in r.getMessage()
                            for r in caplog.records), [
@@ -1012,7 +1012,7 @@ class TestMultiPackEventKeySharing:
         try:
             sdk.create_entity("object", "Y1", objectKind="dev:issue")
             with caplog.at_level(logging.WARNING):
-                sdk.create_event("done", "thingDone", object="Y1")
+                sdk._create_event("done", "thingDone", object="Y1")
             assert any("status_fold_unapplied" in r.getMessage()
                        for r in caplog.records)
         finally:
@@ -1070,7 +1070,7 @@ class TestBareKindCollisionAcrossPacks:
         sdk = _fresh_sdk()
         try:
             sdk.create_entity("object", "Z1", objectKind="thing")
-            sdk.create_event("done", "thingDone", object="Z1")
+            sdk._create_event("done", "thingDone", object="Z1")
             assert _object_status(sdk, "Z1") == "b-done"
         finally:
             sdk.close()

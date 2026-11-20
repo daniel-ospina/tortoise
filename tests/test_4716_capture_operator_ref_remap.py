@@ -85,7 +85,7 @@ def _pre_existing_id(sdk, content: str, kind: str = "statement") -> str:
     capture (a non-payload id, e.g. the m2/ULID shape). ``kind`` must match the
     payload point's kind or the commit's kind-scoped resolver treats it as new
     (#784) and no re-key happens."""
-    sdk.create_point(kind, content)
+    sdk._create_point(kind, content)
     rows = sdk._get_proj().g.query(
         "MATCH (p:Point {content:$c}) RETURN p.id",
         params={"c": content}).result_set
@@ -200,7 +200,7 @@ def test_capture_commit_remaps_pt_supersession_ref(sdk, monkeypatch):
 
     old = "the team decided to ship on friday"
     successor = "the team decided to ship on monday instead"
-    sdk.create_point("decision", old, id="pt_old_decision_4716")
+    sdk._create_point("decision", old, id="pt_old_decision_4716")
     successor_id = _pre_existing_id(sdk, successor, kind="decision")
     successor_pid = ev2._content_id("pt", successor)
     assert successor_id != successor_pid

@@ -99,7 +99,7 @@ class TestErrorMapping:
         from unittest.mock import patch
 
         class FakeSdk:
-            def dream(self, **kw):
+            def _dream(self, **kw):
                 raise ValueError("unknown dream mode 'quantum' — expected "
                                  "one of 'local', 'stale-first', 'full'")
 

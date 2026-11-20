@@ -1367,7 +1367,7 @@ def test_jsonl_recovery_after_total_graph_loss(monkeypatch):
     events_path = os.path.join(os.path.dirname(canonical), "events.jsonl")
     sdk = TortoiseSDK(db_path=canonical, event_log_path=events_path)
     for i in range(3):
-        sdk.create_point("observation", f"log-{i}")
+        sdk._create_point("observation", f"log-{i}")
     sdk.close()
 
     # Guard: adjacency + non-empty log preconditions
