@@ -21,6 +21,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import re
 from pathlib import Path
 from typing import ClassVar
 
@@ -288,9 +289,10 @@ def test_the_edge_arm_ignores_edges_that_are_not_the_map_s(map_doc):
     Mutant: credit an edge whenever each endpoint matches ANY identity present
     (`& present`) — both foreign-edge cases go green with zero declared edges.
     """
-    foreign_nodes = [["Object", "", f"foreign-{i}", ""] for i in range(30)]
+    foreign_nodes = [["Object", f"foreign-{i}", "", ""] for i in range(30)]
     foreign_edges = [["IMPL", "Object", "", f"foreign-{i}", "",
-                      "Object", "", f"foreign-{i + 1}", ""] for i in range(29)]
+                      "Object", "", f"foreign-{i + 1}", ""]
+                     for i in range(29)]
     assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes,
                          foreign_edges, []) == 1
     padded = [foreign_edges[i % len(foreign_edges)] for i in range(len(map_doc["edges"]))]
@@ -335,9 +337,10 @@ def test_an_operator_over_a_THIRD_node_does_not_cover_a_declared_pair(map_doc):
     structural, _operators = _edge_rows(map_doc)
     op_edges = [e for e in map_doc["edges"] if "op" in e]
     first = op_edges[0]
-    rows = [["opX", first["op"], 0, *_row_for(map_doc, first["to"])],
-            ["opX", first["op"], 1, *_row_for(map_doc, first["from"])],
-            ["opX", first["op"], 1, *_row_for(map_doc, first["to"])]]
+    want = filer.direction_of(first)
+    rows = [["opX", first["op"], 0, want, *_row_for(map_doc, first["to"])],
+            ["opX", first["op"], 1, want, *_row_for(map_doc, first["from"])],
+            ["opX", first["op"], 1, want, *_row_for(map_doc, first["to"])]]
     assert filer.verdict(map_doc, _node_rows(map_doc), structural, rows) == 1
 
 
@@ -464,35 +467,14 @@ def test_a_state_whose_SOURCE_ids_are_urls_is_legitimate(map_doc, tmp_path, monk
     capsys.readouterr()
 
 
-def test_a_node_is_matched_by_its_LABEL_and_its_declared_property(map_doc):
-    """An Event row cannot stand in for a declared POINT.
-
-    An Event is written with `name` AND `props.content`; harvesting every
-    non-empty column (and ignoring the label) let that row satisfy a declared
-    Point whose content it restates — the Point was certified present without
-    ever being written, and a correct graph produced a phantom duplicate.
-
-    Mutant: match on any non-empty column of any row — `verdict` returns 0 here.
-    """
-    point = map_doc["points"][0]
-    # The graph holds the Event (name + content), and NOT the Point, but the
-    # Event's content column carries the Point's content.
-    rows = [["Event", "a different event entirely", "", point["content"]]]
-    assert filer.presence(map_doc, rows, [], [])[0] != []
-    assert filer.verdict(map_doc, rows, [], []) == 1
-    # And the same row does not double-count as a duplicate of anything.
-    full = _node_rows(map_doc)
-    assert filer.duplicates(map_doc, full) == []
-    extra_row = ["Event", "a different event entirely", "", point["content"]]
-    assert filer.duplicates(map_doc, [*full, extra_row]) == []
-
-
 def test_validate_refuses_a_mechanism_that_CONTRADICTS_its_meaning(map_doc):
     """`IMPL` + `refutes` is the pair that INVERTS the judgement.
 
-    The write gate only warns (#9963, warn-not-block), so this validator is the
-    last gate before an inverted operator is filed. The shipped map had exactly
-    one such pair (a `refutes` edge wired `IMPL`) and it is now a `NAND`.
+    The write gate only WARNS (#9963, warn-not-block) and stores the mechanism
+    as asked — "An IMPL wire carrying a NAND meaning RAISES the target's
+    confidence where the meaning says it must LOWER it" — so this validator is
+    the last gate before an inverted operator is filed. The shipped map had
+    exactly one such pair (a `refutes` edge wired `IMPL`); it is a `NAND` now.
 
     Mutant: drop the pairing arm — the inverted pair validates clean.
     """
@@ -511,32 +493,31 @@ def test_validate_refuses_a_mechanism_that_CONTRADICTS_its_meaning(map_doc):
 def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_doc, capsys):
     """A write that lands with the WRONG mechanism is reported, not filed silently.
 
-    The gate warns and proceeds, so the marker must stay (unmarking would
+    The gate warns and proceeds, so the marker must stay (un-recording would
     re-issue a non-idempotent write) while the run must NOT exit 0.
 
-    Mutant: ignore `warnings` — this run exits 0 over an inverted operator.
+    Mutant: ignore `warnings` — this exits 0 over an inverted operator and the
+    failure never reaches `state.json`.
     """
     state_path = tmp_path / "state.json"
 
-    class _Warns(_StubMcp):
+    class _Warns(_RealMcp):
         def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
             self._n = 0
-            self._inner = _RealMcp("not-a-real-key")
+            inner = self
 
             def _post(body: dict):
                 tool = (body.get("params") or {}).get("name")
-                self._n += 1
-                inner = {"id": f"{tool}:{self._n}"}
+                inner._n += 1
+                payload = {"id": f"{tool}:{inner._n}"}
                 if tool == "tortoise_create_operator":
-                    inner["warnings"] = [{"code": "mechanism_mismatch",
-                                          "message": "IMPL carrying refutes"}]
-                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
-                    "structuredContent": inner}}, {})
+                    payload["warnings"] = [{"code": "mechanism_mismatch",
+                                            "message": "IMPL carrying refutes"}]
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
 
-            self._inner._post = _post
-
-        def call(self, tool: str, args: dict, **kw) -> dict:
-            return self._inner.call(tool, args, **kw)
+            self._post = _post
 
     monkeypatch.setattr(filer, "STATE_PATH", state_path)
     monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
@@ -549,8 +530,12 @@ def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_do
 
 
 def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
-    """The resume record is replaced in one step (a truncated file loses the
-    `write_once` intent markers and re-issues the non-idempotent writes)."""
+    """The resume record is replaced in one step.
+
+    A kill inside a plain `write_text` truncates it, and the next run loses the
+    recorded intents — which is how a truncated state file re-issues the
+    non-idempotent writes the record exists to protect.
+    """
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
     filer.save_state({"ids": {"a": "1"}, "written": ["x"], "failed": []})
     assert json.loads((tmp_path / "state.json").read_text())["written"] == ["x"]
@@ -576,19 +561,21 @@ def test_validate_refuses_an_orphan(map_doc):
     assert any("no edges — an orphan node is invisible" in e for e in errs), errs
 
 
+def _row_of(ident: tuple[str, str, str]) -> list[str]:
+    """A read-back row for one (label, property, value) identity."""
+    row = [ident[0], "", "", ""]  # label + `filer.IDENTITY_PROPS` order
+    row[1 + filer.IDENTITY_PROPS.index(ident[1])] = ident[2]
+    return row
+
+
 def _row_for(doc: dict, ref: str) -> list[str]:
     """The identity row `verify()` reads back for one declared ref.
 
-    Derived from the same authority the writer uses: an Event is keyed on the
-    `name` its door writes, not on `content` (which the Event door takes as a
-    prop, not as a parameter).
+    Taken from the same authority the writer uses (`identity_by_ref`), so the row
+    carries the LABEL as its first column: a value alone cannot say what kind of
+    node carries it, and the read-back must read the kind (#13913 round 5).
     """
-    item = filer.doc_by_ref(doc, ref)
-    row = ["", "", "", ""]      # [label, name, url, content]
-    row[0] = filer.label_by_ref(doc)[ref]
-    prop, value = filer.declared_identity(item)
-    row[filer.IDENTITY_PROPS.index(prop) + 1] = value
-    return row
+    return _row_of(filer.identity_by_ref(doc)[ref])
 
 
 def _node_rows(doc: dict) -> list[list[str]]:
@@ -754,10 +741,12 @@ def test_the_event_identity_is_the_name_its_door_writes(map_doc):
     Mutant: key Events on `content` — a correctly filed map then reports 14
     missing nodes and `--verify` refuses forever (#13913 review).
     """
-    names = {value for prop, value in filer.map_identities(map_doc) if prop == "name"}
+    names = {value for _label, prop, value in filer.map_identities(map_doc)
+             if prop == "name"}
     event_names = {filer.event_name(e) for e in map_doc["events"]}
     assert event_names <= names, sorted(event_names - names)
-    contents = {value for prop, value in filer.map_identities(map_doc) if prop == "content"}
+    contents = {value for _label, prop, value in filer.map_identities(map_doc)
+                if prop == "content"}
     assert not (event_names & contents)
     # The read-back's power rests on identities being DISTINCT: `ev:no-capture-caps`
     # and the `standard` Object "no capture caps" collide on an unprefixed slug, and
@@ -775,9 +764,24 @@ def test_validate_refuses_two_items_sharing_one_identity(map_doc):
     the verdict noticing.
     """
     clashing = json.loads(json.dumps(map_doc))
-    clashing["objects"][0]["name"] = filer.event_name(map_doc["events"][0])
+    clashing["objects"][1]["name"] = clashing["objects"][0]["name"]
     errs = filer.validate(clashing)
     assert any("share the identity" in e for e in errs), errs
+
+
+def test_a_name_shared_across_KINDS_is_not_a_collision(map_doc):
+    """The label is part of the identity, so an Event and an Object may share a
+    name — and the read-back must still tell them apart.
+
+    Mutant: key identity on `(property, value)` without the label — the
+    legitimate same-name pair is refused here, and the read-back in
+    `test_an_Object_cannot_certify_a_declared_Event` is satisfied by the wrong
+    kind.
+    """
+    shared = json.loads(json.dumps(map_doc))
+    shared["objects"][0]["name"] = filer.event_name(shared["events"][0])
+    errs = filer.validate(shared)
+    assert not any("share the identity" in e for e in errs), errs
 
 
 def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
@@ -798,24 +802,34 @@ def test_the_readback_verdict_refuses_a_map_with_no_edges(map_doc):
     assert filer.verdict(map_doc, _node_rows(map_doc), [], []) == 1
 
 
-def _edge_rows(doc: dict) -> tuple[list[list], list[list]]:
+def _edge_rows(doc: dict,
+               idents: dict[str, tuple[str, str, str]] | None = None,
+               ) -> tuple[list[list], list[list]]:
     """The read-back rows a correctly-filed map would produce.
 
-    Structural edges: `(type, from-identity…, to-identity…)`. Operator edges: an
-    operator NODE whose typed edges reach both endpoints — grouped per operator,
-    mirroring `presence()` and the writer's own shape (`MERGE (o)-[:IMPL]->(s)`).
+    Structural edges: `(type, from-label, from-identity…, to-label, to-identity…)`.
+    Operator edges: an operator NODE whose typed edges reach both endpoints —
+    grouped per operator, mirroring `presence()` and the writer's own shape
+    (`MERGE (o)-[:IMPL]->(s)`), with the DIRECTION the write declares.
+
+    `idents` overrides the ref -> identity map, so a case can describe a graph
+    whose nodes are the WRONG KIND without hand-building 78 rows.
     """
+    idents = idents if idents is not None else filer.identity_by_ref(doc)
     structural: list[list] = []
     operators: list[list] = []
     op_index: dict[str, list] = {}
     for e in doc["edges"]:
-        a, b = _row_for(doc, e["from"]), _row_for(doc, e["to"])
+        a, b = _row_of(idents[e["from"]]), _row_of(idents[e["to"]])
         if "op" in e:
             nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
             # idx 0 IS the source, idx >= 1 ARE the targets (the fold writes one
-            # edge per slot with `idx`) — the read-back matches on the SLOT.
-            operators.append([nid[0], e["op"], 0, *a])
-            operators.append([nid[0], e["op"], 1, *b])
+            # edge per slot with `idx`) — the read-back matches on the SLOT — and
+            # the DIRECTION the write declares rides the operator node too, so a
+            # writer that drops the keyword is not certified by a right-ordered
+            # slot pair.
+            operators.append([nid[0], e["op"], 0, filer.direction_of(e), *a])
+            operators.append([nid[0], e["op"], 1, filer.direction_of(e), *b])
         else:
             structural.append([e["relation"], *a, *b])
     return structural, operators
@@ -873,8 +887,14 @@ def test_a_non_rpc_body_is_not_read_as_success(monkeypatch):
     mcp = _RealMcp("not-a-real-key")
     monkeypatch.setattr(mcp, "_post",
                         lambda body: (401, {"message": "Unauthorized"}, {}))
-    with pytest.raises(RuntimeError, match="carried no tool result"):
+    with pytest.raises(RuntimeError, match="refused: HTTP 401") as exc:
         mcp.call("tortoise_create_edge", {})
+    # ⛔ AND IT IS A DEFINITE REFUSAL, not an UNKNOWN outcome: a 401 is rejected
+    # before the handler runs, so the write did not land and the caller may
+    # re-issue it after fixing auth. Classifying it `UnknownOutcome` left 51
+    # operator intents recorded forever with no way to clear them (#13913 review
+    # round 6). Mutant: treat every no-tool-result body as `UnknownOutcome`.
+    assert not isinstance(exc.value, filer.UnknownOutcome)
 
 
 def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
@@ -950,3 +970,315 @@ def test_the_structural_relation_set_is_the_SHIPPED_one(map_doc):
         pytest.fail("the map has no structural edge to re-point")
     errs = filer.validate(legal)
     assert not any("not a valid structural predicate" in e for e in errs), errs
+
+
+# ── #13913 review round 5: the four fail-open arms ────────────────────────
+class _UnknownOperatorOutcome:
+    """The transport dies on the operator write: the outcome is UNKNOWN.
+
+    `create_operator` is not idempotent, so `Mcp.call` raises `_Unconfirmed`
+    rather than retrying — the caller must NOT un-record the intent (that is the
+    arm that re-issued a second operator on resume) and must NOT re-issue it.
+    """
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, *_a, **_k) -> None:
+        self._n = 0
+        self.operator_calls = 0
+        self._inner = _RealMcp("not-a-real-key")
+
+        def _post(body: dict):
+            tool = (body.get("params") or {}).get("name")
+            if tool == "tortoise_create_operator":
+                self.operator_calls += 1
+                if self.operator_calls == 1:
+                    raise filer.urllib.error.URLError("connection reset")
+            self._n += 1
+            return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+        self._inner._post = _post
+        _UnknownOperatorOutcome.instances.append(self)
+
+    def initialize(self) -> None:  # pragma: no cover - no session to open
+        return None
+
+    def call(self, tool: str, args: dict, **kw) -> dict:
+        return self._inner.call(tool, args, **kw)
+
+
+def test_an_UNCONFIRMED_operator_is_neither_un_remembered_nor_re_issued(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """An UNKNOWN operator outcome may have LANDED, so the intent stays recorded
+    and the resume reports it instead of writing it again.
+
+    Measured before the fix: `except Exception: unmark(marker)` fired on the
+    `_Unconfirmed` path too, so the re-run made **one more operator call over the
+    same endpoints** and printed `all nodes and edges written` — the #10849 EP
+    double-count. Mutants: (a) `except Exception: unmark(marker)` (no distinct
+    class) → the resume re-issues; (b) un-recording removed everywhere → a
+    DEFINITE refusal is skipped on resume.
+    """
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+
+    monkeypatch.setattr(filer, "Mcp", _UnknownOperatorOutcome)
+    _UnknownOperatorOutcome.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+
+    first = _UnknownOperatorOutcome.instances[-1]
+    op_edges = len([e for e in map_doc["edges"] if "op" in e])
+    assert first.operator_calls == op_edges, (
+        f"{first.operator_calls} operator calls for {op_edges} operators — "
+        "a non-idempotent write was retried")
+    recorded = json.loads(state.read_text())
+    unconfirmed = recorded["unconfirmed"]
+    assert len(unconfirmed) == 1, unconfirmed
+    marker = unconfirmed[0]
+    assert marker in recorded["written"], "the intent was un-recorded on UNKNOWN"
+
+    # A healthy re-run: reports the unresolved operator, never re-issues it.
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    sent = [tool for tool, _args in _RecordingMcp.instances[-1].calls]
+    assert "tortoise_create_operator" not in sent, (
+        "the resume re-issued a write whose outcome is UNKNOWN")
+    failed = json.loads(state.read_text())["failed"]
+    assert any(marker in f for f in failed), failed
+
+
+def test_a_recorded_event_intent_without_an_id_is_not_re_issued(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A recorded-but-unresolved event intent is REPORTED, not written again.
+
+    `create_event` has no existence check, so the state left by an interrupted
+    run (marker recorded, no id) used to fall through the `and e['ref'] in ids`
+    guard and issue a SECOND event. Mutant: restore that guard as the only
+    condition — the resume calls `tortoise_create_event` again.
+    """
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    event_ref = map_doc["events"][0]["ref"]
+    recorded = json.loads(state.read_text())
+    del recorded["ids"][event_ref]          # the interrupted-run shape
+    state.write_text(json.dumps(recorded))
+
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    sent = [tool for tool, _args in _RecordingMcp.instances[-1].calls]
+    assert "tortoise_create_event" not in sent, "a duplicate event was written"
+    # It is REPORTED (AMBIGUOUS, exit 1), not silently skipped and not rewritten.
+    assert event_ref in err, err
+
+
+def test_the_verdict_refuses_flipped_operator_DIRECTIONS(map_doc):
+    """A recorded operator's DIRECTION is part of the assertion.
+
+    `direction` is stored on the operator node (`entities.py`: `n.direction=$dir`,
+    "stored ALWAYS") and the door's default is the MUTUAL reading for IMPL/NAND,
+    so a writer that drops the keyword turns 46 one-way edges bidirectional and
+    changes what the graph means. Measured before the fix: flip all 51 declared
+    directions, read back the unchanged rows → `edges: 101/101`, verdict 0.
+
+    Mutant: `held = any(kind == e['op'] and a in ends and b in ends …)` — this
+    fixture passes with every direction flipped.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, op_rows) == 0
+
+    flipped = [[row[0], row[1], row[2],
+                "<->" if row[3] == "->" else "->", *row[4:]]
+               for row in op_rows]
+    assert [row[3] for row in flipped] != [row[3] for row in op_rows]
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, flipped) == 1
+
+
+def test_the_verdict_refuses_an_operator_over_EXTRA_endpoints(map_doc):
+    """An operator over three endpoints holds a declared pair's endpoints, so a
+    match without an ARITY leg certifies an edge the graph does not hold.
+
+    Mutant: drop `len(ends) == 2` — this padded operator satisfies all 51
+    declared operator edges and the verdict returns 0.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    nid = op_rows[0][0]
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
+    # The SAME operator, with a THIRD slot (idx 2) also reaching an endpoint: the
+    # declared pair is held by slots 0 and 1, so without the arity leg the extra
+    # slot is invisible.
+    padded = [*op_rows, [nid, first_op["op"], 2, filer.direction_of(first_op),
+                         "Point", "", "a third endpoint", ""]]
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, padded) == 1
+
+
+def test_an_Object_cannot_certify_a_declared_Event(map_doc):
+    """The LABEL is part of a node's identity.
+
+    Measured before the fix: drop the `ev:beta-gates-measured` row, add a
+    `name`-only row → `nodes: 78/78`, verdict 0 — an Object of the same name
+    certified a missing Event. This fixture describes exactly that graph (the
+    declared Event is absent; everything joins to an Object carrying its name).
+
+    Mutant: the FULL pre-fix identity, `(property, value)` with no label on
+    EITHER side (`identity_by_ref` and `_row_identities`) — this graph then reads
+    78/78 and verdict 0, which is the measured false PASS.
+    """
+    event = map_doc["events"][0]
+    declared = filer.identity_by_ref(map_doc)[event["ref"]]
+    assert declared[0] == "Event", declared
+    impostor = ("Object", declared[1], declared[2])
+    assert impostor != declared
+
+    sabotaged = dict(filer.identity_by_ref(map_doc))
+    sabotaged[event["ref"]] = impostor
+    node_rows = [_row_of(ident) for ident in sabotaged.values()]
+    structural, operators = _edge_rows(map_doc, sabotaged)
+
+    assert filer.verdict(map_doc, node_rows, structural, operators) == 1
+
+
+# ── #13913 review round 6: the ledgers, the 4xx class, and the pins ──────
+def test_the_unconfirmed_intent_is_on_disk_BEFORE_the_call(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A run killed mid-write leaves the intent ON DISK, not only in memory.
+
+    `pending` is a copy of the saved list, so `save_state(st)` without updating
+    `st["unconfirmed"]` persisted nothing: measured with a `BaseException` kill
+    at the first `create_operator`, the state on disk read `written=85,
+    unconfirmed=[]`, and the healthy resume printed `all nodes and edges
+    written`, exited 0, and issued 50 of 51 operators — the missing one
+    indistinguishable from a completed write.
+
+    Mutant: `save_state(st)` before `st["unconfirmed"] = sorted(pending)` — the
+    kill fixture leaves `unconfirmed` empty and the resume exits 0.
+    """
+    state_path = tmp_path / "state.json"
+    seen: dict[str, object] = {}
+
+    class _Killed(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator" and "killed" not in seen:
+                    seen["killed"] = True
+                    seen["on_disk"] = json.loads(state_path.read_text())
+                    raise KeyboardInterrupt("SIGINT between the write and its response")
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Killed)
+    with pytest.raises(KeyboardInterrupt):
+        filer.write_map(map_doc)
+    capsys.readouterr()
+
+    on_disk = seen["on_disk"]
+    assert on_disk["unconfirmed"], (
+        "the intent was never persisted — a killed run is indistinguishable "
+        "from a completed one")
+    marker = on_disk["unconfirmed"][0]
+    assert marker in on_disk["written"]
+
+    # The resume REPORTS it (never re-issues it) — the round-5 behaviour, now
+    # driven by what is actually on disk.
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    failed = json.loads(state_path.read_text())["failed"]
+    assert any(marker in f for f in failed), failed
+
+
+def test_the_direction_expectation_is_the_DOOR_s_OWN_resolution(map_doc):
+    """`direction_of` is the writer's resolver, not a partial restatement.
+
+    `create_operator` applies FOUR steps (`_effective_direction`): a declared
+    semantics outranks a NON-DECLARATION, an absent direction canonicalizes per
+    mechanism, and `coherence` rewrites the legacy default. A read-back that
+    modelled only the default refused a legal write — `IMPL`+`supports` with no
+    declared direction stores `->`, the pre-fix expectation said `<->`.
+
+    Mutant: `return "->" if op == "coherence" else "<->"` — every row below reds.
+    """
+    cases = [
+        ({"op": "IMPL"}, "bidirectional"),                    # absent = mutual
+        ({"op": "NAND"}, "unidirectional"),                    # NAND's own default
+        ({"op": "coherence"}, "->"),
+        ({"op": "IMPL", "direction": "->"}, "->"),             # verbatim
+        ({"op": "IMPL", "label": "supports"}, "->"),           # semantics resolves
+        ({"op": "NAND", "label": "refutes"}, "->"),
+        ({"op": "IMPL", "label": "hasPart"}, "<->"),
+        ({"op": "IMPL", "label": "produces"}, "<-"),           # #11083's `<-`
+        ({"op": "IMPL", "label": "related"}, "-"),             # neutral transfers none
+        ({"op": "IMPL", "direction": "->", "label": "hasPart"}, "->"),
+    ]
+    for edge, want in cases:
+        assert filer.direction_of(edge) == want, (edge, want)
+
+
+def test_the_direction_FALLBACK_is_the_shipped_resolution(map_doc):
+    """The bare-box transcription resolves exactly what the door resolves.
+
+    Non-vacuity for `_fallback_direction`, and the pin for
+    `FALLBACK_SEMANTICS_DIRECTIONS`: a drifted copy is how a read-back starts
+    refusing (or certifying) the wrong thing.
+    """
+    from tortoise.pack_registry import SEMANTICS_DIRECTIONS
+
+    assert dict(SEMANTICS_DIRECTIONS) == filer.FALLBACK_SEMANTICS_DIRECTIONS
+    edges = [{"op": op, "direction": d, "label": s}
+             for op in ("IMPL", "NAND", "coherence")
+             for d in (None, "->", "<->", "bidirectional", "unidirectional")
+             for s in (None, *SEMANTICS_DIRECTIONS)]
+    for edge in edges:
+        assert filer._fallback_direction(edge) == filer.direction_of(edge), edge
+
+
+def test_the_direction_aliases_are_the_SHIPPED_ones():
+    """`DIRECTION_ALIASES` is `live.py`'s table, not a fresh transcription."""
+    from tortoise.live import DIRECTION_ALIASES
+
+    assert dict(DIRECTION_ALIASES) == filer.DIRECTION_ALIASES
+
+
+def test_the_section_labels_are_the_projection_s_LABELS():
+    """Each declared label is a label the projection actually WRITES.
+
+    The identity's first leg is the node label, so a wrong entry makes `--verify`
+    refuse a correctly filed map — and nothing in the suite could see it, because
+    the fixture rows are built from `identity_by_ref` (one authority on both
+    sides). This pins the declaration against the projection's own `MERGE`/`CREATE`
+    statements.
+
+    Mutant: swap any two entries (`subjects`: "Point", `points`: "Subject") — the
+    suite stayed green before this pin.
+    """
+    src = (ROOT / "tortoise" / "projection" / "entities.py").read_text(encoding="utf-8")
+    for section, label in filer.SECTION_LABELS.items():
+        pattern = re.compile(
+            rf"(?:MERGE|CREATE)\s*\(\w*:\s*{re.escape(label)}\s*\{{")
+        assert pattern.search(src), (
+            f"{section} -> {label!r} is not a label the projection writes")
+    assert len(set(filer.SECTION_LABELS.values())) == 5

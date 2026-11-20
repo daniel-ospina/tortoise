@@ -17,16 +17,15 @@ WHY THIS SHAPE
   is a `:Point` (`pointKind: statement`). The map declares those, this script
   re-checks them before it writes anything.
 * **Edges are the difference between filed and findable.** Support and
-  contradiction are OPERATORS (`IMPL`/`NAND`). The map's Layer-2 `semantics` is
-  sent on every operator write, where the gate records it as the operator's
-  `direction_basis` and REFUSES a mechanism that contradicts it — `validate()`
-  refuses that pair before the write and a returned `mechanism_mismatch` is a
-  failure, because an `IMPL` wire carrying a `NAND` meaning raises where the
-  meaning says it must lower. ⛔ This surface has no `label` parameter, so a
-  domain label is NOT filed; the mechanism IS the filed meaning. Structural
-  relations are plain typed edges (`memberOf`, `holdsRole`, `aboutObject`,
-  `performs`, `produces`, …). A node with no edge is an orphan, so the filer
-  reports any ref that ends up unconnected.
+  contradiction are OPERATORS (`IMPL`/`NAND`). ⛔ This surface has no `label`
+  parameter: a Layer-2 `semantics` travels as the write's `semantics` argument
+  and is recorded as the operator's `direction_basis`, while the MECHANISM is
+  what is filed — so `validate()` refuses a mechanism that contradicts the
+  declared meaning (`IMPL` carrying `refutes` RAISES where it must LOWER) and a
+  returned `mechanism_mismatch` is a failure;
+  structural relations are plain typed edges (`memberOf`, `holdsRole`,
+  `aboutObject`, `performs`, `produces`, …). A node with no edge is an orphan,
+  so the filer reports any ref that ends up unconnected.
 
 USAGE
 -----
@@ -172,11 +171,16 @@ def shipped_vocab() -> dict | None:
         relations = set(_VALID_EDGE_PREDICATES)
     except Exception:  # the fallback is the transcription, not a silent pass
         relations = set(STRUCTURAL_RELS)
-    # The MECHANISM each Layer-2 meaning declares (`SEMANTICS_MECHANISMS`). The
-    # write gate COMPARES the two and only warns (#9963, warn-not-block), so a
-    # pair that inverts the meaning — `IMPL` carrying `refutes` — is filed as
-    # asked and raises where the judgement said it must lower. This validator is
-    # the only gate that can refuse it before it is written.
+    try:
+        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+        relations = set(_VALID_EDGE_PREDICATES)
+    except Exception:  # the fallback is the transcription, not a silent pass
+        relations = set(STRUCTURAL_RELS)
+    # The MECHANISM each Layer-2 meaning declares. The write gate COMPARES the two
+    # and only warns (#9963, warn-not-block), so an `IMPL` wire carrying
+    # `refutes` is filed as asked and INVERTS the meaning (it raises where the
+    # judgement said it must lower). This validator is the last gate before the
+    # write; the filer also treats the returned warning as a failure.
     try:
         from tortoise.pack_registry import SEMANTICS_MECHANISMS
         mechanisms = dict(SEMANTICS_MECHANISMS)
@@ -268,12 +272,12 @@ def validate(doc: dict) -> list[str]:
             if e.get("label") and e["label"] not in SEMANTICS:
                 errs.append(f"{where}: label {e['label']!r} not in the Layer-2 semantics vocabulary")
             if e.get("label") and e["label"] in mechanisms:
-                declared = mechanisms[e["label"]]
-                if declared != e["op"]:
+                _declared = mechanisms[e["label"]]
+                if _declared != e["op"]:
                     errs.append(
                         f"{where}: op {e['op']} contradicts the meaning {e['label']!r}, "
-                        f"which declares {declared} — an {e['op']} wire carrying a "
-                        f"{declared} meaning INVERTS what the judgement said")
+                        f"which declares {_declared} — an {e['op']} wire carrying a "
+                        f"{_declared} meaning INVERTS what the judgement said")
             if e.get("direction") and e["direction"] not in DIRECTIONS:
                 errs.append(f"{where}: direction {e['direction']!r} not one of {sorted(DIRECTIONS)}")
             # a target must be epistemic: Point/Subject/Object/Event
@@ -296,15 +300,17 @@ def validate(doc: dict) -> list[str]:
             errs.append(f"{ref}: no edges — an orphan node is invisible")
 
     # identity check — `--verify` reads the map back BY IDENTITY, so two items
-    # sharing one (property, value) make one of them unverifiable: the read-back
-    # cannot tell them apart and reports both present when one is missing.
-    seen: dict[tuple[str, str], int] = {}
+    # sharing one (label, property, value) make one of them unverifiable: the
+    # read-back cannot tell them apart and reports both present when one is
+    # missing. The LABEL is part of the key, so an Event and an Object may share
+    # a name — they are different nodes, and the read-back reads the label.
+    seen: dict[tuple[str, str, str], int] = {}
     for ident in map_identities(doc):
         seen[ident] = seen.get(ident, 0) + 1
-    for (prop, value), count in sorted(seen.items()):
+    for (label, prop, value), count in sorted(seen.items()):
         if count > 1:
-            errs.append(f"{count} items share the identity {prop}={value[:60]!r} — "
-                        "the read-back cannot tell them apart")
+            errs.append(f"{count} items share the identity {label}.{prop}="
+                        f"{value[:60]!r} — the read-back cannot tell them apart")
     # the same rule for EDGES. `--verify` matches each declared edge against the
     # graph independently, so the same edge judged twice is certified by ONE
     # written edge — two judgements, one fact, and the duplicate is invisible.
@@ -381,9 +387,15 @@ class Mcp:
         `tortoise_create_event`, risk=write with no idempotency declaration).
         On a transport death the outcome is UNKNOWN, so the call STOPS: a retry
         would duplicate a write the door cannot undo, and a silent success
-        claim would be the false PASS again. `state.json` is left untouched, so
-        a re-run re-resolves by name and only writes what `--verify` shows is
-        missing.
+        claim would be the false PASS again.
+
+        ⛔ The two failure classes are DIFFERENT, and their caller must not
+        confuse them (#13913 review round 5): a **definite refusal** (the door
+        answered no) is a plain `RuntimeError` — nothing was written, so the
+        caller un-records its intent — while an **UNCONFIRMED** outcome is
+        `_Unconfirmed`, which the caller re-raises WITHOUT un-recording, because
+        a re-issue could write the node twice. `--verify` is the authority on
+        whether an unconfirmed write landed.
         """
         for attempt in range(6):
             self._next_id += 1
@@ -429,10 +441,22 @@ class Mcp:
                 # body is not a JSON-RPC `result`, so `_refusal` found nothing
                 # and the failure was returned as success — 101 edges marked
                 # `written` while 50 were never created (#13913 review).
-                raise RuntimeError(f"{tool}: HTTP {code} after 6 attempts — the "
+                raise UnknownOutcome(f"{tool}: HTTP {code} after 6 attempts — the "
                                    "write is UNCONFIRMED")
+            # ⛔ A 4xx IS NOT AN UNKNOWN OUTCOME. The request was rejected BEFORE
+            # the handler ran, so nothing landed — leaving the intent recorded
+            # would make it permanent: an auth failure on the operator door
+            # recorded 51 unconfirmed intents that no later run could clear, and
+            # the only recovery was hand-editing `state.json` (#13913 review
+            # round 6). A 2xx/3xx that carries no readable tool result is the
+            # opposite case — the server accepted the call and the outcome is
+            # genuinely unknown.
+            if 400 <= code < 500:
+                raise RuntimeError(
+                    f"{tool} refused: HTTP {code} — the write did not land "
+                    f"({json.dumps(payload)[:200]})")
             if not payload:
-                raise RuntimeError(f"{tool}: empty response (HTTP {code})")
+                raise UnknownOutcome(f"{tool}: empty response (HTTP {code})")
             result = payload.get("result", payload)
             # A `result` that is not a tool result at all (a 4xx JSON body such
             # as {"message": "Unauthorized"}) is a FAILURE, not a success: the
@@ -443,7 +467,7 @@ class Mcp:
                 isinstance(result.get("content"), list)
                 or isinstance(result.get("structuredContent"), dict)
             ):
-                raise RuntimeError(
+                raise UnknownOutcome(
                     f"{tool}: HTTP {code} carried no tool result — the write is "
                     f"UNCONFIRMED ({json.dumps(payload)[:200]})")
             # ⛔ A TOOL THAT FAILED IS NOT A SUCCESSFUL CALL. MCP reports a
@@ -467,7 +491,7 @@ class Mcp:
                     continue
                 raise RuntimeError(f"{tool} FAILED: {msg[:400]}")
             return result
-        raise RuntimeError(f"{tool}: gave up after 6 attempts")
+        raise UnknownOutcome(f"{tool}: gave up after 6 attempts")
 
 
 class UnknownOutcome(RuntimeError):
@@ -475,7 +499,11 @@ class UnknownOutcome(RuntimeError):
 
     A distinct type on purpose: the caller must NOT retire the intent marker for
     this class (a re-run would re-issue a non-idempotent write), while a definite
-    refusal must (the write certainly did not land).
+    refusal must (the write certainly did not land). It is a TYPE, not a message
+    match, because the pre-fix `except Exception: unmark(marker)` fired on BOTH
+    classes and the resume then made a second `create_operator` over the same
+    endpoints — the #10849 EP double-count, printed as `all nodes and edges
+    written` (#13913 review round 5).
     """
 
 
@@ -489,14 +517,16 @@ def _mechanism_mismatch(result: dict) -> str | None:
 
     ⛔ The write gate warns and PROCEEDS (#9963, warn-not-block), so an operator
     whose `op_type` contradicts its declared `semantics` is stored as asked and
-    inverts what the meaning says (`sdk.py`: "An IMPL wire carrying a NAND
+    INVERTS what the meaning says (`sdk.py`: "An IMPL wire carrying a NAND
     meaning RAISES the target's confidence where the meaning says it must LOWER
     it"). `validate()` refuses the pair before the write; this catches the case
     where the surface disagrees with the map anyway — the one class a filer must
     never report as filed.
     """
     payload = _json_of(result)
-    for warn in (payload.get("warnings") or []) if isinstance(payload, dict) else []:
+    if not isinstance(payload, dict):
+        return None
+    for warn in payload.get("warnings") or []:
         if isinstance(warn, dict) and warn.get("code") == "mechanism_mismatch":
             return f"mechanism_mismatch — {str(warn.get('message'))[:300]}"
     return None
@@ -568,9 +598,9 @@ def save_state(st: dict) -> None:
     """Write the resume record ATOMICALLY.
 
     The record is what the duplicate-safety argument rests on: a kill inside a
-    plain `write_text` truncates it, and the next run loses the `write_once`
-    intent markers — which is how a truncated state file re-issues the
-    non-idempotent writes it exists to protect.
+    plain `write_text` truncates it, and the next run loses the recorded intents
+    — which is how a truncated state file re-issues the non-idempotent writes the
+    record exists to protect.
     """
     tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
     tmp.write_text(json.dumps(st, indent=1, sort_keys=True) + "\n")
@@ -586,6 +616,7 @@ def write_map(doc: dict) -> int:
     mcp = Mcp(key)
     mcp.initialize()
     st = load_state()
+    st.setdefault("unconfirmed", [])
     ids: dict[str, str] = st["ids"]
     failures: list[str] = []
     ambiguous: list[str] = []
@@ -620,6 +651,11 @@ def write_map(doc: dict) -> int:
               file=sys.stderr)
         return 2
 
+    #: Markers whose write was ATTEMPTED and whose outcome is still unknown:
+    #: recorded in `state.json` so a resume can REPORT them (an unconfirmed
+    #: write is neither re-issued nor claimed as filed).
+    pending: set[str] = set(st.setdefault("unconfirmed", []))
+
     def already(marker: str) -> bool:
         return marker in st["written"]
 
@@ -640,21 +676,44 @@ def write_map(doc: dict) -> int:
         retry — or a run killed between the write and its response — writes a
         SECOND node, and a duplicate operator double-counts the claim's EP
         weight (#10849). Recording the intent first makes that window fail
-        CLOSED on the duplicate side: a definite refusal un-records it, and an
-        UNKNOWN outcome stays recorded while being reported, with `--verify` as
-        the authority on whether it landed.
+        CLOSED on the duplicate side.
+
+        ⛔ THE TWO EXITS ARE NOT THE SAME EXIT. A **definite refusal** (the door
+        answered no) means nothing landed, so the intent is un-recorded and the
+        write may be re-issued. An **UNCONFIRMED** outcome (`_Unconfirmed`) may
+        have landed, so the intent STAYS recorded and is reported as unresolved:
+        un-recording it there is what re-issued a second operator on resume
+        (#13913 review round 5). `--verify` is the authority on what landed.
         """
         mark(marker)
+        pending.add(marker)
+        # ⛔ PERSISTED BEFORE THE CALL. `pending` is a COPY of the saved list, so
+        # saving `st` without this line left the intent only in memory: a run
+        # killed between the write and its response (the exact window this guard
+        # exists for) resumed with `unconfirmed: []`, and the operator it may
+        # have written was indistinguishable from a completed one — the resume
+        # printed `all nodes and edges written` with a declared edge silently
+        # absent (#13913 review round 6, measured with a BaseException kill).
+        st["unconfirmed"] = sorted(pending)
+        save_state(st)
         try:
-            return mcp.call(tool, args, retry_safe=False)
+            res = mcp.call(tool, args, retry_safe=False)
         except UnknownOutcome:
             # It MAY have landed: the marker STAYS, so the next run does not
             # re-issue a write this door cannot dedup (`create_operator` has no
             # existence check). `--verify` is the authority on whether it did.
+            # `pending` is what tells a resume this marker is an UNKNOWN
+            # outcome rather than a completed write — without it the resume
+            # skipped it silently and printed `all nodes and edges written`.
             raise
         except Exception:
+            pending.discard(marker)
             unmark(marker)      # a definite refusal: the write certainly did not land
             raise
+        pending.discard(marker)
+        st["unconfirmed"] = sorted(pending)
+        save_state(st)
+        return res
 
     def _resolve(item_ref: str, name: str, res: dict, what: str) -> str:
         """The id the write returned — or a refusal, never a plausible stand-in.
@@ -716,15 +775,19 @@ def write_map(doc: dict) -> int:
     #    `tortoise_create_event(name, eventKind, props)`: the content and the
     #    start time are PROPS, and `name` is required.
     for e in doc["events"]:
-        if already(f"event:{e['ref']}"):
+        marker = f"event:{e['ref']}"
+        if already(marker):
             if e["ref"] in ids:
+                pending.discard(marker)   # a resolved id confirms the write
                 continue
             # The intent was recorded but no id came back (a run killed between
             # the write and the id assignment, or `_resolve` raising after a
             # landed write). Re-creating would mint a SECOND Event carrying the
             # same identity — and `create_event` has no existence check — so the
-            # ref is reported as AMBIGUOUS instead, never silently re-written.
-            ambiguous.append(f"event:{e['ref']}")
+            # ref is reported as AMBIGUOUS instead, never silently re-written
+            # (#13913 review round 5: the pre-fix guard fell through and
+            # re-issued `create_event`).
+            ambiguous.append(marker)
             continue
         props = {"content": e["content"]}
         if e.get("startedAt"):
@@ -758,6 +821,12 @@ def write_map(doc: dict) -> int:
     for e in doc["edges"]:
         marker = edge_marker(e)
         if already(marker):
+            if "op" in e and marker in pending:
+                # Same rule as an unresolved event: the operator may exist, and
+                # re-issuing it double-counts the claim's EP weight (#10849).
+                failures.append(f"{marker}: attempted, outcome UNCONFIRMED — NOT "
+                                "re-issued; --verify decides what landed")
+                print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
         if not src or not dst:
@@ -773,11 +842,11 @@ def write_map(doc: dict) -> int:
                 res = write_once(marker, "tortoise_create_operator", args)
                 mismatch = _mechanism_mismatch(res)
                 if mismatch:
-                    # The write LANDED (warn-not-block), so the marker stays —
-                    # unmarking would re-issue a non-idempotent write. It is
-                    # recorded as a failure because the mechanism stored is not
-                    # the one the meaning declares: the judgement is filed
-                    # inverted and only a re-filing can fix it.
+                    # The write LANDED (warn-not-block, #9963), so the marker
+                    # stays — un-recording would re-issue a non-idempotent write
+                    # — but the run must NOT report success: the mechanism
+                    # stored is not the one the meaning declares, so the
+                    # judgement is filed INVERTED and only a re-filing fixes it.
                     failures.append(f"{marker}: {mismatch}")
             else:
                 mcp.call("tortoise_create_edge",
@@ -789,6 +858,7 @@ def write_map(doc: dict) -> int:
                             f"{e['from']}->{e['to']}: {exc}")
             print(f"  !! {failures[-1]}", file=sys.stderr)
     st["failed"] = failures
+    st["unconfirmed"] = sorted(pending)
     save_state(st)
     if ambiguous:
         print(f"\n{len(ambiguous)} item(s) were recorded but returned no id — an "
@@ -868,6 +938,29 @@ NON_OPERATOR_PREDICATE = ("(a.is_operator IS NULL OR a.is_operator = false) "
 #: on `content` made `--verify` refuse a correctly-filed map).
 IDENTITY_PROPS = ("name", "url", "content")
 
+#: ⛔ The LABEL is part of the identity. A property value alone cannot say what
+#: KIND of node carries it, so an Event called "decision: x" was certified by an
+#: Object of the same name (#13913 review round 5, measured: drop one Event row,
+#: add a `name`-only row, read back 78/78 and exit 0). The author already met the
+#: shape once — `ev:no-capture-caps` vs the `standard` Object "no capture caps" —
+#: and resolved it by renaming; the read-back must instead READ the label.
+SECTION_LABELS = {"subjects": "Subject", "objects": "Object", "sources": "Source",
+                  "events": "Event", "points": "Point"}
+
+#: A direction the door stores VERBATIM, and the two legacy aliases it still
+#: accepts and returns for the same two model values.
+DIRECTION_ALIASES = {"unidirectional": "->", "bidirectional": "<->"}
+
+#: `pack_registry.SEMANTICS_DIRECTIONS` — the direction each Layer-2 meaning
+#: records. A bare-box transcription, pinned equal to the shipped table by a
+#: test (a drifted transcription is how a read-back starts refusing legal maps).
+FALLBACK_SEMANTICS_DIRECTIONS = {
+    "addresses": "->", "causes": "->", "dependsOn": "->", "managedBy": "->",
+    "ownedBy": "->", "produces": "<-", "refutes": "->", "supports": "->",
+    "hasPart": "<->", "mutuallyExclusive": "<->", "mutuallySupportive": "<->",
+    "related": "-", "transacts": "-",
+}
+
 
 def declared_identity(item: dict) -> tuple[str, str]:
     """The (property, value) that identifies the node ONE map item writes."""
@@ -898,65 +991,85 @@ def edge_marker(edge: dict) -> str:
     return f"edge:{edge['from']}->{edge['to']}:{edge.get('op') or edge['relation']}"
 
 
-#: The label each map section is filed as (`tortoise_create_*` kind → label).
-SECTION_LABELS = {"subjects": "Subject", "objects": "Object", "sources": "Source",
-                  "events": "Event", "points": "Point"}
-
-
-def identity_by_ref(doc: dict) -> dict[str, tuple[str, str]]:
-    """ref -> the (property, value) that identifies the node it writes."""
-    out: dict[str, tuple[str, str]] = {}
-    for section in ("subjects", "objects", "sources", "events", "points"):
-        for item in doc[section]:
-            out[item["ref"]] = declared_identity(item)
-    return out
-
-
-def label_by_ref(doc: dict) -> dict[str, str]:
-    """ref -> the LABEL the node is filed under."""
-    out: dict[str, str] = {}
+def identity_by_ref(doc: dict) -> dict[str, tuple[str, str, str]]:
+    """ref -> the (label, property, value) triple that identifies its node."""
+    out: dict[str, tuple[str, str, str]] = {}
     for section, label in SECTION_LABELS.items():
         for item in doc[section]:
-            out[item["ref"]] = label
+            prop, value = declared_identity(item)
+            out[item["ref"]] = (label, prop, value)
     return out
 
 
-def map_identities(doc: dict) -> list[tuple[str, str]]:
-    """Every node the map declares, as the (property, value) that identifies it.
+def map_identities(doc: dict) -> list[tuple[str, str, str]]:
+    """Every node the map declares, as the triple that identifies it.
 
     ⛔ Identity, not a COUNT. The pre-fix read-back counted nodes anywhere in
     the graph and passed at 90% of the expected total, so a graph holding 71
     unrelated nodes and none of the map was a PASS — and a run that wrote every
     node and zero edges was a PASS too. A count cannot tell the map from
     anything else; the identity can.
+
+    The LABEL is the first leg: a value alone cannot say what kind of node
+    carries it, so `name` alone certified an Event with an Object's row.
     """
     return list(identity_by_ref(doc).values())
 
 
-def _row_matches(row: list, label: str, ident: tuple[str, str]) -> bool:
-    """Does this read-back row carry the DECLARED label + identity?
+def _row_identities(row: list) -> set[tuple[str, str, str]]:
+    """(label, property, value) triples from a `(label, name, url, content)` row."""
+    label = row[0]
+    return {(label, prop, value)
+            for prop, value in zip(IDENTITY_PROPS, row[1:4], strict=False)
+            if value}
 
-    ⛔ BOTH, and only the declared property. Two mistakes were measured here:
 
-    * harvesting every non-empty column lets a node's NON-identity props stand in
-      as identities — an Event written with `name` AND `props.content` yields
-      both, so a declared POINT whose content restates that Event was certified
-      present without ever being written, and a correct graph produced a phantom
-      duplicate;
-    * ignoring the LABEL lets that same Event row satisfy the Point's identity at
-      all. The map declares one label and one identity per node; the read-back
-      asks about exactly those.
+def direction_of(edge: dict) -> str:
+    """The direction the write DECLARES, resolved the way the DOOR resolves it.
+
+    ⛔ This is NOT "read the stored value back", and it is not a hand restatement
+    of the door's steps either. `create_operator` resolves a direction along a
+    FOUR-step chain (`TortoiseSDK._effective_direction`): a declared semantics
+    outranks a NON-DECLARATION, an absent direction canonicalizes per mechanism,
+    and `coherence` rewrites the legacy `bidirectional` default to `->`. A
+    read-back that modelled only the default step FALSELY REFUSES a legal write —
+    `IMPL` + `supports` with no declared direction stores `->`, and the pre-fix
+    expectation (`<->`) refused it (#13913 review round 6).
+
+    So the expectation is the writer's own resolver whenever the repo is
+    importable; `_fallback_direction` reproduces its outcome otherwise, and is
+    pinned equal to it by a test.
     """
-    prop, value = ident
-    if not value or not row or row[0] != label:
-        return False
-    idx = IDENTITY_PROPS.index(prop) + 1     # row layout: [label, name, url, content]
-    return idx < len(row) and row[idx] == value
+    try:
+        from tortoise.sdk import TortoiseSDK
+    except Exception:  # no checkout: the fallback, not a silent pass
+        return _fallback_direction(edge)
+    return TortoiseSDK._effective_direction(
+        edge.get("op") or "", edge.get("direction"), edge.get("label"))
 
 
-def _matched_identities(row: list,
-                        declared: set[tuple[str, tuple[str, str]]]) -> set[tuple[str, tuple[str, str]]]:
-    return {(label, ident) for label, ident in declared if _row_matches(row, label, ident)}
+def _fallback_direction(edge: dict) -> str:
+    """`TortoiseSDK._effective_direction`'s outcome, without the import."""
+    op_type = edge.get("op") or ""
+    direction = edge.get("direction")
+    semantics = edge.get("label")
+    # `_declares_direction`: the parameter default (and its model spelling) is
+    # NOT a declaration — except for `coherence`, whose own default is one-way,
+    # so `<->` IS a statement there.
+    if op_type != "coherence":
+        declared = direction not in (None, "bidirectional", "<->")
+    else:   # `coherence`'s own default is ONE-WAY, so `<->` IS a statement there
+        declared = direction not in (None, "bidirectional")
+    if semantics is not None and not declared:
+        derived = FALLBACK_SEMANTICS_DIRECTIONS.get(semantics)
+        if derived is not None:
+            direction = derived
+    if direction is None:                       # `_canonical_direction`
+        direction = {"NAND": "unidirectional", "coherence": "->"}.get(
+            op_type, "bidirectional")
+    if op_type == "coherence" and direction == "bidirectional":
+        direction = "->"                     # step 4's last half
+    return direction
 
 
 def presence(doc: dict, node_rows: list, edge_rows: list,
@@ -965,57 +1078,72 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
 
     ⛔ A declared edge is present only if the graph holds THAT edge — matched by
     relation type and both endpoint identities (structural) or by an operator
-    node of that mechanism over exactly those two endpoints (operators). The
-    pre-fix arm counted any edge joining two present identities, and the DOOR
-    ITSELF mints undeclared edges (`props.extractedFrom` on 8 Points
-    materialises the Source and links it), so a read-back missing 8 declared
-    edges still printed 101/101 (#13913 review round 3).
+    node of that mechanism, that DIRECTION and exactly two endpoints
+    (operators). The pre-fix arm counted any edge joining two present
+    identities, and the DOOR ITSELF mints undeclared edges (`props.extractedFrom`
+    on 8 Points materialises the Source and links it), so a read-back missing 8
+    declared edges still printed 101/101 (#13913 review round 3). It also
+    matched a superset of endpoints, so flipping all 51 declared directions read
+    back 101/101 — and a writer that drops `direction` turns 46 one-way IMPL
+    edges bidirectional and changes what the graph means (#13913 round 5).
 
     Pure, so the verdict can be exercised without a database.
     """
+    present: set[tuple[str, str, str]] = set()
+    for row in node_rows:
+        present |= _row_identities(row)
     by_ref = identity_by_ref(doc)
-    by_label = label_by_ref(doc)
-    declared = {(by_label[ref], ident) for ref, ident in by_ref.items()}
-    present = {key for key in declared
-               if any(_row_matches(row, key[0], key[1]) for row in node_rows)}
-    missing_nodes = [(label, ident[0], ident[1]) for label, ident in sorted(declared)
-                     if (label, ident) not in present]
+    missing_nodes = [ident for ident in by_ref.values() if ident not in present]
 
-    # endpoint slice layout: [label, name, url, content]
-    structural: set[tuple[str, tuple[str, str], tuple[str, str]]] = set()
+    structural: set[tuple[str, tuple[str, str, str], tuple[str, str, str]]] = set()
     for row in edge_rows:
         kind = row[0]
-        for a in _matched_identities(row[1:5], declared):
-            for b in _matched_identities(row[5:9], declared):
+        for a in _row_identities(row[1:5]):
+            for b in _row_identities(row[5:9]):
                 structural.add((kind, a, b))
 
-    # An operator is a NODE whose typed edges reach its endpoints, and the SLOT
-    # is what carries the direction: `create_operator` writes
-    # `inputs = [source_id] + target_ids` and the fold MERGEs an edge per slot
-    # with `idx`, so idx 0 IS the source and idx >= 1 ARE the targets. Matching
-    # on an unordered endpoint SET would read a REVERSED operator as the declared
-    # edge — 46 of this map's 51 operators declare `->`, i.e. the direction is
-    # what EP propagates (#13913 review round 4).
-    operators: dict[object, tuple[str, dict[int, set[tuple[str, tuple[str, str]]]]]] = {}
+    # An operator is a NODE whose typed edges reach its endpoints, and TWO legs
+    # are carried by that node:
+    #
+    # * the SLOT — `create_operator` writes `inputs = [source_id] + target_ids`
+    #   and the fold MERGEs one edge per slot with `idx`, so idx 0 IS the source
+    #   and idx 1 IS the target. Matching on an unordered endpoint SET read a
+    #   REVERSED operator as the declared edge (#13913 review round 4);
+    # * the DIRECTION — `direction` is stored VERBATIM on the operator, and the
+    #   door's default is the MUTUAL reading for IMPL/NAND, so a writer that
+    #   dropped the keyword turned 46 one-way IMPL edges bidirectional while the
+    #   slot order still looked right (#13913 review round 5). The slot says
+    #   which END is which; the direction says whether confidence flows back.
+    operators: dict[object, tuple[str, str, dict[int, set[tuple[str, str, str]]]]] = {}
     for row in op_rows:
-        nid, kind, idx = row[0], row[1], row[2]
-        _kind, slots = operators.setdefault(nid, (kind, {}))
+        nid, kind, idx, direction = row[0], row[1], row[2], row[3]
+        _kind, _dir, slots = operators.setdefault(
+            nid, (kind, DIRECTION_ALIASES.get(direction, direction), {}))
         try:
             slot = int(idx)
         except (TypeError, ValueError):
             slot = -1
-        slots.setdefault(slot, set()).update(_matched_identities(row[3:7], declared))
+        slots.setdefault(slot, set()).update(_row_identities(row[4:8]))
 
     missing_edges: list[tuple[str, str, str]] = []
     for e in doc["edges"]:
-        a = (by_label[e["from"]], by_ref[e["from"]])
-        b = (by_label[e["to"]], by_ref[e["to"]])
+        a, b = by_ref[e["from"]], by_ref[e["to"]]
         if "op" in e:
+            # Both sides through the SAME alias table: the door's resolver can
+            # return a legacy spelling (`bidirectional`) that the node stores
+            # verbatim, while the read-back normalizes it to the model token.
+            want = direction_of(e)
+            want = DIRECTION_ALIASES.get(want, want)
             held = any(
                 kind == e["op"]
+                and direction == want
+                # the writer's OWN shape: slot 0 = source, slot 1 = the single
+                # target. An operator over three endpoints holds both of a
+                # declared pair's identities and would otherwise certify it.
                 and a in slots.get(0, set())
-                and b in set().union(*[ends for slot, ends in slots.items() if slot >= 1])
-                for kind, slots in operators.values()
+                and b in slots.get(1, set())
+                and all(slot in (0, 1) for slot in slots)
+                for kind, direction, slots in operators.values()
             )
         else:
             held = (e["relation"], a, b) in structural
@@ -1025,7 +1153,7 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
     return missing_nodes, missing_edges
 
 
-def duplicates(doc: dict, node_rows: list) -> list[tuple[str, str]]:
+def duplicates(doc: dict, node_rows: list) -> list[tuple[str, str, str]]:
     """Declared identities the graph holds MORE THAN ONCE.
 
     A set-based read-back cannot see a duplicate: two copies of a decision Event
@@ -1034,14 +1162,12 @@ def duplicates(doc: dict, node_rows: list) -> list[tuple[str, str]]:
     existence check; the SDK mints a fresh `eventId` per call), so the read-back
     owes the count as well as the membership.
     """
-    by_ref = identity_by_ref(doc)
-    by_label = label_by_ref(doc)
-    declared = {(by_label[ref], ident) for ref, ident in by_ref.items()}
-    counts: dict[tuple[str, tuple[str, str]], int] = {}
+    counts: dict[tuple[str, str, str], int] = {}
     for row in node_rows:
-        for key in _matched_identities(row, declared):
-            counts[key] = counts.get(key, 0) + 1
-    return sorted((key[1][0], key[1][1]) for key in declared if counts.get(key, 0) > 1)
+        for ident in _row_identities(row):
+            counts[ident] = counts.get(ident, 0) + 1
+    declared = set(identity_by_ref(doc).values())
+    return sorted(ident for ident in declared if counts.get(ident, 0) > 1)
 
 
 def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
@@ -1057,14 +1183,14 @@ def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
         print(f"MISSING — {len(missing_nodes)} declared node(s) are not in the graph:",
               file=sys.stderr)
         for label, prop, value in missing_nodes[:20]:
-            print(f"  - {label} {prop}: {value[:70]!r}", file=sys.stderr)
+            print(f"  - {label}.{prop}: {value[:70]!r}", file=sys.stderr)
         if len(missing_nodes) > 20:
             print(f"  … and {len(missing_nodes) - 20} more", file=sys.stderr)
     if dupes:
         print(f"DUPLICATED — {len(dupes)} declared identity(ies) are in the graph "
               "more than once (a non-idempotent write landed twice):", file=sys.stderr)
-        for prop, value in dupes[:20]:
-            print(f"  - {prop}: {value[:70]!r}", file=sys.stderr)
+        for label, prop, value in dupes[:20]:
+            print(f"  - {label}.{prop}: {value[:70]!r}", file=sys.stderr)
     if missing_edges:
         print(f"EDGES MISSING — {len(missing_edges)} declared edge(s) are absent "
               "(an unjoined map is filed but not findable):", file=sys.stderr)
@@ -1113,6 +1239,9 @@ def verify(doc: dict) -> int:
                  "RETURN coalesce(e.content,'')  , type(r), coalesce(o.name, o.url, o.content, '')"):
         print(f"  {row[0][:70]}... -[{row[1]}]-> {row[2][:44]}")
 
+    # The LABEL rides every row: a property value alone cannot say what KIND of
+    # node carries it, so an Object named like a declared Event certified the
+    # missing Event (#13913 review round 5).
     node_rows = q("MATCH (n) RETURN labels(n)[0], coalesce(n.name,''), "
                   "coalesce(n.url,''), coalesce(n.content,'')")
     # ⛔ NULL-SAFE, not `NOT (a.is_operator = true OR …)`: a Subject/Object/
@@ -1134,8 +1263,8 @@ def verify(doc: dict) -> int:
                 "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
                 "RETURN coalesce(o.id, o.nodeKey, toString(id(o))), "
                 "coalesce(o.op_type, e.op_type, ''), coalesce(e.idx, -1), "
-                "labels(x)[0], coalesce(x.name,''), coalesce(x.url,''), "
-                "coalesce(x.content,'')")
+                "coalesce(o.direction,''), labels(x)[0], "
+                "coalesce(x.name,''), coalesce(x.url,''), coalesce(x.content,'')")
     return verdict(doc, node_rows, edge_rows, op_rows)
 
 
