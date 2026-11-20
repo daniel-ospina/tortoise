@@ -957,17 +957,17 @@ the order was fixed (`#13098` review F8).
 
 | file:line | fn | shape | role | verdict | statement |
 |---|---|---|---|---|---|
-| `tortoise/__main__.py:767` | `_cmd_reconcile` | plain | read | candidate:SQL-shaped | `UNWIND $ids AS eid MATCH (e:Event {eventId:eid}) RETURN e.eventId` |
-| `tortoise/__main__.py:2021` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:2045` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:13316` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p` |
-| `tortoise/__main__.py:13324` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p.content` |
-| `tortoise/__main__.py:13329` | `_cmd_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id: 'test-verify'}) DELETE p` |
-| `tortoise/__main__.py:13962` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN …` |
-| `tortoise/__main__.py:13964` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = $now RET…` |
-| `tortoise/__main__.py:15815` | `_cmd_doctor` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:17422` | `_cmd_key_create` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) RETURN t.id, t.name` |
-| `tortoise/__main__.py:17451` | `_cmd_key_create` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (:TeamMeta {name: $name, created: $now})` |
+| `tortoise/__main__.py:769` | `_cmd_reconcile` | plain | read | candidate:SQL-shaped | `UNWIND $ids AS eid MATCH (e:Event {eventId:eid}) RETURN e.eventId` |
+| `tortoise/__main__.py:2023` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:2047` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:13318` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p` |
+| `tortoise/__main__.py:13326` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p.content` |
+| `tortoise/__main__.py:13331` | `_cmd_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id: 'test-verify'}) DELETE p` |
+| `tortoise/__main__.py:13964` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN …` |
+| `tortoise/__main__.py:13966` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = $now RET…` |
+| `tortoise/__main__.py:15817` | `_cmd_doctor` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:17424` | `_cmd_key_create` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) RETURN t.id, t.name` |
+| `tortoise/__main__.py:17453` | `_cmd_key_create` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (:TeamMeta {name: $name, created: $now})` |
 | `tortoise/acl_graph_users.py:455` | `_registry_store_credential` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.acl_user=$u, g.acl_pass…` |
 | `tortoise/acl_graph_users.py:477` | `_stored_acl_password` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.acl_pass` |
 | `tortoise/acl_graph_users.py:705` | `credential_for_graph` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.acl_user, g.acl_pass` |

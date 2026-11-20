@@ -98,9 +98,10 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
     two directions are not symmetric: refused friction is one flag, and a partial
     rebuild presented as a full one destroys work with no error.
 
-    A MALFORMED DSN is NOT a usable record (`record_dsn` raises on it): the write
-    path cannot allocate there either, so the append stays and the journal is the
-    source — that arm allows the rebuild, as does an unconfigured deployment.
+    ⚠️ A MALFORMED DSN IN THE SHELL IS NOT AN ANSWER: it means the shell could not
+    say, so the deployment's `.env` is asked instead — the same second source, for
+    the same reason. Only "no record in the env AND none in the `.env`" allows a
+    journal rebuild.
     """
     try:
         from tortoise import record_writer
@@ -109,8 +110,9 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
         return None
     try:
         configured = record_writer.record_dsn() is not None
-    except Exception:  # noqa: BLE001, RUF100 — a malformed DSN: see above
-        return None
+    except Exception:  # noqa: BLE001, RUF100 — the shell could not answer
+        # see the docstring: fall through and ask the DEPLOYMENT
+        configured = False
     if not configured:
         # ⛔ AND THE SHELL IS NOT THE DEPLOYMENT (#14002 review cycle 4, P2).
         # `record_dsn()` reads `os.environ` only, and `tortoise rebuild` loads no

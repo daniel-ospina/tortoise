@@ -415,8 +415,12 @@ def test_the_real_helper_forwards_the_tenant_and_durable_and_the_DECISION(
     asked: list = []
 
     def predicate(*, tenant=None, durable=True):
+        # A FAITHFUL double: the record's own predicate refuses a non-durable
+        # log, so this one answers `durable` — which is what makes the second
+        # half below a real assertion about the outcome and not only about the
+        # argument list.
         asked.append((tenant, durable))
-        return True
+        return durable
 
     monkeypatch.setattr(record_writer, "record_owns_position", predicate)
     monkeypatch.delenv(record_writer.RECORD_ALLOCATE_ENV, raising=False)
@@ -434,6 +438,26 @@ def test_the_real_helper_forwards_the_tenant_and_durable_and_the_DECISION(
         "helper's ANSWER is not reaching the decision")
     assert result.appended is False
     assert seen and seen[0]["journal_skipped"] is True
+
+    # ⛔ AND `durable` IS PART OF THE FORWARDING, NOT A DEFAULT (#14002 review
+    # cycle 5, P2). The first cut drove this with `durable=True`, which is ALSO
+    # the predicate's own default — so dropping `durable=durable` from the helper
+    # passed, and on an armed cut-over graph a SCRATCH buffer (`durable=False`)
+    # would then be read as durable, have its append skipped, and be declined by
+    # the seam as the healthy `no_durable_journal` decline: the write in NEITHER
+    # store, silently, for the M2 capture lane. Driven twice, so the omission and
+    # a hard-coded value both red.
+    asked.clear()
+    scratch_log = _Log()
+    scratch_log.durable = False
+    live_write.write({"type": "PointAdded"}, log=scratch_log,
+                     tenant=("org-z", "graph-z"), project=_project())
+    assert asked == [(("org-z", "graph-z"), False)], (
+        f"the helper did not forward `durable=False` — a scratch buffer would be "
+        f"asked about as if it were a journal: {asked}")
+    assert scratch_log.appended == [{"type": "PointAdded"}], (
+        "a NON-durable log's append was skipped — nothing could reproduce that "
+        "record and the seam declines it, so the write lands in neither store")
 
 
 # ── 2b. the DOOR's per-call commit signal, on the arm #14002 creates ────
