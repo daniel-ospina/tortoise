@@ -1108,6 +1108,51 @@ def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
         f"Indexes seen: {sorted(indexdefs) or 'none'}")
 
 
+def _require_valid_hnsw(
+    index_rows: list[tuple[str, str, bool]], *, label: str = "point",
+    column: str = "embedding_vec",
+) -> tuple[str, str]:
+    """(name, indexdef) of the VALID HNSW cosine index, or `CannotRun`.
+
+    ⛔ `pg_indexes` DOES NOT CARRY `indisvalid` (PG 16 §54.11 exposes `indexdef`
+    and nothing about validity), and `pg_index.indisvalid` is the field the server
+    itself consults: *"False means the index is possibly incomplete … it cannot
+    safely be used for queries"* (§53.26). So an index left invalid by a failed
+    or crashed build carries a PERFECTLY HEALTHY-LOOKING `indexdef`, which the
+    listing check accepted — the guard proved the index was LISTED, and listing
+    was never the claim. Validity is checked FIRST, then the shape: an invalid
+    index is refused by name, because the remedy (REINDEX) differs from the
+    remedy for absence (CREATE INDEX), and a message that names the wrong one
+    costs a reader a diagnosis.
+
+    Takes the rows (`(name, indexdef, indisvalid)`) rather than a connection so
+    the decision is pinnable without Postgres — see
+    `test_an_INVALID_index_is_not_an_index_the_record_arm_may_use`.
+    """
+    valid = [(name, definition) for name, definition, is_valid in index_rows
+             if is_valid]
+    invalid = [(name, definition) for name, definition, is_valid in index_rows
+               if not is_valid]
+    try:
+        matched = _require_hnsw_indexdef([d for _n, d in valid],
+                                         label=label, column=column)
+    except CannotRun as refused:
+        try:
+            _require_hnsw_indexdef([d for _n, d in invalid],
+                                   label=label, column=column)
+        except CannotRun:
+            raise refused from None
+        raise CannotRun(
+            f"cannot run: the HNSW index on public.{label}({column}) is INVALID "
+            f"(pg_index.indisvalid = false — a failed or crashed build, which "
+            f"Postgres itself refuses to use for queries) while its `indexdef` "
+            f"reads perfectly healthy, so a listing check certified an index no "
+            f"read can use. REINDEX it before measuring. Invalid indexes seen: "
+            f"{sorted(d for _n, d in invalid)}") from None
+    return (next(name for name, definition in valid if definition == matched),
+            matched)
+
+
 class RecordStore:
     def __init__(self, dsn: str, org: str, graph: str):
         import psycopg2
@@ -1117,6 +1162,10 @@ class RecordStore:
         self.conn.autocommit = True
         self.app_dsn = app_role_dsn(dsn)
         self.record_hnsw_index: str | None = None
+        self.record_hnsw_index_name: str | None = None
+        #: The connection the PLAN is read on: the APP role's, because the app
+        #: role is the one the record leg actually reads with.
+        self._plan_conn = None
 
     def require_schema(self) -> None:
         with self.conn.cursor() as cur:
@@ -1130,12 +1179,19 @@ class RecordStore:
                     "pgvector migration has not been applied to this database, "
                     "so every comparison would report the graph fallback as a "
                     "clean answer")
-            # ⛔ …AND THE INDEX, not just the column: see `_require_hnsw_indexdef`.
+            # ⛔ …AND THE INDEX, not just the column — including its VALIDITY.
+            # The decision is `_require_valid_hnsw`'s so it is pinnable without a
+            # database (the seam pattern `_require_index_arm` sets out).
             cur.execute(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE schemaname='public' AND tablename='point'")
-            self.record_hnsw_index = _require_hnsw_indexdef(
-                [row[0] for row in cur.fetchall()])
+                "SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indisvalid "
+                "FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indrelid "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname='public' AND c.relname='point'")
+            name, definition = _require_valid_hnsw(
+                [(str(n_), str(d_), bool(v_)) for n_, d_, v_ in cur.fetchall()])
+        self.record_hnsw_index = definition
+        self.record_hnsw_index_name = name
 
     def environment(self) -> dict:
         """The versions the run actually measured on — recorded, not remembered.
@@ -1210,6 +1266,61 @@ class RecordStore:
                     (other_org, other_graph, row.key, row.key,
                      json.dumps(row.embedding), row.updated_at, row.updated_at))
 
+    def assert_index_scan(self, query: list[float], k: int) -> str:
+        """The PLAN the record READ gets — the index must ANSWER, not merely exist.
+
+        ⛔ `require_schema` PROVES A LISTING; THIS PROVES A PLAN, and the two are
+        different claims (the whole point of round 17). Two independent holes
+        remained after the listing check, both measured:
+
+          * `pg_index.indisvalid` — now checked in `require_schema` — because an
+            invalid index's `indexdef` reads healthy;
+          * pgvector's OWN documented behaviour: *"if the table is small, a table
+            scan may be faster"*, and *"By default, pgvector performs exact
+            nearest neighbor search, which provides perfect recall"*
+            (README → Troubleshooting → *"Why isn't a query using an index?"*).
+            This harness seeds ~55 `public.point` rows — the small-table case — so
+            a verified-THEN-ignored index is reachable, and the oracle here is
+            itself an exact scan: a Seq Scan reproduces it VERBATIM and would
+            publish `recall 1.000` under the index's name. That is the K5 class
+            one indirection further out, and it is why `recall=1.000` in
+            `parity-run.json` was equally consistent with "the ANN leg never ran".
+
+        ⛔ THE STATEMENT IS `record_vector.knn_statement`'s, not a copy. An EXPLAIN
+        of a re-spelled SELECT proves something about the re-spelling; the builder
+        is the ONE definition `vector_search` also uses, so the plan read here is
+        the plan of the statement the leg executes.
+
+        Raises `CannotRun` on a Seq Scan of `public.point`, or when the verified
+        index is not the one the plan used. Returns the plan node type, which
+        `run()` records as `arms.record.plan`.
+        """
+        from tortoise import record_vector
+
+        statement = record_vector.knn_statement(
+            LABEL, record_vector._Scope(org_id=self.org, graph_id=self.graph),
+            query, k)
+        if statement is None:
+            raise CannotRun(
+                f"cannot run: `record_vector` would not build a kNN statement for "
+                f"label {LABEL!r}, so there is no plan to check")
+        sql, params = statement
+        if self._plan_conn is None:
+            import psycopg2
+            # ⛔ THE APP ROLE'S CONNECTION, because the app role is the one the
+            # record leg READS with — planning as the owner would answer for a
+            # connection this harness never reads through.
+            self._plan_conn = psycopg2.connect(self.app_dsn)
+            self._plan_conn.autocommit = True
+        with self._plan_conn.cursor() as cur:
+            # The same session setting the read installs, or the plan measured
+            # here is not the plan the read produced (see `HNSW_ITERATIVE_SCAN`).
+            cur.execute("SELECT set_config('hnsw.iterative_scan', %s, true)",
+                        (record_vector.HNSW_ITERATIVE_SCAN,))
+            cur.execute("EXPLAIN (FORMAT JSON) " + sql, params)
+            plan = cur.fetchone()[0]
+        return _require_index_plan(_plan_nodes(plan), self.record_hnsw_index_name)
+
     def read(self, query: list[float], k: int) -> list[tuple[str, float, object]]:
         from tortoise import record_vector
 
@@ -1227,7 +1338,75 @@ class RecordStore:
                 cur.execute("DELETE FROM public.organizations WHERE id = %s", (org,))
 
     def close(self) -> None:
+        if self._plan_conn is not None:
+            self._plan_conn.close()
+            self._plan_conn = None
         self.conn.close()
+
+
+def _require_index_plan(nodes: list[dict], verified_name: str | None, *,
+                        label: str = "point") -> str:
+    """The plan node that served the read, or `CannotRun` — the DB-free decision.
+
+    ⛔ AN INDEX THAT IS LISTED, VALID AND CORRECT IS STILL NOT EVIDENCE THAT IT
+    WAS USED. pgvector's own README (Troubleshooting → *"Why isn't a query using
+    an index?"*) says *"if the table is small, a table scan may be faster"* and
+    *"By default, pgvector performs exact nearest neighbor search, which provides
+    perfect recall"*. This harness seeds ~55 rows, and its ORACLE is itself an
+    exact scan — so a Seq Scan reproduces the oracle VERBATIM and would publish
+    `recall 1.000` under the index's name. Measured in review: a verified
+    `record_hnsw_index` plus a record leg answering the oracle gave `EXIT: 0`,
+    PARITY, with the ANN leg possibly never running.
+
+    A plan is GRADED HERE, not eyeballed: the verified index must appear as the
+    `Index Name` of an `Index Scan`, and a `Seq Scan` of the table refuses —
+    which is the fail-closed direction (it converts an unmeasurable arm into
+    `cannot run`, exit 2, never into a green).
+    """
+    seq = [n for n in nodes
+           if n.get("Node Type") == "Seq Scan"
+           and n.get("Relation Name") == label]
+    used = {(n.get("Node Type"), n.get("Index Name")) for n in nodes
+            if n.get("Index Name")}
+    if seq or (verified_name is not None
+               and verified_name not in {name for _t, name in used}):
+        raise CannotRun(
+            f"cannot run: the record read's own statement is answered by a "
+            f"SEQ SCAN of public.{label} (or by an index other than the one this "
+            f"run verified, {verified_name!r}) — so the arm would publish the "
+            f"index's name over a plan the index did not serve. pgvector does this "
+            f"BY DESIGN on a small table (*\"if the table is small, a table scan "
+            f"may be faster\"*), and its exact scan reproduces this harness's own "
+            f"oracle verbatim. Plan nodes: {sorted(used) or 'none'}"
+        )
+    return ", ".join(sorted({f"{t} on {n}" for t, n in used}))
+
+
+def _plan_nodes(plan: object) -> list[dict]:
+    """Every plan node in an `EXPLAIN (FORMAT JSON)` result, flattened.
+
+    ⛔ RECURSIVE, because the node that answers the ORDER BY need not be the root:
+    a `Limit` → `Index Scan` is the shape pgvector produces, and a non-recursive
+    read of the root would see only `Limit` and conclude nothing about the index
+    — the same "checked the wrong level" defect one layer down.
+    """
+    found: list[dict] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+        if "Node Type" in node:
+            found.append(node)
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                walk(value)
+
+    walk(plan)
+    return found
 
 
 #: The record's table/column for one label, and whether a vector index exists.
@@ -1539,12 +1718,26 @@ def run(args) -> dict:
             except Exception as e:  # noqa: BLE001, RUF100 — record_vector's four, by name
                 rec_answers[qid] = []
                 rec_errors[qid] = f"{type(e).__name__}: {e}"
+        # ⛔ THE PLAN THE RECORD READ ACTUALLY GETS, once per query — not the
+        # index's existence. Round 17's finding: `require_schema` proved an HNSW
+        # index was LISTED, while pgvector answers small tables by EXACT SEQ SCAN
+        # *by design* ("if the table is small, a table scan may be faster") and
+        # this harness seeds ~55 rows. `assert_index_scan` EXPLAINs
+        # `record_vector.knn_statement` — the SAME statement `vector_search` runs
+        # — and raises `CannotRun` on a Seq Scan, so an arm that would have
+        # published the index's name over a scan cannot report at all. The plans
+        # are recorded because a driver name is a claim and this is the evidence.
+        record_plans = {qid: record.assert_index_scan(qvec, k)
+                        for qid, qvec in queries}
         report["arms"]["record"] = {
             "driver": "pgvector HNSW, cosine",
-            # ⛔ THE INDEX ITSELF, recorded from `pg_indexes` by `require_schema`
-            # (which now REFUSES without one) — a driver name is a claim, and this
+            # ⛔ THE INDEX ITSELF, from `pg_index` by `require_schema` (which
+            # REFUSES without a VALID one) — a driver name is a claim, and this
             # artifact is the evidence.
             "index": getattr(record, "record_hnsw_index", None),
+            "index_name": getattr(record, "record_hnsw_index_name", None),
+            # query id -> the plan node that served it. All must name the index.
+            "plan": record_plans,
         }
 
         # ── graph arms: scan first (production today), then indexed ──────

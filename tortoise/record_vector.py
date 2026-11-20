@@ -86,6 +86,7 @@ __all__ = [
     "coverage_verified",
     "cutover_armed",
     "journal_ready",
+    "knn_statement",
     "mirror_required",
     "mirror_verdict",
     "reset_coverage_cache",
@@ -2534,6 +2535,59 @@ def _safe_population(graph_population: Callable[[str], int | None],
         return None
 
 
+def knn_statement(
+    entity_type: str,
+    scope: _Scope,
+    query_vec: Sequence[float],
+    limit: int,
+    *,
+    where: Sequence[str] | None = None,
+    key_params: Sequence[Any] = (),
+) -> tuple[str, tuple[Any, ...]] | None:
+    """The kNN SELECT this module runs, as ``(sql, params)`` — ONE definition.
+
+    ⛔ WHY A NAMED BUILDER AND NOT A LOCAL. The statement's SHAPE is evidence
+    about WHICH PLAN answered the read, and an instrument that re-spells the
+    SELECT to plan it can only ever prove something about its own spelling. That
+    is the reviewed defect exactly (`tools/vector_parity_13906.py` proved an HNSW
+    index was LISTED while an EXACT SEQ SCAN answered), so the parity harness
+    plans **this** statement: `vector_search` and the caller that EXPLAINs it
+    share one string, and neither can drift from the other.
+
+    ``where``/``key_params`` let a caller supply a predicate it has already built
+    (the folded-status arm's terminal-key exclusion). Omitted, the DEFAULT
+    predicate for the label is built here, which is the column-filtered arm —
+    ``point`` included, the label the parity harness reads.
+    """
+    mapping = LABEL_SERVED.get(entity_type)
+    if mapping is None:
+        return None
+    table, id_column, kind_filter, recency_columns = mapping
+    vec = [float(x) for x in query_vec]
+    if limit <= 0 or not vec:
+        return None
+    literal = "[" + ",".join(repr(v) for v in vec) + "]"
+    if where is None:
+        built = ["t.embedding_vec IS NOT NULL"]
+        if kind_filter:
+            built.append(kind_filter)
+        built.extend(_status_predicates(entity_type, None))
+        where, key_params = built, ()
+    sql = (
+        f"SELECT t.{id_column}, "
+        f"(t.embedding_vec <=> %s::vector) AS distance, "
+        f"{_recency_sql(recency_columns)} AS recency "
+        f"FROM public.{table} AS t "
+        f"WHERE t.org_id = %s AND t.graph_id = %s "
+        f"AND {' AND '.join(where)} "
+        f"ORDER BY t.embedding_vec <=> %s::vector "
+        f"LIMIT %s"
+    )
+    params = (literal, scope.org_id, scope.graph_id, *key_params,
+              literal, int(limit))
+    return sql, params
+
+
 def vector_search(
     scope: _Scope,
     entity_type: str,
@@ -2617,7 +2671,7 @@ def vector_search(
         # A label no record table serves. NOT an empty result: the caller's graph
         # branch is this label's real path and always was.
         return None
-    table, id_column, kind_filter, recency_columns = mapping
+    table, id_column, kind_filter, _recency_columns = mapping
     if limit <= 0:
         return []
     vec = [float(x) for x in query_vec]
@@ -2627,7 +2681,8 @@ def vector_search(
     from .record_projection import scope_connection
     from .record_serve import open_record
 
-    literal = "[" + ",".join(repr(v) for v in vec) + "]"
+    # ⛔ THE VECTOR LITERAL IS `knn_statement`'s NOW (it is the one place the
+    # SELECT and its binds may be spelled), so it is not built here.
     # ⛔ THE DIVISOR IS DECIDED HERE, BEFORE ANY STATEMENT RUNS, because the DOOR
     # applies it: a folded label issues :data:`FOLD_ARM_STATEMENTS` data statements
     # (its two prefetches, then the kNN) against the column arm's
@@ -2721,18 +2776,16 @@ def vector_search(
                     key_params.append(terminal_keys)
             else:
                 where.extend(_status_predicates(entity_type, excluded_statuses))
+            # ⛔ THE STATEMENT COMES FROM `knn_statement`, the single definition
+            # the parity harness also EXPLAINs — see its docstring. The shortfall
+            # `count(*)` below reuses the same PREDICATE, so the two statements
+            # cannot disagree about which rows were selected.
             predicate = " AND ".join(where)
-            sql = (
-                f"SELECT t.{id_column}, "
-                f"(t.embedding_vec <=> %s::vector) AS distance, "
-                f"{_recency_sql(recency_columns)} AS recency "
-                f"FROM public.{table} AS t "
-                f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate} "
-                f"ORDER BY t.embedding_vec <=> %s::vector "
-                f"LIMIT %s"
-            )
-            params = (literal, scope.org_id, scope.graph_id, *key_params,
-                      literal, int(limit))
+            statement = knn_statement(entity_type, scope, vec, limit,
+                                      where=where, key_params=key_params)
+            if statement is None:          # unreachable: both were checked above
+                return []
+            sql, params = statement
             # ⛔ TRANSACTION-LOCAL and set BEFORE the read: the default returns a
             # SHORT answer on a selective filter (0 rows where 152 exist —
             # measured, see HNSW_ITERATIVE_SCAN), and a short answer is
