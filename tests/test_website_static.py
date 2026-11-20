@@ -10474,7 +10474,13 @@ class TestProductTeamsCopy:
             "row above stays green (#14020 review cycle 3 P1). The serif and "
             "any size live on `#beat-intro .lead > span`.")
 
-        ch_property = re.search(r"--[\w-]+\s*:[^;{}]*\bch\b", _css_blanked(css))
+        # ⛔ `\bch\b` can NEVER match a CSS `ch` unit: the unit always follows a
+        # digit, and digit -> letter is not a word boundary, so the pin this row
+        # advertised was dead (#14020 review cycle 5, measured GREEN with
+        # `--prose-measure: min(660px, 74ch)` back in the sheet). Match the unit
+        # as it is written: a number, then `ch`.
+        ch_property = re.search(
+            r"--[\w-]+\s*:[^;{}]*?\d+(?:\.\d+)?ch\b", _css_blanked(css))
         assert ch_property is None, (
             f"a custom property carries a `ch` measure: {ch_property.group(0)!r}. "
             "`ch` in a custom property resolves against whatever element "
@@ -10563,20 +10569,30 @@ class TestProductTeamsCopy:
             if not inside and "font-size" in b]
         assert prose_rules, "`.beat p` declares no base `font-size` to mirror"
         want = _effective_decl(prose_rules[-1][0], "font-size")
+        # ⛔ Base AND media: `ch` resolves at the consuming element, so a
+        # `font-size` on `.outcomes` inside `@media (max-width: 760px)` moves the
+        # grid's `74ch` off the prose's at exactly the widths item 3 is about —
+        # and the media block is the natural place to edit, because it already
+        # owns `.outcomes`. Measured (#14020 review cycle 5): `font-size: 14px`
+        # added there left this row GREEN (623.7px vs 605.9px at the clamp
+        # floor), which is why the filter is no longer base-only.
         grid_rules = [
             (b, inside) for b, inside in _css_rules_with_scope(css, ".outcomes")
-            if not inside and "font-size" in b]
+            if "font-size" in b]
         assert grid_rules, (
             "`.outcomes` declares no base `font-size`, so it inherits the body's "
             "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
             "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
             "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
-        got = _effective_decl(grid_rules[-1][0], "font-size")
-        assert got == want, (
-            f"`.outcomes` resolves `ch` at `{got}` while `.beat p` resolves it at "
-            f"`{want}` — so the shared `min(660px, 74ch)` is two different "
-            "measures and the grid can sit wider than the prose above it "
-            "(#14020 review P2.4, #13696 item 3)")
+        for body_, inside_ in grid_rules:
+            got = _effective_decl(body_, "font-size")
+            assert got == want, (
+                f"`.outcomes` resolves `ch` at `{got}` "
+                f"({'inside an @media block' if inside_ else 'at base'}) while "
+                f"`.beat p` resolves it at `{want}` — so the shared "
+                "`min(660px, 74ch)` is two different measures at those widths "
+                "and the grid can sit wider than the prose above it (#14020 "
+                "review P2.4, cycle 5, #13696 item 3)")
 
     def test_the_hero_copy_column_shares_one_left_edge(self):
         """#13696 item 1: `.beat p` centring may not leak into the hero.
@@ -10625,8 +10641,18 @@ class TestProductTeamsCopy:
         # would let `#beat-hero .hero-links { /* display: flex; */ }` — a
         # commented-out declaration inside its own rule — satisfy this row
         # while the row stops being a row (#14020 review P2).
-        links = " ".join(body for body, _inside_media in
-                         _css_rules_with_scope(css, "#beat-hero .hero-links"))
+        # ⛔ BASE rule only, like the separator row below and for the same
+        # reason: joining every body lets a narrow-viewport `display: flex`
+        # mask a base rule that is no longer a row — the desktop links stop
+        # being a row and the `·` separators can lead a wrapped line, with this
+        # row green (#14020 review cycle 5, measured).
+        link_rules = [body for body, inside_ in
+                      _css_rules_with_scope(css, "#beat-hero .hero-links")
+                      if not inside_]
+        assert link_rules, (
+            "`#beat-hero .hero-links` declares no BASE rule — every one of its "
+            "rule(s) sits inside an `@media` block")
+        links = link_rules[-1]
         assert _effective_decl(links, "display") in {"flex", "inline-flex"}, (
             "`.hero-links` is not a flex row on the copy column's left edge — "
             "the `·` separators are `::after` on non-last links, a layout that "
