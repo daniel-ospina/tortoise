@@ -3272,6 +3272,25 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # both guards stayed green.
     # Both ADDRESSES were re-derived at `ef0abcb`; both LOCATORS were narrowed at
     # `c50a03a` (the commit carrying this note), by the texts pinned below.
+    #
+    # ⛔ RE-DERIVED ONCE MORE at `28ca66878d` (`#13833`), by the same method and NOT by
+    # the delta: `#13833`'s `sdk.py` change is net `+194` BELOW `update_knowledge`, so
+    # the three later rows moved and that one did not — a single offset applied to the
+    # whole block would have re-pinned `update_knowledge` to the wrong function and
+    # left it looking "carried". Each address was found by searching its own pinned
+    # FIRST-line text (and, for the arm, its own LAST-line text `continue`) at
+    # `28ca66878d`: `55547-55549` (the non-scalar refusal), `55699-55708` (the
+    # un-supersede arm) and `56148` (the per-label `SET n += $props`). `update_knowledge`
+    # re-measured UNCHANGED at `22629-22804`. The `+194` is the consistency check on a
+    # measurement, never its input.
+    # ⛔ RE-MEASURED at the `#13854` merge of `origin/main` `f2e5e3a98f0` — and the three later
+    # rows are `55579` / `55731` / `56225` again, NOT `28ca66878d`'s figures plus any offset: this
+    # branch's own `sdk.py` inserts sit ABOVE them. Measured on the MERGED tree by each row's own
+    # pinned text: `A row that ALREADY holds a non-scalar` -> `55579`-`55581`, `if (_np_dead ==
+    # [_SUPERSEDED_STATUS]` -> `55731`-`55740` (its bare `continue` at `55740`), the per-label
+    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props` -> `56225`, and `def
+    # update_knowledge(` -> `22651` with its `return self._update_entity_any(id, **props)` at
+    # `22826`. The paragraph above quotes `28ca66878d`'s figures because it describes THAT head.
     ("sdk.py", 55579, 55581): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55731, 55740): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
