@@ -266,8 +266,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
     # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
-    (_AUDIT, '`:5404` at this head', 'tortoise/projection/entities.py', 5404, 'def _upsert_document(self, ev: dict) -> None:'),
-    (_AUDIT, '`:7210` at this head', 'tortoise/projection/entities.py', 7210, 'def _upsert_source('),
+    (_AUDIT, '`:5407` at this head', 'tortoise/projection/entities.py', 5407, 'def _upsert_document(self, ev: dict) -> None:'),
+    (_AUDIT, '`:7213` at this head', 'tortoise/projection/entities.py', 7213, 'def _upsert_source('),
     # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
     # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
     # of the same digits — and this row was the one of the four that carried it.
@@ -287,13 +287,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # row shipped naming a symbol at a line that does not carry it. Re-derived by CONTENT:
     # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
     # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
-    (_PLAN_4997, "tortoise/hosted_backup.py:2684", _HB, 2684, "def _index_has_is_operator() -> bool:"),
+    (_PLAN_4997, "tortoise/hosted_backup.py:2683", _HB, 2683, "def _index_has_is_operator() -> bool:"),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5794` were in NO pin at all
+#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5797` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -309,7 +309,7 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2776", _CP, 2776, "tail_denied = forbidden | {"),
     (":3841", _CP, 3841, 'if table == "point"'),
-    (":5794", _ENT, 5794, "s.summary=coalesce($summary, s.summary, '')"),
+    (":5797", _ENT, 5797, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
     # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24004` is a DELETE
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
@@ -423,14 +423,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5404` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7210` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5407` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7213` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28426` at this head'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28426`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28790`'): 1,
-    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2684'): 1,
+    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
 }
 
 
@@ -1426,17 +1426,17 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":30298", "tortoise/sdk.py", 30298, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
     (":30397", "tortoise/sdk.py", 30397, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":44026", "tortoise/sdk.py", 44026, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
-    ("entities.py:1262", "tortoise/projection/entities.py", 1262, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
-    ("entities.py:2038-2046", "tortoise/projection/entities.py", 2038, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
-    ("entities.py:2476", "tortoise/projection/entities.py", 2476, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
-    ("entities.py:2525", "tortoise/projection/entities.py", 2525, "_POINT_DENY: frozenset = frozenset({", 1),
-    ("entities.py:2385-2386", "tortoise/projection/entities.py", 2386, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
-    ("entities.py:2389-2390", "tortoise/projection/entities.py", 2390, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
-    ("entities.py:3147", "tortoise/projection/entities.py", 3147, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
-    ("entities.py:3952", "tortoise/projection/entities.py", 3952, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
-    (":3265-3267", "tortoise/projection/entities.py", 3267, "self._POINT_HANDLED | self._POINT_DENY,", 1),
-    (":3309", "tortoise/projection/entities.py", 3309, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
-    (":3359", "tortoise/projection/entities.py", 3359, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
+    ("entities.py:1265", "tortoise/projection/entities.py", 1265, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
+    ("entities.py:2041-2049", "tortoise/projection/entities.py", 2041, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
+    ("entities.py:2479", "tortoise/projection/entities.py", 2479, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
+    ("entities.py:2528", "tortoise/projection/entities.py", 2528, "_POINT_DENY: frozenset = frozenset({", 1),
+    ("entities.py:2388-2389", "tortoise/projection/entities.py", 2389, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
+    ("entities.py:2392-2393", "tortoise/projection/entities.py", 2393, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
+    ("entities.py:3150", "tortoise/projection/entities.py", 3150, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
+    ("entities.py:3955", "tortoise/projection/entities.py", 3955, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
+    (":3268-3270", "tortoise/projection/entities.py", 3270, "self._POINT_HANDLED | self._POINT_DENY,", 1),
+    (":3312", "tortoise/projection/entities.py", 3312, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
+    (":3362", "tortoise/projection/entities.py", 3362, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
 )
 
 
