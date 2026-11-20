@@ -26,7 +26,7 @@
 | `POST /backups/restore` refuses custom graphs; `#2339` is an endpoint issue, not a surface | `hosted_api.py:20039-20042` | No restore affordance in this change. Read-only column. |
 | Sweep eligibility is an invisible per-team flag (`tier != free AND backup_enabled`) and no tier has `hourly_backups: true` | `backup_sweep.py:249-268`; `product/pricing.json`; `pricing.py:104-121` | Empty state must be **neutral** ("None recorded"), never causal ("never backed up" / "not enabled"). |
 | Authoritative staleness is server-side + internal-auth only (`stale_threshold_min = 90`) | `backup_watcher.py:263`; `hosted_api.py:20467` | **Forbidden:** a client-computed "stale" verdict. The column shows a time, not a health claim. |
-| Retention prunes manifests (~35 objects/pool) while the last successful sweep survives in server state | `hosted_backup.py:1301-1321`; `backup_sweep.py:803-805` | Corroborates neutral empty-state copy: absence of a manifest cannot prove "never". |
+| Retention prunes manifests (~35 objects/pool) while the last successful sweep survives in server state | `hosted_backup.py:3940-3960`; `backup_sweep.py:803-805` | Corroborates neutral empty-state copy: absence of a manifest cannot prove "never". |
 | Three e2e locators index the Keys cell positionally (`nth(3)`) | `tests/e2e/test_graphs_management.py:348`, `:478`, `:531` | The new column is inserted **after Keys, before Actions** so those keep passing. |
 
 ### Pattern Research

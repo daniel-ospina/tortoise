@@ -902,3 +902,32 @@ def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):
     assert g.query("MATCH (e:Event) WHERE e.embeddingRepairFailedAt IS NOT NULL "
                    "RETURN count(e)").result_set[0][0] == 0, (
         "a repair marker was written for a unit that must never be repaired")
+
+
+# ── 9. the FAIL-SAFE arm of the predicate itself ────────────────────────
+
+
+def test_an_unreadable_predicate_keeps_the_graph_copy(proj, monkeypatch):
+    """`_derived_mirror_required`'s `except` arm answers KEEP — pinned, because it is the
+    one answer a caller CANNOT verify and the arm that must never be reachable as proof.
+
+    ⛔ DIRECTION MATTERS MORE THAN COVERAGE. `True` means "the record has not proved it
+    holds this label's vectors", so the writer stores and the graph copy survives — the
+    safe direction when `record_vector` cannot be read at all. `False` would mean "the
+    record HAS proved it", i.e. a strip, decided by an `ImportError`. Measured: inverting
+    the arm (`except: return False`) leaves this whole file and
+    `tests/test_13610_graph_vector_copy.py` / `tests/test_13629_entity_vector_retire.py`
+    green (173 passed), which is why the arm needs an assertion of its own.
+    """
+
+    def _unreadable(entity_type: str) -> bool:
+        raise RuntimeError("the record's arming predicate could not be read")
+
+    monkeypatch.setattr(record_vector, "mirror_required", _unreadable, raising=False)
+
+    proj._upsert_source({"url": "https://example.com/unreadable-gate",
+                         "title": "Unreadable", "embedding": list(VEC)})
+    assert _prop(proj.g, "(n:Source {url:'https://example.com/unreadable-gate'})",
+                 "embedding") is not None, (
+        "an unreadable gate dropped the graph copy — the fail-safe arm must answer KEEP "
+        "(an `ImportError` is not evidence that the record holds the vector)")
