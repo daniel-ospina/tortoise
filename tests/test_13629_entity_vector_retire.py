@@ -9768,9 +9768,10 @@ def _upsert_object(props, ev):
         # unprovable key source REFUSES, which costs these honest writers their gate and
         # is the cheaper error by the doctrine above. They stay PINNED as refusals: making
         # any of them certify again needs the doctrine argued first, exactly as before.
-        # (`x, *_r = *rest, 1` with `rest = ("embedding",)` is the one row here that
-        # really STORES — `props[x]` lands the vector — so it is a fail-OPEN this polarity
-        # closes, not an over-refusal.)
+        # (SEVERAL of these rows really store once their key source answers `embedding` —
+        # `props |= {k: vec for k in _keys()}` does, and `x, *_r = *rest, 1` with
+        # `rest = ("embedding",)` is statically certain to — so they are fail-OPENs this
+        # polarity closes, not only over-refusals.)
         #
         # ⛔ AND ONE OF THEM IS THE CANONICAL ROW OF THE WHOLE ISSUE, kept here because a
         # review of an earlier cut of this branch found it had been DELETED and not re-pinned

@@ -166,7 +166,7 @@ then have nothing to prove. `#13826` is its partial form (writers ask a gate at 
    is safe; it is proof about ONE question, asked of source text.
 
 ⛔ **THE STATED RESIDUALS.** The polarity closes the KEY-SOURCE family — every shape `#13864`,
-`#13910`, `#13915`, `#13920` and `#13936` measured. Three things it does NOT close, each named
+`#13910`, `#13915`, `#13920` and `#13936` measured. Three things it does NOT close, plus one note, each named
 because a completeness claim narrower than the code is how the next lane re-derives false
 confidence:
 
@@ -202,12 +202,15 @@ confidence:
    Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
    mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
    another positional arm.
-4. **NOT A FAIL-OPEN, stated so nobody hunts for one:** a name rebound behind a dynamic
-   namespace write. `globals()[…] = …` / `locals()[…] = …` / `vars()[…] = …` poisons EVERY name
-   the scope declares `global`/`nonlocal` (`_dynamic_namespace_write`), and a name with no such
-   declaration is either unproven (absent from the binding map ⇒ refuse) or out of reach (a
-   `locals()` write does not rebind a fast local — measured: the writer stores nothing). No
-   certifying-and-storing witness was found, which is why this is a note rather than a hole.
+4. **Dynamic-namespace writes — CLOSED for every shape measured, stated because the rule has a
+   scope.** `globals()[…] = …` / `locals()[…] = …` / `vars()[…] = …` (any index, constant or
+   computed) and their mutator spellings (`globals().update({…})`) poison EVERY name the scope
+   declares `global`/`nonlocal` — **in the writer's own statements AND one level down**, which is
+   where the round-10 review measured the hole (`class _C: globals()["k"] = "embedding"` runs at
+   definition time and was unreachable in the nested-scope walk). A name with no `global`/
+   `nonlocal` declaration is either unproven (absent from the binding map ⇒ refuse) or out of
+   reach (a `locals()` write does not rebind a fast local — measured: the writer stores nothing).
+   Pinned by the `globals-*` rows in `DEFEATED_RESOLVER_ROWS`.
 
 THE REMOVAL ITSELF
 ==================
@@ -560,7 +563,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     (measured at `622e9935`). "No store" is judged ANYWHERE in the arm (`_own_walk`: live
     conditionals and `finally` included), not just unconditionally — on this arm an
     unplaceable store is evidence AGAINST the write-stop, so the fail-closed answer is to
-    refuse. What this still cannot see is residual 4's family: a store reached through a
+    refuse. What this still cannot see is residual 1's family: a store reached through a
     helper ARGUMENT (`_set(props, embedding)`), which no arm-level walk can attribute.
 
     ⛔ AND THE POSITIVE ASK'S `else` IS THAT SAME STOP ARM (`#13647`, measured at
@@ -4661,6 +4664,17 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # the round-4 review: `def _bg(_d=(k := "embedding")): pass` then `props[k] = vec`
         # CERTIFIED). An inner binding that cannot actually reach the outer name only costs a
         # refusal.
+        #
+        # ⛔ AND A DYNAMIC-NAMESPACE WRITE IS TESTED **FIRST** (`#14001`, measured by the
+        # round-10 review): `class _C: globals()["k"] = "embedding"` inside the arm runs at
+        # definition time, and its `Subscript` target poisoned nothing because the generic
+        # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
+        # List targets — the branch written for it was unreachable.
+        if isinstance(sub, ast.Assign) and any(
+                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
+                for target in sub.targets):
+            poisoned.update(_scope_declarations)
+            continue
         if isinstance(sub, ast.Assign | ast.AnnAssign):
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
             for target in targets:
@@ -5745,7 +5759,7 @@ def _stop_arm_places_the_property(statements, scope) -> tuple[bool, str]:
                     if problem:
                         break
                 # ⛔ A MAPPING THE ARM **BUILDS** AND HANDS ON IS NOT PROVED HERE — see
-                # residual 4 in the module docstring. A positional rebuild check was written
+                # residual 3 in the module docstring. A positional rebuild check was written
                 # and withdrawn: it refused two honest fixtures and, measured by the round-9
                 # review, still certified every WRAPPED rebuild (`if/else`, `.copy()`, a
                 # walrus, a `*`-splat, a comprehension, a rebuild nested under the Cypher

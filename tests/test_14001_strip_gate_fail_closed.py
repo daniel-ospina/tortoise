@@ -512,12 +512,23 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
-    # the MUTATOR spelling of the dynamic-namespace write (residual 3's other half)
+    # the MUTATOR spelling of the dynamic-namespace write (residual 4's other half) …
     ("globals-mutator-rebinding", """
     global gk
     gk = "x"
     if not _derived_mirror_required("object"):
         globals().update({"gk": "embedding"})
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # …and the same write ONE SCOPE IN, inside a class body that runs at definition time
+    ("globals-subscript-in-class-body", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        class _C:
+            globals()["gk"] = "embedding"
         props[gk] = _encode(ev)
         return None
     _write(props)
