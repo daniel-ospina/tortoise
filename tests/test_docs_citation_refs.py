@@ -1986,7 +1986,12 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `tortoise/` SET, or the DEICTIC reference that names no command at all.
     r"(?:(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
     r"|`-- tortoise/`"
-    r"|`?tortoise/`?\s+(?:set|side|part)[^`]{0,40}?"
+    # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
+    # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
+    # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
+    # the stated residual — "a noun outside both lists" — did not describe them)
+    r"|`?tortoise/`?\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
+    r"module\s+set|delta|changes?)[^`]{0,40}?"
     # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
     # document states the answer WITHOUT repeating the command: "at THIS head the command
     # this clause prescribes returns NOTHING AT ALL (the diff carries no `tortoise/`
@@ -2036,7 +2041,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"now|still|actually|also)\s+)?"
     r"(?:,\s*[^,.;\n]{1,30},)?\s*"
     # ⛔ AND THE VERB PARTICLE `back` (`gives back nothing`) (#13802 review, round 12, P2)
-    r"(?:back\s+)?"
+    r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
     # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
     # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
     r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?"
@@ -2091,6 +2096,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ANSWER class too — measured GREEN with only the bare-`tortoise/` alternative added.
     r"|untouched|unchanged|unmodified|byte-identical|identical|the\s+same|no\s+code"
     r"|`?tortoise/[A-Za-z0-9_./-]+\.py`?)"
+    r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    # ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, round 13, P2 — MEASURED GREEN in all three
+    # arms: `Nothing is in the `tortoise/` set at this head.`, `Empty is what `-- tortoise/`
+    # prints at this head.`). Every arm here is verb-then-answer, so the same claim stated the
+    # other way round was read by nothing; this alternative requires the ANSWER to open a
+    # clause and the anchor to follow inside the same sentence, so ordinary prose that merely
+    # begins with "Nothing" is untouched.
     r"|neither is `git diff --name-only origin/main\.\.\.HEAD -- tortoise/`)"
     # ⛔ AND THE "which N paths" SHAPE (#13802 review, P1 — MEASURED): the measured leg's own
     # claim list carries `which two `tortoise/` paths this diff carries`, and this ban could
@@ -2118,7 +2130,15 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # about that command"; "untouched" IS that claim, so it belongs here rather than in a
     # footnote limiting the ban's scope.
     r"|`?tortoise/`?\s+(?:is|are|was|were|remains?|stays?)\s+(?:NOT\s+|not\s+)?"
-    r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)"))
+    r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)"
+    # E) ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, round 13, P2 — MEASURED GREEN in all
+    # three arms: `Nothing is in the `tortoise/` set at this head.`, `Empty is what
+    # `-- tortoise/` prints at this head.`). Every other alternative is verb-then-answer, so
+    # the same claim stated the other way round was read by nothing. This one requires the
+    # ANSWER to open a clause and `tortoise/` to follow inside the same sentence, so ordinary
+    # prose that merely begins with `Nothing` is untouched.
+    r"|(?:^|[.;:!?]\s|\n)(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?)"
+    r"\b[^.\n]{0,60}?tortoise/"))
 
 
 def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_verb_class():
@@ -2248,6 +2268,17 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "Per `#10215`, at this head the `tortoise/` set is empty.",
         "`#10215` shipped that; at this head the `tortoise/` set prints NOTHING.",
         "refs #13572 and #13746: the `tortoise/` set is empty at this head.",
+        # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS, THE PRONOUN BEFORE `back`, AND THE ANSWER-FIRST
+        # ORDER (#13802 review, round 13, P2 — each measured GREEN while the SAME verb and the
+        # SAME answer were refused on `set`: the noun set and the word order were the holes,
+        # not the vocabulary)
+        "The `tortoise/` diff is empty at this head.",
+        "The `tortoise/` files are empty at this head.",
+        "The `tortoise/` paths hold nothing at this head.",
+        "The `tortoise/` directory prints nothing at this head.",
+        "`-- tortoise/` gives us back nothing at this head.",
+        "Nothing is in the `tortoise/` set at this head.",
+        "Empty is what `-- tortoise/` prints at this head.",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
         # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
         # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
