@@ -6589,20 +6589,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moved by a uniform +66 — the START was the `grep -n
-        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`,
-        # measured at THAT head), and the END was the blank line before `return OrgInfoResponse(`
-        # (`:15405`, with the call at `:15406`). ⛔ THOSE FIGURES ARE HISTORY AT `09f5c99afd`, NOT
-        # THIS HEAD'S; presenting them as this head's is the exact rot this file exists to refuse
-        # (#13900 review, finding 4).
-        # The three offsets (+29 `nodes_used`, +39 `max_nodes`, +77 END) held EXACTLY from that
-        # START, which is how the figures were re-derived rather than nudged. The span at the
-        # PREVIOUS head, `:15262-15339`, no longer contains the `nodes_used` read at all
-        # (`grep -c 'nodes_used = await asyncio.to_thread'` over those lines -> 0), which is why
-        # carrying it would have been a false pin.
-        # ⛔ AND RE-DERIVED ONCE MORE AT THIS HEAD, by the branch that repaired `main` after it
-        # moved `hosted_api.py` by +18 under five anchors and re-derived none of them (#13844):
-        # the span is `:15346-15423` — the START is the `grep -n 'point_count = await
+        # further down), so the span moves by a uniform +66; then `main`'s `819a473cd4`
+        # (`#13674` close `#13819`'s last review round, `#13841`) inserted 18 lines above `org_info`
+        # (that block OPENS at `:8556`, its first inserted line — `:8552` is the hunk's opening
+        # CONTEXT line and was already there, so naming it would point at a line this commit did
+        # not add), so the span moves by a further uniform
+        # +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
@@ -6859,7 +6851,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
     # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle
+    # (`:15385` itself already carries it — the slice is END-INCLUSIVE, so the failing band
+    # stops one line short of the safe threshold; #13879 review round 5, P2),
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -16826,12 +16820,39 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15328-15405`"):
+    # ⛔ WHAT THIS ARM GRADES, AND WHAT IT DELIBERATELY DOES NOT (#13879 review).
+    #
+    # It grades that D5 still NAMES each pair. It does NOT grade the PROSE TENSE — whether
+    # the row calls the current span current and the older one history.
+    #
+    # That was attempted twice and DELETED, which is this file's own rule for an assertion
+    # whose value cannot be made to vary: a "designation" is a phrase inside a single
+    # ~53k-char markdown row, so every proximity rule is defeated by moving the same words a
+    # little. Measured across two cuts, in BOTH directions:
+    #
+    #   SURVIVORS (the retired pair reading as CURRENT, guard green) — verb swapped to
+    #   "verifies as current at this head"; markdown emphasis splitting the phrase
+    #   ("carries **at this head**"); the designation placed BEFORE the numbers; a
+    #   restatement 253 chars away; the pair spelled as bare START/END endpoints.
+    #
+    #   FALSE REDS (correct prose, guard red) — "carries the range `:15346-15423` at this
+    #   head" with the adverb trailing; a sentence that DISCLAIMS the retired pair while
+    #   naming a DIFFERENT pair as current; "carried at the PREVIOUS head".
+    #
+    # Eight measured mutants with no rule separating them: prose tense is not gradeable by
+    # proximity, and an assertion that pretends to is worse than none, because it reads as
+    # coverage while permitting exactly the failure it names.
+    #
+    # The FACTS keep a pin and the TENSE does not: `04-plan.md`'s own I7 row is bound to
+    # `hosted_api.py:15346-15423` by the structural arm above (`_i7.count(...) == 1` plus
+    # the span-membership and end-shape checks), and THAT is what makes "current" true or
+    # false. A lane re-deriving a `+18` reads that arm, not this comment.
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15346-15423`",
+                  ":15262-15339` → `:15328-15405`"):
         assert _pair in text, (
-            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
-            "this head. Both ends are pinned here because the range's TARGET was once "
-            "typed as the base's own value while its SOURCE was already re-derived "
-            "(#13750 review, cycle 3)")
+            f"D5 no longer names {_pair!r}. Both ends are pinned here because the range's "
+            "TARGET was once typed as the base's own value while its SOURCE was already "
+            "re-derived (#13750 review, cycle 3)")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
