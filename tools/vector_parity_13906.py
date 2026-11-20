@@ -621,6 +621,13 @@ def _conninfo_pairs(dsn: str) -> list[tuple[str | None, str | None]]:
 
     ``(None, value)`` marks a bare token (no `=`), which libpq rejects and the
     rebuild re-emits verbatim.
+
+    ⛔ A BACKSLASH WITH NOTHING LEFT TO ESCAPE IS **DROPPED**, because that is what
+    libpq does with it: `PQconninfoParse('host=127.0.0.1 dbname=x' + chr(92))`
+    answers `dbname='x'` (measured on libpq.so.5). Keeping it — the pre-round-22
+    behaviour — made this scanner certify a DIFFERENT database than libpq reads,
+    and the rebuild then emitted the value `x` + a backslash (parseable, and a
+    database the caller never named).
     """
     pairs: list[tuple[str | None, str | None]] = []
     i, n = 0, len(dsn)
@@ -677,9 +684,17 @@ def _conninfo_pairs(dsn: str) -> list[tuple[str | None, str | None]]:
                 j += 1
         else:
             while j < n and (dsn[j] == "\\" or not dsn[j].isspace()):
-                if dsn[j] == "\\" and j + 1 < n:
-                    value_chars.append(dsn[j + 1])
-                    j += 2
+                if dsn[j] == "\\":
+                    if j + 1 < n:
+                        value_chars.append(dsn[j + 1])
+                        j += 2
+                        continue
+                    # ⛔ A DANGLING BACKSLASH ESCAPES NOTHING, SO LIBPQ DROPS IT
+                    # (`dbname=x\` -> `dbname='x'`, measured with
+                    # `PQconninfoParse`). Keeping it certified a value libpq never
+                    # reads: the rebuild then closed it as `dbname='x\\'`, i.e. a
+                    # DSN naming database `x\` where the caller named `x`.
+                    j += 1
                     continue
                 value_chars.append(dsn[j])
                 j += 1
@@ -1301,7 +1316,7 @@ class RecordStore:
         """The PLAN the record READ gets — the index must ANSWER, not merely exist.
 
         ⛔ `require_schema` PROVES A LISTING; THIS PROVES A PLAN, and the two are
-        different claims (the whole point of round 17). Two independent holes
+        different claims (the whole point of round 20). Two independent holes
         remained after the listing check, both measured:
 
           * `pg_index.indisvalid` — now checked in `require_schema` — because an
@@ -1754,7 +1769,7 @@ def run(args) -> dict:
                 rec_answers[qid] = []
                 rec_errors[qid] = f"{type(e).__name__}: {e}"
         # ⛔ THE PLAN THE RECORD READ ACTUALLY GETS, once per query — not the
-        # index's existence. Round 17's finding: `require_schema` proved an HNSW
+        # index's existence. Round 20's finding: `require_schema` proved an HNSW
         # index was LISTED, while pgvector answers small tables by EXACT SEQ SCAN
         # *by design* ("if the table is small, a table scan may be faster") and
         # this harness seeds ~55 rows. `assert_index_scan` EXPLAINs

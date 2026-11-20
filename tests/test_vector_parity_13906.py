@@ -29,6 +29,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = ROOT / "tools" / "vector_parity_13906.py"
+RECORD_MODULE_PATH = ROOT / "tortoise" / "record_vector.py"
 
 
 @pytest.fixture(scope="module")
@@ -800,7 +801,7 @@ def test_a_conninfo_token_starting_with_equals_cannot_spin_forever(harness):
     ("trailing", "padding"),
     [(1, ""), (3, ""), (1, " "), (1, "  "), (1, "\t"), (1, "\n")],
     ids=["one", "three", "one+space", "one+2spaces", "one+tab", "one+newline"])
-def test_a_value_ending_in_an_ODD_backslash_is_quoted_before_options_is_appended(
+def test_a_value_ending_in_an_ODD_backslash_is_CLOSED_before_options_is_appended(
         harness, trailing, padding):
     """⛔ THE APPEND IS PART OF THE REBUILD, SO THE LAST VALUE MUST BE CLOSED.
 
@@ -848,10 +849,52 @@ def test_a_value_ending_in_an_ODD_backslash_is_quoted_before_options_is_appended
     # … and the app role was ADDED
     assert "role=tortoise_record_app" in (after_map.get("options") or ""), after_map
     # ⛔ THE SPECIFIC HOLE: the value must be CLOSED before the appended pair, so
-    # the rebuild cannot leave a value ending in a bare odd backslash.
+    # the rebuild cannot leave a value ending in a bare odd backslash. Two legal
+    # closures, and which one applies depends on what the odd run MEANS: a quoted
+    # value (`dbname='x\\'`, `dbname='x '`) or — for a DANGLING backslash, which
+    # libpq DROPS — no escape at all (`dbname=x`, round 22). Asserting only the
+    # quoting form would have pinned the pre-round-22 defect in place.
     dbname_segment = rebuilt[rebuilt.index("dbname="):rebuilt.index("options=")].rstrip()
-    assert dbname_segment.endswith("'"), (
-        f"the rebuilt value is left OPEN before the appended pair: {rebuilt!r}")
+    if not dbname_segment.endswith("'"):
+        assert (len(dbname_segment) - len(dbname_segment.rstrip("\\"))) % 2 == 0, (
+            f"the rebuilt value is left OPEN before the appended pair: {rebuilt!r}")
+
+
+def test_the_pair_parser_reads_a_TRAILING_escape_the_way_libpq_does(harness):
+    """⛔ THE ORACLE HERE IS LIBPQ ITSELF, and that is the whole point: the pin
+    above asks THIS MODULE's `_conninfo_pairs` what the caller's string means, so
+    it cannot see a value the module and libpq read DIFFERENTLY.
+
+    It could not: `dbname=x` followed by ONE backslash is `dbname='x'` to libpq
+    (`PQconninfoParse`, measured on this box) because a backslash with nothing left
+    to escape is dropped, while `_conninfo_pairs` kept it. The rebuild then closed
+    the value as `dbname='x' + an escaped backslash` — parseable, and naming a
+    database `x` + a backslash where the caller named `x`: a DSN the guard
+    certified, the harness connected with, and a DIFFERENT database answered.
+    Fail-closed (the read fails), but invisible to every assertion whose oracle was
+    this module's own scanner.
+
+    ⚠️ Skipped only where libpq genuinely cannot be loaded; the module is then the
+    sole authority and the pin above covers the shape it can see.
+    """
+    parse = _libpq()
+    if parse is None:
+        pytest.skip("libpq is not loadable on this box")
+    for backslashes in (1, 2, 3, 4):
+        for padding in ("", " ", "\t"):
+            dsn = "host=127.0.0.1 dbname=x" + "\\" * backslashes + padding
+            want = parse(dsn)
+            assert "__error__" not in want, (dsn, want)
+            got = {k: v for k, v in harness._conninfo_pairs(dsn) if k is not None}
+            assert got == want, (dsn, got, want)
+            # …and the REBUILD must name the SAME database, through libpq's eyes
+            rebuilt = harness.app_role_dsn(dsn)
+            after = parse(rebuilt)
+            assert "__error__" not in after, (dsn, rebuilt, after)
+            for key, value in want.items():
+                assert after.get(key) == value, (dsn, key, value, rebuilt, after)
+            assert "role=tortoise_record_app" in (after.get("options") or ""), (
+                dsn, rebuilt, after)
 
 
 def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
@@ -2018,6 +2061,40 @@ def test_a_SEQ_SCAN_is_not_an_index_measurement(harness):
         harness._plan_nodes(served), None) == "Index Scan on record_hnsw_index"
     assert index in {(n["Node Type"], n["Index Name"])
                      for n in harness._plan_nodes(served) if "Index Name" in n}
+
+
+def test_vector_search_builds_its_statement_through_knn_statement():
+    """⛔ THE PLAN CHECK IS ONLY EVIDENCE IF THE LEG RUNS THE STATEMENT IT EXPLAINS.
+
+    `RecordStore.assert_index_scan` EXPLAINs `record_vector.knn_statement(...)` and
+    the pin above asserts the harness asks for it. Nothing pinned the PRODUCTION
+    side: re-inlining the kNN `SELECT` back into `vector_search` would leave that
+    pin green (the harness still calls the builder) and leave every DB-free
+    assertion green, while the read executed a statement the plan check never saw
+    — the reviewed defect (an instrument proving something about its own spelling)
+    restored with no red anywhere.
+
+    So this is an AST pin, on the module the read lives in: `vector_search` must
+    CALL `knn_statement`, and must not re-spell the kNN `SELECT` itself. Mutants:
+    replacing the call with an inline `SELECT … ORDER BY … <=> …` reds BOTH
+    assertions here.
+    """
+    tree = ast.parse(RECORD_MODULE_PATH.read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "vector_search")
+    called = {(c.func.id if isinstance(c.func, ast.Name)
+               else getattr(c.func, "attr", ""))
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "knn_statement" in called, sorted(called)
+    # ⛔ …AND NO LOCAL RE-SPELLING. `<=>` is the kNN operator: its presence in a
+    # string literal inside this function means the SELECT is built here again.
+    spellings = [node.value for node in ast.walk(fn)
+                 if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    assert not [text for text in spellings if "<=>" in text], [
+        text[:80] for text in spellings if "<=>" in text]
+    assert not [text for text in spellings if "ORDER BY" in text], [
+        text[:80] for text in spellings if "ORDER BY" in text]
 
 
 def test_the_plan_check_explains_the_RECORD_LEG_s_own_statement(harness):
