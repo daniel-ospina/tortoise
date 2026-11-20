@@ -1031,7 +1031,11 @@ def test_rebuild_cli_reports_the_refusal_as_a_message(capsys, monkeypatch):
                    _point_added("sentinel"), full[:full.index('"op"')],
                    torn_last=True)
 
-    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=db_path))
+    # `journal_is_complete=True`: #14002 refuses a journal rebuild on a
+    # deployment whose `.env` (or env) names a RECORD, and this leg is about
+    # the torn-tail refusal, not about that gate.
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=db_path,
+                                         journal_is_complete=True))
     assert rc == 1, "the refusal must exit non-zero"
     err = capsys.readouterr().err
     assert "Refused:" in err, err
@@ -1069,7 +1073,9 @@ def test_rebuild_cli_inmemory_fallback_refuses_a_torn_tail(capsys, monkeypatch):
                    _point_added("sentinel"), full[:full.index('"op"')],
                    torn_last=True)
 
-    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=os.path.join(tmp, "x.db")))
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir,
+                                         db=os.path.join(tmp, "x.db"),
+                                         journal_is_complete=True))
     assert rc == 1, "the fallback refusal must exit non-zero"
     captured = capsys.readouterr()
     assert "Refused:" in captured.err, captured.err
@@ -1205,7 +1211,9 @@ def test_rebuild_cli_inmemory_fallback_keeps_a_harmless_tear(capsys, monkeypatch
                    '{"type": "PointAdded", "point": {"id": "torn-1", ',
                    torn_last=True)
 
-    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir, db=os.path.join(tmp, "x.db")))
+    rc = _cmd_rebuild(argparse.Namespace(dir=log_dir,
+                                         db=os.path.join(tmp, "x.db"),
+                                         journal_is_complete=True))
     captured = capsys.readouterr()
     assert "Refused:" not in captured.err, captured.err
     assert "Done: 1 total (1 statements, 0 operators) [in-memory, no DB]" \

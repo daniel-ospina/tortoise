@@ -1517,6 +1517,24 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
             f"{changed} does not select test_website_static.py")
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
+    # ⛔ AND THE SHARED PRICING SOURCE — the one asset this population cannot
+    # derive. `tortoise-pricing.js` is not an icon and not an `og:image`, so the
+    # derivation above never sees it. #13696 review cycle 2 (P2, measured): its
+    # `SOURCE_PATTERNS['onboarding']` row was unpinned — deleting it left this
+    # file 526 passed, while `select(["website/assets/tortoise-pricing.js"])`
+    # returned `surfaces: []` with `test_website_static.py` absent. That is the
+    # exact silent drop the row's own comment cites as its reason for existing
+    # ("a diff that … changed a price selected NOTHING").
+    for asset in ("website/assets/tortoise-pricing.js",):
+        r = _sel([asset])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{asset} selects {r['surfaces']} — the ONE price table both "
+            "product pages render would change with no surface selected and "
+            "no row run (#13696)")
+        assert "test_website_static.py" in r["test_files"], (
+            f"{asset} does not select test_website_static.py")
+        assert r["slow_run"] is False, f"{asset} must not pull a slow leg"
+
 
 def test_the_crawler_surface_selects_the_guard_that_reads_it():
     """#11615: `robots.txt` and the sitemaps must select the sitemap contract.
@@ -10350,6 +10368,13 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #14001 — the fail-closed POLARITY of that same write gate's stop arm (defence 2 of
+    # the four the issue ranks). A file this fold ADDED, registered on `core` because its
+    # only subject (`tools/strip_graph_entity_vectors.py`) is under `NON_PYTHON_PREFIXES`;
+    # the existing `CORE_ALSO` entry for that tool is what makes a tools-only diff select
+    # it. Listed here for the reason every row above states: the ENTRY-RULE pin iterates
+    # this EXPLICIT tuple, so a file nobody listed has no `durations:` row and nothing reds.
+    "test_14001_strip_gate_fail_closed.py",
     # #13685 — the BACKFILL that unblocks that retirement
     # (`tools/entity_vector_backfill.py`): the additive half of the same contract, which
     # copies the graph's vectors into the record so the strip is finally allowed to run.

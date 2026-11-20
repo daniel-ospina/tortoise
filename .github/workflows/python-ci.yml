@@ -5091,6 +5091,15 @@ jobs:
           # migration, so nothing another file asserts on may run after it
           # without its own re-read.
           #
+          # #14002: the hosted write path stops appending to the JSONL once the
+          # graph is cut over, which takes the `position_divergence` wedge under
+          # concurrent writers out of reach. Its DB-FREE legs run in the fast
+          # matrix (registered on `core`); the legs that need THIS job's DSN are
+          # the issue's own acceptance — a 120-write concurrent burst with zero
+          # divergence refusals and the JSONL's size/mtime unchanged, plus the
+          # falsifier that restores the append and asserts it wedges — so they
+          # must arm where the leg gate reds on a skip.
+          #
           # #9881: `test_9881_rename_reaches_the_record.py` is armed HERE for
           # the same reason — its end-to-end leg (public `update_entity(name=…)`
           # -> journal -> record row, live == replay) SKIPS without this job's
@@ -5146,6 +5155,7 @@ jobs:
             tests/test_12894_record_cursor_live.py \
             tests/test_12894_record_cursor.py \
             tests/test_13043_record_allocator_cli.py \
+            tests/test_14002_record_only_journal.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \

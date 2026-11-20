@@ -101,7 +101,8 @@ PRICING_SOURCE = REPO_ROOT / "website" / "assets" / "tortoise-pricing.js"
 #: these is SAME-ORIGIN — the browser loads the same file a relative path would —
 #: so the absolute spelling must not be read as a foreign asset and skipped
 #: (#13696 round 9, P3). `tortoise.premiselabs.co` is the PRODUCT host and serves
-#: this same `website/` tree (`TestOgImages.SITE_ORIGINS` pins the same pair), so
+#: this same `website/` tree (`TestSiteIconAndSocialPreviewContract.SITE_ORIGINS`
+#: pins the same pair), so
 #: leaving it out read `https://tortoise.premiselabs.co/assets/x.js` as foreign
 #: and left a `$25/mo` in it green — measured, #13696 round 10.
 SITE_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
@@ -161,9 +162,11 @@ def _extract_pricing_object() -> dict:
     renders the same prices, and the owner's decision named a second copy as
     the defect: two prices that can drift with nothing red.
     `TestPricingSourceIsShared` holds both pages to this one file; everything
-    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`,
-    `tests/test_tier_naming.py`) now reads the shared source, so the mirror
-    parity it asserts is a property of the ONE table every page renders.
+    below (`TestMirrorNumericParity`, `TestStaticPricingFallback`) now reads the
+    shared source, so the mirror parity it asserts is a property of the ONE table
+    every page renders. (`tests/test_tier_naming.py` does NOT read this file — it
+    holds the tier NAMES across `product/pricing.json`, product.html's `labels`
+    map and the dashboard's `TIER_LABELS`, so it is not part of this list.)
 
     Raises AssertionError (with the source context) when the block cannot be
     located — a renamed/moved constant must fail loudly, not skip.
@@ -244,6 +247,11 @@ def _fmt_price(price, mode: str, discount_pct: int) -> tuple[str, str]:
         per_month = max(1, round(price * 12 * (1 - disc) / 12))
         total = per_month * 12
         return f"${per_month}", f"${total} billed annually"
+    # The Free tier is free in BOTH modes — a $0 tier reading "Billed monthly"
+    # contradicts the same card one click away, and the static card's own
+    # "Free forever". Mirrors `website/assets/tortoise-pricing.js`.
+    if price == 0:
+        return "$0", "Free forever"
     return f"${price}", "Billed monthly"
 
 
@@ -1184,7 +1192,11 @@ class TestFmtPriceMath:
         return html["display"]["annual_discount_pct"]
 
     def test_monthly_billing(self):
-        for price in (0, 9, 25, 149):
+        # ⛔ $0 IS EXCLUDED, deliberately. A free tier is not "billed monthly" in
+        # either mode — see `test_free_is_forever_free_in_BOTH_modes` (#13696
+        # review cycle 2, P2): the same card read "Billed monthly" on the Monthly
+        # tab and "Free forever" on Annual, and nothing is billed on it.
+        for price in (9, 25, 149):
             big, total = _fmt_price(price, "monthly", 20)
             assert big == f"${price}"
             assert total == "Billed monthly"
@@ -1192,6 +1204,25 @@ class TestFmtPriceMath:
     def test_free_is_forever_free(self):
         big, total = _fmt_price(0, "annual", 20)
         assert (big, total) == ("$0", "Free forever")
+
+    def test_free_is_forever_free_in_BOTH_modes(self):
+        """The Free card must not contradict itself across a one-click toggle.
+
+        #13696 review cycle 2 (P2, measured in node): `_fmt_price(0, 'monthly')`
+        returned `('$0', 'Billed monthly')` while the annual branch returned
+        `('$0', 'Free forever')` — so the Free card read "Billed monthly" on the
+        Monthly tab, which is false (nothing is billed on a free tier) and
+        contradicts the static card's own `Free forever` one line away. Both the
+        shared formatter and this mirror now carry the free case in both modes.
+        """
+        for mode in ("annual", "monthly"):
+            assert _fmt_price(0, mode, 20) == ("$0", "Free forever"), (
+                f"the Free tier reads a different copy in {mode} mode")
+        # …and the EXECUTED source agrees, so the mirror cannot drift from it.
+        for mode in ("annual", "monthly"):
+            assert _js_fmt_price(0, mode, 20) == ("$0", "Free forever"), (
+                f"the shared source renders the Free tier differently in {mode} "
+                "mode")
 
     def test_annual_contract_rounding_once_invariant(self):
         """The page's own invariant: round per-month ONCE, derive the total —
@@ -3510,6 +3541,222 @@ STYLE_OR_SCRIPT_RE = re.compile(r"<(style|script)\b.*?</\1>", re.S | re.I)
 MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{")
 
 
+#: `@media (max-width: Npx) { ... }` — the narrow-viewport blocks. Height has
+#: `_max_height_media_blocks`; width had no reader, which is how owner item 3
+#: (a flat `.outcomes { max-width }` override inside this block) survived a
+#: full review cycle and had to be caught by eye (#13696).
+MAX_WIDTH_MEDIA_RE = re.compile(r"@media\s*\(\s*max-width:\s*(\d+)\s*px\s*\)\s*\{")
+
+
+def _css_declarations(css: str, selector: str) -> str | None:
+    """The body of the LAST **base** `selector { ... }` rule, or None.
+
+    Reads through `_css_rules_with_scope`, so it is COMMENT-BLANKED and it sees
+    a rule that shares its prelude with other selectors. This was the last
+    structural reader still scanning the RAW sheet: `/* max-width: min(660px,
+    74ch); */` inside the shared-measure rule left
+    `test_the_outcomes_grid_is_never_wider_than_the_prose_above_it` GREEN with
+    the prose's measure gone — the same false PASS as #14020's review P2 on the
+    two rows beside this one, so the ROOT is fixed here and `_css_rules` (whose
+    only remaining consumer this was) is deleted rather than left as a trap.
+
+    "Base" is deliberate: a selector legitimately appears twice (base rule +
+    narrow-viewport override), and `[-1]` over ALL rules answers "what does the
+    media block say" when the caller asked "what is the declaration" — the
+    `@media (max-width: 760px) .outcomes` override sits after the shared rule
+    and would win a `[-1]` over the whole sheet (#13696).
+    """
+    rules = _css_rules_with_scope(css, selector)
+    if not rules:
+        return None
+    base = [body for body, inside_media in rules if not inside_media]
+    return (base or [body for body, _inside in rules])[-1]
+
+
+def _css_blanked(css: str) -> str:
+    """`css` with every `/* … */` comment replaced by spaces, SAME length.
+
+    Same length on purpose: an index found in the blanked text is a valid index
+    into the real sheet, so a reader can brace-count structure here and still
+    describe the sheet. Comments matter to every structural reader below — a
+    comment that QUOTES a rule is matched as a rule by any `@media…{` or `--x:`
+    scan. Measured: a note quoting `@media (max-width: 760px)` swallowed the
+    hero's base rule into a phantom media span, and the page still quotes
+    `--prose-measure: min(660px, 74ch)` in prose (:445-446), which a `--x:` scan
+    reads as a declaration (#14020 review P1/P2.4).
+
+    ⛔ The `@media` example is HISTORICAL: that note was deleted in
+    `d6b4776350a`, so no comment on the page quotes a media query today — the
+    rationale outlives the example, and `_max_width_media_blocks` /
+    `_max_height_media_blocks` both cite it. Do not read this docstring as a
+    claim about the sheet's current comments.
+    ⛔ HTML COMMENTS ARE STRIPPED TOO. These readers are handed WHOLE PAGES, and
+    a `/* … */`-only blanker leaves `<!-- … -->` intact: a CSS rule parked in a
+    markup comment (genuinely dead — the browser never parses it) satisfied both
+    `PE_ON_RULE_RE` and the `@media (max-height: …)` scan, keeping
+    `test_the_beat_can_receive_the_scroll_gesture_while_visible` and
+    `test_each_tall_beat_declares_the_css_escape_hatch` GREEN with no live rule
+    on the page (measured, #14020 review). This is the "each stripper ALONE is
+    half a stripper" lesson `_live_markup` records, applied here; composing the
+    two in ONE blanker is what keeps every reader below honest instead of
+    fixing each call site.
+    """
+    css = re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), css, flags=re.S)
+    return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), css, flags=re.S)
+
+
+def _media_block_spans(css: str) -> list[tuple[int, int]]:
+    """Every `@media (…) { … }` block as a `(start, end)` character span.
+
+    `_max_width_media_blocks` answers "what does each narrow block say"; this
+    answers "is THIS rule inside one", which is the question the hero rows need
+    (#14020 review P2.4): a viewport override is a legitimate re-centring, so
+    only the last BASE rule may be read as the desktop alignment.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int]] = []
+    for m in re.finditer(r"@media[^{]*\{", blanked):
+        inner = _brace_block(blanked, m.end() - 1)
+        spans.append((m.start(), m.end() + len(inner) + 1))
+    return spans
+
+
+def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
+    """Every rule whose selector LIST contains `selector`, `(body, inside_media)`.
+
+    Reads the comma-separated PRELUDE, not the rule's exact text: a rule that
+    shares its prelude with other selectors (`#beat-hero .hero-sub,
+    #beat-hero .hero-links { text-align: center }`) is a different string from
+    the exact selector, so an exact-text reader cannot see it — measured at
+    #14020 review P2.5: appending that rule at top level left the hero rows
+    green while the desktop subtitle was centred (the 71px-off-axis defect of
+    #13696 item 1). `_css_rule_preludes` reads the same way for `.outcomes`.
+
+    Bodies come from the COMMENT-BLANKED sheet (see `_css_blanked`), so a
+    `text-align`/`max-width` named in a comment cannot satisfy an assertion.
+
+    A reader that ignores `@media` scope cannot say whether a body sits inside
+    a media block, and that is exactly the difference between the desktop rule
+    and a narrow-viewport override: a `[-1]` over the whole sheet is the LAST
+    rule — on `#beat-hero .doc-copy` that is `@media (max-width: 760px)`'s centred
+    override, so a later BASE `text-align: center` appended after it would leave
+    a `[-1]`-based assertion green while the desktop column is centred (#14020
+    review P2.4, measured).
+    """
+    #: `selector` may itself be a comma-separated LIST, and then a rule matches
+    #: only when its prelude covers ALL of them — the shared-measure caller asks
+    #: for `#beat-intro p, #beat-compute > p, .outcomes` as one request, and a
+    #: rule listing only two of the three is a DIFFERENT (broken) invariant, not
+    #: a match. For a single selector this is the same test as membership.
+    wanted = {part.strip() for part in selector.split(",")}
+    blanked = _css_blanked(css)
+    media = _media_block_spans(css)
+    out: list[tuple[str, bool]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        if not wanted.issubset({p.strip() for p in prelude.split(",")}):
+            continue
+        out.append((_brace_block(blanked, m.end() - 1),
+                    any(start <= m.start() < end for start, end in media)))
+    return out
+
+
+def _effective_decl(body: str, prop: str) -> str | None:
+    """The LAST `prop: …` declaration in a rule body — the one that WINS.
+
+    ⛔ "`prop: value` occurs somewhere in this block" is not "the rule says
+    `value`": inside a block the last declaration wins, so appending
+    `text-align: center` below a `text-align: left` leaves a substring search
+    green with the rule centred — measured at #14020 review cycle 3, P1: the
+    hero subtitle row passed with `text-align: center` appended to the very
+    block it reads, which is the ordinary way an editor changes a rule.
+    Read the winning value, not the presence of a string.
+    """
+    # Split on `;` rather than regexing `(?:\A|;)\s*prop…`: a regex that
+    # CONSUMES the separator cannot match two declarations of the same property
+    # back to back, which is exactly the append shape this guards — the first
+    # draft of this helper reported the FIRST `text-align` and both mutants
+    # stayed green (#14020 review cycle 3, measured).
+    last = None
+    for decl in _css_blanked(body).split(";"):
+        name, sep, value = decl.partition(":")
+        if sep and name.strip().lower() == prop.lower():
+            last = value.strip()
+    return last
+
+
+def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
+    """Every style rule as `(prelude, body, inside_media)`, comment-blanked.
+
+    The reader of last resort for a question no single selector can answer —
+    "does ANY rule reach this element?" (#14020 review cycle 3, P1: the lead
+    row read only rules whose prelude NAMES `#beat-intro .lead`, so
+    `#beat-intro p:first-of-type { font-size: 2rem }` moved the lead's `ch`
+    with every row green). `@media` preludes are returned as their own entries
+    only when they carry declarations; callers that care pass `inside_media`.
+    """
+    blanked = _css_blanked(css)
+    media = _media_block_spans(css)
+    out: list[tuple[str, str, bool]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        out.append((prelude, _brace_block(blanked, m.end() - 1),
+                    any(start <= m.start() < end for start, end in media)))
+    return out
+
+
+def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
+    """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
+
+    An exact-selector-TEXT reader cannot see a rule that
+    shares its prelude with other selectors — which is the shape the shared
+    prose measure uses (`#beat-intro p, #beat-compute > p, .outcomes { … }`) and
+    therefore the shape any `.outcomes` override can hide in: `.outcomes
+    { max-width: 660px }` as its own rule is a DIFFERENT string from the shared
+    prelude, and appending it leaves a prelude-exact reader green (#14020
+    review P2.3). Split on commas and read the list. Comments are blanked first
+    (`_css_blanked`), so a commented-out rule is not a declaration.
+    """
+    blanked = _css_blanked(css)
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        parts = {p.strip() for p in prelude.split(",")}
+        if selector in parts:
+            out.append((prelude, _brace_block(blanked, m.end() - 1)))
+    return out
+
+
+def _max_width_media_blocks(html: str) -> list[tuple[int, str]]:
+    """Every `@media (max-width: Npx) { ... }` block as `(N, body)`.
+
+    Reads the COMMENT-BLANKED sheet: a raw scan matches a media query QUOTED in
+    a CSS comment and emits a phantom block, which can false-RED an assertion
+    about what that block declares (measured at #14020 review cycle 4: a comment
+    quoting `@media (max-width: 360px) { .outcomes { max-width: 660px } }`
+    produced one, and the page's own notes are the kind of prose that quotes
+    these queries — the note that did so here was deleted in `d6b4776350a`, so
+    do not go looking for it in the page today).
+
+    ⛔ The failure mode of a RAW reader here is FAIL-CLOSED (a phantom block
+    makes a row red, not green), which is why this one was only ever noise. Do
+    not read that as "raw readers are safe in this file": the sibling
+    `_max_height_media_blocks` had the same raw scan and its failure mode is the
+    opposite — a COMMENTED-OUT `@media (max-height: …)` block is invisible to a
+    raw reader, so the escape-hatch row could be defeated by a comment. Both
+    read the blanked sheet now (#14020 review cycle 4, measured).
+    """
+    blanked = _css_blanked(html)
+    return [(int(m.group(1)), _brace_block(blanked, m.end() - 1))
+            for m in MAX_WIDTH_MEDIA_RE.finditer(blanked)]
+
+
 def _heading_levels(html: str) -> list[int]:
     """Heading levels in document order, ignoring comments and style/script."""
     stripped = HTML_COMMENT_RE.sub("", html)
@@ -3538,11 +3785,21 @@ def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
     selector inside the media query is semantically identical to a shared one,
     and a regex that stops at the first `}` would read that refactor as "no
     rule names this selector" — a false red on a correct page.
+
+    ⛔ Reads the COMMENT-BLANKED sheet, and here that is LOAD-BEARING rather than
+    cosmetic: the escape-hatch row asks "does this tall beat declare the
+    hatch?", and a RAW reader cannot see a commented-out `@media (max-height:
+    820px)` block — so `/* … */` around the real block, or a comment QUOTING
+    one, let the row stay green while every beat had lost its hatch. That is a
+    false PASS, not noise (#14020 review cycle 4: measured GREEN with the real
+    block commented out, before this change). Blanking makes the commented
+    block invisible and the row red, which is the direction a guard must fail.
     """
+    blanked = _css_blanked(html)
     blocks: list[tuple[int, str]] = []
-    for match in MEDIA_PRELUDE_RE.finditer(html):
+    for match in MEDIA_PRELUDE_RE.finditer(blanked):
         blocks.append((int(match.group(1)),
-                       _brace_block(html, match.end() - 1)))
+                       _brace_block(blanked, match.end() - 1)))
     return blocks
 
 
@@ -3964,7 +4221,7 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
         for path, selector, what in SHORT_VIEWPORT_BEATS:
             html = path.read_text(encoding="utf-8")
             beat_id = selector.lstrip("#")
-            assert PE_ON_RULE_RE.search(html), (
+            assert PE_ON_RULE_RE.search(_css_blanked(html)), (
                 f"{path.name} declares no `.beat.pe-on {{ pointer-events: auto "
                 "}` rule. `.beat` is `pointer-events: none`, so the overflow "
                 f"hatch on {selector} can never receive a wheel/touch gesture "
@@ -7920,8 +8177,10 @@ class TestProductSetIsServedUnderTheOneHost:
 #     the two pages;
 #   * `TestStaticPricingFallback` proves that markup equals the numbers in the
 #     shared source (so the identical copy is also the correct one);
-#   * `TestMirrorNumericParity` + `tests/test_tier_naming.py` prove the shared
-#     source still mirrors `product/pricing.json` and the dashboard's labels.
+#   * `TestMirrorNumericParity` proves the shared source still mirrors
+#     `product/pricing.json`; `tests/test_tier_naming.py` SEPARATELY holds the
+#     tier NAMES across that file, product.html's `labels` map and the
+#     dashboard's `TIER_LABELS` — it does not read `PRICING_SOURCE`.
 
 PRODUCT_PAGES_SHARING_PRICING = (
     ("website/product.html", PRODUCT_HTML),
@@ -7942,6 +8201,28 @@ def _without_html_comments(markup: str) -> str:
     """
     markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
     return re.sub(r"<!--.*", " ", markup, flags=re.S)
+
+
+def _live_markup(markup: str) -> str:
+    """`markup` with BOTH the HTML comments and the JS comments removed.
+
+    ⛔ Each stripper ALONE is half a stripper, and swapping between them is how
+    one false PASS kept reappearing (#13696 rounds 4-6):
+
+    - `_without_html_comments` keeps JS comments, so `// window.addEventListener(
+      'tortoise:consent', …)` satisfied a presence row;
+    - `_code_only` keeps HTML comments, so `<!-- <script> … </script> -->` did too
+      — and commenting a tag out is THE natural way to disable it, as this
+      file's own `_served` docstring says.
+
+    MEASURED (round 6): with only one of them applied, wrapping the page's whole
+    funnel `<script>` in `<!-- -->` left `test_the_three_funnel_events_are_named_
+    in_the_source` and `test_the_click_delegate_counts_the_entry_points_the_legend_
+    names` GREEN over a page that raised nothing. Composed, the same mutation
+    reds 5 rows. Use this for every page-level PRESENCE check; keep the single
+    helpers for the STRUCTURAL extraction of tags, where the tag is the subject.
+    """
+    return _code_only(_without_html_comments(markup))
 
 
 def _pricing_source_includes(html: str) -> list[str]:
@@ -8168,7 +8449,7 @@ def _stylesheet_imports(css: str) -> list[str]:
     found = re.findall(
         r"""@import\s+(?:url\(\s*)?(?:"([^"]+)"|'([^']+)'|([^\s"')]+))""",
         _strip_comment_lines(css), re.I)
-    return [next(g for groups in found for g in groups if g) for groups in found]
+    return [next(g for g in groups if g) for groups in found]
 
 
 def _pricing_stylesheet_hrefs(html: str) -> list[str]:
@@ -8391,6 +8672,22 @@ class TestStylesheetChannelIsRead:
         assert _stylesheet_imports("@import url(a.css);") == ["a.css"]
         assert _stylesheet_imports("@import url( 'a.css' ) screen;") == ["a.css"]
 
+    def test_two_imports_on_one_line_are_BOTH_read(self):
+        """The per-match `next(g for g in groups if g)` correction, pinned.
+
+        Every row above passes a SINGLE `@import`, where the old flattened form
+        (`[next(g for groups in found for g in groups if g) for groups in
+        found]`) and the current one are identical — so the correction was
+        unpinned and a revert would be invisible (#14020 review P2.2). On two
+        matches the old form returns `['a.css', 'a.css']`: the SECOND sheet is
+        silently dropped from the price-channel walk that reads these imports,
+        leaving the file green. Measured: revert + this test only.
+        """
+        assert _stylesheet_imports(
+            '@import "a.css"; @import url("b.css");') == ["a.css", "b.css"]
+        assert _stylesheet_imports(
+            '@import "a.css";\n@import url(b.css);') == ["a.css", "b.css"]
+
     def test_a_commented_out_import_is_not_read(self):
         assert _stylesheet_imports('/* @import "a.css"; */') == []
 
@@ -8540,7 +8837,8 @@ class TestPricingSourceIsShared:
 
     def test_both_product_pages_load_the_same_pricing_source(self):
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
-            srcs = _pricing_source_includes(path.read_text(encoding="utf-8"))
+            html = path.read_text(encoding="utf-8")
+            srcs = _pricing_source_includes(html)
             hits = [s for s in srcs if s == "/assets/tortoise-pricing.js"]
             assert len(hits) == 1, (
                 f"{name} loads the shared pricing source {len(hits)} time(s) "
@@ -8548,6 +8846,40 @@ class TestPricingSourceIsShared:
                 "prices from /assets/tortoise-pricing.js — ONE source — which "
                 "is what makes the two pages' prices agree by construction "
                 "instead of by a copy that can rot.")
+            # ⛔ WHICH TAG, and WHEN it runs — not just that the src string
+            # exists somewhere. #13696 review cycle 2 (P1, measured): adding
+            # `defer` to this tag on BOTH pages left 248 rows green, while in a
+            # browser the INLINE script (which does `const PRICING =
+            # window.TORTOISE_PRICING; … if (PRICING) { … renderPricing(); }`)
+            # executes FIRST — so `PRICING` is undefined, `renderPricing()` never
+            # runs, the toggle is dead and the reader keeps the static cards.
+            # The sibling `/consent.js` tag IS deferred, so this is a natural
+            # edit rather than a contrived one.
+            scripts = list(re.finditer(
+                r"<script\b([^>]*)>(.*?)</script>",
+                _without_html_comments(html), re.S | re.I))
+            loader = next(
+                (m for m in scripts
+                 if "/assets/tortoise-pricing.js" in m.group(1)),
+                None)
+            assert loader is not None, (
+                f"{name} has no `<script src=\"/assets/tortoise-pricing.js\">` "
+                "tag — the src is present but not on a tag a browser parses")
+            assert not re.search(r"\b(?:defer|async)\b", loader.group(1), re.I), (
+                f"{name} loads the shared pricing source with `defer`/`async`. "
+                "The INLINE render script reads `window.TORTOISE_PRICING` "
+                "synchronously, so a deferred load leaves it undefined and the "
+                "JS render silently never runs (#13696 review cycle 2)")
+            readers = [m for m in scripts
+                       if not re.search(r"\bsrc\s*=", m.group(1), re.I)
+                       and "window.TORTOISE_PRICING" in _code_only(m.group(2))]
+            assert readers, (
+                f"{name} has no inline script reading `window.TORTOISE_PRICING` "
+                "— this gate no longer knows which tag must precede it")
+            assert loader.start() < min(m.start() for m in readers), (
+                f"{name} reads `window.TORTOISE_PRICING` BEFORE the tag that "
+                "defines it loads, so the table is undefined at read time and "
+                "the page falls back to the static cards (#13696 review cycle 2)")
         assert PRICING_SOURCE.is_file(), (
             "the shared pricing source is gone; both product pages would "
             "render no prices at all")
@@ -8831,6 +9163,64 @@ class TestPricingSourceIsShared:
                 f"--- {left_name} ---\n{left}\n"
                 f"--- {right_name} ---\n{right}")
 
+    def test_each_page_passes_the_shared_discount_to_the_formatter(self):
+        """A twin comparison cannot see a defect BOTH pages share.
+
+        #13696 review cycle 2 (P1, measured). Every render row above compares
+        the two pages to EACH OTHER, and `test_the_static_cards_on_both_pages_…`
+        reads the STATIC cards — which `renderPricing()` overwrites via
+        `grid.innerHTML = …`. So changing BOTH pages' call from
+        `window.tortoiseFmtPrice(price, currentBilling,
+        PRICING.display.annual_discount_pct)` to `…, 0)` made every JS visitor of
+        both pages read $19/$25/$149 "billed annually" instead of
+        $15/$20/$119 — and left **253 rows GREEN**. Two pages that are
+        identically wrong are indistinguishable from two that are right.
+
+        So the render is bound to the SOURCE here, not to its twin: the page's
+        `fmtPrice` must hand `window.tortoiseFmtPrice` the shared discount, and
+        the pair it therefore prints is held to the Python mirror of the same
+        shared source (`_fmt_price`), never to truthiness — see the loop's own
+        comment (#14020 review P2.1).
+        """
+        pricing = _extract_pricing_object()
+        disc = pricing["display"]["annual_discount_pct"]
+        for name, path in PRODUCT_PAGES_SHARING_PRICING:
+            body = _render_code(path.read_text(encoding="utf-8"), "fmtPrice", name)
+            call = re.search(r"window\.tortoiseFmtPrice\(\s*([^)]*)\)", body)
+            assert call is not None, (
+                f"{name}'s `fmtPrice` does not call `window.tortoiseFmtPrice` "
+                "(#13696)")
+            args = [a.strip() for a in call.group(1).split(",")]
+            assert args == [
+                "price", "currentBilling",
+                "PRICING.display.annual_discount_pct",
+            ], (
+                f"{name}'s `fmtPrice` calls `window.tortoiseFmtPrice({', '.join(args)})` "
+                "— it must pass the SHARED annual discount "
+                "(`PRICING.display.annual_discount_pct`). A literal (or `0`) here "
+                "quotes different money to every JS visitor while both pages "
+                "stay identical to each other, so no twin comparison can see it "
+                "(#13696 review cycle 2, P1)")
+            # …and the numbers that call produces are the shared source's own:
+            # the pair EXECUTED from the page's call is held to the Python
+            # mirror of the same source. ⛔ It used to be `assert big and total`,
+            # a TAUTOLOGY: every tier in every mode returns a non-empty pair
+            # (`_js_fmt_price(0, …)` -> (`$0`, `Free forever`)), so the loop could
+            # only fail on EMPTY output and never on DIFFERENT MONEY, while its
+            # docstring claimed the numbers were checked. Measured at #14020
+            # review P2.1: the loop survived any price change in either formatter.
+            for tier in ("free", "solo", "pro", "team"):
+                price = pricing["tiers"][tier]["price"]
+                for mode in ("annual", "monthly"):
+                    big, total = _js_fmt_price(price, mode, disc)
+                    mirrored = _fmt_price(price, mode, disc)
+                    assert (big, total) == mirrored, (
+                        f"the shared formatter EXECUTED from {name}'s call and "
+                        f"the Python mirror disagree for {tier} at ${price} "
+                        f"({mode} mode): source={(big, total)!r} "
+                        f"mirror={mirrored!r} — one of them now quotes different "
+                        "money than the other (#14020 review P2.1)")
+
     def test_both_pages_init_to_the_same_billing_mode(self):
         """The render is compared; the statement that SEEDS it was not.
 
@@ -8985,7 +9375,14 @@ class TestPricingSourceIsShared:
             "the rounding contract has no home, so each page would re-implement it")
         for name, path in PRODUCT_PAGES_SHARING_PRICING:
             html = path.read_text(encoding="utf-8")
-            assert "window.tortoiseFmtPrice(" in html, (
+            # ⛔ CODE, not the document. #13696 review cycle 2 (P1, measured):
+            # reading raw `html` let a page replace `fmtPrice` with a local
+            # re-implementation and keep this row GREEN by leaving the sentence
+            # `// window.tortoiseFmtPrice( … ) is the shared contract` in a
+            # comment — 248 rows green over exactly the defect four earlier
+            # rounds fixed elsewhere in this file.
+            code = _code_only("\n".join(_inline_scripts(html)))
+            assert "window.tortoiseFmtPrice(" in code, (
                 f"{name} does not call `window.tortoiseFmtPrice` — it formats "
                 "the shared numbers itself, which is the drift one step past "
                 "the table (#13645)")
@@ -8993,7 +9390,7 @@ class TestPricingSourceIsShared:
             # only ONE spelling of the same re-derivation, so `price*12` (or
             # `price *12`) would slip past a plain substring check — and the
             # re-derivation, not its spacing, is the defect.
-            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", html), (
+            assert not re.search(r"Math\.round\(\s*price\s*\*\s*12", code), (
                 f"{name} re-derives the annual per-month price instead of "
                 "delegating to `window.tortoiseFmtPrice`")
 
@@ -9223,14 +9620,64 @@ class TestConsentSeam:
             f"no `function {name}(` at the module's own indent in consent.js — "
             "this gate's subject moved, so it is no longer asserting order")
 
+    def test_the_page_half_of_the_consent_seam_does_not_depend_on_a_CDN(self):
+        """The funnel must register even when the GSAP CDN is blocked.
+
+        #13696 review cycle 2 (P2, measured by evaluating the page's inline
+        script with `gsap` undefined): the funnel block used to be the TAIL of
+        the gsap `<script>`, whose first statement is
+        `gsap.registerPlugin(ScrollTrigger)`. A blocked cdnjs — a common
+        corporate-proxy condition, under which the page still renders fine on
+        its static cards — therefore threw BEFORE
+        `window.addEventListener('tortoise:consent', trackView)` and the click
+        delegate ran, so all three funnel events went to zero with no signal.
+        That is exactly the "blocked requests read as 'nobody clicked'" hazard
+        the page's own comment names.
+
+        Pinned structurally rather than by position: the script that registers
+        the listener must contain no GSAP use, and it must appear BEFORE any
+        `<script src>` that loads gsap.
+        """
+        html = _product_teams_html()
+        scripts = list(re.finditer(
+            r"<script\b([^>]*)>(.*?)</script>", _without_html_comments(html),
+            re.S | re.I))
+        listener = [m for m in scripts
+                    if "addEventListener('tortoise:consent'" in _code_only(m.group(2))]
+        assert listener, (
+            "the page no longer registers a `tortoise:consent` listener at all "
+            "(#13696)")
+        assert len(listener) == 1, (
+            f"the consent listener is registered in {len(listener)} scripts — "
+            "this row cannot tell which one must precede the CDN tags")
+        reg = listener[0]
+        assert "gsap." not in _code_only(reg.group(2)), (
+            "the script that registers the consent listener also uses GSAP, so "
+            "a blocked/failed GSAP CDN throws before the listener is "
+            "registered and every funnel event silently goes to zero "
+            "(#13696 review cycle 2)")
+        gsap_srcs = [m for m in scripts
+                     if re.search(r"gsap", m.group(1), re.I)]
+        if gsap_srcs:
+            assert reg.start() < min(m.start() for m in gsap_srcs), (
+                "the consent listener is registered AFTER a `<script src>` that "
+                "loads GSAP — a blocked CDN then kills the funnel "
+                "(#13696 review cycle 2)")
+
     def test_the_module_emits_the_event_the_page_listens_for(self):
-        js = CONSENT_JS.read_text(encoding="utf-8")
+        # ⛔ CODE, not the file: `_code_only` cuts comment spans, so a module
+        # whose dispatch was commented out — leaving the event NAME in prose —
+        # is RED here. #13696 review cycle 2 (P1, measured): reading the raw
+        # file left all three `TestConsentSeam` rows green over exactly that
+        # mutation, which is the "clicks with no denominator" defect this class
+        # exists to catch.
+        js = _code_only(CONSENT_JS.read_text(encoding="utf-8"))
         assert f'"{self.EVENT}"' in js, (
             f"consent.js never dispatches `{self.EVENT}`. The niche page's only "
             "page-view capture waits for it, so with no emit every visit that "
             "does not re-decide consent is silently uncounted — clicks with no "
             "denominator (#13645)")
-        assert f"'{self.EVENT}'" in _without_html_comments(_product_teams_html()), (
+        assert f"'{self.EVENT}'" in _live_markup(_product_teams_html()), (
             f"the niche page no longer listens for `{self.EVENT}` — its page "
             "view would then fire only when the decision happens mid-visit")
 
@@ -9360,6 +9807,45 @@ class TestConsentSeam:
             "`trackView()` calls `track()` BEFORE checking `consented()`, so "
             "the gate is no longer the only thing between an undecided "
             "visitor and a beacon (#13645)")
+
+    def test_the_click_delegate_counts_the_entry_points_the_legend_names(self):
+        """The funnel's only conversion event must have a pinned selector.
+
+        Nothing else binds the delegate. MEASURED (round 4): retargeting
+        `ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')`
+        to a bare `[data-cta]` left the whole file green, while the four tier
+        cards' and the self-host block's `/auth` links stopped being counted as
+        `product_teams_cta_primary` — the campaign's one conversion event,
+        silently zeroed on the page whose stated purpose is to carry its own
+        denominator. The legend above the handler would have kept describing
+        the old behaviour with no red anywhere.
+        """
+        code = _live_markup(_product_teams_html())
+        assert '[data-cta], #pricing-section a[href^="/auth"]' in code, (
+            "the click delegate no longer selects the funnel's `/auth` entry "
+            "points: the tier cards' and the self-host block's links would "
+            "raise no event, and nothing else in this suite would notice")
+        assert "el.getAttribute('data-cta') === 'primary'" in code, (
+            "the hero's primary CTA is no longer classified as "
+            "`product_teams_cta_primary`")
+        assert "el.closest('#pricing-section')" in code, (
+            "the `/auth` links inside `#pricing-section` are no longer "
+            "classified as `product_teams_cta_primary`")
+
+        # The legend's decomposition, derived from the MARKUP rather than from
+        # the prose it is written in: four tier cards, plus the self-host
+        # block's one `/auth` link.
+        pricing = _element_by_id(_product_teams_html(), "pricing-section")
+        cards = len(re.findall(r'class="[^"]*\bpricing-card\b', pricing))
+        auth = len(re.findall(r'href="/auth"', pricing))
+        assert cards == 4, (
+            f"#pricing-section carries {cards} tier cards; the funnel legend "
+            "names four — update the legend and this row together")
+        assert auth == cards + 1, (
+            f"#pricing-section carries {auth} `/auth` links but {cards} tier "
+            "cards. The legend says 'the four tier cards and the self-host "
+            "block's \"Migrate to cloud anytime\", the only self-host CTA "
+            "that reaches /auth' — a new entry point must be named there too")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -9629,7 +10115,12 @@ class TestProductTeamsIdentity:
             "defect and an undercount (blocked requests read as nobody clicked)")
 
     def test_the_three_funnel_events_are_named_in_the_source(self):
-        html = _without_html_comments(_product_teams_html())
+        # `_code_only`, not `_without_html_comments`: that helper strips HTML
+        # comments only, so a JS comment quoting the three event names left this
+        # row green over a page whose `EVENTS` table was commented out — every
+        # CTA click and the consent event then threw `ReferenceError` and the
+        # experiment raised nothing, with no red anywhere (#13696 round 5, P1).
+        html = _live_markup(_product_teams_html())
         for event in PRODUCT_TEAMS_EVENTS:
             assert f"'{event}'" in html, (
                 f"the page never names the `{event}` event. The owner decision "
@@ -9755,14 +10246,32 @@ class TestProductTeamsIdentity:
 
 
 class TestProductTeamsCopy:
-    """The owner's PDF copy, VERBATIM, section by section.
+    """The owner's PDF copy, VERBATIM, section by section — with THREE ruled exceptions.
 
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
-    repo reads it (the product page's guard deliberately stopped pinning copy in
-    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
-    reason beside them — a builder "fixing" them is the failure this class
-    exists to catch.
+    repo reads it (the product page's guard deliberately stopped pinning copy
+    in #9652).
+
+    ⛔ THE COPY MAY NOT BE "CORRECTED" WITHOUT THE RULING ON THE ARTIFACT — and
+    the owner HAS now ruled, so the two readings ship corrected and these pins
+    assert the ruled forms. The ruling is recorded here, not asserted:
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+    It names the two readings as typos and states that, for those two strings
+    only, it supersedes the earlier "must survive the build unchanged"
+    instruction. Everything else stays verbatim — except the onboarding
+    heading's trailing full stop, which the owner also asked to remove (#13696
+    item 4). That is a THIRD departure, and it is recorded as one rather than
+    folded into the copy ruling.
+
+    ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
+    (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
+    row, reverting the page's copy AND these constants together would stay
+    green — the two move as a pair, so a pair-revert is exactly the shape a
+    stale instruction would produce. An earlier revision of this branch did
+    revert the pair, correctly, while the ruling was not on the artifact;
+    `ba53339f58` set the condition, and this docstring is where a future lane
+    reads it instead of re-deriving it.
     """
 
     #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
@@ -9770,7 +10279,9 @@ class TestProductTeamsCopy:
     H1 = "A Superbrain for Founders & Product Teams"
     HERO_SUB = "A million moving pieces. One coherent & logical picture."
 
-    #: page 1 — the intro block (after the PDF's hairline rule).
+    #: page 1 — the intro block. The first line is a `.lead` since #13696 (it
+    #: reads as the section's title) and the PDF's hairline rule above it was
+    #: removed on the owner's instruction — neither changes the text.
     INTRO = (
         "Free up time from repetitive explaining, supervision, and managing dependencies.\n"
         "When agents (and people) understand goal cascades, root causes, trade-offs, "
@@ -9781,9 +10292,12 @@ class TestProductTeamsCopy:
     )
 
     #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
+    #: ⛔ `decisions` (PLURAL) is the owner's RULING, not a builder's tidy-up:
+    #: #13645#issuecomment-7047852104 records it, and the PDF's singular is the
+    #: typo it corrects (#14020 review P1 at `73dbbf66ea`).
     COMPUTE = (
         "Tortoise then computes over this context, analysing hundreds or even "
-        "millions of variables so you and your agents make decision with "
+        "millions of variables so you and your agents make decisions with "
         "superintelligence."
     )
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
@@ -9801,12 +10315,12 @@ class TestProductTeamsCopy:
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
         ("beat-reason", "03 · Reason",
-         "Improve decision-making with super intelligence, grounded in your "
+         "Improve decision-making with superintelligence, grounded in your "
          "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
          "inspired by interconnected prediction markets, Tortoise can compute "
          "hundreds or even millions of data points."),
     )
-    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI."
+    ONBOARD_H2 = "Onboard in 5 minutes, without learning another UI"
     ONBOARD_P = (
         "Tortoise connects via MCP or SDK, so you and your agents can use it in "
         "Codex, Claude Code & Web, ChatGPT, Cursor, Pi, or any other harness."
@@ -9834,23 +10348,370 @@ class TestProductTeamsCopy:
             f"the intro block reads {paragraphs!r}; the owner's page 1 reads "
             f"{self.INTRO!r}")
 
-    def test_the_compute_claim_is_verbatim_including_its_defect(self):
-        """⛔ "make decision with superintelligence" is NOT a typo to fix.
+    def test_the_intro_opens_on_the_lead_and_carries_no_rule(self):
+        """#13696 item 2: the hairline rule is GONE, the first line IS the lead.
+
+        Both halves read the SERVED markup. Without this row the owner's item 2
+        could be reverted silently and the whole suite stay green — measured:
+        re-inserting `<div class="rule" aria-hidden="true"></div>` and dropping
+        `class="lead"` reds nothing else here, because
+        `test_the_intro_block_carries_the_three_paragraphs` counts <p>s (a div
+        is invisible to it) and the lead is still a <p>.
+        """
+        intro = _element_by_id(_product_teams_html(), "beat-intro")
+        assert 'class="rule"' not in intro, (
+            "the intro still renders a `class=\"rule\"` element — the owner "
+            "asked for the hairline divider to be DELETED (#13696 item 2), and "
+            "it also outdented 32.8px past the text at 390px wide")
+        first = re.search(r"<p[^>]*>", intro)
+        assert first, "#beat-intro has no paragraph"
+        assert 'class="lead"' in first.group(0), (
+            f"the intro's first paragraph reads {first.group(0)!r}; it must "
+            "carry `class=\"lead\"` so the opening line reads as the section's "
+            "title rather than as body copy (#13696 item 2)")
+
+    def test_the_lead_resolves_the_shared_measure_in_the_prose_font(self):
+        """The lead's first line may not be WIDER than the prose under it.
+
+        #14020 review P1, measured: `--prose-measure: min(660px, 74ch)` was
+        declared on `#beat-intro` and consumed by `.lead`. A custom property is
+        substituted as a TOKEN STREAM, so its `ch` resolves at the CONSUMER —
+        `.lead`, whose `font-size` was the serif clamp (1.3–1.9rem) — where 74ch
+        is ~710–780px, so `min()` picked the flat 660px while the paragraphs
+        below computed 605.625px (13.6px mono). 54px wider, ~27px left of the
+        prose, every box flex-centred: owner item 3's defect one element up.
+        Headless Chrome at 768x900: `.lead` 660px @ 20.8px vs `p` 605.625px.
+
+        Three things keep it resolved in the PROSE font, and each is asserted
+        separately so a revert names itself: the `<p class="lead">` declares no
+        font-size (the serif lives on its inner `<span>`), it declares no
+        max-width (it INHERITS the shared measure rather than restating it), and
+        no custom property carries a `ch` measure — that is the trap itself.
+        """
+        css = _product_teams_html()
+
+        lead_rules = _css_rules_with_scope(css, "#beat-intro .lead")
+        assert lead_rules, "`#beat-intro .lead` declares no rule"
+        for body, inside_media in lead_rules:
+            where = "inside an @media block" if inside_media else "at top level"
+            assert "font-size" not in body, (
+                "`#beat-intro .lead` declares a `font-size` "
+                f"({where}): {body.strip()!r}. `max-width: min(660px, 74ch)` on "
+                "this <p> resolves `74ch` against THAT size — the serif clamp "
+                "makes it ~710–780px, so `min()` picks the flat 660px while the "
+                "prose below is 605.6px: the intro's first line 54px wider and "
+                "~27px left of it (#14020 review P1). Keep the serif on the "
+                "inner <span>.")
+            assert "max-width" not in body, (
+                "`#beat-intro .lead` declares its own `max-width` "
+                f"({where}): {body.strip()!r}. The lead must INHERIT the shared "
+                "`min(660px, 74ch)` from `#beat-intro p` — a second declaration "
+                "is a second measure, and a `var(--…)` one resolves its `ch` "
+                "at this <p> anyway (#14020 review P1)")
+            # `ch` is the advance of `0` in the CONSUMING element's font, so the
+            # FONT FAMILY matters as much as the size: guarding `font-size`
+            # alone left this row blind. Measured (#14020 review P1): adding
+            # `#beat-intro .lead { font-family: Georgia, serif }` made the lead
+            # 502.97px against the prose's 605.63px at 768x900 — 51.3px the
+            # OTHER way, the alignment defect restored — with this row green.
+            assert not re.search(r"(?:^|;)\s*(?:font-family|font)\s*:", body), (
+                "`#beat-intro .lead` switches its own font "
+                f"({where}): {body.strip()!r}. `max-width: min(660px, 74ch)` is "
+                "resolved in THIS element's font — `ch` is the advance of `0` — "
+                "so a serif or mono switch moves the lead's measure away from "
+                "the prose's even at the same size (measured with Georgia: "
+                "502.97px vs 605.63px at 768x900, #14020 review P1). The serif "
+                "belongs on the inner <span>.")
+
+        span_rules = [body for body, _inside_media in
+                      _css_rules_with_scope(css, "#beat-intro .lead > span")]
+        assert span_rules, (
+            "`#beat-intro .lead > span` declares no rule — the lead's serif has "
+            "to live on an inner element, or it lands back on the element whose "
+            "font-size resolves `74ch` (#14020 review P1)")
+        # …read through the COMMENT-BLANKED reader (`_css_rules_with_scope`):
+        # a raw-sheet reader would let a declaration wrapped in `/* … */` inside
+        # its own rule — the shape an editor leaves while debugging — keep this
+        # row GREEN while the lead loses its serif (#14020 review P2).
+        assert any("font-family: var(--serif)" in b for b in span_rules), (
+            "the lead's inner <span> does not take the serif; owner item 2 has "
+            "the opening line read as the section's title, not as body copy")
+        # …and the <span> has to EXIST. The serif moved onto it, so deleting it
+        # from the markup drops the lead back to body copy with every CSS row
+        # above still green: `_beat_text` strips tags, so the copy pins cannot
+        # see it, and the rule for `> span` simply never applies (#14020 review
+        # P1, measured: span removed, nothing reds).
+        lead_markup = re.search(
+            r'<p[^>]*\bclass="lead"[^>]*>(.*?)</p>',
+            _element_by_id(_product_teams_html(), "beat-intro"), re.S)
+        assert lead_markup, 'the page carries no `<p class="lead">`'
+        assert re.match(r"\s*<span[\s>]", lead_markup.group(1)), (
+            f"the lead's markup reads {lead_markup.group(0)[:160]!r}; the serif "
+            'is declared on `#beat-intro .lead > span`, so the markup must stay '
+            '<p class="lead"><span>…</span></p> — without the inner <span> the '
+            "serif silently disappears and no CSS row above reds (#14020 "
+            "review P1)")
+
+        # ...and nothing may move the lead's font through a selector that does
+        # not NAME it. `.lead` is a <p> inside `#beat-intro`, so any
+        # `#beat-intro`-rooted rule without a child combinator can reach it:
+        # `#beat-intro p:first-of-type { font-size: 2rem }` resolved the lead's
+        # `74ch` past the flat 660px while EVERY row in this class stayed green
+        # (#14020 review cycle 3, P1 — measured, not reasoned).
+        reachable = [
+            (prelude, _effective_decl(body, "font-size"))
+            for prelude, body, inside_media in _css_all_rules(css)
+            if not inside_media
+            and re.search(r"(?:^|;)\s*(?:font-size|font-family|font)\s*:", body)
+            for part in (p.strip() for p in prelude.split(","))
+            if part.startswith("#beat-intro") and ">" not in part
+        ]
+        assert reachable == [], (
+            f"rules set the lead's font without naming `.lead`: {reachable!r}. "
+            "`.lead` is a <p> inside `#beat-intro`, so these reach it — and "
+            "`max-width: min(660px, 74ch)` resolves in ITS font, so changing "
+            "that size moves the lead's measure to ~the flat 660px while every "
+            "row above stays green (#14020 review cycle 3 P1). The serif and "
+            "any size live on `#beat-intro .lead > span`.")
+
+        # ⛔ `\bch\b` can NEVER match a CSS `ch` unit: the unit always follows a
+        # digit, and digit -> letter is not a word boundary, so the pin this row
+        # advertised was dead (#14020 review cycle 5, measured GREEN with
+        # `--prose-measure: min(660px, 74ch)` back in the sheet). Match the unit
+        # as it is written: a number, then `ch`.
+        ch_property = re.search(
+            r"--[\w-]+\s*:[^;{}]*?\d+(?:\.\d+)?ch\b", _css_blanked(css))
+        assert ch_property is None, (
+            f"a custom property carries a `ch` measure: {ch_property.group(0)!r}. "
+            "`ch` in a custom property resolves against whatever element "
+            "CONSUMES the var(), not the one that declares it, so this reads as "
+            "a shared measure and is not one — measured #14020 review P1: "
+            "declared on `#beat-intro`, picked up as the flat 660px at `.lead`. "
+            "Declare the measure on the rule that applies it.")
+
+    def test_the_outcomes_grid_is_never_wider_than_the_prose_above_it(self):
+        """#13696 item 3: ONE measure, and no flat override in the narrow block.
+
+        The owner's item 3 was a grid WIDER than the prose above it: on
+        `origin/main` (`5ff1466ddc`) `.outcomes` carried a FLAT `max-width:
+        760px` (:349) while the prose carried a FLAT `max-width: 660px`
+        (`#beat-intro p { max-width: 660px }`, :336) — no `ch` term existed
+        anywhere, so from 660px up the grid box stood 54.1px wider than the text
+        above it (27.1px out on each side).
+
+        The shared `min(660px, 74ch)` closes that, and the shape it regressed
+        into ONCE — inside this branch's own first fix commit (`e11914c020d`) —
+        was a FLAT `.outcomes { max-width: 660px }` inside `@media (max-width:
+        760px)`, which restored the same 54.1px overhang at 760. ⛔ Those are two
+        different states and the attribution matters: the owner reported the
+        `origin/main` one; the media-block one was ours. So it is pinned twice:
+        the shared measure must exist, and no max-width block may re-declare
+        one.
+        """
+        css = _product_teams_html()
+        shared = _css_declarations(
+            css, "#beat-intro p, #beat-compute > p, .outcomes")
+        assert shared is not None, (
+            "no shared-measure rule for `#beat-intro p, #beat-compute > p, "
+            ".outcomes` — the prose and the ↑/↓ grid must stand on one measure")
+        # The WINNING declaration, not the presence of the string: `min(660px,
+        # 74ch)` followed by `max-width: 660px` in the same block leaves a
+        # substring search green while the effective measure is the flat value
+        # the message forbids (#14020 review cycle 3, P2 — measured).
+        assert _effective_decl(shared, "max-width") == "min(660px, 74ch)", (
+            f"the shared measure's winning `max-width` is "
+            f"{_effective_decl(shared, 'max-width')!r} (block: {shared!r}); it "
+            "must BE `min(660px, 74ch)` — a flat 660px keeps 80 mono characters "
+            "per line at the 13.6px font floor (the band is 45–75ch), and a "
+            "later declaration in the block wins whatever the earlier one says")
+        for width, body in _max_width_media_blocks(css):
+            for m in re.finditer(r"\.outcomes\s*\{([^}]*)\}", body):
+                assert "max-width" not in m.group(1), (
+                    f"`@media (max-width: {width}px)` re-declares a FLAT "
+                    f"`max-width` for `.outcomes` ({m.group(1).strip()!r}). "
+                    "That overrides the shared `min(660px, 74ch)` for every "
+                    "width in the band and makes the grid wider than the prose "
+                    "it sits under — owner item 3, #13696. Delete the override "
+                    "and let the grid inherit the shared measure.")
+        # ⛔ THE MEDIA-ONLY SWEEP ABOVE IS NOT THE INVARIANT, and reading only
+        # `@media (max-width: Npx)` bodies left the BASE block unread: appending
+        # `.outcomes { max-width: 660px; }` at top level restored item 3's
+        # 54.1px overhang at 760px with every assertion above GREEN (#14020
+        # review P2.3, measured). The invariant is the EFFECTIVE measure, so
+        # read every rule whose selector LIST contains `.outcomes` — base and
+        # media alike — and allow exactly one declaration: the shared measure.
+        with_measure = [
+            (prelude, body) for prelude, body in _css_rule_preludes(css, ".outcomes")
+            if "max-width" in body]
+        assert len(with_measure) == 1, (
+            "`.outcomes` gets its measure from "
+            f"{len(with_measure)} rules: "
+            f"{[p for p, _ in with_measure]!r}. Exactly ONE may declare it — a "
+            "second override (base OR media) is owner item 3 again: the grid "
+            "is wider than the prose above it whenever that rule applies "
+            "(#13696, #14020 review P2.3)")
+        prelude, body = with_measure[0]
+        assert _effective_decl(body, "max-width") == "min(660px, 74ch)", (
+            f"the `.outcomes` measure is declared on `{prelude}` as "
+            f"{body.strip()!r}; the grid's ONLY max-width must be the shared "
+            "`min(660px, 74ch)` — a flat value is the 54.1px overhang at 760px "
+            "(#13696)")
+        # ⛔ The DECLARATION being right is not the MEASURE being right: `74ch`
+        # is only the same length for the grid and the prose if both resolve `ch`
+        # against the same font-size (`ch` = advance of `0` in the CONSUMING
+        # element's font). `.outcomes` used to inherit the body's 14px while
+        # `.beat p` carries the clamp below, so the shared term computed 623.7px
+        # for the grid against 605.9px for the prose at 768 — item 3 again, 18px
+        # the other way. Measured (#14020 review P2.4): `font-size: 14px` on
+        # `.outcomes` reds no other row in this file.
+        prose_rules = [
+            (b, inside) for b, inside in _css_rules_with_scope(css, ".beat p")
+            if not inside and "font-size" in b]
+        assert prose_rules, "`.beat p` declares no base `font-size` to mirror"
+        want = _effective_decl(prose_rules[-1][0], "font-size")
+        # ⛔ Base AND media: `ch` resolves at the consuming element, so a
+        # `font-size` on `.outcomes` inside `@media (max-width: 760px)` moves the
+        # grid's `74ch` off the prose's at exactly the widths item 3 is about —
+        # and the media block is the natural place to edit, because it already
+        # owns `.outcomes`. Measured (#14020 review cycle 5): `font-size: 14px`
+        # added there left this row GREEN (623.7px vs 605.9px at the clamp
+        # floor), which is why the filter is no longer base-only.
+        grid_rules = [
+            (b, inside) for b, inside in _css_rules_with_scope(css, ".outcomes")
+            if "font-size" in b]
+        assert grid_rules, (
+            "`.outcomes` declares no base `font-size`, so it inherits the body's "
+            "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
+            "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
+            "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
+        for body_, inside_ in grid_rules:
+            got = _effective_decl(body_, "font-size")
+            assert got == want, (
+                f"`.outcomes` resolves `ch` at `{got}` "
+                f"({'inside an @media block' if inside_ else 'at base'}) while "
+                f"`.beat p` resolves it at `{want}` — so the shared "
+                "`min(660px, 74ch)` is two different measures at those widths "
+                "and the grid can sit wider than the prose above it (#14020 "
+                "review P2.4, cycle 5, #13696 item 3)")
+
+    def test_the_hero_copy_column_shares_one_left_edge(self):
+        """#13696 item 1: `.beat p` centring may not leak into the hero.
+
+        `.beat p` sets `text-align: center` and caps at 560px, and `.hero-sub` /
+        `.hero-links` ARE <p> elements — so without these overrides the h1/CTA
+        sat on the column's left edge while the link row started 71px right of
+        it (measured at 1440x900: h1/CTA x=220, links x=291), in three axes.
+        """
+        css = _product_teams_html()
+        # The last BASE rule, not the first and not the media blocks:
+        # `@media (max-width: 760px)` deliberately re-centres the stacked hero
+        # (`.doc-copy`/`.hero-sub` -> centre), which is correct on one column.
+        # What must never regress is the EFFECTIVE DESKTOP alignment — so
+        # `copy_rules[0]` (the first rule) is the wrong reader: appending a
+        # later `text-align: center` at top level leaves it green while the
+        # cascade is centred, which IS the 71px-off-axis defect (#14020 review
+        # P2.4, measured).
+        for selector, why in (
+            ("#beat-hero .doc-copy",
+             "it must declare `text-align: left`, or `.beat p`'s centring leaks "
+             "into `.hero-sub` and `.hero-links` — the 71px-off-axis defect of "
+             "#13696 item 1"),
+            ("#beat-hero .hero-sub",
+             "it is a <p>, so it inherits `.beat p`'s centred alignment "
+             "(#13696 item 1)"),
+            ("#beat-hero .hero-links",
+             "it is a <p>, so it inherits `.beat p`'s centred alignment "
+             "(#13696 item 1)"),
+        ):
+            scoped = _css_rules_with_scope(css, selector)
+            assert scoped, f"{selector} declares no rule"
+            base = [body for body, inside_media in scoped if not inside_media]
+            assert base, (
+                f"{selector} declares no BASE rule — every one of its "
+                f"{len(scoped)} rule(s) sits inside an `@media` block")
+            assert _effective_decl(base[-1], "text-align") == "left", (
+                f"the last base `{selector}` rule's winning `text-align` is "
+                f"{_effective_decl(base[-1], 'text-align')!r} (block: "
+                f"{base[-1].strip()!r}); {why}. A later top-level rule wins the "
+                "cascade even when an earlier one says `left`, and a later "
+                "DECLARATION in this same block wins too — read the value that "
+                "wins, not whether the string appears (#14020 review P2.4, "
+                "cycle 3 P1)")
+        # Comment-blanked, like the alignment rows above: a raw-sheet reader
+        # would let `#beat-hero .hero-links { /* display: flex; */ }` — a
+        # commented-out declaration inside its own rule — satisfy this row
+        # while the row stops being a row (#14020 review P2).
+        # ⛔ BASE rule only, like the separator row below and for the same
+        # reason: joining every body lets a narrow-viewport `display: flex`
+        # mask a base rule that is no longer a row — the desktop links stop
+        # being a row and the `·` separators can lead a wrapped line, with this
+        # row green (#14020 review cycle 5, measured).
+        link_rules = [body for body, inside_ in
+                      _css_rules_with_scope(css, "#beat-hero .hero-links")
+                      if not inside_]
+        assert link_rules, (
+            "`#beat-hero .hero-links` declares no BASE rule — every one of its "
+            "rule(s) sits inside an `@media` block")
+        links = link_rules[-1]
+        assert _effective_decl(links, "display") in {"flex", "inline-flex"}, (
+            "`.hero-links` is not a flex row on the copy column's left edge — "
+            "the `·` separators are `::after` on non-last links, a layout that "
+            "only holds as a row (#13696 item 1)")
+        # The separator must keep BOTH declarations, in this order: the plain one
+        # is the fallback for engines that drop alt-text syntax at parse time;
+        # the alt-text one removes `·` from the accessible name. Reverting to the
+        # plain form alone silently re-leaks `·` into all three names, and
+        # dropping the fallback makes the dot VANISH on Chrome<77 / Firefox<128 /
+        # Safari 16–17.3 (measured, #14020 review).
+        # ⛔ BASE rule only, read through the SCOPE-AWARE, comment-blanked
+        # reader. Joining every body for the selector is scope-blind: moving both
+        # declarations into the narrow-viewport block (where a `content: none`
+        # also lives) satisfied the assertions while Chromium rendered NO dot on
+        # desktop and one on mobile — the exact inversion of the intent
+        # (#14020 review).
+        sep_scoped = _css_rules_with_scope(
+            css, "#beat-hero .hero-links a:not(:last-child)::after")
+        sep_base = [body for body, inside_media in sep_scoped if not inside_media]
+        assert sep_base, "the hero `::after` separator rule has no base rule"
+        sep_all = "".join(sep_base)
+        assert 'content: "\\00b7" / ""' in sep_all, (
+            "the separator lost its CSS ALT TEXT (`content: \"\\00b7\" / \"\"`), "
+            "so `·` is back in every link's accessible name")
+        assert 'content: "\\00b7";' in sep_all, (
+            "the separator has no single-value fallback declaration. Without it "
+            "an engine that cannot parse alt-text syntax drops the declaration "
+            "entirely and the `·` disappears (Chrome<77, Firefox<128, Safari "
+            "16–17.3) — the fallback is not redundant")
+        assert sep_all.index('content: "\\00b7";') < sep_all.index('content: "\\00b7" / ""'), (
+            "the fallback declaration must come BEFORE the alt-text one, or it "
+            "overrides it and `·` returns to the accessible name")
+
+    def test_the_compute_claim_carries_the_owner_ruled_correction(self):
+        """The PDF's singular "make decision" ships as "make decisions" — RULED.
 
         The PDF reads "so you and your agents make decision with
-        superintelligence." (singular `decision`). It is a defect a copy editor
-        would flag, and the scoping recommended normalising it — but the owner
-        did not rule, and this lane's instruction is verbatim. So it ships as
-        written, and this pin is what keeps the next reader from "correcting"
-        it silently: if the owner rules, change the copy AND this pin together.
+        superintelligence." The singular is a typo a copy editor would flag, and
+        the owner ruled it so. ⛔ THE RULING IS ON THE ARTIFACT, which is what
+        makes this pin legitimate rather than a builder's preference:
+        https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+        An earlier revision of this branch reverted this correction — correctly
+        — because the ruling was only in a conversation, and `ba53339f58`
+        recorded exactly that condition: "the copy stays verbatim until the
+        ruling is ON the artifact". The ruling is now on the artifact, so copy
+        and pin move together, as that commit required.
+
+        Flipping this pin back to the PDF's spelling is therefore not
+        "honouring verbatim" — it re-lands a typo the owner ruled on.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
         first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
         assert first, "#beat-compute has no paragraph"
         assert _beat_text(first.group(1)) == self.COMPUTE, (
             f"the compute claim reads {_beat_text(first.group(1))!r}; the "
-            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
-            "(singular) is the owner's text, not a builder typo.")
+            f"owner's page 2, as ruled, reads {self.COMPUTE!r}. ⛔ `make "
+            "decisions` (plural) is the owner's ruling, recorded on "
+            "#13645#issuecomment-7047852104 — restoring the PDF's singular "
+            "re-lands a typo the owner ruled on.")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -9882,9 +10743,47 @@ class TestProductTeamsCopy:
                 f"PDF reads {heading!r}")
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
-                f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
-                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
-                "is the owner's spelling.")
+                f"#{section_id}'s paragraph reads {body!r}; the PDF, as ruled, "
+                f"reads [{paragraph!r}]. ⛔ `superintelligence` (one word) in "
+                "step 03 is the owner's ruling, recorded on "
+                "#13645#issuecomment-7047852104 — restoring the PDF's two-word "
+                "spelling re-lands a typo the owner ruled on.")
+
+    def test_the_pdfs_two_typos_are_absent_from_the_rendered_page(self):
+        """The PDF's spellings must NOT reach the reader — pinned as ABSENCE.
+
+        ⛔ Every other copy row in this class compares the page to a CONSTANT on
+        this class, so reverting the page's copy AND the constant together keeps
+        all of them green — and a PAIR-REVERT is exactly the shape a stale
+        "the copy is verbatim, unchanged" instruction produces (it happened on
+        this branch once, at `fdd3a6a60f`). This row reads the SERVED markup, so
+        it reds on the pair, and `_served` drops HTML comments so the header
+        note that QUOTES the PDF's spelling cannot satisfy or defeat it.
+
+        The ruling that makes the corrected forms correct:
+        https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+        """
+        served = _served(_product_teams_html())
+        for typo in ("make decision with superintelligence",
+                     "super intelligence, grounded"):
+            assert typo not in served, (
+                f"the rendered page contains the PDF's spelling {typo!r}. The "
+                "owner ruled it a typo and the corrected string is what ships "
+                "(#13645#issuecomment-7047852104) — restoring it is a revert "
+                "of a recorded ruling, not a return to verbatim copy.")
+        for ruled in ("make decisions with superintelligence",
+                      "superintelligence, grounded"):
+            assert ruled in served, (
+                f"the rendered page is missing the ruled string {ruled!r} "
+                "(#13645#issuecomment-7047852104)")
+        # The onboarding heading is the THIRD departure (#13696 item 4) and its
+        # pair-revert was unpinned: `ONBOARD_H2` has no full stop, so reverting
+        # page and constant together kept every copy row green. Pinned ABSENT
+        # here for the same reason as the two spellings above.
+        assert "without learning another UI." not in served, (
+            "the onboarding heading renders a trailing full stop. The owner "
+            "asked for it to go (#13696 item 4) — restoring it reverts an owner "
+            "item, and a page+constant pair-revert would otherwise stay green")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")

@@ -80,7 +80,7 @@ def _outcome(*, applied: bool, refusal: str | None = None, outcome: str = "appli
 
 
 def _record(project, order):
-    def call(event, seq):
+    def call(event, seq, *, journal_skipped=False):
         order.append("project")
         return project(event, seq)
     return call
@@ -111,7 +111,7 @@ def test_the_record_is_handed_the_append_s_own_ordinal():
     seen = {}
     log = _Log(seq=41)
 
-    def project(event, seq):
+    def project(event, seq, *, journal_skipped=False):
         seen["seq"] = seq
         return _outcome(applied=True)
 
@@ -169,7 +169,7 @@ def test_a_raising_projection_is_reported_not_raised_after_the_append():
     log = _Log(order=order)
     projection = _Projection(order=order)
 
-    def project(event, seq):
+    def project(event, seq, *, journal_skipped=False):
         order.append("project")
         raise RuntimeError("record is down")
 
@@ -317,14 +317,14 @@ def test_the_outcome_serializes_what_it_claims():
     """
     refused = _outcome(applied=False, refusal="write_failed", outcome="refused")
     armed = live_write.write({"type": "PointAdded"}, log=_Log(seq=9),
-                             project=lambda e, s: refused)
+                             project=lambda e, s, journal_skipped=False: refused)
     assert armed.as_dict() == {
         "seq": 9, "appended": True, "record": "refused",
         "refusal": "write_failed", "folded": False, "unprojected": 1,
         "cache_fold": None}
 
     unarmed = live_write.write({"type": "PointAdded"}, log=_Log(seq=3),
-                               project=lambda e, s: None)
+                               project=lambda e, s, journal_skipped=False: None)
     assert unarmed.as_dict() == {
         "seq": 3, "appended": True, "record": None,
         "refusal": None, "folded": False, "unprojected": 0,
@@ -337,7 +337,8 @@ def test_the_record_outcome_travels_to_the_capture_sink():
     out = _outcome(applied=True)
 
     live_write.write({"type": "PointAdded"}, log=_Log(),
-                     project=lambda e, s: out, record_sink=sink)
+                     project=lambda e, s, journal_skipped=False: out,
+                     record_sink=sink)
 
     assert sink == [out]
 
@@ -345,7 +346,9 @@ def test_the_record_outcome_travels_to_the_capture_sink():
 def test_fold_false_leaves_the_fold_to_the_door():
     projection = _Projection()
     live_write.write({"type": "PointAdded"}, log=_Log(), projection=projection,
-                     fold=False, project=lambda e, s: _outcome(applied=True))
+                     fold=False,
+                     project=lambda e, s, journal_skipped=False: _outcome(
+                         applied=True))
     assert projection.applied == []
 
 

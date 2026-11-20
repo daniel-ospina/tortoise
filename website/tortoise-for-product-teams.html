@@ -7,7 +7,9 @@
        A GTM EXPERIMENT: the product story told for ONE audience — founders and
        product teams. It is ADDED ALONGSIDE `/tortoise`, which stays the
        canonical product page and does NOT redirect here (owner decision,
-       2026-11-12 — `~/.pi/agent/state/DECISION-product-page-11762.md`).
+       2026-11-12, tracked on #13645; the host-map bullet is in
+       `website/website_architecture.md`, pinned by
+       `test_the_routing_decision_is_recorded_in_the_architecture_doc`).
 
        INDEXED, deliberately, and this meta is the decision written where the
        next reader will find it. A niche page nobody can find has no traffic to
@@ -20,11 +22,30 @@
        decision, one file over — keep the two in step.
 
        COPY is the owner's prose from
-       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM —
-       including "make decision with superintelligence" (page 2, singular
-       "decision") and "super intelligence" (step 03) as the PDF spells them.
-       Those are recorded copy defects the owner has not ruled on; verbatim
-       outranks a builder's opinion, so they ship as written.
+       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
+       with THREE departures — departures 1-2 RULED ON #13645, departure 3 is
+       #13696 item 4 — recorded here so these are decisions and not assertions:
+
+       1. page 2 — "make decision" is written "make decisions";
+       2. step 03 — "super intelligence" is written "superintelligence";
+          both ruled as TYPOS, with the correction recorded on the artifact:
+          https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+          That comment states that, for these two strings only, it supersedes
+          the earlier "must survive the build unchanged" instruction — which
+          was the default UNTIL the owner ruled, and is why `ba53339f58`
+          reverted an earlier correction with "the copy stays verbatim until
+          the ruling is ON the artifact". The ruling is now on the artifact, so
+          copy and pin move together, as that revert required.
+
+       3. the onboarding heading — the owner asked for the trailing full stop
+          to go (#13696 item 4), so it reads "Onboard in 5 minutes, without
+          learning another UI" with no period. This is a THIRD departure, not
+          part of the copy ruling above: `origin/main`'s pin asserted the
+          period as the PDF's text, so the departure is recorded here and
+          pinned by `test_the_pdfs_two_typos_are_absent_from_the_rendered_page`
+          rather than left to a comment.
+
+       Copy is verbatim everywhere else.
 
        PRICING is forked from /tortoise as the PDF instructs, and renders from
        the SAME SOURCE: `/assets/tortoise-pricing.js`, loaded by both pages.
@@ -70,8 +91,10 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     /* Tokens are product.html's, plus `--border` lifted from investors.html —
-       the hero's video frame and the intro's hairline rule need it, and minting
-       a third grey for one rule is exactly what the brief excludes. */
+       the hero's video frame and the pricing toggle's fallback need it, and
+       minting a third grey for one hairline is exactly what the brief excludes.
+       (The intro's hairline rule that also used this token was removed on the
+       owner's instruction — #13696 item 2; the token outlived it.) */
     :root {
       --bg: #060b14;
       --border: #1e293b;
@@ -106,7 +129,19 @@
     /* Beat: fixed overlay, z-index above canvas */
     .beat {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center;
+      /* ⛔ `safe center`, not plain `center`. A centred flex column that
+         OVERFLOWS spends its own padding — half the overflow comes off the top —
+         and the hero's 5rem `padding-top` is the only thing keeping its <h1>
+         out from under the fixed Login pill (`padding: 18px 24px` → the button
+         reaches y 54.4). Measured at 320x821: content 783.1px in a padded box of
+         709 → 74.1px of overflow, 37.1px of it off the top, h1 at y=43.0 = an
+         11.4px overlap with the pill. `safe center` falls back to flex-start
+         exactly when the content does not fit, so the padding survives at every
+         viewport — no height threshold, no per-beat special case. Browsers
+         without `safe` keep the plain `center` above, i.e. today's behaviour. */
+      justify-content: safe center;
       z-index: 1; pointer-events: none; opacity: 0;
       padding: 2rem;
       box-sizing: border-box;
@@ -241,12 +276,39 @@
       letter-spacing: -0.01em;
     }
     #beat-hero h1 span { color: var(--accent); }
+    /* ONE alignment grid for the hero copy column.
+       `.beat p` centres body copy and caps it at 560px; both of those leaked
+       into `.hero-sub` and `.hero-links`, which are <p> elements — so the sub
+       and the secondary-link row were centred inside a 560px box while the h1
+       and the CTA sat on the column's left edge (measured at 1440x900: h1/CTA
+       x=220, links row started x=291 — 71px off the axis, in three axes).
+       The subtitle's 560px cap also broke "…& logical picture." onto a second
+       line with one short word alone. Both are overridden here: one left edge
+       and one measure.
+
+       ⛔ NOT literally "one vertical step", and the comment that used to say
+       so was wrong. Measured in Chromium at 1440x900 and 768: h1 → sub is 24px
+       (`.hero-sub { margin-top: 1.5rem }`), sub → CTA is 32px (`#beat-hero
+       .cta-start { margin-top: 2rem }` in its BASE rule, which the narrow block
+       restates as 1.5rem), and CTA → links is 24px. So the column has one left
+       edge and one measure but TWO vertical steps. That is pre-existing (main
+       is identical) and is deliberately NOT "fixed" here: the hero is
+       height-constrained and `safe center` (:~120) is what keeps its 5rem
+       `padding-top` clear of the fixed Login pill, so normalising the step is a
+       layout change that needs a measured pass, not a drive-by in a copy PR. */
+    #beat-hero .doc-copy { text-align: left; }
     #beat-hero .hero-sub {
-      margin-top: 1.25rem;
-      max-width: 560px;
+      margin-top: 1.5rem;           /* the copy column's step */
+      max-width: 640px;             /* holds the line in ONE line where the column can */
       color: var(--text);
       font-size: clamp(0.95rem, 1.6vw, 1.1rem);
       line-height: 1.6;
+      text-align: left;
+      /* Between ~761 and ~837px the copy column is narrower than the line, so
+         it must break — and a plain break left `picture.` alone on line 2
+         (73.2px against 430.1px). Balancing the break removes the orphan at
+         every width instead of only at the two the owner screenshotted. */
+      text-wrap: balance;
     }
 
     /* Hero CTA — product.html's button, unchanged. The .beat overlay is
@@ -271,13 +333,50 @@
       background: #0891b2;
       transform: scale(1.02);
     }
+    /* The secondary-link row: a flex row on the SAME left edge as the h1 and
+       the CTA, with the `·` separators rendered as `::after` on each link that
+       is not last. They were literal ` · ` text nodes between the anchors, so
+       the line-breaker could put one at the START of a wrapped line (and at
+       390x844 left "GitHub repo → ·" trailing on line 1 with "Read the blog →"
+       orphaned on line 2). Glued to its preceding link, a separator can never
+       lead a line; on narrow screens the row stacks one link per line and the
+       separators are switched off entirely. */
     #beat-hero .hero-links {
-      margin-top: 1.25rem;
+      margin-top: 1.5rem;
+      max-width: none;
       font-size: 0.85rem;
+      text-align: left;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: flex-start;
+      column-gap: 0.5rem;
+      row-gap: 0.35rem;
     }
     #beat-hero .hero-links a {
       color: var(--accent);
       text-decoration: none;
+      white-space: nowrap;
+    }
+    #beat-hero .hero-links a:not(:last-child)::after {
+      /* The `·` is generated content inside an <a>, and generated content
+         participates in NAME-FROM-CONTENT: a plain `content: "\00b7"` makes
+         every link's accessible name read "Browse the docs → ·" and puts the
+         dot inside the click target. The second value below is CSS ALT TEXT,
+         which removes it from the name.
+
+         ⛔ TWO DECLARATIONS, and the first is not redundant: an engine that
+         does not understand alt-text syntax DROPS the declaration at parse
+         time (`content` computes to `normal`, measured), so with only the
+         alt-text form the separator would VANISH on Chrome <77, Firefox <128
+         and Safari 16–17.3 — it does not "degrade to the previous behaviour",
+         and there is no single-value fallback syntax. The plain declaration is
+         therefore the fallback, and supporting engines override it with the
+         alt-text form. (Feature is Newly Available, not Baseline.) */
+      content: "\00b7";
+      content: "\00b7" / "";
+      margin-left: 0.5rem;
+      color: var(--text-dim);
     }
 
     /* Video column — investors.html's `.video` component, verbatim. */
@@ -325,28 +424,119 @@
       color: var(--text-dim); text-transform: uppercase;
     }
 
-    /* ── The intro block's hairline rule (the PDF's ______) ───────────── */
-    .beat .rule {
-      width: min(92vw, 660px);
-      height: 1px;
-      background: var(--border);
-      margin-bottom: 2rem;
-      position: relative; z-index: 1;
+    /* ── Copy measure ───────────────────────────────────────────────────
+       ONE measure for the whole narrative — the intro paragraphs, the compute
+       paragraph and the ↑/↓ grid below them — so the column of prose and the
+       two-column block stand on one alignment grid instead of three.
+       It is `min(660px, 74ch)`, not a flat 660px: `.beat p`'s font floor is
+       0.85rem, so below ~907px the type sits at 13.6px while a flat 660px line
+       kept 80 MONO CHARACTERS per line (measured at 768 and 900; the body-copy
+       band is 45–75ch). 74ch is 606px at that floor and >660px above it, so
+       the desktop line is unchanged at 660px and the mid widths stop being a
+       wall of text. The `ch` term cannot go lower than ~74 either: the two
+       content-sized ↑/↓ columns need 592px to stay side by side (322.3 + 48
+       gap + 221.7), and item 3 forbids the grid being wider than the prose it
+       sits under — so the grid is what sets the floor of the shared measure.
+       ⛔ The hairline rule (`<div class="rule">`) that used to open this beat
+       was REMOVED on the owner's instruction (#13696 item 2) — it also
+       outdented 32.8px past the text at 390px wide and sat 660px wide over a
+       358.8px column. */
+    /* ⛔ `ch` resolves against the font-size of the element that CONSUMES the
+       length — and a custom property does NOT move that point. `--prose-measure:
+       min(660px, 74ch)` declared on `#beat-intro` (or on any ancestor) is
+       substituted into `.lead` as a TOKEN STREAM, so its `ch` still resolves
+       against `.lead`'s own font: with the serif clamp on `.lead` that is
+       ~710–780px, `min()` picks the flat 660px, and the intro's first line is
+       54px wider than — and, every box being flex-centred, ~27px left of — the
+       605.6px prose beneath it. That IS owner item 3's defect, one element up.
+       (Measured at 768×900 in headless Chrome: `.lead` 660px at 20.8px, the
+       paragraph 605.625px at 13.6px. #14020 review P1.)
+
+       So the measure is declared ONCE, on the paragraphs, and the serif that
+       would break it lives on an inner <span> instead of on `.lead` — see the
+       `.lead` rule below. One measure, one place, no custom property to
+       substitute. */
+    #beat-intro p, #beat-compute > p, .outcomes {
+      max-width: min(660px, 74ch);
     }
-    #beat-intro p { max-width: 660px; }
+    /* No last line may be one word. Widening the measure to 74ch moved the
+       break for these paragraphs, and at 41 of 106 sampled widths (640–1040px,
+       including 768/800/820/836/838/900) the second intro paragraph ended on
+       `business.` alone — 73.7px on a 3-line paragraph — and the compute
+       paragraph ended on `superintelligence.` alone (147.4px, 24.3% of its
+       width) at 768–900, where it had been `reliably advance your business.`
+       before. `pretty` is the prose variant (it only re-breaks the LAST line);
+       `balance` would re-ragged every line of the paragraph and is why the
+       lead and the hero subtitle use it instead. Unsupported browsers keep the
+       normal wrap, so this degrades to the previous behaviour. */
+    #beat-intro p, #beat-compute > p { text-wrap: pretty; }
     #beat-intro p + p { margin-top: 1.25rem; }
 
-    /* ── The ↑/↓ contrast grid — investors.html's `.outcomes`, verbatim ──
-       Same two-list component, same green/gold markers, the PDF's labels. */
+    /* The intro's first line is a LEAD, not body copy: it opens the section and
+       reads as its title. It stays a <p> (the copy pins read the intro as three
+       paragraphs) and it takes the shared prose measure from the rule above by
+       INHERITANCE — the <p class="lead"> is not restating it.
+
+       ⛔ The serif lives on an INNER <span>, and that is load-bearing rather
+       than cosmetic. `max-width: min(660px, 74ch)` is resolved against THIS
+       <p>'s font-size; put the serif clamp (1.3–1.9rem) on the <p> and `74ch`
+       becomes ~710–780px, so `min()` picks the flat 660px while the body
+       paragraphs beneath it compute 605.6px — the intro's first line 54px wide
+       of the prose and ~27px left of it (measured, #14020 review P1). Keeping
+       the <p> on the body mono font-size is what makes the shared measure
+       resolve to the SAME number for the lead and for the prose below it.
+       Markup: `<p class="lead"><span>…</span></p>`. */
+    #beat-intro .lead {
+      /* 36px below the lead, against 20px between body paragraphs. The intro's
+         three <p> are DIRECT CHILDREN of `.beat`, a flex column, and FLEX-ITEM
+         MARGINS DO NOT COLLAPSE — the gap is `margin-bottom` PLUS the next
+         paragraph's `margin-top: 1.25rem`, so 1rem gives 16 + 20 = 36px.
+         (2.25rem was here first and rendered 56px, not the 36px its comment
+         claimed; measured in Chromium at 320/390/768/900/1440.) */
+      margin-bottom: 1rem;
+      /* Same orphan rule as the hero subtitle: at ~768px this breaks into
+         611.8 / 129.4 ("dependencies." alone) without it. */
+      text-wrap: balance;
+    }
+    #beat-intro .lead > span {
+      font-family: var(--serif);
+      font-size: clamp(1.3rem, 2.6vw, 1.9rem);
+      font-weight: 400;
+      line-height: 1.35;
+      letter-spacing: -0.005em;
+      color: var(--text);
+    }
+
+    /* ── The ↑/↓ contrast grid — investors.html's `.outcomes` COMPONENT ──
+       Same two-list component, same green/gold markers, same baseline-aligned
+       rows. It departs from investors.html in two measured ways (that page's
+       figures are different and it has no `1fr 1fr` pressure): content-sized
+       columns instead of `1fr 1fr`, and a 660px cap instead of 620px so the
+       block sits inside the copy measure above it rather than wider than it. */
     .outcomes {
-      display: grid; grid-template-columns: 1fr 1fr;
+      display: grid;
+      /* CONTENT-SIZED columns, not `1fr 1fr`: the ↑ list is the long one ("Agent
+         Autonomy & Token efficiency", 302px of label) and an equal split forced
+         it to wrap while wasting ~100px on the short ↓ labels. */
+      grid-template-columns: auto auto;
+      justify-content: center;
       gap: 0.6rem 3rem;
       margin-top: 2rem;
-      /* Wide enough that the longest label ("Agent Autonomy & Token
-         efficiency", 34 mono characters) does not wrap: the PDF pairs each ↑
-         with the ↓ BESIDE it, and a wrapped label shifts every row below it
-         out of that pairing. Measured at 620px the first row broke. */
-      max-width: 760px;
+      /* ⛔ NEVER wider than the single column above it. It was 760px against a
+         560px paragraph — measured at 1440x900: the grid spanned 373.7→1066.3
+         (692.7px) where the paragraph spanned 440→1000 (560px), so the ↑ column
+         hung 66.3px off the left of the prose and the whole block read as a
+         wider, unrelated element (owner's item 3). It now shares the prose
+         measure exactly (`min(660px, 74ch)` above); content-sized columns keep
+         the longest label on one line inside it. */
+      /* `ch` resolves against THIS element's font-size, not the paragraph's.
+         `.outcomes` inherits 14px while `.beat p` uses the body clamp, so the
+         shared `min(660px, 74ch)` computed 623.7px here against the paragraph's
+         605.9px at 768 — re-creating item 3 in the opposite direction. Matching
+         the body font-size gives the two the same `ch`; the rows set their own
+         (`li { font-size: 0.95rem }`), so nothing else changes. */
+      font-size: clamp(0.85rem, 1.5vw, 1.05rem);
+      width: 100%;
       position: relative; z-index: 1;
       text-align: left;
     }
@@ -459,9 +649,50 @@
       #beat-hero .hero-sub { margin-left: auto; margin-right: auto; }
       #beat-hero .doc-copy { text-align: center; }
       #beat-hero .cta-start { margin-top: 1.5rem; }
-      .video { width: 100%; max-width: 190px; margin: 0 auto; }
+      /* One link per line, centred — the row cannot fit three links plus their
+         separators in 326px, and wrapping it inline stranded a `·`. Where the
+         row stacks, the separators have nothing to separate. */
+      #beat-hero .hero-links {
+        flex-direction: column;
+        align-items: center;
+        row-gap: 0.3rem;
+      }
+      #beat-hero .hero-links a:not(:last-child)::after { content: none; }
+      /* ⛔ DO NOT touch `#beat-hero`'s padding-top here. The 5rem is the hero's
+         ONLY clearance from the fixed Login pill (`top:0; padding:18px 24px`,
+         so the button occupies y 18–54.4). Short viewports (≤820px tall) fire
+         the escape hatch two blocks down, which top-aligns the beat, so the
+         padding IS the clearance at every phone height — reducing it to 2rem
+         put the h1 at y=33 and painted the first line UNDER the button
+         (26.7x21.4px overlap at 375x812, and only +1.0px clearance at 390x844
+         against +25.0px before). The vertical room this beat needs is taken
+         from the video below instead, which is the block that makes the
+         single-column stack tall. */
+      .video { width: 100%; max-width: 176px; margin: 0 auto; }
       .video figcaption { text-align: center; }
-      .outcomes { grid-template-columns: 1fr; gap: 0.6rem; max-width: 320px; }
+      /* Same measure as the paragraph above (no 3px inset), one column. The
+         ↓ group keeps a hair more separation so the two lists still read as
+         two lists stacked into one column, not six interchangeable rows.
+         ⛔ The `max-width` used to be a FLAT 660px here, which overrides the
+         shared `min(660px, 74ch)` for the whole 670–760px band: at 760 the grid
+         box was 660 against a 605.9px prose box (+54.1px, 27.1px out on each
+         side). It is inherited now, so the grid matches the prose at every
+         width — that is owner item 3, and it was still broken here. */
+      .outcomes {
+        grid-template-columns: 1fr;
+        justify-content: stretch;
+        gap: 0.6rem;
+      }
+      #beat-compute .outcomes .down { margin-top: 0.35rem; }
+    }
+
+    /* Very narrow (iPhone SE 1st gen, 320px): the primary CTA is 256.7px wide
+       against a 256px column, so its label wrapped and left the arrow alone on
+       a second line — the same orphan shape the rest of this page avoids. 24px
+       less horizontal padding fits it on one line and changes nothing above
+       324px. */
+    @media (max-width: 360px) {
+      #beat-hero .cta-start { padding: 0.9rem 1.25rem; }
     }
 
     /* Short viewports: a beat is a fixed full-height overlay with no scroll of
@@ -508,8 +739,8 @@
              data-cta="primary"
              href="/auth?utm_source=tortoise-for-product-teams&amp;utm_medium=cta&amp;utm_campaign=tortoise-for-product-teams">Connect your agent →</a>
           <p class="hero-links">
-            <a data-cta="secondary" href="/tortoise/docs?utm_source=tortoise-for-product-teams&amp;utm_medium=hero&amp;utm_campaign=tortoise-for-product-teams">Browse the docs →</a> ·
-            <a data-cta="secondary" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">GitHub repo →</a> ·
+            <a data-cta="secondary" href="/tortoise/docs?utm_source=tortoise-for-product-teams&amp;utm_medium=hero&amp;utm_campaign=tortoise-for-product-teams">Browse the docs →</a>
+            <a data-cta="secondary" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">GitHub repo →</a>
             <a data-cta="secondary" href="/blog?utm_source=tortoise-for-product-teams&amp;utm_medium=hero&amp;utm_campaign=tortoise-for-product-teams">Read the blog →</a>
           </p>
         </div>
@@ -543,15 +774,14 @@
 
     <!-- ══ 2. Intro ══════════════════════════════════════════════════════ -->
     <section id="beat-intro" class="beat workflow">
-      <div class="rule" aria-hidden="true"></div>
-      <p>Free up time from repetitive explaining, supervision, and managing dependencies.</p>
+      <p class="lead"><span>Free up time from repetitive explaining, supervision, and managing dependencies.</span></p>
       <p>When agents (and people) understand goal cascades, root causes, trade-offs, and dependencies, they autonomously and reliably advance your business.</p>
       <p>Tortoise builds a logical model of your business, product, and code. It connects goals, insights and analytics, decisions, and execution so you, your team, and agents have the whole context, current and logical.</p>
     </section>
 
     <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
     <section id="beat-compute" class="beat workflow">
-      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decision with superintelligence.</p>
+      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decisions with superintelligence.</p>
       <!-- investors.html's `.outcomes` component: two lists, green ↑ / gold ↓,
            collapsing to one column on narrow viewports. The PDF's labels. -->
       <div class="outcomes">
@@ -579,12 +809,12 @@
     </section>
     <section id="beat-reason" class="beat workflow">
       <h2><span class="beat-num">03</span> · Reason</h2>
-      <p>Improve decision-making with super intelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
+      <p>Improve decision-making with superintelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
     </section>
 
     <!-- ══ 7. Onboarding ═════════════════════════════════════════════════ -->
     <section id="beat-onboard" class="beat workflow">
-      <h2>Onboard in 5 minutes, without learning another UI.</h2>
+      <h2>Onboard in 5 minutes, without learning another UI</h2>
       <p>Tortoise connects via MCP or SDK, so you and your agents can use it in Codex, Claude Code &amp; Web, ChatGPT, Cursor, Pi, or any other harness.</p>
     </section>
   </div>
@@ -597,8 +827,10 @@
        `#pricing-grid`/usage-line/selfhost markup, and
        `tests/test_website_static.py::TestPricingSourceIsShared` asserts that:
        edit both together or neither. The static cards are the no-JS fallback
-       (see the long comment there), pinned to the shared source by
-       `TestStaticPricingFallback`. -->
+       (see the long comment there); THIS page's cards are held to the shared
+       source by
+       `TestPricingSourceIsShared::test_the_static_cards_on_both_pages_carry_the_shared_numbers`
+       (`TestStaticPricingFallback` derives product.html's cards only). -->
     <section id="pricing-section" class="content-section">
       <h2>Pricing</h2>
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
@@ -617,9 +849,11 @@
              (a crawler, or an AI evaluator reading the page) otherwise sees the
              toggle above an EMPTY grid. The static cards carry the ANNUAL
              figures because that is `display.annual_default`, so there is no
-             flash before the JS runs. Parity with the PRICING mirror is pinned by
-             tests/test_website_static.py::TestStaticPricingFallback — edit both
-             sides together. -->
+             flash before the JS runs. THIS page's cards are held to the shared
+             source by
+             tests/test_website_static.py::TestPricingSourceIsShared
+             (::test_the_static_cards_on_both_pages_carry_the_shared_numbers) —
+             edit both sides together. -->
       <div class="pricing-grid" id="pricing-grid" aria-live="polite">
         <div class="pricing-card">
           <h3>Free</h3>
@@ -714,6 +948,106 @@
 
   <!-- ONE pricing source (#13645) — the same file /tortoise loads. -->
   <script src="/assets/tortoise-pricing.js"></script>
+  <!-- ⛔ THE FUNNEL RUNS BEFORE gsap, in its own script. It used to be the
+       tail of the gsap script, whose first statement is
+       `gsap.registerPlugin(ScrollTrigger)` — so a blocked cdnjs (a common
+       corporate-proxy condition, under which this page still renders fine
+       on its static cards) threw BEFORE the consent listener and the click
+       delegate were registered, and all three events went to zero with no
+       signal. The page's own note names "blocked requests read as 'nobody
+       clicked'" as the hazard it guards, so its own analytics must not be
+       behind a third-party CDN (#13696 review cycle 2, P2). -->
+  <script>
+    /* ── Campaign funnel (#13645) ────────────────────────────────────────
+       This page is an EXPERIMENT, so it has to carry its own denominator.
+       Three events, named here so a later reader can see the funnel without
+       opening a dashboard config:
+
+         product_teams_view           once per visit, carrying the utm_*
+                                      parameters (and the referrer) that
+                                      carried the visitor
+         product_teams_cta_primary    a click that enters the sign-up funnel
+                                      (the hero's `data-cta="primary"` button,
+                                      plus every /auth link inside
+                                      `#pricing-section` — the four tier cards
+                                      and the self-host block's "Migrate to
+                                      cloud anytime", the only self-host CTA
+                                      that reaches /auth)
+         product_teams_cta_secondary  a click on the hero's docs / GitHub /
+                                      blog row
+
+       CONSENT IS THE GATE, and it is /consent.js's state, not ours: PostHog
+       is loaded opted OUT, so a capture before consent is dropped anyway —
+       but it would also be a beacon, and blocked requests read as "nobody
+       clicked". So track() refuses unless the state is exactly "granted",
+       and the view event waits for /consent.js's `tortoise:consent` event —
+       without it, a visitor who accepts AFTER this script ran would have had
+       their page view dropped, and the funnel would show clicks with no
+       denominator.
+
+       CAMPAIGN TAGS: every link this page controls that points back into our
+       own surfaces (the CTA to /auth, the docs and blog links) carries
+       utm_campaign=tortoise-for-product-teams + utm_source + utm_medium, so
+       this page's traffic is separable from /tortoise's in the same project.
+       The pricing cards' hrefs are NOT tagged in markup: that block is
+       byte-identical to product.html's on purpose (asserted by
+       tests/test_website_static.py::TestPricingSourceIsShared), so their
+       clicks are counted by the event below instead. */
+    (function () {
+      var EVENTS = {
+        view: 'product_teams_view',
+        primary: 'product_teams_cta_primary',
+        secondary: 'product_teams_cta_secondary'
+      };
+      var CAMPAIGN = 'tortoise-for-product-teams';
+      var viewed = false;
+
+      function campaignParams() {
+        var params = new URLSearchParams(window.location.search);
+        var out = { campaign: CAMPAIGN };
+        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+        for (var i = 0; i < keys.length; i++) {
+          var value = params.get(keys[i]);
+          if (value) out[keys[i]] = value;
+        }
+        if (document.referrer) out.referrer = document.referrer;
+        return out;
+      }
+
+      function consented() {
+        return typeof window.consentState === 'function'
+          && window.consentState() === 'granted';
+      }
+
+      function track(event, props) {
+        if (!consented()) return;
+        if (!window.posthog || typeof window.posthog.capture !== 'function') return;
+        window.posthog.capture(event, props || {});
+      }
+
+      function trackView() {
+        if (viewed || !consented()) return;
+        viewed = true;
+        track(EVENTS.view, campaignParams());
+      }
+
+      window.addEventListener('tortoise:consent', trackView);
+
+      document.addEventListener('click', function (ev) {
+        var el = ev.target && ev.target.closest
+          ? ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')
+          : null;
+        if (!el) return;
+        var primary = el.getAttribute('data-cta') === 'primary'
+          || (!el.hasAttribute('data-cta') && el.closest('#pricing-section'));
+        track(primary ? EVENTS.primary : EVENTS.secondary, {
+          campaign: CAMPAIGN,
+          surface: el.hasAttribute('data-cta') ? 'hero' : 'pricing',
+          href: el.getAttribute('href')
+        });
+      });
+    })();
+  </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
   <script>
@@ -1026,6 +1360,13 @@
     }
 
     function setBilling(mode) {
+      // ⛔ THE SAME GUARD AS INIT, on the TOGGLE path. `renderPricing()`
+      // dereferences the shared table, so with /assets/tortoise-pricing.js
+      // blocked this threw AFTER flipping the pill — leaving the Monthly pill
+      // highlighted over the ANNUAL static cards, which is the mislabelling the
+      // static-markup comment above exists to prevent (#13696 review cycle 2).
+      // Returning before the flip keeps the cards and the pill agreeing.
+      if (!PRICING) return;
       currentBilling = mode;
       document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
       document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
@@ -1042,92 +1383,6 @@
       renderSelfHost();
     }
 
-    /* ── Campaign funnel (#13645) ────────────────────────────────────────
-       This page is an EXPERIMENT, so it has to carry its own denominator.
-       Three events, named here so a later reader can see the funnel without
-       opening a dashboard config:
-
-         product_teams_view           once per visit, carrying the utm_*
-                                      parameters (and the referrer) that
-                                      carried the visitor
-         product_teams_cta_primary    a click that enters the sign-up funnel
-                                      (the hero CTA and the pricing /
-                                      self-host CTAs, which all POST a visitor
-                                      to /auth)
-         product_teams_cta_secondary  a click on the hero's docs / GitHub /
-                                      blog row
-
-       CONSENT IS THE GATE, and it is /consent.js's state, not ours: PostHog
-       is loaded opted OUT, so a capture before consent is dropped anyway —
-       but it would also be a beacon, and blocked requests read as "nobody
-       clicked". So track() refuses unless the state is exactly "granted",
-       and the view event waits for /consent.js's `tortoise:consent` event —
-       without it, a visitor who accepts AFTER this script ran would have had
-       their page view dropped, and the funnel would show clicks with no
-       denominator.
-
-       CAMPAIGN TAGS: every link this page controls that points back into our
-       own surfaces (the CTA to /auth, the docs and blog links) carries
-       utm_campaign=tortoise-for-product-teams + utm_source + utm_medium, so
-       this page's traffic is separable from /tortoise's in the same project.
-       The pricing cards' hrefs are NOT tagged in markup: that block is
-       byte-identical to product.html's on purpose (asserted by
-       tests/test_website_static.py::TestPricingSourceIsShared), so their
-       clicks are counted by the event below instead. */
-    (function () {
-      var EVENTS = {
-        view: 'product_teams_view',
-        primary: 'product_teams_cta_primary',
-        secondary: 'product_teams_cta_secondary'
-      };
-      var CAMPAIGN = 'tortoise-for-product-teams';
-      var viewed = false;
-
-      function campaignParams() {
-        var params = new URLSearchParams(window.location.search);
-        var out = { campaign: CAMPAIGN };
-        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
-        for (var i = 0; i < keys.length; i++) {
-          var value = params.get(keys[i]);
-          if (value) out[keys[i]] = value;
-        }
-        if (document.referrer) out.referrer = document.referrer;
-        return out;
-      }
-
-      function consented() {
-        return typeof window.consentState === 'function'
-          && window.consentState() === 'granted';
-      }
-
-      function track(event, props) {
-        if (!consented()) return;
-        if (!window.posthog || typeof window.posthog.capture !== 'function') return;
-        window.posthog.capture(event, props || {});
-      }
-
-      function trackView() {
-        if (viewed || !consented()) return;
-        viewed = true;
-        track(EVENTS.view, campaignParams());
-      }
-
-      window.addEventListener('tortoise:consent', trackView);
-
-      document.addEventListener('click', function (ev) {
-        var el = ev.target && ev.target.closest
-          ? ev.target.closest('[data-cta], #pricing-section a[href^="/auth"]')
-          : null;
-        if (!el) return;
-        var primary = el.getAttribute('data-cta') === 'primary'
-          || (!el.hasAttribute('data-cta') && el.closest('#pricing-section'));
-        track(primary ? EVENTS.primary : EVENTS.secondary, {
-          campaign: CAMPAIGN,
-          surface: el.hasAttribute('data-cta') ? 'hero' : 'pricing',
-          href: el.getAttribute('href')
-        });
-      });
-    })();
   </script>
 
   <footer class="legal-footer">

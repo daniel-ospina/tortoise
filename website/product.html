@@ -853,6 +853,13 @@
     }
 
     function setBilling(mode) {
+      // ⛔ THE SAME GUARD AS INIT, on the TOGGLE path. `renderPricing()`
+      // dereferences the shared table, so with /assets/tortoise-pricing.js
+      // blocked this threw AFTER flipping the pill — leaving the Monthly pill
+      // highlighted over the ANNUAL static cards, which is the mislabelling the
+      // static-markup comment above exists to prevent (#13696 review cycle 2).
+      // Returning before the flip keeps the cards and the pill agreeing.
+      if (!PRICING) return;
       currentBilling = mode;
       document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
       document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
