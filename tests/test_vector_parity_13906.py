@@ -433,6 +433,53 @@ def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harne
     assert "_record_dsn_hosts" in called, sorted(called)
 
 
+def test_a_path_less_uri_still_has_a_QUERY(harness, monkeypatch):
+    """⛔ REGRESSION, caught by review at `09c9b1ab`: bound-at-`/` was fail-open.
+
+    libpq ends the AUTHORITY at the first of `/`, `?` or `#` after the userinfo.
+    While this module ended it only at `/`, a PATH-LESS URI swallowed its own
+    query into the authority and the guard saw no query at all:
+
+        postgresql://127.0.0.1:5432?hostaddr=203.0.113.9
+
+    — libpq parses `{host: 127.0.0.1, hostaddr: 203.0.113.9}` and DIALS
+    203.0.113.9 (measured: `psql` reports `connection to server at "203.0.113.9"`),
+    while the guard PASSED. That is a remote record certified local on the path
+    where `run()` seeds org/graph/node_identity/point and `teardown()` deletes by
+    `org_id`. The rewrite that fixed the `'?'`-in-userinfo over-block traded it
+    for this fail-open, which is why every remote shape is listed here.
+    """
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    monkeypatch.delenv("PGHOSTADDR", raising=False)
+    monkeypatch.delenv("PGHOST", raising=False)
+
+    remote = (
+        "postgresql://127.0.0.1:5432?hostaddr=203.0.113.9",
+        "postgresql://127.0.0.1:5432?host=203.0.113.9",
+        "postgresql://u:p@127.0.0.1:5432?hostaddr=203.0.113.9",
+        "postgresql://127.0.0.1:5432?sslmode=require&hostaddr=203.0.113.9",
+        "postgres://127.0.0.1:5432?hostaddr=203.0.113.9",
+        "postgresql://localhost:5432?host=203.0.113.9",
+        "postgresql://127.0.0.1:5432?service=prod",
+    )
+    for dsn in remote:
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act works
+        # …and the QUERY is what carried it, not the authority
+        assert harness._record_dsn_hosts(dsn) != ["127.0.0.1"], dsn
+
+    # THE CONTROL: the same URI WITH a path was already refused (which is exactly
+    # why the path-less shape hid), and a plain local URI still passes.
+    with pytest.raises(harness.CannotRun):
+        harness._assert_local_record_dsn(
+            "postgresql://127.0.0.1:5432/db?hostaddr=203.0.113.9", False)
+    for dsn in ("postgresql://127.0.0.1:5432", "postgresql://127.0.0.1:5432/db",
+                "postgresql:///tortoise_record?host=localhost"):
+        harness._assert_local_record_dsn(dsn, False)
+
+
 def test_a_service_dsn_cannot_prove_it_is_local(harness, monkeypatch):
     """A `service=` HANDS THE DIAL TO A FILE THIS HARNESS CANNOT READ.
 
@@ -704,6 +751,14 @@ def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
         "host=127.0.0.1 options=-c\\ search_path=a",
         "host=127.0.0.1 password='options=zzz'",
         "host=127.0.0.1 password='a options=b c'",
+        # ⛔ AN EMPTY VALUE AT THE END. `dbname=` is legal (libpq: `dbname=''`),
+        # but re-emitting it BARE and then appending ` options=…` makes libpq skip
+        # the whitespace after `=` and read `options='-c` as dbname's value, so
+        # the tail becomes the bogus keyword `role=…'` (measured: `invalid
+        # connection option "role"`). The quoted form is the control.
+        "host=127.0.0.1 dbname=",
+        "host=127.0.0.1 dbname=x sslmode=",
+        "host=127.0.0.1 user=",
     )
     for dsn in spellings:
         out = harness.app_role_dsn(dsn)

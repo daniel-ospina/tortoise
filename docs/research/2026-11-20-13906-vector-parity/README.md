@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (62 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (63 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -402,6 +402,7 @@ rebuild still wrong for two legal conninfo spellings — both measured on real
 | **P2 (docstring)** round 15's prose stated the rule as *"…up to the first `/` (or the end) … and only searches for the `?` in what follows"* — the sentence the hole was built from. Corrected alongside the code, with both boundaries and the two half-fixes' failure modes spelled out | — | docstring rewritten |
 | **P2 (non-blocking, friction)** a `#` in userinfo (`postgresql://u#x@127.0.0.1/db?sslmode=require`) is REFUSED as `RECORD_DSN_AMBIGUOUS` although libpq dials `127.0.0.1` — the docstring's authority-first split exists so a `#` in userinfo is *not* over-blocked, but the `#`-in-base arm still does it whenever a query is present | `PQconninfoParse`: `user='u#x', host='127.0.0.1'` | left as-is: fail-closed, cleared by `--allow-remote-writes` |
 | **P2 (non-blocking, latent)** `_assert_local_record_dsn` skips any host string starting with `/` as a unix-socket path, and `_authority_hosts` percent-decodes before that test (`postgresql://%2Ffoo:5432` → host `/foo` → skipped). No independently exploitable case found, and libpq also reads `/foo` as a socket dir | `PQconninfoParse` + `PQhost` | noted as a hardening seam, not a defect |
+| **T2 (P2)** a DSN whose LAST keyword has an EMPTY value was rebuilt into a string libpq REJECTS: `host=127.0.0.1 dbname=` re-emitted as `dbname=` and then ` options=…` appended, and since libpq skips whitespace AFTER `=`, `dbname` took `options='-c` as its value and the tail became the bogus keyword `role=tortoise_record_app'` (`invalid connection option "role"`). 96 of 676 fuzz DSNs hit it, every one carrying a trailing empty value; 0 silent value changes. This also falsified Round 14's claim that inter-keyword whitespace is not read by libpq — it IS, as the value separator | `PQconninfoParse` on every rebuild | an empty value re-emits quoted (`dbname=''`), the form libpq parses; three spellings added to the matrix (`dbname=`, `dbname=x sslmode=`, `user=`). Mutant: emit it bare → **1 failed** |
 
 ## 6. Reproducing
 
@@ -432,7 +433,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **62 passed**.
+tests/test_vector_parity_13906.py -q` → **63 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
