@@ -4461,8 +4461,8 @@ three guards red: `test_shipped_manifest_matches_the_real_workflow_and_recorded_
 `test_the_reviewer_entry_point_names_every_fly_only_member`. They re-derive the member counts from
 `fly-managed-secrets.txt` itself, so the deletion has to carry its prose: drop the manifest's
 `⚠️ ONE DECLARED GAP` paragraph (the one naming `#13674`) and change the reviewer entry point's
-`THREE names` to `TWO`. Read those reds as the guards working, not as a regression — measured at
-#13814's head by deleting the entry line alone, which gives `3 failed, 142 passed` on
+`THREE names` to `TWO`. Read those reds as the guards working, not as a regression — measured at the
+`#13814` head by deleting the entry line alone, which gives `3 failed, 142 passed` on
 `tests/test_fly_secret_drift.py`.
 
 ⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
