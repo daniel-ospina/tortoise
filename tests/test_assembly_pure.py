@@ -4685,7 +4685,7 @@ class _FakeAskSDK:
     behind the D8 marker block (also fail-open — it raises here on purpose, so
     the branch under test is proven to survive an unavailable projection)."""
 
-    def annotate_ask_hits(self, hits):
+    def _annotate_ask_hits(self, hits):
         return hits
 
     def _get_proj(self):

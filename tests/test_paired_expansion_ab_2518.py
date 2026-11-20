@@ -386,7 +386,7 @@ def test_read_arm_records_the_ranked_list_for_every_arm():
     None` back" reds here rather than only on a box with a database.
     """
     class _FakeSDK:
-        def tortoise_fts_query(self, query, *, entity_type, limit,
+        def _tortoise_fts_query(self, query, *, entity_type, limit,
                                include_terminal, _record_reads,
                                _valid_time_rerank, _rerank_candidates,
                                leg_trace, entity_key_expansion):
@@ -2018,11 +2018,14 @@ def test_the_briefs_call_site_citation_resolves_at_the_merge_target():
     assert armed, (
         "no single gate both arms the sparse half and the dense half — the "
         "object arm being gated out needs re-deriving before the brief says so")
-    assert "def tortoise_fts_query(" in sdk, (
-        "the predicate lives in TortoiseSDK.tortoise_fts_query — cite a symbol "
+    # ⛔ #12901 privatised this method (`tools/sdk_privatise.py`), so the SYMBOL that
+    # resolves at this tree is the private spelling — the pin follows it rather than
+    # citing a name the class no longer holds.
+    assert "def _tortoise_fts_query(" in sdk, (
+        "the predicate lives in TortoiseSDK._tortoise_fts_query — cite a symbol "
         "that resolves, not `sdk.SDK.search_graph`")
     brief = (_DOCS / "research-brief.md").read_text()
-    assert "TortoiseSDK.tortoise_fts_query" in brief
+    assert "TortoiseSDK._tortoise_fts_query" in brief
     assert predicate in brief
     for stale in ("sdk.py:44955", ":45453"):
         assert stale not in brief, (

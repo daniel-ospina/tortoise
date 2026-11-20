@@ -1004,15 +1004,15 @@ class TestWriterScript(unittest.TestCase):
         self.assertNotIn("__LOG__", WRITER_SCRIPT)
 
     def test_uses_public_doors_not_private_handles(self):
-        for door in ("create_point", "manage_source_trust", "get_source_reliability",
-                     "compute_confidence", "sdk.query"):
+        for door in ("_create_point", "manage_source_trust", "_get_source_reliability",
+                     "_compute_confidence", "sdk._query"):
             self.assertIn(door, WRITER_SCRIPT)
         self.assertNotIn("_get_proj", WRITER_SCRIPT)
 
     def test_validates_all_claims_before_first_mutation(self):
         # the validation loop must precede the create_point loop
         self.assertLess(WRITER_SCRIPT.index("prepared = []"),
-                        WRITER_SCRIPT.index("sdk.create_point"))
+                        WRITER_SCRIPT.index("sdk._create_point"))
         self.assertIn("unknown claim kind", WRITER_SCRIPT)
 
     # The warning-tripwire scoping and the non-live guarantee are pinned
@@ -1075,9 +1075,9 @@ class TestWriterValidation(unittest.TestCase):
         class _FakeSDK:
             def __init__(self, **kw):
                 self.n = 0
-            def query(self, **kw):
+            def _query(self, **kw):
                 return []
-            def create_point(self, kind, content, **kw):
+            def _create_point(self, kind, content, **kw):
                 self.n += 1
                 if self.n == 2:
                     raise RuntimeError("boom mid-write")
@@ -1109,9 +1109,9 @@ class TestWriterValidation(unittest.TestCase):
         class _FoldingSDK:
             def __init__(self, **kw):
                 pass
-            def query(self, **kw):
+            def _query(self, **kw):
                 return []
-            def create_point(self, kind, content, **kw):
+            def _create_point(self, kind, content, **kw):
                 # the survivor already carried another source; this write
                 # folded onto it and the fold wired `extractedFrom` too
                 return {"id": "p-existing", "status": "live",
@@ -1151,12 +1151,12 @@ class TestWriterValidation(unittest.TestCase):
         class _ArrayPropSurvivorSDK:
             def __init__(self, **kw):
                 pass
-            def query(self, **kw):
+            def _query(self, **kw):
                 # `[]` BY CONSTRUCTION, not because an array prop is invisible
                 # post-#10063 (the `:Source` edge makes it visible) — so the
                 # classification cannot be satisfied by the read-back
                 return []
-            def create_point(self, kind, content, **kw):
+            def _create_point(self, kind, content, **kw):
                 return {"id": "p-array", "status": "live",
                         "extractedFrom": [kw.get("extractedFrom")],
                         "extractedFromAll": [kw.get("extractedFrom")]}
@@ -1311,9 +1311,9 @@ class TestWriterValidation(unittest.TestCase):
         class _DriftSDK:
             def __init__(self, **kw):
                 pass
-            def query(self, **kw):
+            def _query(self, **kw):
                 return []
-            def create_point(self, kind, content, **kw):
+            def _create_point(self, kind, content, **kw):
                 return {"id": "p1", "status": "live"}
             def close(self):
                 pass
@@ -1721,12 +1721,12 @@ class TestWriterContract(unittest.TestCase):
                 self.n = 0
             def __getattr__(self, name):
                 return getattr(self._inner, name)
-            def create_point(self, *a, **kw):
+            def _create_point(self, *a, **kw):
                 self.n += 1
                 if self.n == 2:
                     logging.getLogger("tortoise.sdk").warning(
                         "synthetic drift probe: %s", "reserved-key shape")
-                return self._inner.create_point(*a, **kw)
+                return self._inner._create_point(*a, **kw)
         claims = [{"kind": "fact", "content": f"probe a {os.urandom(4).hex()}"},
                   {"kind": "fact", "content": f"probe b {os.urandom(4).hex()}"},
                   {"kind": "fact", "content": f"probe c {os.urandom(4).hex()}"}]

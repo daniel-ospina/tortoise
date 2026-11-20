@@ -53,11 +53,11 @@ class _StubSDK:
         self.n_tag_points = n_tag_points
         self.raises = raises
 
-    def query(self, kind=None, **kwargs):
+    def _query(self, kind=None, **kwargs):
         self.calls.append(("query", kind, kwargs))
         return self.points
 
-    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+    def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
         if self.raises is not None:
             raise self.raises
@@ -65,7 +65,7 @@ class _StubSDK:
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag, *, _record_reads=True):
+    def _query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
         return [{"id": f"tag{i}"} for i in range(self.n_tag_points)]
 

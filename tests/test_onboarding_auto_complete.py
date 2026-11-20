@@ -421,7 +421,7 @@ class _FakeSDK:
     def __init__(self):
         self.calls = []
 
-    def create_point(self, kind, content, **kwargs):
+    def _create_point(self, kind, content, **kwargs):
         self.calls.append(("create_point", kind, content))
         return {"id": "p-1", "pointKind": kind, "content": content}
 

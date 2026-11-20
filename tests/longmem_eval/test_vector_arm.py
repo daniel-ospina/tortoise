@@ -2205,10 +2205,10 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
         def _get_proj(self):
             return self._proj
 
-        def create_point(self, *a, **k):
+        def _create_point(self, *a, **k):
             return {"id": k.get("id", "x")}
 
-        def create_event(self, *a, **k):
+        def _create_event(self, *a, **k):
             return {}
 
         def close(self):

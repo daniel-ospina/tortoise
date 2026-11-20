@@ -456,7 +456,7 @@ class TestHostedSearchRoute:
                 # fake standing in for `_data_sdk` must model the attach.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "empty"
@@ -533,7 +533,7 @@ class TestHostedSearchRoute:
                 # opens and then cannot answer.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     # the store is down: the SDK sets `degraded` and the
@@ -565,7 +565,7 @@ class TestHostedSearchRoute:
                 # #10602: see the sibling `_DownSDK` above.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "degraded"

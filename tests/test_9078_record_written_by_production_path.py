@@ -3712,7 +3712,7 @@ def test_the_dream_drain_opens_the_graph_the_enqueue_resolved(monkeypatch):
         def _mark_dirty(self, roots):
             self.roots = roots
 
-        def dream(self, **kw):
+        def _dream(self, **kw):
             self.dreamed = kw
 
         def _bind_record_tenant(self, org_id, graph_id):

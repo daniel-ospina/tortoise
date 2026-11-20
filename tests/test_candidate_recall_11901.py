@@ -291,7 +291,7 @@ def test_search_graph_unions_the_derived_queries_into_one_id_keyed_dict(monkeypa
     class StubSDK:
         # no `_get_proj`: the env label decides searchability (the documented
         # mock path), and this pins the UNION, not the backend gate.
-        def tortoise_fts_query(self, query, *, entity_type, limit=3,
+        def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                include_terminal=False, **_ignored):
             queries_asked.append(f"{entity_type}:{query}")
             return rows_by_query.get(query, [])[:limit]
@@ -1031,7 +1031,7 @@ def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=N
         def _get_proj(self):
             return self._proj
 
-        def tortoise_fts_query(self, q, **kw):
+        def _tortoise_fts_query(self, q, **kw):
             trace = kw.get("leg_trace")
             if trace is not None:
                 trace.append(trace_maker())
@@ -1382,7 +1382,7 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
         def _get_proj(self):
             return self._proj
 
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             # Every query for the FIRST name the arm asks about returns a hit, so
             # the sample has BOTH a hit and a miss. With every query empty,
             # `in_window == 0` and `exact_misses_total == recorded` under ANY
