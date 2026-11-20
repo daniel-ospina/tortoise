@@ -1,0 +1,2483 @@
+{
+  "issue": "#13906",
+  "generated_at": "2026-11-20T01:01:03Z",
+  "k": 10,
+  "seed": 13906,
+  "n_rows": 59,
+  "label": "point",
+  "poison": "vector",
+  "environment": {
+    "record": {
+      "pgvector": "0.8.7",
+      "postgres": "16.16 (Debian 16.16-1.pgdg12+1)"
+    },
+    "graph": {
+      "falkordb": "4.20.6 (module ver 42006)"
+    }
+  },
+  "arms": {
+    "record": {
+      "driver": "pgvector HNSW, cosine"
+    },
+    "graph_scan": {
+      "driver": "run_vector_query brute-force scan, euclidean",
+      "mechanisms": [
+        "scan_fallback"
+      ]
+    },
+    "graph_index": {
+      "driver": "run_vector_query HNSW (cypher), cosine",
+      "index_ready": true,
+      "mechanisms": [
+        "index"
+      ],
+      "index_params": {
+        "dimension": 384,
+        "similarityFunction": "cosine",
+        "M": 16,
+        "efConstruction": 200,
+        "efRuntime": 10
+      },
+      "min_recall": 0.8
+    },
+    "graph_index_ef200": {
+      "driver": "run_vector_query HNSW at efRuntime=200 (diagnostic)",
+      "index_params": {
+        "dimension": 384,
+        "similarityFunction": "cosine",
+        "M": 16,
+        "efConstruction": 200,
+        "efRuntime": 200
+      },
+      "mechanisms": [
+        "index"
+      ]
+    }
+  },
+  "queries": [
+    {
+      "query": "q_anchor",
+      "record_error": null,
+      "truth_cosine": [
+        "anchor",
+        "r036",
+        "r032",
+        "r022",
+        "r011",
+        "r004",
+        "r046",
+        "r013",
+        "r025",
+        "r044"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 4.665883013288408e-09,
+          "worst": "r011",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "anchor",
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025",
+          "r044"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025",
+          "r044"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": true,
+          "max_delta": 3.1155620083822555e-08,
+          "worst": "r036",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": false,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.8,
+        "missing": [
+          "anchor",
+          "r044"
+        ],
+        "extra": [],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r036",
+            "truth_distance": 0.0,
+            "candidate_distance": 0.8966973735514021
+          },
+          {
+            "position": 1,
+            "truth": "r036",
+            "candidate": "r032",
+            "truth_distance": 0.8966973735514021,
+            "candidate_distance": 0.8978730834209104
+          },
+          {
+            "position": 2,
+            "truth": "r032",
+            "candidate": "r022",
+            "truth_distance": 0.8978730834209104,
+            "candidate_distance": 0.9087998936901998
+          },
+          {
+            "position": 3,
+            "truth": "r022",
+            "candidate": "r011",
+            "truth_distance": 0.9087998936901998,
+            "candidate_distance": 0.9140404750402632
+          },
+          {
+            "position": 4,
+            "truth": "r011",
+            "candidate": "r004",
+            "truth_distance": 0.9140404750402632,
+            "candidate_distance": 0.9143911291781817
+          }
+        ],
+        "candidate_ids": [
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025",
+          "r044"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 1.2572615322170577e-06,
+          "worst": "r036",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r024"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r013",
+            "truth_distance": 0.0,
+            "candidate_distance": 7.223878917713745
+          },
+          {
+            "position": 1,
+            "truth": "r013",
+            "candidate": "r029",
+            "truth_distance": 7.223878917713745,
+            "candidate_distance": 8.49369414661975
+          },
+          {
+            "position": 2,
+            "truth": "r029",
+            "candidate": "r001",
+            "truth_distance": 8.49369414661975,
+            "candidate_distance": 8.687166672597648
+          },
+          {
+            "position": 3,
+            "truth": "r001",
+            "candidate": "r004",
+            "truth_distance": 8.687166672597648,
+            "candidate_distance": 8.850867551627445
+          },
+          {
+            "position": 4,
+            "truth": "r004",
+            "candidate": "r037",
+            "truth_distance": 8.850867551627445,
+            "candidate_distance": 8.905114613346463
+          }
+        ],
+        "candidate_ids": [
+          "r013",
+          "r029",
+          "r001",
+          "r004",
+          "r037",
+          "r036",
+          "r034",
+          "r011",
+          "r002",
+          "r024"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r013",
+          "r029",
+          "r001",
+          "r004",
+          "r037",
+          "r036",
+          "r034",
+          "r011",
+          "r002"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.4,
+        "missing": [
+          "anchor",
+          "r022",
+          "r025",
+          "r032",
+          "r044",
+          "r046"
+        ],
+        "extra": [
+          "r001",
+          "r002",
+          "r024",
+          "r029",
+          "r034",
+          "r037"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r013",
+            "truth_distance": 0.0,
+            "candidate_distance": 0.9309658872773399
+          },
+          {
+            "position": 1,
+            "truth": "r036",
+            "candidate": "r029",
+            "truth_distance": 0.8966973735514021,
+            "candidate_distance": null
+          },
+          {
+            "position": 2,
+            "truth": "r032",
+            "candidate": "r001",
+            "truth_distance": 0.8978730834209104,
+            "candidate_distance": null
+          },
+          {
+            "position": 3,
+            "truth": "r022",
+            "candidate": "r004",
+            "truth_distance": 0.9087998936901998,
+            "candidate_distance": 0.9143911291781817
+          },
+          {
+            "position": 4,
+            "truth": "r011",
+            "candidate": "r037",
+            "truth_distance": 0.9140404750402632,
+            "candidate_distance": null
+          }
+        ],
+        "candidate_ids": [
+          "r013",
+          "r029",
+          "r001",
+          "r004",
+          "r037",
+          "r036",
+          "r034",
+          "r011",
+          "r002",
+          "r024"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025",
+          "r044"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": true,
+          "max_delta": 3.1155620083822555e-08,
+          "worst": "r036",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": false,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.8,
+        "missing": [
+          "anchor",
+          "r044"
+        ],
+        "extra": [],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r036",
+            "truth_distance": 0.0,
+            "candidate_distance": 0.8966973735514021
+          },
+          {
+            "position": 1,
+            "truth": "r036",
+            "candidate": "r032",
+            "truth_distance": 0.8966973735514021,
+            "candidate_distance": 0.8978730834209104
+          },
+          {
+            "position": 2,
+            "truth": "r032",
+            "candidate": "r022",
+            "truth_distance": 0.8978730834209104,
+            "candidate_distance": 0.9087998936901998
+          },
+          {
+            "position": 3,
+            "truth": "r022",
+            "candidate": "r011",
+            "truth_distance": 0.9087998936901998,
+            "candidate_distance": 0.9140404750402632
+          },
+          {
+            "position": 4,
+            "truth": "r011",
+            "candidate": "r004",
+            "truth_distance": 0.9140404750402632,
+            "candidate_distance": 0.9143911291781817
+          }
+        ],
+        "candidate_ids": [
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r036",
+          "r032",
+          "r022",
+          "r011",
+          "r004",
+          "r046",
+          "r013",
+          "r025",
+          "r044"
+        ]
+      },
+      "graph_index_returned": 8,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 2,
+      "record_vs_graph_scan": {
+        "recall": 0.4,
+        "only_a": [
+          "anchor",
+          "r022",
+          "r025",
+          "r032",
+          "r044",
+          "r046"
+        ],
+        "only_b": [
+          "r001",
+          "r002",
+          "r024",
+          "r029",
+          "r034",
+          "r037"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 0.8,
+        "only_a": [
+          "anchor",
+          "r044"
+        ],
+        "only_b": []
+      },
+      "metric_divergence_ids": [
+        "r001",
+        "r002",
+        "r022",
+        "r025",
+        "r029",
+        "r032",
+        "r034",
+        "r037",
+        "r044",
+        "r046"
+      ]
+    },
+    {
+      "query": "q_tie",
+      "record_error": null,
+      "truth_cosine": [
+        "r000",
+        "tie0",
+        "tie1",
+        "tie2",
+        "r011",
+        "r006",
+        "r018",
+        "r002",
+        "r009",
+        "r014"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.709240449176974e-08,
+          "worst": "r006",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "tie",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "tie2",
+          "tie0",
+          "tie1",
+          "r000",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": true,
+          "max_delta": 8.428132602933402e-08,
+          "worst": "r011",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "tie",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 4.094970130097408e-06,
+          "worst": "r013",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r001"
+        ],
+        "order_mismatches": [
+          {
+            "position": 4,
+            "truth": "anchor",
+            "candidate": "r029",
+            "truth_distance": 21.12500353745642,
+            "candidate_distance": 22.528147692021527
+          },
+          {
+            "position": 5,
+            "truth": "r029",
+            "candidate": "r013",
+            "truth_distance": 22.528147692021527,
+            "candidate_distance": 22.69562367810003
+          },
+          {
+            "position": 6,
+            "truth": "r013",
+            "candidate": "r011",
+            "truth_distance": 22.69562367810003,
+            "candidate_distance": 22.815223323624842
+          },
+          {
+            "position": 7,
+            "truth": "r011",
+            "candidate": "r037",
+            "truth_distance": 22.815223323624842,
+            "candidate_distance": 22.84986785312282
+          },
+          {
+            "position": 8,
+            "truth": "r037",
+            "candidate": "r004",
+            "truth_distance": 22.84986785312282,
+            "candidate_distance": 23.243673963374544
+          }
+        ],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r029",
+          "r013",
+          "r011",
+          "r037",
+          "r004",
+          "r001"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "anchor",
+          "r029",
+          "r013",
+          "r011",
+          "r037",
+          "r004"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.5,
+        "missing": [
+          "r002",
+          "r006",
+          "r009",
+          "r014",
+          "r018"
+        ],
+        "extra": [
+          "r001",
+          "r004",
+          "r013",
+          "r029",
+          "r037"
+        ],
+        "order_mismatches": [
+          {
+            "position": 4,
+            "truth": "r011",
+            "candidate": "r029",
+            "truth_distance": 0.857272183060288,
+            "candidate_distance": null
+          },
+          {
+            "position": 5,
+            "truth": "r006",
+            "candidate": "r013",
+            "truth_distance": 0.8743662630551648,
+            "candidate_distance": null
+          },
+          {
+            "position": 6,
+            "truth": "r018",
+            "candidate": "r011",
+            "truth_distance": 0.9005830764384603,
+            "candidate_distance": 0.857272183060288
+          },
+          {
+            "position": 7,
+            "truth": "r002",
+            "candidate": "r037",
+            "truth_distance": 0.9405939237928636,
+            "candidate_distance": null
+          },
+          {
+            "position": 8,
+            "truth": "r009",
+            "candidate": "r004",
+            "truth_distance": 0.9428994861771216,
+            "candidate_distance": null
+          }
+        ],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r029",
+          "r013",
+          "r011",
+          "r037",
+          "r004",
+          "r001"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": true,
+          "max_delta": 8.428132602933402e-08,
+          "worst": "r011",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "tie",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r006",
+          "r018",
+          "r002",
+          "r009",
+          "r014"
+        ]
+      },
+      "graph_index_returned": 10,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 0,
+      "record_vs_graph_scan": {
+        "recall": 0.5,
+        "only_a": [
+          "r002",
+          "r006",
+          "r009",
+          "r014",
+          "r018"
+        ],
+        "only_b": [
+          "r001",
+          "r004",
+          "r013",
+          "r029",
+          "r037"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 1.0,
+        "only_a": [],
+        "only_b": []
+      },
+      "metric_divergence_ids": [
+        "anchor",
+        "r002",
+        "r004",
+        "r006",
+        "r009",
+        "r013",
+        "r014",
+        "r018",
+        "r029",
+        "r037"
+      ]
+    },
+    {
+      "query": "q00",
+      "record_error": null,
+      "truth_cosine": [
+        "r027",
+        "r005",
+        "r009",
+        "r026",
+        "r034",
+        "r041",
+        "r042",
+        "r002",
+        "r000",
+        "tie0"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.707291197305949e-08,
+          "worst": "r005",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000",
+          "tie0"
+        ],
+        "truth_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000",
+          "tie0"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": false,
+          "max_delta": 6.849817257847945e-08,
+          "worst": "r009",
+          "unmeasured": 1,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "tie0"
+        ],
+        "extra": [
+          "anchor"
+        ],
+        "order_mismatches": [
+          {
+            "position": 4,
+            "truth": "r034",
+            "candidate": "anchor",
+            "truth_distance": 0.9126355336813793,
+            "candidate_distance": null
+          },
+          {
+            "position": 5,
+            "truth": "r041",
+            "candidate": "r034",
+            "truth_distance": 0.926128539343811,
+            "candidate_distance": 0.9126355336813793
+          },
+          {
+            "position": 6,
+            "truth": "r042",
+            "candidate": "r041",
+            "truth_distance": 0.93604755786761,
+            "candidate_distance": 0.926128539343811
+          },
+          {
+            "position": 7,
+            "truth": "r002",
+            "candidate": "r042",
+            "truth_distance": 0.9420048961625209,
+            "candidate_distance": 0.93604755786761
+          },
+          {
+            "position": 8,
+            "truth": "r000",
+            "candidate": "r002",
+            "truth_distance": 0.9458498130400729,
+            "candidate_distance": 0.9420048961625209
+          }
+        ],
+        "candidate_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "anchor",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000"
+        ],
+        "truth_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000",
+          "tie0"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 1.0541391624485641e-05,
+          "worst": "r004",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r024"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r013",
+            "truth_distance": 33.24426052098935,
+            "candidate_distance": 33.68974608680018
+          },
+          {
+            "position": 1,
+            "truth": "r013",
+            "candidate": "r034",
+            "truth_distance": 33.68974608680018,
+            "candidate_distance": 33.94343136558925
+          },
+          {
+            "position": 2,
+            "truth": "r034",
+            "candidate": "r004",
+            "truth_distance": 33.94343136558925,
+            "candidate_distance": 34.263405748891564
+          },
+          {
+            "position": 3,
+            "truth": "r004",
+            "candidate": "r029",
+            "truth_distance": 34.263405748891564,
+            "candidate_distance": 34.313305593367325
+          },
+          {
+            "position": 4,
+            "truth": "r029",
+            "candidate": "r001",
+            "truth_distance": 34.313305593367325,
+            "candidate_distance": 34.589831606553254
+          }
+        ],
+        "candidate_ids": [
+          "r013",
+          "r034",
+          "r004",
+          "r029",
+          "r001",
+          "r037",
+          "r002",
+          "r011",
+          "r036",
+          "r024"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r013",
+          "r034",
+          "r004",
+          "r029",
+          "r001",
+          "r037",
+          "r002",
+          "r011",
+          "r036"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.2,
+        "missing": [
+          "r000",
+          "r005",
+          "r009",
+          "r026",
+          "r027",
+          "r041",
+          "r042",
+          "tie0"
+        ],
+        "extra": [
+          "r001",
+          "r004",
+          "r011",
+          "r013",
+          "r024",
+          "r029",
+          "r036",
+          "r037"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "r027",
+            "candidate": "r013",
+            "truth_distance": 0.8490813755487667,
+            "candidate_distance": null
+          },
+          {
+            "position": 1,
+            "truth": "r005",
+            "candidate": "r034",
+            "truth_distance": 0.8734317482161378,
+            "candidate_distance": 0.9126355336813793
+          },
+          {
+            "position": 2,
+            "truth": "r009",
+            "candidate": "r004",
+            "truth_distance": 0.8816160052543066,
+            "candidate_distance": null
+          },
+          {
+            "position": 3,
+            "truth": "r026",
+            "candidate": "r029",
+            "truth_distance": 0.883891488935709,
+            "candidate_distance": null
+          },
+          {
+            "position": 4,
+            "truth": "r034",
+            "candidate": "r001",
+            "truth_distance": 0.9126355336813793,
+            "candidate_distance": null
+          }
+        ],
+        "candidate_ids": [
+          "r013",
+          "r034",
+          "r004",
+          "r029",
+          "r001",
+          "r037",
+          "r002",
+          "r011",
+          "r036",
+          "r024"
+        ],
+        "truth_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000",
+          "tie0"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": false,
+          "max_delta": 6.849817257847945e-08,
+          "worst": "r009",
+          "unmeasured": 1,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "tie0"
+        ],
+        "extra": [
+          "anchor"
+        ],
+        "order_mismatches": [
+          {
+            "position": 4,
+            "truth": "r034",
+            "candidate": "anchor",
+            "truth_distance": 0.9126355336813793,
+            "candidate_distance": null
+          },
+          {
+            "position": 5,
+            "truth": "r041",
+            "candidate": "r034",
+            "truth_distance": 0.926128539343811,
+            "candidate_distance": 0.9126355336813793
+          },
+          {
+            "position": 6,
+            "truth": "r042",
+            "candidate": "r041",
+            "truth_distance": 0.93604755786761,
+            "candidate_distance": 0.926128539343811
+          },
+          {
+            "position": 7,
+            "truth": "r002",
+            "candidate": "r042",
+            "truth_distance": 0.9420048961625209,
+            "candidate_distance": 0.93604755786761
+          },
+          {
+            "position": 8,
+            "truth": "r000",
+            "candidate": "r002",
+            "truth_distance": 0.9458498130400729,
+            "candidate_distance": 0.9420048961625209
+          }
+        ],
+        "candidate_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "anchor",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000"
+        ],
+        "truth_ids": [
+          "r027",
+          "r005",
+          "r009",
+          "r026",
+          "r034",
+          "r041",
+          "r042",
+          "r002",
+          "r000",
+          "tie0"
+        ]
+      },
+      "graph_index_returned": 10,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 0,
+      "record_vs_graph_scan": {
+        "recall": 0.2,
+        "only_a": [
+          "r000",
+          "r005",
+          "r009",
+          "r026",
+          "r027",
+          "r041",
+          "r042",
+          "tie0"
+        ],
+        "only_b": [
+          "r001",
+          "r004",
+          "r011",
+          "r013",
+          "r024",
+          "r029",
+          "r036",
+          "r037"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 0.9,
+        "only_a": [
+          "tie0"
+        ],
+        "only_b": [
+          "anchor"
+        ]
+      },
+      "metric_divergence_ids": [
+        "anchor",
+        "r000",
+        "r001",
+        "r004",
+        "r005",
+        "r009",
+        "r011",
+        "r013",
+        "r026",
+        "r027",
+        "r029",
+        "r036",
+        "r037",
+        "r041",
+        "r042",
+        "tie0"
+      ]
+    },
+    {
+      "query": "q01",
+      "record_error": null,
+      "truth_cosine": [
+        "r000",
+        "tie0",
+        "tie1",
+        "tie2",
+        "r011",
+        "r029",
+        "r039",
+        "r003",
+        "r007",
+        "r031"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.840409713516067e-08,
+          "worst": "r003",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "tie",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r000",
+          "tie1",
+          "tie2",
+          "tie0",
+          "r011",
+          "r029",
+          "r039",
+          "r003",
+          "r007",
+          "r031"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r029",
+          "r039",
+          "r003",
+          "r007",
+          "r031"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": false,
+          "max_delta": 5.700938066066641e-08,
+          "worst": "r039",
+          "unmeasured": 1,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "r031"
+        ],
+        "extra": [
+          "anchor"
+        ],
+        "order_mismatches": [
+          {
+            "position": 5,
+            "truth": "r029",
+            "candidate": "anchor",
+            "truth_distance": 0.9289846573450982,
+            "candidate_distance": null
+          },
+          {
+            "position": 6,
+            "truth": "r039",
+            "candidate": "r029",
+            "truth_distance": 0.9312452051912956,
+            "candidate_distance": 0.9289846573450982
+          },
+          {
+            "position": 7,
+            "truth": "r003",
+            "candidate": "r039",
+            "truth_distance": 0.9390958567772751,
+            "candidate_distance": 0.9312452051912956
+          },
+          {
+            "position": 8,
+            "truth": "r007",
+            "candidate": "r003",
+            "truth_distance": 0.9512690729165509,
+            "candidate_distance": 0.9390958567772751
+          },
+          {
+            "position": 9,
+            "truth": "r031",
+            "candidate": "r007",
+            "truth_distance": 0.9521307938108129,
+            "candidate_distance": 0.9512690729165509
+          }
+        ],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r011",
+          "anchor",
+          "r029",
+          "r039",
+          "r003",
+          "r007"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r029",
+          "r039",
+          "r003",
+          "r007",
+          "r031"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 1.2693586178613714e-05,
+          "worst": "r036",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r024"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r029",
+            "truth_distance": 35.92319745771661,
+            "candidate_distance": 36.22007251174817
+          },
+          {
+            "position": 1,
+            "truth": "r029",
+            "candidate": "r004",
+            "truth_distance": 36.22007251174817,
+            "candidate_distance": 36.58931770297566
+          },
+          {
+            "position": 2,
+            "truth": "r004",
+            "candidate": "r013",
+            "truth_distance": 36.58931770297566,
+            "candidate_distance": 36.65155285618712
+          },
+          {
+            "position": 3,
+            "truth": "r013",
+            "candidate": "r001",
+            "truth_distance": 36.65155285618712,
+            "candidate_distance": 36.65768939933564
+          },
+          {
+            "position": 4,
+            "truth": "r001",
+            "candidate": "r037",
+            "truth_distance": 36.65768939933564,
+            "candidate_distance": 36.72567119300653
+          }
+        ],
+        "candidate_ids": [
+          "r029",
+          "r004",
+          "r013",
+          "r001",
+          "r037",
+          "r011",
+          "r034",
+          "r036",
+          "r002",
+          "r024"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r029",
+          "r004",
+          "r013",
+          "r001",
+          "r037",
+          "r011",
+          "r034",
+          "r036",
+          "r002"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.2,
+        "missing": [
+          "r000",
+          "r003",
+          "r007",
+          "r031",
+          "r039",
+          "tie0",
+          "tie1",
+          "tie2"
+        ],
+        "extra": [
+          "r001",
+          "r002",
+          "r004",
+          "r013",
+          "r024",
+          "r034",
+          "r036",
+          "r037"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "r000",
+            "candidate": "r029",
+            "truth_distance": 0.8902149867840045,
+            "candidate_distance": 0.9289846573450982
+          },
+          {
+            "position": 1,
+            "truth": "tie0",
+            "candidate": "r004",
+            "truth_distance": 0.8902149867840045,
+            "candidate_distance": null
+          },
+          {
+            "position": 2,
+            "truth": "tie1",
+            "candidate": "r013",
+            "truth_distance": 0.8902149867840045,
+            "candidate_distance": null
+          },
+          {
+            "position": 3,
+            "truth": "tie2",
+            "candidate": "r001",
+            "truth_distance": 0.8902149867840045,
+            "candidate_distance": null
+          },
+          {
+            "position": 4,
+            "truth": "r011",
+            "candidate": "r037",
+            "truth_distance": 0.9022308999128208,
+            "candidate_distance": null
+          }
+        ],
+        "candidate_ids": [
+          "r029",
+          "r004",
+          "r013",
+          "r001",
+          "r037",
+          "r011",
+          "r034",
+          "r036",
+          "r002",
+          "r024"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r029",
+          "r039",
+          "r003",
+          "r007",
+          "r031"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": false,
+          "max_delta": 5.700938066066641e-08,
+          "worst": "r039",
+          "unmeasured": 1,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "r031"
+        ],
+        "extra": [
+          "anchor"
+        ],
+        "order_mismatches": [
+          {
+            "position": 5,
+            "truth": "r029",
+            "candidate": "anchor",
+            "truth_distance": 0.9289846573450982,
+            "candidate_distance": null
+          },
+          {
+            "position": 6,
+            "truth": "r039",
+            "candidate": "r029",
+            "truth_distance": 0.9312452051912956,
+            "candidate_distance": 0.9289846573450982
+          },
+          {
+            "position": 7,
+            "truth": "r003",
+            "candidate": "r039",
+            "truth_distance": 0.9390958567772751,
+            "candidate_distance": 0.9312452051912956
+          },
+          {
+            "position": 8,
+            "truth": "r007",
+            "candidate": "r003",
+            "truth_distance": 0.9512690729165509,
+            "candidate_distance": 0.9390958567772751
+          },
+          {
+            "position": 9,
+            "truth": "r031",
+            "candidate": "r007",
+            "truth_distance": 0.9521307938108129,
+            "candidate_distance": 0.9512690729165509
+          }
+        ],
+        "candidate_ids": [
+          "tie2",
+          "tie1",
+          "tie0",
+          "r000",
+          "r011",
+          "anchor",
+          "r029",
+          "r039",
+          "r003",
+          "r007"
+        ],
+        "truth_ids": [
+          "r000",
+          "tie0",
+          "tie1",
+          "tie2",
+          "r011",
+          "r029",
+          "r039",
+          "r003",
+          "r007",
+          "r031"
+        ]
+      },
+      "graph_index_returned": 10,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 0,
+      "record_vs_graph_scan": {
+        "recall": 0.2,
+        "only_a": [
+          "r000",
+          "r003",
+          "r007",
+          "r031",
+          "r039",
+          "tie0",
+          "tie1",
+          "tie2"
+        ],
+        "only_b": [
+          "r001",
+          "r002",
+          "r004",
+          "r013",
+          "r024",
+          "r034",
+          "r036",
+          "r037"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 0.9,
+        "only_a": [
+          "r031"
+        ],
+        "only_b": [
+          "anchor"
+        ]
+      },
+      "metric_divergence_ids": [
+        "anchor",
+        "r000",
+        "r001",
+        "r002",
+        "r003",
+        "r004",
+        "r007",
+        "r013",
+        "r031",
+        "r034",
+        "r036",
+        "r037",
+        "r039",
+        "tie0",
+        "tie1",
+        "tie2"
+      ]
+    },
+    {
+      "query": "q02",
+      "record_error": null,
+      "truth_cosine": [
+        "r011",
+        "r037",
+        "r015",
+        "r024",
+        "r007",
+        "r025",
+        "r030",
+        "r023",
+        "r001",
+        "r039"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.1012964984402629e-08,
+          "worst": "r007",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ],
+        "truth_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": true,
+          "max_delta": 5.06105373165866e-08,
+          "worst": "r011",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ],
+        "truth_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 3.880892116114865e-06,
+          "worst": "r034",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r002"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r001",
+            "truth_distance": 16.38266008824204,
+            "candidate_distance": 18.058749505102824
+          },
+          {
+            "position": 1,
+            "truth": "r001",
+            "candidate": "r037",
+            "truth_distance": 18.058749505102824,
+            "candidate_distance": 18.10622171062372
+          },
+          {
+            "position": 2,
+            "truth": "r037",
+            "candidate": "r004",
+            "truth_distance": 18.10622171062372,
+            "candidate_distance": 18.276369140752927
+          },
+          {
+            "position": 3,
+            "truth": "r004",
+            "candidate": "r013",
+            "truth_distance": 18.276369140752927,
+            "candidate_distance": 18.421578210086768
+          },
+          {
+            "position": 4,
+            "truth": "r013",
+            "candidate": "r029",
+            "truth_distance": 18.421578210086768,
+            "candidate_distance": 18.47895751183883
+          }
+        ],
+        "candidate_ids": [
+          "r001",
+          "r037",
+          "r004",
+          "r013",
+          "r029",
+          "r011",
+          "r034",
+          "r036",
+          "r024",
+          "r002"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r001",
+          "r037",
+          "r004",
+          "r013",
+          "r029",
+          "r011",
+          "r034",
+          "r036",
+          "r024"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.4,
+        "missing": [
+          "r007",
+          "r015",
+          "r023",
+          "r025",
+          "r030",
+          "r039"
+        ],
+        "extra": [
+          "r002",
+          "r004",
+          "r013",
+          "r029",
+          "r034",
+          "r036"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "r011",
+            "candidate": "r001",
+            "truth_distance": 0.9082955807981536,
+            "candidate_distance": 0.9567080682662581
+          },
+          {
+            "position": 2,
+            "truth": "r015",
+            "candidate": "r004",
+            "truth_distance": 0.9476929416880863,
+            "candidate_distance": null
+          },
+          {
+            "position": 3,
+            "truth": "r024",
+            "candidate": "r013",
+            "truth_distance": 0.9484518393612374,
+            "candidate_distance": null
+          },
+          {
+            "position": 4,
+            "truth": "r007",
+            "candidate": "r029",
+            "truth_distance": 0.9497822934604987,
+            "candidate_distance": null
+          },
+          {
+            "position": 5,
+            "truth": "r025",
+            "candidate": "r011",
+            "truth_distance": 0.9512840880535292,
+            "candidate_distance": 0.9082955807981536
+          }
+        ],
+        "candidate_ids": [
+          "r001",
+          "r037",
+          "r004",
+          "r013",
+          "r029",
+          "r011",
+          "r034",
+          "r036",
+          "r024",
+          "r002"
+        ],
+        "truth_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": true,
+          "max_delta": 5.06105373165866e-08,
+          "worst": "r011",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ],
+        "truth_ids": [
+          "r011",
+          "r037",
+          "r015",
+          "r024",
+          "r007",
+          "r025",
+          "r030",
+          "r023",
+          "r001",
+          "r039"
+        ]
+      },
+      "graph_index_returned": 10,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 0,
+      "record_vs_graph_scan": {
+        "recall": 0.4,
+        "only_a": [
+          "r007",
+          "r015",
+          "r023",
+          "r025",
+          "r030",
+          "r039"
+        ],
+        "only_b": [
+          "r002",
+          "r004",
+          "r013",
+          "r029",
+          "r034",
+          "r036"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 1.0,
+        "only_a": [],
+        "only_b": []
+      },
+      "metric_divergence_ids": [
+        "anchor",
+        "r004",
+        "r007",
+        "r013",
+        "r015",
+        "r023",
+        "r025",
+        "r029",
+        "r030",
+        "r034",
+        "r036",
+        "r039"
+      ]
+    },
+    {
+      "query": "q03",
+      "record_error": null,
+      "truth_cosine": [
+        "r017",
+        "r044",
+        "r038",
+        "r014",
+        "r037",
+        "r004",
+        "anchor",
+        "r045",
+        "r024",
+        "r020"
+      ],
+      "record": {
+        "distance": {
+          "ok": true,
+          "max_delta": 7.921950873068795e-09,
+          "worst": "r037",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": true,
+        "order": "exact",
+        "recall": 1.0,
+        "missing": [],
+        "extra": [],
+        "order_mismatches": [],
+        "candidate_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "anchor",
+          "r045",
+          "r024",
+          "r020"
+        ],
+        "truth_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "anchor",
+          "r045",
+          "r024",
+          "r020"
+        ]
+      },
+      "graph_index": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.0558362295576273e-07,
+          "worst": "r017",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": false,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.8,
+        "missing": [
+          "anchor",
+          "r020"
+        ],
+        "extra": [],
+        "order_mismatches": [
+          {
+            "position": 6,
+            "truth": "anchor",
+            "candidate": "r045",
+            "truth_distance": 0.9450883178922008,
+            "candidate_distance": 0.9534253945402302
+          },
+          {
+            "position": 7,
+            "truth": "r045",
+            "candidate": "r024",
+            "truth_distance": 0.9534253945402302,
+            "candidate_distance": 0.9542255494257744
+          }
+        ],
+        "candidate_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "r045",
+          "r024"
+        ],
+        "truth_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "anchor",
+          "r045",
+          "r024",
+          "r020"
+        ]
+      },
+      "graph_scan_vs_euclidean": {
+        "distance": {
+          "ok": false,
+          "max_delta": 9.467861978862402e-06,
+          "worst": "r011",
+          "unmeasured": 1,
+          "tolerance": 0.001
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.9,
+        "missing": [
+          "anchor"
+        ],
+        "extra": [
+          "r044"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "anchor",
+            "candidate": "r037",
+            "truth_distance": 36.85629362918909,
+            "candidate_distance": 37.44011274069372
+          },
+          {
+            "position": 1,
+            "truth": "r037",
+            "candidate": "r004",
+            "truth_distance": 37.44011274069372,
+            "candidate_distance": 37.4658645661355
+          },
+          {
+            "position": 2,
+            "truth": "r004",
+            "candidate": "r029",
+            "truth_distance": 37.4658645661355,
+            "candidate_distance": 37.53723184485786
+          },
+          {
+            "position": 3,
+            "truth": "r029",
+            "candidate": "r013",
+            "truth_distance": 37.53723184485786,
+            "candidate_distance": 37.58378736939622
+          },
+          {
+            "position": 4,
+            "truth": "r013",
+            "candidate": "r001",
+            "truth_distance": 37.58378736939622,
+            "candidate_distance": 37.72538706949393
+          }
+        ],
+        "candidate_ids": [
+          "r037",
+          "r004",
+          "r029",
+          "r013",
+          "r001",
+          "r034",
+          "r036",
+          "r024",
+          "r011",
+          "r044"
+        ],
+        "truth_ids": [
+          "anchor",
+          "r037",
+          "r004",
+          "r029",
+          "r013",
+          "r001",
+          "r034",
+          "r036",
+          "r024",
+          "r011"
+        ]
+      },
+      "graph_scan_vs_cosine": {
+        "distance": {
+          "ok": null,
+          "max_delta": null,
+          "worst": null,
+          "unmeasured": 0
+        },
+        "count_equal": true,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.4,
+        "missing": [
+          "anchor",
+          "r014",
+          "r017",
+          "r020",
+          "r038",
+          "r045"
+        ],
+        "extra": [
+          "r001",
+          "r011",
+          "r013",
+          "r029",
+          "r034",
+          "r036"
+        ],
+        "order_mismatches": [
+          {
+            "position": 0,
+            "truth": "r017",
+            "candidate": "r037",
+            "truth_distance": 0.9055297834515119,
+            "candidate_distance": 0.9408454225509763
+          },
+          {
+            "position": 1,
+            "truth": "r044",
+            "candidate": "r004",
+            "truth_distance": 0.9247885551501261,
+            "candidate_distance": 0.944140322972228
+          },
+          {
+            "position": 2,
+            "truth": "r038",
+            "candidate": "r029",
+            "truth_distance": 0.9263015173258743,
+            "candidate_distance": null
+          },
+          {
+            "position": 3,
+            "truth": "r014",
+            "candidate": "r013",
+            "truth_distance": 0.9336929056671265,
+            "candidate_distance": null
+          },
+          {
+            "position": 4,
+            "truth": "r037",
+            "candidate": "r001",
+            "truth_distance": 0.9408454225509763,
+            "candidate_distance": null
+          }
+        ],
+        "candidate_ids": [
+          "r037",
+          "r004",
+          "r029",
+          "r013",
+          "r001",
+          "r034",
+          "r036",
+          "r024",
+          "r011",
+          "r044"
+        ],
+        "truth_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "anchor",
+          "r045",
+          "r024",
+          "r020"
+        ]
+      },
+      "graph_index_ef200": {
+        "distance": {
+          "ok": true,
+          "max_delta": 1.0558362295576273e-07,
+          "worst": "r017",
+          "unmeasured": 0,
+          "tolerance": 0.0001
+        },
+        "count_equal": false,
+        "duplicates": [],
+        "ids_equal": false,
+        "order": "diverged",
+        "recall": 0.8,
+        "missing": [
+          "anchor",
+          "r020"
+        ],
+        "extra": [],
+        "order_mismatches": [
+          {
+            "position": 6,
+            "truth": "anchor",
+            "candidate": "r045",
+            "truth_distance": 0.9450883178922008,
+            "candidate_distance": 0.9534253945402302
+          },
+          {
+            "position": 7,
+            "truth": "r045",
+            "candidate": "r024",
+            "truth_distance": 0.9534253945402302,
+            "candidate_distance": 0.9542255494257744
+          }
+        ],
+        "candidate_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "r045",
+          "r024"
+        ],
+        "truth_ids": [
+          "r017",
+          "r044",
+          "r038",
+          "r014",
+          "r037",
+          "r004",
+          "anchor",
+          "r045",
+          "r024",
+          "r020"
+        ]
+      },
+      "graph_index_returned": 8,
+      "graph_scan_returned": 10,
+      "record_returned": 10,
+      "graph_index_shortfall": 2,
+      "record_vs_graph_scan": {
+        "recall": 0.4,
+        "only_a": [
+          "anchor",
+          "r014",
+          "r017",
+          "r020",
+          "r038",
+          "r045"
+        ],
+        "only_b": [
+          "r001",
+          "r011",
+          "r013",
+          "r029",
+          "r034",
+          "r036"
+        ]
+      },
+      "record_vs_graph_index": {
+        "recall": 0.8,
+        "only_a": [
+          "anchor",
+          "r020"
+        ],
+        "only_b": []
+      },
+      "metric_divergence_ids": [
+        "r001",
+        "r011",
+        "r013",
+        "r014",
+        "r017",
+        "r020",
+        "r029",
+        "r034",
+        "r036",
+        "r038",
+        "r044",
+        "r045"
+      ]
+    }
+  ],
+  "verdict": {
+    "ok": false,
+    "poison": "vector",
+    "poison_status": "POISON DETECTED",
+    "failures": [
+      "q_anchor: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.2572615322170577e-06)",
+      "q_tie: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=4.094970130097408e-06)",
+      "q00: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.0541391624485641e-05)",
+      "q01: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.2693586178613714e-05)",
+      "q02: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=3.880892116114865e-06)",
+      "q03: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=9.467861978862402e-06)"
+    ],
+    "informational": {
+      "metric_divergence_ids_total": 76
+    }
+  }
+}

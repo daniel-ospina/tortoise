@@ -19,7 +19,11 @@ reds. The transport is stubbed (`_post`), so nothing here opens a socket.
 from __future__ import annotations
 
 import ast
+import datetime
+import email.message
+import email.utils
 import importlib.util
+import io
 import json
 import re
 import urllib.error as urllib_error
@@ -185,7 +189,12 @@ def test_write_map_refuses_a_state_whose_ids_are_item_identities(tmp_path, monke
         for item in map_doc[section]:
             _prop, value = filer.declared_identity(item)
             stale["ids"][item["ref"]] = value            # an identity, not an id
-    stale["written"] = [f"{section[:-1]}:{item['ref']}"
+    # ⛔ CURRENT MARKERS ON PURPOSE: the pre-fix spelling (`subject:<ref>`) is an
+    # ORPHAN, which a later guard refuses first — so a regression in `named`
+    # stayed invisible (measured: `named = []` left the suite green, and the run
+    # still returned 2 through the orphan arm). With `item_marker` the ONLY guard
+    # that can refuse this state is the one under test (#13913 review round 17).
+    stale["written"] = [filer.item_marker(section, item)
                         for section in ("subjects", "objects", "sources", "events", "points")
                         for item in map_doc[section]]
     path = tmp_path / "state.json"
@@ -366,6 +375,16 @@ def test_the_verdict_refuses_DUPLICATED_nodes(map_doc):
     assert filer.verdict(map_doc, nodes, structural, operators) == 0
     assert filer.verdict(map_doc, nodes + nodes, structural, operators) == 1
     assert filer.duplicates(map_doc, nodes) == []
+    # ⛔ THE SCOPE IS DECLARED IDENTITIES ONLY, and only its INCLUSION was pinned.
+    # A duplicated node the map does NOT declare is not a filing defect: without
+    # the scope, `--verify` prints `DUPLICATED — 1 declared identity(ies)` and
+    # exits 1 naming a node this map never claims — the false-red class this PR
+    # keeps closing (measured: dropping the filter left 116 passed) (#13913
+    # round 19).
+    foreign = [["Object", "foreign-dup", "", ""], ["Object", "foreign-dup", "", ""]]
+    assert filer.duplicates(map_doc, [*nodes, *foreign]) == []
+    assert filer.verdict(map_doc, [*nodes, *foreign], structural, operators) == 0, (
+        "an undeclared duplicated node was reported as a filing defect")
 
 
 def test_the_structural_edge_query_is_NULL_SAFE():
@@ -540,7 +559,90 @@ def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_do
     state = json.loads(state_path.read_text())
     assert any("mechanism_mismatch" in f for f in state["failed"])
     assert len([m for m in state["written"] if m.startswith("edge:")]) == len(map_doc["edges"])
+    err = capsys.readouterr().err
+    # ⛔ THE RUN THAT RECORDS IT MUST ALSO REPORT IT. This arm appends a failure
+    # and calls `mark(marker)`, so the marker enters `done` and `carried` drops
+    # its line on every LATER run — meaning a `state.json`-only diagnosis was the
+    # permanent state of the one run that observed the inversion, while the exit
+    # summary told the operator `51 edge(s) not written` about 51 writes that all
+    # landed (#13950 review round 2). Three surfaces: the `!!` line, the class
+    # header, and a summary that does not invert the state.
+    assert "mechanism_mismatch" in err, err
+    assert "LANDED with a mechanism the judgement does not declare" in err, err
+    # Bullet 3 is the RIGHT remedy for this class — the write landed — and it was
+    # unreachable because the gate could not be entered.
+    assert "otherwise the write landed" in err, err
+    assert "filed INVERTED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "a landed write was reported as not written: " + err)
     capsys.readouterr()
+
+
+def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """`carried` reads the ledger AS LOADED, not the mid-run-mutated one.
+
+    The `mechanism_mismatch` arm saves `st["failed"] = old ∪ failures` while it
+    runs — it must, or a run killed before the final save loses the only record
+    of an inverted operator. `carried` was then computed from that SAME list, so
+    this run's own declined lines (whose markers never enter `done`) were
+    re-labelled as an earlier run's failures. Measured at #13950 review round 3:
+    an 11-mismatched + 9-declined run over `failed: []` printed `9 marker(s) from
+    an earlier run are STILL unresolved`, sending the operator to hunt for
+    prior-run state that does not exist.
+
+    `map_doc`'s first six edges are structural and the first operator is index 6,
+    so the declines are appended BEFORE the first mismatch save — which is what
+    makes this deterministic rather than order-dependent.
+
+    Mutant: `carried`'s snapshot and the `reobserved` filter are REDUNDANT —
+    either alone prevents the mislabel — so mutating either ONE stays green
+    (measured both ways at #13950 review round 36, and re-measured at this
+    head after the `Retry-After` row was added: each stays fully green — no
+    row reds). Remove BOTH
+    (compute `carried` from `st["failed"]` AND drop the filter) and the original
+    bug is back: this row reds, together with
+    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _DeclinesAndWarns(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": False, "nudges": []}
+                elif tool == "tortoise_create_operator":
+                    payload = {"id": f"{tool}:{inner._n}",
+                               "warnings": [{"code": "mechanism_mismatch",
+                                             "message": "IMPL carrying refutes"}]}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    state_path.write_text(json.dumps(
+        {"ids": {}, "written": [], "failed": [], "unconfirmed": []}))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _DeclinesAndWarns)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # Sanity: both classes really are present, so the assertion below is about
+    # the label and not about a run that produced nothing.
+    assert "DECLINED by the door" in err, err
+    assert "mechanism_mismatch" in err, err
+    assert "from an earlier run" not in err, (
+        "this run's own failures were labelled an EARLIER run's — `carried` read "
+        "the ledger AFTER the mismatch arm had merged this run into it: " + err)
 
 
 def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
@@ -551,9 +653,110 @@ def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
     non-idempotent writes the record exists to protect.
     """
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    # ⛔ THE REPLACE IS THE PROPERTY, NOT THE CONTENT: a plain `write_text`
+    # satisfies every content assertion above (`measured: replacing the temp-file
+    # + `os.replace` with `STATE_PATH.write_text(...)` left the suite green`), and
+    # it is exactly the run that a kill truncates. So the atomic step is
+    # observed, not inferred (#13913 review round 17).
+    replaced = []
+    real_replace = filer.os.replace
+
+    def _replace(src, dst):
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(filer.os, "replace", _replace)
     filer.save_state({"ids": {"a": "1"}, "written": ["x"], "failed": []})
+    assert replaced, "save_state did not replace atomically"
+    assert replaced[-1][1] == str(tmp_path / "state.json"), replaced
     assert json.loads((tmp_path / "state.json").read_text())["written"] == ["x"]
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize(("mutate", "expect"), [
+    (lambda d: d["subjects"][0].update(subjectKind="not-a-kind"),
+     "not in core §5"),
+    (lambda d: d["subjects"].append(dict(d["subjects"][0])), "duplicate ref"),
+    (lambda d: d["events"][0].update(content="x" * 1001), "> 1000 chars"),
+    (lambda d: d["points"][0].update(content="x" * 1001), "> 1000 chars"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(op="MAYBE"),
+     "not a mechanism"),
+    (lambda d: next(e for e in d["edges"]
+                    if "op" in e and e.get("label")).update(label="suports"),
+     "not in the Layer-2 semantics vocabulary"),
+])
+def test_each_VALIDATE_leg_2_actually_refuses(map_doc, mutate, expect):
+    """Six more `validate()` legs had NO row: each could be disabled, green.
+
+    Measured pre-fix: `pass` on any of them left 102 passed. The SEMANTICS leg is
+    not cosmetic — the door WARN-NOT-BLOCKS an out-of-vocabulary `semantics`
+    (`undeclared_relation`, #7852) and `--verify` cannot read the word back, so it
+    is the ONLY gate between a Layer-2 typo and a filed operator: measured with
+    the leg disabled, a label typo'd to `suports` passed `validate()`, was sent,
+    and the run printed `all nodes and edges written` with rc 0 (#13913 review
+    round 18).
+
+    Mutant: `pass` on that leg's `errs.append` — its own case reds.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    mutate(bad)
+    errs = filer.validate(bad)
+    assert [e for e in errs if expect in e], (expect, errs)
+
+
+def test_the_LAYER2_and_MECHANISM_vocabularies_are_the_SHIPPED_ones():
+    """`SEMANTICS` and `OP_TYPES` are read from the source, not transcribed.
+
+    `DIRECTIONS` had this pin and these two did not. A drifted transcription here
+    refuses a surface-LEGAL write (a validator bug) or admits an out-of-vocabulary
+    one (a filed operator with an unreadable meaning) — the same class as the
+    `STRUCTURAL_RELS` lag (#13913 review round 18).
+
+    ⛔ IDENTITY, NOT EQUALITY, AND THE DIFFERENCE IS THE WHOLE ROW (#13950 review
+    round 31). The fallback literals in `file_map.py` are the SAME SETS as the
+    shipped ones, so the two `==` assertions alone stay GREEN under the mutation
+    this docstring claims to pin — delete the `try:` import, keep
+    `OP_TYPES = set(_FALLBACK_OP_TYPES)`, and both sides are still equal. The row
+    was a comparison between two equal sets, which is exactly the shape
+    `test_direction_of_is_the_DOOR_s_resolver_not_a_transcription` (above) rejects
+    one file over. `_SHIPPED_*` is bound BY THE IMPORT, so `is` proves the import
+    is the source.
+
+    Mutants, each measured RED: (a) delete the `try:` import leg — `_SHIPPED_*` is
+    then unbound, so this raises `AttributeError` instead of passing; (b) add a
+    word to either fallback literal — the literal pins at the end of this row
+    name it via `^`. ⛔ (b) ONLY reds because those pins exist, and they were
+    added for exactly that reason: while the import resolves the literals are the
+    DEAD fallback that `SEMANTICS`/`OP_TYPES` never read, so the two `==`
+    assertions above cannot see them drift (measured at #13950 review round 36:
+    `_FALLBACK_OP_TYPES` + "funds" left this row green when only the identity
+    pins were present). An unreachable mutant is the same defect the identity
+    pins close one layer out, so the literals get their own reachable pins rather
+    than a disclaimer.
+    """
+    from tortoise.ep import MECHANISM_REL_TYPES
+    from tortoise.pack_registry import SEMANTICS_VALUES
+
+    # The import leg IS the source: these are the imported objects, not copies of
+    # their values. A deleted or shadowed import cannot satisfy this.
+    assert filer._SHIPPED_SEMANTICS is SEMANTICS_VALUES, (
+        "`SEMANTICS` is not read from `pack_registry.SEMANTICS_VALUES`")
+    assert filer._SHIPPED_OP_TYPES is MECHANISM_REL_TYPES, (
+        "`OP_TYPES` is not read from `ep.MECHANISM_REL_TYPES`")
+
+    got_semantics, want_semantics = filer.SEMANTICS, set(SEMANTICS_VALUES)
+    got_mechanics, want_mechanics = filer.OP_TYPES, set(MECHANISM_REL_TYPES)
+    assert got_semantics == want_semantics, got_semantics ^ want_semantics
+    assert got_mechanics == want_mechanics, got_mechanics ^ want_mechanics
+    # ⛔ AND PIN THE FALLBACK LITERALS, NOT THEIR VALUES. While the import
+    # resolves these are UNREACHABLE, so nothing above can see them drift: a
+    # drifted transcription passed every assertion in this row (#13950 review
+    # round 32) and adding a word to one passed too (round 36). They are what a
+    # standalone box validates an offline map against, so they get their own pins.
+    assert want_semantics == filer._FALLBACK_SEMANTICS, (
+        want_semantics ^ filer._FALLBACK_SEMANTICS)
+    assert want_mechanics == filer._FALLBACK_OP_TYPES, (
+        want_mechanics ^ filer._FALLBACK_OP_TYPES)
 
 
 def test_validate_refuses_an_undeclared_object_kind(map_doc):
@@ -565,6 +768,29 @@ def test_validate_refuses_an_undeclared_object_kind(map_doc):
     bad["objects"][0]["objectKind"] = "core:notARealKind"
     errs = filer.validate(bad)
     assert any("is not declared by core or any installed pack" in e for e in errs), errs
+
+
+def test_validate_refuses_two_judgements_of_one_edge(map_doc):
+    """`edge_key` is endpoints + mechanism, so a differently-WORDED twin is a duplicate.
+
+    The gate refuses "the same edge judged twice" by `edge_key`, deliberately NOT
+    by `edge_marker`: two rows that differ only in their Layer-2 WORD are one
+    operator, and `presence()` cannot read a label back by this module's own
+    stated limitation — so one written operator would certify BOTH. Measured:
+    keying the gate on `edge_marker` left 116 passed, and the pair then passed
+    `validate()` (#13913 review round 19).
+
+    Mutant: `edge_seen[edge_key(e)]` → `edge_seen[edge_marker(e)]` — this reds.
+    """
+    twin = json.loads(json.dumps(map_doc))
+    base = next(e for e in twin["edges"] if "op" in e and e.get("label") == "supports")
+    other = "causes" if base["op"] == "IMPL" else "supports"
+    assert filer.SEMANTICS_MECHANISMS_FALLBACK[other] == base["op"], (
+        "the twin's word must resolve to the SAME mechanism, or it is refused "
+        "for a different reason")
+    twin["edges"].append({**base, "label": other})
+    errs = filer.validate(twin)
+    assert [e for e in errs if "judged twice" in e], errs
 
 
 def test_validate_refuses_an_orphan(map_doc):
@@ -756,6 +982,444 @@ def test_a_refused_edge_is_not_marked_as_written(tmp_path, monkeypatch, map_doc,
     capsys.readouterr()
 
 
+def test_a_verdict_refuses_a_WRONG_mechanism_and_a_WRONG_target(map_doc):
+    """`presence()`'s two remaining legs each decide a certificate on their own.
+
+    `kind == e["op"]` and `b in slots[1][0]` were the only legs of the operator
+    match with NO discriminating assertion: deleting either left the suite green
+    (81 passed) while the shipped code refused. Measured on the real map —
+    every operator rebuilt with the OTHER mechanism (`IMPL` <-> `NAND`, same
+    endpoints, same direction, one endpoint per slot) read `101/101`,
+    `missing_edges=[]`, verdict 0 over a graph whose 51 operators ALL carry the
+    inverted mechanism; and an operator whose slot 1 reaches a node the declared
+    source is not joined to certified the declared edge (#13913 review round 15).
+
+    ⛔ THE SUBSTITUTION IS WHY THIS ROW EXISTS: `_edge_rows()` derives a row's
+    mechanism and its slot-1 target FROM the declaration it is meant to
+    contradict, so no fixture built by that helper can exercise either leg.
+    """
+    idents = filer.identity_by_ref(map_doc)
+    edge_rows, op_rows = _edge_rows(map_doc)
+    declared = next(e for e in map_doc["edges"] if "op" in e)
+    src, dst = idents[declared["from"]], idents[declared["to"]]
+
+    # the operator rows that hold the declared pair, and no other
+    holders = {}
+    for row in op_rows:
+        holders.setdefault(row[0], []).append(row)
+    opid = next(
+        nid for nid, rows in holders.items()
+        if {tuple(r[4:]) for r in rows if r[2] == 0} == {tuple(_row_of(src))}
+        and {tuple(r[4:]) for r in rows if r[2] == 1} == {tuple(_row_of(dst))})
+    triple = (declared["op"], declared["from"], declared["to"])
+
+    def _presence_with(**swaps) -> set:
+        """The declared edge is MISSING under the substitution, certified without it."""
+        rows = []
+        for row in op_rows:
+            if row[0] != opid:
+                rows.append(row)
+                continue
+            new = list(row)
+            if "mechanism" in swaps and new[2] == 0:
+                new[1] = swaps["mechanism"]
+            if "target" in swaps and new[2] == 1:
+                new[4:] = _row_of(swaps["target"])
+            rows.append(new)
+        _missing_nodes, missing_edges = filer.presence(
+            map_doc, _node_rows(map_doc), edge_rows, rows)
+        return missing_edges
+
+    # baseline: the unsubstituted rows certify it, so the row is not vacuous
+    assert triple not in _presence_with(), "the fixture's own rows do not certify it"
+
+    other_op = "NAND" if declared["op"] != "NAND" else "IMPL"
+    assert triple in _presence_with(mechanism=other_op), (
+        "an operator carrying the WRONG mechanism certified the declared edge")
+
+    # a real node the declared source is joined to by nothing
+    joined = {e["to"] for e in map_doc["edges"] if e["from"] == declared["from"]}
+    joined |= {e["from"] for e in map_doc["edges"] if e["to"] == declared["from"]}
+    stranger = next(r for r, ident in idents.items()
+                    if r != declared["to"] and r != declared["from"]
+                    and r not in joined)
+    assert triple in _presence_with(target=idents[stranger]), (
+        "an operator whose slot 1 reaches an UNRELATED node certified the "
+        "declared edge")
+
+
+def test_an_UNBOUND_endpoint_is_recorded_as_a_failure(tmp_path, monkeypatch, map_doc,
+                                                      capsys):
+    """The `unbound endpoint` line is the ONLY record of a skipped declared edge.
+
+    Silencing the append (leaving the `continue`) skips the edge with no failure
+    and no marker, so the run reports `all nodes and edges written` over a
+    declared edge that was never attempted — measured: the mutant left the suite
+    green and the line's only test references asserted the REMEDY text, never the
+    code that produces the line (#13913 review round 17).
+
+    Mutant: `failures.append(f"{marker}: unbound endpoint …")` → `pass`.
+    """
+    # ⛔ AN EVENT, NOT A POINT: a point whose marker is present but whose id is
+    # absent is RE-WRITTEN (the points loop has no ambiguity guard), so it gets an
+    # id and the unbound arm is never reached — measured, which is why the first
+    # version of this row read rc 0. An Event is the ref a resume can legitimately
+    # hold without an id (the AMBIGUOUS ledger), and its declared edge then hits
+    # `unbound endpoint`.
+    victim = next(e["ref"] for e in map_doc["events"]
+                  if any(d["from"] == e["ref"] or d["to"] == e["ref"]
+                         for d in map_doc["edges"]))
+    declared = next(e for e in map_doc["edges"]
+                    if e["from"] == victim or e["to"] == victim)
+    marker = filer.edge_marker(declared)
+    victim_item = next(e for e in map_doc["events"] if e["ref"] == victim)
+    state = {"ids": {}, "written": [], "failed": [], "unconfirmed": []}
+    for section in ("subjects", "objects", "sources", "events", "points"):
+        for item in map_doc[section]:
+            if item["ref"] != victim:
+                state["ids"][item["ref"]] = f"id:{item['ref']}"
+    state["written"] = [filer.item_marker(section, item)
+                        for section in ("subjects", "objects", "sources", "events", "points")
+                        for item in map_doc[section]]
+    state["unconfirmed"] = [filer.item_marker("events", victim_item)]
+    state["written"] += [filer.edge_marker(e) for e in map_doc["edges"]
+                         if e is not declared]
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(state))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    filer.write_map(map_doc)
+    err = capsys.readouterr().err
+    state = json.loads(path.read_text())
+    assert [f for f in state["failed"] if "unbound endpoint" in f], state["failed"]
+    assert marker not in state["written"], "an unattempted edge was marked as written"
+    assert "unbound endpoint" in err, err
+    # ⛔ THE LINE MUST COME WITH ITS EXIT. The `!!` print above is satisfied by
+    # the failure line alone, so this row passed while the remedy block was gated
+    # on `carried or declined` — and on the run that FIRST records an unbound
+    # endpoint `carried` is empty (the line is this run's own), so the bullet that
+    # tells the reader how to clear it was never printed (#13950 review, P2: the
+    # PR's own claim 3). Two surfaces, two assertions: the class header, and the
+    # load-bearing edit inside the bullet.
+    assert "hit an UNBOUND endpoint" in err, err
+    assert "nothing was written for the EDGE" in err, err
+    assert "record the landed" in err, (
+        "the unbound-endpoint line printed with no route out: " + err)
+
+
+def test_an_EMPTY_200_body_is_an_UNKNOWN_outcome(monkeypatch):
+    """A 200 with no payload has no tool result to read, so it is UNCONFIRMED.
+
+    Mutant: `if not payload:` → `if False:` — the call falls through to
+    `payload.get("result")` on `None` and raises `AttributeError`, an
+    unclassified exception (#13913 review round 18).
+    """
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", lambda _b: (200, None, {}))
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "empty response" in str(excinfo.value), excinfo.value
+
+
+def test_a_WAIT_BUDGET_refusal_is_retried_TWICE_on_a_repeat_safe_door(monkeypatch):
+    """A degraded data plane does not heal inside one call; the docstring says two retries.
+
+    Mutant: `if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 2:`
+    → `if False:` — one POST then a failure (#13913 review round 18).
+    """
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+
+    def _post(_b):
+        posts.append(1)
+        return 200, {"content": [{"type": "text", "text": "wait budget exceeded"}],
+                     "isError": True}, {}
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+    with pytest.raises(filer.Refusal):
+        mcp.call("tortoise_create_point", {})
+    assert len(posts) == 3, f"a repeat-safe write retried {len(posts) - 1} time(s)"
+
+
+def test_direction_of_is_the_DOOR_s_resolver_not_a_transcription(monkeypatch):
+    """`direction_of` must CALL the shipped resolver, not merely agree with it.
+
+    With the import made to fail, `_fallback_direction` takes over and every row
+    still passes — because the comparison test compares the fallback's own
+    expectations, so the two became the same object (measured: injecting
+    `raise ImportError` before the import left the suite green). A sentinel on
+    the real resolver is the only thing that proves the import is the source
+    (#13913 review round 17).
+
+    Mutant: drop the import and return `_fallback_direction(edge)` — this reds.
+    """
+    import tortoise.sdk as sdk
+
+    seen = []
+
+    def _sentinel(op_type, direction, semantics):
+        seen.append((op_type, direction, semantics))
+        return "SENTINEL"
+
+    monkeypatch.setattr(sdk.TortoiseSDK, "_effective_direction",
+                        staticmethod(_sentinel))
+    got = filer.direction_of({"op": "IMPL", "direction": "->", "label": "supports"})
+    assert got == "SENTINEL", got
+    assert seen == [("IMPL", "->", "supports")], seen
+
+
+def test_presence_normalises_the_EXPECTED_direction_too(monkeypatch, map_doc):
+    """The expected-side alias is inert today and load-bearing the moment a
+    resolver answers with the MODEL spelling.
+
+    `want = DIRECTION_ALIASES.get(want, want)` was unpinned: deleting it left the
+    suite green, because `direction_of` answers `->`/`<->` for every edge this map
+    declares. A resolver answering `bidirectional` (the model token) against a
+    graph storing `<->` would then report a correctly filed edge ABSENT
+    (#13913 review round 17).
+
+    Mutant: `want = want` — this reds.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    # the STORED row must carry the alias-normalised spelling, so this needs an
+    # edge whose declared direction resolves to `<->` (a `->` edge would red for
+    # the wrong reason)
+    declared = next(e for e in map_doc["edges"]
+                    if "op" in e and filer.direction_of(e) == "<->")
+    triple = (declared["op"], declared["from"], declared["to"])
+    assert triple not in filer.presence(
+        map_doc, _node_rows(map_doc), edge_rows, op_rows)[1]
+
+    monkeypatch.setattr(filer, "direction_of", lambda _e: "bidirectional")
+    assert triple not in filer.presence(
+        map_doc, _node_rows(map_doc), edge_rows, op_rows)[1], (
+        "the model spelling `bidirectional` was not normalised to the stored one")
+
+
+def test_a_NON_MISMATCH_warning_is_not_a_mechanism_mismatch(tmp_path, monkeypatch,
+                                                            map_doc, capsys):
+    """`create_operator` also returns `undeclared_relation` warnings.
+
+    Without the `code == "mechanism_mismatch"` filter the census reports them AS a
+    mismatch: exit 1, the inverted-mechanism wording, and the remedy "delete the
+    node in the graph" — for a warning that says nothing about the mechanism
+    (#13913 review round 17).
+
+    Mutant: `if isinstance(warn, dict)` with no code test — this reds.
+    """
+    class _OtherWarning(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                return {"structuredContent": {
+                    "id": "op-id",
+                    "warnings": [{"code": "undeclared_relation",
+                                  "message": "relation `supports` is undeclared"}]}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _OtherWarning)
+    assert filer.write_map(map_doc) == 0
+    err = capsys.readouterr().err
+    assert "mechanism_mismatch" not in err, err
+    assert not json.loads(state_path.read_text())["failed"]
+
+
+def test_a_200_body_that_is_not_a_tool_result_is_an_UNKNOWN_outcome(monkeypatch):
+    """The arm that catches a proxy/an error page on a 2xx had no row of its own.
+
+    `test_a_non_rpc_body_is_not_read_as_success` feeds a **401**, which `urlopen`
+    raises as `HTTPError` and the `400 <= code < 500` arm answers first, so the
+    "not a tool result" guard was never reached: defanging it left the suite
+    green (#13913 review round 16). A 200 whose body is `{"message": …}` is a
+    proxy error page — a transport that answered, and a write that did not
+    happen.
+
+    Mutant: `if not isinstance(result, dict):` — this raises nothing and reds.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post",
+                        lambda _b: (200, {"message": "Unauthorized"}, {}))
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "no tool result" in str(excinfo.value), excinfo.value
+
+
+def test_a_200_error_page_never_certifies_a_write(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The consequence: rc 1 and NO edge marker, so a resume cannot skip it.
+
+    Measured with such a transport: the shipped filer gives rc=1 with every edge
+    reported `no tool result`, while a filer that dropped the guard gave rc=0,
+    `failed: []` and `all nodes and edges written` over zero created edges — and
+    every marker left in `written`, so the resume skipped them permanently.
+
+    Mutant: the `not isinstance(result, dict) or not (…content… or
+    …structuredContent…)` guard reduced to `not isinstance(result, dict)`.
+    """
+    class _ErrorPage(_RealMcp):
+        def _post(self, body):
+            tool = (body.get("params") or {}).get("name")
+            if tool in ("tortoise_create_edge", "tortoise_create_operator"):
+                return 200, {"message": "Unauthorized"}, {}
+            # nodes land first: the arm under test is the EDGE loop's
+            return 200, {"content": [{"type": "text", "text": "{}"}],
+                         "structuredContent": {"id": "node-id"}}, {}
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _ErrorPage)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    state = json.loads(state_path.read_text())
+    assert state["failed"], "a 2xx error page left no diagnosis"
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert structural
+    assert not [m for m in state["written"] if m in structural], (
+        "an edge answered by a 2xx error page was marked as written")
+    # ⛔ THE OPERATOR ARM IS FAIL-CLOSED, NOT EMPTY: its marker STAYS (the write
+    # may have landed) and is reported as unconfirmed, so a resume never
+    # re-issues it.
+    ops = [filer.edge_marker(e) for e in map_doc["edges"] if "op" in e]
+    assert [m for m in ops if m in state["written"]], (
+        "an UNCONFIRMED operator intent was retired — the resume would re-issue it")
+    assert [m for m in state["unconfirmed"] if m in ops], state["unconfirmed"]
+    assert any("no tool result" in f for f in state["failed"]), state["failed"]
+
+
+def test_MAIN_refuses_a_map_that_VALIDATE_rejected(tmp_path, monkeypatch, map_doc,
+                                                  capsys):
+    """`validate()`'s verdict is the ONLY gate between it and `--write`.
+
+    Nothing tested the `if errs: return 2` branch, so disabling it left the suite
+    green while making EVERY `validate()` refusal leg bypassable: a map with
+    `objectKind: not-a-kind` then wrote through 180 transport calls and exited 0
+    (#13913 review round 16).
+
+    Mutant: `if errs:` → `if False:` — this reds on both modes.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    bad["objects"][0]["objectKind"] = "not-a-kind"
+    path = tmp_path / "bad_map.json"
+    path.write_text(json.dumps(bad))
+    monkeypatch.setattr(filer, "MAP_PATH", path)
+    calls = []
+
+    class _Counting(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            calls.append(tool)
+            return super().call(tool, args, **_kw)
+
+    monkeypatch.setattr(filer, "Mcp", _Counting)
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+
+    # ⛔ EACH MODE'S REFUSAL IS READ IN ITS OWN OUTPUT: `verify()` also exits 2
+    # without a graph URI, so one shared read let a `--verify`-only weakening
+    # (`if errs and not args.verify:`) pass the whole suite (#13950 round 22).
+    for mode in ("--dry-run", "--write", "--verify"):
+        capsys.readouterr()
+        monkeypatch.setattr(filer.sys, "argv", ["file_map.py", mode])
+        assert filer.main() == 2, f"{mode} accepted a map validate() refused"
+        err = capsys.readouterr().err
+        assert "MAP REFUSED" in err, (
+            f"{mode} exited 2 for some OTHER reason, not validate(): {err!r}")
+        assert not calls, f"{mode} reached the transport: {calls[:3]}"
+
+
+@pytest.mark.parametrize(("mutate", "expect"), [
+    (lambda d: next(o for o in d["objects"]
+                    if o["objectKind"] == "product-strategy:competitor"
+                    ).update(goalState="met"),
+     "goalState is only meaningful"),
+    (lambda d: d["points"][0].update(kind="decision"),
+     "the state-centric model writes `statement` only"),
+    (lambda d: d["points"][0].update(source="src:not-declared"),
+     "is not declared in sources[]"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(direction="sideways"),
+     "not one of"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(
+        to=next(s["ref"] for s in d["sources"])),
+     "not epistemic"),
+])
+def test_each_VALIDATE_refusal_leg_actually_refuses(map_doc, mutate, expect):
+    """Five refusal legs had NO row: each could be disabled with a green suite.
+
+    Measured pre-fix: setting `if False:` on any of the five left 82 passed, and
+    four of the five then FILED with exit 0 (the undeclared `source` one is caught
+    later by `doc_by_ref`'s `KeyError`). The `direction` leg is the notable one:
+    `DIRECTIONS` is loaded from `tortoise.live` precisely because a surface-legal
+    `unidirectional` was being refused, yet the leg that consumes it was untested
+    (#13913 review round 16).
+
+    Mutant: `if False:` on that leg's `errs.append` — its own case reds.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    mutate(bad)
+    errs = filer.validate(bad)
+    assert [e for e in errs if expect in e], (expect, errs)
+
+
+def test_presence_refuses_a_TWO_ROW_source_slot_and_reads_a_STORED_alias(map_doc):
+    """Two `presence()` legs that decided a certificate with no row of their own.
+
+    (a) `len(slots.get(0, ())) == 1`: a slot 0 holding TWO rows — the declared
+    source first — certified the declared edge, while the shipped code reports it
+    missing. `create_operator` writes `inputs = [source_id] + target_ids`, so
+    slot 0 is one row through this door; the leg is defensive, and it also guards
+    the `slots[0][0]` index.
+    (b) the STORED-side `DIRECTION_ALIASES` normalisation: an operator stored with
+    `direction: unidirectional` — a surface-legal value, the very one that forced
+    `DIRECTIONS` to be read from `tortoise.live` — read back MISSING without it.
+    (#13913 review round 16.)
+
+    Mutants: delete the `len(slots.get(0, ())) == 1` leg; drop the stored-side
+    alias — each reds only its own assertion.
+    """
+    idents = filer.identity_by_ref(map_doc)
+    edge_rows, op_rows = _edge_rows(map_doc)
+    declared = next(e for e in map_doc["edges"] if "op" in e)
+    src, dst = idents[declared["from"]], idents[declared["to"]]
+    triple = (declared["op"], declared["from"], declared["to"])
+    holders: dict[str, list] = {}
+    for row in op_rows:
+        holders.setdefault(row[0], []).append(row)
+    opid = next(
+        nid for nid, rows in holders.items()
+        if {tuple(r[4:]) for r in rows if r[2] == 0} == {tuple(_row_of(src))}
+        and {tuple(r[4:]) for r in rows if r[2] == 1} == {tuple(_row_of(dst))})
+
+    def _missing(rows) -> set:
+        _n, missing_edges = filer.presence(
+            map_doc, _node_rows(map_doc), edge_rows, rows)
+        return missing_edges
+
+    assert triple not in _missing(op_rows), "the fixture's own rows do not certify it"
+
+    # (a) a SECOND row in slot 0, declared source first
+    decoy = next(ident for ref, ident in idents.items()
+                 if ident != src and ident != dst)
+    wide_source = [list(r) for r in op_rows]
+    wide_source.insert(
+        next(i for i, r in enumerate(wide_source) if r[0] == opid and r[2] == 0) + 1,
+        [opid, declared["op"], 0, filer.direction_of(declared), *_row_of(decoy)])
+    assert triple in _missing(wide_source), (
+        "a source slot holding TWO rows certified the declared edge")
+
+    # (b) the operator stored with the surface's alias spelling
+    aliased = [list(r) for r in op_rows]
+    for row in aliased:
+        if row[0] == opid:
+            row[3] = "unidirectional"
+    assert triple not in _missing(aliased), (
+        "an operator stored with `unidirectional` read back as MISSING")
+
+
 def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
         tmp_path, monkeypatch, map_doc, capsys):
     """`create_edge` declines WITHOUT raising, so its result is the only witness.
@@ -793,6 +1457,117 @@ def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
         "a structural edge the door DECLINED was marked as written")
     assert any("created=False" in f for f in state["failed"]), state["failed"]
     assert "created=False" in err, err
+    # ⛔ AND ITS OWN REMEDY: this class wrote NOTHING and has NO marker, so the
+    # "otherwise the write landed — keep its marker in `written`" bullet is a
+    # wrong instruction for it: following it ADDS the marker, which is the
+    # permanent skip this guard exists to remove (#13913 review round 18).
+    assert "line says `create_edge returned created=`" in err, err
+    assert "do NOT add a marker to `written`" in err, err
+    # …and the line is reported ONCE, not once in-loop and again as "STILL
+    # unresolved" (the same line twice reads as two failures).
+    # ⛔ The header counts MARKERS, not lines: the dedupe is marker-keyed, so a
+    # line count could exceed what is listed and the parenthetical would claim a
+    # line was printed that was not (#13913 review round 19).
+    assert "edge(s) were DECLINED" in err, err
+    # ⛔ NOT "markers": this class has NO marker, and the sentence above says so.
+    assert "each of those was re-reported above" in err, err
+    assert "markers was re-reported" not in err, err
+    # The exception class has no marker either: bullet 3 must say what to do.
+    assert "If NO marker for this line is in `written` at all" in err, err
+    one = structural[0]
+    assert err.count(one) == 1, (
+        f"the declined edge is reported more than once ({err.count(one)}x): "
+        "once in-loop and again as an earlier run's line reads as two failures")
+
+
+def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The same marker in `failed` and re-reported this run is ONE failure.
+
+    An operator whose marker is in `written` AND in `unconfirmed` is reported by
+    the loop (`attempted, outcome UNCONFIRMED — NOT re-issued`) and is also
+    `carried` (its marker never re-enters `done`), so the "STILL unresolved"
+    block listed it a second time — two headings over one failure, and the
+    earlier run's wording differs from today's (#13913 review round 18).
+
+    Mutant: `repeated = list(carried)` (no dedupe) — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    first = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first)
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [marker],
+        "unconfirmed": [marker],
+        # an EARLIER run's wording for the SAME marker
+        "failed": [f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued."],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert err.count(marker) == 1, (
+        f"{marker!r} is reported {err.count(marker)}x — once in-loop and again "
+        "as an earlier run's line reads as two failures")
+    # ⛔ AND ONE HEADING, NOT TWO. This run RE-OBSERVES an intent a previous run
+    # left unconfirmed, so the line is in `carried` too — the carried heading used
+    # to be built from `carried`, so it counted this same failure a second time
+    # under a premise (“its marker is never re-attempted … the line can never clear
+    # itself”) that is FALSE for a re-attempted line (#13950 review round 6).
+    # `err.count(marker)` cannot see that: headings never repeat the marker text,
+    # which is exactly why the assertion above passed over the defect.
+    assert "from an earlier run" not in err, (
+        "the same failure was reported under two headings: " + err)
+    # ⛔ AND THE SUMMARY MUST NOT SAY "NOT WRITTEN" ABOUT A MAY-HAVE-LANDED
+    # WRITE. `unwritten_n` was `len(failures) - mismatched_n`, i.e. an arithmetic
+    # bucket for everything that was not a mismatch — so an UNCONFIRMED operator
+    # was reported `NOT written` directly beneath a `!!` line saying it may have
+    # landed, inviting a re-issue of a non-idempotent write over endpoints that
+    # may already be joined (#10849) (#13950 review round 3).
+    assert "MAY HAVE LANDED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "an UNCONFIRMED write was reported as NOT written: " + err)
+
+
+def test_the_carried_header_COUNTS_MARKERS_not_lines(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """Two lines over one marker is ONE unresolved marker.
+
+    The "STILL unresolved" header counted `carried` LINES while the dedupe below
+    is marker-keyed, so a marker with an earlier `unbound endpoint` line and an
+    earlier `created=False` line advertised `2 failure(s)` and then listed them —
+    the count disagreeing with the marker it belongs to, and the parenthetical
+    claiming a line was printed that was not (#13913 review round 19).
+
+    Mutant: `len(carried)` in the header — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    structural = [e for e in map_doc["edges"] if "op" not in e]
+    assert structural
+    marker = filer.edge_marker(structural[0])
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [marker],
+        "unconfirmed": [],
+        "failed": [
+            f"{marker}: unbound endpoint sub:nobody/sub:nobody",
+            f"{marker}: create_edge returned created=False — the edge was NOT written",
+        ],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "1 marker(s) from an earlier run" in err, err
+    assert "2 marker(s) from an earlier run" not in err, err
 
 
 def test_a_non_idempotent_write_is_not_retried(monkeypatch):
@@ -847,6 +1622,1215 @@ def test_a_non_idempotent_write_is_not_retried(monkeypatch):
         assert len(posts) == 1, (
             f"a retry-shaped answer re-issued a non-idempotent write {len(posts)} "
             f"times: {body}")
+
+
+@pytest.mark.parametrize("status", [504, 503, 429, 500])
+def test_a_5xx_or_429_ERROR_ENVELOPE_is_not_a_refusal(monkeypatch, status):
+    """The STATUS decides the origin, not the body shape.
+
+    The `error` arm used to sit ABOVE the status arm, so a 5xx/408/429 carrying a
+    JSON-RPC `error` envelope — which the control-plane middleware emits
+    (`mcp_auth`: `_jsonrpc_error(..., status=503, headers={"Retry-After": …})`) —
+    matched the refusal channel by SHAPE and retired a non-idempotent intent:
+    measured with a real `urllib.error.HTTPError(504, {"error": ...})` and
+    `retry_safe=False`, run 1 left the marker out of `written` AND `unconfirmed`,
+    and run 2 POSTed `create_operator` again over endpoints the upstream may have
+    written (#10849). It is also EXACTLY ONE POST: a retry of a non-idempotent
+    write is the same double-count (#13913 review round 17).
+
+    Mutant: move the `error` arm back above the status arm, or delete the 5xx
+    arm's `not retry_safe` guard — the first reds this row's outcome, the second
+    its post count.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+
+    def _post(_body):
+        posts.append(1)
+        return status, {"jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000,
+                                  "message": "upstream request timeout"}}, {}
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "UNKNOWN" in str(excinfo.value), excinfo.value
+    assert len(posts) == 1, f"a non-idempotent write was POSTed {len(posts)} times"
+
+
+def test_a_DECLINE_with_a_non_boolean_created_value_is_still_a_decline(
+        tmp_path, monkeypatch, map_doc):
+    """The guard is `created is not True`, not `created is False`.
+
+    A payload carrying the key with a non-boolean (`created: null`, or a
+    re-serialised `"false"`) is not a success, and reading it as one is the same
+    false PASS the guard exists to remove: the edge would be marked `written` and
+    every resume would skip it. No such payload is reachable from today's
+    projection (it returns a `bool`), which is why this is the narrowest pin
+    rather than a reachable bug (#13950 review round 22).
+
+    Mutant: `is not True` → `is False` — this reds.
+    """
+    class _NullCreated(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                return {"structuredContent": {"edge": {"relation": "related"},
+                                              "created": None, "nudges": []}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _NullCreated)
+    assert filer.write_map(map_doc) == 1
+    state = json.loads(state_path.read_text())
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert not [m for m in state["written"] if m in structural], (
+        "an edge whose `created` was None was marked as written")
+
+
+def test_an_EXCEPTION_only_run_still_prints_a_ROUTE_OUT(tmp_path, monkeypatch,
+                                                       map_doc, capsys):
+    """A counted failure with no printed remedy is a permanent false red.
+
+    `exception` is a bucket in the summary, so an exception-only run printed
+    `101 edge(s) failed — 101 edge(s) NOT written — recorded in state.json` and
+    NOTHING else: no class heading, no bullet. The identical state reached via
+    `declined` printed the whole block (#13950 review round 26).
+
+    Mutant: the gate without `or failures` — this reds.
+    """
+    class _Boom(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                raise RuntimeError("the transport died")
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Boom)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # ⛔ THE VERB IS "UNCLASSIFIED EXCEPTION", NOT "NOT WRITTEN": `write_once`
+    # KEEPS an unclassified raise's intent (in `written` AND `unconfirmed`), so
+    # the write MAY HAVE LANDED and the old verb was false for this class
+    # (#13950 review rounds 31 and 32).
+    assert "UNCLASSIFIED exception" in err, err
+    assert "edge(s) NOT written" not in err, err
+    assert "to resolve one" in err, (
+        "a counted failure printed no route out at all: " + err)
+
+
+def test_a_LANDED_write_is_not_offered_the_NOTHING_WAS_WRITTEN_bullet(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The remedy bullets carry BOTH terms of the guard, because either text can
+    quote the other's anchor.
+
+    A `mechanism_mismatch` line is textually `mechanism_mismatch — {server
+    message}`, so a warning whose message quotes `create_edge returned created=`
+    summarises under LANDED while its TEXT matches bullet 2's anchor. With
+    bullet 2 guarded on MAY-HAVE-LANDED alone, that landed write — marker already
+    in `written` — was handed "NOTHING was written and NO marker exists … the
+    next run re-attempts the edge" (#13950 review round 30).
+
+    Mutant: narrow bullet 2's guard back to `MAY HAVE LANDED` only — this reds.
+    """
+    class _QuotingMismatch(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                return {"structuredContent": {
+                    "id": "op1",
+                    "warnings": [{"code": "mechanism_mismatch", "message": (
+                        "see create_edge returned created=False on the decline "
+                        "channel")}]}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _QuotingMismatch)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "LANDED" in err, err
+    # ⛔ BULLET 2's OWN sentence: bullet 1 carries the same phrase, so a loose
+    # containment check cannot see this guard being narrowed (#13950 round 30).
+    assert "MAY HAVE LANDED or LANDED): NOTHING was" in err, (
+        "a bullet guards on MAY-HAVE-LANDED alone, so a LANDED write whose text "
+        "quotes another anchor is handed the nothing-was-written instruction: " + err)
+
+
+def test_a_LANDED_write_is_not_offered_the_UNBOUND_bullet_EITHER(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """Bullet 1 carries both guard terms too, and for the same reason.
+
+    A `mechanism_mismatch` warning whose message quotes `unbound endpoint` puts a
+    LANDED write's only failure record next to bullet 1 — "nothing was written for
+    the EDGE … delete this line from `failed`" — which, followed literally, deletes
+    the sole record of an operator filed INVERTED. Same class as the bullet-2 row
+    above, one bullet over (#13950 review round 31).
+
+    Mutant: narrow bullet 1's guard to `MAY HAVE LANDED` only — this reds.
+    """
+    class _QuotingMismatch(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                return {"structuredContent": {
+                    "id": "op1",
+                    "warnings": [{"code": "mechanism_mismatch", "message": (
+                        "z: unbound endpoint q")}]}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _QuotingMismatch)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "LANDED" in err, err
+    assert "MAY HAVE LANDED or LANDED): nothing was written for the EDGE" in err, (
+        "bullet 1 guards on MAY-HAVE-LANDED alone, so a LANDED write whose text "
+        "quotes its anchor is told to delete its own last record: " + err)
+
+
+def test_a_REFUSAL_whose_message_QUOTES_another_class_stays_in_its_own_bucket(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The class comes from the SITE, so the door cannot move a line's bucket.
+
+    A structural edge's door write is `retry_safe=True`, so a tool-level failure
+    there is a `Refusal` — nothing landed. Quoting `": mechanism_mismatch — "`
+    (or `": unbound endpoint "`) inside the refusal's own message used to put
+    that ONE line in the mismatch bucket as well, and the summary then reported a
+    refused write as LANDED with contradictory remedies, dropping it from the
+    NOT-written count entirely (#13950 review round 25).
+
+    Mutant: classify by prose again (`": mechanism_mismatch — " in f`) — this
+    reds.
+    """
+    class _QuotingRefusal(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                raise filer.Refusal(
+                    "tortoise_create_edge FAILED: : mechanism_mismatch — "
+                    "IMPL carrying refutes")
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _QuotingRefusal)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # ⛔ AND IT IS `declined`, NOT `exception` (#13950 review rounds 31 and 33).
+    # Folding `Refusal` into the unclassified bucket made ONE class mean both
+    # "the door answered no" and "may have landed", so no single verb could be
+    # true of it — and the NOT-written verb was false for the may-have-landed
+    # half. The ledger settles which state THIS is: `write_once` un-records the
+    # intent on a `Refusal`, and this arm never records one at all, so `declined`
+    # (nothing written) is the only bucket true of every line in it.
+    assert "edge(s) NOT written" in err, (
+        "a refused structural edge vanished from the NOT-written count: " + err)
+    assert "DECLINED by the door" in err, (
+        "a `Refusal` was not reported under the DECLINED class: " + err)
+    assert "UNCLASSIFIED exception" not in err, (
+        "a definite `Refusal` was reported as an unclassified, may-have-landed "
+        "raise — the mirror of the false verb finding 4 filed: " + err)
+    # The point of the row: the TEXT cannot move it into the mismatch bucket —
+    # no LANDED remedy, no INVERTED count.
+    assert "the write DID happen" not in err, (
+        "a REFUSED write was reported as LANDED: " + err)
+    assert "filed INVERTED" not in err, (
+        "a REFUSED write's quoted anchor moved it into the mismatch bucket: " + err)
+    # ⛔ AND THE LEDGER SAYS NOTHING LANDED FOR A REFUSED STRUCTURAL EDGE, which
+    # is why the summary must not tell the operator an intent is waiting in
+    # `written` for EVERY line in this class: this arm never records one (only an
+    # operator goes through `write_once`, whose `Refusal` arm RETIRES the intent).
+    # Measured here, on this run (#13950 review round 32's clause said "an intent
+    # is kept in `written` for each", which is false on this path).
+    state = json.loads(state_path.read_text())
+    refused = {filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e}
+    assert refused, "the fixture no longer holds a structural edge to refuse"
+    assert not (refused & set(state["written"])), state["written"]
+
+
+def test_an_HTTP_DATE_Retry_After_is_advice_too(monkeypatch):
+    """RFC 9110 allows `Retry-After: <HTTP-date>`; dropping it ignored the advice.
+
+    Both channels run through one converter, and a date value used to be
+    unparsable there — so the server's own back-off was silently replaced by the
+    client's ramp (#13950 review round 32).
+
+    ⛔ THE NUMBER IS TRIED FIRST AND THE DATE SECOND, with no spelling heuristic:
+    RFC 5322 makes the day-of-week OPTIONAL, so `"31 Dec 1999 23:59:59 GMT"` is a
+    legal `HTTP-date` carrying no comma, and a `\",\" in value` gate silently
+    misses it (#13950 review round 31).
+
+    Mutant: the `_http_date_seconds` fallback removed — this reds on both forms.
+    """
+    import datetime
+
+    soon = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=30)
+    stamp = soon.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    got = filer._seconds_or_none(stamp)
+    assert got is not None, "an HTTP-date Retry-After was dropped"
+    assert 25 <= got <= 90, got
+
+    # ⛔ THE COMMA-LESS FORM IS THE SAME GRAMMAR: a day-of-week-less date is legal
+    # RFC 5322, so a detector keyed on the comma is a silent hole.
+    bare = soon.strftime("%d %b %Y %H:%M:%S GMT")
+    assert "," not in bare
+    got_bare = filer._seconds_or_none(bare)
+    assert got_bare is not None, "a comma-less HTTP-date was dropped"
+    assert 25 <= got_bare <= 90, got_bare
+
+    mcp = _RealMcp("not-a-real-key")
+    slept = []
+
+    def _post(_body):
+        return 503, {}, {"Retry-After": stamp}
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda s: slept.append(s))
+    with pytest.raises(filer.UnknownOutcome):
+        mcp.call("tortoise_create_point", {"content": "x"}, retry_safe=True)
+    assert slept and 25 <= slept[0] <= 90, slept
+
+
+def test_a_REAL_HTTPError_honours_the_Retry_After_HEADER(monkeypatch):
+    """`urlopen` reports EVERY non-2xx as `HTTPError`, so the `_post` unpack never runs there.
+
+    The status arm dereferenced `headers`, which was bound only on the `_post`
+    path: on a real `HTTPError(504)` the call raised `UnboundLocalError` — one
+    POST, no retry, no `state.json` (measured end-to-end) — which is EXACTLY the
+    5xx path the `Retry-After` handling exists for, and the one the PR documents
+    meeting (#13913 review round 18). The pure helper's row did not catch it,
+    because the CALL SITE was never driven.
+
+    Mutant: the handler's `headers = dict(_hdrs)` bind removed — NOT an
+    `UnboundLocalError`: `headers: dict = {}` above the `try` leaves the name bound
+    to `{}`, so the `Retry-After` is silently dropped and the client ramp
+    `[5, 10, 15, 20, 25]` runs instead. This row reds on `slept[:1] == [3.0]`.
+    """
+    import io
+
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+    slept = []
+
+    def _post(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError(
+            "https://example.invalid", 504, "Gateway Timeout",
+            {"Retry-After": "3"}, io.BytesIO(b'{"error": "upstream timeout"}'))
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda s: slept.append(s))
+    with pytest.raises(filer.UnknownOutcome):
+        mcp.call("tortoise_create_point", {})
+    assert len(posts) == 6, posts          # the retry loop ran
+    assert slept[:1] == [3.0], slept       # the server's own back-off, not a guess
+    assert all(3.0 <= s <= 120 for s in slept), slept
+
+
+def test_a_RETRY_AFTER_HEADER_is_the_back_off_when_the_body_names_none(monkeypatch):
+    """`Retry-After` rides a HEADER, on the `HTTPError` path a real 5xx takes.
+
+    `code, payload, _ = self._post(...)` threw the third element away, so the
+    server's own back-off was ignored (“`call()` discarded it”).
+
+    ⛔ THIS DRIVES `Mcp.call`, NOT `_retry_after_seconds` ALONE. The earlier cut
+    asserted only the helper, so the mutation that actually mattered left it
+    GREEN: deleting the `headers` bind in the `HTTPError` handler — which is the
+    `UnboundLocalError` that shipped (#13950 review, finding 1; finding 3 was
+    that nothing here could see it). Measured PRE-FIX over a real
+    `HTTPError(503, …, {"Retry-After": "7"})` raised from `_post`: ONE post and
+    no sleeps, `UnboundLocalError: cannot access local variable 'headers'`,
+    where `main` made six posts. `urlopen` raises `HTTPError` for EVERY non-2xx,
+    so this handler — not the tuple return — is the only way a real 503 reaches
+    the status arm.
+
+    Mutants, each measured to RED this row: (b) delete the `headers = dict(_hdrs)
+    …` bind in the `HTTPError` handler — NOT an `UnboundLocalError` (`headers`
+    is also initialised to `{}` above the `try`), so the `Retry-After` is
+    silently dropped and the client ramp `[5, 10, 15, 20, 25]` runs where arm
+    (a) asserts `[7.0] * 5`; (c) `_retry_after_seconds(headers)` → `None` at the
+    sleep site. ⛔ NOT a
+    mutant FOR THIS ROW: reverting the call site to
+    `code, payload, _ = self._post(...)`. Once
+    the handler binds `headers`, that tuple element is never READ on a real 5xx —
+    `urlopen` cannot return one — so this row correctly stays green over it.
+    ⛔ IT IS STILL NOT AN EQUIVALENT MUTANT SUITE-WIDE, and calling it one was the
+    round-34 error: `test_an_HTTP_DATE_Retry_After_is_advice_too` stubs `_post`
+    to return a non-2xx TUPLE (`503, {}, {"Retry-After": stamp}`) and reads that
+    third element, so it REDS under the same mutation. Stated rather than
+    implied, because a pin that names an equivalent mutant as its mutant
+    overclaims what it covers — and one that calls a divergent mutation
+    equivalent mis-attributes another row's red.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    # (a) THE REAL PATH. `HTTPError.headers` is an `email.message.Message`, not a
+    # dict, so the fix must normalise it — binding the Message directly leaves
+    # `_retry_after_seconds` returning None, i.e. the defect wearing the fix's
+    # clothes (measured at #13950 review).
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "7"
+    posts: list[int] = []
+
+    def _post_http_error(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", hdrs, None)
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post_http_error)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, f"a retryable 5xx was POSTed {len(posts)} times"
+    assert sleeps == [7.0] * 5, (
+        f"the server's own `Retry-After` was not the back-off: {sleeps}")
+
+    # (b) NO HEADER OBJECT AT ALL still retries on the client's own schedule: the
+    # fix must not turn an absent header into a crash (the pre-fix arm raised
+    # here too, which is what made any transient 5xx abort a `--write` run).
+    sleeps.clear()
+    posts.clear()
+    mcp2 = _RealMcp("not-a-real-key")
+
+    def _post_no_headers(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", None, None)
+
+    monkeypatch.setattr(mcp2, "_post", _post_no_headers)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp2.call("tortoise_create_subject", {})
+    assert sleeps == [5, 10, 15, 20, 25], sleeps
+
+    # (c) The helper's own parsing rules, kept — they are what the two paths
+    # above rely on. A non-numeric or absent header is None, never a raise.
+    assert filer._retry_after_seconds({"Retry-After": "0.5"}) == 0.5
+    assert filer._retry_after_seconds({}) is None
+    assert filer._retry_after_seconds(None) is None
+    assert filer._retry_after_seconds({"retry-after": "soon"}) is None
+
+
+def test_an_UNCLASSIFIED_exception_is_NAMED_and_never_summarised_NOT_written(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The `exception` bucket gets its own verb, because its intent is KEPT.
+
+    `unwritten` was `declined + unbound + exception` and the summary printed
+    `N edge(s) NOT written`. True for the first two; FALSE for `exception` on the
+    operator path, where `write_once` has NO generic `except` arm — deliberately,
+    because "a wrongly-retired intent re-issues a non-idempotent write" — so the
+    marker is written to BOTH `written` and `unconfirmed` before the call and
+    stays there. The summary told the operator the write did not land, which is
+    the state that invites a hand-edit of `written` — the same contradiction this
+    PR already closed for `mismatch` and `unknown` (#13950 review round 31).
+
+    Mutant: put `"exception"` back in `unwritten` and drop the `unclassified`
+    clause — this reds on both `NOT written not in err` and the missing
+    `UNCLASSIFIED exception` sentence.
+    """
+    class _Boom(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                raise RuntimeError("an unclassified raise out of the transport")
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Boom)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "NOT written" not in err, (
+        "an unclassified exception was summarised as a write that did not land: "
+        + err)
+    assert "UNCLASSIFIED exception" in err, (
+        "the summary named no class for the unclassified exception: " + err)
+    assert "check `written` before re-running" in err, (
+        "the clause did not send the reader to the check that settles it: " + err)
+    # ⛔ AND THE COUNT IS STATED ONCE. Reconciling rounds 32 and 33 left TWO
+    # clauses for this class, so one sentence carried the number twice directly
+    # after a comment promising the buckets sum to the number of failures
+    # (#13950 review round 34, measured: 2 occurrences).
+    assert err.count("left an UNCLASSIFIED") == 1, (
+        "the unclassified class was summarised more than once: " + err)
+    # ⛔ THE VERB IS FALSE UNLESS THE LEDGER AGREES: the intent really is KEPT, so
+    # the summary says MAY HAVE LANDED for the same reason `unknown` does.
+    st = json.loads(state_path.read_text())
+    assert st["written"], "the run retired the intent it must keep: " + repr(st)
+    assert st["failed"], st
+
+
+def test_a_RETRY_AFTER_HTTP_DATE_is_honoured_on_the_header_channel(monkeypatch):
+    """RFC 9110 §10.2.3: `Retry-After = HTTP-date / delay-seconds`, BOTH accepted.
+
+    `_seconds_or_none` USED TO take numbers and numeric strings only, so the
+    header form `Retry-After: Fri, 31 Dec 1999 23:59:59 GMT` — the RFC's own
+    example — went to `None`, the `or` fell to the body, and then to the client's
+    5 s ramp: the server's advice was dropped on the channel this PR adds, with no
+    raise and no note (#13950 review round 31). It now falls back to
+    `_http_date_seconds` on a non-numeric string.
+
+    Mutant (measured RED): remove the `_http_date_seconds` fallback inside
+    `_seconds_or_none` (the `except` arm returns `None`) — the 42 s date then
+    reads `None` and the sleeps are `[5, 10, 15, 20, 25]`. ⛔ NOT a mutant:
+    `_retry_after_seconds` → `_seconds_or_none(value)` unconditionally, which IS
+    its body now, so it is a no-op (round 36 measured it green).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    target = (datetime.datetime.now(datetime.UTC)
+              + datetime.timedelta(seconds=42))
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = email.utils.format_datetime(target)
+
+    posts: list[int] = []
+
+    def _post_date(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", hdrs, None)
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post_date)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, posts
+    assert 40.0 <= sleeps[0] <= 43.0, (
+        f"the server's HTTP-date back-off was not read: {sleeps}")
+
+    # ⛔ A DATE ALREADY PAST IS NOT A HAMMER. It parses to a non-positive wait,
+    # which the status arm treats as no usable advice and answers with its own
+    # ramp — LONGER than asked, never shorter.
+    sleeps.clear()
+    past = email.message.Message()
+    past["Retry-After"] = email.utils.format_datetime(
+        datetime.datetime.now(datetime.UTC)
+        - datetime.timedelta(hours=1))
+
+    def _post_past(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", past, None)
+
+    mcp2 = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp2, "_post", _post_past)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp2.call("tortoise_create_subject", {})
+    assert sleeps == [5, 10, 15, 20, 25], sleeps
+
+    # The helper's rules, kept: the RFC's own example parses (to a past date, so
+    # 0.0), and prose that is neither a number nor a date stays None.
+    assert filer._retry_after_seconds(
+        {"Retry-After": "Fri, 31 Dec 1999 23:59:59 GMT"}) == 0.0
+    assert filer._retry_after_seconds({"retry-after": "soon"}) is None
+    assert filer._retry_after_seconds({"Retry-After": ""}) is None
+
+
+def test_a_NON_IDEMPOTENT_write_on_a_REAL_5xx_is_POSTed_once(monkeypatch):
+    """The fail-closed arm holds on the `HTTPError` path too: ONE post, UNKNOWN.
+
+    The reordering's whole point is that a 5xx may have been ACTED ON, so a
+    non-idempotent write must not be re-issued. `test_a_5xx_or_429_ERROR_ENVELOPE
+    _is_not_a_refusal` pins that on the tuple return, a shape `urlopen` cannot
+    produce for a 5xx — this pins it on the handler a real 503 uses, where the
+    `headers` bind lives.
+
+    Mutant: `if not retry_safe: raise UnknownOutcome(...)` → deleted from the
+    status arm — this then reads 6 posts.
+    """
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "1"
+    posts: list[int] = []
+
+    def _post(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", hdrs, None)
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "UNKNOWN" in str(excinfo.value), excinfo.value
+    assert len(posts) == 1, (
+        f"a non-idempotent write was re-issued {len(posts)} times over a 5xx")
+
+
+def test_a_BODY_ONLY_retry_after_is_honoured_on_a_NON_2xx(monkeypatch):
+    """The advice can ride the BODY, and the status arm must read it there too.
+
+    The status arm sits ABOVE the `error` arm (that reordering is this PR's
+    point), so a 429 whose body names a delay and whose headers carry no
+    `Retry-After` reaches the status arm and — with a header-only read — was
+    retried on the client's own 5-second ramp. Measured at #13950 review round 2:
+    head slept `[5, 10, 15, 20, 25]` for a server that asked for 30 s, while the
+    pre-reorder arm order slept `[31, 31, …]`.
+
+    ⛔ EXACTLY 5 SLEEPS, not 6: the body arm used to `continue` on the SIXTH
+    attempt too, so the last back-off was taken for a request no attempt would
+    make (measured: 6 posts, 6 sleeps, against 6 and 5 in every sibling arm).
+
+    Mutants: drop `_body_retry_after(payload)` from the status arm's `wait` (this
+    reds on the sleeps); drop the `if attempt < 5` guard (this reds on the
+    length).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+    posts: list[int] = []
+
+    def _post(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError(
+            "http://x", 429, "x", email.message.Message(),
+            io.BytesIO(json.dumps({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {"code": -32000, "data": {"retry_after": 30}},
+            }).encode()))
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, f"a retryable 429 was POSTed {len(posts)} times"
+    assert sleeps == [30.0] * 5, (
+        f"the body's own `retry_after` was not the back-off: {sleeps}")
+
+
+def test_the_200_error_arm_takes_FIVE_back_offs_not_six(monkeypatch):
+    """The `data.retry_after` arm WAS the only retry arm with no attempt guard.
+
+    This row is the pin for the guard that closed it. Every retry arm now guards
+    before sleeping (`attempt == 5`, `attempt < 5`, `attempt < 2`); this one used
+    to sleep on the sixth iteration and then `continue` straight out of the loop.
+
+    ⛔ A DIFFERENT ARM FROM THE ONE ABOVE. A non-2xx now reaches the STATUS arm
+    (that reordering is this PR's point), so the `error` arm's `retry_after`
+    branch is only reachable from a 200/3xx that carries an error envelope — which
+    is what this row drives. An earlier cut of this round pinned only the
+    non-2xx shape, so the guard this row exists for was still unpinned and the
+    mutant that removes it stayed green (#13950 review round 2).
+
+    Measured pre-fix: `data.retry_after: 2` produced 6 posts and 6 sleeps — the
+    sixth back-off taken for a request no attempt would make — while every
+    sibling arm does 6 and 5. At `retry_after: 119` that is a full 120 s stall
+    inside a run that is otherwise ready to report.
+
+    Mutants: `if attempt < 5:` → `if attempt < 6:` in this arm (reds on the sleep
+    count); or drop the guard and the raise (reds on the `UnknownOutcome` text).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+    posts: list[int] = []
+
+    def _post(_body):
+        posts.append(1)
+        return 200, {"jsonrpc": "2.0", "id": 1,
+                     "error": {"code": -32000,
+                               "data": {"retry_after": 2}}}, {}
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome,
+                       match="retry_after 2s after 6 attempts"):
+        mcp.call("tortoise_create_subject", {})
+    assert len(posts) == 6, f"POSTed {len(posts)} times"
+    assert sleeps == [2.0] * 5, (
+        f"a back-off was taken for a retry the loop never makes: {sleeps}")
+
+    # ⛔ AND THE SAME 1 s FLOOR AS THE STATUS ARM: fractional seconds are legal
+    # advice, and this arm used to honour them literally — measured at #13950
+    # review round 5, `retry_after: 0.001` gave 6 posts in ~15 ms on THIS channel
+    # even after the status arm was floored.
+    for sub in (0.001, 1e-9):
+        sleeps.clear()
+        posts.clear()
+        mcp2 = _RealMcp("not-a-real-key")
+
+        def _post_sub(_body, _v=sub, _p=posts):
+            _p.append(1)
+            return 200, {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": -32000,
+                                   "data": {"retry_after": _v}}}, {}
+
+        monkeypatch.setattr(mcp2, "_post", _post_sub)
+        with pytest.raises(filer.UnknownOutcome):
+            mcp2.call("tortoise_create_subject", {})
+        assert sleeps == [1.0] * 5, (
+            f"a sub-second `retry_after` ({sub}) was a retry storm: {sleeps}")
+
+
+def test_a_ZERO_body_retry_after_is_ADVICE_not_the_absence_of_advice(monkeypatch):
+    """`retry_after: 0` is a legal "retry now" — and this arm decides LANDED-NESS.
+
+    The `error` arm is the last one above the `Refusal` fall-through, so its guard
+    is not just "how long to wait": a truthiness test reads a PRESENT zero as NO
+    ADVICE, declares a definite refusal for a write the door said may still
+    complete, and `write_once` then retires the intent — the marker lands in
+    neither `written` nor `unconfirmed` and a resume re-issues a non-idempotent
+    operator over an endpoint that may already have it (#10849's double-count,
+    measured at #13950 review round 7 as a fail-OPEN).
+
+    `_seconds_or_none` clamps at zero (`max(0.0, seconds)`), so `0`, `-5` and
+    `"0"` all arrive here as `0.0`: one arm, three spellings of the same advice.
+
+    Non-vacuity, MEASURED: on the pre-fix `if retry_after:` this raises
+    `Refusal` (a `RuntimeError` sibling of `UnknownOutcome`, not a subclass), so
+    the `pytest.raises(filer.UnknownOutcome)` below reds on the FIRST value; and
+    `write_once`'s type-keyed arm then keeps the intent only because the type is
+    the unknown one. Mutant: `if retry_after is not None:` → `if retry_after:`.
+    """
+    for zero in (0, -5, "0", 0.0):
+        posts: list[int] = []
+        sleeps: list[float] = []
+        monkeypatch.setattr(filer.time, "sleep",
+                            lambda s, _s=sleeps: _s.append(s))
+
+        def _post(_body, _zero=zero, _posts=posts):
+            _posts.append(1)
+            return 200, {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": -32000,
+                                   "data": {"retry_after": _zero}}}, {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "UNKNOWN" in str(excinfo.value), excinfo.value
+        assert "refused" not in str(excinfo.value).lower(), (
+            "`retry_after: 0` was read as a definite refusal: "
+            f"{excinfo.value}")
+        assert len(posts) == 1, (
+            f"a non-idempotent write was re-issued {len(posts)} times over "
+            f"`retry_after: {zero!r}`")
+        assert sleeps == [], (
+            "a non-idempotent write must not back off and retry at all: "
+            f"{sleeps}")
+
+    # AND THE IDEMPOTENT HALF: the same zero takes the RAMP (not the 1 s floor,
+    # which six times in a row is the hammer the floor exists to prevent) and
+    # still makes exactly 5 sleeps for 6 attempts.
+    sleeps = []
+    posts = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def _post_retry_safe(_body):
+        posts.append(1)
+        return 200, {"jsonrpc": "2.0", "id": 1,
+                     "error": {"code": -32000,
+                               "data": {"retry_after": 0}}}, {}
+
+    mcp2 = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp2, "_post", _post_retry_safe)
+    with pytest.raises(filer.UnknownOutcome):
+        mcp2.call("tortoise_create_subject", {})
+    assert sleeps == [5, 10, 15, 20, 25], (
+        f"`retry_after: 0` on an idempotent write must take the ramp: {sleeps}")
+    assert len(posts) == 6, posts
+
+
+def test_a_4xx_carrying_retry_after_is_still_a_REFUSAL(monkeypatch):
+    """A pre-handler rejection is a refusal whatever advice its body carries.
+
+    The `error` arm sits ABOVE the `4xx` arm, so a `403` whose body is a JSON-RPC
+    `error` with `data.retry_after` reached the may-have-landed branch and raised
+    `UnknownOutcome`. `write_once` keeps the intent on that type, so the operator's
+    marker sat in `written` AND `unconfirmed` with nothing written and no later run
+    able to clear it — the hand-edited-`state.json` recovery the `4xx` arm's own
+    comment describes (#13950 review round 33). A 4xx means the request was
+    rejected BEFORE the handler ran, so nothing landed, whatever the body advises.
+
+    The `0` spelling is a REGRESSION against the pre-#13950 truthiness test, which
+    fell past the advice arm to the refusal; the non-zero spellings were already
+    wrong before it, on both sides of the change.
+
+    Non-vacuity, MEASURED: with the `not (400 <= code < 500)` exclusion removed
+    from the `retry_after` arm this raises `UnknownOutcome` — a `RuntimeError`
+    sibling of `Refusal`, not a subclass — so the `pytest.raises(filer.Refusal)`
+    below reds on the first value.
+    """
+    for zero in (0, -5, "0", 0.0, 30):
+        posts: list[int] = []
+        sleeps: list[float] = []
+        monkeypatch.setattr(filer.time, "sleep",
+                            lambda s, _s=sleeps: _s.append(s))
+
+        def _post(_body, _zero=zero, _posts=posts):
+            _posts.append(1)
+            return 403, {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": -32000,
+                                   "data": {"retry_after": _zero}}}, {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.Refusal) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "refused" in str(excinfo.value).lower(), excinfo.value
+        assert len(posts) == 1, (
+            f"a 403 was re-issued {len(posts)} times over `retry_after: {zero!r}`")
+        assert sleeps == [], (
+            "a 403 must not back off at all — nothing landed: "
+            f"{sleeps}")
+
+
+def test_a_4xx_with_a_NON_OBJECT_body_is_still_a_REFUSAL(monkeypatch):
+    """The STATUS decides landed-ness, not the shape of the body.
+
+    The non-object guard (`payload is not None and not isinstance(payload, dict)`)
+    exists so no arm below calls `payload.get` on a list or a string. It stood
+    ABOVE the status arm, so it OVERRULED it: a 4xx whose body parsed as valid
+    JSON but not an object — `400` with `[]`, `401` with `[]`, `403` with
+    `"nope"`, `422` with `[1, 2]`, the default page a proxy or WAF emits — was
+    classified `UnknownOutcome`, `write_once` KEPT the intent, and no later run
+    could clear it: the hand-edited-`state.json` recovery the `4xx` arm's own
+    comment describes. A 4xx was rejected BEFORE the handler ran, so nothing
+    landed whatever the body looks like (#13950 verification of the rebased head,
+    measured).
+
+    Non-vacuity, MEASURED: with the guard's status split reverted to the single
+    `raise UnknownOutcome(...)` this reds on the first value — `UnknownOutcome` is
+    a `RuntimeError` sibling of `Refusal`, not a subclass. The second half is the
+    control that the split did not WIDEN the refusal: 5xx/408/429 keep UNKNOWN,
+    because those may have been acted on.
+    """
+    for code, body in ((400, []), (401, []), (403, "nope"), (422, [1, 2])):
+        posts: list[int] = []
+        sleeps: list[float] = []
+        monkeypatch.setattr(filer.time, "sleep",
+                            lambda s, _s=sleeps: _s.append(s))
+
+        def _post(_body, _code=code, _body_value=body, _posts=posts):
+            _posts.append(1)
+            return _code, _body_value, {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.Refusal) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "refused" in str(excinfo.value).lower(), excinfo.value
+        assert len(posts) == 1, (
+            f"a {code} was re-issued {len(posts)} times over a {type(body).__name__} body")
+        assert sleeps == [], f"a {code} must not back off at all: {sleeps}"
+
+    # The control: the same body shapes on a status that MAY have been acted on
+    # stay UNKNOWN, so the intent is kept — the split must not refuse these.
+    for code in (500, 503, 408, 429):
+        posts2: list[int] = []
+
+        def _post_unknown(_body, _code=code, _posts=posts2):
+            _posts.append(1)
+            return _code, [], {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post_unknown)
+        with pytest.raises(filer.UnknownOutcome) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "UNCONFIRMED" in str(excinfo.value), excinfo.value
+        assert len(posts2) == 1, (
+            f"a non-idempotent write on a real {code} was POSTed {len(posts2)} times")
+
+
+def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
+    """A junk `retry_after` must not escape `call()` as an unclassified raise.
+
+    This module's fail-closed contract is decided by exception TYPE, so a bare
+    `float()` on a non-numeric body value raised `ValueError` straight out of
+    `call()` — and the node loops call `mcp.call` with no `try`, so `--write`
+    aborted on its FIRST write with `state.json` still `{}`: no summary, no
+    ledger, no exit code (#13950 review round 2, measured with `"10s"` and
+    `[30]`). The header channel already promised "never a raise"; the body path
+    did not, because it used `float` directly.
+
+    Mutant: `_body_retry_after` → `float(data.get("retry_after"))` (this reds with
+    the `ValueError` escaping instead of `UnknownOutcome`).
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    for junk in ("10s", [30], {"s": 30}, "nan", "inf", True, b"30", 10**400):
+        posts: list[int] = []
+
+        def _post(_body, _junk=junk, _posts=posts):
+            _posts.append(1)
+            raise urllib_error.HTTPError(
+                "http://x", 429, "x", email.message.Message(),
+                io.BytesIO(json.dumps({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "data": {"retry_after": _junk}},
+                }, default=str).encode()))
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome) as excinfo:
+            mcp.call("tortoise_create_subject", {})
+        assert "after 6 attempts" in str(excinfo.value), (junk, excinfo.value)
+        assert len(posts) == 6, (junk, len(posts))
+
+    # The converter's own contract, which is what the two call sites rely on.
+    assert filer._seconds_or_none("7") == 7.0
+    assert filer._seconds_or_none(7) == 7.0
+    assert filer._seconds_or_none(-5) == 0.0
+    assert filer._seconds_or_none(True) is None
+    assert filer._seconds_or_none(float("nan")) is None
+    assert filer._seconds_or_none(float("inf")) is None
+    assert filer._seconds_or_none(b"7") is None
+    assert filer._seconds_or_none(None) is None
+    # ⛔ AN INT TOO LARGE FOR A FLOAT RAISES `OverflowError`, NOT `ValueError` —
+    # the same defect in another dress, and it escaped `call()` unclassified
+    # until #13950 review round 3. A STRING cannot reach it (`float("1e400")` is
+    # `inf`, refused by the finiteness guard above), so the int path is the hole
+    # this pins.
+    assert filer._seconds_or_none(10**400) is None
+
+
+def test_a_cross_classifying_MESSAGE_cannot_print_a_NEGATIVE_count(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """One line, at most one class — whatever the server puts in its message.
+
+    A generic-`except` line ENDS with `{exc}`, and a server controls that text, so
+    a door that quotes one of the class tokens inside an error message made ONE
+    line match two prose classes. Measured at #13950 review round 5 through
+    `write_map`: `1 edge(s) failed — -1 edge(s) NOT written; 1 operator(s) WRITTEN
+    with a mechanism the judgement does not declare (filed INVERTED); 1 edge(s)
+    MAY HAVE LANDED …` — a negative count, and two contradictory remedies for the
+    same line ("keep its marker" vs "do NOT re-file").
+
+    The class is a TAG now, assigned by the site that produced the line, so one
+    line can belong to exactly one bucket however its text reads; `unwritten` is a
+    tag filter and cannot be negative either.
+
+    Mutant: classify a PROSE bucket again — e.g.
+    `mismatched = {f for f in failures if "mechanism_mismatch" in f}`, or the same
+    for `unbound`/`declined` — the poison text carries every spelling, so that
+    bucket's header prints and this reds.
+    """
+    # Every class token in one message, on the operator the write_once path makes
+    # non-idempotent, so the line lands through the generic `except` as an
+    # `UnknownOutcome`.
+    poison = ("boom: mechanism_mismatch — y: create_edge returned created=False: "
+              "z: unbound endpoint q")
+    state_path = tmp_path / "state.json"
+
+    class _PoisonMessage(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_operator":
+                    # ⛔ `isError`/`content` sit at the RESULT level, not inside
+                    # `structuredContent` — `_refusal` reads `result.get("isError")`
+                    # and `_text(result)["content"]`, so nesting them a level
+                    # deeper makes the write look SUCCESSFUL (measured: rc 0 and
+                    # `all nodes and edges written`).
+                    return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                                  "result": {"isError": True,
+                                             "content": [{"type": "text",
+                                                           "text": poison}]}}, {})
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": True}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _PoisonMessage)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # The poison really did reach the line, so this is a cross-classification test
+    # and not a run where nothing happened.
+    assert "mechanism_mismatch" in err, err
+    assert "-1 edge(s)" not in err, f"a bucket counted one line twice: {err}"
+    # The may-have-landed reading is the correct one for this line, and it is the
+    # ONLY class header printed for it.
+    assert "MAY HAVE LANDED" in err, err
+    assert "filed INVERTED" not in err, (
+        "one line was given two contradictory remedies: " + err)
+    assert "UNBOUND endpoint" not in err, (
+        "one line was given two contradictory remedies: " + err)
+    assert "DECLINED by the door" not in err, (
+        "one line was given two contradictory remedies: " + err)
+
+
+def test_an_EMPTY_200_summary_says_MAY_HAVE_LANDED(tmp_path, monkeypatch, map_doc,
+                                                   capsys):
+    """An `UnknownOutcome` is NEVER summarised as "NOT written".
+
+    `empty response (HTTP 200)` raised `UnknownOutcome` — whose whole meaning is
+    that the write MAY have landed, and whose intent `write_once` deliberately
+    KEEPS — but the exit summary classified by PROSE against a marker tuple, and
+    the empty-response spelling was not in it. Measured at #13950 review round 4:
+    51 operators hitting it printed `51 edge(s) NOT written`, directly beneath
+    `!!` lines saying they may have landed. That is the state that invites a
+    hand-edit of `written`, i.e. the #10849 double-count.
+
+    Classifying by TYPE at the append site is the fix: a new raise site cannot
+    drift out of an `isinstance` test the way it drifts out of a string list.
+
+    Mutant: classify the summary by prose again (e.g. `"outcome UNKNOWN" in f`) —
+    this reds on the empty-response spelling.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _EmptyBodyOnOperator(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_operator":
+                    # The 2xx-with-no-body shape: accepted, outcome UNKNOWN.
+                    return (200, None, {})
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": True}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _EmptyBodyOnOperator)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "MAY HAVE LANDED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "an UNCONFIRMED write was reported as NOT written: " + err)
+
+
+def test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE(monkeypatch):
+    """Both exhausted-transport arms must raise `UnknownOutcome`, not `RuntimeError`.
+
+    `write_once` decides by TYPE: `UnknownOutcome` keeps the intent, a bare
+    `RuntimeError` falls through its generic path. These arms raised
+    `RuntimeError`, so the ledger kept the intent (correct) while the summary read
+    the prose and said "NOT written" (wrong) — the line and the type disagreed
+    (#13950 review round 4). `UnknownOutcome` subclasses `RuntimeError`, so the
+    type is asserted exactly.
+
+    Mutant: revert either arm to `raise RuntimeError(...)` — this reds.
+    """
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+
+    def _post(_body):
+        raise TimeoutError("the socket died after the request was sent")
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_subject", {})
+    assert type(excinfo.value) is filer.UnknownOutcome, (
+        f"an exhausted transport raised {type(excinfo.value).__name__}, which "
+        "`write_once` does not classify")
+    assert "outcome UNKNOWN" in str(excinfo.value), excinfo.value
+
+    # ⛔ AND THE SECOND EXHAUSTED-TRANSPORT ARM: the `HTTPError` whose BODY dies on
+    # the LAST attempt. `_DeadBody.read` raises `IncompleteRead`, so this leaves
+    # through the handler's `attempt == 5` arm rather than the `not retry_safe`
+    # one above it — and a bare `RuntimeError` there makes the summary say "NOT
+    # written" over a request that WAS sent.
+    # ⛔ THE TYPE AND THE POST COUNT ARE NOT ENOUGH TO PIN IT (measured at #13950
+    # review round 5): deleting that arm drops the 6th iteration to the `continue`
+    # below it and then out of the loop, so the POST-LOOP raise answers with the
+    # same `UnknownOutcome` after the same 6 posts — the whole suite stayed green.
+    # The two things that separate the arm from the post-loop raise are pinned
+    # here instead: it must not sleep a SIXTH time (the post-loop reach sleeps
+    # 30 s for an attempt nobody makes, the defect #13950 review round 2 fixed on
+    # the sibling arms), and its message must keep the STATUS CODE (the post-loop
+    # one says `gave up after 6 attempts` and drops it, so the operator loses
+    # "which door refused me").
+    posts: list[int] = []
+    dead_sleeps: list[float] = []
+
+    def _post_dead_body(_body):
+        posts.append(1)
+        raise urllib_error.HTTPError("http://x", 503, "x", {}, _DeadBody())
+
+    monkeypatch.setattr(filer.time, "sleep", lambda s: dead_sleeps.append(s))
+    mcp2 = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp2, "_post", _post_dead_body)
+    with pytest.raises(filer.UnknownOutcome) as dead:
+        mcp2.call("tortoise_create_subject", {})
+    assert type(dead.value) is filer.UnknownOutcome, (
+        "an exhausted unreadable-body transport raised "
+        f"{type(dead.value).__name__}, which `write_once` does not classify")
+    assert len(posts) == 6, (
+        f"a retryable 5xx was POSTed {len(posts)} times")
+    assert len(dead_sleeps) == 5, (
+        f"the exhausted unreadable-body arm slept {len(dead_sleeps)} times for "
+        f"{len(posts)} posts — the 6th sleep is taken for an attempt that is "
+        f"never made: {dead_sleeps}")
+    assert "503" in str(dead.value), (
+        "the exhausted unreadable-body arm dropped the HTTP status from its "
+        f"message, so the operator cannot tell which door refused it: {dead.value}")
+
+
+def test_an_UNREADABLE_body_still_honours_the_RETRY_AFTER_HEADER(monkeypatch):
+    """The body died; the advice sent beside it did not.
+
+    `Retry-After` arrives as a HEADER, on the same response whose body may be the
+    very thing that cannot be read (a proxy truncation, a reset mid-body). This
+    arm slept its own 5-second ramp and discarded the advertised delay, so a door
+    that asked for 30 s was re-hit 5 s later — on the one arm where the header is
+    the only channel left (#13950 review round 5, measured: `6` posts, sleeps
+    `[5, 10, 15, 20, 25]` against `Retry-After: 30`). Every other retry arm was
+    fixed for the same gap; this is the last one.
+
+    Mutants, each measured: revert the sleep to
+    `time.sleep(min(60, 5 * (attempt + 1)))` -> the `30` and `900` rows red;
+    drop the `min(120, max(1.0, wait))` floor/cap -> the `0.001` and `900` rows
+    red; read `Retry-After` from `payload` (which does not exist here) -> the `30`
+    row reds.
+    """
+    sleeps: list[float] = []
+    posts: list[int] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(advertised: str | None):
+        sleeps.clear()
+        posts.clear()
+        hdrs = email.message.Message()
+        if advertised is not None:
+            hdrs["Retry-After"] = advertised
+
+        def _post(_b, _h=hdrs):
+            posts.append(1)
+            raise urllib_error.HTTPError("http://x", 503, "x", _h, _DeadBody())
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps), len(posts)
+
+    # The advertised delay is honoured on every wait, and no 6th wait is taken.
+    assert drive("30") == ([30.0] * 5, 6), drive("30")
+    # The RFC's other grammar form reaches the same converter through this channel.
+    assert drive("Fri, 31 Dec 2099 23:59:59 GMT") == ([120] * 5, 6), drive("date")
+    # The same 1 s floor and 120 s cap every other retry arm applies.
+    assert drive("0.001") == ([1.0] * 5, 6), drive("0.001")
+    assert drive("0") == ([5, 10, 15, 20, 25], 6), drive("0")
+    assert drive("900") == ([120] * 5, 6), drive("900")
+    # No advice at all: the client's own ramp, and the run still gives up.
+    assert drive(None) == ([5, 10, 15, 20, 25], 6), drive(None)
+
+
+def test_a_SUB_SECOND_retry_after_is_FLOORED(monkeypatch):
+    """Fractional `Retry-After` is legal, and it must not become a hammer.
+
+    Measured at #13950 review round 4: `Retry-After: 0.001` produced 6 posts in
+    **14.5 ms** — six back-to-back POSTs at a door that had just answered 429,
+    exactly the retry storm an earlier version of the code's own comment claimed
+    could not happen. The wait is floored at 1 s so the server's intent survives
+    while the hammer does not, and the cap still applies above that.
+
+    Mutant: `min(120, max(1.0, wait))` → `min(120, wait)` — this reds.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(advertised: str):
+        sleeps.clear()
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = advertised
+
+        def _post(_b, _h=hdrs):
+            raise urllib_error.HTTPError("http://x", 429, "x", _h, None)
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps)
+
+    assert drive("0.001") == [1.0] * 5, drive("0.001")
+    assert drive("1e-9") == [1.0] * 5, drive("1e-9")
+    # And the floor does not swallow advice that is above it.
+    assert drive("7") == [7.0] * 5
+    # …nor does it lift the 120 s cap.
+    assert drive("900") == [120] * 5
+
+
+def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
+    """A non-positive `Retry-After` must not turn the retry loop into a hammer.
+
+    `Retry-After: 0` legally means "retry now", and honouring it literally makes
+    this six-attempt loop fire six back-to-back POSTs at a door that has just
+    answered 429/503 — a server-controlled value deciding that the client hammers.
+    Treating a non-positive value as no usable advice is a DELIBERATE departure
+    from the RFC's literal reading: the ramp waits LONGER than advised, never
+    shorter, and no server-supplied value can induce a tight loop. The bounded
+    over-wait is the accepted trade (#13950 review round 3 measured the `0` case).
+
+    ⛔ TWO CHANNELS, TWO DIFFERENT GUARDS, so both are driven here. A `0` in the
+    BODY arrives at `wait` as `0.0` and is turned into the ramp by the
+    NORMALISATION on the assignment line (`… if wait else None`), which maps a
+    non-positive value to `None`; a `0` in the HEADER is dropped to the next
+    channel by the `or` in the assignment, and with no body value there is none.
+    An earlier cut of this row drove only the header, so the mutant below — which
+    is the guard the body case depends on — stayed GREEN.
+
+    Mutant: `wait = min(120, max(1.0, wait)) if wait else None` → `… if wait is
+    not None …` — this reds on the body case with five `1.0` sleeps, because the
+    `0.0` then survives to the 1 s floor instead of taking the ramp.
+
+    ⛔ NOT a mutant: the `time.sleep` line's own condition. After that
+    normalisation `wait` is `None` or in `[1.0, 120.0]`, so the sleep line can
+    never see a falsy non-`None` and mutating its test reds NOTHING (measured at
+    #13950 review round 35: 133 passed). The load-bearing guard is the
+    normalisation, and an earlier version of this docstring named the inert line.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(headers, body):
+        sleeps.clear()
+
+        def _post(_b, _h=headers, _body=body):
+            raise urllib_error.HTTPError("http://x", 429, "x", _h,
+                                         io.BytesIO(json.dumps(_body).encode()))
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps)
+
+    # (a) the BODY channel — this is the one the named mutant reds.
+    assert drive(email.message.Message(),
+                 {"jsonrpc": "2.0", "id": 1,
+                  "error": {"code": -32000, "data": {"retry_after": 0}}}) \
+        == [5, 10, 15, 20, 25]
+    # (b) the HEADER channel.
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "0"
+    assert drive(hdrs, {"jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000}}) == [5, 10, 15, 20, 25]
+    # (c) a negative value is likewise not a wait at all.
+    neg = email.message.Message()
+    neg["Retry-After"] = "-5"
+    assert drive(neg, {"jsonrpc": "2.0", "id": 1,
+                       "error": {"code": -32000}}) == [5, 10, 15, 20, 25]
 
 
 def test_the_event_identity_is_the_name_its_door_writes(map_doc):
@@ -1373,7 +3357,13 @@ def test_a_node_is_matched_by_its_LABEL_and_its_declared_property(map_doc):
     # The graph holds the Event (name + content), and NOT the Point, but the
     # Event's content column carries the Point's content.
     rows = [["Event", "a different event entirely", "", point["content"]]]
-    assert filer.presence(map_doc, rows, [], [])[0] != []
+    # ⛔ THE IDENTITY ITSELF, not "the missing list is non-empty": 77 OTHER
+    # declared nodes are absent from this one-row graph, so `!= []` is satisfied
+    # by them and the label leg of the node arm went unpinned (measured: matching
+    # a bare `(prop, value)` with no label left 116 passed) (#13913 round 19).
+    missing_nodes, _missing_edges = filer.presence(map_doc, rows, [], [])
+    assert ("Point", "content", point["content"]) in missing_nodes, (
+        "the Event row's content column certified the declared POINT")
     assert filer.verdict(map_doc, rows, [], []) == 1
     # And the same row does not double-count as a duplicate of anything.
     full = _node_rows(map_doc)
@@ -1640,6 +3630,16 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
     op_q = next(q for q in queries if "o.is_operator = true" in q)
     for prop in filer.IDENTITY_PROPS:
         assert f"coalesce(x.{prop},'')" in op_q, op_q
+    # ⛔ THE LEADING COLUMNS ARE READ POSITIONALLY BY `presence()`, so a
+    # transcription here is a false FAILURE over a correctly filed graph: with
+    # every operator row at `idx=-1` the shipped query shape reports 101/101
+    # declared edges missing (a correct graph reports 50 — the structural ones
+    # only). Only the `x.*` tail was pinned (#13913 review round 16).
+    for leading in ("coalesce(o.id, o.nodeKey, toString(id(o)))",
+                    "coalesce(o.op_type, e.op_type, '')",
+                    "coalesce(e.idx, -1)",
+                    "coalesce(o.direction,'')"):
+        assert leading in op_q, (leading, op_q)
 
 
 def test_an_UNREADABLE_body_is_an_UNKNOWN_outcome_not_a_refusal(monkeypatch):
@@ -2355,6 +4355,11 @@ def test_the_carried_failure_prints_the_ONE_remedy_that_clears_it(
     assert filer.write_map(map_doc) == 1
     err = capsys.readouterr().err
     assert "delete this line from `failed`" in err, err
+    # ⛔ THE LINE ITSELF: printing "N failure(s) … are STILL unresolved" while
+    # naming NONE of them leaves the diagnosis only in `state.json`, and a resume
+    # then reports a number the operator cannot act on (measured: `for line in
+    # repeated[:10]` → `for line in []` left the suite green) (#13913 round 17).
+    assert marker in err, ("the carried failure's own line was not printed", err)
     assert "Never delete `state.json`" in err, err
     # The remedy is PER CLASS: a marker-bearing line and an `unbound endpoint`
     # line have different exits, and one text for both is a wrong instruction.

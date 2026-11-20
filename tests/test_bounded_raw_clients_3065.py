@@ -759,6 +759,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
     "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
+    "tools/vector_parity_13906.py": 1,          # #13906's read-only graph leg (`GraphStore`), bound: `**_bounded_server_socket_kwargs()` on the `FalkorDB(...)` construction — without this row the inventory assert reds on the very file the bound was added to (#8118's "a new raw client must be listed here (and carry a bound)")
 }
 
 

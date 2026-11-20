@@ -168,7 +168,7 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 ⚠️ **This revision adds its own entries to it**: `projection/__init__.py`'s fulltext declarations
 `:6974-6990` (the block), `:6984` (`Event`), `:6985` (`Subject`), `:6989` (`Object`), `:6990` (`Source`);
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37697`/`:37720` (the whole-node pair, still 23 apart);
-`audit.py:817`; `mcp_server.py:5184`/`:8206`; `goal_judgement.py:1128`; and §2.1's own table, which carries
+`audit.py:817`; `mcp_server.py:5184`/`:8206`/`:11280`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:24440` and `search_engine.py:6891`, both open at this revision and neither
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth

@@ -312,10 +312,23 @@ def test_audit_tool_registry_surface():
     by_name = {t.name: t for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)}
     assert "list_knowledge" in RETIRED_USE_INSTEAD["tortoise_list_batch"], (
         "the retired batch mirror must name the list_knowledge container")
-    for name, method in (("tortoise_list_batch", "list_batch"),
-                         ("tortoise_list_batches", "list_batches")):
+    # ⛔ The row's method is the PRIVATE name: #13899 privatised the door these mirrors
+    # call (`list_batch` -> `_list_batch`, `list_batches` -> `_list_batches`, archive/INDEX.md:81-82,
+    # "Body survives PRIVATE as `_list_batch`") and the surface manifest pins the same spelling
+    # (`config/surface-manifest.yml` `sdk_method: _list_batch`). Pinning the pre-#13899 public
+    # spelling here reds `test (a)` on every PR — it did, from #13899 until this follow-through.
+    for name, method in (("tortoise_list_batch", "_list_batch"),
+                         ("tortoise_list_batches", "_list_batches")):
         entry = by_name.get(name)
         assert entry is not None, f"{name} missing from the served registry"
         assert entry.sdk_method == method
+        # The literal above is the pin; this is the property behind it. #13899 removed the public
+        # spelling from the CLASS body — the retirement hint lives on the instance hook
+        # `TortoiseSDK.__getattr__`, which class-level `hasattr` never reaches — so this arm is
+        # True exactly when the class declares the door, and False for any name it no longer
+        # serves (including one that never existed). A rename reds here, naming the declaration,
+        # instead of only reporting a bare string mismatch.
+        assert hasattr(TortoiseSDK, method), (
+            f"{name} declares sdk_method {method!r}, which does not resolve on TortoiseSDK")
         assert entry.annotations.readOnlyHint is True
         assert entry.http_policy is True  # read surface → HTTP-accessible

@@ -1979,6 +1979,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # and by
              # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
              "tools/entity_vector_backfill.py",
+             # #13906: the dense-leg QUERY-parity harness
+             # (`tools/vector_parity_13906.py`) owns
+             # tests/test_vector_parity_13906.py (registered `core`). Same flat `tools/`
+             # swallow — a harness-only diff filters to `changed == []`, takes the
+             # docs-only early return and runs tier-1 smoke, where that file is not
+             # registered. The stakes are the instrument's own negative: the comparator
+             # is what is ALLOWED to say "the two dense legs agree", so a diff that
+             # widened the tie tolerance, dropped the distance comparison or made a
+             # poison undetectable would merge with every falsifier asleep — and the
+             # artifact it would produce is a green parity report. Pinned by
+             # tests/test_ci_selection.py::test_a_vector_parity_harness_only_diff_selects_its_pins,
+             # which asserts THE ARM ITSELF (`surfaces == ["core"]` plus the file in
+             # `test_files`). ⛔ Not by the comparator's own falsifiers: an earlier
+             # version of this comment cited
+             # `tests/test_vector_parity_13906.py::test_each_poison_makes_the_comparison_fail`
+             # and `::test_a_distance_change_with_identical_ids_is_a_divergence`, and
+             # neither calls `select()` — so deleting this entry left every one of them
+             # green while a tools-only diff collapsed to `surfaces: []` (measured,
+             # #13914 review round 5). The entry now cites only the pin that reads it.
+             "tools/vector_parity_13906.py",
+
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:
