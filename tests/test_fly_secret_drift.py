@@ -2235,10 +2235,10 @@ _READER_NEEDLE = {
 #: copy left). The ordinal is CAPTURED, because the prose below binds its range cites
 #: to it.
 _READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
-#: The sentence that ENDS the numbered claims in both artifacts: the prose after
-#: it names no function, so nothing in it may inherit reader 5's symbol.
-#: Markdown emphasis is stripped before matching — the runbook bolds
-#: "**function names**", the manifest shouts "FUNCTION NAMES".
+#: The sentence that ENDS the numbered claims in the runbook (its manifest twin went
+#: with the `fly-only:#13674` block this change deletes): the prose after it names no
+#: function, so nothing in it may inherit reader 5's symbol. Markdown emphasis is
+#: stripped before matching — the runbook bolds "**function names**".
 _READER_SYMBOL_RESET_RE = re.compile(
     r"function names? (?:above )?are the invariant", re.IGNORECASE
 )
@@ -2343,13 +2343,13 @@ _READER_ORDINAL_GROUP_CLAIM_RE = re.compile(
 def _resolver_definition_span() -> tuple[int, int]:
     """1-based (first, last) line of the flag resolver's own definition.
 
-    DERIVED FROM THE SOURCE, never written as a literal here: both artifacts tell a
+    DERIVED FROM THE SOURCE, never written as a literal here: the runbook tells a
     maintainer that "the line numbers are a convenience and they move whenever
     `embeddings.py` grows — re-pin them on a merge", so a hard-coded tuple turns
     that documented maintenance step into a FALSE RED (#13814 review round 7: a
-    correct re-pin after a 5-line insertion reddened, while the runbook copy — which
-    names the function inline — passed, so the two copies could no longer be
-    re-pinned together as the block instructs).
+    correct re-pin after a 5-line insertion reddened here while the runbook copy —
+    which names the function inline — passed; the manifest's parallel copy, which is
+    what made the asymmetry confusing, went with this change).
     """
     body = (REPO_ROOT / "tortoise" / "embeddings.py").read_text()
     # `ast`, not indentation heuristics: the span must be the function's OWN body,
@@ -2640,10 +2640,9 @@ def _reader_citations(
     # unbound, because the block names no reader for `:40-50` anywhere.
     unbound = {(fname, lo, hi) for fname, lo, hi, sym in cites if sym is None}
     # ⛔ The resolver's span is DERIVED from the `def`, not pinned as a literal here:
-    # a literal would make the documented re-pin (both artifacts say the numbers move
-    # when `embeddings.py` grows) a false red, and would pin the manifest's copy harder
-    # than the runbook's — which names the function inline — so the two copies could not
-    # be re-pinned together (#13814 review round 7). What the invariant keeps is the
+    # a literal would make the documented re-pin (the runbook says the numbers move
+    # when `embeddings.py` grows) a false red (#13814 review round 7). What the
+    # invariant keeps is the
     # property that matters: a cite naming no reader must land in the RESOLVER, so
     # re-pointing it at another reader's gate line still reds.
     resolver_lo, resolver_hi = _resolver_definition_span()
@@ -4033,7 +4032,12 @@ def test_the_warmup_revert_guidance_names_both_red_states():
     """
     section = _embedder_warmup_runbook_section()
     # Non-vacuity: a section read that picked up the wrong region must not pass.
-    assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
+    # BODY-ONLY marker, deliberately: the section always CONTAINS the name (it is in
+    # the heading the slice starts at), so a name-based "non-vacuity" check could
+    # never fail. This sentence exists only in the body.
+    assert "Number 4 is the one an operator is most likely to miss" in section, (
+        "the section reader found the wrong region — the body marker is gone"
+    )
 
     quoted = _runbook_quoted_red_states(section)
     missing = [leader for leader in _WARMUP_REVERT_REDS if leader not in quoted]
@@ -4106,7 +4110,12 @@ def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
     """
     section = _embedder_warmup_runbook_section()
     # Non-vacuity: a section read that picked up the wrong region must not pass.
-    assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
+    # BODY-ONLY marker, deliberately: the section always CONTAINS the name (it is in
+    # the heading the slice starts at), so a name-based "non-vacuity" check could
+    # never fail. This sentence exists only in the body.
+    assert "Number 4 is the one an operator is most likely to miss" in section, (
+        "the section reader found the wrong region — the body marker is gone"
+    )
     assert "the transition must be PERFORMED AND VERIFIED" in section, (
         "the runbook no longer states that the route-(b) transition must be performed and "
         "verified — without it the exit-1 state reads as the finished repair."
