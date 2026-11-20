@@ -3177,13 +3177,9 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # draft said "61 of the 192", the figure did not reproduce under any reading of "that arm",
     # and the `192` was not this head's tuple length either way it is counted — the same
     # typed-figure rot this file polices about itself, caught by #13802 review round 28, P3.
-    # ⛔ THE CORRECTION CHAIN IS DELIBERATELY NOT RESTATED: it was re-worded in consecutive
-    # rounds and each wording drew a fresh finding, so the chain stops here rather than being
-    # re-worded again — and the round numbers in it were themselves mis-attributed once, which
-    # is the same rot one level up. That history lives in the commit messages, not in this note,
-    # and no claim about an earlier head's tuple is made here. What remains is the rule and its
-    # one measured fact: no count of THIS head's tuple is typed anywhere in this note, and none
-    # is re-derived from a figure quoted in it.
+    # ⛔ NO COUNT OF THIS HEAD'S TUPLE IS TYPED OR RE-DERIVED HERE. Any further correction to
+    # this note goes in the commit message, not in it: what the reader needs is the rule, and
+    # the provenance of its wording is not load-bearing.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
