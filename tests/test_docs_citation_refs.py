@@ -2814,6 +2814,10 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "both out",
     "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
     "comment",
+    "a docstring line whose content opens with anything else passes both stages and "
+    "prints",
+    "a docstring or code line whose content opens with anything else WOULD appear in "
+    "its output",
 )
 
 #: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
@@ -3017,6 +3021,10 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "rules both out",
         "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
         "comment",
+        "a docstring line whose content opens with anything else passes both stages and "
+        "prints",
+        "a docstring or code line whose content opens with anything else WOULD appear in "
+        "its output",
     ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
