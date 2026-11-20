@@ -976,7 +976,7 @@ def test_the_structural_relation_set_is_the_SHIPPED_one(map_doc):
 class _UnknownOperatorOutcome:
     """The transport dies on the operator write: the outcome is UNKNOWN.
 
-    `create_operator` is not idempotent, so `Mcp.call` raises `_Unconfirmed`
+    `create_operator` is not idempotent, so `Mcp.call` raises `UnknownOutcome`
     rather than retrying — the caller must NOT un-record the intent (that is the
     arm that re-issued a second operator on resume) and must NOT re-issue it.
     """
@@ -1014,7 +1014,7 @@ def test_an_UNCONFIRMED_operator_is_neither_un_remembered_nor_re_issued(
     and the resume reports it instead of writing it again.
 
     Measured before the fix: `except Exception: unmark(marker)` fired on the
-    `_Unconfirmed` path too, so the re-run made **one more operator call over the
+    `UnknownOutcome` path too, so the re-run made **one more operator call over the
     same endpoints** and printed `all nodes and edges written` — the #10849 EP
     double-count. Mutants: (a) `except Exception: unmark(marker)` (no distinct
     class) → the resume re-issues; (b) un-recording removed everywhere → a
@@ -1275,6 +1275,13 @@ def test_the_section_labels_are_the_projection_s_LABELS():
     Mutant: swap any two entries (`subjects`: "Point", `points`: "Subject") — the
     suite stayed green before this pin.
     """
+    # ⛔ AN EXPECTED MAPPING, not a membership test: a membership test accepts any
+    # PERMUTATION of the five labels (measured — swapping subjects<->points left
+    # the suite green), and a swap makes `--verify` report all 78 nodes missing on
+    # a correctly filed map (#13913 review round 7).
+    assert filer.SECTION_LABELS == {"subjects": "Subject", "objects": "Object",
+                                    "sources": "Source", "events": "Event",
+                                    "points": "Point"}
     src = (ROOT / "tortoise" / "projection" / "entities.py").read_text(encoding="utf-8")
     for section, label in filer.SECTION_LABELS.items():
         pattern = re.compile(
@@ -1390,3 +1397,66 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
     op_q = next(q for q in queries if "o.is_operator = true" in q)
     for prop in filer.IDENTITY_PROPS:
         assert f"coalesce(x.{prop},'')" in op_q, op_q
+
+
+def test_an_UNREADABLE_body_is_an_UNKNOWN_outcome_not_a_refusal(monkeypatch):
+    """A 2xx whose body cannot be PARSED may still have landed.
+
+    `_post` parses the response itself, so a truncated body (`IncompleteRead`) or
+    a proxy error page (`JSONDecodeError`) raises one frame BELOW `call()`'s
+    classification. Uncaught, both reached `write_once`'s refusal arm, which
+    un-recorded a NON-IDEMPOTENT intent — measured: the resume re-issued
+    `create_operator`, the #10849 double-count (#13913 review round 7).
+
+    Mutant: drop `http.client.HTTPException` / `json.JSONDecodeError` from the
+    except tuple — both cases raise themselves instead of `UnknownOutcome`.
+    """
+    for exc in (filer.http.client.IncompleteRead(b"partial"),
+                json.JSONDecodeError("Expecting value", "<html>502</html>", 0)):
+        mcp = _RealMcp("not-a-real-key")
+
+        def _post(_body, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome):
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+
+
+def test_a_408_or_429_is_not_a_pre_handler_refusal(monkeypatch):
+    """A timeout may have been read and acted on; a rate limiter can sit INSIDE
+    the door. Both must take the UNKNOWN path, never un-record the intent.
+
+    Measured pre-fix: a 429 un-recorded an operator intent and the resume wrote a
+    SECOND operator (#13913 review round 7).
+
+    Mutant: `400 <= code < 500` with no 408/429 exclusion — both raise a plain
+    `RuntimeError` and the marker is retired.
+    """
+    for code in (408, 429):
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post",
+                            lambda body, code=code: (code, None, {}))
+        with pytest.raises(filer.UnknownOutcome):
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+
+
+def test_the_verdict_refuses_DUPLICATED_operators(map_doc):
+    """A re-issued non-idempotent operator is the corruption the intent markers
+    exist to prevent — `--verify` must see it.
+
+    An operator carries no `name`/`url`/`content`, so `duplicates()` cannot see
+    it and `presence()`'s arm is existential: measured, a graph holding TWO
+    copies of every declared operator read `nodes: 78/78 / edges: 101/101` and
+    exited 0 (#13913 review round 7, the #10849 EP double-count).
+
+    Mutant: `duplicate_operators()` returns [] — this fixture exits 0.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    assert filer.duplicate_operators(map_doc, op_rows) == []
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, op_rows) == 0
+
+    # Every operator minted a SECOND time — a fresh node id, same endpoints.
+    doubled = [*op_rows, *[[f"{row[0]}~dup", *row[1:]] for row in op_rows]]
+    assert filer.duplicate_operators(map_doc, doubled), "the duplicate was invisible"
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, doubled) == 1
