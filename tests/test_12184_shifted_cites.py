@@ -631,28 +631,89 @@ _ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifter
 #: up (a figure quoted from a document rots while the comparator beside it stays green). The prose was
 #: corrected by the lane that landed `#13991`; nothing GRADED it, so this arm is the durable half: without
 #: it the next re-measurement of this document can state any number here and the comparator stays green.
-_TWO_SPAN_TOTAL = re.compile(
-    r"writes (\d+|one|two|three|four|five|six|seven|eight|nine|ten) pairs? as two code spans"
-)
-_TWO_SPAN_NEW = re.compile(
-    r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten) of them are resolved but not "
-    r"counted by the one-token rule"
+#: The spelled numerals these two sentences may state a count in, and the ONLY source both the patterns
+#: and `_as_int` read — so the class the patterns ACCEPT cannot drift from the class the grader GRADES.
+#: ⛔ The ceiling is STATED here, not accidental. It used to stop at `ten` while `_NUMERALS` already
+#: graded `zero`, and the mismatch produced exactly the verdict this file's header forbids: an edition
+#: legitimately stating `zero pairs` (the form is cleaned up, nothing left to disclose) or `eleven pairs`
+#: got "the header no longer states how many…" about a sentence that is right there — the false-absence
+#: class of `#13599` finding 1, reported two review rounds running (`#14010` rounds 3 and 4). A prefix
+#: match (`four` inside `fourteen`) could never report a wrong FIGURE — the literal after the group cannot
+#: be completed by a prefix — so the only outcome above the ceiling was that false absence verdict.
+#: `zero`/`none` are entries, not decoration: an honest re-measurement can find NO two-code-span pair
+#: left, and `zero` shipped as a `_NUMERALS` key no pattern could ever feed (dead entry, `#14010` round 4).
+_SPELLED_NUMERALS: tuple[str, ...] = (
+    "zero",
+    "none",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
 )
 #: Spelled numerals are graded as NUMBERS, not treated as an absent statement. The edition this guard was
 #: written against states `three pairs` IN WORDS, so a digits-only pattern reported "the header no longer
 #: states how many pairs…" — a MISSING-SENTENCE verdict about a sentence that is right there, one digit
 #: wrong, which is the false-negative shape `#13599` finding 1 punished on the other side of this file.
+#: ⛔ DERIVED from `_SPELLED_NUMERALS`, never written out again: a third hand-kept copy of the vocabulary is
+#: how the pattern's ceiling and the grader's class came apart in the first place.
 _NUMERALS: dict[str, int] = {
-    word: value
-    for value, word in enumerate(
-        ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
-    )
+    **{word: 0 for word in ("zero", "none")},
+    **{word: value for value, word in enumerate(_SPELLED_NUMERALS[2:], start=1)},
 }
+#: Longest first, so `sixteen` is tried before `six`. An unanchored alternation over spelled words normally
+#: needs a `\b` to stop `four` matching inside `fourteen`; here the required literal after the group
+#: (` pairs? as two code spans`, ` of them are resolved`) already makes a prefix match unable to complete,
+#: so the ordering is defence and the literal is the guarantee.
+_NUMERAL_ALT = "|".join(sorted(_NUMERALS, key=len, reverse=True))
+_TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code spans")
+_TWO_SPAN_NEW = re.compile(
+    rf"(\d+|{_NUMERAL_ALT}) of them are resolved but not counted by the one-token rule"
+)
 
 
 def _as_int(token: str) -> int:
-    """*token* as an int, spelling the numerals this header may write as words (`three`) as well as digits."""
+    """*token* as an int, spelling the numerals this header may write as words (`three`) as well as digits.
+
+    The spelled class is `_NUMERALS` — `zero`/`none` through `twenty` — and it is the SAME mapping the
+    patterns' alternation is built from, so a token the pattern captures is always a token this grades.
+    """
     return int(token) if token.isdigit() else _NUMERALS[token]
+
+
+def _two_span_total_mutant(stated: int) -> int:
+    r"""A two-code-span pair count that CONTRADICTS *stated* and that `_TWO_SPAN_TOTAL` can still read.
+
+    ⛔ The control at `test_a_carried_forward_figure_is_reported` asserts only that the mutated document
+    reports SOME problem, so a mutant whose value the count pattern cannot parse proves nothing: the red
+    then comes from the ABSENT-SENTENCE arm, and the count comparison the control exists for was never
+    consulted (a false PASS of the control — `#14010` round-4 finding 1, reported as a `-1 pairs` value
+    that `\d+` will not read because the character after `writes ` is `-`).
+
+    The P2-A narrative is the BELOW direction (`three` stated where five are written), so that is kept
+    wherever it parses and decreases — `stated - 2` for every measurement of 2 or more. Below 2 it does
+    not exist (an honest edition measuring one pair gives `-1`, measuring none gives `-2`), so the mutant
+    takes the OVERSTATE direction instead: `+1` parses at every measurement including 0 and always
+    disagrees. There is no floor that repairs the below direction at 0 (`max(stated - 2, 0) == stated`
+    there), which is why the fallback is a direction, not a clamp.
+    """
+    below = stated - 2
+    return below if below >= 0 else stated + 1
 
 
 def _mutate_numeral(match: re.Match[str], value: int) -> str:
@@ -668,11 +729,17 @@ def _mutate_numeral(match: re.Match[str], value: int) -> str:
     CONSTRUCTION for numerals this file's own patterns accept, on CORRECT text: the sentence scaffold
     spells `two` (`… writes two pairs as TWO code spans`) and `one` (`… the ONE-token rule`), so a
     document legitimately measuring two two-code-span pairs, or ONE uncounted pair, tripped it. Both are
-    real measurements — the patterns accept `one`..`ten` and `_as_int` grades all of them — so the count
-    could only ever fire on correct content, at the next lane re-measuring this header, and pointed them
-    at this helper's token bookkeeping instead of at their figure (`#13599` review, finding 1: a control
-    that reds on CORRECT text). The offset comparison carries the same guarantee and is true wherever the
-    guarantee holds.
+    real measurements — the patterns accept `_SPELLED_NUMERALS` and `_as_int` grades all of them — so the
+    count could only ever fire on correct content, at the next lane re-measuring this header, and pointed
+    them at this helper's token bookkeeping instead of at their figure (`#13599` review, finding 1: a
+    control that reds on CORRECT text). The offset comparison carries the same guarantee and is true
+    wherever the guarantee holds.
+
+    ⛔ "Asserted here" is worth nothing unless a red is REACHABLE: for both patterns that call this, the
+    capture sits at the numeral's own offset on every input they accept, so no document can violate it and
+    deleting this `assert` left the suite green (`#14010` round 3, finding 2 — dead weight under #3442
+    rule 3). `test_the_numeral_mutators_offset_assert_can_fire` supplies the synthetic match that DOES
+    violate it, so the guard has a red of its own rather than a claim in a docstring.
     """
     token = match.group(1)
     offset = match.start(1) - match.start(0)
@@ -736,12 +803,6 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     problems: list[str] = []
     spellings, pairs = _resolved_pairs(text, repo)
     collisions = spellings - len(pairs)
-    # ⛔ The two-code-span form is MEASURED from this document, never asserted as an offset: `_SPELLING`
-    # cannot see it, so the count it contributes moves whenever the document does. Computed once here
-    # because TWO arms grade it — the disclosure's own stated counts below, and the alternative basis it
-    # justifies (whose `227`/`130` are these same pairs).
-    two_span = _two_span_pairs(text, repo)
-    extra_pairs = len(pairs | two_span) - len(pairs)
     # Matched on the unbolded body: see `_unbolded` — a bold marker between a word and its figure is not a
     # disagreement about the figure.
     body = _unbolded(text)
@@ -753,6 +814,17 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     if not quadruple:
         return ["the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters` "
                 "sentence (matched with emphasis stripped)"]
+    # ⛔ The two-code-span form is MEASURED from this document, never asserted as an offset: `_SPELLING`
+    # cannot see it, so the count it contributes moves whenever the document does. Computed once here
+    # because TWO arms grade it — the disclosure's own stated counts below, and the alternative basis it
+    # justifies (whose `227`/`130` are these same pairs). ⛔ Placed AFTER the two early returns above:
+    # `_two_span_pairs` resolves each written path through `_resolve_path`, whose ambiguity check is an
+    # `AssertionError`. Hoisted above them, a header whose `_TRIPLE`/`_QUADRUPLE` sentence had been reworded
+    # — a case this function grades as a plain problem STRING — instead died on an assertion from a
+    # resolution the caller never needed, so the graded message became a crash (`#14010` final review,
+    # finding 3).
+    two_span = _two_span_pairs(text, repo)
+    extra_pairs = len(pairs | two_span) - len(pairs)
     if tuple(map(int, triple.groups())) != (spellings, len(pairs), collisions):
         problems.append(
             f"the header publishes spellings/pairs/collisions {triple.groups()}, but this file MEASURES "
@@ -832,7 +904,17 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     # alternative basis is computed from, so they cannot disagree with it or with each other.
     total = _TWO_SPAN_TOTAL.search(body)
     if not total:
-        problems.append("the header no longer states how many pairs it writes as two code spans")
+        # ⛔ Names the ACCEPTED CLASS and admits it cannot tell "reworded" from "dropped". The message it
+        # replaces asserted the sentence was GONE, which is FALSE whenever the sentence is present in a form
+        # the pattern does not read — the false-absence verdict `#13599` finding 1 punished, and the reason
+        # the vocabulary above is now derived rather than hand-copied (`#14010` rounds 3 and 4). A lane that
+        # re-measures this header must not be told to "restore" a sentence it is looking at.
+        problems.append(
+            "the header states no two-code-span pair count in a form this guard reads (digits, or "
+            f"{'/'.join(_SPELLED_NUMERALS[:3])}..{_SPELLED_NUMERALS[-1]}) — the sentence was reworded or "
+            "dropped, and neither this message nor `_TWO_SPAN_TOTAL` can tell which: re-point the pattern "
+            "against how the count is published now, do not delete this arm"
+        )
     elif _as_int(total.group(1)) != len(two_span):
         problems.append(
             f"the header says it writes {total.group(1)} pairs as two code spans, but this document "
@@ -841,8 +923,10 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     uncounted = _TWO_SPAN_NEW.search(body)
     if not uncounted:
         problems.append(
-            "the header no longer states how many of its two-code-span pairs the one-token rule does "
-            "not count"
+            "the header states no count of two-code-span pairs the one-token rule skips in a form this "
+            f"guard reads (digits, or {'/'.join(_SPELLED_NUMERALS[:3])}..{_SPELLED_NUMERALS[-1]}) — the "
+            "sentence was reworded or dropped: re-point `_TWO_SPAN_NEW` against how it is published now, "
+            "do not delete this arm"
         )
     elif _as_int(uncounted.group(1)) != extra_pairs:
         problems.append(
@@ -1025,10 +1109,13 @@ def test_a_carried_forward_figure_is_reported() -> None:
         ),
         (
             two_total,
-            {1: two_span_stated - 2},
-            "the two-code-span pair count is stated BELOW what the document measures — the shipped P2-A "
-            "state (`three` stated where five are written), which leaves the published `227` unreachable "
-            "from the `223` beside it and turns the reconciliation into arithmetic a reader cannot close",
+            {1: _two_span_total_mutant(two_span_stated)},
+            "the two-code-span pair count DISAGREES with what the document measures — below it at the "
+            "shipped P2-A edition (`three` stated where five are written), which leaves the published "
+            "`227` unreachable from the `223` beside it and turns the reconciliation into arithmetic a "
+            "reader cannot close; above it when a below value would not be a count the pattern reads "
+            "(`_two_span_total_mutant`), so the mutant always lands on the COUNT arm rather than on the "
+            "absent-sentence arm",
         ),
         (
             two_new,
@@ -1048,6 +1135,25 @@ def test_a_carried_forward_figure_is_reported() -> None:
         assert stale != match.group(0), f"the negative control for {why!r} did not change the figures"
         mutated = text.replace(match.group(0), stale, 1)
         assert mutated != text, f"the negative control for {why!r} did not change the text"
+        if match in (two_total, two_new):
+            # ⛔ RULE 2, ENFORCED HERE RATHER THAN ASSUMED: this mutant's red has to come from the COUNT
+            # comparison, and the only observation below is `_figure_problems(mutated) != []`, which the
+            # ABSENT-SENTENCE arm satisfies just as well. A value the pattern cannot parse (the old fixed
+            # `stated - 2`, which renders `-1` at an honest edition measuring one pair) therefore passed
+            # the control while the comparator it exists to prove was never consulted — a false PASS of the
+            # control (`#14010` round-4 finding 1). Asserting the mutated sentence still parses makes that
+            # state a red HERE, whatever the mutant value is.
+            arm = _TWO_SPAN_TOTAL if match is two_total else _TWO_SPAN_NEW
+            rematched = arm.search(_unbolded(mutated))
+            assert rematched is not None, (
+                f"the control for {why!r} produced {stale!r}, which its own pattern cannot read, so the "
+                "red would come from the absent-sentence arm and the count comparison would stay unproven "
+                "— fix the mutant VALUE, do not relax this control"
+            )
+            assert _as_int(rematched.group(1)) == next(iter(overrides.values())), (
+                f"the control for {why!r} rewrote the count the pattern grades, not its own figure: "
+                f"{rematched.group(1)!r} vs {next(iter(overrides.values()))!r}"
+            )
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
         )
@@ -1065,22 +1171,26 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
       the sentence, so `count("one") == 2` on the (entirely plausible) reading that one of the pairs is
       not already counted.
 
-    Both are legitimate measurements of this document — the patterns accept `one`..`ten` and `_as_int`
-    grades all of them — so the helper rejected two numerals the rest of the guard is built to accept. The
-    one trigger it had was a false red on correct text, which is the class this file's own header exists
-    to prevent (`#13599` review, finding 1: a comparator that reds on CORRECT text), and it pointed the
+    Both are legitimate measurements of this document — the patterns accept `_SPELLED_NUMERALS` and
+    `_as_int` grades all of them — so the helper rejected numerals the rest of the guard is built to
+    accept. The one trigger it had was a false red on correct text, which is the class this file's own
+    header exists to
+    prevent (`#13599` review, finding 1: a comparator that reds on CORRECT text), and it pointed the
     next re-measuring lane at the control's token bookkeeping rather than at their measurement.
 
     NON-VACUOUS, measured: with the count assert in place this test reds with `the numeral `two` occurs
     twice in 'writes two pairs as two code spans'` on the first case it tries; with the positional assert
     both cases mutate their own capture group and re-match. It iterates the WHOLE accepted class, not the
-    two instances, because a guard written against one spelling of one numeral is the defect above.
+    two instances, because a guard written against one spelling of one numeral is the defect above — and
+    the class it iterates is DERIVED from `_NUMERALS`, so extending the vocabulary (the `eleven`/`zero`
+    end, `#14010` round 4) extends the pin in the same edit instead of leaving a hand-copied tuple to stop
+    at `ten` while the patterns accept more.
     """
     for pattern, template in (
         (_TWO_SPAN_TOTAL, "the header writes {n} pairs as two code spans"),
         (_TWO_SPAN_NEW, "{n} of them are resolved but not counted by the one-token rule"),
     ):
-        for numeral in ("two", "one", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "7"):
+        for numeral in (*_NUMERALS, "7"):
             sentence = template.format(n=numeral)
             match = pattern.search(sentence)
             assert match is not None, f"the pattern no longer matches its own sentence frame: {sentence!r}"
@@ -1100,6 +1210,123 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
                 f"the mutated sentence {mutated!r} no longer re-matches with its new count — the edit did "
                 "not land on the numeral the pattern grades"
             )
+
+
+def test_the_numeral_mutators_offset_assert_can_fire() -> None:
+    """The offset assert has a red of its own, on the one shape that violates it.
+
+    ⛔ Both patterns `_mutate_numeral` serves capture at the numeral's own offset on EVERY input they accept
+    (`_TWO_SPAN_NEW` at 0; `_TWO_SPAN_TOTAL` at 7, behind a literal prefix that contains no numeral), so no
+    document can violate the assertion and DELETING it left the whole suite green (`#14010` round 3,
+    finding 2 — a guard no mutation can redden is dead weight under #3442 rule 3). The property it states
+    is still the one the edit depends on (`str.replace(…, 1)` rewrites the LEFTMOST occurrence), so the
+    repair is to reach it, not to delete it: this synthetic pattern captures the second `two`, which is the
+    exact state the assertion exists to refuse.
+    """
+    synthetic = re.compile(r"(?:two )?writes (two) pairs as two code spans")
+    match = synthetic.search("two writes two pairs as two code spans")
+    assert match is not None and match.group(1) == "two"
+    try:
+        _mutate_numeral(match, 9)
+    except AssertionError as exc:
+        assert "not at the captured numeral's offset" in str(exc), (
+            f"the offset assert fired, but not with its own message: {exc}"
+        )
+    else:
+        raise AssertionError(
+            "`_mutate_numeral` accepted a match whose captured numeral is NOT its leftmost occurrence: "
+            "the leftmost rewrite would have edited a different word than the one the pattern grades, and "
+            "the positional precondition is unenforced"
+        )
+
+
+def test_the_two_span_count_mutant_always_lands_on_the_count_arm() -> None:
+    r"""Every measurement this document can legitimately reach gets a mutant the count arm can READ.
+
+    ⛔ The control asserts only `_figure_problems(mutated) != []`, so a mutant value the count pattern
+    cannot parse still passes — on the ABSENT-SENTENCE arm, with the comparison it exists to prove never
+    consulted (a false PASS of the control, `#14010` round-4 finding 1). The fixed `stated - 2` did exactly
+    that at an honest edition measuring one two-code-span pair: `-1` is not a token `\d+` reads after
+    `writes `, so no sentence the store can hold carried this mutant onto the count arm.
+
+    NON-VACUOUS: with `_two_span_total_mutant` replaced by the `stated - 2` it replaces, this reds on its
+    first uncovered measurement (`stated=1` renders `writes -1 pairs…`, which the pattern does not match) —
+    a measurement the shipped document does not have today, which is exactly why the control could not see
+    it and why the property is pinned here rather than sampled.
+    """
+    for stated in range(0, len(_SPELLED_NUMERALS) + 3):
+        value = _two_span_total_mutant(stated)
+        sentence = f"the header writes {value} pairs as two code spans"
+        match = _TWO_SPAN_TOTAL.search(sentence)
+        assert match is not None, (
+            f"a document stating {value} pairs (the mutant for a stated {stated}) is not a sentence "
+            "`_TWO_SPAN_TOTAL` can read, so the control would pass on the absent-sentence arm"
+        )
+        assert _as_int(match.group(1)) == value, (match.group(0), value)
+        assert value != stated, f"the mutant for a stated {stated} states {value} — it proves nothing"
+        assert value >= 0, f"the mutant for a stated {stated} is negative: {value}"
+
+
+def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() -> None:
+    r"""A header whose `_TRIPLE`/`_QUADRUPLE` sentence moved gets its problem STRING, not an assertion.
+
+    ⛔ `_two_span_pairs` resolves every written path through `_resolve_path`, whose ambiguity check is an
+    `AssertionError`. Hoisted above the two early returns that grade a reworded figures sentence as a plain
+    problem, that resolution ran on a header the function never needed it for, so a re-measurement that
+    reworded `dedupes the N …` — the case this function is written to REPORT — died on a traceback from an
+    unrelated cite instead (`#14010` final review, finding 3). The call is below those returns now, and this
+    is the shape that tells the two orders apart: the text carries an unresolvable two-code-span cite AND
+    no figures sentence, so a hoisted call raises and the correct order returns.
+    """
+    text = (
+        "the header writes one pairs as two code spans and cites `no_such_module_zzz.py` `:1`, "
+        "with no figures sentence in this text"
+    )
+    problems = _figure_problems(text)
+    assert problems and "no longer publishes" in problems[0], (
+        "a header whose figures sentence was reworded must come back as a graded problem — getting an "
+        f"`AssertionError` out of `_resolve_path` instead means the two-code-span measurement is running "
+        f"before the early returns that own this state; got {problems!r}"
+    )
+
+
+def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
+    """The two-code-span arms say the count is not in a readable form, never that the sentence is gone.
+
+    ⛔ Both messages used to assert *"the header no longer states how many pairs…"* on ANY unparsed input.
+    That was FALSE for the one state the guard was built to survive: a correct sentence using a form the
+    pattern did not read (`zero`, `none`, `eleven` — all of them honest re-measurements of this very
+    header) came back as a MISSING-SENTENCE verdict, the class `#13599` finding 1 punished and `#14010`
+    rounds 3 and 4 both blocked on. The vocabulary above is derived now so those particular forms read, but
+    the message must not re-acquire the false claim for whatever form the NEXT re-measurement invents.
+
+    NON-VACUOUS: against the previous wording the `"in a form this guard reads"` assertion reds on both
+    frames, and so does `"no longer states" not in message` — the old text contains exactly that clause.
+    """
+    document = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for arm, sentence, frame in (
+        (_TWO_SPAN_TOTAL, "writes a handful of pairs as two code spans", "writes a handful of pairs as two code spans"),
+        (_TWO_SPAN_NEW, "a handful of them are resolved but not counted by the one-token rule", "a handful of them"),
+    ):
+        assert arm.search(document) is not None, "the shipped document must carry the sentence mutated here"
+        mutated = re.sub(
+            r"(?:writes [\w-]+ pairs as two code spans)|(?:[\w-]+ of them are resolved but not counted by the one-token rule)",
+            sentence,
+            document,
+            count=1,
+        )
+        assert mutated != document
+        problems = _figure_problems(mutated)
+        assert problems, f"a header carrying {frame!r} was reported clean"
+        unread = [p for p in problems if "in a form this guard reads" in p]
+        assert unread, (
+            f"a header carrying {frame!r} must be reported as a count this guard cannot READ (the accepted "
+            f"class named in the message); got {problems!r}"
+        )
+        assert "no longer states" not in unread[0], (
+            "the message asserts the sentence is GONE, which is false for a sentence that is present in a "
+            f"form the pattern does not read: {unread[0]!r}"
+        )
 
 
 def _resolve(pins, repo: Path = REPO) -> list[str]:
