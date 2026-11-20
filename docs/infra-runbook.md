@@ -4384,6 +4384,7 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 | TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
+| TORTOISE_RECORD_ALLOCATE | ✅ **A live Fly secret, armed out-of-band AFTER every graph is seeded and armed** (an **arming flag**, not a credential — no secret material to rotate) — declared `fly-only:#12894`, so it is deliberately absent from version control; a `fly secrets unset` must delete that declaration in the same change | — | — (no GitHub secret, so CI never arms it) |
 | TORTOISE_EMBEDDER_WARMUP | ✅ **The embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — the value is **version-controlled** in `fly.toml [env]` (`TORTOISE_EMBEDDER_WARMUP = "0"`, production's live value) and declared `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (#13923 / #13926), so flipping it is a merged `[env]` edit, not an out-of-band secret. ⛔ **While a Fly secret of this name is on the app it SHADOWS `[env]`** — true as of **2026-11-20**, and a VOLATILE fact, so re-measure (`flyctl secrets list -a tortoise-y4mjjq`) rather than trusting this sentence — so the versioned value is dead until that secret is unset **after** a deploy applied `[env]` — the four steps and their failure modes live in the manifest's route-(b) block, and the transition is tracked in #13923. See §"The embedder warm-up switch" below | — | — (no GitHub secret, and it must stay OUT of the deploy payload: the manifest's own VCS declaration is the source) |
 
 ### The embedder warm-up switch — `TORTOISE_EMBEDDER_WARMUP` (#13674)
@@ -4514,6 +4515,29 @@ is RESERVED for a deliberate, PERMANENT out-of-band secret whose issue carries a
 ruling; this value is non-secret config whose source is version control, which is the `fly-toml-env`
 route. The checker also refuses a `fly-only:` line for an `[env]` key
 (`tests/test_fly_secret_drift.py::test_fly_only_on_a_fly_toml_env_key_is_stale`).
+
+### Arming the allocator's cutover — `TORTOISE_RECORD_ALLOCATE` (#12894)
+
+`TORTOISE_RECORD_ALLOCATE` is the **LAST** step of the per-graph cutover, and the ORDER is the
+authority (`tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT`):
+
+```
+sweep  →  seed --journal <path>  →  arm (per graph)  →  TORTOISE_RECORD_ALLOCATE=1 for the box
+```
+
+It is rolled **after** every graph is seeded and armed, because the refusal on a cut-over graph is
+the `public.record_cursor` **ROW**, not the flag (`record_projection._refuse_an_enumerated_replay`,
+#9190). A graph holding a cursor row refuses the enumerated replay whether or not the flag is set.
+
+```bash
+fly secrets set TORTOISE_RECORD_ALLOCATE=1 -a tortoise-y4mjjq     # only after every graph is seeded+armed
+fly secrets unset TORTOISE_RECORD_ALLOCATE -a tortoise-y4mjjq     # NOT a way back to enumeration
+```
+
+⛔ **`unset` is NOT the way back to the enumerated replay.** Clearing the flag turns the record path
+OFF for a cut-over graph; the route back to enumeration is `halt` → `seed --journal <path>` →
+`reopen` → `arm`. Removing the **declaration** from `.github/scripts/fly-managed-secrets.txt` is the
+visible one-line change in review — the two operations are different and must not be conflated.
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 
