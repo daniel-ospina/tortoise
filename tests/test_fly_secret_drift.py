@@ -3621,8 +3621,26 @@ def _declared_gap_paragraph() -> str:
     # paragraph above …`), and a containment match would anchor the reader inside that
     # block the moment the real paragraph is deleted — which is exactly the stale-removal
     # case this reader exists to report, so a containment match would make it pass.
+    #
+    # ⛔ THE COUNT IS PART OF THE ANCHOR, not the literal `ONE`. Pinning `⚠️ ONE
+    # DECLARED GAP` made a CORRECTLY declared SECOND gap invisible: measured (#13814
+    # review round 10) on a fully consistent two-gap artifact — a second unruled
+    # member, heading `⚠️ TWO DECLARED GAPS`, both refs named, gap count `TWO`, entry
+    # point `FOUR`, runbook row — the suite was `1 failed, 144 passed`, and the one
+    # red demanded a gap the artifact had ALREADY declared ("appear neither in the
+    # RESERVED-members paragraph … nor in the DECLARED GAP paragraph"). A misled lane
+    # then promotes the unruled entry into the ruled set — the exact weakening this
+    # guard exists to prevent. The count arm this reader feeds already accepts
+    # `ONE|TWO|…|SIX`, so a literal anchor contradicted the arm it feeds.
     heading = next(
-        (index for index, line in enumerate(lines) if line.lstrip("#").strip().startswith("⚠️ ONE DECLARED GAP")),
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(
+                r"⚠️ (?:ONE|TWO|THREE|FOUR|FIVE|SIX) DECLARED GAPS?\b",
+                line.lstrip("#").strip(),
+            )
+        ),
         None,
     )
     if heading is None:
