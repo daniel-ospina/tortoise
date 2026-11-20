@@ -75,6 +75,17 @@ is visible instead of silent.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_4211_session_hierarchy.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_4211_session_hierarchy.py`"
+    )
+
 import argparse
 import contextlib
 import hashlib
@@ -82,7 +93,6 @@ import json
 import math
 import os
 import shutil
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -393,8 +403,20 @@ def _open_embedded(path: Path):
     registration (#1005), which is what makes the close in ``measure_store`` reachable.
     """
     from tortoise import FalkorDB
+    from tortoise.projection import _socket_timeouts
 
-    return FalkorDB(str(path))
+    # #8118/#3065: a raw client with no read bound parks in `recv()` forever on a
+    # stalled engine (the #2969 defrag loop), which a MEASUREMENT tool cannot
+    # tolerate — it would hang the lane with no output instead of reporting an
+    # error. The embedded lane takes the READ half only: redis-py's
+    # `Redis.__init__` DROPS `socket_connect_timeout` on the unix-socket branch
+    # (`_apply_embedded_connect_timeout`), so spreading the host-lane
+    # `_bounded_server_socket_kwargs()` here would install a connect bound that
+    # does not exist. `tortoise.FalkorDB` is the embedded choke-point, so this
+    # bound rides the same client the product builds, resolved from the same
+    # knobs (`TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`).
+    _connect_to, read_to = _socket_timeouts()
+    return FalkorDB(str(path), socket_timeout=read_to)
 
 
 def measure_store(db_path: str, graph_name: str) -> dict:
@@ -462,9 +484,17 @@ def _parse_uri(uri: str) -> dict:
 
 def _open_live(uri: str):
     from falkordb import FalkorDB
+
+    from tortoise.projection import _bounded_server_socket_kwargs
+
     spec = _parse_uri(uri)
+    # #8118/#3065: the host lane carries the FULL bounded pair — a read bound and
+    # a zero-retry policy (`_no_server_retry`) — because redis-py's 3-retry
+    # default silently multiplies the wait. Same single resolution point the
+    # product's host branch uses, so a knob set for the product is set here too.
     return FalkorDB(host=spec["host"], port=spec["port"],
-                    password=spec["password"] or None), spec
+                    password=spec["password"] or None,
+                    **_bounded_server_socket_kwargs()), spec
 
 
 def _redact_uri(uri: str) -> str:

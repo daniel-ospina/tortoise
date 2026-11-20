@@ -757,6 +757,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/embedding_residual_scan.py": 1,      # #11642's read-only dense-leg scan (bound: `**_bounded_server_socket_kwargs()`)
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
+    "tools/measure_4211_session_hierarchy.py": 2,  # #4211's store-arm embedded handle (`socket_timeout=read_to` — the embedded lane's read half, #3350) + the live/instrument arm's host client (`**_bounded_server_socket_kwargs()`); both were UNBOUNDED when the tool landed on this branch, which is what redded this guard
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
     "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
 }
