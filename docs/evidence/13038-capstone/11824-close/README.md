@@ -1,3 +1,14 @@
+---
+title: "Capstone #13038 — the state model, before and after this strand (11824-close)"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-20
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#11824, #13038, #13302, #14028, #14035, state/lifecycle model, tools/capstone_state_value.py, narrative.json"
+---
+
 # Capstone #13038 — the state model, before and after this strand
 
 The instrument is described in `README.md` one level up and was built in #13038.
@@ -116,9 +127,10 @@ on every one of its runs. And 4 of the 13 searches reported no legs at all
 (`retrieval: keyword_only`, `legs: []`): Q1 `current commitments`, Q5 `ended`,
 Q6 `has anything we relied on been withdrawn` and Q6 `ended` — which is why the
 posture reads `searches: 13` while the `vector` / `fts` / `structural` legs report
-9 runs each and `valid_time` reports 5 — it ran on 5 of the 13 searches, 3 of
-which set `include_terminal: false`, so its count is not the `include_terminal`
-count. Q1's two object searches took different paths inside this one run:
+9 runs each and `valid_time` reports 5 — it ran on all five point-entity searches
+that ran a retrieval leg (3 of the five set `include_terminal: false`) and on
+none of the four object searches, so its count follows entity type, not the
+flag. Q1's two object searches took different paths inside this one run:
 `current commitments` `keyword_only` with no legs, `onboarding flow` `hybrid`
 with three.
 
