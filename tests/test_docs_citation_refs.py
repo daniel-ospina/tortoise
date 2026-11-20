@@ -3489,6 +3489,20 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     if match is None:
         return None
     option, rest = match.group(1), match.group(2)
+    # ⛔ A SHORT CLUSTER SPLITS AT ITS FIRST ARGUMENT-TAKING FLAG, AND THE TAIL IS THAT FLAG'S
+    # VALUE (#14027 round 9, P2 — MEASURED, and this was a live false PASS). grep parses a cluster
+    # left to right and the first flag that takes an argument OWNS the rest: `grep -c -Dread
+    # '^[+-]$'` is `-c` then `-D` with the value `read`, and it prints `2` on the probe, so it
+    # COUNTS the blank class. Treating the whole alphanumeric run as the name (`-cDread`) left its
+    # last character looking like a flag still awaiting a separate word, so the quoted expression
+    # was consumed as that value and the invocation came back UNREAD — a second blank-class
+    # prescription in this spelling sat invisible beside the one that was read. Without this split
+    # the reader also disagreed with its own `-A2` pin in spirit (there the tail IS the value)
+    # purely because `A` happened to be the last character.
+    if not option.startswith("--"):
+        for split_at in range(1, len(option)):
+            if option[split_at] in _ARG_TAKING_SHORT_FLAGS:
+                return option[:split_at + 1], option[split_at + 1:] + rest
     if not rest:
         return option, ""
     if not (rest.startswith("=") or rest[0] in "'\""):
@@ -3832,7 +3846,12 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: class only because that cap is at or above its size. This is FAIL-CLOSED in the direction that
 #: matters here — the executed row is bound by `_D5_BLANK_COUNT_RE`, so a capped command cannot make
 #: a wrong count look right — and the cost is a false RED on a document that legitimately prescribes
-#: a CAPPED second count. `egrep -c` is blind for the same reason (another tool spelling): measured
+#: a CAPPED second count. ⛔ AND A CROSS-FLAG CONFLICT IS GRADED TOO (#14027 round 9, P3 —
+#: MEASURED): grep refuses `-cEG`/`-cEP`/`-cGP` (`conflicting matchers specified`, rc 2) and every
+#: value in such a cluster is valid, so it sits outside the invalid-value cluster below and is
+#: declared nowhere else — the same bounded false RED (the executed row is still
+#: `_D5_BLANK_COUNT_RE`), closable by refusing an invocation that carries two of `-E`/`-G`/`-P`.
+#: `egrep -c` is blind for the same reason (another tool spelling): measured
 #: `2` on the probe, and this reader only knows `grep`.
 #:
 #: ⛔ AND A CLUSTER WHOSE ARGUMENT-TAKING MEMBER HAS AN INVALID VALUE IS GRADED, NOT DECLINED
@@ -5040,17 +5059,22 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
         "quoted tail as more flag characters would call it unreadable and leave a REAL count "
         "invisible behind it, which is the false PASS this arm exists to refuse "
         "(#14027 P3 — MEASURED)")
-    assert _d5_flag_word("-ec'^[+-]$'") == ("-ec", "'^[+-]$'"), (
-        "`-ec'^[+-]$'` IS an attached value: the QUOTED branch asks whether the cluster CONTAINS "
-        "an argument-taking flag (`any(...)`), not whether its LAST character takes one, and the "
-        "module comment used to say otherwise. No graded row can red this — `-ec`'s value has "
-        "role `other`, so nothing is graded either way — which is why the pin is on the reader "
-        "(#14027 P3 — MEASURED)")
-    assert _d5_flag_word("-ec^[+-]$") is None, (
-        "`-ec^[+-]$` is NOT a flag word: the UNQUOTED branch needs the cluster's LAST character "
-        "to take the argument (`option[-1]`), and `c` does not — the token is argv "
-        "`-e c^[+-]$`, i.e. `-e`'s pattern, so it carries no count flag. Loosening this branch to "
-        "`any(...)` would turn it into an attached value (#14027 round 7, P3 — MEASURED)")
+    # ⛔ BOTH SHAPES BELOW CHANGED WHEN THE CLUSTER STARTED SPLITTING AT ITS FIRST
+    # ARGUMENT-TAKING FLAG (#14027 round 9, P2 — MEASURED). grep parses a cluster left to right
+    # and the FIRST flag that takes an argument owns the rest, so `-ec'^[+-]$'` and `-ec^[+-]$` are
+    # both argv `-ec^[+-]$` = `-e` with the pattern `c^[+-]$` — the NAME is `-e`, not `-ec`, and
+    # the value starts at the `c`. The pins used to assert the opposite (`-ec` + `'^[+-]$'`, and
+    # `None` for the unquoted form) because the reader looked at the cluster's LAST character; that
+    # model is what let `grep -c -Dread '^[+-]$'` — which really counts the blank class — come back
+    # UNREAD, a live false PASS. Neither shape is graded either way (`-e`'s value is a pattern that
+    # is not this class), so the correction costs no row.
+    assert _d5_flag_word("-ec'^[+-]$'") == ("-e", "c'^[+-]$'"), (
+        "`-ec'^[+-]$'` is `-e` with an attached value `c'^[+-]$'`: the FIRST argument-taking "
+        "character owns the tail, as grep parses it (#14027 round 9, P2 — MEASURED)")
+    assert _d5_flag_word("-ec^[+-]$") == ("-e", "c^[+-]$"), (
+        "`-ec^[+-]$` is the same argv and the same reading — `-e`, pattern `c^[+-]$` — so it IS a "
+        "flag word with an attached value; grep runs it (rc 1, nothing matches). Pinned `None` "
+        "before the split, which is the model that hid `-cDread` (#14027 round 9, P2 — MEASURED)")
 
     # ⛔ DECLARED RESIDUAL, AND IT IS PINNED AS ONE (#14027 third review round, P3 —
     # MEASURED): this reader checks that an argument-taking SHORT flag HAS an argument, never that
