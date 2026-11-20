@@ -1712,7 +1712,7 @@ AND read — until it does. Concretely, five facts a reader can hold against the
    is simply not written, and the ROW is written either way), and so does every writer outside the
    folds that sets the same property: `sdk::_update_entity` (the caller-prop door, asked per label),
    `sdk::_event_raw_write_door`, `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`,
-   `sdk::ingest_corpus`, `session_indexer::main` and `hosted_backup::restore_graph`. One ungated
+   `sdk::_ingest_corpus`, `session_indexer::main` and `hosted_backup::restore_graph`. One ungated
    writer would re-add the vector on its next call and undo a strip, which is why
    `tools/strip_graph_entity_vectors.py`'s census — not this document — is the authority on whether
    a label may be stripped: it reads each declared writer's own source and refuses while one still
