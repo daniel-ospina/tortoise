@@ -756,6 +756,45 @@ def test_a_refused_edge_is_not_marked_as_written(tmp_path, monkeypatch, map_doc,
     capsys.readouterr()
 
 
+def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """`create_edge` declines WITHOUT raising, so its result is the only witness.
+
+    `create_edge` answers `{edge, created, nudges}` and `created` is `False` — no
+    exception, no error payload — when the writer cannot resolve an endpoint
+    (`projection/edges.py`: `if not sources or not targets: return False`).
+    Discarding the result marked the edge `written` and printed the success line
+    over a write that never happened, and the marker made every resume skip it
+    (#13913 review round 14). Reachable in production: `ids` is taken on trust
+    from a gitignored, machine-local `state.json`, so a resume against a graph
+    that was reset or re-tenanted writes zero nodes and every structural edge
+    comes back `created: false`.
+
+    Mutant: discard the result (`mcp.call(...)` with no check) — the markers
+    reappear in `written` and the rc is 0.
+    """
+    class _DecliningEdges(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                return {"structuredContent": {"edge": {"relation": "related"},
+                                              "created": False, "nudges": []}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _DecliningEdges)
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    state = json.loads(state_path.read_text())
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert structural
+    assert not [m for m in state["written"] if m in structural], (
+        "a structural edge the door DECLINED was marked as written")
+    assert any("created=False" in f for f in state["failed"]), state["failed"]
+    assert "created=False" in err, err
+
+
 def test_a_non_idempotent_write_is_not_retried(monkeypatch):
     """`retry_safe=False` stops on a 5xx instead of re-issuing.
 
@@ -777,6 +816,37 @@ def test_a_non_idempotent_write_is_not_retried(monkeypatch):
     with pytest.raises(RuntimeError, match="outcome UNKNOWN"):
         mcp.call("tortoise_create_operator", {}, retry_safe=False)
     assert len(calls) == 1, f"retried a non-idempotent write {len(calls)} times"
+
+    # ⛔ THE TWO RETRY-SHAPED ANSWERS ARE SEPARATE ARMS, and only the transport
+    # one was pinned: deleting either `not retry_safe` guard below left the suite
+    # green, while the shipped code posted the operator ONCE. Measured mutual
+    # (each guard removed, `_post` counting): the `retry_after` arm posted 6x and
+    # the tool-level "wait budget" arm 3x — 6 POSTs of `create_operator` over one
+    # endpoint pair is 6x the #10849 EP double-count, and
+    # `error.data.retry_after` is what the wait-bound refusal ALWAYS carries
+    # (`mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S`), i.e. the transport state this
+    # map actually met (#13913 review round 14).
+    for body in (
+        {"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32000,
+            "data": {"retry_after": 1, "message": "wait budget"}}},
+        {"content": [{"type": "text",
+                      "text": "wait budget exceeded — retry later"}],
+         "isError": True},
+    ):
+        retrying = filer.Mcp("not-a-real-key")
+        posts = []
+
+        def _post_retry_after(_b, _body=body, _posts=posts):
+            _posts.append(1)
+            return 200, _body, {}
+
+        monkeypatch.setattr(retrying, "_post", _post_retry_after)
+        with pytest.raises(RuntimeError, match="outcome UNKNOWN"):
+            retrying.call("tortoise_create_operator", {}, retry_safe=False)
+        assert len(posts) == 1, (
+            f"a retry-shaped answer re-issued a non-idempotent write {len(posts)} "
+            f"times: {body}")
 
 
 def test_the_event_identity_is_the_name_its_door_writes(map_doc):
@@ -2035,10 +2105,16 @@ def test_a_WIDE_or_REVERSED_operator_over_a_declared_pair_is_a_duplicate(map_doc
     src, dst = idents[declared["from"]], idents[declared["to"]]
     edge_rows, op_rows = _edge_rows(map_doc)
 
+    # ⛔ THE DECLARED PAIR IS REACHABLE ONLY THROUGH SLOT >= 2: putting the second
+    # endpoint at `idx 1` (where `create_operator(op, A, [B, C])` never places it)
+    # left `if slot != 1: continue` green — a regression that stopped pricing
+    # slots past 1 would leave a declared pair charged twice, unreported
+    # (#13913 review round 14).
     wide = [*op_rows,
             ["opWIDE", declared["op"], 0, filer.direction_of(declared), *_row_of(src)],
-            ["opWIDE", declared["op"], 1, filer.direction_of(declared), *_row_of(dst)],
-            ["opWIDE", declared["op"], 1, filer.direction_of(declared), *_row_of(idents[second["to"]])]]
+            ["opWIDE", declared["op"], 1, filer.direction_of(declared),
+             *_row_of(idents[second["to"]])],
+            ["opWIDE", declared["op"], 2, filer.direction_of(declared), *_row_of(dst)]]
     assert filer.duplicate_operators(map_doc, wide), "a wide operator priced the pair twice"
     assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, wide) == 1
 

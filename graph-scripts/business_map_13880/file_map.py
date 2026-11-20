@@ -1007,9 +1007,39 @@ def write_map(doc: dict) -> int:
                                            *failures})
                     save_state(st)
             else:
-                mcp.call("tortoise_create_edge",
-                         {"source_id": src, "target_id": dst,
-                          "predicate": e["relation"]})
+                res = mcp.call("tortoise_create_edge",
+                               {"source_id": src, "target_id": dst,
+                                "predicate": e["relation"]})
+                # ⛔ THE DOOR DECLINES WITHOUT RAISING, SO THE RESULT IS THE
+                # ONLY WITNESS. `create_edge` answers `{edge, created, nudges}`
+                # and `created` is `False` — no exception, no error payload —
+                # when the writer cannot resolve an endpoint
+                # (`projection/edges.py`: `if not sources or not targets:
+                # return False`). Discarding the result marked the edge
+                # `written` and printed the success line over a write that
+                # never happened, and the marker then made every resume skip
+                # it (#13913 review round 14). This is the same false PASS round
+                # 3 fixed one layer up (101 edges marked `written` while the
+                # structural ones were never created), still open on the door's
+                # own declined-write channel. Reachable without a synthetic
+                # transport: `ids` is taken on trust from a gitignored,
+                # machine-local `state.json`, so a resume against a graph that
+                # was reset or re-tenanted writes zero nodes and every
+                # structural edge comes back `created: false`.
+                # ⛔ THE KEY'S PRESENCE IS WHAT MAKES IT READABLE: the surface
+                # always answers `created`, so a payload that carries it and says
+                # `false` is a DECLINE and is treated as one. A payload without
+                # the key is left to `--verify` — the one residual this guard
+                # does not close, stated rather than implied (#13913 review
+                # round 14, second pass).
+                got = _json_of(res)
+                if "created" in got and got.get("created") is not True:
+                    failures.append(
+                        f"{marker}: create_edge returned created="
+                        f"{got.get('created')!r} — the edge was NOT written, so "
+                        "it is NOT marked; the endpoints it names may not exist")
+                    print(f"  !! {failures[-1]}", file=sys.stderr)
+                    continue
             mark(marker)
         except Exception as exc:  # recorded in `failures`, never swallowed
             failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
