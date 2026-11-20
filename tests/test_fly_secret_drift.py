@@ -2590,7 +2590,9 @@ def _reader_citations(
     # Non-vacuity, and it is the whole point: if that sentence is deleted or
     # reworded the ranges silently fall back to the needle-only check, which
     # passes a range re-pinned onto ANY flag-reading line — the wrong reader
-    # included. Both artifacts carry the sentence, so both must bind two ranges.
+    # included. The one artifact this runs for (the runbook; the manifest's
+    # `#13674` block and its copy went with #13926 / this change) carries the
+    # sentence, so it must bind two ranges.
     assert ordinal_bound == 2, (
         f"{artifact}: the sentence naming the range cites' readers by ordinal bound "
         f"{ordinal_bound} of them, not 2 — reworded, or the ranges moved off it? A range "
@@ -2615,9 +2617,10 @@ def _reader_citations(
     resolver_lo, resolver_hi = _resolver_definition_span()
     # Non-vacuity for the ceiling below: with NO cite resolving to the resolver the
     # `outside` check passes on an empty set, so a block that lost its resolver cite
-    # altogether would read clean. The two artifacts reach it differently — the
-    # manifest with a BARE span (unbound) and the runbook with the function named
-    # inline (bound) — so the floor is presence, not unboundedness.
+    # altogether would read clean. The runbook — the only artifact left with these
+    # cites — names the function inline (bound), while the manifest's copy carried a
+    # BARE span (unbound) until #13926/this change removed it, so the floor is
+    # presence, not unboundedness.
     resolver_cites = sorted(
         (fname, lo, hi)
         for fname, lo, hi, _sym in cites
@@ -2784,9 +2787,11 @@ def test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers():
     reads a line number out of it.
 
     The brief's own recorded defect class — "guards that cannot be reddened" —
-    is why this is a restore of an existing check to a SECOND artifact rather
-    than a new predicate: the numbers, the needle and the NAME↔NUMBER binding
-    are the same three, and the mutants that red the manifest arm red this one.
+    is why this arm is written as the same three properties (the numbers, the
+    needle and the NAME↔NUMBER binding) on the ONE artifact left: #13926 took
+    the name to route (b), this change's `fly-only:` block went with it, and the
+    manifest's copy plus `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
+    went with that block. The mutants that used to red that arm red this one.
     """
     _assert_every_citation_reads_the_flag(
         _embedder_warmup_runbook_citations(), "docs/infra-runbook.md"
@@ -3954,15 +3959,25 @@ def _runbook_quoted_red_states(section: str) -> dict[str, str]:
 
 
 def test_the_warmup_revert_guidance_names_both_red_states():
-    """Moving this name between its sources is RED in EITHER state, so the runbook must name both.
+    """The two states a move between this name's sources can be RED in, and the runbook must name both.
 
     The gate holds both halves of the `fly-toml-env` declaration: while the live
     Fly secret shadows `[env]` the declaration describes a source that loses
-    (`STALE DECLARATION`), and once the declaration is gone the secret is
-    undeclared (`UNDECLARED`). An operator who splits the move across two changes
-    is therefore red in the window between them WHICHEVER step comes first — and
-    the previous text named only the first, so the second order's failure read as
+    (`STALE DECLARATION`), and if the declaration is deleted while the secret is
+    still live the name is undeclared (`UNDECLARED`). An operator who splits a
+    revert across two changes meets the second in the window between them — and
+    the previous text named only the first, so that order's failure read as
     "the revert broke something" (#13674, measured on the issue).
+
+    ⛔ Not "red in EITHER order", which this docstring asserted until review
+    round 2 and which is FALSE on this route: with the `fly-toml-env`
+    declaration standing, UNSETTING the secret is GREEN on this name
+    (`fly.toml [env]` alone satisfies the declaration — measured, three states,
+    against the shipped manifest / `fly.toml` / workflow). That order is
+    prescribed by the manifest's route-(b) block for a BEHAVIOURAL reason (flag
+    unset ⇒ warm-up ON ⇒ ~196 s of extra boot per boot until a deploy applies
+    `[env]`, #13926), so no red here catches it and this guard must not claim
+    one does. The runbook says the same thing in the same place.
 
     The runbook's quotes are bound to the gate's ACTUAL output, end-to-end, so this
     cannot stay green while it quotes a sentence the gate no longer prints. THREE
@@ -3985,9 +4000,10 @@ def test_the_warmup_revert_guidance_names_both_red_states():
     missing = [leader for leader in _WARMUP_REVERT_REDS if leader not in quoted]
     assert not missing, (
         "the runbook's `fly-toml-env` red-state guidance names only some of the red "
-        "states the transition can meet. BOTH are red — while the shadow is set, and "
-        "after an unset that lands before the deploy applies `[env]` — so naming one "
-        f"leaves the other reading as a regression: missing {missing}"
+        "states a move between this name's sources can meet. The SECOND is the "
+        "declaration deleted while the Fly secret is still live (`UNDECLARED`) — "
+        "naming one leaves the other reading as a regression: "
+        f"missing {missing}"
     )
 
     emitted = _warmup_revert_red_states()

@@ -4443,9 +4443,12 @@ VOLATILE production fact, not a property of the tree: re-measure `flyctl secrets
 before relying on it. Until that secret is unset,
 the versioned value is not what the app reads, so the provenance gate is RED on this name by design.
 ⛔ **The ORDER is not this section's to restate** — the manifest's route-(b) block owns the four steps
-and their failure modes: `[env]` must be **on the machine before the unset**, because a value absent
-from the MERGED `fly.toml` is removed by the next deploy, and an unset-first window leaves the name
-absent for hours (#4568). Follow that block; the transition is tracked in #13923.
+and their failure modes: `[env]` must be **on the machine before the unset**, because until a deploy
+applies it the box is running the pre-`[env]` `fly.toml`, and a flag unset on that release falls back to
+the shipped default (ON) until one does — ~196 s of extra boot on every boot in the window, measured and
+recorded on #13926, **not** an outage and **not** the ~5 h absence of #4568 (which is a different flag,
+and the *shape* to avoid: a value missing from the MERGED `fly.toml`). Follow that block; the transition
+is tracked in #13923.
 
 Two red states an operator will meet while moving this name. **Both are the expected interval, not a
 regression**, and neither can be cleared by editing prose:
@@ -4455,9 +4458,14 @@ regression**, and neither can be cleared by editing prose:
 | the `fly-toml-env` declaration stands while the Fly secret is still live | `STALE DECLARATION — 'TORTOISE_EMBEDDER_WARMUP' is declared fly-toml-env but is also a Fly secret, which shadows [env] (declare the real source instead; for a sanctioned fly-toml-env transition the shadow is unset LAST, after [env] is on the machine — docs/infra-runbook.md §8.4)` |
 | the declaration is deleted while the Fly secret is still live | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
 
-The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second only
-by restoring the declaration. So do not "unset now, file the declaration change later" — the interval
-is red in either order. The quotes above are bound to the messages the gate **actually prints** by
+The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second by
+restoring the declaration (an unset also clears it, and leaves a clean `fly-toml-env` state).
+⛔ **Only the FIRST is red.** Unsetting the secret while the `fly-toml-env` declaration stands is
+**GREEN on this name** — `fly.toml [env]` alone satisfies the declaration — so an unset that lands
+BEFORE `[env]` is on the machine is **not** caught here: its cost is behavioural (flag unset ⇒ warm-up
+ON ⇒ the ~196 s cold load, #13926's recorded correction) and the order is prescribed by the manifest's
+route-(b) block, **not enforced by a red**. Do not read a green run as permission to unset first.
+The quotes above are bound to the messages the gate **actually prints** by
 `tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
 violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
 
