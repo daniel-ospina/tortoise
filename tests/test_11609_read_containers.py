@@ -28,6 +28,14 @@ WHAT THIS GATES, IN BOTH DIRECTIONS
 
 NO DATABASE: these are routing tests, and routing is what a container changes. Each
 door's own behaviour is covered by its own suite, which this change does not touch.
+
+Every substitution here names the `def` the CLASS actually holds: #12901's FINAL batch
+privatised these off-surface methods (`_name`), so a patch of the retired public spelling
+never lands, and `raising=True` turns that into a loud `AttributeError` rather than a
+second door. Two took the `__svc` suffix because the plain private spelling was already
+taken by an unrelated primitive — `audit` → `_audit__svc` (the `_audit` logger), matching
+`delete_entity` → `_delete_entity__svc`. The APPROVED container names
+(`search_knowledge`, `list_knowledge`, …) are public and are not re-keyed.
 """
 from __future__ import annotations
 
@@ -67,17 +75,17 @@ def _bare_sdk(monkeypatch, doors, reached):
 # ── row 6 — graph_overview, section= ──────────────────────────────────
 GRAPH_OVERVIEW_DOORS = {
     "taxonomy": "_taxonomy",
-    "structure": "summarize_structure",
-    "structure_check": "check_structure",
+    "structure": "_summarize_structure",
+    "structure_check": "_check_structure",
     "pointkinds": "_list_pointkinds",
     "tags": "_list_tags",
     "sources": "_list_sources",
     "namespaces": "_list_namespaces",
     "status": "_status",
-    "stale": "stale_points",
+    "stale": "_stale_points",
     "validate_domain": "_validate_domain",
-    "audit": "audit",
-    "dream_health": "dream_health_check",
+    "audit": "_audit__svc",
+    "dream_health": "_dream_health_check",
     "topics": "_list_topics",
 }
 
@@ -215,11 +223,11 @@ class TestOverviewSectionSets:
 
 # ── row 3 — search_knowledge, mode= ───────────────────────────────────
 SEARCH_KNOWLEDGE_DOORS = {
-    "hybrid": "tortoise_fts_query",
-    "tag": "query_points_by_tag",
+    "hybrid": "_tortoise_fts_query",
+    "tag": "_query_points_by_tag",
     "sessions": "_search_sessions",
     "entry_points": "_suggest_entry_points",
-    "issue_insight": "issue_insight",
+    "issue_insight": "_issue_insight",
 }
 
 
@@ -241,7 +249,7 @@ class TestSearchKnowledge:
         monkeypatch.setattr(
             TortoiseSDK, "_query_points_by_tag",
             lambda self, tag, _record_reads=True: reached.append(
-                ("query_points_by_tag", (), {}))
+                ("_query_points_by_tag", (), {}))
             or [{"id": "point-1"}])
         kwargs = {"query": "q", "tag": "t", "title": "a title"}
         sdk.search_knowledge(mode=mode, **kwargs)
@@ -269,7 +277,7 @@ class TestSearchKnowledge:
         reached: list = []
         sdk = _bare_sdk(monkeypatch, set(SEARCH_KNOWLEDGE_DOORS.values()), reached)
         sdk.search_knowledge(query="q")
-        assert reached[0][0] == "tortoise_fts_query"
+        assert reached[0][0] == "_tortoise_fts_query"
 
     def test_an_unknown_mode_refuses_and_names_the_valid_set(self, monkeypatch):
         sdk = _bare_sdk(monkeypatch, set(SEARCH_KNOWLEDGE_DOORS.values()), [])
@@ -380,9 +388,9 @@ class TestSearchKnowledgeTagArm:
 
 # ── row 4 — list_knowledge, kind= ─────────────────────────────────────
 LIST_KNOWLEDGE_DOORS = {
-    "claim": "paginated_query",
+    "claim": "_paginated_query",
     "source": "_list_sources",
-    "source_reliability": "get_source_reliability",
+    "source_reliability": "_get_source_reliability",
     "namespace": "_list_namespaces",
     "topic": "_list_topics",
     "diary": "_diary_read",
@@ -403,18 +411,18 @@ class TestListKnowledge:
         assert [r[0] for r in reached] == [door]
 
     @pytest.mark.parametrize("kwargs,door", [
-        ({"id": "batch-1"}, "list_batch"),
-        ({}, "list_batches"),
+        ({"id": "batch-1"}, "_list_batch"),
+        ({}, "_list_batches"),
     ])
     def test_batch_dispatches_on_the_id(self, kwargs, door, monkeypatch):
         reached: list = []
-        sdk = _bare_sdk(monkeypatch, {"list_batch", "list_batches"}, reached)
+        sdk = _bare_sdk(monkeypatch, {"_list_batch", "_list_batches"}, reached)
         sdk.list_knowledge("batch", **kwargs)
         assert [r[0] for r in reached] == [door]
 
     def test_claim_forwards_paging_to_the_exact_read(self, monkeypatch):
         reached: list = []
-        sdk = _bare_sdk(monkeypatch, {"paginated_query"}, reached)
+        sdk = _bare_sdk(monkeypatch, {"_paginated_query"}, reached)
         sdk.list_knowledge("claim", point_kind="statement", offset=20, limit=10)
         _label, args, kwargs = reached[0]
         assert kwargs["kind"] == "statement"
@@ -446,18 +454,18 @@ class TestListKnowledge:
 # ── row 5 — check_confidence, dispatch by argument ────────────────────
 class TestCheckConfidence:
     @pytest.mark.parametrize("kwargs,door", [
-        ({"claim_id": "point-1"}, "get_confidence"),
-        ({"topic": "pricing"}, "belief_timeline"),
-        ({"session": True}, "session_context"),
-        ({"calibrate": True}, "calibrate_summary"),
-        ({}, "calibrate_summary"),
+        ({"claim_id": "point-1"}, "_get_confidence"),
+        ({"topic": "pricing"}, "_belief_timeline"),
+        ({"session": True}, "_session_context"),
+        ({"calibrate": True}, "_calibrate_summary"),
+        ({}, "_calibrate_summary"),
     ])
     def test_selector_reaches_its_door(self, kwargs, door, monkeypatch):
         reached: list = []
         sdk = _bare_sdk(
             monkeypatch,
-            {"get_confidence", "belief_timeline", "session_context",
-             "calibrate_summary", "_provenance", "compute_confidence"},
+            {"_get_confidence", "_belief_timeline", "_session_context",
+             "_calibrate_summary", "_provenance", "_compute_confidence"},
             reached)
         sdk.check_confidence(**kwargs)
         assert [r[0] for r in reached] == [door]
@@ -467,23 +475,23 @@ class TestCheckConfidence:
         reached: list = []
         sdk = _bare_sdk(
             monkeypatch,
-            {"get_confidence", "belief_timeline", "session_context",
-             "calibrate_summary", "compute_confidence"},
+            {"_get_confidence", "_belief_timeline", "_session_context",
+             "_calibrate_summary", "_compute_confidence"},
             reached)
         sdk.check_confidence(claim_id="point-1")
         sdk.check_confidence(topic="t")
         sdk.check_confidence(session=True)
         sdk.check_confidence()
-        assert "compute_confidence" not in [r[0] for r in reached]
+        assert "_compute_confidence" not in [r[0] for r in reached]
 
     def test_provenance_rides_the_claim_arm_only_when_asked(self, monkeypatch):
         reached: list = []
         sdk = _bare_sdk(monkeypatch,
-                        {"get_confidence", "_provenance"}, reached)
+                        {"_get_confidence", "_provenance"}, reached)
         sdk.check_confidence(claim_id="point-1")
-        assert [r[0] for r in reached] == ["get_confidence"]
+        assert [r[0] for r in reached] == ["_get_confidence"]
         out = sdk.check_confidence(claim_id="point-1", include_provenance=True)
-        assert [r[0] for r in reached] == ["get_confidence", "get_confidence",
+        assert [r[0] for r in reached] == ["_get_confidence", "_get_confidence",
                                            "_provenance"]
         assert set(out) == {"confidence", "provenance"}
 
@@ -534,9 +542,9 @@ class TestExploreConnections:
 
 # ── row 10 — review_link_candidates, dispatch by argument ─────────────
 REVIEW_LINK_DOORS = {
-    "connections": "review_connections",
+    "connections": "_review_connections",
     "dedup": "_list_dedup_candidates",
-    "cross_lens": "get_cross_lens_candidates",
+    "cross_lens": "_get_cross_lens_candidates",
 }
 
 
@@ -589,10 +597,10 @@ WRAP_ENVELOPE_DOORS = (
     # tool name, the SDK door its handler reaches
     ("tortoise_search_sessions", "search_knowledge"),
     ("tortoise_suggest_entry_points", "search_knowledge"),
-    # `list_batches` is the one member whose SDK method did NOT retire (it is the
-    # still-public exact read that `list_knowledge(kind='batch')` delegates to), so
-    # this door reaches the method itself rather than the container.
-    ("tortoise_list_batches", "list_batches"),
+    # `list_batches` is the one member whose SDK method is the EXACT read
+    # `list_knowledge(kind='batch')` delegates to, so this door reaches the method
+    # itself rather than the container — privatised to `_list_batches` by #12901 FINAL.
+    ("tortoise_list_batches", "_list_batches"),
     ("tortoise_list_namespaces", "graph_overview"),
     ("tortoise_diary_read", "list_knowledge"),
     ("tortoise_expand_relationships", "explore_connections"),
