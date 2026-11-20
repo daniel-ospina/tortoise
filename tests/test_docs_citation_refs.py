@@ -3831,7 +3831,10 @@ def _d5_class_members(char_class: str) -> set[str] | None:
     """The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
 
     A negated class, a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members) and
-    an incomplete escape are all answered `None` rather than interpreted.
+    an incomplete escape are all answered `None` rather than interpreted. ⛔ A BACKSLASH IS NOT AN
+    ESCAPE IN A POSIX BRACKET EXPRESSION (#13995 review round 12, P2 — MEASURED): `[\-+]` is the
+    descending range `\`–`+` (`grep: Invalid range end`, rc 2), which this helper used to read as
+    the members `{-, +}` because it consumed `\-` as an escaped hyphen.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
@@ -3844,6 +3847,15 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             escaped = False
             continue
         if char == "\\":
+            # ⛔ POSIX BRACKET EXPRESSIONS HAVE NO BACKSLASH ESCAPES, AND GNU grep ERRORS HERE
+            # (#13995 review round 12, P2 — MEASURED). `[\-+]` reads as the DESCENDING RANGE
+            # `\`–`+` — `grep -cE '^[\-+]$'` → `grep: Invalid range end`, rc 2, in BRE and ERE —
+            # so consuming `\-` as an escaped member (which this helper did) graded a command that
+            # cannot run as a BLANK-class prescription. An escaped `-` BETWEEN two members is the
+            # range case; one at either end is the literal `[+\-]`/`[-+]` spelling, kept because
+            # GNU grep accepts it (it also carries a literal `\` member — a declared superset).
+            if index + 2 < len(content) and content[index + 1] == "-":
+                return None  # a `-` between members is a RANGE, escaped or not
             escaped = True
             continue
         if char == "-" and 0 < index < len(content) - 1:
@@ -3863,11 +3875,16 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
-    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, and the alternation form
-    `^(\+|-)$` (a PLAIN group — each counts `2` on the 4-line probe). Two spellings are NOT among
-    them, both measured: `^[\-+]$` (GNU grep: `Invalid range end`, rc 2) and `^(?:\+|-)$` (POSIX
-    ERE has no non-capturing group: `warning: ? at start of expression`, counts `1`). What it does
-    NOT decide is stated at
+    Accepted here, each measured: `^[+-]$`, `^[-+]$`, `^[+\-]$`, and the alternation form
+    `^(\+|-)$` (a PLAIN group — each counts `2` on the `x`/`+`/`-`/empty probe). ⛔ `^[+\-]$` IS A
+    DECLARED SUPERSET, not an equivalence: with no backslash escapes inside a POSIX bracket it also
+    carries a literal `\` member and counts `3` on a probe that has a `\` line — accepted because
+    it is the spelling a document plausibly writes, and the cost is one impossible diff line, stated
+    rather than implied. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
+    `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
+    counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
+    does NOT decide is stated at
     the assertion that uses it: a regex equivalent to this class but spelled differently
     (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised — a declared residual, not a
     claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
@@ -4367,7 +4384,7 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # instrument from the one the sentence names. The third row is the alternation spelling of the
     # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
     # special case for the literal form.
-    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$"):
+    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: each names ONE line shape "
             "(`^-$` counts only the removed half, measured 0 on a diff whose only blank line is "
