@@ -68,6 +68,12 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
       `live_surface(root)` already refuses when `import tortoise` is not inside `root`;
     · `archive/INDEX.md` is a regenerated view of `MANIFEST.json` — a stale index is a
       violation;
+    · THE SHRINK DIRECTION, when a base ref is given (`check --base-ref`, #12402/#12291): a
+      MODULE that left `tortoise/` since the merge base must carry a `module` entry, and an
+      entry that left — or was rewritten in — `archive/MANIFEST.json` must be restored or
+      waived with a stated reason. This is the half every other arm here is blind to, because
+      they all iterate the entries the manifest FINDS; it needs the base ref because the
+      reference has to be outside the diff (see the block comment above `CLAIM_FIELDS`);
     · NO product module imports the archive, which is the archive's promise turned around
       (removed BEHAVIOUR must not re-enter the product): a static `import archive…` /
       `from archive… import` and a dynamic `import_module("archive…")` / `__import__("archive…")`
@@ -84,6 +90,7 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
 
 Usage
     uv run python tools/archive_surface.py check
+    uv run python tools/archive_surface.py check --base-ref          # + the shrink arms
     uv run python tools/archive_surface.py index              # regenerate INDEX.md
     uv run python tools/archive_surface.py index --check      # assert it is current
     uv run python tools/archive_surface.py archive mcp-tool <tool> --batch <slug> --reason <text>
@@ -898,13 +905,311 @@ def index_violations(entries: list[dict], root: Path | None = None) -> list[str]
     return []
 
 
-def check(root: Path | None = None, *, require_entries: bool = False) -> list[str]:
+# ── the SHRINK direction: the removals nothing else can see (#12402, #12291) ────
+#
+# Every arm above iterates the MANIFEST's own entries, so it answers one direction: an
+# archived symbol that came BACK is red. That leaves the other direction ungraded, and it is
+# the one that loses code:
+#
+#   #12402  a WHOLE MODULE deleted from `tortoise/` with no `module` entry. `module` is a
+#           first-class kind (`KINDS`) and the one committed archive entry IS a module, but
+#           the surface baseline carries no module rows, so `surface_manifest.cut`'s removal
+#           gate compares nothing for it and `removal_report` refuses the class by name
+#           rather than crash (`ARCHIVE_KIND_BY_CLASS`). A module is the largest removable
+#           unit and it was the one unit no gate could see.
+#   #12291  an entry DROPPED from `archive/MANIFEST.json` (or rewritten in place). `check`
+#           grades the entries PRESENT; an entry that is gone is not a row it can compare,
+#           so deleting the index row turned removed code into code that exists nowhere —
+#           green archive gate, green surface gate, green cut.
+#
+# WHY THE BASE REF AND NOT A SAME-TREE CHECK. Both artifacts are authored by the PR under
+# test, so a check over them can only ask "is this consistent with itself" — and a splicer
+# edits both sides consistently. The reference has to be outside the diff: the merge base.
+# This is the same property supply-chain transparency logs get from being append-only
+# (Sigstore's Rekor: "an immutable, tamper-resistant ledger of metadata generated within a
+# software project's supply chain", https://docs.sigstore.dev/logging/overview/), and the
+# same reason TUF makes a version counter MONOTONIC: a client that accepts a lower version
+# than the one it already trusts has been rolled back, so the update is aborted and the
+# rollback attack reported (TUF 1.0 §5.3, and §1.5.2's "Rollback attacks. An attacker
+# cannot trick clients into installing software that is older than that which the client
+# previously knew to be available"). Git history is this repo's append-only log; the merge
+# base is the last version this tree is allowed to disagree with, and a removal that lives
+# only in the new version must carry its own record (an archive row, or a stated waiver).
+#
+# ⛔ WHY MERGE-BASE AND NOT THE BASE TIP: on `refs/pull/N/merge` the merge base IS the base
+# tip, while on a feature branch it is the fork point — and using the base TIP on a stale
+# branch attributes MAIN's own removals to the PR (the #7628 class measured in MEMORY.md's
+# `[ci-diff-base]` note: every commit the base branch gained after the fork was attributed to
+# the PR). Merge-base is the one ref that means "what THIS change removed" in both shapes.
+
+#: The fields that carry a row's CLAIM: which code, from where, at which commit, with which
+#: bytes. `batch`/`reason` are deliberately NOT here — a prose correction is not a rewrite of
+#: the record's evidence, and gating it would refuse an honest typo fix for no gain.
+CLAIM_FIELDS = ("kind", "symbol", "file", "archived_from", "archived_at", "sources", "blocks")
+
+#: What to do about a module that left the tree — printed INSIDE the violation, because a gate
+#: whose remedy is elsewhere is a gate whose remedy is not read.
+MODULE_ROUTE = (
+    "REMEDY (archive/README.md, 'Archive a whole module'): restore it from the base FIRST "
+    "(`git checkout <base-sha> -- <path>`) — the writer freezes the source it reads from the "
+    "WORKING TREE and refuses without it, so archiving AFTER the deletion cannot work — then "
+    "`uv run python tools/archive_surface.py archive module <dotted.path> --batch <slug> "
+    "--reason <text>`, then delete it again in the same batch. A file that was RENAMED or "
+    "MOVED is the same case: the old path is the symbol that left the product, so archive the "
+    "old path and treat the new one as new code. If the removal is already recorded somewhere "
+    "this gate cannot read, state it on the command line "
+    "(`--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>`) and "
+    "say why in the PR body."
+)
+
+
+def module_name(path: str) -> str:
+    """`tortoise/a/b.pyi` → `tortoise.a.b` — the dotted name an archive row records.
+
+    `__init__` collapses onto its package (`tortoise/a/__init__.py` → `tortoise.a`), which is
+    what `archive module tortoise.a` names and what `tortoise.archived.search_legacy` shows in
+    the committed entry.
+    """
+    for suffix in (".pyi", ".py"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    parts = path.split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _dotted_modules(paths) -> set[str]:
+    """The dotted names a set of package paths carries, INCLUDING package ancestors.
+
+    A directory that holds only submodules is still an importable (namespace) package, so
+    deleting its `__init__.py` while `pkg/sub.py` survives removes nothing a caller could
+    import. Adding every ancestor name on BOTH sides is what makes that case cancel out
+    instead of reding a `__init__` cleanup as a module removal.
+    """
+    out: set[str] = set()
+    for path in paths:
+        parts = module_name(path).split(".")
+        for depth in range(1, len(parts) + 1):
+            out.add(".".join(parts[:depth]))
+    return out
+
+
+def _package_paths_at(root: Path, sha: str) -> list[str]:
+    """The package's module files AS THE GIVEN COMMIT HOLDS THEM (repo-relative)."""
+    code, out = _git(root, "ls-tree", "-r", "--name-only", sha, "--", "tortoise")
+    if code != 0:
+        raise ArchiveRefused(
+            f"could not list tortoise/ at {sha[:12]} (`git ls-tree` exited {code}) — the shrink "
+            "check cannot tell what the tree held before this change, and it must not answer "
+            "'nothing was removed' from an unreadable base"
+        )
+    return [
+        line for line in out.splitlines()
+        if line.strip() and line.endswith((".py", ".pyi"))
+    ]
+
+
+def resolve_base(root: Path | None = None, ref: str | None = None) -> tuple[str, str]:
+    """`(sha, label)` of the commit this tree is graded AGAINST, or a refusal.
+
+    `ref` empty/None means "the default branch, as this clone names it". The answer is the
+    MERGE BASE of HEAD and that ref (see the block comment above for why not the tip).
+    """
+    root = Path(root or ROOT)
+    base = (ref or "").strip() or default_branch_ref(root)
+    if not base:
+        raise ArchiveRefused(
+            "the shrink check needs a base ref and this clone names none (no "
+            "refs/remotes/origin/HEAD, origin/main, main, origin/master or master). Pass "
+            "`--base-ref <ref>`; a gate that cannot say what it compared cannot verify a "
+            "removal, and must not report one as absent"
+        )
+    code, out = _git(root, "merge-base", "HEAD", base)
+    if code != 0 or not out.strip():
+        raise ArchiveRefused(
+            f"could not resolve the merge base of HEAD and {base} (`git merge-base` exited "
+            f"{code}) — a shallow or unrelated-history clone cannot answer, and answering "
+            "'no removals' from a base it cannot read is the false green this arm exists to "
+            "prevent. Fetch full history (`git fetch --unshallow`, or a `--depth=0` checkout) "
+            "or pass `--base-ref <ref>`"
+        )
+    return out.strip(), f"{base} (merge base {out.strip()[:12]})"
+
+
+def _entries_at(root: Path, sha: str) -> list[dict]:
+    """The archive entries AS THE GIVEN COMMIT RECORDS THEM (empty when it has no archive)."""
+    present, _ = _git(root, "cat-file", "-e", f"{sha}:archive/MANIFEST.json")
+    if present != 0:
+        # ABSENT is an honest answer here (the commit predates the archive), and it is a
+        # different fact from "unreadable" — which is why the question is asked of the tree
+        # rather than inferred from `_git_blob` returning None for both.
+        return []
+    blob = _git_blob(root, sha, "archive/MANIFEST.json")
+    if blob is None:
+        raise ArchiveRefused(
+            f"could not read archive/MANIFEST.json at {sha[:12]} even though that commit holds "
+            "it — the archive record at the base cannot be graded from here"
+        )
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError as exc:
+        raise ArchiveRefused(
+            f"archive/MANIFEST.json at {sha[:12]} is not JSON ({exc}) — a base record this gate "
+            "cannot read must not read as 'no entries were dropped'"
+        ) from exc
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise ArchiveRefused(
+            f"archive/MANIFEST.json at {sha[:12]} carries no `entries` list — the base record "
+            "is unreadable, so a drop cannot be ruled out"
+        )
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _entry_key(entry: dict) -> tuple[str, str]:
+    return str(entry.get("kind")), str(entry.get("symbol"))
+
+
+def _entry_claim(entry: dict) -> str:
+    """A canonical digest of the fields that carry this row's CLAIM (see `CLAIM_FIELDS`)."""
+    return json.dumps(
+        {field: entry.get(field) for field in CLAIM_FIELDS}, sort_keys=True, default=str
+    )
+
+
+def parse_shrink_waiver(text: str) -> tuple[str, str]:
+    """`kind:symbol` → `(kind, symbol)`, or a refusal. A waiver must name what it waives."""
+    kind, sep, symbol = str(text).partition(":")
+    if not sep or not symbol.strip() or kind not in KINDS:
+        raise ArchiveRefused(
+            f"--allow-archive-shrink {text!r} is not `<kind>:<symbol>` with a kind from "
+            f"{KINDS} — e.g. `module:tortoise.legacy_thing` or `mcp-tool:tortoise_old_tool`. "
+            "A waiver that does not name the record it waives cannot be audited"
+        )
+    return kind, symbol.strip()
+
+
+def shrink_violations(
+    root: Path | None = None,
+    *,
+    base_ref: str | None = None,
+    allowed: tuple[str, ...] | list[str] = (),
+) -> list[str]:
+    """Every removal this tree made that left NO trace, graded against the base ref.
+
+    TWO arms, because the two artifacts fail differently (#12402, #12291):
+      · a MODULE that left `tortoise/` must carry a `module` archive entry — nothing else in
+        the repo can see a whole-module deletion;
+      · an archive entry that left (or was rewritten in) `archive/MANIFEST.json` must be
+        restored, or waived with a stated reason, because that manifest is the only index of
+        what was removed.
+
+    `allowed` is the deliberate-departure escape hatch, applied to a NAMED record only — there
+    is no blanket flag, for the same reason `cut --allow-removal` has none: a blanket flag is
+    how a gate becomes decoration. A waiver that matches no violation is itself reported, so a
+    stale waiver cannot sit in a PR body looking like a record of something.
+    """
+    root = Path(root or ROOT)
+    sha, base_label = resolve_base(root, base_ref)
+    entries = load_manifest(root / "archive" / "MANIFEST.json")["entries"]
+    working = {_entry_key(entry): entry for entry in entries}
+    base_entries = {_entry_key(entry): entry for entry in _entries_at(root, sha)}
+    waivers: dict[tuple[str, str], str] = {parse_shrink_waiver(t): t for t in allowed}
+    used: set[tuple[str, str]] = set()
+    out: list[str] = []
+
+    # ── arm 1: a MODULE that disappeared from the package tree (#12402) ──────────
+    head_paths = _package_modules(root)
+    base_paths = _package_paths_at(root, sha)
+    gone_modules = _dotted_modules(base_paths) - _dotted_modules(head_paths)
+    for module in sorted(gone_modules):
+        key = (MODULE, module)
+        if key in working:
+            continue  # an entry of the right kind names it: the removal has its record
+        if key in waivers:
+            used.add(key)
+            continue
+        candidates = sorted(path for path in base_paths if module_name(path) == module)
+        where = candidates[0] if candidates else f"{module.replace('.', '/')}.py"
+        out.append(
+            f"{module}: MODULE REMOVED — {base_label} carries it and this tree does not, and "
+            "`archive/MANIFEST.json` has no `module` entry for it. A module is the largest "
+            "removable unit and the surface baseline carries no `module` rows, so neither "
+            "`surface_manifest.cut` nor the rest of this check can see the deletion (#12402). "
+            f"{MODULE_ROUTE} (the file was {where})"
+        )
+
+    # ── arm 2: an entry that left, or was rewritten in, MANIFEST.json (#12291) ───
+    for key, base_entry in sorted(base_entries.items()):
+        kind, symbol = key
+        if key not in working:
+            if key in waivers:
+                used.add(key)
+                continue
+            out.append(
+                f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
+                "it and this tree does not, so the only index of what was removed from the "
+                "product no longer names it. The frozen file under archive/ may still be on "
+                "disk; without its row it is code nothing indexes, and every other arm here "
+                "iterates the rows it FINDS, so the drop is invisible to them (#12291). "
+                "REMEDY: restore the entry, or — if the code was RESTORED to the product — "
+                "delete its frozen file in the same commit and state the restore: "
+                f"`--allow-archive-shrink {kind}:{symbol} --allow-archive-shrink-reason <why>`, "
+                "naming the restore in the PR body."
+            )
+        elif _entry_claim(working[key]) != _entry_claim(base_entry):
+            if key in waivers:
+                used.add(key)
+                continue
+            changed = [
+                field for field in CLAIM_FIELDS
+                if json.dumps(base_entry.get(field), sort_keys=True, default=str)
+                != json.dumps(working[key].get(field), sort_keys=True, default=str)
+            ]
+            out.append(
+                f"{symbol} ({kind}): REWRITTEN in archive/MANIFEST.json — {base_label} records "
+                f"a different {', '.join(changed)} for it. A recorded entry is the evidence "
+                "that the removed code is what it says it is; editing it in place leaves the "
+                "same faithless record as deleting it, with the frozen file still on disk to "
+                "make the drop look complete (#12291). REMEDY: restore the recorded "
+                f"field(s), or state the correction: `--allow-archive-shrink {kind}:{symbol} "
+                "--allow-archive-shrink-reason <why>`."
+            )
+
+    # A waiver is a RECORD. One that waived nothing is a false record, and it is the kind of
+    # false record that makes a later reader believe a departure was checked (#12237's rule).
+    for key in sorted(set(waivers) - used):
+        kind, symbol = key
+        out.append(
+            f"--allow-archive-shrink {waivers[key]!r} waives nothing: {base_label} does not "
+            f"record `{symbol}` ({kind}) at all, so there is no removal to waive. Drop the "
+            "flag (an override that replaces a real record is the state this arm exists to "
+            "make visible)"
+        )
+    return out
+
+
+def check(
+    root: Path | None = None,
+    *,
+    require_entries: bool = False,
+    base_ref: str | None = None,
+    allowed_shrink: tuple[str, ...] | list[str] = (),
+) -> list[str]:
     """Every violation, or an empty list when the archive is consistent.
 
     `require_entries` is OFF by default because the documented restore path ends with a LEGAL
     empty archive: restoring the last entry deletes its row and file, and `check` must then be
     clean (`archive/README.md` step 4). The `surface-guard` job passes the flag, where an empty
     archive means the archived code was deleted rather than restored.
+
+    `base_ref` is OFF by default and turns on the SHRINK arms (`shrink_violations`), which need
+    a ref to compare against: every other arm here iterates the entries the manifest FINDS, so
+    none of them can see an entry that is gone or a module that was deleted. `None` = the arm
+    does not run; a string (possibly empty → the default branch) = it runs, and an unresolvable
+    ref is a REFUSAL rather than a silent pass.
     """
     root = Path(root or ROOT)
     manifest = load_manifest(root / "archive" / "MANIFEST.json")
@@ -924,6 +1229,8 @@ def check(root: Path | None = None, *, require_entries: bool = False) -> list[st
     problems += surface_violations(entries, live_surface(root))
     problems += package_violations(root)
     problems += index_violations(entries, root)
+    if base_ref is not None:
+        problems += shrink_violations(root, base_ref=base_ref, allowed=allowed_shrink)
     return problems
 
 
@@ -1465,6 +1772,37 @@ def main(argv: list[str] | None = None) -> int:
             "documented restore of the last entry can finish)"
         ),
     )
+    check_parser.add_argument(
+        "--base-ref",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REF",
+        help=(
+            "ALSO grade the SHRINK direction (#12402, #12291) against REF (default: the "
+            "default branch), compared at its MERGE BASE with HEAD: a module that left "
+            "tortoise/ must carry a `module` entry, and an entry that left or was rewritten "
+            "in archive/MANIFEST.json must be restored or waived. Off unless given; an "
+            "unresolvable ref is a REFUSAL, never a pass"
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-archive-shrink",
+        action="append",
+        default=[],
+        metavar="KIND:SYMBOL",
+        help=(
+            "waive ONE deliberate removal (repeatable): `module:<dotted.path>`, "
+            "`mcp-tool:<tool>` or `sdk-method:<method>`. Needs --base-ref and "
+            "--allow-archive-shrink-reason, and a waiver that waives nothing is reported"
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-archive-shrink-reason",
+        default=None,
+        metavar="TEXT",
+        help="WHY the waived removal is legitimate — it belongs in the PR body, not only here",
+    )
 
     index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
     index_parser.add_argument("--check", action="store_true", help="assert it is current")
@@ -1479,7 +1817,30 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "check":
-            problems = check(require_entries=args.require_entries)
+            # An override is a RECORD: it needs the arm it waives, and a WHY. Both refusals are
+            # exit 2 (a defect in the invocation), never exit 1 — an unwaivable invocation is
+            # not a finding about the tree, and reading it as one would send the operator
+            # looking for a removal that does not exist.
+            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason):
+                print(
+                    "REFUSED --allow-archive-shrink and --allow-archive-shrink-reason go "
+                    "together: an override with no stated reason is not a record, and a "
+                    "reason with nothing waived waives nothing",
+                    file=sys.stderr,
+                )
+                return 2
+            if args.allow_archive_shrink and args.base_ref is None:
+                print(
+                    "REFUSED --allow-archive-shrink needs --base-ref: it waives a removal "
+                    "only the shrink arm can see, and that arm is off without a base ref",
+                    file=sys.stderr,
+                )
+                return 2
+            problems = check(
+                require_entries=args.require_entries,
+                base_ref=args.base_ref,
+                allowed_shrink=args.allow_archive_shrink,
+            )
             if args.anchors:
                 problems += anchor_unverified()
             if problems:
@@ -1493,7 +1854,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"{sum(1 for e in entries if e['kind'] == kind)} {INDEX_LABEL[kind][2]}"
                 for kind in KINDS
             )
-            print(f"OK — archive consistent: {len(entries)} entries ({counts}).")
+            shrink = ""
+            if args.base_ref is not None:
+                # Say WHAT was compared, in the green line: a shrink pass that does not name
+                # its base reads identically to a run where the arm silently did nothing.
+                _sha, label = resolve_base(ROOT, args.base_ref)
+                shrink = f" Shrink checked against {label}"
+                if args.allow_archive_shrink:
+                    shrink += f" (waived: {', '.join(args.allow_archive_shrink)})"
+            print(f"OK — archive consistent: {len(entries)} entries ({counts}).{shrink}")
             return 0
         if args.cmd == "verify-anchors":
             # The strict verb, and the only one that turns "this clone cannot answer" into a

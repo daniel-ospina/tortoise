@@ -1304,3 +1304,227 @@ class TestRestoreDependenciesResolve:
         monkeypatch.delattr(mcp_mod, "ERR_UNAUTHORIZED", raising=True)
         with pytest.raises(AssertionError, match="NameError on the first call"):
             self.test_every_free_name_in_a_frozen_handler_resolves_in_its_module()
+
+
+# ── 10. the SHRINK direction (#12402 + #12291) ────────────────────────────────
+#
+# Every arm above iterates the entries the manifest FINDS. These two questions are the ones
+# that shape cannot ask, and each is proven BOTH ways here: the guard must red on the
+# violation (performed, in a scratch repo, not simulated) and stay green on the legitimate
+# case. A guard nobody has seen fire is the defect #12402/#12291 were filed about.
+
+def _commit_drop(root: Path, path: str) -> None:
+    """Delete a tracked path and commit — the violation, performed for real."""
+    subprocess.run(["git", "rm", "-q", path], cwd=root, check=True)
+    _commit(root, ".")
+
+
+def _archive_module(tree: Path, module: str) -> dict:
+    """Write a `module` entry into the fixture's manifest (what `archive` would record)."""
+    entry = _entry(arch.MODULE, module, batch="b-shrink", file=f"archive/modules/b-shrink/{module}.py")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    return entry
+
+
+def test_a_module_removal_with_no_archive_entry_is_reported(tree: Path) -> None:
+    """#12402: a whole module leaves `tortoise/` and every other gate is blind to it."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p and "MODULE REMOVED" in p for p in problems), problems
+    joined = " ".join(problems)
+    assert "archive module" in joined and "WORKING TREE" in joined, (
+        "the violation must print the runnable route, including the order trap (the writer "
+        f"reads the WORKING TREE, so archiving after the deletion refuses): {problems}"
+    )
+
+
+def test_a_module_removal_with_an_archive_entry_is_green(tree: Path) -> None:
+    """The legitimate case: the module was frozen, so the deletion has its record."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    _archive_module(tree, "tortoise.gone")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_renamed_module_is_a_removal_of_the_old_path(tree: Path) -> None:
+    """#12402's acceptance names renaming: the old DOTTED PATH stops existing either way."""
+    (tree / "tortoise" / "old_name.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/old_name.py")
+    subprocess.run(["git", "mv", "tortoise/old_name.py", "tortoise/new_name.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.old_name" in p for p in problems), problems
+    assert not any("tortoise.new_name" in p for p in problems), (
+        f"the NEW path is new code, not a removal: {problems}"
+    )
+
+
+def test_deleting_an_init_py_whose_package_still_imports_is_not_a_removal(tree: Path) -> None:
+    """A directory that still holds submodules is an importable namespace package."""
+    (tree / "tortoise" / "pkg").mkdir()
+    (tree / "tortoise" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tree / "tortoise" / "pkg" / "sub.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/pkg")
+    _commit_drop(tree, "tortoise/pkg/__init__.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "`tortoise.pkg` still imports through `pkg/sub.py`, so nothing a caller could import "
+        "was removed — reding this is the false block that makes an operator disable the gate"
+    )
+
+
+def test_an_archive_entry_dropped_from_the_manifest_is_reported(tree: Path) -> None:
+    """#12291: the index of what was removed loses a row, and every gate stays green."""
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p and "REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        problems
+    )
+
+
+def test_dropping_the_row_and_its_file_is_STILL_reported(tree: Path) -> None:
+    """The tidy deletion — row AND frozen file — is an unexplained drop, not a restore."""
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p for p in problems), (
+        "an entry whose file is gone is already a `manifest_violations` finding in the OTHER "
+        f"direction; dropping BOTH is still a record that vanished: {problems}"
+    )
+
+
+def test_a_rewritten_manifest_entry_is_reported(tree: Path) -> None:
+    """A recorded entry edited in place leaves the same faithless record as a deleted one."""
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    rewired = dict(entry, archived_at="b" * 40)
+    arch.save_manifest({"entries": [rewired]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "archived_at" in p for p in problems), problems
+
+
+def test_a_tombstone_field_added_to_an_entry_is_not_a_rewrite(tree: Path) -> None:
+    """Appending to the record is what an append-only ledger DOES; editing it is not."""
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest(
+        {"entries": [dict(entry, restored_in="PR #1")]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_recorded_archive_shrink_is_green(tree: Path) -> None:
+    """The documented restore path: the row leaves, and the reason is on the record."""
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    ) == []
+
+
+def test_a_waiver_that_waives_nothing_is_reported(tree: Path) -> None:
+    """A false record is worse than no record: it reads as a departure that was checked."""
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.never_existed"]
+    )
+    assert any("waives nothing" in p for p in problems), problems
+
+
+def test_a_waiver_must_name_a_real_kind_and_symbol(tree: Path) -> None:
+    with pytest.raises(arch.ArchiveRefused, match="not `<kind>:<symbol>`"):
+        arch.shrink_violations(tree, base_ref="HEAD", allowed=["tortoise.gone"])
+
+
+def test_an_unchanged_tree_is_green(tree: Path) -> None:
+    """Non-vacuity: the arm must not red an ordinary merge."""
+    assert arch.shrink_violations(tree, base_ref="HEAD") == []
+    assert arch.shrink_violations(tree) == []  # default branch of the fixture
+
+
+def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`check(tmp)` keeps its old meaning: an opt-in arm cannot red the depth-1 `test` job."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    assert arch.shrink_violations(tree, base_ref="HEAD~1"), "positive control: the arm fires"
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    # `check` reaches the arm only when asked — through the SAME call site `main` uses.
+    off = arch.check(tree)
+    on = arch.check(tree, base_ref="HEAD~1")
+    assert not any("MODULE REMOVED" in problem for problem in off), (
+        f"check() ran the base-ref arm without being given a base ref: {off}"
+    )
+    assert any("MODULE REMOVED" in problem for problem in on), (
+        "the call site does not pass the base ref through, so the arm is unreachable from the "
+        f"CLI: {on}"
+    )
+
+
+def test_an_unreadable_base_ref_is_a_refusal_not_a_pass(tree: Path) -> None:
+    """A gate that cannot answer must not answer 'nothing was removed'."""
+    with pytest.raises(arch.ArchiveRefused, match="merge base|base ref"):
+        arch.shrink_violations(tree, base_ref="no-such-ref")
+
+
+def test_the_cli_reds_on_a_module_removal_and_names_it(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance's own shape: the GATE exits non-zero, not just a helper returning text."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    rc = arch.main(["archive_surface.py", "check", "--base-ref", "HEAD~1"])
+    assert rc == 1, "the shrink arm did not reach the CLI's exit code"
+
+
+def test_the_cli_refuses_a_waiver_without_a_reason(tree: Path) -> None:
+    """An override with no stated reason is not a record (same rule as `cut --allow-removal`)."""
+    assert arch.main(
+        ["archive_surface.py", "check", "--base-ref", "HEAD", "--allow-archive-shrink", "module:x"]
+    ) == 2
+    assert arch.main(
+        ["archive_surface.py", "check", "--allow-archive-shrink-reason", "because"]
+    ) == 2
+
+
+def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
+    """Wiring: an arm no job invokes is a no-op gate (the measured #9075/#11057 shape)."""
+    workflow = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    assert "tools/archive_surface.py check --require-entries --base-ref" in workflow, (
+        "no workflow runs the shrink arm; deleting the flag from the step must red here, not "
+        "read as a cleanup"
+    )
+    index = workflow.index("tools/archive_surface.py check --require-entries --base-ref")
+    job = workflow.rfind("\n  surface-guard:", 0, index)
+    assert job != -1, "the shrink arm needs the job whose clone has real history"
+    assert "fetch-depth: 0" in workflow[job:index], (
+        "the job running the shrink arm must check out full history, or the merge base is "
+        "absent by construction and the gate cannot answer"
+    )
