@@ -414,3 +414,57 @@ def test_the_scan_arm_tolerates_the_inversion_it_performs(harness):
     strict = harness.compare(truth_rows, ["a", "b"],
                              candidate_distances=[100.0008, 101.0008], distance_tol=1e-4)
     assert strict["distance"]["ok"] is False
+
+
+def test_a_none_distance_is_not_a_verified_one(harness):
+    """The second branch of the same fail-open the short-list guard closes.
+
+    `(embedding_vec <=> %s)` is NULL for a row whose generated column is NULL, and
+    `ORDER BY … ASC` puts those last — so an all-None distance list is reachable
+    exactly when the answer is SHORT, and it used to publish `ok: True, max_delta:
+    0.0`.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    cmp_ = harness.compare(truth_rows, ["a", "b", "c"],
+                           candidate_distances=[None, None, None])
+    assert cmp_["distance"]["ok"] is False
+    assert cmp_["distance"]["unmeasured"] == 3
+
+    partly = harness.compare(truth_rows, ["a", "b", "c"],
+                             candidate_distances=[0.1, None, 0.3])
+    assert partly["distance"]["ok"] is False
+    assert partly["distance"]["unmeasured"] == 1
+
+
+def test_the_order_poison_crosses_a_distance_bucket(harness):
+    """On a one-tie-group answer a same-bucket swap is classified `tie` — the
+    falsifier would be masked by the comparator's own policy (measured live:
+    `q_tie` and `q01` both reported `order="tie"` under poison-order)."""
+    truth_rows = [("a", 0.1), ("b", 0.1), ("c", 0.9)]
+    pairs = [("a", 0.1), ("b", 0.1), ("c", 0.9)]
+    poisoned = harness.poison(pairs, truth_rows, "order")
+    cmp_ = harness.compare(truth_rows, [k for k, _d in poisoned],
+                           candidate_distances=[d for _k, d in poisoned])
+    assert cmp_["order"] == "diverged", (
+        "the swap stayed inside the tie group, so the poison is invisible")
+
+
+def test_the_vector_poison_moves_the_victim_beyond_the_whole_corpus(harness):
+    """The one poison whose mechanism is not in `poison()` — pinned here because
+    the CI weight row claims it is covered."""
+    rows = harness.build_corpus(n_random=8)
+    victim = next(r for r in rows if r.key == "anchor")
+    perturbed = harness.perturb_for_vector_poison(rows)
+    moved = next(r for r in perturbed if r.key == "anchor")
+    assert moved.embedding != victim.embedding
+    query = harness._unit(0)
+    far = harness._cosine_distance(moved.embedding, query)
+    others = [harness._cosine_distance(r.embedding, query) for r in rows
+              if r.key not in ("anchor",) and r.eligible(len(query))]
+    assert far > max(others), (
+        "the perturbed row is still inside the corpus' distance range, so it "
+        "would not leave the window and the poison would be invisible")
+    # …and it does not touch any other row.
+    assert [r.key for r in perturbed] == [r.key for r in rows]
+    assert all(a.embedding == b.embedding for a, b in zip(perturbed, rows)
+               if a.key != "anchor")

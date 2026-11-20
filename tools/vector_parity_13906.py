@@ -290,7 +290,14 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     # DISTINCT) used to print PARITY with recall 1.0. Measured in review; the
     # docstring above promised the opposite and the `extra id` pin could not see
     # it because a REPEATED key is neither missing nor novel.
-    duplicates = sorted({key for key in cand if cand.count(key) > 1})
+    # `Counter`, not `cand.count(key)` in a comprehension: `cand` is whatever the
+    # leg returned and is deliberately NOT truncated, so a leg that ignored
+    # `LIMIT` and returned the production corpus (~35,312 rows) would make the
+    # quadratic form ~1.2e9 comparisons per arm per query — the loud red becomes
+    # a hang, in exactly the case the comparison exists to report.
+    from collections import Counter
+
+    duplicates = sorted(key for key, n in Counter(cand).items() if n > 1)
     count_equal = len(cand) == len(truth_ids)
 
     distance_of = {key: dist for key, dist in truth_rows}
@@ -317,7 +324,7 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         if len(mismatches) >= 5:  # bounded: a report, not a transcript
             break
 
-    distance = {"ok": None, "max_delta": None, "worst": None}
+    distance = {"ok": None, "max_delta": None, "worst": None, "unmeasured": 0}
     if candidate_distances is not None and len(candidate_distances) != len(cand):
         # ⛔ A SHORT DISTANCE LIST IS A DEFECT, NOT A PASS. `zip` stops at the
         # shorter side, so a length mismatch used to leave `ok: True` having
@@ -333,8 +340,17 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
             delta = abs(float(dist) - float(distance_of[key]))
             if delta > worst_delta:
                 worst, worst_delta = key, delta
-        distance = {"ok": worst_delta <= distance_tol, "max_delta": worst_delta,
-                    "worst": worst, "tolerance": distance_tol}
+        # ⛔ A `None` DISTANCE IS NOT A VERIFIED ONE. The loop above `continue`s on
+        # it, so an all-None list left `ok: True, max_delta: 0.0` — the SAME
+        # fail-open class the short-list branch one line up refuses. It is
+        # reachable: the record's `(embedding_vec <=> %s)` is NULL for a row whose
+        # generated column is NULL, and `ORDER BY … ASC` puts those last, i.e.
+        # exactly when the answer is short.
+        unmeasured = sum(1 for _k, d in zip(cand, candidate_distances)
+                         if d is None or _k not in distance_of)
+        distance = {"ok": worst_delta <= distance_tol and unmeasured == 0,
+                    "max_delta": worst_delta, "worst": worst,
+                    "unmeasured": unmeasured, "tolerance": distance_tol}
 
     return {
         "distance": distance,
@@ -379,8 +395,16 @@ def poison(pairs: list[tuple[str, float | None]],
         if out:
             out[0] = ("r999_absent_from_truth", out[0][1])
     elif kind == "order":
-        # Swap two rows that do NOT share a distance bucket — row and distance.
-        i = next((n for n in range(1, len(out)) if out[n][0] != out[0][0]), None)
+        # Swap two rows that do NOT share a distance BUCKET, not merely two rows
+        # with different keys: on an answer that is one tie group, a same-bucket
+        # swap is classified `tie` by the comparator, i.e. the falsifier is
+        # MASKED by the very policy it is testing. Measured on the live run:
+        # `poison-order.json` reports `order="tie"` for `q_tie` and `q01`.
+        buckets = {key: round(dist / TIE_TOL) for key, dist in truth_rows}
+        i = next(
+            (n for n in range(1, len(out))
+             if out[n][0] != out[0][0]
+             and buckets.get(out[n][0]) != buckets.get(out[0][0])), None)
         if i is not None:
             out[0], out[i] = out[i], out[0]
     elif kind == "recall":
@@ -388,6 +412,30 @@ def poison(pairs: list[tuple[str, float | None]],
         out = out[:-1] if out else out
     else:
         raise ValueError(f"unknown poison {kind!r}")
+    return out
+
+
+def perturb_for_vector_poison(rows: list[Row], victim: str = "anchor") -> list[Row]:
+    """The graph-side store divergence for `--poison vector`: seed DIFFERENT data.
+
+    ⛔ NOT A NEGATION. `-unit` sits 2.0 from the query while this corpus'
+    unrelated rows are up to ~48 away, so a negated anchor stays in the top-k and
+    an id-only comparison sees nothing — measured, and it is why the first
+    `--poison vector` reported POISON NOT DETECTED. `-100` on the first axis is
+    beyond every corpus row, so the victim leaves the window under BOTH metrics.
+
+    It lives here, as a pure function, so the DB-free suite can pin the one
+    poison whose mechanism is not in `poison()`.
+    """
+    out: list[Row] = []
+    for r in rows:
+        if r.key == victim and r.embedding:
+            embedding = [-100.0 if i == 0 else 0.0 for i in range(len(r.embedding))]
+        else:
+            embedding = r.embedding
+        out.append(Row(key=r.key, embedding=embedding, status=r.status,
+                       outdated=r.outdated, updated_at=r.updated_at,
+                       tenant=r.tenant))
     return out
 
 
@@ -444,6 +492,25 @@ class RecordStore:
                     "pgvector migration has not been applied to this database, "
                     "so every comparison would report the graph fallback as a "
                     "clean answer")
+
+    def environment(self) -> dict:
+        """The versions the run actually measured on — recorded, not remembered.
+
+        ⛔ A version quoted in a write-up that the artifact does not carry is
+        unreproducible by the next reader, and the next reader is the one who has
+        to decide whether the numbers still apply.
+        """
+        out: dict = {}
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT extversion FROM pg_extension WHERE extname='vector'")
+                row = cur.fetchone()
+                out["pgvector"] = row[0] if row else None
+                cur.execute("SHOW server_version")
+                out["postgres"] = cur.fetchone()[0]
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {e}"
+        return out
 
     def seed(self, rows: list[Row]) -> None:
         with self.conn.cursor() as cur:
@@ -615,6 +682,27 @@ class GraphStore:
             time.sleep(0.25)
         return False
 
+    def environment(self) -> dict:
+        out: dict = {}
+        try:
+            # `MODULE LIST` answers DICTS on this client (`decode_responses`), not
+            # the flat tuples an earlier cut assumed — measured, and the flat form
+            # silently recorded nothing.
+            for entry in self.client.connection.execute_command("MODULE LIST"):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name", ""))
+                if name in ("graph", "falkordb"):
+                    ver = entry.get("ver")
+                    # e.g. 42006 -> "4.20.6", the spelling the module itself uses.
+                    text = str(ver)
+                    pretty = (f"{text[0]}.{text[1:3]}.{int(text[3:])}"
+                              if text.isdigit() and len(text) == 5 else str(ver))
+                    out["falkordb"] = f"{pretty} (module ver {ver})"
+        except Exception as e:  # noqa: BLE001
+            out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
     def index_params(self) -> dict:
         """The parameters the store ACTUALLY built the index with.
 
@@ -717,6 +805,8 @@ def run(args) -> dict:
         "k": k, "seed": args.seed, "n_rows": len(rows),
         "label": LABEL,
         "poison": args.poison,
+        "environment": {"record": record.environment(),
+                        "graph": store.environment()},
         "arms": {},
         "queries": [],
     }
@@ -731,21 +821,7 @@ def run(args) -> dict:
         # goes undetected — measured on this harness's first attempt: `vector`
         # reported POISON NOT DETECTED while the other three were caught. The
         # oracle stays on the unperturbed corpus, which is the point.
-        store_rows = rows
-        if args.poison == "vector":
-            store_rows = [
-                Row(key=r.key,
-                    # ⛔ NOT a negation. `-unit` is 2.0 away from the query while
-                    # this corpus' unrelated rows are 15-25 away, so a negated
-                    # anchor stays in the top-k and an id-only comparison sees
-                    # nothing (measured). `-100` on every axis is beyond every
-                    # corpus row, so the row leaves the window AND its distance
-                    # moves — the two detections a divergence needs.
-                    embedding=([(-100.0 if i == 0 else 0.0) for i in range(len(r.embedding))]
-                               if r.key == "anchor" and r.embedding else r.embedding),
-                    status=r.status, outdated=r.outdated,
-                    updated_at=r.updated_at, tenant=r.tenant)
-                for r in rows]
+        store_rows = perturb_for_vector_poison(rows) if args.poison == "vector" else rows
         store.seed(store_rows)
         rows_ours = [r for r in rows if r.tenant == "ours"]
 
@@ -1085,6 +1161,17 @@ def main(argv: list[str] | None = None) -> int:
         report = run(args)
     except CannotRun as e:
         print(f"cannot run: {e}", file=sys.stderr)
+        return 2
+    except Exception as e:  # noqa: BLE001 — see the docstring below
+        # ⛔ A DRIVER OR SETUP FAILURE MUST NOT EXIT 1. A missing `psycopg2`, an
+        # unreachable Postgres, a refused role, a seeding/teardown/index error —
+        # each used to escape as a traceback and exit **1**, which this module's
+        # table defines as "a comparison diverged". The falsifier's own loop
+        # (`--poison id; echo exit=$?`) would then read `exit=1` as "poison
+        # confirmed" having measured nothing. The comparison itself never raises
+        # for a divergence (it returns a report), so ANY exception here means the
+        # run could not measure.
+        print(f"cannot run: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     text = json.dumps(report, indent=2, default=str)
     if args.json_out:

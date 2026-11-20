@@ -10264,7 +10264,7 @@ def test_duration_coverage_guard_boundary_and_realistic():
 # on a shallow CI checkout, which is the #10356 shallow-channel trap this same file
 # already carries a control for).
 ROWED_BY_THIS_FOLD = (
-    "test_vector_parity_13906.py",
+    "test_10084_graph_argument_omit_first.py",
     "test_10084_graph_disclosure.py",
     "test_4051_gate_graph.py",
     "test_9548_record_search_keys_shape.py",
@@ -10371,6 +10371,7 @@ ROWED_BY_THIS_FOLD = (
     # row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
     # file nobody listed has no `durations:` row and nothing reds.
     "test_business_map_filer.py",
+    "test_vector_parity_13906.py",
 )
 
 
