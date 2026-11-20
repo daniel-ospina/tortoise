@@ -75,12 +75,25 @@ import sys
 # `tests/test_entry_point_python_guard.py` pins it for the corpus). This guard is
 # PROTECTIVE, not documentary: nothing below it may use 3.12-only SYNTAX, or the file
 # would die in the tokenizer and never reach this statement.
+#
+# ⛔ EXIT **4**, NOT the historical `raise SystemExit(<message>)` — that exits 1,
+# and this module's exit table (see `CannotRun` above) spends 1 on "a required
+# comparison diverged". The falsifier's repro loop is one `echo exit=$?` per
+# poison (§6), so a guard wearing 1 would make `--poison id` read **"poison
+# confirmed"** on an interpreter that measured nothing — the same false PASS
+# `CannotRun` was introduced to close, one indirection out. 0/1/2/3 are all
+# spent here (PARITY / DIVERGED / CANNOT-RUN / BLIND), so 4 is the code this
+# tool can spare; `SystemExit(<int>)` carries no message, hence the explicit
+# `print` to stderr. Registered in `tests/test_entry_point_python_guard.py`'s
+# `REFUSAL_CODES`/`REFUSAL_WHY` so the decision survives the next rebase.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/vector_parity_13906.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/vector_parity_13906.py`"
+        f"`uv run python tools/vector_parity_13906.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(4)
 
 import argparse
 import contextlib
