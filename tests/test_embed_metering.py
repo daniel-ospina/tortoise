@@ -100,17 +100,17 @@ def _enforce_quota_double(resource: str = "points", *,
     any reader existed: `lambda resource:` raised `TypeError` on every `_quota_gated`
     write once #13829 added `truth_carried`, and its replacement `lambda resource,
     **kw:` accepted ANY keyword — a real shape drift would then raise in production
-    while these arms stayed green. Reverting either fix leaves the whole file GREEN
-    (measured: `58 passed` on the cycle-2 `**kw` shape), so the comment's "MIRRORS IT
-    EXACTLY" had no force at all. `test_the_enforce_quota_double_is_the_door` reads
-    this signature against the door's, so the next drift reds instead of being
-    described in prose.
+    while these arms stayed green. Reverting either fix left the whole file green
+    BEFORE THIS READER EXISTED (`58 passed` then, on the cycle-2 `**kw` shape — the
+    file is 59 now), so the comment's "MIRRORS IT EXACTLY" had no force at all.
+    `test_the_enforce_quota_double_is_the_door` reads this signature against the
+    door's, so the next drift reds instead of being described in prose.
     """
     return None
 
 
 def test_the_enforce_quota_double_is_the_door():
-    """Name, kind AND default per parameter, read from the door itself.
+    """Name, kind, annotation AND default per parameter, read from the door itself.
 
     ⛔ WHY A READER AND NOT A COMMENT (#14003 review, cycle 4, P3 — MEASURED): the
     double's two earlier shapes were both wrong and neither was observable — the
@@ -120,20 +120,30 @@ def test_the_enforce_quota_double_is_the_door():
     durable claim the neighbouring `test_13829_cache_cap_at_fold.py`
     `test_the_mcp_gate_defaults_to_the_protective_arm` already makes for
     `_quota_gated` is exactly this one, one door down, so it is read here too.
+
+    ⛔ AND THE PIN IS TOTAL, WHICH COST ONE MORE REVIEW ROUND (#14037 review, cycle
+    2, P3 — MEASURED). A `(name, kind, default)` triple compared with `==` left TWO
+    drifts GREEN: an annotation-only change (`resource: int = "points"` passed), and
+    `False`↔`0` because `False == 0`. So name/kind/ANNOTATION are compared by `==`
+    (both modules are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and
+    each default is compared by IDENTITY, where `False is 0` is False.
     """
     import inspect
 
     import tortoise.mcp_server as mcp
 
-    def shape(fn):
-        return [(p.name, p.kind, p.default)
-                for p in inspect.signature(fn).parameters.values()]
-
-    assert shape(_enforce_quota_double) == shape(mcp._enforce_quota), (
-        "the `_enforce_quota` double no longer matches the door's signature — a "
-        "wider double (`**kw`) fails OPEN on a shape drift and a narrower one (a "
-        "missing default) reads a legal zero-arg door call as a TEST defect. Fix "
-        "the double, not this assertion")
+    double = list(inspect.signature(_enforce_quota_double).parameters.values())
+    door = list(inspect.signature(mcp._enforce_quota).parameters.values())
+    assert [(p.name, p.kind, p.annotation) for p in double] == [
+        (p.name, p.kind, p.annotation) for p in door], (
+        "the `_enforce_quota` double's parameters (name, kind, annotation) no longer "
+        "match the door's — a wider double (`**kw`) fails OPEN on a shape drift and a "
+        "narrower one (a missing default) reads a legal zero-arg door call as a TEST "
+        "defect. Fix the double, not this assertion")
+    assert all(a.default is b.default for a, b in zip(double, door, strict=True)), (
+        "the `_enforce_quota` double's DEFAULT differs from the door's in identity — "
+        "`False == 0` is True, so an equality comparison would accept a flipped "
+        "default. Fix the double, not this assertion")
 
 
 @pytest.fixture(autouse=True)
@@ -1302,13 +1312,15 @@ class TestRunnerWiring:
         # "mirrors the door exactly" was wrong TWICE with nothing red: `lambda resource:`
         # raised `TypeError` on every `_quota_gated` write once #13829 added
         # `truth_carried`, and `lambda resource, **kw:` swallowed any keyword, so a door
-        # drift would have raised in production while this arm stayed green (measured:
-        # reverting to that shape leaves the whole file 58-passed).
-        # `test_the_enforce_quota_double_is_the_door` compares name, kind AND default per
-        # parameter against the door itself, so read the shape from that assertion — and
-        # ⚠️ the two `mcp_server.py` addresses a previous cut typed here are GONE on
-        # purpose: nothing reads a number in a comment, which is the rule this same PR
-        # applies to `tests/test_7949_capstone_measure.py`.
+        # drift would have raised in production while this arm stayed green (measured,
+        # before the reader below existed: reverting to that shape left the whole file
+        # green, `58 passed` then — the file is 59 now).
+        # `test_the_enforce_quota_double_is_the_door` compares name, kind,
+        # annotation AND default per parameter against the door itself, so read the
+        # shape from that assertion — and ⚠️ the two `mcp_server.py` addresses an
+        # earlier cut typed here are GONE on purpose: nothing reads a number in a
+        # comment, which is the rule #14025 applied to
+        # `tests/test_7949_capstone_measure.py`.
         monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
