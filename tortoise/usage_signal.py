@@ -168,6 +168,11 @@ HEAD_FINGERPRINT_BYTES = 8192
 
 _warned: set[str] = set()
 
+#: The events the LAST `_append_many` kept (i.e. not dropped for size or
+#: encoding). `record_serves` needs them to report how many of ITS caller's rows
+#: provably reached the file — the intended count is not the delivered one.
+_LAST_KEPT = threading.local()
+
 #: Re-entrancy guard for one process; the cross-process lock is `_file_lock`.
 _REFRESH_LOCK = threading.Lock()
 
@@ -359,6 +364,7 @@ def _append_many(records: Iterable[Mapping[str, Any]], *, path: Path) -> int:
     indistinguishable from a store nobody reads.
     """
     lines: list[str] = []
+    kept: list[Mapping[str, Any]] = []
     n_events = 0
     for record in records:
         try:
@@ -378,9 +384,12 @@ def _append_many(records: Iterable[Mapping[str, Any]], *, path: Path) -> int:
             )
             continue
         lines.append(line)
+        kept.append(record)
         n_events += 1
     if not lines:
+        _LAST_KEPT.kept = []
         return 0
+    _LAST_KEPT.kept = kept
     target: Path | None = None
     try:
         target = path
@@ -528,8 +537,15 @@ def record_serves(
         events.append({"at": stamp, "event": "unresolved", "n": unresolved})
     if not events:
         return 0
-    _append_many(events, path=path or usage_path())
-    return sum(1 for e in events if e.get("event") == EVENT_SERVE)
+    written = _append_many(events, path=path or usage_path())
+    if not written:
+        return 0
+    # ⛔ WHAT LANDED, NOT WHAT WAS INTENDED. `_append_many` may drop an over-long
+    # line and a short write lands only a prefix, so counting the serve events we
+    # CONSTRUCTED would report a serve the file never received — and the caller
+    # that logs this number is the only evidence a deployment has.
+    landed = (getattr(_LAST_KEPT, "kept", None) or [])[:written]
+    return sum(1 for e in landed if e.get("event") == EVENT_SERVE)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1064,6 +1080,19 @@ def _consume(state: _State, chunk: bytes) -> None:
         state.apply(label, key, at)
 
 
+def _stream_exists(target: Path) -> bool:
+    """Does the stream exist? An unreadable `stat` is a NO, never a raise.
+
+    `Path.exists()` propagates `OSError` (a vanished mount, a permission change),
+    and this function is on a path whose contract is "never raises into the
+    caller" — a signal read may not take down a search.
+    """
+    try:
+        return target.exists()
+    except OSError:  # pragma: no cover — a vanished mount / permission change
+        return False
+
+
 def refresh(
     path: Path | None = None,
     *,
@@ -1102,7 +1131,7 @@ def refresh(
     if window is not None:
         window_started = (ref - timedelta(days=window)).isoformat(timespec="seconds")
 
-    if not target.exists():
+    if not _stream_exists(target):
         # ⛔ A MISSING STREAM IS NOT "NOTHING IS HOT". The reading carries
         # `served_total == 0` AND `stale` so a consumer cannot read an unarmed
         # signal as a confident cold corpus.
