@@ -271,14 +271,26 @@ SWEEP_NAMES = 66
 #: new number. `--check` on the merged tree exits 0 with typed references `0`. Re-derive with
 #: `--repin` on your own tree, never by arithmetic on the last pin.
 #: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
-#: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
-#: still calling the RETIRED public spelling on a `TortoiseSDK`, `stub.get_point("p-1", served_out={})`
-#: — #13899's sweep re-pointed that file's seven other sites to `_get_point` and missed this one, so it
-#: raised `AttributeError` instead of asserting the record bound and reddened `test (a)`. Re-pointed
-#: to `stub._get_point(...)`, which removes exactly that one untyped-receiver row (-1: 11822 → 11821).
-#: Direction matters and is the reason this is safe to take: a residue that SHRINKS cannot hide a new
-#: reference shape, and `typed references still pointing at a public name: 0` on this tree says no
-#: typed site replaced it. Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+#: call site rather than a new shape: the `stub.get_point("p-1", served_out={})` call in
+#: `tests/test_12941_read_your_writes.py` was the LAST site still calling the RETIRED public spelling
+#: on a `TortoiseSDK` — #13899's sweep re-pointed that file's seven other sites to `_get_point` and
+#: missed this one, so it raised `AttributeError` instead of asserting the record bound and reddened
+#: `test (a)`. Re-pointed to `stub._get_point(...)`, which removes exactly that one untyped-receiver
+#: row (-1: 11822 → 11821).
+#: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
+#: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
+#: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
+#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
+#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
+#: untyped receivers, add one different shape -> net -1, absorbed). Read the rows `--repin` prints,
+#: not the direction of the delta (#14003 review, round 3, P3 / #14030).
+#: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
+#: once the file moves, and this block carried exactly such a stale address — nothing in the tree
+#: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
+#: WRONG line, measures an unchanged 11821, and concludes the attribution is falsified (#14030
+#: review, P2). Name the call site by its TEXT; the text is the durable fact.
+#: `typed references still pointing at a public name: 0` on this tree says no typed site replaced it.
+#: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
 SWEEP_RESIDUE = (11821, "abf4a5c65f380206")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
