@@ -653,6 +653,35 @@ def _as_int(token: str) -> int:
     return int(token) if token.isdigit() else _NUMERALS[token]
 
 
+def _mutate_numeral(match: re.Match[str], value: int) -> str:
+    r"""The matched sentence with its OWN numeral rewritten to *value*, spelled or in digits.
+
+    `_mutate` splits on `\d+` and so cannot see a numeral the header SPELLS: both counts in the
+    two-code-span sentence are published as words (`writes five pairs`, `four of them`), which is
+    precisely the edition that shipped the wrong one. The positional guarantee `_mutate` exists for is
+    kept POSITIONALLY: `str.replace(…, 1)` rewrites the LEFTMOST occurrence, so the edit lands on
+    `group(1)` exactly when `group(1)` is where that leftmost occurrence sits — which is asserted here.
+
+    ⛔ Counting occurrences (`match.group(0).count(token) == 1`) proves something else, and it is FALSE BY
+    CONSTRUCTION for numerals this file's own patterns accept, on CORRECT text: the sentence scaffold
+    spells `two` (`… writes two pairs as TWO code spans`) and `one` (`… the ONE-token rule`), so a
+    document legitimately measuring two two-code-span pairs, or ONE uncounted pair, tripped it. Both are
+    real measurements — the patterns accept `one`..`ten` and `_as_int` grades all of them — so the count
+    could only ever fire on correct content, at the next lane re-measuring this header, and pointed them
+    at this helper's token bookkeeping instead of at their figure (`#13599` review, finding 1: a control
+    that reds on CORRECT text). The offset comparison carries the same guarantee and is true wherever the
+    guarantee holds.
+    """
+    token = match.group(1)
+    offset = match.start(1) - match.start(0)
+    leftmost = match.group(0).index(token)
+    assert leftmost == offset, (
+        f"`{token}` first occurs at {leftmost} in {match.group(0)!r}, not at the captured numeral's "
+        f"offset {offset} — the leftmost rewrite would edit a different word than the one the pattern grades"
+    )
+    return match.group(0).replace(token, str(value), 1)
+
+
 def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, int]]]:
     """(as-written spellings, unique `(resolved path, start line)` pairs) for a document.
 
@@ -943,22 +972,6 @@ def test_a_carried_forward_figure_is_reported() -> None:
                 parts[index] = str(overrides[group])
         return "".join(parts)
 
-    def _mutate_numeral(match: re.Match[str], value: int) -> str:
-        r"""The matched sentence with its OWN numeral rewritten to *value*, spelled or in digits.
-
-        `_mutate` splits on `\d+` and so cannot see a numeral the header SPELLS: both counts in the
-        two-code-span sentence are published as words (`writes five pairs`, `four of them`), which is
-        precisely the edition that shipped the wrong one. The positional guarantee `_mutate` exists for
-        is kept by asserting the token occurs once inside the matched sentence, so the edit cannot land
-        on a different word.
-        """
-        token = match.group(1)
-        assert match.group(0).count(token) == 1, (
-            f"the numeral `{token}` occurs twice in {match.group(0)!r} — the edit would land on one of "
-            "them by position, not by meaning"
-        )
-        return match.group(0).replace(token, str(value), 1)
-
     triple_pairs, triple_collisions = map(int, triple.groups()[1:])
     _written, _pairs, collisions, _drifters, comparable = map(int, quadruple.groups())
     ratio_drifters, _ratio_pairs = map(int, ratio.groups())
@@ -1034,6 +1047,55 @@ def test_a_carried_forward_figure_is_reported() -> None:
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
         )
+
+
+def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells() -> None:
+    """`_mutate_numeral` mutates the numeral its own patterns accept, in every spelling they accept.
+
+    ⛔ Its positional guard used to be `match.group(0).count(token) == 1`, and that is FALSE BY
+    CONSTRUCTION for two of the numerals `_TWO_SPAN_TOTAL`/`_TWO_SPAN_NEW` accept — on CORRECT content:
+
+    * `writes TWO pairs as TWO code spans` — `_TWO_SPAN_TOTAL`'s own scaffold spells `two`, so a document
+      measuring two two-code-span pairs (`count("two") == 2`) tripped the assert;
+    * `ONE of them are resolved but not counted by the ONE-token rule` — the `one-token rule` is part of
+      the sentence, so `count("one") == 2` on the (entirely plausible) reading that one of the pairs is
+      not already counted.
+
+    Both are legitimate measurements of this document — the patterns accept `one`..`ten` and `_as_int`
+    grades all of them — so the helper rejected two numerals the rest of the guard is built to accept. The
+    one trigger it had was a false red on correct text, which is the class this file's own header exists
+    to prevent (`#13599` review, finding 1: a comparator that reds on CORRECT text), and it pointed the
+    next re-measuring lane at the control's token bookkeeping rather than at their measurement.
+
+    NON-VACUOUS, measured: with the count assert in place this test reds with `the numeral `two` occurs
+    twice in 'writes two pairs as two code spans'` on the first case it tries; with the positional assert
+    both cases mutate their own capture group and re-match. It iterates the WHOLE accepted class, not the
+    two instances, because a guard written against one spelling of one numeral is the defect above.
+    """
+    for pattern, template in (
+        (_TWO_SPAN_TOTAL, "the header writes {n} pairs as two code spans"),
+        (_TWO_SPAN_NEW, "{n} of them are resolved but not counted by the one-token rule"),
+    ):
+        for numeral in ("two", "one", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "7"):
+            sentence = template.format(n=numeral)
+            match = pattern.search(sentence)
+            assert match is not None, f"the pattern no longer matches its own sentence frame: {sentence!r}"
+            assert match.group(1) == numeral, (match.group(0), numeral)
+            mutated = _mutate_numeral(match, 9)
+            assert mutated == match.group(0).replace(numeral, "9", 1), (
+                f"mutating `{numeral}` in {match.group(0)!r} landed on the wrong occurrence: {mutated!r}"
+            )
+            assert sentence.replace(numeral, "9", 1) == (
+                sentence[: match.start()] + mutated + sentence[match.end() :]
+            ), (
+                f"`{numeral}` in {sentence!r} does not FIRST occur at the capture group, so rewriting the "
+                "leftmost occurrence edits a different word than the one the pattern grades"
+            )
+            rematched = pattern.search(mutated)
+            assert rematched is not None and rematched.group(1) == "9", (
+                f"the mutated sentence {mutated!r} no longer re-matches with its new count — the edit did "
+                "not land on the numeral the pattern grades"
+            )
 
 
 def _resolve(pins, repo: Path = REPO) -> list[str]:
