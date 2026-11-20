@@ -3507,7 +3507,17 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     if not option.startswith("--"):
         for split_at in range(1, len(option)):
             if option[split_at] in _ARG_TAKING_SHORT_FLAGS:
-                return option[:split_at + 1], option[split_at + 1:] + rest
+                value = option[split_at + 1:] + rest
+                # ⛔ QUOTE REMOVAL IS OURS, AND ONLY WHERE THE SHELL DID IT (#14027 round 9, P5 —
+                # MEASURED): `grep -c -ec'^[+-]$'` is argv `-e` + `c^[+-]$`, so the VALUE is
+                # `c^[+-]$` — those quotes were the shell's, not the pattern's. Reporting
+                # `c'^[+-]$'` handed back a string no argv can contain (verdict-neutral, the class
+                # test rejects it either way, but a reported prescription must be an argument).
+                # A tail that STARTS with a quote (`-ce'…'`) keeps it: the shell removed only the
+                # OUTER quotes there, and that form is read by the quoted branch below.
+                if value and value[0] not in "'\"":
+                    value = value.replace("'", "").replace('"', "")
+                return option[:split_at + 1], value
     if not rest:
         return option, ""
     if not (rest.startswith("=") or rest[0] in "'\""):
@@ -5075,13 +5085,29 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
     # model is what let `grep -c -Dread '^[+-]$'` — which really counts the blank class — come back
     # UNREAD, a live false PASS. Neither shape is graded either way (`-e`'s value is a pattern that
     # is not this class), so the correction costs no row.
-    assert _d5_flag_word("-ec'^[+-]$'") == ("-e", "c'^[+-]$'"), (
-        "`-ec'^[+-]$'` is `-e` with an attached value `c'^[+-]$'`: the FIRST argument-taking "
-        "character owns the tail, as grep parses it (#14027 round 9, P2 — MEASURED)")
+    assert _d5_flag_word("-ec'^[+-]$'") == ("-e", "c^[+-]$"), (
+        "`-ec'^[+-]$'` is `-e` with an attached value `c^[+-]$`: the FIRST argument-taking "
+        "character owns the tail, as grep parses it, and the quotes are the shell's — argv "
+        "`-ec^[+-]$` is `-e c^[+-]$`, so a reported value of `c'^[+-]$'` is a string no command "
+        "can contain (#14027 round 9, P2/P5 — MEASURED)")
     assert _d5_flag_word("-ec^[+-]$") == ("-e", "c^[+-]$"), (
         "`-ec^[+-]$` is the same argv and the same reading — `-e`, pattern `c^[+-]$` — so it IS a "
         "flag word with an attached value; grep runs it (rc 1, nothing matches). Pinned `None` "
         "before the split, which is the model that hid `-cDread` (#14027 round 9, P2 — MEASURED)")
+    # ⛔ AND THE SPELLING THAT MOTIVATED THE SPLIT IS GRADED, NOT MERELY DESCRIBED (#14027 round 9,
+    # P3 — MEASURED, and this row is what makes the fix itself witnessed): the two pins above move
+    # shapes whose VERDICT is neutral, so a partial revert that splits only when the cluster's
+    # FIRST flag is the argument-taking one left the suite GREEN while
+    # `_d5_count_prescriptions("grep -c -cDread '^[+-]$'")` went back to `[]` — the false PASS the
+    # round-9 message names, invisible again. `grep -c -Dread '^[+-]$'` really counts the blank
+    # class (`2` on the probe, rc 0), and `-cDread` is the same argv with `-c` in front of it
+    # (`2`, rc 0), so both must be READ: treating `-cDread` as ONE name leaves the quoted expression
+    # to be consumed as `-D`'s value and answers `[]`.
+    for read_spelling in ("grep -c -Dread '^[+-]$'", "grep -c -cDread '^[+-]$'"):
+        assert _d5_blank_class_prescriptions(f"a count: `{read_spelling}`\n") == ["^[+-]$"], (
+            f"{read_spelling!r} counts the blank class — `-D` takes `read` as its value and `-c` "
+            "still counts (measured: 2, rc 0) — so the expression must be READ. Answering `[]` is "
+            "the false PASS the round-9 split closed (#14027 round 9, P3 — MEASURED)")
 
     # ⛔ DECLARED RESIDUAL, AND IT IS PINNED AS ONE (#14027 third review round, P3 —
     # MEASURED): this reader checks that an argument-taking SHORT flag HAS an argument, never that
