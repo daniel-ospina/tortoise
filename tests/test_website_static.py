@@ -3717,9 +3717,18 @@ def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
 
 
 def _max_width_media_blocks(html: str) -> list[tuple[int, str]]:
-    """Every `@media (max-width: Npx) { ... }` block as `(N, body)`."""
-    return [(int(m.group(1)), _brace_block(html, m.end() - 1))
-            for m in MAX_WIDTH_MEDIA_RE.finditer(html)]
+    """Every `@media (max-width: Npx) { ... }` block as `(N, body)`.
+
+    Reads the COMMENT-BLANKED sheet. A raw scan matches a media query QUOTED in
+    a comment — this page's own notes write `@media (max-width: 760px)` in prose
+    — and emits a phantom block that can false-RED an assertion about what that
+    block declares (measured: a comment quoting
+    `@media (max-width: 360px) { .outcomes { max-width: 660px } }` produced one).
+    Fail-closed, but wrong, and the sheet's other readers are already blanked.
+    """
+    blanked = _css_blanked(html)
+    return [(int(m.group(1)), _brace_block(blanked, m.end() - 1))
+            for m in MAX_WIDTH_MEDIA_RE.finditer(blanked)]
 
 
 def _heading_levels(html: str) -> list[int]:
@@ -10201,26 +10210,29 @@ class TestProductTeamsIdentity:
 
 
 class TestProductTeamsCopy:
-    """The owner's PDF copy, VERBATIM, section by section.
+    """The owner's PDF copy, VERBATIM, section by section — with the ONE ruled exception.
 
     This is the pin the page most needs: the copy is the owner's prose, the
     build was instructed to reproduce it unchanged, and nothing else in this
-    repo reads it (the product page's guard deliberately stopped pinning copy in
-    #9652). Two known copy DEFECTS are pinned as-written on purpose, with the
-    reason beside them — a builder "fixing" them is the failure this class
-    exists to catch.
+    repo reads it (the product page's guard deliberately stopped pinning copy
+    in #9652).
 
-    ⛔ THE COPY MAY NOT BE "CORRECTED" WITHOUT THE RULING ON THE ARTIFACT.
-    `e654a120ad` flipped both strings here and on the page to the corrected
-    forms, citing an owner ruling on #13645 that is not on that artifact: the
-    issue's owner decision comment says the PDF's copy "must survive the build
-    **unchanged** — this is the owner's prose, not a draft to improve", and the
-    scoping comment's "If the owner says nothing, the plan below ships (1) and
-    (2) as recommended" is a DEFAULT, not a ruling. #14020's review at
-    `73dbbf66ea` measured the absence (no comment on #13645, #13696 or the PR
-    records it), so the copy and these pins were reverted TOGETHER at #14020's
-    P1 fix — the only correct pair move. If the owner rules, quote the ruling in
-    this docstring and move the page's copy AND these pins in ONE commit.
+    ⛔ THE COPY MAY NOT BE "CORRECTED" WITHOUT THE RULING ON THE ARTIFACT — and
+    the owner HAS now ruled, so the two readings ship corrected and these pins
+    assert the ruled forms. The ruling is recorded here, not asserted:
+    https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+    It names the two readings as typos and states that, for those two strings
+    only, it supersedes the earlier "must survive the build unchanged"
+    instruction. Everything else stays verbatim.
+
+    ⛔ AND THE TYPOS' ABSENCE IS PINNED SEPARATELY
+    (`test_the_pdfs_two_typos_are_absent_from_the_rendered_page`). Without that
+    row, reverting the page's copy AND these constants together would stay
+    green — the two move as a pair, so a pair-revert is exactly the shape a
+    stale instruction would produce. An earlier revision of this branch did
+    revert the pair, correctly, while the ruling was not on the artifact;
+    `ba53339f58` set the condition, and this docstring is where a future lane
+    reads it instead of re-deriving it.
     """
 
     #: page 1 — hero. The h1's second half is wrapped in a <span> for the accent
@@ -10378,12 +10390,10 @@ class TestProductTeamsCopy:
             "`#beat-intro .lead > span` declares no rule — the lead's serif has "
             "to live on an inner element, or it lands back on the element whose "
             "font-size resolves `74ch` (#14020 review P1)")
-        # …read through the COMMENT-BLANKED reader (`_css_rules_with_scope`),
-        # not `_css_rules`: the latter scans the raw sheet, so wrapping the
-        # declaration in `/* … */` inside its own rule — the shape an editor
-        # leaves while debugging — keeps this row GREEN while the lead loses its
-        # serif. That is the exact false PASS `_css_blanked` exists to close
-        # (#14020 review P2).
+        # …read through the COMMENT-BLANKED reader (`_css_rules_with_scope`):
+        # a raw-sheet reader would let a declaration wrapped in `/* … */` inside
+        # its own rule — the shape an editor leaves while debugging — keep this
+        # row GREEN while the lead loses its serif (#14020 review P2).
         assert any("font-family: var(--serif)" in b for b in span_rules), (
             "the lead's inner <span> does not take the serif; owner item 2 has "
             "the opening line read as the section's title, not as body copy")
@@ -10572,9 +10582,10 @@ class TestProductTeamsCopy:
                 "DECLARATION in this same block wins too — read the value that "
                 "wins, not whether the string appears (#14020 review P2.4, "
                 "cycle 3 P1)")
-        # Comment-blanked, like the alignment rows above: `_css_rules` scans the
-        # raw sheet, so `#beat-hero .hero-links { /* display: flex; */ }` — a
         # commented-out declaration inside its own rule — would satisfy this row
+        # Comment-blanked, like the alignment rows above: a raw-sheet reader
+        # would let `#beat-hero .hero-links { /* display: flex; */ }` — a
+        # commented-out declaration inside its own rule — satisfy this row
         # while the row stops being a row (#14020 review P2).
         links = " ".join(body for body, _inside_media in
                          _css_rules_with_scope(css, "#beat-hero .hero-links"))
@@ -10671,6 +10682,34 @@ class TestProductTeamsCopy:
                 "step 03 is the owner's ruling, recorded on "
                 "#13645#issuecomment-7047852104 — restoring the PDF's two-word "
                 "spelling re-lands a typo the owner ruled on.")
+
+    def test_the_pdfs_two_typos_are_absent_from_the_rendered_page(self):
+        """The PDF's spellings must NOT reach the reader — pinned as ABSENCE.
+
+        ⛔ Every other copy row in this class compares the page to a CONSTANT on
+        this class, so reverting the page's copy AND the constant together keeps
+        all of them green — and a PAIR-REVERT is exactly the shape a stale
+        "the copy is verbatim, unchanged" instruction produces (it happened on
+        this branch once, at `fdd3a6a60f`). This row reads the SERVED markup, so
+        it reds on the pair, and `_served` drops HTML comments so the header
+        note that QUOTES the PDF's spelling cannot satisfy or defeat it.
+
+        The ruling that makes the corrected forms correct:
+        https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+        """
+        served = _served(_product_teams_html())
+        for typo in ("make decision with superintelligence",
+                     "super intelligence, grounded"):
+            assert typo not in served, (
+                f"the rendered page contains the PDF's spelling {typo!r}. The "
+                "owner ruled it a typo and the corrected string is what ships "
+                "(#13645#issuecomment-7047852104) — restoring it is a revert "
+                "of a recorded ruling, not a return to verbatim copy.")
+        for ruled in ("make decisions with superintelligence",
+                      "superintelligence, grounded"):
+            assert ruled in served, (
+                f"the rendered page is missing the ruled string {ruled!r} "
+                "(#13645#issuecomment-7047852104)")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")
