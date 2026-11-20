@@ -2172,6 +2172,32 @@ def test_c11_every_published_count_has_its_query_in_the_same_arm():
                 f"publish: {no_count} — the value was renamed away from its own Cypher, "
                 "so a reader re-deriving from `queries` reads a reading that was never "
                 "taken")
+        # ⛔ …and the blocks whose queries live under their OWN key (#13919 cycle 13).
+        # Naming this pin "EVERY published block" while reading two of the writer arm's
+        # four was a claim the code did not keep: `per_session` is a published block of
+        # measured counts whose Cypher sits in `per_session_queries`, so the loop above
+        # could never cover it, and re-keying a row would have been silent — measured by
+        # mutation (`shared_points` -> `shared_point` in `per_session` only): the whole
+        # suite stayed green.
+        per_session = block.get("per_session")
+        if isinstance(per_session, dict) and per_session:
+            per_q = block.get("per_session_queries")
+            assert isinstance(per_q, dict) and per_q, (
+                f"{arm}: `per_session` publishes measured rows with no "
+                "`per_session_queries` beside them — no query to re-derive them from")
+            for session_id, row in per_session.items():
+                assert set(row) == set(per_q), (
+                    f"{arm}.per_session[{session_id}] publishes {sorted(set(row) - set(per_q))} "
+                    f"with no recorded query and {sorted(set(per_q) - set(row))} with no "
+                    "published value — the value was renamed away from its own Cypher")
+        # `delta_this_run` is `after - before` over keys the arm already publishes, so its
+        # scope is the arm's `queries` — an unrecorded delta key is a number no query in
+        # this arm can produce.
+        delta = block.get("delta_this_run")
+        if isinstance(delta, dict) and delta:
+            assert not (set(delta) - set(block["queries"])), (
+                f"{arm}.delta_this_run publishes key(s) with no recorded query: "
+                f"{sorted(set(delta) - set(block['queries']))}")
 
 
 def test_c11_no_ledger_entry_repeats_itself():
