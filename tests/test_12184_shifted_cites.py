@@ -65,6 +65,7 @@ _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
 _HB = "tortoise/hosted_backup.py"
+_SSM = "tortoise/session_source_prose_migration.py"
 #: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2666` for
 #: `_index_has_is_operator()`, and that row is in this branch's diff.
 _PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
@@ -302,6 +303,26 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "sdk.py:15787", _SDK, 15787, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
+    # --- #14043 review, finding 2 (the FINAL-head review): the same class, still UNCLOSED for five
+    # addresses this revision writes at THIS head in its new §2.2 `:Source` reader row and in row 13. They
+    # were in neither the header's enumeration nor any pin here, and the header's own reader rule
+    # resolves such an address to the PIN — where a review measured that the `_REPAIR_PAIR` block opens
+    # at `:274` and not at the `:277-279` row 13 quotes (that range is the two clauses INSIDE the
+    # block), so the default head is wrong for every one of them. Same shape as the `:6989`,
+    # `hosted_backup.py:2666` and four rows above: one ROW per SITE, and an unlisted token is coverage
+    # this file only APPEARED to have (the document's §2.7 note: file-scoped drift is "either fixed
+    # everywhere or trusted nowhere").
+    # NON-VACUOUS: move any of the five by `+1` and the content arm reds (the token arm cannot fire —
+    # the document still carries the address); each fragment below is the line's own text at this head,
+    # taken with `grep -n 'def …'/the SQL literal` on this tree, never by a delta. ⚠️ `:218-223` is
+    # pinned on the ONE-TOKEN spelling, whose two document sites are the same address (the §2.2 row's
+    # `tortoise/…` spelling and row 13's bare one) — a single content pin resolves both, and the
+    # occurrence count is what stops a third site appearing unannounced.
+    (_AUDIT, 'session_source_prose_migration.py:218-223', _SSM, 218, '_SOURCE_ROWS = ('),
+    (_AUDIT, '`:1263-1268`', _SSM, 1263, '_HITS_ROWS = ('),
+    (_AUDIT, '`:274-281`', _SSM, 274, '_REPAIR_PAIR = ('),
+    (_AUDIT, 'session_source_prose_migration.py:277-279', _SSM, 277, "AND coalesce(s.summary,'')=$old_sum "),
+    (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -458,6 +479,18 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # that could not be resolved by grep while it named the census's `:842`. Measured:
     # `grep -o 'hosted_backup.py:844' <the document> | wc -l` -> 2.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 2,
+    # #14043 review, finding 2: five UNCLOSED head-relative addresses in this revision's own new
+    # §2.2 `:Source` reader row and in row 13, now enumerated in the header and pinned above. Measured on
+    # this document at this head (`grep -o -F '<token>' <the document> | wc -l`): the one-token
+    # `:218-223` spelling is carried 2x (the §2.2 row's `tortoise/…` form contains it, plus row 13's
+    # bare form — one address, two sites), and each bare sibling is carried 2x (its row plus the
+    # header sentence that now enumerates it) except `:1263-1268`, which row 13, the §2.2 row and the
+    # header all carry — 3x.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:218-223'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1263-1268`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:274-281`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
 }
 
 
@@ -1071,7 +1104,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # in neither the header's enumeration nor `_PINS`, so the header's reader rule sent a reader to the
     # pin, where none of them opens. Same shape as the `:6989` / `hosted_backup.py:2666` rows above:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
-    assert len(_PINS) == 72
+    # 72 -> 77 at the SAME review's finding 2: the class was still unclosed for FIVE addresses this
+    # revision writes at this head — the new §2.2 `:Source` reader row's `session_source_prose_migration.py`
+    # cites (`:218-223`, `:1263-1268`, `:274-281`) and row 13's inner pair (`:277-279`) plus its
+    # `_CONTROL_LEXICON_ROWS` read (`:1292-1300`). The document itself was the only thing naming them,
+    # so nothing reddened when the tree moved under them — the exact failure mode the four rows above
+    # exist to stop, and §2.7's own note (file-scoped drift is "either fixed everywhere or trusted
+    # nowhere") is why the file's remaining unpinned sites are closed in the same commit.
+    assert len(_PINS) == 77
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
