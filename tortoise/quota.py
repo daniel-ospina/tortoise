@@ -783,6 +783,14 @@ def resolve_org_limits(org_id: str) -> dict:
         # fails the whole read and the ladder drops REAL data tiers to recover
         # from a column nothing on this path consumes.
         _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+        # #2406's onboarding marker rides _QUOTA_SELECT too, so its tier is
+        # equally load-bearing here. Without it a schema one migration behind
+        # (20260907000001 absent) keeps `onboarding_email_sent_at` in EVERY rung
+        # — including the terminal base-only one — so every attempt 400s and the
+        # read raises instead of degrading, the exact #1832 class. Found by
+        # `test_13998_capacity_notice.py::test_every_quota_select_ladder_is_complete`
+        # (#13998 review, same finding as the two `hosted_api` ladders).
+        _ORG_ADDITIVE_ONBOARDING_TIER,
         _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
@@ -800,6 +808,7 @@ def resolve_org_limits(org_id: str) -> dict:
         row = _orgs_row_fail_soft(
             get_control_plane(), org_id, select=_QUOTA_SELECT,
             additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+                            _ORG_ADDITIVE_ONBOARDING_TIER,
                             _ORG_ADDITIVE_2040_TIER,
                             _ORG_ADDITIVE_IMPORT_TIER,
                             _ORG_ADDITIVE_DKL_TIER,

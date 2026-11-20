@@ -9727,6 +9727,8 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         _ORG_ADDITIVE_BILLING_TIER,
         _ORG_ADDITIVE_DKL_TIER,
         _ORG_ADDITIVE_IMPORT_TIER,
+        _ORG_ADDITIVE_ONBOARDING_TIER,
+        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
         default_graph_for_credential,
@@ -9741,7 +9743,15 @@ async def _session_user_org(request: Request, user: dict) -> dict:
             # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
             # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
             # /v1/sessions, /v1/onboarding/state.
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+            # ⛔ #13998 review (BLOCKING): `storage_notice_pct` rides
+            # _QUOTA_SELECT too, so ITS tier must be named here or the terminal
+            # base-only rung still selects the missing column and the exact 500
+            # above returns. `tests/test_13998_capacity_notice.py::
+            # test_every_quota_select_ladder_names_the_storage_notice_tier`
+            # parses this module and fails on the omission.
+            additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+                            _ORG_ADDITIVE_ONBOARDING_TIER,
+                            _ORG_ADDITIVE_2040_TIER,
                             _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
                             _ORG_ADDITIVE_0015_TIER,
                             _ORG_ADDITIVE_BILLING_TIER]),
@@ -35786,6 +35796,11 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         _ORG_ADDITIVE_2040_TIER, _ORG_ADDITIVE_IMPORT_TIER,
         _ORG_ADDITIVE_DKL_TIER,
         _ORG_ADDITIVE_0015_TIER, _ORG_ADDITIVE_BILLING_TIER,
+        # #13998 review (BLOCKING): `storage_notice_pct` rides _QUOTA_SELECT, so
+        # its tier must be in this ladder or the terminal base-only rung still
+        # selects the missing column — a 500 on the recovery emergency path.
+        _ORG_ADDITIVE_ONBOARDING_TIER,
+        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
     )
 
     # [SECOND-MODEL-GATE] P2: normalize user-entered case BEFORE the format
@@ -35816,7 +35831,11 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
                 # 500 on migration skew (a schema one migration behind the
                 # newest additive drops that tier to safe defaults instead of
                 # raising).
-                additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+                # ⛔ #13998 review (BLOCKING): the #13998 mark's tier is part of
+                # that ladder for the same reason — it rides _QUOTA_SELECT.
+                additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+                                _ORG_ADDITIVE_ONBOARDING_TIER,
+                                _ORG_ADDITIVE_2040_TIER,
                                 _ORG_ADDITIVE_IMPORT_TIER,
                                 _ORG_ADDITIVE_DKL_TIER,
                                 _ORG_ADDITIVE_0015_TIER,

@@ -531,7 +531,17 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # A registry/agent-minted org carries no address; the copy greets a
         # PERSON, so there is nobody to greet.
         return {"status": "no-email", "org_id": org_id}
-    notice, reason = evaluate(org_id, limits=limits, reading=reading)
+    # ⛔ OFF THE EVENT LOOP. ``evaluate`` is sync and performs TWO blocking
+    # control-plane reads (`quota.resolve_org_limits` → `_orgs_row_fail_soft` →
+    # `cp.query`, and `allowance_gate.read_dimension` → `cp.query`), and this
+    # module's pass runs as an asyncio task INSIDE the API process
+    # (`hosted_api._capacity_notice_sweep_loop`, armed by default). Called
+    # inline, every account's two round-trips stalled the whole event loop for
+    # the length of a fleet pass — the very thing `_cp_offload` exists for
+    # (#3498). The two reads beside it (`read_account`, `claim_notice`) were
+    # already offloaded; the decision between them was not.
+    notice, reason = await asyncio.to_thread(
+        evaluate, org_id, limits=limits, reading=reading)
     if notice is None:
         return {"status": reason, "org_id": org_id}
     if account.notice_pct is not None and notice.threshold <= account.notice_pct:

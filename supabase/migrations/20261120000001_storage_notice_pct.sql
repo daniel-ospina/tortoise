@@ -5,9 +5,19 @@
 -- (`tortoise/capacity_notice.py`) may be sent AT MOST ONCE PER THRESHOLD PER
 -- ACCOUNT, EVER. This column is that ledger.
 --
---   teams.storage_notice_pct  (integer, nullable) — the HIGHEST threshold ever
---     notified for this account (80 or 100), stamped only after the provider
---     ACCEPTS the send.
+--   organizations.storage_notice_pct  (integer, nullable) — the HIGHEST
+--     threshold ever notified for this account (80 or 100), stamped only after
+--     the provider ACCEPTS the send.
+--
+-- ⛔ The table is `organizations`, NOT `teams`. `teams` was renamed by
+-- 20260915000001_tenancy_team_to_org.sql:50 (`ALTER TABLE public.teams RENAME
+-- TO organizations`), and no compatibility view named `teams` is created
+-- anywhere — so a migration written against `teams` fails with
+-- `relation "public.teams" does not exist` and this column never exists. The
+-- `teams` spelling in older additive migrations (e.g. 20260907000001) predates
+-- that rename; copying its TABLE name is what this header used to do and it was
+-- wrong. Verified by `schema-drill` (`supabase/tests/pglite/validate.mjs`
+-- enumerates every migration on disk).
 --
 -- ⛔ ONE mark, not two columns. Two independent markers (one per threshold) let
 -- a lagging pass email "at 80 %" AFTER the 100 % notice has gone out — the
@@ -30,7 +40,10 @@
 -- (#1138) a graceful ramp on the first fleet-wide pass: past the daily cap the
 -- remaining accounts are skipped, unstamped, and retried on a later pass.
 --
--- Additive + idempotent (IF NOT EXISTS), same pattern as 20260907000001.
+-- Additive + idempotent (IF NOT EXISTS) — the same `ALTER TABLE … ADD COLUMN IF
+-- NOT EXISTS` pattern as 20260907000001, applied to the post-rename table name
+-- (20260918000001_metering_period_window.sql is the recent precedent for
+-- `ALTER TABLE public.organizations`).
 -- Nullable, no default, no NOT NULL — a schema missing it (drift, one migration
 -- behind) fails soft: the #1096 ladder drops the mark's OWN tier
 -- (_ORG_ADDITIVE_STORAGE_NOTICE_TIER, newest dropped first) so only the mark
@@ -43,9 +56,19 @@
 -- watermark, not a clock reading).
 --
 -- ⚠️ Deploy ORDER: this migration must apply BEFORE the capacity-notice sweep
--- ships. A PGRST204 missing-column error degrades fail-soft (the mark reads as
--- unset, one retryable notice per pass, provider key deduped), never a 500.
+-- ships. If the column is absent:
+--   · the orgs-row readers (`supabase_control.resolve_api_key` / `org_by_id`,
+--     `quota.resolve_org_limits`, and BOTH `hosted_api` ladders) read the mark
+--     as unset — the #1096 ladder drops `_ORG_ADDITIVE_STORAGE_NOTICE_TIER`
+--     (newest first) and every older additive column stays readable. No 500.
+--   · `capacity_notice.read_account` selects the mark DIRECTLY (one read, so the
+--     mark and the address are one snapshot) and therefore raises; `sweep_pass`
+--     isolates the failure per account, so the pass logs one warning per account
+--     and sends nothing — a quiet no-op for the sweep, never a 500, and never a
+--     notice that could not be stamped.
+-- Nothing here is a licence to ship without applying it: the sweep is the ONLY
+-- path that tells a customer they are near their cap.
 -- ============================================================================
 
-ALTER TABLE public.teams
+ALTER TABLE public.organizations
     ADD COLUMN IF NOT EXISTS storage_notice_pct integer;
