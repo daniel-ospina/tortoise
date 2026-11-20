@@ -1172,16 +1172,25 @@ def test_docs_toc_anchors_all_resolve() -> None:
 
 
 def _docs_section(anchor: str = "storage") -> str:
-    """The markup of `docs.html`'s `#<anchor>` section, up to the next `<h2`.
+    """The markup of `docs.html`'s `#<anchor>` section, up to the next ADVERTISED `<h2`.
 
     A slice rather than the whole page: the vocabulary rule applies to what a
     reader arriving at the anchor meets, and holding the page's deliberately
     technical sections (`How it works`, the API reference) to it would be wrong.
 
+    ⛔ The slice ends at the next heading the TOC ADVERTISES, not at the next
+    `<h2 id=` of any kind. Bounded at any `<h2 id=`, a sibling heading nobody
+    linked — plus everything under it — sits outside the slice and escapes the
+    golden and vocabulary pins; measured, a whole
+    `<h2 id="storage-limits">` carrying `FalkorDB`, `allowance`, `tier` and
+    "permanently deleted" passed all five (#14066 review round 3). A heading a
+    reader can only reach through the TOC is a heading that had to be added
+    deliberately; one that is not advertised stays inside the pinned text.
+
     ⛔ The anchor's absence is asserted BEFORE `str.index` is reached. A bare
-    `index` raises `ValueError`, which surfaces as an ERROR in the three tests
-    that call this helper and names no cause — the opposite of what a guard owes
-    a reader whose edit moved the section (#14066 review, P2).
+    `index` raises `ValueError`, which surfaces as an ERROR in the tests that
+    call this helper and names no cause — the opposite of what a guard owes a
+    reader whose edit moved the section (#14066 review round 1).
     """
     html = _read(DOCS)
     opening = f'<h2 id="{anchor}">'
@@ -1190,16 +1199,25 @@ def _docs_section(anchor: str = "storage") -> str:
         f"(#13998) points at `/tortoise/docs#{anchor}`, so moving or renaming this "
         f"section silently breaks the notices' link text."
     )
-    start = html.index(opening)
-    rest = html[start:]
-    # `<h2 id=` searched from index 1 so the section's OWN opening tag is not
-    # mistaken for the next section.
-    end = rest.find("<h2 id=", 1)
-    return rest if end == -1 else rest[:end]
+    advertised = set(re.findall(r'href="#([^"]+)"', html))
+    rest = html[html.index(opening):]
+    for match in re.finditer(r'<h2 id="([^"]+)">', rest):
+        if match.start() == 0:
+            continue  # the section's OWN opening tag
+        if match.group(1) in advertised:
+            return rest[:match.start()]
+    return rest
 
 
 def test_the_storage_section_is_the_notices_destination_and_is_advertised() -> None:
-    """The anchor the email links to exists on the page AND appears in its TOC."""
+    """The anchor the email links to exists on the page AND appears in its TOC.
+
+    ⚠️ This pins the LITERAL both sides must agree on, plus the notices' own
+    constant once it is importable. `tortoise/capacity_notice.py` lands with the
+    unmerged PR `#14038`, so at this head nothing in the tree knows the URL the
+    email ships — the `importorskip` arms below become the real pin on the day it
+    merges, so a fragment change there cannot quietly stop landing here.
+    """
     html = _read(DOCS)
     assert 'id="storage"' in html, (
         "website/docs.html has no `id=\"storage\"`. `capacity_notice.STORAGE_DOCS_URL` "
@@ -1209,6 +1227,20 @@ def test_the_storage_section_is_the_notices_destination_and_is_advertised() -> N
     assert 'href="#storage"' in html, (
         "the storage section is an orphan: it has an id but no TOC entry, so the "
         "only way to reach it is the email itself."
+    )
+
+    capacity_notice = pytest.importorskip(
+        "tortoise.capacity_notice",
+        reason="lands with #13998's PR #14038; until then the literal above is the pin",
+    )
+    url = urlparse(capacity_notice.STORAGE_DOCS_URL)
+    assert url.path == "/tortoise/docs", (
+        f"the notices now link to {url.path}, which is not the docs page this "
+        f"section lives on."
+    )
+    assert url.fragment == "storage", (
+        f"the notices link to #{url.fragment}, but the section's id is 'storage' — "
+        f"the link text would land on the page's top."
     )
 
 
@@ -1227,7 +1259,7 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     round 2). Punctuation collapses to a space and `falkor` subsumes
     `falkordb`, `falkor db` and the bare product name the owner himself uses.
     """
-    section = re.sub(r"[^a-z0-9]+", " ", _docs_section().lower())
+    section = re.sub(r"[^a-z0-9]+", " ", _visible_text(_docs_section()).lower())
     banned = {
         "allowance": "the notices say 'fast-search capacity'",
         "evict": "the notices say items 'step out of' the fast layer",
@@ -1294,8 +1326,23 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     notices themselves (`tests/fixtures/13998_notice_*.txt`): the copy is
     reviewed once, then held. When `#14012` lands its two controls, the wording
     changes — regenerate the fixture in that PR, where the change IS the review.
+
+    ⛔ ATTRIBUTES ARE ASSERTED ABSENT FIRST. `_visible_text` strips tags, so a
+    claim parked in `title=`/`alt=`/`aria-label=` — all of which a reader meets
+    (hover, screen reader) — is invisible to this comparison; measured, a `title`
+    saying items are "permanently deleted … after thirty days" passed all five
+    storage pins (#14066 review round 3). The section needs no attribute, so the
+    strong form is that it has none; the day one is genuinely wanted, compare RAW
+    markup against a raw fixture instead of relaxing this.
     """
-    got = _visible_text(_docs_section())
+    markup = _docs_section()
+    present = sorted(set(re.findall(r"\s(?:title|alt|aria-label)=", markup)))
+    assert not present, (
+        f"the #storage section carries {present}. The golden compares VISIBLE "
+        f"text, so a reader-facing claim in an attribute would never be reviewed "
+        f"against it."
+    )
+    got = _visible_text(markup)
     want = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
     assert got == want, (
         "the #storage section no longer matches the reviewed wording "
