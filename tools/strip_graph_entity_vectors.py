@@ -2248,7 +2248,8 @@ def label_write_gate(label: str, *,
 
     ⛔ AND THE CERTIFIED REASON CARRIES THE COVERAGE COUNTS (`#13796`). A ``False`` here is
     what a plan's ``strip_ready: True`` rests on, so the sentence behind it must be the
-    measurement ("the record holds N vector(s) …, the graph serves M") and not a bare
+    measurement ("the count measured N vector(s) in the record … against M in the graph")
+    and not a bare
     "write-stopped" a reader cannot check. The blocked side keeps every refusing type's
     own account, joined, because a label blocked on two writers must name both.
     """
@@ -2433,8 +2434,8 @@ def build_plan(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
             "blocked_reason": row["blocked_reason"],
             #: ⛔ THE GATE'S OWN ACCOUNT, carried on BOTH arms (`#13796`). A ready row used
             #: to say only `strip_ready: True`, which is an assertion a human cannot check;
-            #: the reason is the MEASUREMENT ("the record holds N vector(s) …, the graph
-            #: serves M"), so the approver can see what was compared. Additive and
+            #: the reason is the MEASUREMENT ("the count measured N vector(s) in the record
+            #: … against M in the graph"), so the approver can see what was compared. Additive and
             #: optional — a plan written before this field re-reads and executes unchanged.
             "readiness_reason": probe_measurements.get(row["label"]),
         })
@@ -2499,7 +2500,8 @@ def render_plan(plan: dict) -> str:
         if row["strip_ready"]:
             # ⛔ NOT THE BARE WORD "ready" (`#13796`). `strip_ready: True` is what an
             # operator approves, so the note beside it is the GATE'S OWN ACCOUNT — the
-            # measurement ("the record holds N vector(s) …, the graph serves M") and the
+            # measurement ("the count measured N vector(s) in the record … against M in the
+            # graph") and the
             # writers it proved stopped. A ready row that says only "ready" is an
             # assertion the approver has no way to check.
             note = row.get("readiness_reason") or "ready"
