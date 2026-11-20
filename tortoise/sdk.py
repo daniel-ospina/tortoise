@@ -16648,12 +16648,16 @@ class TortoiseSDK:
         id_ = event.get("id") or event.get("eventId")
         if id_ is None:
             return None
-        # RETURN the append outcome: `_emit_event` is True (appended), False (a
-        # configured journal's append RAISED) or None (nothing to log / no
-        # journal). This is the PER-CALL value, which is what a live door must
-        # gate its cache write on — never a delta of `_journal_write_failures`,
-        # which a CONCURRENT writer can inflate (#5612). Existing callers
-        # ignored the return and are unaffected by its arrival.
+        # RETURN the per-call commit signal: `_emit_event` is True (the write
+        # reached the store that OWNS it — the journal line on the append arm,
+        # the record's own `applied` on the cut-over arm #14002 adds), False (it
+        # reached NEITHER — the append RAISED, or, on a cut-over graph, the
+        # record did not take it; read `appended`/`applied` together) or None
+        # (nothing to log / no journal). This is the PER-CALL value, which is
+        # what a live door must gate its cache write on — never a delta of
+        # `_journal_write_failures`, which a CONCURRENT writer can inflate
+        # (#5612). Existing callers that read it as "the append landed" are
+        # unaffected on every arm that is not cut over (#14002).
         # `recorded_ts` rides the ARGUMENT, never the payload: it is a
         # `_JOURNAL_ENVELOPE_KEYS` member, so `_journal_record_payload` strips a
         # caller-authored one — which is also why the door that stamps `ts` must
@@ -53515,15 +53519,20 @@ class TortoiseSDK:
             (``commit_ops.apply_supersessions``). ``None`` (the default, and
             every ``_update_entity`` call) leaves the record byte-identical.
 
-        RETURNS ``_emit_event``'s per-call outcome (#7951): ``True`` when the
-        record was appended to a configured JSONL journal, ``False`` when a
-        configured journal's append RAISED, ``None`` when there is nothing to
-        log or no journal is configured. The per-call value — never a delta of
+        RETURNS `_emit_event`'s per-call commit signal (#7951, re-scoped by
+        #14002): ``True`` when this write reached the store that OWNS it — the
+        JSONL journal line on the append arm, the RECORD's own ``applied`` on a
+        cut-over graph, where the append is skipped because the counter is the
+        only allocator; ``False`` when it reached NEITHER (the append RAISED, or
+        the record refused the write on the cut-over arm — `live_write`'s
+        ``appended=False, applied=False`` pair); ``None`` when there is nothing
+        to log or no journal is configured. The per-call value — never a delta of
         the shared ``_journal_write_failures`` counter, which a CONCURRENT
         writer on the same instance can move (#5612) — is what a live door must
         gate its CACHE WRITE on: it is the §17.1 COMMIT SIGNAL (`create_point`,
-        `update_point`: a failed append leaves the node untouched). Its FIRST
-        consumer was ``delete_point``; #9207 reversed that door's ordering, so
+        `update_point`: a failed append leaves the node untouched, and since
+        #14002 a refused record on a cut-over graph refuses the same way). Its
+        FIRST consumer was ``delete_point``; #9207 reversed that door's ordering, so
         the delete gates its RECORD on the cache write instead and reads this
         value to decide whether the destruction it just performed is recorded.
 

@@ -22618,7 +22618,12 @@ def _report_narrative_home(*, session_id: str, outcome, journalled,
     reached when no journal is configured (its `if log is None:` arm calls
     `_record_write_without_journal` and returns before the record) or when the
     journal append RAISED (its per-call `return False`; the caller's
-    `record_sink` then stays empty). Measured consequence before this report
+    `record_sink` then stays empty). #14002 adds a THIRD arm with the same
+    consequence and a different cause: on a cut-over graph the append is SKIPPED
+    (the record owns the ordinal), so there is no journal line to fall back on
+    and `journalled` answers for the RECORD instead — which is why the caller
+    passes `journal_skipped` separately, from the chokepoint's own `LiveWrite`.
+    Measured consequence before this report
     existed: the commit answered 200 with the narrative in no store at all,
     which is the state the sibling pin calls out — "with the node write gone
     (#10000) the narrative would then be stored NOWHERE".
