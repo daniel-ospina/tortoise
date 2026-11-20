@@ -430,6 +430,18 @@ def test_index_path_document_link_records_the_version_read(tmp_path):
         sdk.close()
 
 
+# ⛔ TWO SPELLINGS, because the retirements split the sites by RECEIVER and not by what
+# they do. `link_source_to_entity` is the PROJECTION's own method
+# (`tortoise/projection/edges.py:2913`) and stays public — `tortoise/connectors/github.py`
+# and `tortoise/mining.py` reach it through `proj.`. The SDK's was PUBLIC until
+# #12901's final batch PRIVATISED it (`tortoise/sdk.py: def _link_source_to_entity`),
+# so `tortoise/hosted_api.py` now writes `sdk._link_source_to_entity(...)`.
+# ⛔ A scan keyed on ONE spelling is the #13899 review's finding: on the retired name it
+# found two of the three sites, on the private name one. The contract is about the DERIVED
+# WRITE, so it keys on both spellings and the count still pins which sites exist.
+_DOC_DERIVATION_ATTRS = frozenset({"link_source_to_entity", "_link_source_to_entity"})
+
+
 def test_document_call_sites_express_derivation_not_containment():
     """A STRUCTURAL contract test, deliberately, and the reason is the regression class
     itself: D10 rewrote three production call sites from ``"Document"`` to
@@ -469,7 +481,7 @@ def test_document_call_sites_express_derivation_not_containment():
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "link_source_to_entity"]
+                 and n.func.attr in _DOC_DERIVATION_ATTRS]
         # The label VARIABLES that reach a document call site's third argument.
         # The conditional-assignment arm below must be scoped to these: a bare
         # `label = A if c else B` is not a document call site, and matching every

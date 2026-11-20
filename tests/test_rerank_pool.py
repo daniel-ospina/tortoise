@@ -1370,6 +1370,14 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
     # volunteer resolve limit while this census called it intentional. A seam is
     # not an exemption; it must carry the flag, and ``_sites`` reads it.
 
+    # ⛔ THE SPELLING THE READ IS MENTIONED BY, in the tree. `tortoise_fts_query`
+    # was the PUBLIC name until #12901's final batch PRIVATISED it
+    # (`tortoise/sdk.py: def _tortoise_fts_query`), so a census that kept keying
+    # on the retired spelling saw ZERO sites and the `>= 12` floor redded with an
+    # empty scan — the "instrument keyed on a name that no longer exists" class,
+    # not a code change. The private spelling is what the call sites actually say.
+    _RERANK_LEVER_ATTR = "_tortoise_fts_query"
+
     def _sites(path: _pl.Path) -> list[tuple[str, bool]]:
         """(enclosing function, opted-out?) for every mention of the read."""
         tree = _ast.parse(path.read_text())
@@ -1386,7 +1394,7 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         out: list[tuple[str, bool]] = []
         for node in _ast.walk(tree):
             if not (isinstance(node, _ast.Attribute)
-                    and node.attr == "tortoise_fts_query"):
+                    and node.attr == _RERANK_LEVER_ATTR):
                 continue
             # the CALL the mention feeds: either it IS the callee, or it is an
             # argument (``_safe(sdk.tortoise_fts_query, …)``)
@@ -1591,8 +1599,15 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # fail-safe) and it does NOT warm the cross-encoder — no per-arm
         # `elapsed_s` figure may be read as a warm start. The registration is
         # about the CALL SHAPE, not about a warmed model.
+        # ⛔ THE OWNER IS THE PRIVATE SPELLING NOW. That file's double DEFINES
+        # `def _tortoise_fts_query(self, …)` delegating to
+        # `self._sdk._tortoise_fts_query(…)`; the retired public name is what this row
+        # recorded before #12901's final batch privatised the SDK method, so the census
+        # reported the site as an UNRECORDED owner (`… is on that list, but only for
+        # ['_query_rows', 'run', 'tortoise_fts_query']`). Named as the tree spells it —
+        # the grant is unchanged, only the owner it is recorded under.
         "tools/capstone_12186_recall.py": frozenset({
-            "tortoise_fts_query", "_query_rows", "run"}),
+            "_tortoise_fts_query", "_query_rows", "run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
