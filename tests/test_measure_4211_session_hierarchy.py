@@ -966,3 +966,121 @@ def test_f4_the_embedded_arm_takes_the_embedded_resolver_not_the_server_one(
     assert getattr(seen.get("retry"), "_retries", None) == 1, (
         "the embedded lane's retry policy (_embedded_retry: ONE reconnect for a real "
         "transport blip) was replaced by the host lane's (_no_server_retry: zero)")
+
+
+# ── #13919 review round 6 ───────────────────────────────────────────────────
+def test_r6_a_writer_run_whose_counts_RAISED_is_unmeasurable_not_a_zero_delta(
+        monkeypatch, tmp_path):
+    """R6 (P1): an UNREADABLE delta was silently treated as a delta of zero.
+
+    ``_delta`` emits a key only when BOTH sides are numbers, and ``_run_queries``
+    turns a raising query into ``{"error": …}``. So a count that timed out left the
+    key ABSENT, ``delta.get(k)`` was ``None``, and ``None == 0`` is ``False`` — the
+    round-5 guard fell straight through and the run exited 0 with an empty delta,
+    which ``--out <receipt> || exit 1`` accepts before overwriting the committed
+    receipt. Reproduced by the reviewer at head ``cd47569012``.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    err = {"error": "TimeoutError: Timeout reading from socket"}
+    after_error = {k: dict(err) for k in
+                   ("points_total", "turns_total", "contains_edges", "sessions_total",
+                    "objects_total", "aboutObject_by_endpoint",
+                    "turns_with_aboutObject", "sessions_with_aboutObject")}
+    before_ok = {"points_total": 0, "turns_total": 0, "contains_edges": 0,
+                 "sessions_total": 0, "objects_total": 0,
+                 "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+                 "sessions_with_aboutObject": 0}
+    seq = iter([dict(before_ok), dict(after_error)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 22, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+    body = mod.measure_writer()
+    assert body["delta_this_run"] == {}, body["delta_this_run"]
+    assert body.get("unmeasurable"), (
+        "an UNREADABLE delta was reported as a measurement — `delta.get(k) is None` "
+        "is not `delta.get(k) == 0`")
+    assert "not readable" in body["unmeasurable"]
+    assert "turns_total" in body["unmeasurable"]
+    assert "queries_failed" in body, (
+        "the writer arm must publish which queries it could not run, like "
+        "measure_live/measure_store do")
+
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "writer", "--out", str(out)]) == 2
+
+
+def test_r6_the_turn_discriminator_is_pinned_against_the_PRODUCTS_source():
+    """R6 (P2): `TURN` was pinned only against itself.
+
+    ``test_every_turn_named_key_carries_the_turn_discriminator`` asserts
+    ``mod.TURN in queries[key]`` — the tool's own constant on both sides — so
+    mutating ``TURN`` to drop its ``pointKind`` half kept all 43 cases green while
+    turning the tool back into the conflation its docstring says the key prevents
+    (extracted episodic MEMORY points counted as turns). The discriminator is the
+    product's, so it is pinned against the product's own words.
+    """
+    sdk_src = (_REPO / "tortoise" / "sdk.py").read_text()
+    anchor = "def _capture_turn_ids("
+    assert anchor in sdk_src, "sdk.py lost _capture_turn_ids — re-derive this pin"
+    doc = sdk_src.split(anchor, 1)[1].split('"""', 2)[1]
+    assert "is_episodic" in doc and "pointKind" in doc, doc
+    assert "pointKind='event'" in doc or "pointKind = 'event'" in doc, doc
+
+    # …and the tool's constant carries BOTH halves of that discriminator.
+    assert "is_episodic" in mod.TURN, mod.TURN
+    assert "pointKind='event'" in mod.TURN.replace('"', "'"), mod.TURN
+
+
+def test_r6_the_store_arm_opens_the_COPY_and_never_the_users_original(
+        monkeypatch, tmp_path):
+    """R6 (P2): "the original is never opened by the engine" was unpinned.
+
+    Mutating ``db = _open_embedded(dst)`` to ``_open_embedded(src)`` — the engine
+    opening the user's real store while still reporting the copy path — left all 43
+    cases green: the fake engine rewrites whatever it is handed, and ``test_n3``
+    hashes the original BEFORE the open, so ``source_sha256`` and
+    ``copy_matches_source`` both stayed "correct". The property is stated in the
+    arm's own comment, so it is asserted on the artifact that would change.
+    """
+    opened: list[Path] = []
+    src = tmp_path / "store.db"
+    src.write_bytes(b"rdb-bytes")
+
+    def _spy(path):
+        opened.append(Path(path))
+        return _MutatingEngine(path)
+
+    monkeypatch.setattr(mod, "_open_embedded", _spy)
+    mod.measure_store(str(src), "tortoise")
+
+    assert opened, "the store arm never opened an engine"
+    assert opened[0] != src, (
+        "the engine was handed the USER'S OWN store — the arm's contract is a "
+        "read-only COPY, and an embedded RDB open rewrites the file it opens")
+    assert src.read_bytes() == b"rdb-bytes", (
+        "the user's original store was rewritten by this measurement")

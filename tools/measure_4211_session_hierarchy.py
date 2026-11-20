@@ -965,6 +965,10 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
             "counts": after,
             "counts_before_any_write": before,
             "delta_this_run": delta,
+            # Which queries the arm could not run — the writer was the one arm with no
+            # such accounting, so an unreadable population was invisible here while it
+            # was published by `measure_live` and `measure_store` (#13919 round 6).
+            "queries_failed": _failed_keys(after),
             # The extraction MODE per session, recorded so a reader can tell a mocked
             # extraction from a keyless one without re-running (#13919 review F1).
             "extraction_modes": modes,
@@ -989,7 +993,25 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
         # and then ignored. A first run under the same keyless env still writes its
         # turns (the mechanical turn loop and link pass are mock-independent), so
         # this cannot mask a real capture.
-        if delta.get("turns_total") == 0 and delta.get("points_total") == 0:
+        # ⛔ And an UNREADABLE delta is not a delta of zero (#13919 review round 6).
+        # `_delta` emits a key only when BOTH sides are numbers, and `_run_queries`
+        # turns a raising query into `{"error": …}` — so a count that timed out
+        # leaves the key ABSENT, `delta.get(k)` is `None`, and `None == 0` is False:
+        # the guard failed open again, by exactly the failure mode this PR's own read
+        # bound produces on a 25k-turn store. Unreadable must be a verdict, not a
+        # skipped branch — the writer arm is the only one with no `queries_failed`
+        # accounting, and `measure_live`/`measure_store` both publish it.
+        turns_delta = delta.get("turns_total")
+        points_delta = delta.get("points_total")
+        if turns_delta is None or points_delta is None:
+            unreadable = _failed_keys(after) or _failed_keys(before)
+            body["unmeasurable"] = (
+                "the before/after counts are not readable ("
+                + (", ".join(unreadable) if unreadable else
+                   "turns_total/points_total absent from a three-session fixture run")
+                + ") — a delta that could not be read is not a delta of zero, so this "
+                "run cannot be reported as a measurement")
+        elif turns_delta == 0 and points_delta == 0:
             # A replay proves nothing about a writer: nothing was written. The numbers
             # that follow are the PRE-EXISTING content of this graph.
             why = ("sessions replayed, not captured: " + ", ".join(replayed)
