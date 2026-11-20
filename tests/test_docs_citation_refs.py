@@ -1819,14 +1819,15 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # ⛔ AN UNTERMINATED `<` IS THE SAME CLASS, AND IT WAS STILL OPEN (#13921 review, finding 1,
     # MEASURED). `_TAG` requires a closing `>`, so a bare `<` matched NOTHING in the unit list and
     # the separator walk stopped on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
-    # `b19c056151`, while `origin/main`'s `_GAP_ABBREV` (`[^\w&\n]`, which
-    # admitted `<`) returned `[('prints TWO paths', False)]` — a fail-open REGRESSION, not a
+    # `b19c056151`, while `origin/main`'s `_GAP_ABBREV` (`[^\w&\n]`, which admitted `<`)
+    # returned `[('prints TWO paths', False)]` — a fail-open REGRESSION, not a
     # declared limit, and the ABBREVIATION is the spelling this document uses most. The row is on
     # BOTH subjects: the abbreviation is the regression `origin/main` proves, and the full command
     # is the widening that closes the same hole there (it was `[]` at `e3f894b31b` too).
-    # Non-vacuity: deleting `_OPEN_TAG` from the unit list reds BOTH rows, because `<` is excluded
-    # from the single-character class — so the unit cannot be reverted silently, which is the
-    # property `_OPEN_BRACKET`'s row above has and this hole is exactly what its absence cost.
+    # Non-vacuity, EXECUTED: `_OPEN_TAG` is the only branch that admits `<`, so deleting it from
+    # the unit list reds this assertion (measured: `1 failed, 13 passed`, the failure naming the
+    # full command's `[]`) — the unit cannot be reverted silently, which is the property
+    # `_OPEN_BRACKET`'s row above has and this hole is exactly what its absence cost.
     for _subject in _TORTOISE_CENSUS_SUBJECTS:
         assert _typed_answers_to_tortoise_cmd(
             f"`{_subject}` < prints TWO paths", _subject), (
