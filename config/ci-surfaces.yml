@@ -3527,6 +3527,16 @@ surfaces:
   # `ro_query`/`query` in-process and the record leg is a monkeypatched reader — no DSN,
   # no graph, no Postgres, no model call.
   - test_13629_entity_vector_retire.py
+  # #13906: the dense-leg QUERY-parity harness (`tools/vector_parity_13906.py`) and
+  # its comparator pins. `core` for the reason every `tools/`-owned row here gives:
+  # the subject is a `tools/` path, which `NON_PYTHON_PREFIXES` swallows, so a
+  # tools-only diff resolves `surfaces: []` and no other row can rescue this file —
+  # hence the `CORE_ALSO` entry in `tools/ci_selection.py`. ⛔ The comparator is the
+  # instrument that is allowed to say "the two dense legs agree"; its own falsifiers
+  # (four poisons, the tie policy, the distance check) are what stop a green parity
+  # report from being an unverified one. DB-free: the module is loaded from `tools/`
+  # by path and every case answers from fixture lists — no DSN, no graph, no model.
+  - test_vector_parity_13906.py
   # #13685: the backfill that unblocks the retirement — `tools/entity_vector_backfill.py`
   # copies each graph node's stored `embedding` for `:Point`/`:Object`/`:Subject`/`:Event`/
   # `:Source` into the matching RECORD row's `embedding` jsonb, only where that column is
