@@ -533,6 +533,48 @@ def test_problem_map_guard_runs_on_the_diffs_it_guards():
     assert "test_problem_map_2820.py" in index["test_files"]
 
 
+def test_a_vector_parity_harness_only_diff_selects_its_pins():
+    """#13914 review (P1): the `CORE_ALSO` arm ITSELF, not just its pin.
+
+    `tools/vector_parity_13906.py` is the comparator that is ALLOWED to say "the
+    two dense legs agree"; its pins live in `tests/test_vector_parity_13906.py`
+    (registered `core`). `tools/` is a flat `NON_PYTHON_PREFIXES` swallow, so a
+    harness-only diff filters to `changed == []` and takes the docs-only early
+    return — measured BEFORE the entry: `surfaces: []`, `full: False`, and the
+    pin file ABSENT from `test_files`, i.e. tier-1 smoke only.
+
+    ⛔ THIS TEST IS THE ARM THE ENTRY'S OWN COMMENT USED TO CLAIM. The entry
+    cited `tests/test_vector_parity_13906.py::test_each_poison_makes_the_
+    comparison_fail` and `::test_a_distance_change_with_identical_ids_is_a_
+    divergence` as its coverage, and those are falsifiers of the COMPARATOR —
+    neither calls `select()`, so neither could see the entry deleted. Measured
+    control: removing the entry leaves every one of them green while a tools-only
+    diff collapses to `surfaces: []`, which is the silent-drop class the entry
+    exists to close (#4309). `test_problem_map_2820.py`'s sibling pin is the
+    shape, and its comment records the same defect found by reading a test
+    against its own comment.
+
+    Selected on the diff that could delete the entry: a change to
+    `tools/ci_selection.py` resolves `full: True` (measured), so this file runs
+    whatever the entry says.
+    """
+    r = _sel(["tools/vector_parity_13906.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        "a harness-only diff must select the comparator's own falsifiers — "
+        "`tools/` is swallowed by NON_PYTHON_PREFIXES, so the `CORE_ALSO` entry "
+        "is the only thing keeping this out of the docs-only early return "
+        f"(#4309); got {r['surfaces']!r}"
+    )
+    assert "test_vector_parity_13906.py" in r["test_files"], (
+        "the entry exists so the comparator's DB-free pins run on the one diff "
+        "class that can weaken them (a widened tie tolerance, a dropped distance "
+        "check, a poison that stopped being detectable) — a green parity "
+        "artifact from an unverified comparator is the exact failure this file "
+        "guards"
+    )
+
+
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
@@ -10371,6 +10413,14 @@ ROWED_BY_THIS_FOLD = (
     # row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
     # file nobody listed has no `durations:` row and nothing reds.
     "test_business_map_filer.py",
+    # #13906 — the dense-leg QUERY-parity comparator (`tools/vector_parity_13906.py`),
+    # a file this fold ADDED. `core` plus a `CORE_ALSO` entry (a tools-only diff
+    # otherwise selects `surfaces: []`) and, since #13914 review round 5, an arm pin
+    # of its own (`test_a_vector_parity_harness_only_diff_selects_its_pins`) — the
+    # entry had cited two comparator falsifiers as its coverage, and neither calls
+    # `select()`. Listed here for the reason every row above states: the ENTRY-RULE
+    # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
+    # row and nothing reds.
     "test_vector_parity_13906.py",
 )
 
