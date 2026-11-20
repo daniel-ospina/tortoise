@@ -3703,20 +3703,24 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
-    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, and the alternation forms
-    `^(\+|-)$` and `^(?:\+|-)$`. `^[\-+]$` is NOT among them: GNU grep answers `Invalid range
-    end`, rc 2, so it is not a spelling a working document can carry (measured). What it does NOT
-    decide is stated at
+    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, and the alternation form
+    `^(\+|-)$` (a PLAIN group — each counts `2` on the 4-line probe). Two spellings are NOT among
+    them, both measured: `^[\-+]$` (GNU grep: `Invalid range end`, rc 2) and `^(?:\+|-)$` (POSIX
+    ERE has no non-capturing group: `warning: ? at start of expression`, counts `1`). What it does
+    NOT decide is stated at
     the assertion that uses it: a regex equivalent to this class but spelled differently
     (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised — a declared residual, not a
     claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
     P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
     false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
-    only blank line is added), and `^+$` is not a regex at all (`grep: Invalid preceding
-    regular expression`, rc 2). Accepting them let a row re-spell its way out of half the class
+    only blank line is added), and `^+$` matches only `+` lines (`+` is literal at the start of a
+    BRE, and ERE warns `+ at start of expression` and then treats it literally too — measured 1 on
+    `x`/`+`/`-`/empty, where the class counts 2). Accepting them let a row re-spell its way out of
+    half the class
     while this arm still called it graded; arm (5) of this cell caught it, which is why this is a
     second guard's weakness rather than an open hole — and why it is closed here rather than left
-    to that one.
+    to that one. The same reasoning retires `^(?:\+|-)$`: POSIX ERE has no non-capturing group, so
+    GNU grep warns `? at start of expression` and counts ONE sign (`1`, where the class counts 2).
     """
     if not (expr.startswith("^") and expr.endswith("$")):
         return False
@@ -3726,8 +3730,10 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
         return False
     if len(alternatives) == 1 and body.startswith("(") and body.endswith(")"):
         inner = body[1:-1]
-        if inner.startswith("?:"):
-            inner = inner[2:]
+        # ⛔ NO `?:` STRIPPING: POSIX ERE has no non-capturing group, so `^(?:\+|-)$` is not the
+        # two-sign alternation it looks like — GNU grep warns `? at start of expression` and
+        # counts ONE sign (measured 1 on `x`/`+`/`-`/empty; the class counts 2). Left unstripped,
+        # the body is `?:\+|-` and the sign loop refuses it below.
         nested = _d5_split_top_level(inner, "|")
         alternatives = nested if nested is not None else alternatives
     if len(alternatives) == 1:
@@ -4056,11 +4062,13 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         # with `_ARG_TAKING_SHORT_FLAGS` dropped from `_d5_flag_word`'s tail this one REDs (the
         # next quoted token becomes the count's expression) while `grep -c'^\+$'` above stays `[]`
         # — an attached value with NO separate token never yields a prescription either way.
-        "grep -c'x' '^\\+$'",           # `-c` takes no argument, so as THIS READER models the
-                                         # document token (quotes preserved) `'x'` is not an
-                                         # attached value — and the shell would strip the quotes
-                                         # and hand grep `-cx`, a VALID count (measured, rc 0);
-                                         # the reader models the prose, not a shell transcript
+        # It sits in this loop on the READER's model, NOT on a claim about grep: the shell strips
+        # the quotes and hands grep `-cx`, a VALID count (measured, rc 0), so a row stating grep's
+        # verdict here would be false. Pinned `[]` because the reader models the DOCUMENT's token,
+        # quotes preserved — the residual is the reader's, and it is declared as such rather than
+        # buried under this group's "not a count of anything" label
+        # (#13995 review round 11, P3).
+        "grep -c'x' '^\\+$'",
         "grep -c -f /tmp/pats '^\\+$'",   # `-f` supplies the PATTERN; the quoted token is a FILE
         "grep -ec '^\\+$'",              # `-e` takes `c` as ITS pattern; this is not a count
         "grep -e'c' '^\\+$'",            # …same, attached
@@ -4144,7 +4152,7 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # ⛔ THE BLANK-CLASS TEST IS A BOUNDED EQUIVALENCE, NOT A SPELLING LIST (#13995 review, P2 —
     # MEASURED). Each spelling below counts the SAME class (`2` on the 4-line probe). The old test,
     # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the other
-    # three — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
+    # two — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
     # the arm GREEN (false PASS), and in place of the row's own expression it tripped the ZERO
     # assertion whose message blamed the count READER (false RED, misattributed). The two the list
     # already carried are kept as controls, so a narrowing that loses them reds here too.
@@ -4152,8 +4160,11 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "grep -cE '^[+-]$'",           # the form the row itself uses
         "grep -cE '^[+\\-]$'",         # the hyphen escaped inside the class
         "grep -cE '^[-+]$'",           # members in the other order
-        "grep -cE '^(\\+|-)$'",        # alternation inside a plain group
-        "grep -cE '^(?:\\+|-)$'",      # …and a non-capturing group
+        "grep -cE '^(\\+|-)$'",       # alternation inside a plain group
+        # ⛔ NOT `^(?:\+|-)$` (#13995 review round 11, P2 — MEASURED): POSIX ERE has no
+        # non-capturing group, so GNU grep warns `? at start of expression` and the expression
+        # counts ONE sign (1 on `x`/`+`/`-`/empty, where the class counts 2). It is pinned as a
+        # REJECTION in the `half_class` loop below, not as an accepted spelling here.
     ):
         assert _d5_blank_class_prescriptions(
             f"a prescription: `{equivalent_class}`\n") == [
@@ -4175,19 +4186,22 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "names this as a residual, so update that docstring in the same commit instead of "
             "leaving a false statement beside the code (#13995 review, P2)")
     # ⛔ AND A LONE SIGN IS NOT THIS CLASS (#13995 review round 10, P2 — MEASURED). `^-$` counts
-    # ONLY the removed half — 0 on a diff whose only blank line is added — and `^+$` is not a
-    # regex at all (`grep: Invalid preceding regular expression`, rc 2). Grading either as this
+    # ONLY the removed half — 0 on a diff whose only blank line is added — and `^+$` matches only
+    # `+` lines (`+` is literal there, measured 1 on `x`/`+`/`-`/empty where the class counts 2).
+    # Grading either as this
     # class let a row re-spell its way out of half of it while the arm still called it graded,
     # which is a false PASS in the direction that matters: the arm cannot tell a narrower
-    # instrument from the one the sentence names. The last row is the alternation spelling of the
-    # same half-class, so the rejection is not a special case for the literal form.
-    for half_class in ("^-$", "^+$", "^(\\-)$", "^[-]$"):
+    # instrument from the one the sentence names. The third row is the alternation spelling of the
+    # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
+    # special case for the literal form.
+    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$"):
         assert not _d5_counts_the_blank_class(half_class), (
-            f"{half_class!r} must NOT be graded as the blank class: a lone sign names ONE line "
-            "shape (`^-$` counts only the removed half, measured 0 on a diff whose only blank "
-            "line is added) and `^+$` is not a regex grep accepts. Grading it would let the "
+            f"{half_class!r} must NOT be graded as the blank class: each names ONE line shape "
+            "(`^-$` counts only the removed half, measured 0 on a diff whose only blank line is "
+            "added; `^+$` matches only `+` lines; `^(?:\\+|-)$` loses its group to POSIX ERE). "
+            "Grading it would let the "
             "row's instrument narrow while this arm reported the class as graded "
-            "(#13995 review round 10, P2)")
+            "(#13995 review rounds 10-11, P2)")
 
 
 def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
