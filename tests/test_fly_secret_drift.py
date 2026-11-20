@@ -3516,8 +3516,25 @@ def _reviewer_entry_point() -> str:
     # loop body") — the lint that reddened `agent-infra-ci / lint` on the first
     # push of this probe. Same fail-closed behaviour: `None` when the heading is
     # gone.
+    #
+    # ⛔ The heading must be the BLOCK'S OWN line, not a prose mention of it. The
+    # gap paragraph and the #13674 block both refer to this paragraph BY NAME, and
+    # a containment match takes the FIRST mention — which slices a note instead of
+    # the entry point and then reports that the entry point names no `fly-only:`
+    # member at all. Measured while fixing #13814's review: adding one note that
+    # named the paragraph cost a full failure of
+    # `test_the_reviewer_entry_point_names_every_fly_only_member` (all three names
+    # reported missing). The same trap was fixed for `_declared_gap_paragraph`'s
+    # anchor in the commit that reconciled the two P2 fixes; this is the twin the
+    # reconciliation left on containment.
     heading = next(
-        (index for index, line in enumerate(lines) if "ENTRY-POINT FOR A REVIEWER" in line),
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip("#").strip().lstrip("\u2500").strip().startswith(
+                "ENTRY-POINT FOR A REVIEWER"
+            )
+        ),
         None,
     )
     if heading is None:
@@ -3763,6 +3780,41 @@ def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
         "unruled member makes the one property this paragraph exists for unfalsifiable "
         "(#13814 review P2: 'their rulings do NOT all exist yet').\n"
         f"--- paragraph ---\n{reserved}"
+    )
+
+    # ⛔ PRESENCE OF THE PREDICATE IS NOT THE PROPERTY. The regression has a SECOND
+    # route: keep the sentence and concede, beside it in the same paragraph, that it
+    # is not met ("…each with its own recorded ruling. Not all of the members'
+    # rulings exist yet."). The rule's words are then still there while the
+    # paragraph states the rule is already false — the same unfalsifiable state, and
+    # the assertion above passes it. The manifest's own note already promises this
+    # arm ("the sentence must be present UNQUALIFIED (a 'not yet recorded' qualifier
+    # inside it REDS)"); this is the check behind that promise. Measured on this
+    # tree: that wording passes the assertion above and reds only here.
+    #
+    # Several spellings, because the defect is the SPEECH ACT (the paragraph
+    # conceding that the precondition is not met), not one string — a guard that knew
+    # only the review's exact wording would pass every paraphrase of it.
+    concession = next(
+        (
+            match
+            for pattern in (
+                r"\bdo(?:es)?\s+not\s+all\s+(?:exist|carry|have|record|land)\b",
+                r"\bnot\s+all\b[^.]{0,60}\b(?:exist|exists|recorded|present|carry|carries|have|has|land)\b",
+                r"\bnot\s+every\b[^.]{0,60}\b(?:exists?|recorded|present|carries|carry|has|have|lands?)\b",
+                r"\b(?:rulings?|markers?)\b[^.]{0,40}\bdo(?:es)?\s+not\s+all\b",
+            )
+            if (match := re.search(pattern, reserved, re.IGNORECASE)) is not None
+        ),
+        None,
+    )
+    assert concession is None, (
+        "the RESERVED paragraph still carries the precondition's WORDS but concedes, in "
+        f"the same breath, that it is not met ({concession.group(0)!r}). A sentence that "
+        "admits the rulings are not all recorded cannot be falsified by any future "
+        "member, so the reservation stops refusing anything while still reading as a "
+        "guard. The gap is already declared in its OWN paragraph — leave this one "
+        f"asserting the contract only.\n--- paragraph ---\n{reserved}"
     )
 
 
