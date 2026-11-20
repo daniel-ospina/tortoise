@@ -466,7 +466,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     # / `_backup_graph` DIRECTLY — the file never imports `tortoise.hosted_api`
     # and makes no endpoint call, so NOTHING resolves `registry_tortoise`:
     # `create_backup` consumes the passed handle verbatim
-    # (`hosted_backup.py:1516-1530`; `_stamp_backup_latest` at :1490-1494).
+    # (`hosted_backup.py:1520-1530`; `_stamp_backup_latest` at :1490-1494).
     # Verified, not assumed: replacing all nine literals with a scratch name
     # leaves the module green, so the name is NOT production-shape by
     # contract. Production's backup handle is `registry_control_plane`, a

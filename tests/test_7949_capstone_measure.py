@@ -6174,11 +6174,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
             # never carried forward from either side. The anchors are unchanged —
             # that is the point of keying a row on the symbol.
-            ("21823", "relation_write = apply_relation_edges("),        ), "sdk"),
+            ("21845", "relation_write = apply_relation_edges("),        ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("21822", "from tortoise.relation_write import apply_relation_edges"),        ), "sdk"),
+            ("21844", "from tortoise.relation_write import apply_relation_edges"),        ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("21810", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
+            ("21832", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to one
         # FILE and the consume pair was re-pointed in one document while the definition
@@ -6187,8 +6187,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("7201", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("12168", "subject_binding_available,"),
-            ("12221", "and not subject_binding_available(graph):"),
+            ("12175", "subject_binding_available,"),
+            ("12228", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("7201", "def subject_binding_available(graph) -> bool:"),
@@ -6197,13 +6197,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so). ⛔ Same +36 `sdk.py` insert as its `00-plan.md` sibling: `12074`/`12127` -> `12110`/`12163`, and the same `#13466` +5 as the `12111`/`12164` -> `12116`/`12169` pair (`#13556` then added a further `+20` to `12136`/`12189`, and a later `origin/main` merge a further `+32` to the `12168`/`12221` the rows below carry).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("12168", "subject_binding_available,"),
-            ("12221", "and not subject_binding_available(graph):"),
+            ("12175", "subject_binding_available,"),
+            ("12228", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("21470", "bind_point_subjects(proj, self, point_id=pid,"),        ), "sdk"),
+            ("21492", "bind_point_subjects(proj, self, point_id=pid,"),        ), "sdk"),
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
         # few lines still "contains" the number the document names.
@@ -6241,7 +6241,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("2506", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
-            ("19233", "The v2 path reports"),            ("19234", '"extraction_mode": "llm:<route>"'),        ), "sdk"),
+            ("19255", "The v2 path reports"),            ("19256", '"extraction_mode": "llm:<route>"'),        ), "sdk"),
         # ...and THAT sentence names a second file, so its `.ts` pair takes its
         # own row: a row carries ONE source key. Both anchors are the FUNCTIONS
         # the row's prose names (`postCapture` and its `install-probe` sibling),
@@ -6331,14 +6331,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("1174", 'env_flag("TORTOISE_S4_DELTA", True)'),
         ), "extractor_v2"),
         ("02-scope.md", "per-door `_honours` set", (
-            ("22616", "_honours: dict[str, frozenset[str]] = {"),        ), "sdk"),
+            ("22638", "_honours: dict[str, frozenset[str]] = {"),        ), "sdk"),
         # ⛔ The D5 row's OWN currency claim for the same symbol, added at review round 2: the row
         # says "The clause is read directly there now", and until this row existed NOTHING read it —
         # measured: mutating all three `:22327` back to `:22291` in `05-verify.md` left all 458 tests
         # green. Its `02-scope.md` sibling above does not reach this document, so this is a second
         # row and not a duplicate: a row scopes to one FILE.
-        ("05-verify.md", "is at `:22616` at THIS head", (
-            ("22616", "_honours: dict[str, frozenset[str]] = {"),
+        ("05-verify.md", "is at `:22638` at THIS head", (
+            ("22638", "_honours: dict[str, frozenset[str]] = {"),
         ), "sdk"),
         ("A4-PER-LAYER.md", "compares `pkind.lower()` against", (
             # RE-DERIVED by CONTENT on the merged tree (main added this row, but this
@@ -6352,7 +6352,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("11686", '"pointKind": pkind,'),
         ), "extractor_v2"),
         ("04-plan.md", "operator / label path", (
-            ("28913", "declared = declared_relation_predicates()"),        ), "sdk"),
+            ("28935", "declared = declared_relation_predicates()"),        ), "sdk"),
         # ⛔ THE RECONCILE APPENDIX'S OWN REPRODUCTION BLOCK (#12462 review round 2).
         # `RECONCILE-A1-A2-A5.md` is in NEITHER `_BUNDLE_DOCS` nor any sweep, so the
         # comment block that prints this record's own `git grep` output had readers for
@@ -6370,11 +6370,11 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # on the other extractor and concludes the opposite of what §0 records, which is
         # why it is pinned by its ANCHOR and not merely by a number.
         ("RECONCILE-A1-A2-A5.md", "reaches it at", (
-            ("19689", "extracted, meta = self._extract_session_v2("),            # …and the CALL on the same line, so the appendix's second half of the
+            ("19711", "extracted, meta = self._extract_session_v2("),            # …and the CALL on the same line, so the appendix's second half of the
             # sentence has a reader too (#12462 review round 3: `:19012` was corrected
             # here and left unpinned, so it could re-stale silently while §0 stayed
             # right — the round-2 shape, one number short).
-            ("21823", "relation_write = apply_relation_edges("),        ), "sdk"),
+            ("21845", "relation_write = apply_relation_edges("),        ), "sdk"),
         # ⛔ THIS HIT IS STATED **THREE** TIMES IN THE DOCUMENT, and the row that reads
         # §0 (`:104`) embeds its number in its own PHRASE — `relation_write.py:7,
         # sdk.py:` — so it binds §0's `sdk.py` half only *incidentally*, and NOTHING read
@@ -6384,7 +6384,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("7", "extractor_v2._assemble_relations"),
         ), "relation_write"),
         ("RECONCILE-A1-A2-A5.md", "relation_write.py:7, sdk.py:", (
-            ("21810", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
+            ("21832", "# `#10999` made the channel TRANSPORT ONLY"),        ), "sdk"),
         # ⛔ THE SAME HIT, IN THE REPRODUCTION BLOCK TWO SCREENS DOWN (#12462 review
         # round 4). The row above binds the appendix's SUMMARY line; the block that
         # prints the `git grep` output states the identical cite again, and it was the
@@ -6392,7 +6392,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # reverting every changed block individually. Two statements of one hit, one
         # reader, is how "one document asserts two numbers" comes back.
         ("RECONCILE-A1-A2-A5.md", "CONSUMER's docstring) and sdk.py:", (
-            ("21810", "# `#10999` made the channel TRANSPORT ONLY"),            # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
+            ("21832", "# `#10999` made the channel TRANSPORT ONLY"),            # …and that block's `relation_write.py:7` half, keyed on ITS OWN source (#12569
             # review round 6: `:7` → `:9` here stayed GREEN — the two rows for this block
             # are both `sdk`-keyed, because a row carries ONE source key).
         ), "sdk"),
@@ -6445,12 +6445,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20329", "if count + est > max_points:"),
         ), "hosted_api"),
         ("05-verify.md", "Measured at `9d790287af`", (
-            ("12141", "_registry_cache = PackRegistry(packs_dir)"),
+            ("12148", "_registry_cache = PackRegistry(packs_dir)"),
             # …and the `subject_binding_available` consume pair on the SAME line, which the
             # registration above left unread (#12569 review round 6: `:10064`/`:10117` →
             # `:10063`/`:10116` stayed GREEN). ⛔ RE-DERIVED at `#13486`: its own `sdk.py` insert is +36 above all three, so `12047`/`12074`/`12127` -> `12083`/`12110`/`12163`; `#13466` then inserted +5 above the pair, onto `12116`/`12169` — the `+1` between `#13486`'s `12110`/`12163` and that pair is `#13456`'s `from . import derived_embedding` (`sdk.py:45`), NOT `#12745`, which is an ancestor of `#13486` — and `#13556`'s own `+20` then took it to `12136`/`12189`, and a later `origin/main` merge a further `+32` took the live values to `12168`/`12221`.
-            ("12168", "subject_binding_available,"),
-            ("12221", "and not subject_binding_available(graph):"),
+            ("12175", "subject_binding_available,"),
+            ("12228", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("05-verify.md", "Measured at `9d790287af`", (
             ("1186", '"sha256": sha, "turns": None'),
@@ -6528,10 +6528,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # opens a different block), which is why the cited line is graded rather than the
         # anchor's uniqueness.
         ("05-verify.md", "their THIS-HEAD values are", (
-            ("27636", "if batch_id:"),
-            ("27748", "dedup_wired = False"),
-            ("27659", ("def", "def _cas_witness(result) -> bool:")),
-            ("27924", ("def",
+            ("27658", "if batch_id:"),
+            ("27770", "dedup_wired = False"),
+            ("27681", ("def", "def _cas_witness(result) -> bool:")),
+            ("27946", ("def",
                        "def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:")),
         ), "sdk"),
         # ⛔ THE CONTENT-REVIEW FILTER AND THE `_list_dedup_candidates` SIGNATURE — D5 states both in
@@ -6551,12 +6551,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # above it is NOT the signature. Re-derived by content at the head this row lands on
         # (`grep -nF 'dedup_reviewed IS NULL' tortoise/sdk.py`), never nudged.
         ("05-verify.md", "the content-review queue filter that cite named", (
-            ("28373", "dedup_reviewed IS NULL"),
+            ("28395", "dedup_reviewed IS NULL"),
         ), "sdk"),
         ("05-verify.md", "under `def _list_dedup_candidates(`", (
-            ("28336", ("def",
+            ("28358", ("def",
                        'def _list_dedup_candidates(self, candidate_type: str = "content",')),
-            ("28337", "limit: int = 50) -> list[dict]:"),
+            ("28359", "limit: int = 50) -> list[dict]:"),
         ), "sdk"),
         # ⚠️ BOTH RANGE ENDS ARE NOW HELD: `:4208` by the `("4201", …)` row above (that line
         # carries text) and `:4230` by the exact-closer form above. A range whose END a
@@ -6615,12 +6615,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `main`'s `c3309ec656` (`#13674`/`#13819`, the embedder's `/health` block) inserts 67 lines
         # above `org_info` (the block OPENS at `:8379`, its first inserted line) and removes 1 (the
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
-        # further down), so the span moves by a uniform +66; then `main`'s `819a473cd4`
-        # (`#13674` close `#13819`'s last review round, `#13841`) inserted 18 lines above `org_info`
-        # (that block OPENS at `:8556`, the first line it added TEXT on — `:8555` is the blank
-        # separator it also added, and `:8552` is the hunk's opening CONTEXT line, already
-        # there, so naming `:8552` would point at a line this commit did not add), so the span
-        # moves by a further uniform +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
+        # further down), so the span moved by a uniform +66 — the START was the `grep -n
+        # 'point_count = await asyncio.to_thread(' tortoise/hosted_api.py` line (`:15328`,
+        # measured at THAT head), and the END was the blank line before `return OrgInfoResponse(`
+        # (`:15405`, with the call at `:15406`). ⛔ THOSE FIGURES ARE HISTORY AT `09f5c99afd`, NOT
+        # THIS HEAD'S; presenting them as this head's is the exact rot this file exists to refuse
+        # (#13900 review, finding 4).
+        # The three offsets (+29 `nodes_used`, +39 `max_nodes`, +77 END) held EXACTLY from that
+        # START, which is how the figures were re-derived rather than nudged. The span at the
+        # PREVIOUS head, `:15262-15339`, no longer contains the `nodes_used` read at all
+        # (`grep -c 'nodes_used = await asyncio.to_thread'` over those lines -> 0), which is why
+        # carrying it would have been a false pin.
+        # ⛔ AND RE-DERIVED ONCE MORE AT THIS HEAD, by the branch that repaired `main` after it
+        # moved `hosted_api.py` by +18 under five anchors and re-derived none of them (#13844):
+        # the span is `:15346-15423` — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
@@ -6804,8 +6812,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 262 cite-shaped `:N` tokens (the `~50` these
-    # comments used to say was about five times low, `262/50 ≈ 5.2`, not a tenfold one —
+    # because D5 is one markdown LINE carrying 266 cite-shaped `:N` tokens (the `~50` these
+    # comments used to say was about five times low, `266/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
     # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
@@ -6827,19 +6835,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING (`:28373` is the file's only `dedup_reviewed IS NULL`),
+    # named`, which is DISCRIMINATING (`:28178` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28373` four times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28178` six times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28373` (the only hit), while
-    # at `e679d22286` `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
-    #
-    # ⛔ AND AT THIS HEAD THAT COMMAND DOES NOT PRINT IT (fresh review at `1021ff6ed7`, P2,
-    # MEASURED): `sed -n '28067p' tortoise/sdk.py` reads `resolver just proved there is only
-    # one.` here and the Tier 1 comment is `:28262`. The reading above is `e679d22286`'s — a
-    # PAST head's — which is the same one-reading-two-heads defect this comment is about.
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178` (the only hit), while
+    # `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
     # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes THREE commits, not
     # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
     # `:28178` (main's `#13724`) — each hop measured on `docs/00_index.md`'s `#12296` row
@@ -6847,10 +6850,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
     # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
-    # prints `:28067` six times and it is still not what the clause says. The live value — and
-    # the one the pin row above asserts — is `:28373`. (`:28336`/`:28337` are the `def` and signature lines, which is a
+    # prints `:28067` four times and it is still not what the clause says. The live value — and
+    # the one the pin row above asserts — is `:28178`. (`:28141`/`:28142` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
-    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28373`" left the
+    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28178`" left the
     # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
     # source, so both halves are graded: a source move the document did not follow reds, and
     # a document re-point the source did not make reds.
@@ -6889,9 +6892,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
     # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle
-    # (`:15385` itself already carries it — the slice is END-INCLUSIVE, so the failing band
-    # stops one line short of the safe threshold; #13879 review round 5, P2),
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -16491,10 +16492,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 262 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 266 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `262` reds instead of leaving four comments behind (a
+    any commit moving the line off `266` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -16705,7 +16706,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 262 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 266 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -16720,16 +16721,11 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: `:6798`-`:6801` asserts each of the four (the symbol derived at `:6794`), and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. What IS new coverage here: the `dedup_reviewed IS NULL`
-#: clause below, the `_D5_TRIPLE_RE` three-anchor sentence (a number swapped onto ANOTHER
-#: anchor's slot, which no per-line row can see), the #13845 quota guard (a number ON D5's
-#: line belonging to a clause about another file) and the `sdk.py` import's other hit
-#: (#13879) — and NOT the I7 `nodes_used`/`max_nodes` pair, which this tuple does not carry: those
-#: two rows are DELETED (see the note at their old site below), because the `_i7` arms bind
-#: `04-plan.md`'s range endpoints, not this row's pair of anchors. Provenance is attached to each
-#: item rather than to a POSITION — "the last two" would silently re-attribute the next
-#: entry appended here. No count is stated either: this list grows, and a count in a
-#: comment is the head-bound figure the rows below forbid.
+#: that clause ever had a reader. THREE things here are new coverage: the
+#: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
+#: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
+#: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
+#: a number that IS on D5's line but belongs to a clause about a different file.
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
@@ -16739,10 +16735,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 262 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 266 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
-    # say was about five times low (`262/50 ≈ 5.2`), which is the same rot one layer up) — so `:20329`
+    # say was about five times low (`266/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
@@ -16756,40 +16752,14 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "hosted_api",
         "if count + est > max_points:",
     ),
-    # ⛔ THE I7 SPAN'S `nodes_used`/`max_nodes` ENTRIES ARE **DELETED** BY THE 2026-11-20
-    # RE-CUT, and this is the record of why (#13879 re-cut). They existed because the row
-    # stated both as CURRENT, and until they did NO ARM read them — the `_i7` arms bind
-    # `04-plan.md`'s range endpoints, not this row's pair of anchors. ⛔ `main`'s `#13853`
-    # REWROTE that clause to label both numbers **at `09f5c99afd`** and to say they are stale
-    # at the head being merged, so there is no present-tense address left on the line for
-    # these two rows to bind; a row scoped to a sentence that no longer exists can only red
-    # as "re-derive the sentence", which is what a DELIBERATELY dropped claim would have to
-    # say.
-    # ⛔ AND THE LABELLED PAIR IS **UNGUARDED**, stated here because an earlier cut of this
-    # comment claimed the opposite (fresh review at `1021ff6ed7`, P2, MEASURED):
-    # `test_the_merge_head_honours_line_is_what_that_head_carries` hard-codes `2584a86ec1`
-    # (`_honours`) and reads the quartet's head OUT OF THE DOCUMENT (`_quartet.group("head")`
-    # -> `bd020ff45b` at this head), then compares each against `git show <sha>:tortoise/sdk.py`;
-    # NO arm in `tests/` or `tools/` reads
-    # `09f5c99afd:tortoise/hosted_api.py`, so `:15328`/`:15405`/`:15357`/`:15367` are
-    # read by nothing. Guarding them is a follow-up, not a claim this file can make.
     # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
-    # review, P2). The I7 pair above closed this class for two anchors and left this
-    # equally bindable clause unbound: the row states `:46062` as CURRENT
-    # ("the same grep also hits `:46062`"), and REVERTING the re-derivation to the
-    # pre-fix `:45728` reddened NOTHING — the delta added no `def test_` at `4747fb570e`, so this
-    # selection was the same there: `pytest tests/test_7949_capstone_measure.py -k 'D5 and not
-    # current_claim' -q` -> `3 passed` (the `current_claim` census arm this branch added is
-    # that delta's ONLY `def test_`, and it is excluded so the selector keeps its `4747fb570e`
-    # size — `-k D5` alone selects 4 at this head), plus `pytest
-    # tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e. `17 passed` and no red.
-    # ⛔ The `20 passed` an earlier cut printed is DELETED: it measures 17.
-    # ⛔ An earlier cut said "the delta adds no `def test_`" as a PRESENT-tense premise, which
-    # the addition two clauses later falsifies (#13879 review round 6, P3) — the exclusion
-    # exists BECAUSE that arm was added, so the premise is stated with its head.
-    # Both parts were measured unique at that head: the regex matches the D5 row once,
-    # and the needle occurs in `sdk.py` once — so this pins the ADDRESS, not just a
-    # number that happens to sit on the line.
+    # review, P2). The row says the registry-import grep ALSO hits a name in a DIFFERENT
+    # import list — ⛔ **not a call site** — and that second address was graded by NOTHING:
+    # reverting it to a pre-fix value reddened no arm at all, which is the class this tuple
+    # exists to close. The needle is that line's own text, so the number and the content it
+    # describes are read by the same regex. Re-derived at the re-cut's merged head: the
+    # grep `-n 'subject_binding_available,'` prints `12175` and `46094` on `tortoise/sdk.py`
+    # (measured 2026-11-20; `main` named the second at `:45867`, which is 227 lines off).
     (
         "the `sdk.py` import's OTHER hit",
         r"the same grep also hits `:(?P<n>\d+)`",
@@ -16801,11 +16771,11 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
 #: The labels `_D5_CURRENT_CLAIMS` must still carry, one per entry. Compared as a SET, never
 #: as a count: a count in a comment about a list that grows is the head-bound figure this
 #: file forbids, while a set reds on BOTH a dropped entry and a duplicated label.
-#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader UNTIL
-#: this census was the loop in `test_the_D5_current_head_anchors_are_the_lines_they_name`, so it
-#: walks whatever entries it FINDS and a SHORTER tuple is silently green. Deleting the I7
-#: `nodes_used` entry left `len(_D5_CURRENT_CLAIMS)` at 4 and `pytest -k D5 -q` at `3 passed`,
-#: no red — so the loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
+#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader
+#: UNTIL this census was the loop in `test_the_D5_current_head_anchors_are_the_lines_they_name`,
+#: so it walks whatever entries it FINDS and a SHORTER tuple is silently green. Deleting the
+#: I7 `nodes_used` entry left `len(_D5_CURRENT_CLAIMS)` at 4 with no red anywhere, so the
+#: loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
 #: nothing, and the one direction a reviewer or fixer under pressure can take — convert a
 #: graded present-tense number back to an ungraded one — had no gate at all.
 _D5_CURRENT_CLAIM_LABELS = frozenset({
@@ -16819,10 +16789,10 @@ def test_every_D5_current_claim_is_still_present() -> None:
     """No `_D5_CURRENT_CLAIMS` entry may be dropped or duplicated without a red.
 
     The tuple's own reader walks the entries it finds, so a shorter tuple reads as green:
-    dropping the I7 `nodes_used` entry left the whole D5 set at `3 passed` (#13879 review,
-    cycle 2). This compares labels against the declared set, so a DROP reds, a duplicate
-    reds (the set comparison alone cannot see one), and an ADDITION must declare its label
-    in the same commit — the set is the census, and a census that is not compared is prose.
+    dropping the I7 `nodes_used` entry left the whole D5 set green (#13879 review, cycle 2).
+    This compares labels against the declared set, so a DROP reds, a duplicate reds (the set
+    comparison alone cannot see one), and an ADDITION must declare its label in the same
+    commit — the set is the census, and a census that is not compared is prose.
     """
     labels = [label for label, _pattern, _source_key, _needle in _D5_CURRENT_CLAIMS]
     dropped = sorted(_D5_CURRENT_CLAIM_LABELS - set(labels))
@@ -16837,6 +16807,7 @@ def test_every_D5_current_claim_is_still_present() -> None:
         f"`_D5_CURRENT_CLAIMS` carries {len(labels)} entries for "
         f"{len(_D5_CURRENT_CLAIM_LABELS)} declared labels — a duplicate label satisfies the "
         f"set comparison while one entry is never read: {labels}")
+
 
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
 #: because its shape (three numbers, three named anchors) is what makes it checkable: the
@@ -16858,8 +16829,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
-    number that shared a line with 262 others (the `~50` this sentence used to say
-    was about five times low — `262/50 ≈ 5.2`: #13900 review, finding 5).
+    number that shared a line with 266 others (the `~50` this sentence used to say
+    was about five times low — `266/50 ≈ 5.3`: #13900 review, finding 5).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
     document handed them two different answers for ONE statement on the SAME line.
@@ -16954,7 +16925,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
     # re-point — `sdk.py:28559` → `:28592`", while at THAT head the file was not in the diff at
     # all (`git diff --name-only origin/main...HEAD -- …/04-plan.md` was EMPTY there, and so was
-    # its `--numstat`) and the document's own row reads `sdk.py:28913`. ⛔ THAT MEMBERSHIP IS NOT
+    # its `--numstat`) and the document's own row reads `sdk.py:28718`. ⛔ THAT MEMBERSHIP IS NOT
     # TYPED AS CURRENT, on purpose: `main`'s `#13819` later moved `hosted_api.py` by +66 and this
     # branch re-derived the I7 range, which puts the file IN the diff — `git diff --numstat
     # origin/main...HEAD -- …/04-plan.md` at the head you merge is the command, never this line.
@@ -16976,39 +16947,19 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead (`sdk.py:28718` -> `sdk.py:28913`, the measured pair), which "
-            "the document CARRIES at this head — "
+            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
+            "`:15262-15339` -> `:15346-15423`), which the document CARRIES at this head — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
-    # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
-    # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
-    # halves were false: the diff's OLD side is `sdk.py:28718` (never `:28682`, which is the
-    # pre-`#13750` value — `b68883c11b` wrote it and `aeb4882c18` re-pointed it to `:28718`), and
-    # `:15346-15423` is on BOTH sides —
-    # `main` made that move — so naming it as this diff's pair was a CHIMERA of two
-    # heads. The pin was green over it, which is exactly the class it exists to close, so
-    # it now pins the measured pair and REFUSES the chimera.
-    for _pair in ("`sdk.py:28718` → `sdk.py:28913`",):
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15346-15423`"):
         assert _pair in text, (
-            f"D5 no longer names {_pair!r}, the one re-point `04-plan.md` carries in this "
-            "diff (`git diff origin/main...HEAD -- …/04-plan.md` is `1 1`; the OLD side "
-            "reads `sdk.py:28718`, the new `sdk.py:28913`) — re-derive the pair, do not "
-            "drop it (#13879 review, cycle 3)")
-    # and the chimera is refused, not merely absent from the message above
-    # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
-    # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
-    # backtick the target, so a literal caught ONE spelling and let three through — green
-    # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
-    # exact old spelling fired, and all three variants stayed green under the literal.
-    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
-        "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
-        "`:15346-15423` reads identically on `origin/main` and at this head, because "
-        "`main` made that move — a pair whose two halves come from two different heads "
-        "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
-    assert "sdk.py:28913" in text, (
-        "D5 no longer names `sdk.py:28913`, the value `04-plan.md`'s own row carries at "
+            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
+            "this head. Both ends are pinned here because the range's TARGET was once "
+            "typed as the base's own value while its SOURCE was already re-derived "
+            "(#13750 review, cycle 3)")
+    assert "sdk.py:28935" in text, (
+        "D5 no longer names `sdk.py:28935`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
         "address; do not drop it")
