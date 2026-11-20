@@ -506,37 +506,43 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
-#: ⛔ TWO GAPS, BECAUSE THE TWO SUBJECTS ASK DIFFERENT QUESTIONS (#13900 review, cycles 9-11).
-#: For the FULL command (`git diff --name-only origin/main...HEAD -- tortoise/`) any gap at all is
-#: an answer's gap: the sentence named THIS head, so a claim behind it is a claim about this head,
-#: and the gap is simply "up to 40 characters with no newline and no sentence terminator" — no
-#: enumeration of punctuation, widths, tags, entities or footnote shapes (all four of those were
-#: measured holes in the three earlier attempts).
+#: ⛔ TWO GAPS, BECAUSE THE TWO SUBJECTS ASK DIFFERENT QUESTIONS (#13900 review, cycles 9-13).
 #:
-#: For the ABBREVIATION (`-- tortoise/`) the gap must stay SHORT — punctuation, emphasis, a tag or
-#: an entity, but not prose. Reason, measured: the abbreviation is a SUBSTRING of every longer
-#: `git diff <other revs> -- tortoise/` invocation, so a long gap cannot distinguish "the command
-#: said something" from "somebody else's invocation was quoted and this is a later clause". Three
-#: true, head-named history sentences on the live document red under the long gap; none red under
-#: this one. That is the F4 fail-open and its fix in the same place.
-#: ⛔ A PERIOD IS NOT A TERMINATOR HERE (#13900 review, cycle 11, MEASURED): excluding `.`
-#: reds `… -- tortoise/`<span class="x"> prints ONE` because the attribute carries one, and an
-#: inline tag is in-house spelling (`<span` appears 44 times under `docs/`). Only `;`, `|` and a
-#: newline stop the gap; a period does not, so a claim one clause past the command is graded
-#: rather than skipped — the over-block direction, which this file's rule prefers.
-#: ⛔ A TAG IS A UNIT, NOT A RUN OF CHARACTERS (#13900 review, cycle 11, MEASURED): with a
-#: flat gap, `<span class="x">` matched its own `=` as the VERB and the claim was dropped —
-#: the verb list includes `=`, so a flat gap cannot stop the scan landing inside a tag. The
-#: gap therefore consumes a tag (or an entity) WHOLE and otherwise proceeds one non-`;`,
-#: non-`|`, non-newline character at a time.
-#: ⛔ A SOFT BREAK IS NOT A PARAGRAPH BREAK (#13900, and `7557a52cf5`'s measurement, kept):
-#: a single newline is a CommonMark SOFT BREAK, so a claim hard-wrapped after the command is
-#: still one claim and is graded; a BLANK line delimits the paragraph and IS the boundary.
-#: Alternatives are DISJOINT — `[^;|<\n]` cannot start a tag or an entity, and the newline
-#: enters only through its own branch — so the run stays linear (measured: 8/16/28/40 spaces
-#: 0.000s; the ambiguous form `7557a52cf5` replaced took 15.8 s at 24).
-_GAP_FULL = r"(?:[^;|<\n]|<[^>\n]*>|&[a-z]{1,8};|\n(?![^\S\n]*\n)){0,40}?"
-_GAP_ABBREV = (r"(?:[^\w\n]|_|<[^>\n]*>|\[\^?\d+\]|&[a-z]{1,8};"
+#: The FULL command (`git diff --name-only origin/main...HEAD -- tortoise/`) names THIS head, so
+#: anything behind it is a claim about this head and the gap is WIDE: at most 40 units of
+#: non-`;`, non-`|`, non-newline text. A period is NOT a terminator — an inline tag's attribute
+#: carries one (`<span class="x">`, in-house spelling: 44 uses under `docs/`), and a claim one
+#: clause past the command is safer graded than skipped.
+#:
+#: The ABBREVIATION (`-- tortoise/`) is a SUBSTRING of every longer `git diff <other revs> --
+#: tortoise/` invocation, so its gap must stay NARROW — no word characters outside a unit — or a
+#: quoted invocation's later clause is refused (the F4 fail-open, measured: three true, head-named
+#: history sentences on the live document red under a wide gap and none red under this one).
+#:
+#: Both gaps are built from FOUR UNIT KINDS and nothing else. Listing them is not an enumeration
+#: of SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
+#: itself, stated once, and each kind is defined structurally:
+#:
+#:   1. a non-word character (plus `_`, which Python counts as a word character and markdown
+#:      emphasis depends on), and for the wide gap any other non-`;`, non-`|` character;
+#:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is a unit (so
+#:      `title="a > b"` does not close early) and in which a SOFT break is allowed but a BLANK
+#:      line is not: `_TAG` below;
+#:   3. a BRACKETED run — `[…]`, which covers `[^1]`, `[^note]`, `[^A]`, `[12]` and a markdown
+#:      link label alike; a run of DIGITS or of LETTERS is not spelled separately anywhere;
+#:   4. an ENTITY — `&…;` with `[#\w]{1,10}` inside, which covers `&nbsp;`, `&#160;` and `&#xA0;`
+#:      (the numeric references are why a letters-only charset was a measured hole).
+#:
+#: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
+#: crossed, a BLANK line is the boundary. The alternatives are close to disjoint — `&` can start
+#: both the entity unit and the catch-all in the wide gap — but every unit is bounded at 10
+#: characters, and the measured cost is linear (8/16/28/40/80/200 spaces and 40 repeated units:
+#: 0.000-0.002 s; the ambiguous form `7557a52cf5` replaced took 15.8 s at 24 spaces).
+_TAG = (r'<(?:"[^"\n]*"|\'[^\'\n]*\'|[^>"\'\n]'
+        r'|\n(?![^\S\n]*\n))*>')
+_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|&[#\w]{1,10};"
+              r"|\n(?![^\S\n]*\n)){0,40}?")
+_GAP_ABBREV = (r"(?:[^\w\n]|_|" + _TAG + r"|\[[^\]\n]*\]|&[#\w]{1,10};"
                 r"|\n(?![^\S\n]*\n))*")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
