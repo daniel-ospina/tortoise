@@ -116,9 +116,10 @@ written as ONE token. The document also writes six pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
 `` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` ``,
 `` `projection/entities.py` `:5765` `` and the `#13124` enumeration's
-`` `projection/entities.py` `:5824` ``); five of them are resolved but not counted by the one-token rule —
-`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, so it is one of the 223
-already — and counting that form gives **227 pairs and 130 drifters**. ⛔ **This enumeration is COUNTED, not
+`` `projection/entities.py` `:5824` ``); four of them are resolved but not counted by the one-token rule —
+two of the six are ALSO written one-token, so they are among the 223 already: `` `sdk.py` `:61594` `` in
+the `:Meta` row of §2.7, and the `#13124` enumeration's `` `projection/entities.py` `:5824` `` — and
+counting that form gives **227 pairs and 130 drifters**. ⛔ **This enumeration is COUNTED, not
 carried**: the `#13971` merge brought `main`'s edition of this paragraph, which listed five forms in a
 document that writes six, so the sentence would have published a denominator one short. So the
 basis must travel with the figure — 127 and 130 are one measurement under two counting decisions, not two
