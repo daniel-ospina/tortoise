@@ -335,19 +335,30 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     elif candidate_distances is not None:
         worst, worst_delta = None, 0.0
         for key, dist in zip(cand, candidate_distances):
-            if key not in distance_of or dist is None:
+            if key not in distance_of or dist is None or not math.isfinite(float(dist)):
                 continue
             delta = abs(float(dist) - float(distance_of[key]))
             if delta > worst_delta:
                 worst, worst_delta = key, delta
-        # ⛔ A `None` DISTANCE IS NOT A VERIFIED ONE. The loop above `continue`s on
-        # it, so an all-None list left `ok: True, max_delta: 0.0` — the SAME
-        # fail-open class the short-list branch one line up refuses. It is
-        # reachable: the record's `(embedding_vec <=> %s)` is NULL for a row whose
-        # generated column is NULL, and `ORDER BY … ASC` puts those last, i.e.
-        # exactly when the answer is short.
+        # ⛔ A `None` OR NON-FINITE DISTANCE IS NOT A VERIFIED ONE. The loop above
+        # `continue`s on both, so an all-None list left `ok: True, max_delta: 0.0`
+        # — the SAME fail-open class the short-list branch one line up refuses.
+        #
+        # `None` is reachable: the record's `(embedding_vec <=> %s)` is NULL for a
+        # row whose generated column is NULL, and `ORDER BY … ASC` puts those
+        # last, i.e. exactly when the answer is short.
+        #
+        # ⛔ AND NaN IS REACHABLE, which is why the test is `isfinite` and not
+        # `is None`: pgvector answers **NaN**, not NULL, for a zero-norm vector
+        # (measured on this box: `SELECT '[0,0,0]'::vector <=> '[1,0,0]'::vector`
+        # → `NaN`). A NaN delta fails `delta > worst_delta` silently, so an
+        # all-NaN arm published `ok: True, max_delta: 0.0` and `main()` printed
+        # PARITY — a required arm turned green by the one input it cannot score.
+        def _unmeasurable(d) -> bool:
+            return d is None or not math.isfinite(float(d))
+
         unmeasured = sum(1 for _k, d in zip(cand, candidate_distances)
-                         if d is None or _k not in distance_of)
+                         if _unmeasurable(d) or _k not in distance_of)
         distance = {"ok": worst_delta <= distance_tol and unmeasured == 0,
                     "max_delta": worst_delta, "worst": worst,
                     "unmeasured": unmeasured, "tolerance": distance_tol}
@@ -1061,6 +1072,13 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
                 f"distance_ok={dist_ok}, "
                 f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
         divergences += len(entry["metric_divergence_ids"])
+
+    # ⛔ AN EMPTY REPORT IS NOT PARITY. `_validate_args` refuses `--queries < 1`,
+    # so this is not reachable through `main()` today — but the guard belongs in
+    # the verdict, not only at the argument layer, or the next caller of `run()`
+    # that skips validation inherits "zero measurements → green".
+    if not report["queries"]:
+        failures.append("no queries were measured — an empty report is not parity")
 
     ok = not failures
     if poisoned:
