@@ -10183,11 +10183,12 @@ class TestProductTeamsCopy:
     )
 
     #: page 2 — the compute claim + the six ↑/↓ labels, in the PDF's ROW order.
-    #: ⛔ `decision` (SINGULAR) is the PDF's own text, not a builder's typo —
-    #: see the class docstring (#14020 review P1 at `73dbbf66ea`).
+    #: ⛔ `decisions` (PLURAL) is the owner's RULING, not a builder's tidy-up:
+    #: #13645#issuecomment-7047852104 records it, and the PDF's singular is the
+    #: typo it corrects (#14020 review P1 at `73dbbf66ea`).
     COMPUTE = (
         "Tortoise then computes over this context, analysing hundreds or even "
-        "millions of variables so you and your agents make decision with "
+        "millions of variables so you and your agents make decisions with "
         "superintelligence."
     )
     OUTCOMES_UP = ("Agent Autonomy & Token efficiency", "Decision quality", "Alignment")
@@ -10205,7 +10206,7 @@ class TestProductTeamsCopy:
          "superseding. This logical model enables your agents to not just retrieve "
          "facts but understand your logic, eliminating drift and regressions."),
         ("beat-reason", "03 · Reason",
-         "Improve decision-making with super intelligence, grounded in your "
+         "Improve decision-making with superintelligence, grounded in your "
          "company\u2019s knowledge and fully auditable. Thanks to an algorithm "
          "inspired by interconnected prediction markets, Tortoise can compute "
          "hundreds or even millions of data points."),
@@ -10484,30 +10485,32 @@ class TestProductTeamsCopy:
             "the `·` separators are `::after` on non-last links, a layout that "
             "only holds as a row (#13696 item 1)")
 
-    def test_the_compute_claim_is_verbatim_including_its_defect(self):
-        """⛔ "make decision with superintelligence" is NOT a typo to fix.
+    def test_the_compute_claim_carries_the_owner_ruled_correction(self):
+        """The PDF's singular "make decision" ships as "make decisions" — RULED.
 
         The PDF reads "so you and your agents make decision with
-        superintelligence." (singular `decision`). It is a defect a copy editor
-        would flag, and the scoping recommended normalising it — but the owner's
-        recorded instruction on #13645 is that the PDF's copy "must survive the
-        build unchanged", so it ships as written, and this pin is what keeps the
-        next reader from "correcting" it silently.
+        superintelligence." The singular is a typo a copy editor would flag, and
+        the owner ruled it so. ⛔ THE RULING IS ON THE ARTIFACT, which is what
+        makes this pin legitimate rather than a builder's preference:
+        https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+        An earlier revision of this branch reverted this correction — correctly
+        — because the ruling was only in a conversation, and `ba53339f58`
+        recorded exactly that condition: "the copy stays verbatim until the
+        ruling is ON the artifact". The ruling is now on the artifact, so copy
+        and pin move together, as that commit required.
 
-        ⛔ A corrected form was shipped once (`e654a120ad`, on a ruling recorded
-        on no artifact) and reverted with its pin at #14020's review P1 — the
-        two move together or not at all. If the owner rules, change the copy AND
-        this pin in the same commit and quote the ruling here.
+        Flipping this pin back to the PDF's spelling is therefore not
+        "honouring verbatim" — it re-lands a typo the owner ruled on.
         """
         compute = _element_by_id(_product_teams_html(), "beat-compute")
         first = re.search(r"<p[^>]*>(.*?)</p>", compute, re.S)
         assert first, "#beat-compute has no paragraph"
         assert _beat_text(first.group(1)) == self.COMPUTE, (
             f"the compute claim reads {_beat_text(first.group(1))!r}; the "
-            f"owner's page 2 reads {self.COMPUTE!r}. ⛔ `make decision` "
-            "(singular) is the owner's text, not a builder typo. A correction "
-            "is allowed only with the owner's ruling recorded on #13645, and "
-            "then the copy and THIS pin move in the same commit.")
+            f"owner's page 2, as ruled, reads {self.COMPUTE!r}. ⛔ `make "
+            "decisions` (plural) is the owner's ruling, recorded on "
+            "#13645#issuecomment-7047852104 — restoring the PDF's singular "
+            "re-lands a typo the owner ruled on.")
 
     def test_the_outcomes_grid_carries_the_pdfs_six_labels_in_row_order(self):
         compute = _element_by_id(_product_teams_html(), "beat-compute")
@@ -10539,11 +10542,11 @@ class TestProductTeamsCopy:
                 f"PDF reads {heading!r}")
             body = [_beat_text(p) for p in re.findall(r"<p[^>]*>(.*?)</p>", beat, re.S)]
             assert body == [paragraph], (
-                f"#{section_id}'s paragraph reads {body!r}; the PDF reads "
-                f"[{paragraph!r}]. ⛔ `super intelligence` (two words) in step 03 "
-                "is the owner's spelling — corrected only with the ruling "
-                "recorded on #13645, and then together with this pin "
-                "(#14020 review P1 at `73dbbf66ea`).")
+                f"#{section_id}'s paragraph reads {body!r}; the PDF, as ruled, "
+                f"reads [{paragraph!r}]. ⛔ `superintelligence` (one word) in "
+                "step 03 is the owner's ruling, recorded on "
+                "#13645#issuecomment-7047852104 — restoring the PDF's two-word "
+                "spelling re-lands a typo the owner ruled on.")
 
     def test_the_onboarding_beat_is_verbatim(self):
         beat = _element_by_id(_product_teams_html(), "beat-onboard")

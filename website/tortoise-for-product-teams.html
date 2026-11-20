@@ -22,23 +22,19 @@
        decision, one file over — keep the two in step.
 
        COPY is the owner's prose from
-       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM —
-       including "make decision with superintelligence" (page 2, singular
-       "decision") and "super intelligence" (step 03) as the PDF spells them.
-       Those are recorded copy DEFECTS the owner has NOT ruled on. #13645's
-       owner decision comment is explicit: the PDF's copy "must survive the
-       build **unchanged** — this is the owner's prose, not a draft to
-       improve." A scoping comment's "If the owner says nothing, the plan below
-       ships (1) and (2) as recommended" is a DEFAULT, not a ruling, so it does
-       not license a correction.
-
-       ⛔ Both strings were corrected once and reverted, copy and pin together:
-       `e654a120ad` shipped "make decisions"/"superintelligence" citing an owner
-       ruling on #13645 that is on no artifact, and #14020's review at
-       `73dbbf66ea` measured its absence (no comment on #13645, #13696 or this
-       PR records it). Verbatim outranks a builder's opinion. If the owner
-       rules, quote the ruling here, change BOTH strings on the page, AND move
-       `TestProductTeamsCopy` in the same commit.
+       `A Superbrain for Founders & Product Teams.pdf`, reproduced VERBATIM,
+       with TWO departures the owner RULED on, recorded here so this is a
+       decision and not an assertion:
+       https://github.com/daniel-ospina/tortoise/issues/13645#issuecomment-7047852104
+       In the owner's terms the two readings are TYPOS and the corrected strings
+       are what ships — page 2's "make decision" is written "make decisions",
+       and step 03's "super intelligence" is written "superintelligence". That
+       comment states that, for these two strings only, it supersedes the
+       earlier "must survive the build unchanged" instruction — which was the
+       default UNTIL the owner ruled, and is why `ba53339f58` reverted an
+       earlier correction with "the copy stays verbatim until the ruling is ON
+       the artifact". The ruling is now on the artifact, so copy and pin move
+       together, as that revert required. Copy is verbatim everywhere else.
 
        PRICING is forked from /tortoise as the PDF instructs, and renders from
        the SAME SOURCE: `/assets/tortoise-pricing.js`, loaded by both pages.
@@ -765,7 +761,7 @@
 
     <!-- ══ 3. Compute claim + the ↑/↓ contrast ═══════════════════════════ -->
     <section id="beat-compute" class="beat workflow">
-      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decision with superintelligence.</p>
+      <p>Tortoise then computes over this context, analysing hundreds or even millions of variables so you and your agents make decisions with superintelligence.</p>
       <!-- investors.html's `.outcomes` component: two lists, green ↑ / gold ↓,
            collapsing to one column on narrow viewports. The PDF's labels. -->
       <div class="outcomes">
@@ -793,7 +789,7 @@
     </section>
     <section id="beat-reason" class="beat workflow">
       <h2><span class="beat-num">03</span> · Reason</h2>
-      <p>Improve decision-making with super intelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
+      <p>Improve decision-making with superintelligence, grounded in your company&rsquo;s knowledge and fully auditable. Thanks to an algorithm inspired by interconnected prediction markets, Tortoise can compute hundreds or even millions of data points.</p>
     </section>
 
     <!-- ══ 7. Onboarding ═════════════════════════════════════════════════ -->
