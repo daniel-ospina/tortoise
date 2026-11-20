@@ -69,6 +69,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
+import datetime
+import email.utils
 import http.client
 import json
 import os
@@ -118,10 +120,35 @@ STRUCTURAL_RELS = {"performs", "produces", "uses", "authoredBy", "ownedBy",
                    "participatesIn", "hasPart", "related", "dependsOn",
                    "references", "wasDerivedFrom", "aboutObject", "aboutSubject",
                    "aboutEvent", "aboutDocument", "aboutSource"}
-OP_TYPES = {"IMPL", "NAND", "coherence"}
-SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
-             "mutuallyExclusive", "hasPart", "causes", "produces", "dependsOn",
-             "transacts", "related", "ownedBy", "managedBy"}
+#: ⛔ TWO MORE TRANSCRIPTIONS THAT GATE A WRITE, READ FROM THE SHIPPED SOURCE.
+#: `SEMANTICS` is the ONLY gate between a Layer-2 typo and a filed operator: the
+#: door WARN-NOT-BLOCKS an out-of-vocabulary `semantics` (`undeclared_relation`,
+#: #7852) and `--verify` cannot read the word back, so a drifted transcription
+#: files an operator whose meaning is neither the judgement's nor recoverable.
+#: ⛔ THE EVIDENCE IS THE SHAPE, NOT A MEASUREMENT — and an earlier cut of this
+#: comment claimed one that CANNOT happen: it said a label typo'd to `suports`
+#: "passed `validate()`", but `validate()`'s own `label not in SEMANTICS` guard
+#: refuses it at every commit of this branch (#13950 review round 6, measured:
+#: `label 'suports' not in the Layer-2 semantics vocabulary`, exit 2 at MAP
+#: REFUSED before any dispatch). What is true is the reason the transcription must
+#: not drift: this set IS the gate, so a copy that gains a word silently ACCEPTS an
+#: operator the judgement never declared, and a copy that loses one refuses a
+#: correct map forever. `OP_TYPES` gates the mechanism. Both now follow the shipped
+#: vocabularies; the literals are the standalone-box fallback, the same shape
+#: `DIRECTIONS` uses (#13913 round 18).
+_FALLBACK_OP_TYPES = {"IMPL", "NAND", "coherence"}
+_FALLBACK_SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
+                       "mutuallyExclusive", "hasPart", "causes", "produces",
+                       "dependsOn", "transacts", "related", "ownedBy", "managedBy"}
+try:
+    from tortoise.ep import MECHANISM_REL_TYPES as _SHIPPED_OP_TYPES
+    from tortoise.pack_registry import SEMANTICS_VALUES as _SHIPPED_SEMANTICS
+
+    OP_TYPES = set(_SHIPPED_OP_TYPES)
+    SEMANTICS = set(_SHIPPED_SEMANTICS)
+except Exception:  # standalone box: the literals, never a silent pass
+    OP_TYPES = set(_FALLBACK_OP_TYPES)
+    SEMANTICS = set(_FALLBACK_SEMANTICS)
 #: ⛔ READ THE DIRECTION VOCABULARY FROM THE SHIPPED SOURCE, never transcribe
 #: it. `validate()` refuses a direction this set does not hold, so a drifted
 #: transcription is a validator that refuses a surface-LEGAL edge — the same
@@ -409,16 +436,33 @@ class Mcp:
 
         ⛔ The two failure classes are DIFFERENT, and their caller must not
         confuse them (#13913 review round 5): a **definite refusal** (the door
-        answered no) is a plain `RuntimeError` — nothing was written, so the
-        caller un-records its intent — while an **UNCONFIRMED** outcome is
-        `UnknownOutcome`, which the caller re-raises WITHOUT un-recording, because
-        a re-issue could write the node twice. `--verify` is the authority on
-        whether an unconfirmed write landed.
+        answered no) is `Refusal` — a `RuntimeError` SUBCLASS, but the subclass is
+        the distinction, not the base — and `write_once` un-records the intent on
+        that type alone, because nothing was written. An **UNCONFIRMED** outcome
+        is `UnknownOutcome`, which the caller re-raises WITHOUT un-recording,
+        because a re-issue could write the node twice. ⛔ AND A BARE
+        `RuntimeError` IS NOT A REFUSAL: `write_once` does not classify it, so the
+        intent STAYS recorded. An earlier cut of this docstring said a refusal was
+        "a plain `RuntimeError`", which is precisely how a new refusal arm gets
+        written as `RuntimeError` and leaves an intent no later run can clear
+        (#13950 review round 5). `--verify` is the authority on whether an
+        unconfirmed write landed.
         """
         for attempt in range(6):
             self._next_id += 1
+            # ⛔ AN UNCONDITIONAL INITIALISATION, KEPT FOR READABILITY AND FOR THE
+            # TYPE — NOT A GUARANTEE, and NOT the fix. The load-bearing bind is the
+            # one in the `except HTTPError` handler below, and `headers` is rebound
+            # on BOTH paths in EVERY iteration (the tuple unpack and that handler),
+            # so no arm could read a previous attempt's value with or without this
+            # line — deleting it leaves the suite green (#13950 review rounds 5 and
+            # 6 both measured that). It is here so the name is visibly bound before
+            # the `try`, which is a readability choice; do not read it as protection
+            # and do not "simplify" the handler's `dict(_hdrs)` normalisation away
+            # on the strength of it.
+            headers: dict = {}
             try:
-                code, payload, _ = self._post({
+                code, payload, headers = self._post({
                     "jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
                     "params": {"name": tool, "arguments": args},
                 })
@@ -430,7 +474,24 @@ class Mcp:
                 # retired a non-idempotent intent the server may have acted on —
                 # the resume then re-issued `create_operator` (#13913 review
                 # round 8, measured). No body is an UNKNOWN body, never a refusal.
+                # ⛔ `headers` IS BOUND HERE BECAUSE THIS IS WHERE A REAL 5xx
+                # LANDS: `urlopen` raises `HTTPError` for every non-2xx, so the
+                # tuple-returning path above is 2xx/3xx only and the status arm's
+                # `Retry-After` read would otherwise reach an unbound name on
+                # exactly the responses it was written for (measured: a real
+                # `HTTPError(503, …, {"Retry-After": "7"})` from `_post` raised
+                # `UnboundLocalError` instead of backing off — one POST where
+                # `main` made six; #13950 review).
+                # ⛔ AND IT IS NORMALISED TO A `dict`: `HTTPError.headers` is an
+                # `email.message.Message`, and `_retry_after_seconds` requires a
+                # mapping — binding the Message directly would leave the header
+                # unread, i.e. the same defect wearing the fix's clothes.
                 code, payload = exc.code, None
+                _hdrs = getattr(exc, "headers", None)
+                try:
+                    headers = dict(_hdrs) if _hdrs else {}
+                except (TypeError, ValueError):
+                    headers = {}
                 # ⛔ THE BODY READ IS PART OF THE CLASSIFICATION. This read sits
                 # inside `except HTTPError`, so an exception raised HERE is not
                 # caught by the sibling `except` below — and it escaped all the
@@ -459,9 +520,17 @@ class Mcp:
                             _unknown(tool, f"HTTP {code} body unreadable: "
                                      f"{read_exc}")) from read_exc
                     if attempt == 5:
-                        raise RuntimeError(
-                            f"{tool}: transport died reading the error body — "
-                            f"{read_exc}") from read_exc
+                        # ⛔ AN UNCLASSIFIED `RuntimeError` HERE IS NOT A "NOT
+                        # WRITTEN": the request was SENT and the status line came
+                        # back, so only the body died. `write_once` catches
+                        # `UnknownOutcome` (and `Refusal`) by TYPE, so the intent
+                        # was already kept — but the exit summary read the prose
+                        # and called it "NOT written", contradicting the ledger
+                        # (#13950 review round 4). `_unknown` is what makes the
+                        # line and the type agree.
+                        raise UnknownOutcome(
+                            _unknown(tool, f"HTTP {code} body unreadable: "
+                                     f"{read_exc}")) from read_exc
                     time.sleep(min(60, 5 * (attempt + 1)))
                     continue
                 try:
@@ -481,7 +550,13 @@ class Mcp:
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, exc)) from exc
                 if attempt == 5:
-                    raise RuntimeError(f"{tool}: transport died — {exc}") from exc
+                    # ⛔ SAME REASON AS THE UNREADABLE-BODY ARM ABOVE: a transport
+                    # death after the request was sent may have LANDED, which is
+                    # what keeps the intent recorded — so the type must say so
+                    # too, or the summary reads it as "NOT written" (#13950
+                    # review round 4).
+                    raise UnknownOutcome(
+                        _unknown(tool, f"transport died — {exc}")) from exc
                 time.sleep(min(60, 5 * (attempt + 1)))
                 continue
 
@@ -493,28 +568,48 @@ class Mcp:
                 raise UnknownOutcome(
                     f"{tool}: HTTP {code} body is not a JSON-RPC object "
                     f"({type(payload).__name__}) — the write is UNCONFIRMED")
-            err = (payload or {}).get("error")
-            if err:
-                data = err.get("data") if isinstance(err, dict) else None
-                retry_after = data.get("retry_after") if isinstance(data, dict) else None
-                if retry_after:
-                    # "the work may still complete" — wait the advertised delay,
-                    # then re-issue. Only for a write whose repeat converges.
-                    if not retry_safe:
-                        raise UnknownOutcome(_unknown(tool, err))
-                    time.sleep(min(120, float(retry_after) + 1))
-                    continue
-                raise Refusal(f"{tool} refused: {err}")
-            # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS: a timeout may have been
-            # read and acted on, and a rate limiter can sit INSIDE the door
-            # (measured: a 429 un-recorded an operator intent and the resume wrote
-            # a SECOND operator). They take the retryable/UNKNOWN path (#13913
-            # review round 7).
+            # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS, AND THE STATUS SAYS SO —
+            # NOT THE BODY SHAPE: a timeout may have been read and acted on, and
+            # a rate limiter can sit INSIDE the door (measured: a 429
+            # un-recorded an operator intent and the resume wrote a SECOND
+            # operator). This arm used to sit BELOW the `error` arm, so a
+            # 504/429/5xx carrying a JSON-RPC `error` envelope — which the
+            # control-plane middleware emits (`mcp_auth`: `_jsonrpc_error(...,
+            # status=503, headers={"Retry-After": …})`) — matched the refusal
+            # channel by SHAPE and retired a non-idempotent intent: measured, a
+            # 504 whose body is `{"error": "upstream request timeout"}` left the
+            # marker out of `written` AND `unconfirmed`, and the next run POSTed
+            # `create_operator` again over endpoints the upstream may have
+            # written (#10849). Status first (#13913 review round 17).
             if code >= 500 or code in (408, 429):
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, f"HTTP {code}"))
                 if attempt < 5:
-                    time.sleep(min(60, 5 * (attempt + 1)))
+                    # ⛔ THE ADVICE CAN RIDE EITHER CHANNEL, SO READ BOTH. The
+                    # control-plane middleware answers `Retry-After` in HEADERS
+                    # and `call()` used to discard the third element of `_post`'s
+                    # result; some surfaces answer only in the BODY
+                    # (`error.data.retry_after`). Reading the header alone dropped
+                    # a server's advertised 30 s back-off and retried 5 s later
+                    # (#13950 review round 2, measured) — and the `error` arm that
+                    # used to carry the body value sits BELOW this arm, so it can
+                    # no longer speak for a non-2xx at all.
+                    wait = (_retry_after_seconds(headers)
+                            or _body_retry_after(payload))
+                    # ⛔ A POSITIVE WAIT IS FLOORED AT 1 s, AND A NON-POSITIVE ONE
+                    # IS NO USABLE ADVICE. Both halves are deliberate, and neither
+                    # is an accident of truthiness. `Retry-After: 0` legally means
+                    # "retry now" and fractional seconds are legal too, so honouring
+                    # the value literally lets a server drive SIX back-to-back POSTs
+                    # at itself — measured at #13950 review round 4: a
+                    # `Retry-After: 0.001` produced 6 posts in **14.5 ms**, exactly
+                    # the retry storm an earlier comment here claimed could not
+                    # happen. The floor keeps the server's intent (wait roughly what
+                    # it asked) while bounding the hammer; a `0` falls through to
+                    # the next channel and then to the ramp, which waits LONGER than
+                    # advised and never shorter.
+                    wait = min(120, max(1.0, wait)) if wait else None
+                    time.sleep(wait if wait else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
                 # body is not a JSON-RPC `result`, so `_refusal` found nothing
@@ -530,12 +625,55 @@ class Mcp:
             # round 6). A 2xx/3xx that carries no readable tool result is the
             # opposite case — the server accepted the call and the outcome is
             # genuinely unknown.
+            err = (payload or {}).get("error")
+            if err:
+                retry_after = _body_retry_after(payload)
+                # ⛔ `is not None`, NOT TRUTHINESS — this decides LANDED-NESS, not
+                # just how long to wait, and `0` is a legal "retry now". With a
+                # truthiness test, `retry_after: 0` (also `-5` and `"0"`, which
+                # `_seconds_or_none` clamps to `0.0`) fell past this arm to the
+                # `Refusal` below, so a may-have-landed write was declared a
+                # DEFINITE REFUSAL — `write_once` then retired the intent, its
+                # marker sat in neither `written` nor `unconfirmed`, and the resume
+                # re-issued non-idempotent operators over endpoints the door said
+                # "the work may still complete" for: the #10849 EP double-count, and
+                # a fail-OPEN measured at #13950 review round 7. Absent advice is
+                # still a refusal; present-but-zero is not.
+                if retry_after is not None:
+                    # "the work may still complete" — wait the advertised delay,
+                    # then re-issue. Only for a write whose repeat converges.
+                    if not retry_safe:
+                        raise UnknownOutcome(_unknown(tool, err))
+                    # ⛔ THE ATTEMPT GUARD EVERY SIBLING ARM HAS. Without it the
+                    # SIXTH iteration slept and then `continue`d out of the loop,
+                    # so a 120 s back-off was taken for a request no attempt would
+                    # make, inside a run that was already ready to report
+                    # (#13950 review round 2, measured: 6 posts, 6 sleeps against
+                    # every other arm's 6 and 5).
+                    if attempt < 5:
+                        # ⛔ THE SAME 1 s FLOOR THE STATUS ARM APPLIES. Fractional
+                        # seconds are legal server advice, and this arm honoured
+                        # them literally: measured at #13950 review round 5,
+                        # `retry_after: 0.001` still produced 6 posts in ~15 ms on
+                        # a 2xx error envelope — the retry storm the floor exists
+                        # to prevent, on a channel the first fix did not cover.
+                        # ⛔ AND A NON-POSITIVE VALUE TAKES THE RAMP, never the
+                        # floor: `Retry-After: 0` must not become six back-to-back
+                        # POSTs either, and the ramp waits LONGER than it advised.
+                        time.sleep(min(120, max(1.0, retry_after)) if retry_after
+                                   else min(60, 5 * (attempt + 1)))
+                        continue
+                    raise UnknownOutcome(
+                        f"{tool}: retry_after {retry_after:g}s after 6 attempts — "
+                        "the write is UNCONFIRMED")
+                raise Refusal(f"{tool} refused: {err}")
             if 400 <= code < 500:
                 raise Refusal(
                     f"{tool} refused: HTTP {code} — the write did not land "
                     f"({json.dumps(payload)[:200]})")
             if not payload:
-                raise UnknownOutcome(f"{tool}: empty response (HTTP {code})")
+                raise UnknownOutcome(f"{tool}: empty response (HTTP {code}) — "
+                                     "the write is UNCONFIRMED")
             result = payload.get("result", payload)
             # A `result` that is not a tool result at all (a 4xx JSON body such
             # as {"message": "Unauthorized"}) is a FAILURE, not a success: the
@@ -616,9 +754,143 @@ class Refusal(RuntimeError):
     """
 
 
+# ⛔ THE MAY-HAVE-LANDED CLASS IS IDENTIFIED BY EXCEPTION **TYPE**, NOT BY PROSE.
+# The module's central distinction is `Refusal` (nothing landed, the intent may be
+# retired) vs `UnknownOutcome` (may have landed, the intent STAYS), and prose is a
+# second definition of it that drifts: an earlier cut classified the exit summary
+# by matching substrings, and measured at #13950 review round 4 it missed TWO of
+# the module's own raise sites — `empty response (HTTP 200)` and both
+# exhausted-transport arms — so 51 non-idempotent writes whose intents the ledger
+# had correctly KEPT were summarised `51 edge(s) NOT written`, the state that
+# invites hand-editing `written` (#10849's double-count). A new raise site cannot
+# drift out of a type test.
+
+
 def _unknown(tool: str, reason: object) -> str:
     return (f"{tool}: outcome UNKNOWN ({reason}) — this write is NOT idempotent, so "
             "it is not retried; re-run and let --verify decide what landed")
+
+
+def _seconds_or_none(value: object) -> float | None:
+    """A `Retry-After` value in seconds, or None when it is not one.
+
+    ⛔ ONE CONVERTER FOR BOTH CHANNELS — the header (`Retry-After`) and the body
+    (`error.data.retry_after`). The module's fail-closed contract is decided by
+    exception TYPE (`Refusal` vs `UnknownOutcome`), so an unclassified raise is
+    the same defeat as a wrong verdict: a bare `float()` on a non-numeric body
+    value (`"10s"`, `[30]`) raised `ValueError` straight out of `call()`, and the
+    node loops call `mcp.call` with no `try`, so `--write` aborted on its FIRST
+    write with `state.json` still `{}` — no summary, no ledger, no exit code
+    (#13950 review round 2, measured). `_retry_after_seconds` already promised
+    "never a raise"; the body path did not, because it used `float` directly.
+    """
+    # ⛔ RFC 9110 §10.2.3 ALLOWS AN `HTTP-date` FORM: `Retry-After: Fri, 31 Dec
+    # 1999 23:59:59 GMT`. Dropping it silently fell back to the client's own
+    # ramp, i.e. the server's advice was ignored (#13950 review rounds 31 and
+    # 32). ⛔ TRY THE NUMBER FIRST AND THE DATE SECOND — never a spelling
+    # heuristic: RFC 5322 makes the day-of-week OPTIONAL, so a date carrying no
+    # comma is legal, and a `"," in value` gate silently misses it.
+    # `float()` failing IS the discriminator, and an unparsable value is still
+    # `None` (the same as no advice), so the no-raise contract is unchanged.
+    # `bool` is an `int` in Python, and `Retry-After: True` is not a wait.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        # ⛔ `OverflowError` IS THE SAME DEFECT IN ANOTHER DRESS: a JSON integer
+        # too large for a float (`10**400`) raises it from `float()`, and an
+        # uncaught one escapes `call()` unclassified — aborting a `--write` run
+        # on its first write with no summary, which is exactly what the
+        # `ValueError` arm above closes. A STRING cannot reach it
+        # (`float("1e400")` is `inf`, refused below); the integer path can
+        # (#13950 review round 3). A string that is not a number is the OTHER
+        # legal form of the same header, so it is tried as one before giving up.
+        return _http_date_seconds(value) if isinstance(value, str) else None
+    # ⛔ `nan`/`inf` ARE NOT A WAIT. `min(120, nan)` is NOT 120 — every
+    # comparison against `nan` is False, so `min` returns its FIRST argument and
+    # the cap silently does nothing — and an infinite back-off is not advice.
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        return None
+    return max(0.0, seconds)
+
+
+def _http_date_seconds(value: str) -> float | None:
+    """An RFC 9110 `HTTP-date` value as a wait in seconds (or None).
+
+    ⛔ THE DATE FORM IS NOT OPTIONAL IN THE GRAMMAR: RFC 9110 §10.2.3 defines
+    `Retry-After = HTTP-date / delay-seconds`, and the recipient must accept
+    both. This is the fallback `_seconds_or_none` takes when `float()` refuses a
+    value, so BOTH channels read both forms (#13950 review rounds 31 and 32).
+
+    A date already in the PAST yields `0.0`, which the status arm treats as no
+    usable advice and answers with its own (longer, bounded) ramp — never
+    shorter than asked. Nothing here raises: an unparseable or out-of-range date
+    is `None`, so a caller falls through exactly as it did before.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if when is None:            # `parsedate_to_datetime` returns it for a bad day
+        return None
+    if when.tzinfo is None:     # `-0000` is legal and parses NAIVE, as UTC
+        when = when.replace(tzinfo=datetime.UTC)
+    try:
+        delta = (when - datetime.datetime.now(datetime.UTC))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    try:
+        return max(0.0, delta.total_seconds())
+    except (OverflowError, ValueError):
+        return None
+
+
+def _retry_after_seconds(headers: object) -> float | None:
+    """The `Retry-After` a transport answered with, in seconds (or None).
+
+    `mcp_auth`'s control-plane answers carry the back-off as a HEADER
+    (`headers={"Retry-After": …}`) while their JSON-RPC body's `data` may hold
+    none, so reading only `data["retry_after"]` ignored the server's own advice.
+
+    ⛔ REQUIRES A `dict`, DELIBERATELY: `HTTPError.headers` is an
+    `email.message.Message`, and a caller that binds that directly gets `None`
+    back — the fix silently not fixing anything. `Mcp.call` normalises at the one
+    place a real `HTTPError` is caught, and the strict guard is what makes that
+    normalisation load-bearing rather than decorative.
+
+    ⛔ BOTH GRAMMAR FORMS ARRIVE THROUGH `_seconds_or_none`, which falls back to
+    the `HTTP-date` form the RFC also requires — one converter, so the body
+    channel reads both forms too.
+    """
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if str(key).lower() != "retry-after":
+            continue
+        return _seconds_or_none(value)
+    return None
+
+
+def _body_retry_after(payload: object) -> float | None:
+    """The `retry_after` a JSON-RPC error body advertised, in seconds (or None).
+
+    The SECOND channel for the same advice. It is read on the status arm as well
+    as the `error` arm because the status arm sits ABOVE the `error` arm — so a
+    non-2xx whose body names a delay but whose headers carry no `Retry-After`
+    would otherwise reach the status arm and be retried on the client's own
+    5-second ramp, silently dropping the server's advertised back-off (#13950
+    review round 2).
+    """
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    data = err.get("data") if isinstance(err, dict) else None
+    if not isinstance(data, dict):
+        return None
+    return _seconds_or_none(data.get("retry_after"))
 
 
 def _mechanism_mismatch(result: dict) -> str | None:
@@ -729,6 +1001,35 @@ def write_map(doc: dict) -> int:
     ids: dict[str, str] = st["ids"]
     failures: list[str] = []
     ambiguous: list[str] = []
+    # ⛔ SNAPSHOT THE LEDGER AS LOADED, because a mid-run arm MUTATES `st`.
+    # The `mechanism_mismatch` arm saves `st["failed"] = old ∪ failures` while it
+    # runs (it must — a run killed before the final save would lose the only
+    # record of an inverted operator), so by the time the remedy block computes
+    # `carried` from `st["failed"]`, that list already holds THIS RUN's own
+    # declined/unbound lines. Their markers never enter `done`, so they were then
+    # re-labelled as "marker(s) from an earlier run" — a directive to go looking
+    # for prior-run state that does not exist (#13950 review round 3, measured on
+    # an 11-mismatched + 9-declined run with `failed: []` on disk: it printed
+    # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
+    # statement about what was on disk BEFORE this run, so it reads that.
+    failed_before: list[str] = list(st.get("failed") or [])
+    # ⛔ THERE IS NO SECOND LIST OF MAY-HAVE-LANDED LINES. The class rides as a
+    # TAG beside each line (`_fail`), assigned where the type is known; a parallel
+    # list of the same lines could only drift from it.
+    # ⛔ EVERY LINE CARRIES ITS CLASS FROM THE SITE THAT PRODUCED IT. The summary
+    # used to infer the class from the line's PROSE, and every failure string can
+    # contain server-controlled text, so a door quoting `": mechanism_mismatch — "`
+    # (or `": unbound endpoint "`) inside its own error put ONE line in several
+    # buckets at once: the numeric summary then reported a refused write as
+    # LANDED and printed contradictory remedies for one failure (#13950 review
+    # round 25, measured with a `Refusal` whose message carried the anchor). The
+    # tag is structural — a site cannot be talked into another class by its input.
+    failure_class: dict[str, str] = {}
+
+    def _fail(line: str, cls: str) -> None:
+        """Append a failure line and record the class the SITE assigned it."""
+        failures.append(line)
+        failure_class[line] = cls
 
     # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
     # taken on trust. The pre-fix run recorded every item's own name/url/content
@@ -965,17 +1266,23 @@ def write_map(doc: dict) -> int:
             if "op" in e and marker in pending:
                 # Same rule as an unresolved event: the operator may exist, and
                 # re-issuing it double-counts the claim's EP weight (#10849).
-                failures.append(
+                _fail(
                     f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued. "
                     "Run --verify: if the edge is present it landed — delete this "
                     "marker from `unconfirmed` in state.json, KEEP it in `written`, "
                     "and delete the matching line from `failed`; if it is absent, "
-                    "delete it from `written` (and its `failed` line) and re-run.")
+                    "delete it from `written` (and its `failed` line) and re-run.",
+                    "unknown")
                 print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
         if not src or not dst:
-            failures.append(f"{marker}: unbound endpoint {e['from']}/{e['to']}")
+            # ⛔ PRINTED, not merely recorded: this is the ONLY trace of a
+            # declared edge that was never attempted, and a failure that exists
+            # only in `state.json` is one an operator reads about after the run
+            # has already reported what it did (#13913 review round 17).
+            _fail(f"{marker}: unbound endpoint {e['from']}/{e['to']}", "unbound")
+            print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         try:
             if "op" in e:
@@ -992,7 +1299,17 @@ def write_map(doc: dict) -> int:
                     # — but the run must NOT report success: the mechanism
                     # stored is not the one the meaning declares, so the
                     # judgement is filed INVERTED and only a re-filing fixes it.
-                    failures.append(f"{marker}: {mismatch}")
+                    _fail(f"{marker}: {mismatch}", "mismatch")
+                    # ⛔ PRINTED, like every other failure class: this arm and the
+                    # two below are the ONLY producers of a `failed` line, and the
+                    # other two print. Silently appending left the `mismatch` arm's
+                    # diagnosis in `state.json` alone on the run that recorded it —
+                    # the very condition the unbound arm's print exists to remove
+                    # (#13950 review round 2, measured: a run that wrote all 51
+                    # operators against a warn-not-block surface reported
+                    # `51 edge(s) not written` and named `mechanism_mismatch` ZERO
+                    # times on stderr).
+                    print(f"  !! {failures[-1]}", file=sys.stderr)
                     # ⛔ PERSISTED AS IT IS OBSERVED, not at the end of the run.
                     # `failures` is a LOCAL list: `mark()`/`write_once()` save
                     # `st` while `st["failed"]` still holds the value loaded from
@@ -1034,16 +1351,29 @@ def write_map(doc: dict) -> int:
                 # round 14, second pass).
                 got = _json_of(res)
                 if "created" in got and got.get("created") is not True:
-                    failures.append(
+                    _fail(
                         f"{marker}: create_edge returned created="
                         f"{got.get('created')!r} — the edge was NOT written, so "
-                        "it is NOT marked; the endpoints it names may not exist")
+                        "it is NOT marked; the endpoints it names may not exist",
+                        "declined")
                     print(f"  !! {failures[-1]}", file=sys.stderr)
                     continue
             mark(marker)
+        except (UnknownOutcome, Refusal) as exc:
+            # ⛔ A `Refusal` IS NOT AN UNCLASSIFIED EXCEPTION, and folding both
+            # into one bucket is what made finding 4 a false verb (#13950 review
+            # round 31). `Refusal` means THE DOOR ANSWERED NO — nothing landed,
+            # which is exactly what `declined` says and exactly why `write_once`
+            # un-records the intent on it. A GENERIC raise leaves the intent
+            # recorded, so it may have landed. One bucket cannot honestly carry
+            # both, and the NOT-written verb was true of only one of them.
+            _fail(f"{marker}: {e.get('op') or e.get('relation')} "
+                  f"{e['from']}->{e['to']}: {exc}",
+                  "unknown" if isinstance(exc, UnknownOutcome) else "declined")
+            print(f"  !! {failures[-1]}", file=sys.stderr)
         except Exception as exc:  # recorded in `failures`, never swallowed
-            failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
-                            f"{e['from']}->{e['to']}: {exc}")
+            _fail(f"{marker}: {e.get('op') or e.get('relation')} "
+                  f"{e['from']}->{e['to']}: {exc}", "exception")
             print(f"  !! {failures[-1]}", file=sys.stderr)
     # ⛔ A RESUME MUST NOT ERASE A DIAGNOSIS IT DID NOT RE-OBSERVE. `failed` was
     # overwritten unconditionally, so a run that resolved nothing but also failed
@@ -1053,12 +1383,56 @@ def write_map(doc: dict) -> int:
     # nodes and edges written` and erased the only record that the graph stores an
     # operator meaning the opposite of the judgement (#13913 review round 10).
     # A failure is cleared only when THIS run re-wrote its marker successfully.
-    carried = [f for f in (st.get("failed") or [])
+    carried = [f for f in failed_before
                if not any(f.startswith(marker) for marker in done)]
     st["failed"] = sorted({*carried, *failures})
     st["unconfirmed"] = sorted(pending)
     save_state(st)
-    if carried:
+    # ⛔ THE REMEDY BLOCK IS REACHED BY A DECLINED EDGE TOO. A declined
+    # `create_edge` wrote NOTHING and has NO marker, so it is not `carried` — but
+    # it exits 1, and its only printed line names the failure without a route out
+    # (#13913 review round 18).
+    # ⛔ CLASS FROM THE TAG, NEVER FROM THE TEXT — one classifier per class,
+    # computed once and used by both the gate and the exit summary. Every line
+    # this run produced carries the class its own site assigned (`_fail`), so no
+    # server-controlled message can move it: a `Refusal` quoting
+    # `": mechanism_mismatch — "` stays a refusal (#13950 review round 25,
+    # measured before the tags: `-1 edge(s) NOT written` plus two contradictory
+    # remedies for one line).
+    # ⛔ THE RESIDUAL, STATED: the CLASS is tagged for every line this run
+    # produced, but the REMEDY BULLET a reader picks is still chosen from the
+    # line's text (and a carried line has no tag at all). The bullets therefore
+    # carry their own guard — "and the summary does NOT list it under …" — so a
+    # server-controlled message that quotes another class's spelling cannot hand
+    # a landed write the "nothing was written" instruction. BOTH bullets carry
+    # both terms: a `LANDED` line's text can quote the decline anchor, and a
+    # `created=` line's text can quote the mismatch anchor (#13950 review rounds
+    # 27 and 29).
+    unknown = {f for f in failures if failure_class.get(f) == "unknown"}
+    declined = {f for f in failures if failure_class.get(f) == "declined"}
+    unbound = {f for f in failures if failure_class.get(f) == "unbound"}
+    mismatched = {f for f in failures if failure_class.get(f) == "mismatch"}
+    # ⛔ AN UNCLASSIFIED EXCEPTION IS NOT "NOT WRITTEN". On the operator path
+    # `write_once` KEEPS the intent (only a `Refusal` retires it), so a
+    # `ValueError` out of the door left 51 markers in `written` AND in
+    # `unconfirmed` while the summary said "51 edge(s) NOT written" — the same
+    # false verb this PR removes for `mismatch` and `unknown`. It gets its own
+    # clause, phrased as what the ledger actually says (#13950 review round 32).
+    unwritten = {f for f in failures
+                 if failure_class.get(f) in ("declined", "unbound")}
+    # ⛔ …AND `exception` HOLDS ONLY RAISES THAT KEPT AN INTENT. A `Refusal` is
+    # the opposite state — the door answered NO and `write_once` retires the
+    # intent — so it is classified `declined` where the line is PRODUCED, and it
+    # is counted in `unwritten` where it belongs. That is what makes this bucket
+    # unmixed, and what makes "check `written` for an intent before re-running"
+    # true of every line in it: a refused STRUCTURAL edge never records one at
+    # all, and it never reaches this set (#13950 review rounds 31 and 33).
+    unclassified = {f for f in failures
+                    if failure_class.get(f) == "exception"}
+    # ⛔ `exception` IS A CLASS TOO: an exception-only run used to print the
+    # count and NO route out, while the identical state reached through
+    # `declined` printed the full block (#13950 review round 26).
+    if carried or declined or unbound or mismatched or failures:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
         # the line can never clear itself. Saying so — with the exact edit — is
@@ -1066,28 +1440,86 @@ def write_map(doc: dict) -> int:
         # with no route out (#13913 review round 11, measured: the printed remedy
         # for the UNCONFIRMED arm cleared `unconfirmed` and the run still exited 1
         # forever, because nothing named the `failed` line).
-        print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
-              "(their markers were not re-written this run) — see state.json",
-              file=sys.stderr)
-        for line in carried[:10]:
+        # ⛔ NOT TWICE: a line this run re-observed and re-failed was already
+        # printed as `!!` in the loop that produced it. Repeating it here reads
+        # as a second, unrelated failure (#13913 review round 18).
+        # Keyed on the MARKER, not the whole sentence: an earlier run's wording
+        # for the same marker differs from today's, and the duplicate reads as a
+        # second, unrelated failure either way.
+        reobserved = {f.split(": ", 1)[0] for f in failures}
+        repeated = [line for line in carried
+                    if line.split(": ", 1)[0] not in reobserved]
+        # ⛔ COUNT MARKERS, NOT LINES, AND COUNT THEM FROM `repeated` — NOT FROM
+        # `carried`. `carried` includes every marker this run RE-OBSERVED and
+        # re-failed, and those are reported under their own class heading below, so
+        # counting them here too made a resume print three failures under TWO
+        # headings — with this heading's "its marker is never re-attempted … the
+        # line can never clear itself" premise, which is simply FALSE for an
+        # `unbound`/`declined` line: its marker is not in `written`, the edge IS
+        # re-attempted every run, and the line clears itself the moment the
+        # endpoints resolve (#13950 review round 6, measured on the resume the
+        # unbound pin builds: `3 marker(s) from an earlier run` above `3 edge(s)
+        # hit an UNBOUND endpoint`). Counting markers rather than lines still
+        # holds: `repeated` is marker-keyed.
+        markers_carried = {line.split(": ", 1)[0] for line in repeated}
+        if markers_carried:
+            print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
+                  "STILL unresolved (their markers were not re-written this run) "
+                  "— see state.json", file=sys.stderr)
+        # ⛔ ONE HEADER PER NON-EMPTY CLASS, not an `else` chain: a run can record
+        # a declined edge AND an unbound one, and an `elif` silently drops the
+        # second class's count (#13950 review).
+        if declined:
+            print(f"\n{len(declined)} edge(s) were DECLINED by the door — nothing "
+                  "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        if unbound:
+            print(f"\n{len(unbound)} edge(s) hit an UNBOUND endpoint — nothing "
+                  "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        if mismatched:
+            print(f"\n{len(mismatched)} operator(s) LANDED with a mechanism the "
+                  "judgement does not declare — the write DID happen, so its "
+                  "marker stays in `written` (see `failed` in state.json)",
+                  file=sys.stderr)
+        for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
+        if not repeated:
+            # ⛔ THE DECLINED CLASS HAS NO MARKER, so it must not be told one
+            # exists — the sentence directly above says "NO marker exists", and a
+            # reader who believes otherwise lands on bullet 3's "keep its marker
+            # in `written`", a line that can never clear itself (#13913 review
+            # round 20).
+            print("  (…each of those was re-reported above, in this run's own "
+                  "`!!` lines)", file=sys.stderr)
         # ⛔ THE REMEDY IS PER CLASS. The marker-bearing lines (a landed write
-        # whose follow-up step failed) and the `unbound endpoint` lines (a write
-        # that never happened) have DIFFERENT exits, and printing one of them for
-        # both is a permanent false red with a wrong instruction (#13913 review
-        # round 12).
+        # whose follow-up step failed), the `unbound endpoint` lines and the
+        # `create_edge returned created=` lines (both writes that never happened,
+        # with different edits) have DIFFERENT exits, and printing one of them for
+        # another is a permanent false red with a wrong instruction (#13913 review
+        # rounds 12 and 18).
         print("  → to resolve one, `--verify` decides what is in the graph:\n"
-              "    * line says `unbound endpoint`: nothing was written for the "
-              "EDGE, and its endpoint is missing an id. A plain re-run does NOT "
+              "    * line says `unbound endpoint` (and the summary does NOT "
+              "list it under MAY HAVE LANDED or LANDED): nothing was written for "
+              "the EDGE, and its endpoint is missing an id. A plain re-run does NOT "
               "clear this when the endpoint is a recorded Event — file the node "
               "that WAS written, or (the load-bearing edit) record the landed "
               "node's id under the item's ref in `ids`; then delete this line "
               "from `failed`.\n"
+              "    * line says `create_edge returned created=` (and the summary "
+              "does NOT list it under MAY HAVE LANDED or LANDED): NOTHING was "
+              "written and NO marker exists — this is a line an earlier run "
+              "recorded over a write the door DECLINED. Delete this line from "
+              "`failed` and do NOT add a marker to `written`: the next run "
+              "re-attempts the edge and clears it itself once the endpoints "
+              "resolve.\n"
               "    * otherwise the write landed: if it is correct, delete this "
               "line from `failed` and keep its marker in `written`; if it is wrong "
               "(e.g. a mechanism inversion, which `--verify` cannot see), delete "
               "the node in the graph, then delete its marker from `written` and "
-              "this line from `failed`, and re-run.\n"
+              "this line from `failed`, and re-run. If NO marker for this line is "
+              "in `written` at all — an exception before the write, say — the "
+              "write did not land: delete the line and re-run.\n"
               "    Never delete `state.json` to clear these — a re-run would "
               "re-issue every non-idempotent write.", file=sys.stderr)
         # A failure whose marker the map no longer declares can never be
@@ -1117,7 +1549,61 @@ def write_map(doc: dict) -> int:
         for marker in ambiguous:
             print(f"  ? {marker}", file=sys.stderr)
     if failures:
-        print(f"\n{len(failures)} edge(s) not written — recorded in state.json", file=sys.stderr)
+        # ⛔ NOT "not written" FOR A LANDED WRITE. `mechanism_mismatch` DID write
+        # (warn-not-block) and stored the OPPOSITE meaning, so one "not written"
+        # verb inverts the state the operator has to repair — they would re-file a
+        # node that exists instead of removing the inverted operator (#13950
+        # review round 2, measured: a run that wrote all 51 operators printed
+        # `51 edge(s) not written`). The sentence names each class that is
+        # present, because no single verb is true of both.
+        # ⛔ AND "not written" IS A THIRD LIE FOR THE UNKNOWN CLASS. `Refusal` vs
+        # `UnknownOutcome` is this module's central distinction: an UNKNOWN write
+        # MAY HAVE LANDED, and `--verify` is the only authority on whether it did.
+        # An arithmetic bucket of "everything that is not a mismatch" told the
+        # operator it did NOT land while the `!!` line directly above said it may
+        # have — inviting a re-issue of a non-idempotent `create_operator` over
+        # endpoints that may already be joined (#10849's EP double-count, the very
+        # thing `retry_safe=False` exists to prevent) (#13950 review round 3).
+        mismatched_n = len(mismatched)
+        unknown_n = len(unknown)
+        # ⛔ THE BUCKETS ARE THE TAGS, and they sum to the number of failures: no
+        # arithmetic on overlapping sets, so a count cannot go negative and no
+        # line can be counted twice (#13950 review round 26).
+        # …and the NOT-written bucket is the TAG's, so a line whose text quotes
+        # another class cannot move buckets at all (#13950 review round 25).
+        unwritten_n = len(unwritten)
+        unclassified_n = len(unclassified)
+        parts = []
+        if unwritten_n:
+            parts.append(f"{unwritten_n} edge(s) NOT written")
+        if mismatched_n:
+            parts.append(f"{mismatched_n} operator(s) WRITTEN with a mechanism "
+                         "the judgement does not declare (filed INVERTED)")
+        if unknown_n:
+            parts.append(f"{unknown_n} edge(s) MAY HAVE LANDED (outcome UNKNOWN — "
+                         "`--verify` decides; do NOT re-file)")
+        if unclassified_n:
+            # ⛔ NO SINGLE VERB IS TRUE OF THIS CLASS EITHER — AND ONE CLAUSE, NOT
+            # TWO. The reconciliation of rounds 32 and 33 left a second
+            # `parts.append` for this same class, so one summary sentence stated
+            # the count twice ("51 edge(s) … 51 edge(s) …") right after a comment
+            # promising the buckets sum to the number of failures (#13950 review
+            # round 34, measured). An OPERATOR's
+            # intent STAYS in `written` (it went through `write_once`, which has
+            # no generic `except`), while a `Refusal` RETIRES its intent and a
+            # plain edge call never records one — measured on the refused
+            # structural edge of `test_a_REFUSAL_whose_message_QUOTES_another_class…`:
+            # `state["written"]` holds NO marker for it. Saying "an intent is kept
+            # for each" (round 32's wording) told the operator to leave a write
+            # alone that a resume re-attempts, so the sentence names the CHECK
+            # that distinguishes the two (#13950 review round 33).
+            parts.append(f"{unclassified_n} edge(s) left an UNCLASSIFIED "
+                         "exception — check `written` before re-running (an "
+                         "operator's intent STAYS, so it MAY HAVE LANDED; a "
+                         "`Refusal`'s is retired, so nothing did); `--verify` "
+                         "decides what landed")
+        print(f"\n{len(failures)} edge(s) failed — {'; '.join(parts)} — "
+              "recorded in state.json", file=sys.stderr)
         return 1
     if ambiguous or carried:
         return 1
