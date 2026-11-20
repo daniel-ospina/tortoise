@@ -19,7 +19,10 @@ to close.
 
 The parser below is also the ONE place this repo asks "what does a browser
 actually put in the document tree?", so the duplicate-`id` guard reads it too
-(``extract_element_ids``, #4118). It used to keep an `HTMLParser` subclass of its
+(``extract_element_ids``, #4118) and the docs page's attribute allowlist reads it
+for attribute NAMES (``extract_element_attributes``, #14073 — a claim parked in a
+`title`/`aria-*` is invisible to a visible-text golden, and a source pattern
+misses the spellings HTML permits). It used to keep an `HTMLParser` subclass of its
 own, which inherited the stdlib tokenizer's divergences from a browser in BOTH
 directions — it missed `<svg><style><div id="dup"></div></style></svg>` (raw text
 to the stdlib, markup to a browser: a SILENT miss) and counted `<template>`
@@ -179,6 +182,11 @@ class _AnchorHrefParser(HTMLParser):
         # `(id, line)` of every element a browser would put in the document tree,
         # in document order — see the class docstring's "Ids" bullet (#4118).
         self.ids: list[tuple[str, int]] = []
+        # `(tag, attribute name, line)` for every attribute on an element in that
+        # tree, in document order — the allowlist guard's input (#14073). See
+        # `_record_attributes` for why this is the parser's answer and not a
+        # source pattern's.
+        self.attrs: list[tuple[str, str, int]] = []
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -258,6 +266,33 @@ class _AnchorHrefParser(HTMLParser):
                 if value:
                     self.ids.append((value, self.getpos()[0]))
                 return
+
+    def _record_attributes(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        """Every attribute NAME on an element the browser puts in the tree.
+
+        Same placement and same suppression rule as ``_record_id``: the element
+        is in the tree, so its own attributes count even where its CONTENT is
+        inert, while a start tag inside a suppressed region is not markup the
+        browser parses and is skipped (an attribute name written inside a
+        comment or a ``<script>`` body is not a reader-facing attribute, and a
+        source pattern would count it).
+
+        Why the parser rather than a regex over the raw source: WHATWG's HTML
+        syntax allows whitespace around ``=`` and lets an attribute name hold
+        digits and ``_``, so ``title = "…"``, ``data-30day="…"`` and
+        ``data_del="…"`` are all real, rendered attributes — and all three
+        walked past the ``\\s([a-zA-Z][a-zA-Z-]*)=`` pattern this replaced, each
+        carrying a reader-facing claim the visible-text golden cannot see
+        (#14073 review). The tag is kept alongside the name because an allowlist
+        is per-element in practice and it costs nothing to keep.
+        """
+        if self._suppress or self.wedged_reason:
+            return
+        line = self.getpos()[0]
+        for name, _value in attrs:
+            self.attrs.append((tag, name, line))
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
@@ -359,9 +394,10 @@ class _AnchorHrefParser(HTMLParser):
         super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # Before `_open`, because this tag's own id counts even where its CONTENT
-        # does not (see `_record_id`).
+        # Before `_open`, because this tag's own id/attributes count even where
+        # its CONTENT does not (see `_record_id`, `_record_attributes`).
         self._record_id(attrs)
+        self._record_attributes(tag, attrs)
         if not self._open(tag, attrs):
             self._collect(tag, attrs)
 
@@ -380,6 +416,7 @@ class _AnchorHrefParser(HTMLParser):
             # would count a single element twice — `<svg id="d"/>` is ONE
             # element, and two ids on it is a duplicate a browser does not have.
             self._record_id(attrs)
+            self._record_attributes(tag, attrs)
             self._collect(tag, attrs)
             return
         self.handle_starttag(tag, attrs)
@@ -565,6 +602,25 @@ def extract_anchor_hrefs(html: str) -> list[str]:
     parser.feed(html)
     parser.close()
     return parser.hrefs
+
+
+def extract_element_attributes(html: str) -> list[tuple[str, str, int]]:
+    """``(tag, attribute name, line)`` for every attribute in ``html``'s tree.
+
+    The attribute-allowlist guard's input (#14073). Names come back lowercased,
+    because a browser's attribute name is case-insensitive and the tokenizer
+    normalises it. Duplicate attributes are all reported: the tokenizer keeps the
+    first VALUE, but reporting both names cannot hide an unallowed one — the
+    direction this guard must not fail in.
+
+    Parsed from the same render-fidelity seam as ``extract_element_ids``, so an
+    attribute name written inside a comment, a raw-text element, or an inert
+    ``<template>`` is not counted, exactly as ``_record_id`` decides it for ids.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    return parser.attrs
 
 
 def extract_element_ids(html: str) -> list[tuple[str, int]]:
