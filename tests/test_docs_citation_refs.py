@@ -2189,6 +2189,28 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # claim list carries `which two `tortoise/` paths this diff carries`, and this ban could
     # not see it — an anchor-less membership question in the document's own idiom.
     r"|which (?:one|two|three|four|five)\s+`?tortoise/[^`]*`?\s+paths?"
+    # E) ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, rounds 13 and 16 — MEASURED GREEN in all
+    # three arms, BOTH directions: `Nothing is in the `tortoise/` set at this head.`,
+    # `Empty is what `-- tortoise/` prints`, `Both files are what the `tortoise/` set holds`,
+    # `Two paths are what `-- tortoise/` prints`, `tortoise/x.py is what `-- tortoise/`
+    # returns`, `A non-empty set is what the `tortoise/` set is`). Every other alternative is
+    # verb-then-answer, so the same claim stated the other way round was read by nothing; this
+    # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
+    # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
+    # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
+    r"|(?:^|[.;:!?]\s|\n)(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|both\s+(?:files?|paths?|modules?|entries)"
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?)"
+    r"|(?:an?|the)\s+(?:empty|non[- ]?empty))"
+    # ⛔ AND THE ANCHOR MUST BE FOLLOWED BY THE VERB OR THE SUBJECT-NOUN (#13802 review, round
+    # 16 — MEASURED): without that, ordinary prose (`… it is transport only — nothing in
+    # `tortoise/``, `; `tortoise/x.py` was in an earlier cut`) matched the emptiness answer and
+    # the path answer with no claim behind it. A path is also dropped from the answer class
+    # here: `tortoise/x.py is what … returns` is prose this pattern cannot distinguish from a
+    # mention, and the row's own rule is that an over-block costs more than a false PASS.
+    r"\b[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
+    r"subtree|delta|changes?|holds|holds?|returns?|prints?|reports?|lists?|"
+    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?)\b"
     # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
     # spellings measured GREEN): `this diff carries no `tortoise/` path at all`, `this diff
     # touches no `tortoise/` file`, `the `tortoise/` set holds no path here`. Shape A cannot
@@ -2367,6 +2389,15 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "The `tortoise/` directory prints nothing at this head.",
         "`-- tortoise/` gives us back nothing at this head.",
         "Nothing is in the `tortoise/` set at this head.",
+        # ⛔ AND THE MEMBERSHIP DIRECTION IN THAT ORDER (#13802 review, round 16, P2 — the
+        # round-13 cut covered emptiness only, so these four were GREEN in both arms)
+        "Both files are what the `tortoise/` set holds at this head.",
+        "Two paths are what `-- tortoise/` prints at this head.",
+        # ⛔ the path answer is NOT pinned: a bare `tortoise/x.py` at a clause start is
+        # indistinguishable from a mention in ordinary prose (`; `tortoise/x.py` was in an
+        # earlier cut`), and the row's own rule is that an over-block costs more than a false
+        # PASS — so this ONE spelling of the membership direction stays a declared residual.
+        "A non-empty set is what the `tortoise/` set holds at this head.",
         "Empty is what `-- tortoise/` prints at this head.",
         # ⛔ AND THE INDEFINITE ARTICLE, AND THE PARENTHETICAL (#13802 review, round 14, P1+P2).
         # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320` and
