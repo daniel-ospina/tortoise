@@ -928,23 +928,29 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int]) -> str:
     if not total:
         return ("no CONTAINS targets were measured, so this run says nothing about "
                 "which writer produced the population")
-    if not isinstance(about, int):
+    if not isinstance(about, int) or not isinstance(turns_about, int):
         # ⛔ A note generated from a MISSING reading cannot name the reading (#13919
-        # cycle 11 residual, the same class as the cycle-9 fix one signature up): the
-        # old default left ``about`` None and the sentence printed "`aboutObject_edges`
+        # cycle 11/12, the same class as the cycle-9 fix one signature up): the old
+        # default left ``about`` None and the sentence printed "`aboutObject_edges`
         # reads None here, so that 0 describes THEIR output" — a zero asserted about a
         # key this run never read. The parameter is now required, and a caller that
-        # still has no reading gets prose that says so instead of a number.
+        # still has no reading gets prose that says so instead of a number. ⛔ BOTH keys,
+        # not just the first: guarding ``about`` alone left ``turns_with_aboutObject``
+        # rendering an absent reading as the MEASURED zero "no turn(s) carry one" — the
+        # one sentence a reader of the any-label branch acts on.
+        unread = [k for k, v in (("aboutObject_edges", about),
+                                 ("turns_with_aboutObject", turns_about))
+                  if not isinstance(v, int)]
         return (
-            "this run did not read `aboutObject_edges`, so this note says nothing about "
-            "whether the entity-link edge is present — the kind breakdown measured here "
-            f"is ({', '.join(f'{k}={v}' for k, v in kinds.items())}); read the key "
-            "before attributing the population to a writer")
+            f"this run did not read {' or '.join(f'`{k}`' for k in unread)}, so this "
+            "note says nothing about whether the entity-link edge is present — the kind "
+            f"breakdown measured here is ({', '.join(f'{k}={v}' for k, v in kinds.items())}); "
+            "read that key before attributing the population to a writer")
     parts = ", ".join(f"{kind}={cnt}" for kind, cnt in kinds.items())
     turn_n = kinds.get("event", 0)
     chunk_n = kinds.get("session-transcript", 0)
 
-    if about > 0 and isinstance(turns_about, int) and turns_about > 0:
+    if about > 0 and turns_about > 0:
         # ⛔ The edge IS present AT THE TURN LEVEL — the shape the #4211 question is
         # about. State the MEASURED counts and do NOT reason about a zero this run did
         # not observe.
@@ -970,7 +976,7 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int]) -> str:
             f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
             f"{turn_n} event / {chunk_n} session-transcript). `aboutObject` IS present "
             f"as an ANY-LABEL count ({about} edge(s)), but "
-            f"{turns_about if isinstance(turns_about, int) else 'no'} turn(s) carry "
+            f"{turns_about} turn(s) carry "
             "one — so those attachments hang off Session/Event/claim Points, and the "
             "#4211 question ('is there an edge for the arm to walk from a TURN') is "
             "NOT answered affirmatively by this population. The product's own capture "

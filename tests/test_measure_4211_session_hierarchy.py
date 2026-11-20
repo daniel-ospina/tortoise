@@ -2097,6 +2097,15 @@ def test_c11_a_note_cannot_print_None_for_the_edge_count_it_did_not_read():
     assert "so that 0 describes THEIR output" not in note, (
         f"a note with no edge reading asserted a zero: {note}")
 
+    # ⛔ ITS SIBLING TOO (#13919 cycle 12): guarding `aboutObject_edges` alone left
+    # `turns_with_aboutObject` rendering an ABSENT reading as the measured zero
+    # "no turn(s) carry one" — the one sentence a reader of the any-label branch acts on.
+    half = mod._instrument_note({"event": 22}, {"aboutObject_edges": 2})
+    assert "no turn(s) carry one" not in half, (
+        f"an unread turn count was rendered as a measured zero: {half}")
+    assert "did not read `turns_with_aboutObject`" in half, half
+    assert "ANY-LABEL" not in half, half
+
 
 def test_c11_the_console_names_the_queries_that_raised(monkeypatch, tmp_path, capsys):
     """C11 (P3): the ⛔ "queries that RAISED" line read ``counts`` and could never print.
@@ -2144,16 +2153,25 @@ def test_c11_every_published_count_has_its_query_in_the_same_arm():
     receipt = _receipt()
     for arm in ("store", "writer", "live"):
         block = receipt["arms"][arm]
-        counts, queries = set(block["counts"]), set(block["queries"])
-        no_query = sorted(counts - queries)
-        no_count = sorted(queries - counts)
-        assert not no_query, (
-            f"{arm}: published key(s) with NO recorded query in the same arm: "
-            f"{no_query} — a number nobody can re-derive")
-        assert not no_count, (
-            f"{arm}: recorded quer(ies) for a key this arm does not publish: "
-            f"{no_count} — the value was renamed away from its own Cypher, so a reader "
-            "re-deriving from `queries` reads a reading that was never taken")
+        # ⛔ EVERY published block, not just `counts` (#13919 cycle 12): the writer arm
+        # also publishes `counts_before_any_write`, and the re-key missed it — so the
+        # pin that was supposed to make this recurrence impossible read only half the
+        # arm and passed over it.
+        published = [("counts", block["counts"])]
+        if isinstance(block.get("counts_before_any_write"), dict):
+            published.append(("counts_before_any_write", block["counts_before_any_write"]))
+        for label, counts_block in published:
+            counts, queries = set(counts_block), set(block["queries"])
+            no_query = sorted(counts - queries)
+            no_count = sorted(queries - counts)
+            assert not no_query, (
+                f"{arm}.{label}: published key(s) with NO recorded query in the same "
+                f"arm: {no_query} — a number nobody can re-derive")
+            assert not no_count, (
+                f"{arm}.{label}: recorded quer(ies) for a key this block does not "
+                f"publish: {no_count} — the value was renamed away from its own Cypher, "
+                "so a reader re-deriving from `queries` reads a reading that was never "
+                "taken")
 
 
 def test_c11_no_ledger_entry_repeats_itself():

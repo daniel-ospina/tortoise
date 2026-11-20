@@ -484,7 +484,7 @@
     "objects_with_any_attachment": 0,
     "events_total": 0,
     "events_with_aboutObject": 0,
-    "event_session_ids_distinct": 0,
+    "event_attached_session_ids_distinct": 0,
     "events_without_session_id": 0,
     "events_with_aboutObject_missing_session_id": 0,
     "objects_reaching_gt1_event": 0,
@@ -1381,7 +1381,7 @@
   },
   "round_11_key_and_ledger_correction": {
    "why": "A cycle-11 fresh-context review found that `8f7e1b508b` renamed a COUNT key (`event_session_ids_distinct` -> `event_attached_session_ids_distinct`, when the unfiltered reading became its own query) without renaming the same arm's `queries` entry \u2014 so all three arms published a count with NO recorded query, and kept the ATTACHED Cypher under the name the ledger says is absent. A reader re-deriving from `queries` (the discipline `cycle_8_ledger_correction` installs) concluded the unfiltered read ran here.",
-   "fix": "The `queries` entry is re-keyed to `event_attached_session_ids_distinct` in every arm \u2014 the Cypher it stores IS the attached one, so the value and the query now sit under one name. No measured NUMBER is touched and no Cypher text is edited. Also removed from `round_7_census_and_gate.not_in_this_receipt.sessions_with_gt1_contains_point` a clause pasted TWICE (an edit artefact: the same sentence ran twice before its own continuation), and a pin now requires every published `counts` key to carry a `queries` entry in the same arm, so this cannot recur silently."
+   "fix": "The `queries` entry is re-keyed to `event_attached_session_ids_distinct` in every arm \u2014 the Cypher it stores IS the attached one, so the value and the query now sit under one name. No measured NUMBER is touched and no Cypher text is edited. Also removed from `round_7_census_and_gate.not_in_this_receipt.sessions_with_gt1_contains_point` a clause pasted TWICE (an edit artefact: the same sentence ran twice before its own continuation), and a pin now requires every published `counts` key to carry a `queries` entry in the same arm, so this cannot recur silently. \u26d4 AND THE SECOND HALF, found by the cycle-12 review of this very correction: `arms.writer.counts_before_any_write` still published the same value under the OLD name, so the writer arm's BEFORE block kept a number with no recorded query and a value under the name the ledger says is absent \u2014 the recurrence the first pass had missed because the pin read only `counts`. Re-keyed there too (value 0, untouched), and the pin now checks `counts_before_any_write` in every arm that publishes it."
   }
  },
  "warnings": []
