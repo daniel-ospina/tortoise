@@ -62,6 +62,11 @@ from tests._cite_resolution import ANCHOR_KINDS  # noqa: E402
 from tests._cite_resolution import anchor_lines as _anchor_lines  # noqa: E402
 from tests._cite_resolution import cite_failure as _cite_failure  # noqa: E402
 from tests._cite_resolution import locate_hint as _locate_hint  # noqa: E402
+
+#: The RECORD's own required-row set (`REQUIRED_CRITERIA`), imported as its own module: the
+#: table must carry what the RECORD must carry, and the CLOSE reads `cvc.CRITERIA`. Two
+#: files, two sets — reading one for the other is the confusion `#11673` corrected twice.
+from tools import capstone_preregistration_check as cpc  # noqa: E402
 from tools import capstone_verdict_check as cvc  # noqa: E402
 
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
@@ -299,10 +304,14 @@ def test_the_bars_are_the_frozen_ones():
     assert bars["E3"]["required_share"] == 1.0
     assert bars["E4"] == {"required": 15, "of": 15}
     assert bars["E5"] == {"ratio": 0.9, "raw_absolute": 0.8}
+    # #11695: E6's bar (a zero-tolerance defect count) and its population floor are read
+    # out of the record like every other row's, so a lane cannot re-type `= 0` here.
+    assert bars["E6"] == {"unbound_max": 0}
     assert bars["floors"] == {"e1_objects": 30,
                              "e1_min_before_share": 0.2,
                              "e2b_surviving_units": 30,
-                             "e3_derived_nodes": 30, "e5_rate_min_sentences": 10}
+                             "e3_derived_nodes": 30, "e5_rate_min_sentences": 10,
+                             "e6_declared_rows": 30}
 
 
 def test_a_threshold_edited_in_the_record_moves_the_bar():
@@ -980,11 +989,33 @@ def test_the_e1_e2_record_refuses_a_corpus_off_the_frozen_pin(tmp_path):
 #: "the SAME receipt, on the SAME corpus" while its fields declare another revision).
 _E4_ON_PIN = "tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json"
 
+#: A canned E6 row mapping in `build_e6_row`'s own shape — the two cells `build_rows`
+#: REFUSES to build without are `written` (the beside-the-bar column) and `blocked_by`
+#: (the pointer a non-green row must carry), so the fixture carries both.
+_E6_ROW_FIXTURE = {
+    "verdict": "RED", "numerator": 43, "denominator": 45,
+    "blocked_by": measure.E6_BINDING_OWNER,
+    "written": {"direct": 9, "mediated": 35, "none": 1, "unmeasured": 0},
+    "note": "E6 note",
+}
+
+
+def _e6_fixture() -> tuple[dict, dict]:
+    """``(measurement, row)`` from the REAL packs + census — both hermetic reads.
+
+    `measure_e6` parses `packs/` and `build_e6_row` reads the committed census artifact;
+    neither touches a graph or a model, so a renderer pin can execute the SAME subscript
+    paths a real run does instead of a hand-typed block that drifts from the emitter's keys.
+    """
+    measurement = measure.measure_e6()
+    return measurement, measure.build_e6_row(measurement, bars=BARS)
+
 
 def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
           *, e2_verdict: str = "RED",
           log_corpus_sha: str = "sha256:" + "d" * 64,
-          e4: dict | None = None) -> list[dict]:
+          e4: dict | None = None,
+          e6: dict | None = None) -> list[dict]:
     parsed = measure.measure_e1_e2(_REPO)
     return measure.build_rows(
         head="a" * 40, out_path=out_path, log_corpus_sha=log_corpus_sha,
@@ -1002,7 +1033,8 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
             "sha": "a999be41e", "corpus_sha256": log_corpus_sha,
             "evidence": _E4_ON_PIN, "note": "E4 note"} if e4 is None else e4,
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-            "note": "E5 note"})
+            "note": "E5 note"},
+        e6=_E6_ROW_FIXTURE if e6 is None else e6)
 
 
 def _e1_kwargs() -> dict:
@@ -1023,14 +1055,278 @@ def _e1_kwargs() -> dict:
             "below_floor": parsed["below_floor"]}
 
 
-def test_the_table_is_five_rows_in_the_gates_order():
+def test_the_table_is_six_rows_the_record_requires_and_the_close_reads_five():
+    """⛔ TWO SETS, ONE TABLE (#11695, and `#11673`'s correction).
+
+    The RECORD must carry `E1`–`E6` — `REQUIRED_CRITERIA` in
+    `tools/capstone_preregistration_check.py` is what a registration (and a scored record)
+    may not be silent about — while the epic's CLOSE reads `E1`–`E5` only
+    (`tools/capstone_verdict_check.py`'s `CRITERIA`, V2/V9). So the table is SIX rows and
+    the closing five are a strict SUBSET of them, in order, with `E6` appended.
+
+    Non-vacuity: at the head before this row's producer the builder emitted five rows, so
+    both `"E6" in ids` and the `REQUIRED_CRITERIA` subset assertion red there — which is
+    the whole defect `#11695` files: a scored run produced a table the RECORD calls
+    incomplete.
+    """
     rows = _rows()
-    assert [row["criterion"] for row in rows] == list(cvc.CRITERIA)
+    ids = [row["criterion"] for row in rows]
+    assert set(cpc.REQUIRED_CRITERIA) <= set(ids), (
+        f"the record must carry every REQUIRED_CRITERIA row, and the builder emits "
+        f"{ids} — E6 was registered by #11673 (#11695 owns its producer)")
+    assert set(cvc.CRITERIA) <= set(ids), (
+        f"the CLOSING set {list(cvc.CRITERIA)} must be a subset of the emitted rows "
+        f"{ids} — V2 refuses a table missing one of them")
+    assert ids == [*cvc.CRITERIA, "E6"], (
+        f"the rows are {ids}, not the closing five in order with E6 appended — the "
+        f"five-row order is what the shipped logs carry, so E6 goes LAST")
     for row in rows:
         assert set(cvc.VERDICTS) >= {row["verdict"]}
         assert row["evidence_kind"] == "measurement"
-        assert row["blocked_by"].startswith("#"), row
+        if row["verdict"] != "GREEN":
+            assert row["blocked_by"].startswith("#"), row
         assert row["note"].strip(), row
+    # E6 is the one row carrying the census's BESIDE-the-bar column, and it is a
+    # MEASUREMENT cell, not a note: the registration requires `written` to be reported
+    # beside the bar (§3.8), so a row that only mentions it in prose would satisfy no
+    # machine reader.
+    e6_row = rows[-1]
+    assert e6_row["criterion"] == "E6"
+    assert set(e6_row["written_counts"]) == {"direct", "mediated", "none", "unmeasured"}
+    assert all("written_counts" not in row for row in rows[:-1]), (
+        "only E6 has a `written` column — a `None` on the other five would read as "
+        "'the column is there, the numbers are missing'")
+
+
+# ── E6: the producer (#11695) ────────────────────────────────────────────
+#
+# #11673 registered the row and left it unscorable: no instrument emitted an `E6` verdict,
+# so no scored run could produce the record `REQUIRED_CRITERIA` demands. These pins hold the
+# PRODUCER — the metric's two clauses, the population floor, and the `written` column being
+# reported BESIDE the bar rather than as it (§3.8, §10.21).
+
+
+def test_e6_measures_the_packs_at_this_head_not_a_committed_census():
+    """The bar is re-derived from `packs/` at this head; the artifact is only `written`.
+
+    ⛔ THIS IS THE OFF-PIN GUARD FOR E6. Reading the committed census's numbers as the bar
+    would report another revision's population under this run's `sha` — the E4-off-pin shape
+    the probe already refuses — so the population is counted HERE from the same
+    `tools/pack_relation_census.py` call the row cites, and the assertion compares the two
+    readers instead of trusting either.
+    """
+    e6 = measure.measure_e6()
+    assert e6["error"] is None, e6["error"]
+    census = measure._pack_census_module().build_census(
+        _REPO / measure.PACKS_DIR)
+    rows = [row for block in census["packs"].values()
+            for surface in ("relations", "hierarchies")
+            for row in block[surface]]
+    # The population the registration names (`population.declared`), counted independently.
+    assert e6["declared"] == len(rows) == census["population"]["declared"]
+    assert e6["declared"] == e6["relations"] + e6["hierarchies"]
+    assert e6["packs"] == len(census["packs"])
+
+    # The metric's two clauses, over the rows: nothing is unbound-and-unexplained, and every
+    # counted defect is NAMED with a reason rather than folded into a number.
+    pnia = measure._pack_census_module().RELATION_PREDICATE_NOT_IN_ALLOWLIST
+    expected = [row for row in rows
+                if measure.e6_row_reasons(row, pnia_verdict=pnia)]
+    assert e6["unbound_and_unexplained"] == len(expected)
+    assert len(e6["defects"]) == len(expected)
+    for defect in e6["defects"]:
+        assert defect["reasons"], defect
+        assert defect["pack"] and defect["surface"], defect
+
+    # Every declared row is accounted for in the beside column exactly once: a cell the
+    # artifact does not carry reads `unmeasured`, never zero (#10995).
+    assert sum(e6["written"].values()) == e6["declared"], e6["written"]
+
+
+def test_e6s_written_column_is_reported_beside_the_bar_and_never_as_it():
+    """`written` answers A1's question, not E6's — so it may not reach numerator/denominator.
+
+    The registration is explicit (*"the census's `written` column … is reported beside it,
+    **never** the bar: `A1` already measures what the written graph answers"*), and a bar on
+    `written` would let one defect red two rows. Here the tree says **1** row is `none` —
+    under a `written` bar E6 would be RED today; under the registered bar it is GREEN. So
+    this fixture is not hypothetical: the two bars genuinely disagree at this head.
+    """
+    e6 = measure.measure_e6()
+    row = measure.build_e6_row(e6, bars=BARS)
+    assert row["denominator"] == e6["declared"]
+    assert row["numerator"] == e6["declared"] - e6["unbound_and_unexplained"]
+    assert e6["written"]["none"] >= 1, (
+        "this pin's non-vacuity rests on the tree carrying at least one `written: none` "
+        "row — if it stops doing so, the beside-vs-bar distinction below proves nothing")
+    # `build_e6_row` hands `build_rows` the cell under `written`; the TABLE row carries it
+    # as `written_counts` (the census's own key), so both spellings are asserted here and in
+    # `test_the_table_is_six_rows_…` respectively.
+    assert row["written"] == e6["written"]
+    assert row["written"] != {
+        "direct": row["numerator"], "mediated": 0, "none": 0, "unmeasured": 0}
+    # …and the ROW's verdict follows the registered bar, not the beside column.
+    assert row["outcome"] == "PASS", row
+    assert row["verdict"] == "GREEN", row
+    assert row["blocked_by"] is None
+    assert "REPORTED BESIDE" in row["note"], row["note"]
+    assert f"none={e6['written']['none']}" in row["note"], row["note"]
+
+
+def test_e6_counts_a_row_unbound_only_when_it_is_also_unexplained():
+    """The metric, clause by clause, on synthetic rows — including the EXPLAINED exemption.
+
+    A row retired as `declarationOnly` WITH its reason is the shape the metric EXCLUDES
+    (`pm`'s `onBoard`: *a board is a VIEW over cards*); a row retired with no reason is a
+    defect, because nothing states why the pack declares a connection it will never build.
+    """
+    pnia = measure._pack_census_module().RELATION_PREDICATE_NOT_IN_ALLOWLIST
+    writable = {"verdict": "writable", "write_path": "operator",
+                "effective_direction": "->", "declaration_only": False,
+                "declaration_only_reason": None}
+    assert measure.e6_row_reasons(writable, pnia_verdict=pnia) == []
+    # no write path, no reason -> unbound AND unexplained
+    assert measure.e6_row_reasons(
+        {**writable, "verdict": "declaration-only", "write_path": None},
+        pnia_verdict=pnia)
+    # no write path, retired WITH a reason -> explained, so not counted
+    assert measure.e6_row_reasons(
+        {**writable, "verdict": "declaration-only", "write_path": None,
+         "declaration_only": True, "declaration_only_reason": "a board is a VIEW"},
+        pnia_verdict=pnia) == []
+    # a blank reason is not a reason
+    assert measure.e6_row_reasons(
+        {**writable, "verdict": "declaration-only", "write_path": None,
+         "declaration_only": True, "declaration_only_reason": "   "},
+        pnia_verdict=pnia)
+    # binds a path but records no sense -> the registration's SECOND clause
+    assert measure.e6_row_reasons(
+        {**writable, "effective_direction": None}, pnia_verdict=pnia)
+    # predicate not in the allowlist, unexplained -> counted
+    assert measure.e6_row_reasons(
+        {**writable, "verdict": pnia, "write_path": None}, pnia_verdict=pnia)
+
+
+def test_e6_refuses_below_its_population_floor_and_never_scores_an_absent_subject():
+    """`e6_declared_rows` is the false-PASS guard: 0 declared rows must NOT read GREEN.
+
+    A registry that failed to load its packs reports `declared: 0`, so `unbound: 0` too —
+    and a bar stated as `unbound_and_unexplained = 0` would then be met by a subject that is
+    not there. The floor maps that to REFUSED (the table's BLOCKED), never GREEN.
+    """
+    floor = BARS["floors"]["e6_declared_rows"]
+    refused = measure.e6_outcome(declared=floor - 1, unbound=0, bars=BARS)
+    assert refused["below_floor"] is True
+    assert refused["outcome"] == "REFUSED"
+    assert measure.verdict_word(refused) == "BLOCKED"
+    assert measure.e6_outcome(declared=0, unbound=0, bars=BARS)["outcome"] == "REFUSED"
+    assert measure.e6_outcome(declared=floor, unbound=0,
+                              bars=BARS)["outcome"] == "PASS"
+    # a defect above the floor is a FAIL, not a refusal — and each outcome gets the pointer
+    # for ITS finding, both of them OPEN (V12 refuses a CLOSED blocker).
+    failed = measure.build_e6_row(
+        {"declared": floor, "unbound_and_unexplained": 1, "error": None,
+         "written": {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0},
+         "defects": [{"pack": "p", "surface": "relations", "predicate": "x",
+                      "from_kind": "a", "to_kind": "b", "verdict": "declaration-only",
+                      "declaration_only": False, "effective_direction": None,
+                      "reasons": ["no write path binds the declared row"]}],
+         "written_source": "fixture", "packs": 1, "relations": floor,
+         "hierarchies": 0, "writable": floor - 1, "declaration_only": 0,
+         "predicate_not_in_allowlist": 0, "packs_dir": "packs",
+         "census_tool": "fixture"}, bars=BARS)
+    assert failed["verdict"] == "RED", failed
+    assert failed["blocked_by"] == measure.E6_BINDING_OWNER, failed
+    refused_row = measure.build_e6_row(
+        {"declared": 0, "unbound_and_unexplained": 0, "error": None,
+         "written": {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0},
+         "defects": [], "written_source": "fixture", "packs": 0, "relations": 0,
+         "hierarchies": 0, "writable": 0, "declaration_only": 0,
+         "predicate_not_in_allowlist": 0, "packs_dir": "packs",
+         "census_tool": "fixture"}, bars=BARS)
+    assert refused_row["verdict"] == "BLOCKED", refused_row
+    assert refused_row["blocked_by"] == measure.E6_POPULATION_OWNER, refused_row
+    # an unloadable registry is a NAMED gap, never zeros that read as a measurement
+    broken = measure.build_e6_row(
+        {"declared": 0, "unbound_and_unexplained": 0, "error": "PackRegistry: boom",
+         "written": {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0},
+         "defects": [], "written_source": "not read", "packs": 0, "relations": 0,
+         "hierarchies": 0, "writable": 0, "declaration_only": 0,
+         "predicate_not_in_allowlist": 0, "packs_dir": "packs",
+         "census_tool": "fixture"}, bars=BARS)
+    assert broken["verdict"] == "BLOCKED", broken
+    assert broken["numerator"] is None and broken["denominator"] is None, broken
+    assert "boom" in broken["note"], broken["note"]
+
+
+def test_e6_refuses_when_the_registry_isolated_a_pack():
+    """⛔ The pack set that did not fully load is NOT the registered population (#11695 P1).
+
+    `PackRegistry.load_all` ISOLATES a pack whose manifest fails validation and records it in
+    `load_errors`; the pack's declared rows then leave `population.declared` silently. The
+    floor cannot catch that — measured with one corrupted manifest: 45 declared rows dropped
+    to 41, still above the floor of 30, every other cell clean, and the row read **GREEN**.
+    That is the false PASS over a wrongly-loaded subject §3.8's floor exists to prevent, one
+    layer down, so the producer carries `load_errors` and refuses on it.
+
+    Non-vacuity: a build of `build_e6_row` that ignored `load_errors` (the shape before the
+    review) returns PASS/GREEN here and reds the first two assertions.
+    """
+    measured = {"declared": 41, "unbound_and_unexplained": 0, "defects": [],
+                "relations": 35, "hierarchies": 6, "packs": 6, "writable": 40,
+                "declaration_only": 1, "predicate_not_in_allowlist": 0,
+                "packs_dir": "packs", "census_tool": "fixture", "error": None,
+                "written": {"direct": 9, "mediated": 31, "none": 1, "unmeasured": 0},
+                "written_source": "fixture",
+                "load_errors": {"project-management": "relation 'onBoard' declares no "
+                                                    "semantics"}}
+    row = measure.build_e6_row(measured, bars=BARS)
+    assert row["outcome"] == "REFUSED", row
+    assert row["verdict"] == "BLOCKED", row
+    assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
+    assert "ISOLATED" in row["note"] and "project-management" in row["note"], row["note"]
+    assert row["load_errors"] == measured["load_errors"], row
+    # …and the clean case still scores, so the refusal is about the load and not the shape.
+    clean = {**measured, "declared": 45, "packs": 7, "relations": 39,
+             "load_errors": {}}
+    assert measure.build_e6_row(clean, bars=BARS)["verdict"] == "GREEN"
+    # The real tree is the clean case, and this pin says so rather than assuming it.
+    assert measure.measure_e6()["load_errors"] == {}, (
+        "the tree's own packs no longer load cleanly — E6 is REFUSED at this head, which "
+        "is a finding about the packs, not about this pin")
+
+
+def test_the_emitted_e6_row_is_accepted_by_the_verdict_gate():
+    """The row this producer emits is scoreable — `#11673` bought exactly that much.
+
+    `RECOGNISED_CRITERIA` accepts `E6` and V1–V12 check it as an `E`-row; before `#11695`
+    the row could not exist, so the recognition was never exercised on a produced row. This
+    drives the REAL row through the REAL gate over a complete record.
+    """
+    e6 = measure.measure_e6()
+    row = measure.build_e6_row(e6, bars=BARS)
+    rows = _rows(e6={**row, "verdict": row["verdict"], "numerator": row["numerator"],
+                     "denominator": row["denominator"],
+                     "blocked_by": row["blocked_by"], "written": row["written"],
+                     "note": row["note"]})
+    record = {"schema": cvc.SCHEMA, "prereg": {"sha": "a" * 40, "status": "OK"},
+              "corpus": {"sha256": "sha256:" + "d" * 64},
+              "run": {"status": "COMPLETED", "steps_observed": list(cvc.STEPS)},
+              "rows": rows}
+    # ⛔ EVERY finding is checked, by its WHERE. Filtering on the message text (``"E6" in
+    # msg``) only ever matches V2's own messages — V3–V12 name the row by ``where``
+    # (``rows[E6]``) and their text says e.g. "numerator 0 outside 1..45" — so a text
+    # filter would let a V4/V5/V6/V7/V12 refusal of the emitted row ship green (#11695
+    # review P2, measured: a row with ``numerator: 0`` produces a V5 on ``rows[E6]`` that
+    # the text filter could not see).
+    findings = cvc.check(record, repo=_build_gate_repo(), require_green=False)
+    e6_findings = [(code, where, msg) for code, where, msg in findings.items
+                   if where == "rows[E6]" or "E6" in msg]
+    assert not e6_findings, (
+        f"the gate refused the emitted E6 row: {e6_findings} — `E6` is a RECOGNISED "
+        f"criterion, so a produced row must pass V1–V12 exactly as an `E`-row does")
+    # …and the record-level arms must be clean too, or the pin proves nothing about the row.
+    assert not [f for f in findings.items if f[0] in ("V1", "V2")], findings.items
 
 
 def test_a_green_row_on_a_missing_artifact_is_refused():
@@ -1974,6 +2270,12 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     must print the moved number, so the sentence is read from the record rather
     than typed into the f-string.
     """
+    # ⛔ E6 BEFORE the census: `_canned_census` swaps `sys.modules["tortoise"]` for a bare
+    # module so the real `census()` runs against canned rows, and `measure_e6` loads the pack
+    # registry through `tortoise.pack_registry` — measured, calling it AFTER the swap makes the
+    # import fail inside `measure_e6`, which correctly reports a NAMED BLOCKED row (fail-closed,
+    # not zeros) and would make this pin assert against a gap instead of a measurement.
+    e6_measure, e6_row = _e6_fixture()
     census_data = _canned_census(monkeypatch)
     e1 = measure.measure_e1_e2(_REPO)
     # ⛔ The receipt is selected BY the frozen pin (#10679): `load_e4` refuses an
@@ -2046,9 +2348,28 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
                     e3_result=e3_out, graph="capstone_measure_fixture_0",
                     corpus_sha=corpus_sha)},
             e3_out=e3_out, e4=e4, e4_out=e4_out, e5=e5, e5_out=e5_out,
-            rows=_rows(), out_path="docs/evidence/9889/e1-e2-scores.json")
+            e6=e6_measure, e6_row=e6_row,
+            rows=_rows(e6=e6_row), out_path="docs/evidence/9889/e1-e2-scores.json")
 
     text = render(_prereg())
+    # ⛔ #11695: the record this renderer WRITES is the complete one `REQUIRED_CRITERIA`
+    # demands. Before the producer, this block carried five rows and no census, so a scored
+    # run's artifact was incomplete by the record's own definition — and nothing read the
+    # block back to say so.
+    block = cvc.extract_block(text)
+    assert [row["criterion"] for row in block["rows"]] == [*cvc.CRITERIA, "E6"], (
+        f"the emitted record's rows are {[r['criterion'] for r in block['rows']]} — the "
+        f"closing five in order plus E6")
+    assert "e6_census" in block["run"], sorted(block["run"])
+    census_block = block["run"]["e6_census"]
+    assert census_block["unbound_and_unexplained"] == 0, census_block
+    assert census_block["population"]["declared"] >= BARS["floors"]["e6_declared_rows"], (
+        census_block["population"])
+    assert set(census_block["written"]) == {"direct", "mediated", "none", "unmeasured"}, (
+        "E6's beside-the-bar column must be in the MACHINE record, not only in the note — "
+        f"got {sorted(census_block['written'])}")
+    assert block["rows"][-1]["written_counts"] == census_block["written"], (
+        "the row's beside column and the census block's must be the same measurement")
     assert "e1 note: both before realizations clear E1's own floors" in text
     # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
     # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
@@ -5763,8 +6084,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # accounting block moved the def from `:745` to `:751`, and its last commit
         # re-derived the DOCUMENT's cite while leaving this row on the old number —
         # so the pin reddened against a document that was already right (#11837).
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:779`) refuses a GREEN row whose", (
-            ("779", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:788`) refuses a GREEN row whose", (
+            ("788", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -11482,6 +11803,9 @@ def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
     same shape the sibling renderer pin uses, so this fixture cannot drift from the
     keys `render_log` subscripts off it.
     """
+    # ⛔ `_e6_fixture()` FIRST — before `_canned_census` swaps `sys.modules["tortoise"]` in the
+    # call arguments below; see `test_the_renderer_renders_a_log_from_the_committed_record`.
+    e6_measure, e6_row = _e6_fixture()
     bars = measure.parse_bars(_prereg())
     return measure.render_log(
         head="a" * 40, prereg_sha="b" * 40,
@@ -11512,6 +11836,7 @@ def _render_a_log(monkeypatch, *, receipt: dict, corpus_sha: str) -> str:
         e5_out={"ratio": 1.0833, "ratio_ok": True, "raw_recovery": 0.48,
                 "raw_ok": False, "narrative_recovery": 0.52,
                 "outcome": "RED", "bar": "x"},
+        e6=e6_measure, e6_row=e6_row,
         rows=[], out_path="canned.log")
 
 
@@ -11759,7 +12084,8 @@ def test_a_row_cites_the_receipt_the_selector_chose():
         e4={"verdict": "RED", "numerator": 5, "denominator": 15, "sha": "a" * 9,
             "corpus_sha256": "sha256:" + "d" * 64, "note": "E4 note",
             "evidence": "tests/eval/write_path/receipts/w2b-operator-selected.json"},
-        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"})
+        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"},
+        e6=_E6_ROW_FIXTURE)
     by_criterion = {row["criterion"]: row for row in rows}
     assert (by_criterion["E4"]["evidence"]
             == "tests/eval/write_path/receipts/w2b-operator-selected.json")
@@ -11792,7 +12118,8 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
                 "sha": "a" * 9, "corpus_sha256": "sha256:" + "d" * 64,
                 "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-                "note": "E5 note"})
+                "note": "E5 note"},
+            e6=_E6_ROW_FIXTURE)
     assert "REFUSED" in str(exc.value), str(exc.value)
     assert "evidence" in str(exc.value), str(exc.value)
 
@@ -11824,7 +12151,8 @@ def test_a_mapping_missing_corpus_sha256_is_refused_by_name_too():
             e4={"verdict": "RED", "numerator": 5, "denominator": 15,
                 "sha": "a" * 9, "evidence": _E4_ON_PIN, "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-                "note": "E5 note"})
+                "note": "E5 note"},
+            e6=_E6_ROW_FIXTURE)
     message = str(exc.value)
     assert "REFUSED" in message, message
     # The NAMED part is the leading clause; the explanatory tail legitimately mentions
@@ -15657,8 +15985,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             encoding="utf-8", errors="replace").splitlines() if mention.search(line))
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
-    assert per_file == {"PRE-REGISTRATION.md": 23, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 10}, (
+    #: The probe's count moved 10 -> 19 with `#11695`'s E6 producer comments, which name the
+    #: `hierarchies[]` surface the metric spans, and the record's own §10.39 entry adds one
+    #: more to `PRE-REGISTRATION.md` (23 -> 24); the note in the record is re-derived with them.
+    assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
+                        "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
