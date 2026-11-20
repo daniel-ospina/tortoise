@@ -352,9 +352,16 @@ def test_a_threshold_that_cannot_be_parsed_refuses_rather_than_defaulting():
 def test_a_record_without_the_E6_criterion_refuses():
     """`_criteria` requires E6 (#11673's `REQUIRED_CRITERIA`), and that must REFUSE.
 
-    ⛔ `#11695` review F2: the requirement had no arm. Deleting `"E6"` from the tuple made
-    a record that omits the sixth criterion parse happily — the probe would then read E6's
-    bar out of a record that never registered it, which is the "a bar nobody froze" shape.
+    ⛔ `#11695` review F2: the requirement had no arm. This record omits the sixth
+    criterion, so `_criteria` refuses it BY NAME — the "a bar nobody froze" shape, and the
+    only refusal standing between this record and `_threshold`'s `crit["E6"]` subscript.
+
+    ⛔ The mechanism is stated as MEASURED (#14060 review, P3). Delete `"E6"` from
+    `_criteria`'s required tuple and this case DOES red — but not on the assertion below:
+    `_threshold(crit, "E6")` subscripts the key the record does not carry, so a `KeyError`
+    escapes this `except ValueError` and the case fails as an error. The guard is reddened
+    either way; the named refusal is the half this arm owns, and the crash is the half
+    `parse_bars`' own `ValueError → G0` promise turns on the tuple remaining.
     """
     record = _prereg()
     record["criteria"] = [c for c in record["criteria"] if c["id"] != "E6"]
@@ -1024,14 +1031,17 @@ _E6_ROW_FIXTURE = {
 }
 
 
-def _e6_fixture() -> tuple[dict, dict]:
+def _e6_fixture(packs_dir=None) -> tuple[dict, dict]:
     """``(measurement, row)`` from the REAL packs + census — both hermetic reads.
 
     `measure_e6` parses `packs/` and `build_e6_row` reads the committed census artifact;
     neither touches a graph or a model, so a renderer pin can execute the SAME subscript
     paths a real run does instead of a hand-typed block that drifts from the emitter's keys.
+
+    ``packs_dir`` overrides the pack set (the isolated-pack fixture), so the RECORD-side arm
+    can be driven with the same real input as the producer-side one.
     """
-    measurement = measure.measure_e6()
+    measurement = measure.measure_e6(packs_dir=packs_dir)
     return measurement, measure.build_e6_row(measurement, bars=BARS)
 
 
@@ -2531,7 +2541,7 @@ def test_every_e1_key_the_renderer_reads_is_one_the_measure_returns():
             node = node[key]
 
 
-def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
+def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch, tmp_path):
     """#10610 review issue 1 — the render had never been EXECUTED by any test.
 
     A static scan can only ask about keys it knows how to find. This runs the real
@@ -2561,7 +2571,8 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     e4 = measure.load_e4(
         _REPO, frozen_pin=_prereg()["corpus"]["fixtures_hash"])
 
-    def render(record: dict) -> str:
+    def render(record: dict, e6_pair: tuple[dict, dict] | None = None) -> str:
+        e6_measured, e6_recorded = e6_pair or (e6_measure, e6_row)
         bars = measure.parse_bars(record)
         corpus_sha = record["corpus"]["fixtures_hash"]
         e1_out = measure.e1_outcome(**_e1_kwargs())
@@ -2624,8 +2635,8 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
                     e3_result=e3_out, graph="capstone_measure_fixture_0",
                     corpus_sha=corpus_sha)},
             e3_out=e3_out, e4=e4, e4_out=e4_out, e5=e5, e5_out=e5_out,
-            e6=e6_measure, e6_row=e6_row,
-            rows=_rows(e6=e6_row), out_path="docs/evidence/9889/e1-e2-scores.json")
+            e6=e6_measured, e6_row=e6_recorded,
+            rows=_rows(e6=e6_recorded), out_path="docs/evidence/9889/e1-e2-scores.json")
 
     text = render(_prereg())
     # ⛔ #11695: the record this renderer WRITES is the complete one `REQUIRED_CRITERIA`
@@ -2649,7 +2660,18 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
     # ⛔ `load_errors` travels in the RECORD (#11695 review F1). Without it a reader of the
     # log cannot see WHICH pack left the denominator — the row would refuse (or, before the
     # refusal landed, read GREEN) with no evidence of the isolated pack anywhere.
+    #
+    # ⛔ AND THE CARRY IS DISCRIMINATING (#14060 review, P3): on this clean fixture the map
+    # is `{}`, which a hard-coded `"load_errors": {}` at the record site satisfies just as
+    # the carried value does — the arm would stay green with the carry deleted. So the
+    # record half is driven with the SAME real isolated-pack input the producer arm uses
+    # (`dev`'s manifest made unparseable), which no constant can produce.
     assert census_block["load_errors"] == {}, census_block["load_errors"]
+    isolated = _e6_fixture(packs_dir=_corrupted_packs_copy(tmp_path))
+    isolated_block = cvc.extract_block(render(_prereg(), isolated))["run"]["e6_census"]
+    assert list(isolated_block["load_errors"]) == ["dev"], isolated_block["load_errors"]
+    assert isolated_block["outcome"] == "REFUSED", isolated_block["outcome"]
+    assert isolated_block["population"]["declared"] == 31, isolated_block["population"]
     assert "e1 note: both before realizations clear E1's own floors" in text
     # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
     # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
