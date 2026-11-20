@@ -6590,7 +6590,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
         # further down), so the span moves by a uniform +66; then `main`'s `819a473cd4`
         # (`#13674` close `#13819`'s last review round, `#13841`) inserted 18 lines above `org_info`
-        # (the embedder-health docstring block at `:8552`), so the span moves by a further uniform
+        # (that block OPENS at `:8556`, its first inserted line — `:8552` is the hunk's opening
+        # CONTEXT line and was already there, so naming it would point at a line this commit did
+        # not add), so the span moves by a further uniform
         # +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
