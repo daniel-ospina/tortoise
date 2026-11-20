@@ -62,6 +62,18 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — the documented invocation
+# is a bare `python3 tools/...`, and a module-level 3.11+-only import would fail first.
+# Same shape as `tools/surface-target-check.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        "tools/mcp_surface_approval.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/mcp_surface_approval.py`"
+    )
+
 import argparse
 import re
 from pathlib import Path

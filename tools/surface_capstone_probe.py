@@ -73,20 +73,27 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: the guard must precede every other import — a module-level 3.11+-only import
+# raises ImportError on an older interpreter before a later guard could run, which reads
+# as "this tool is broken" rather than "your python3 is too old". Found RED by
+# `tests/test_entry_point_python_guard.py` on this file's first push (the guard sat below
+# the import block); same shape as `tools/surface-target-check.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        "tools/surface_capstone_probe.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/surface_capstone_probe.py`"
+    )
+
 import argparse
 import json
 import os
-import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        "tools/surface_capstone_probe.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it with `uv run python`"
-    )
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
