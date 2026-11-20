@@ -36,7 +36,8 @@ returns — same ids, same order, same recall@k, same distances?**
   graph's index census. That census is #13906's own audit (7 indexes, all
   range/fulltext) and is cited, not re-derived.
 - **The Tortoise graph could not be read**: `[mandate-preflight]` reports
-  `TORTOISE-GRAPH-BRIEF.md` missing on this cell (`/home/cmux/.pi/agent/state/`),
+  `TORTOISE-GRAPH-BRIEF.md` missing on this cell (the agent state directory,
+  `${CELL_HOME:-$HOME}/.pi/agent/state/`),
   and there is no provisioning path (#1193 owns the content, #3377 the report).
   The internal pass therefore rests on the docs and the code, and the graph is
   recorded as **not readable here** — never as "empty".
