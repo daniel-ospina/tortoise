@@ -59,7 +59,11 @@ guaranteed to agree. This harness measures both rather than assuming either:
     uv run python tools/vector_parity_13906.py ... --poison vector
 
 Exit codes: ``0`` parity within policy · ``1`` a required comparison diverged ·
-``2`` cannot run (no store, no schema, no driver) — never reported as parity.
+``2`` cannot run (no store, no schema, no driver) — never reported as parity ·
+``3`` a poisoned run measured everything and the poison moved NOTHING (HARNESS
+BLIND). ⛔ 3 rather than 1 on purpose: §6's repro recipe is one `echo exit=$?`
+per poison, and a blind harness that shares `1` with "diverged" reads as
+"poison confirmed" — the one bit the falsifier's proof rests on.
 """
 from __future__ import annotations
 
@@ -83,6 +87,20 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 from tortoise.live import TERMINAL_EXCLUDED_STATUSES as TERMINAL_STATUSES
 
 DIM = 384
+
+#: Which REQUIRED arm each poison can actually move. `id|order|recall` rewrite the
+#: RECORD candidate list (`rec_pairs = poison(…, rec_ids, …)`); `vector` perturbs
+#: the rows the GRAPH is seeded with, so it reaches the graph "scan" arm and never
+#: the record one. ⛔ A poison is "detected" only when the arm IT reaches measured
+#: a divergence: a divergence on some OTHER arm is real, but it certifies nothing
+#: about whether this instrument can see the corruption the run applied — the same
+#: self-certification the round-7 fix closed one door over (see `_verdict`).
+POISON_REACH: dict[str, tuple[str, ...]] = {
+    "id": ("record",),
+    "order": ("record",),
+    "recall": ("record",),
+    "vector": ("graph_scan",),
+}
 
 
 class CannotRun(RuntimeError):
@@ -217,7 +235,14 @@ def build_corpus(seed: int = 13906, n_random: int = 48) -> list[Row]:
     rows.append(Row(key="outdated", embedding=_unit(0), outdated=True))
 
     # Edge: another tenant, same vectors as the query. A tenancy leak on the
-    # record leg ranks FOREIGN first; the graph side gets its own graph.
+    # record leg ranks FOREIGN first.
+    #
+    # ⛔ RECORD-ONLY, and the comment used to claim otherwise ("the graph side gets
+    # its own graph"): `seed_foreign_tenant()` exists only on `RecordStore`, and
+    # `GraphStore.seed` SKIPS every `tenant != "ours"` row — no second cypher graph
+    # is ever created, so a tenancy leak on the graph leg is UNTESTED. Stated here
+    # rather than silently implied by the corpus: the edge is a property of the
+    # record leg only, which is the leg the migration moves TO.
     for j in range(3):
         rows.append(Row(key=f"other{j}", embedding=_unit(0), tenant="other"))
 
@@ -1280,8 +1305,17 @@ def run(args) -> dict:
 
 
 def _cross_recall(a: list[str], b: list[str]) -> dict:
+    """Overlap of two candidate lists, or `recall: None` over an EMPTY one.
+
+    ⛔ An empty `a` used to publish `recall: 1.0` — the ``an empty answer is not a
+    passed check`` class `compare()`'s own recall was already fixed for. A raised
+    record leg answers `[]`, so those artifact rows read as PERFECT agreement over
+    zero rows. It cannot turn a run green (the required record arm fails first),
+    but a field that says 1.0 over nothing is a claim the data does not support.
+    Artifact replay is unaffected: every committed run has a non-empty `a`.
+    """
     sa, sb = set(a), set(b)
-    return {"recall": len(sa & sb) / len(sa) if sa else 1.0,
+    return {"recall": len(sa & sb) / len(sa) if sa else None,
             "only_a": sorted(sa - sb)[:10], "only_b": sorted(sb - sa)[:10]}
 
 
@@ -1377,6 +1411,10 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
     # These strings are collected into BOTH lists, so the status below can tell
     # "the corruption was seen" from "the instrument could not look".
     unmeasured: list[str] = []
+    #: message -> the REQUIRED arm that produced it (`None` for report-level
+    #: failures: an oracle too short for `k`, an empty report). `detected` reads
+    #: this so a divergence can only certify the arm the poison actually reaches.
+    arm_of: dict[str, str | None] = {}
     divergences = 0
     # ⛔ AN ORACLE SHORTER THAN `k` IS NOT A MEASUREMENT AT `k`, and `_validate_args`
     # is not the only place that has to say so. Its refusal counts the corpus
@@ -1401,6 +1439,7 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
                 f"was asked for, so a full-recall parity here measures no width")
             failures.append(missing)
             unmeasured.append(missing)
+            arm_of[missing] = None
         # REQUIRED: the arm the migration is moving TO, against the metric the
         # record's index is built with.
         #
@@ -1421,6 +1460,7 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
             error=entry.get("record_error"))
         if mine:
             failures.append(mine)
+            arm_of[mine] = "record"
             if not measured:
                 unmeasured.append(mine)
         # REQUIRED, as the COMPARATOR'S OWN sanity check: the graph scan must
@@ -1432,6 +1472,7 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
             oracle="truth_euclidean")
         if mine:
             failures.append(mine)
+            arm_of[mine] = "graph_scan"
             if not measured:
                 unmeasured.append(mine)
         divergences += len(entry["metric_divergence_ids"])
@@ -1444,6 +1485,7 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         why = "no queries were measured — an empty report is not parity"
         failures.append(why)
         unmeasured.append(why)
+        arm_of[why] = None
 
     ok = not failures
     if poisoned:
@@ -1460,10 +1502,27 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         # never looked (and it is the reading the repro recipe in the README's
         # §6 collapses: one `echo exit=$?` cannot tell the three apart, so the
         # codes now differ too — see `main`).
-        detected = any(f for f in failures if f not in unmeasured)
+        # ⛔ AND THE FAILURE MUST COME FROM THE ARM THE POISON REACHES. The
+        # `not in unmeasured` filter above answers "was this MEASURED"; it does not
+        # answer "was it measured ON THE THING THE POISON MOVED". `--poison
+        # id|order|recall` only ever rewrites the RECORD candidate list, so a
+        # graph_scan divergence (a real, measured failure) satisfied the old
+        # predicate and printed `POISON DETECTED` for a poison the record arm had
+        # not moved — the round-7 self-certification one door over. `POISON_REACH`
+        # is the mapping, and both arms are represented in it so the scoping can
+        # never collapse into "any measured failure" again.
+        detected = any(arm_of.get(f) in POISON_REACH[poisoned]
+                       for f in failures if f not in unmeasured)
         if detected:
             status = "POISON DETECTED"
-        elif failures:
+        elif unmeasured:
+            # ⛔ THE CANNOT-MEASURE READING IS KEYED ON THE CANNOT-MEASURE FAILURES,
+            # not on `failures` being non-empty: a MEASURED divergence on an arm the
+            # poison does not reach is neither a detection (nothing proves this
+            # corruption is visible) nor an absence of measurement — and calling it
+            # "UNMEASURED" would say the instrument could not look when it did look,
+            # at the wrong thing. That state falls through to BLIND below, with the
+            # other arm's divergence still printed in `failures`.
             status = ("POISON UNMEASURED — the run could not measure the arms "
                       "the poison would have to move")
         else:
@@ -1473,7 +1532,7 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
                    "failures": failures or [
                        "poison produced no divergence — the comparison is blind"],
                    "informational": {"metric_divergence_ids_total": divergences}}
-        if not detected and failures:
+        if not detected and unmeasured:
             # ⛔ PRESENT ONLY IN THE STATE IT DESCRIBES. `main` reads it to choose
             # exit **2** (cannot run) over 1 (a comparison diverged), so a caller's
             # exit code tells the three readings apart and not only the printed
@@ -1659,6 +1718,14 @@ def main(argv: list[str] | None = None) -> int:
               "— this run says nothing about the harness's blindness",
               file=sys.stderr)
         return 2
+    if (v.get("poison_status") or "").startswith("POISON NOT DETECTED"):
+        # ⛔ A BLIND HARNESS IS NOT A CONFIRMED ONE. Everything measured and the
+        # poison moved nothing: that is a verdict about the INSTRUMENT, and it must
+        # not share the code §6's one-bit recipe reads as "the poison was caught".
+        print("blind: every arm measured and the poison moved NOTHING — the "
+              "comparison cannot see this corruption; it is NOT confirmed",
+              file=sys.stderr)
+        return 3
     return 1
 
 

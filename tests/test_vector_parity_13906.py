@@ -816,7 +816,7 @@ def test_a_nan_distance_is_not_a_verified_one(harness):
 
 
 def _reachable_entry(harness, *, record_error=None, corrupt_record=False,
-                    nan_distances=False, query="q0"):
+                     nan_distances=False, corrupt_scan=False, query="q0"):
     """An entry in the shape `run()` ACTUALLY produces — built by `compare` itself.
 
     ⛔ GENERATED, NOT HAND-WRITTEN, and that is the whole lesson of this pin. The
@@ -832,6 +832,7 @@ def _reachable_entry(harness, *, record_error=None, corrupt_record=False,
     t_cos = harness.truth(rows, qvec, 8, metric="cosine")
     t_euc = harness.truth(rows, qvec, 8, metric="euclidean")
     cos_ids = [key for key, _ in t_cos]
+    euc_ids = [key for key, _ in t_euc]
     cos_dists = [d for _, d in t_cos]
     if record_error is not None:
         # exactly what `run()` does when `record.read` raises
@@ -846,7 +847,9 @@ def _reachable_entry(harness, *, record_error=None, corrupt_record=False,
         rec = harness.compare(t_cos, cos_ids, candidate_distances=cos_dists)
     entry = {"query": query, "record": rec, "graph_index": rec,
              "graph_scan_vs_euclidean": harness.compare(
-                 t_euc, [key for key, _ in t_euc],
+                 t_euc,
+                 ([euc_ids[1], euc_ids[0], *euc_ids[2:]] if corrupt_scan
+                  else euc_ids),
                  candidate_distances=[d for _, d in t_euc]),
              "graph_scan_vs_cosine": harness.compare(t_cos, cos_ids),
              "metric_divergence_ids": []}
@@ -946,6 +949,83 @@ def test_a_poisoned_run_that_could_not_measure_is_not_a_detection(harness):
     both = harness._verdict(mixed, poisoned="order")
     assert both["poison_status"] == "POISON DETECTED", both["poison_status"]
     assert "unmeasured" not in both, both
+
+
+def test_a_poison_is_only_detected_on_the_arm_it_reaches(harness):
+    """⛔ A DIVERGENCE ON AN UNREACHED ARM CERTIFIES NOTHING (#13914 round 10).
+
+    `detected = any(f for f in failures if f not in unmeasured)` answered "was this
+    MEASURED", never "was it measured ON THE THING THE POISON MOVED". `--poison
+    id|order|recall` rewrite only the RECORD candidate list (`rec_pairs =
+    poison(…, rec_ids, …)`), and `--poison vector` perturbs the rows the GRAPH is
+    seeded with — so a real, measured divergence on the OTHER required arm printed
+    `POISON DETECTED` for a corruption the run never applied to it. Same
+    self-certification the round-7 fix closed one door over.
+
+    Both directions are pinned, because a one-sided pin is satisfied by the old
+    behaviour half the time.
+    """
+    scan_bad = {"k": 8, "queries": [_reachable_entry(harness, corrupt_scan=True)]}
+    record_bad = {"k": 8, "queries": [_reachable_entry(harness, corrupt_record=True)]}
+
+    # (1) `--poison id` cannot move the graph arm, so a scan divergence is NOT it.
+    v = harness._verdict(scan_bad, poisoned="id")
+    assert v["poison_status"].startswith("POISON NOT DETECTED"), (
+        f"a graph_scan divergence certified --poison id, which only rewrites the "
+        f"record candidate list: {v['poison_status']!r} / {v['failures']}")
+
+    # (2) …and the arm it DOES reach is still a detection (so (1) cannot be
+    # satisfied by a verdict that answers BLIND to everything).
+    assert harness._verdict(record_bad, poisoned="id")["poison_status"] == \
+        "POISON DETECTED"
+
+    # (3) `--poison vector` perturbs the graph store, so a RECORD divergence is
+    # not evidence about it.
+    vv = harness._verdict(record_bad, poisoned="vector")
+    assert vv["poison_status"].startswith("POISON NOT DETECTED"), (
+        f"a record divergence certified --poison vector, which perturbs the graph "
+        f"side: {vv['poison_status']!r} / {vv['failures']}")
+
+    # (4) …and the graph arm it DOES reach is.
+    assert harness._verdict(scan_bad, poisoned="vector")["poison_status"] == \
+        "POISON DETECTED"
+
+
+def test_a_blind_run_does_not_share_the_detected_exit_code(harness, monkeypatch):
+    """§6's one-bit recipe must not read a BLIND harness as a confirmed one.
+
+    README §6 runs each poison and reads `echo exit=$?`. BLIND and DETECTED both
+    exited 1, so "every arm measured and the poison moved nothing" — a verdict
+    AGAINST the instrument — was byte-identical to "the poison was caught".
+    """
+    entry = _reachable_entry(harness)
+    blind = {"k": 8, "queries": [dict(entry)],
+             "verdict": harness._verdict({"k": 8, "queries": [dict(entry)]},
+                                          poisoned="vector")}
+    assert blind["verdict"]["poison_status"].startswith("POISON NOT DETECTED"), \
+        blind["verdict"]["poison_status"]
+    monkeypatch.setattr(harness, "run", lambda _args: blind)
+    argv = ["--record-dsn", "postgresql://u:p@127.0.0.1/db",
+            "--graph-port", "1", "--poison", "vector"]
+    code = harness.main(argv)
+    assert code == 3, (
+        f"a BLIND run exited {code}; 1 is the code §6's recipe reads as "
+        f"'the poison was confirmed'")
+
+
+def test_an_empty_candidate_list_is_not_perfect_agreement(harness):
+    """`_cross_recall` over zero rows published `recall: 1.0` (round 10).
+
+    `compare()`'s recall was already fixed to answer `None` over an empty set; the
+    cross-leg column kept the old shape, so a raised record leg's `[]` wrote
+    `record_vs_graph_scan.recall = 1.0` into the artifact — perfect agreement over
+    nothing. It cannot turn a run green (the required record arm fails first), but
+    the field is a claim the data does not support.
+    """
+    assert harness._cross_recall([], ["a"])["recall"] is None
+    assert harness._cross_recall(["a"], [])["recall"] == 0.0, (
+        "an empty SECOND list is zero overlap, which IS a measurement")
+    assert harness._cross_recall(["a", "b"], ["a"])["recall"] == 0.5
 
 
 def test_an_empty_answer_is_not_a_passed_distance_check(harness):
