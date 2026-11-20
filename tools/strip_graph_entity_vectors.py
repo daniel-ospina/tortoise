@@ -1144,34 +1144,38 @@ def _container_call_operand(node):
     return node.args[0]
 
 
-#: The names of the pass-through family that `_source_holds_the_store_anywhere`'s container arm
-#: deliberately does NOT answer, because an upstream leg has already decided their spellings.
-#: ⛔ A SUBTRACTION FROM `_CONTAINER_CALLS`, NEVER A SECOND MEMBER SET — the whole reason that list
-#: exists is that the family was spelled out four times with four different member sets, and the
-#: two names missing from all four CERTIFIED a stop arm that stored the vector (21 of 100 rows).
-#: A tuple re-spelled at the site is that defect again: adding a name to `_CONTAINER_CALLS` would
-#: silently not reach this seam and NOTHING would redden. So membership lives in one place and only
-#: the DISPOSITION is local — and an excluded name is SUBTRACTED, so a NEW family member is asked
-#: at this seam by default (fail-closed: it can only add refusals).
+#: The names of the pass-through family that an upstream leg of
+#: `_pairs_operand_stores_the_vector`'s dict-comprehension arm ALSO answers, so that
+#: `_source_holds_the_store_anywhere`'s container arm is REDUNDANT for them.
+#: ⛔ THIS IS A RECORD, NOT A DISPOSITION: THE ARM DOES NOT SUBTRACT IT (PR #13928 review, P1).
+#: It used to, and that subtraction was the one direction this file forbids — it can only REDUCE
+#: refusals — on a licence from a sample that never asked the pair-WITH-EXTRAS shape the arm's own
+#: docstring says it exists for. The review's counterexample
+#: (`<wrapper>([("embedding", vec, 1)])` behind an `if`-filtered comprehension) turned out to be
+#: answered twice over, so no verdict moved; but an unsampled class inside an exclusion is not a
+#: licence, and the direction of the change was the forbidden one either way.
 #:
-#: ⛔ ONLY SAFE WHILE IT IS REDUNDANT, and that is measured, not assumed (`#13788` round 12;
-#: re-measured for the review of PR #13928 at `fc5e67cc49`). In the position this seam is asked
-#: from — a NON-`Name` key over a container-wrapped pairs source — every one of the six names is
-#: answered BEFORE the fourth leg: sampled all six names x five inner shapes (literal, `.copy()`,
-#: `if`-expression, `Starred` splice, set literal) = **30 rows**; leg 1
-#: (`_pairs_operand_stores_the_vector`) answered 30/30 and leg 3
-#: (`_comprehension_source_pairs_the_property_with_a_value`) 30/30, so this arm was the SOLE
-#: decider of **0/30**. Emptying its name set moves **no** row of
-#: `test_the_stop_arm_must_not_store_the_vector` either (measured by emptying it, and again by
-#: deleting the arm outright). `set`/`list`/`tuple` are SAMPLED here — not extrapolated from the
-#: `sorted`/`reversed`/`iter` sweep that named only three of the six.
-#: ⛔ THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 is ever thinned so that it stops
-#: answering an excluded name,
-#: `test_the_container_arm_this_seam_does_not_answer_is_covered_one_leg_earlier` reddens — instead
-#: of this exclusion quietly losing the legs that were doing the work.
+#: ⛔ SO ONLY BELIEVE THE REDUNDANCY WHILE IT IS MEASURED, and the sample is stated with its read
+#: recipe (`test_the_fourth_legs_container_arm_asks_the_whole_family`, which asserts it): six names
+#: x eight inner shapes (literal, `.copy()`, `if`-expression, `Starred` splice, set literal, and
+#: three pair-with-extras spellings) = **48 rows at this seam**. Leg 1
+#: (`_pairs_operand_stores_the_vector`) answers 30/48, leg 3
+#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/48, and the arm 36/48 — every row
+#: the arm answers is answered by one of them first, which is the redundancy. End to end, through
+#: `_writer_consults_gate`, six names x ten shapes = **60 rows**: 54 refused and 6 CERTIFIED (the
+#: pair-with-extras whose property sits at index 1 — a `list`/`tuple`-only reading of the extras
+#: shape, certified on `main` too, i.e. a pre-existing hole in the extras rule and NOT this arm),
+#: and the arm's disposition moves **0** of the 60 — whole family, four-name subtraction, and arm
+#: answering NOTHING (measured by emptying it) all grade the same rows the same way. So keeping the
+#: arm costs nothing and dropping names from it buys nothing. `set`/`list`/`tuple` are SAMPLED here — never
+#: extrapolated from the `sorted`/`reversed`/`iter` sweep that named only three of the six.
+#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 stops answering a family name, or
+#: if a family name is added to `_CONTAINER_CALLS` without being asked at this seam,
+#: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
+#: losing the legs that were doing the work.
 #: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
 #: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
-#: DISCLOSED here, never left looking load-bearing.
+#: DISCLOSED here, never left looking load-bearing — and an arm that IS witnessed stays whole.
 _CONTAINER_CALLS_ANSWERED_UPSTREAM = ("set", "sorted", "reversed", "iter")
 
 
@@ -2368,22 +2372,24 @@ def _source_holds_the_store_anywhere(node) -> bool:
     if isinstance(node, ast.Starred):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
-        # ⛔ THIS SEAM ASKS THE ONE INCLUDE LIST, AND ANSWERS A MEASURED PART OF IT (`#13788`
-        # round 12; re-measured for the review of PR #13928). The MEMBER SET comes from
+        # ⛔ THIS SEAM ASKS THE ONE INCLUDE LIST AND ANSWERS ALL OF IT (`#13788` round 12;
+        # re-measured for the review of PR #13928). The MEMBER SET comes from
         # `_container_call_operand`/`_CONTAINER_CALLS` — which is also what keeps that helper's
         # documented keyword semantics here (`key=`/`reverse=` re-order without re-selecting, so
         # for the ELEMENT question this arm asks they are transparent). The site re-spells
-        # neither: a second tuple here is how the family came to have four different member sets.
-        # What is local is only the DISPOSITION — the names in
-        # `_CONTAINER_CALLS_ANSWERED_UPSTREAM` are dropped because an upstream leg decides their
-        # spellings first (see that constant for the measurement and for the guard that keeps the
-        # cover honest). A leg with no witness is not a closed hole, and WIDENING an unreachable
-        # arm would CLAIM a fix that no row could ever redden — so the arm stays disclosed
-        # rather than claiming protection, and the three seams that ARE reached
-        # (`_pairs_operand_stores_the_vector`, `_comprehension_source_yields`,
-        # `_sequence_options`) carry the fix.
-        if (_callee_name(node) not in _CONTAINER_CALLS_ANSWERED_UPSTREAM
-                and (operand := _container_call_operand(node)) is not None):
+        # nothing: a second tuple here is how the family came to have four different member sets.
+        # ⛔ AND IT IS NOT SUBTRACTED EITHER (PR #13928 review, P1 — adopted fail-closed). This
+        # arm used to drop the four names `_CONTAINER_CALLS_ANSWERED_UPSTREAM` lists, on a sample
+        # of five PLAIN two-element inner shapes only. The review's counterexample — a
+        # pair-WITH-EXTRAS (`(…, 1)`) behind a wrapper and an `if`-filtered comprehension, the
+        # shape this function's own docstring says it must read — was measured to be answered by
+        # an upstream leg anyway (see that constant for the 48-row and 60-row measurements), so
+        # no verdict moved; but a subtraction can only REDUCE refusals, which is the direction
+        # this file forbids, and its licence did not cover the class it was excluding. Restoring
+        # the whole family moved **0** of the 60 end-to-end rows sampled and can only ADD refusals
+        # to shapes nobody has sampled — so the arm answers every family name and the measurement,
+        # not a local name list, is the record.
+        if (operand := _container_call_operand(node)) is not None:
             return _source_holds_the_store_anywhere(operand)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
                 and not node.args and not node.keywords):
