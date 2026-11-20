@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1317** | **100** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,110** | **838** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 / 9,170 here, and only `9,110` reproduces at this tree — the 2,513 files it scans are `main`'s own tracked 2,511 (counted on `origin/main`, no file in this branch's diff) plus this branch's two new files `tools/vector_parity_13906.py` and `tests/test_vector_parity_13906.py`; the row's PREVIOUS figure of 2,507 was read before `main` grew those 4. The number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,110** | **838** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 / 9,170 here, and only `9,110` reproduces at this tree — re-derived by RUNNING the tool on this merged tree and on `origin/main` `626bab101a` (re-run after this branch's SECOND forward merge; the `0ddc6ded8d` reading was unchanged by it), not by arithmetic on a previous row: `main` scans 2,511 files and carries 9,102 sites, and THIS PR adds the 2 files (`tools/vector_parity_13906.py`, `tests/test_vector_parity_13906.py`) and the 8 sites (7 in the tool, 1 in `tortoise/record_vector.py`) that take those to 2,513 / 9,110. The number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -222,9 +222,9 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
 | `fulltext` | **2** | read=2 |
-| `unresolved` | **101** | unresolved=101 |
+| `unresolved` | **102** | unresolved=102 |
 
-**What the unresolved bucket is.** 101 sites hand a door a statement built where no static reader
+**What the unresolved bucket is.** 102 sites hand a door a statement built where no static reader
 can follow: a **parameter** (`def _count(proj, query: str)` in `tortoise/audit.py:247`), a
 **call-built** string (`proj.g.query(cypher, …)` where `cypher` is an argument), a helper's return
 value, or — since `#13098` review P1 — a `CALL` whose procedure NAME the text cannot prove
@@ -449,35 +449,25 @@ two files stop carrying any site at all (hence `files` 101 → 99). No Cypher st
 product — the true door sites are all still here, and the `unresolved` bucket is now 101 sites that
 really do hand a door a statement this reader cannot follow.
 
-§1's `rg` reconciliation is re-quoted from the tool at this tree (door **1,632 / 108** whole-text,
-verb **2,365 / 147**, bare **1,638 / 109**), and the `--all-surface` row re-derived: **9,102 / 836**
-across **2,507** scanned files. Appendix A is regenerated with `--markdown`, and `--check` prints
-**`25 pinned counts match`**. ⚠️ The two paragraphs below describe each parent's cut against ITS OWN
-base, so their numbers are relative and no longer the table's — the tables and pins carry THIS one.
+§1's `rg` reconciliation is re-quoted from the tool at this merged tree (door **1,632 / 108**
+whole-text, verb **2,365 / 147**, bare **1,638 / 109**), and the `--all-surface` row re-derived:
+**9,110 / 838** across **2,513** scanned files. Appendix A is regenerated with `--markdown`, and
+`--check` prints **`25 pinned counts match`**.
 
-**The cut at THIS forward merge (`origin/main` `626bab101a` × `#13906`):** the same rule — measured on
-the merged tree, never by arithmetic on the markers. `main` brought three cuts this branch had not
-measured (`#13938`, `#13939`, `#13940`), and the merge is where they land. Measured against
-`origin/main` itself (`--json`, then a per-file row diff — the only pair of numbers this paragraph
-rests on), this branch adds **exactly one** site, and it is a CENSUS ARTIFACT of the change rather
-than new Cypher: `tortoise/record_vector.py:2795` in `vector_search` reads `unresolved` because
-`#13906` extracted the kNN SELECT into `record_vector.knn_statement()` — ONE definition shared with
-the parity harness, which `EXPLAIN`s that same string — so the `cur.execute(sql, …)` at the call site
-now takes a name the AST cannot resolve. On `main` the identical call was counted as a NON-Cypher
-door call (the statement was a local `sql = (…)`), which is why the two operands move in opposite
-directions while their sum does not. From `main`'s:
-`sites` **1317** = 1316 + 1; `unresolved` **102** = 101 + 1 (`shape_unresolved` and
-`shape_unresolved_unresolved` with it); `non_cypher_door_calls` **261** = 262 − 1;
-`ast_door_calls` **1578** = 1317 + 261, unchanged on BOTH parents — the arithmetic that proves this is
-a re-classification, not a new call; `files` **100** = 99 + 1 (`record_vector.py` is the only file that
-starts carrying a site). Unchanged: `plain` **868** (read **586**, write **282**), `adjacency` **293**
-(read **192**, write **101**), `ep` **32**, `traversal` **3**, `fulltext` **2**, `ddl` **17**,
-`candidates` **586**, `partial` **318**, `files_scanned` **302**. ⛔ §3's candidate list is therefore
-untouched: nothing here is a new record-store candidate, and a re-classified SQL statement is not one.
-§1's `rg` reconciliation is unchanged as well — the door lines are the same **1,632 / 108**, because
-the extraction moved a statement, not a door call. Appendix A is regenerated with `--markdown` and is
-byte-identical to the tool's own output (checked by command, not by eye), and `--check` prints
-**`25 pinned counts match`**.
+**This PR's own cut, measured on the merged tree (`origin/main` `626bab101a` + this branch), not
+inferred from either parent's table:** `sites` 1316→**1317**, `files` 99→**100**,
+`unresolved` 101→**102**, and it *lowers* `non_cypher_door_calls` 262→**261** — so
+`ast_door_calls` is unchanged at **1578** (1317 + 261). The cause is one file, measured with the
+tool's own `enumerate_file` on each side rather than by subtracting published scalars:
+`tortoise/record_vector.py` carried **0 sites and 5 non-Cypher door calls** on `main`, and carries
+**1 site and 4 non-Cypher door calls** here — its `vector_search` `execute(<built statement>)` now
+resolves to nothing a static reader can follow (`unresolved`), because the SELECT moved into the
+named builder `knn_statement` that the parity harness EXPLAINs. So this PR adds one `unresolved`
+site, not a candidate, and that is why `candidates` stays **586** and `plain` stays **868**
+(read **586**, write **282**) with every other shape unchanged (`adjacency` **293**, `ep` **32**,
+`ddl` **17**, `traversal` **3**, `fulltext` **2**); `files_scanned` stays **302**. ⚠️ The three
+paragraphs below describe each parent's cut against ITS OWN
+base, so their numbers are relative and no longer the table's — the tables and pins carry THIS one.
 
 **The cut for `#13557`/`#13558` (the reachable state reads):** `origin/fix/13128-occurrence-kind-spellings`
 **`5f73f582a0`**, the read-layer PR this lane is deliberately based on (so it inherits that PR's changes
