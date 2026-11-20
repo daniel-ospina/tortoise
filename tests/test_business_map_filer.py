@@ -1215,6 +1215,9 @@ def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
     # line count could exceed what is listed and the parenthetical would claim a
     # line was printed that was not (#13913 review round 19).
     assert "edge(s) were DECLINED" in err, err
+    # ⛔ NOT "markers": this class has NO marker, and the sentence above says so.
+    assert "each of those was re-reported above" in err, err
+    assert "markers was re-reported" not in err, err
     # The exception class has no marker either: bullet 3 must say what to do.
     assert "If NO marker for this line is in `written` at all" in err, err
     one = structural[0]
