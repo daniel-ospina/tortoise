@@ -3513,8 +3513,18 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
                 # `c^[+-]$` — those quotes were the shell's, not the pattern's. Reporting
                 # `c'^[+-]$'` handed back a string no argv can contain (verdict-neutral, the class
                 # test rejects it either way, but a reported prescription must be an argument).
-                # A tail that STARTS with a quote (`-ce'…'`) keeps it: the shell removed only the
-                # OUTER quotes there, and that form is read by the quoted branch below.
+                # ⛔ A TAIL THAT STARTS WITH A QUOTE (`-ce'…'`) IS RETURNED WITH THAT QUOTE, AND
+                # THAT IS THIS FUNCTION'S OWN DOING — NOT THE SHELL'S (#14027 round 11, P2 —
+                # MEASURED). The sentence here used to say "the shell removed only the OUTER
+                # quotes there, and that form is read by the quoted branch below"; both halves are
+                # false. The shell removes EVERY quote character (`set -- -ce'^[+-]$'` gives argv
+                # `-ce^[+-]$`, and `-e`'s value is `^[+-]$`), and the quoted branch below is not
+                # reached at all: the split returns first, and that branch is reachable only when
+                # nothing in the cluster takes an argument. The leading quote is therefore the one
+                # shape this slice still hands back as a value that is not itself an argv element
+                # — a declared residual, stripped downstream by `_d5_quoted_literal` and rejected
+                # by the class test, so no verdict depends on it (`-ce'^[+-]$'` and `-ce^[+-]$`
+                # both end as `['^[+-]$']`).
                 if value and value[0] not in "'\"":
                     value = value.replace("'", "").replace('"', "")
                 return option[:split_at + 1], value
@@ -3731,11 +3741,13 @@ def _d5_command_expression(text: str, start: int) -> list[tuple[str, str]] | Non
                     patterns.append(literal if literal is not None else raw)
                 awaiting_role = None
             else:
-                # ⛔ ONLY A FLAG WHOSE ARGUMENT IS STILL MISSING AWAITS THE NEXT WORD. `-A2`
-                # carries its argument INSIDE the word (last character is not an argument-taking
-                # flag), so awaiting nothing is what keeps the expression from being eaten
-                # (#13995, MEASURED — the rule is `_d5_needs_a_separate_value`'s, reused here so
-                # the two cannot disagree about where a word stops being a flag).
+                # ⛔ ONLY A FLAG WHOSE ARGUMENT IS STILL MISSING AWAITS THE NEXT WORD, AND IT IS
+                # `not attached` THAT ESTABLISHES IT (#14027 round 11, P3 — MEASURED). `-A2` is
+                # split into `('-A', '2')` before it reaches here, so `option`'s last character IS
+                # an argument-taking one and `_d5_needs_a_separate_value("-A")` answers True; what
+                # keeps the expression from being eaten is the non-empty `attached`, which
+                # short-circuits the condition. A comment attributing it to the last-character
+                # test invites a fixer to drop `not attached` and reopen the false PASS.
                 awaiting_role = (role if role is not None and not attached
                                  and _d5_needs_a_separate_value(option) else None)
             continue
