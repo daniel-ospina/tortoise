@@ -434,16 +434,21 @@ class TestF4CaptureGuards:
             self._targeted, self._stabilized = targeted, stabilized
             self.calls: list[tuple[str, dict]] = []
 
-        def compute_confidence(self, **kw):
-            self.calls.append(("compute_confidence", kw))
+        # The three seams ``capture_f4_oracle`` reaches are the PRIVATE spellings
+        # (#12901 retired the public ones), so the double mirrors the class it
+        # stands in for. Defining the public names here left every arm of this
+        # class running over an AttributeError envelope instead of the capture's
+        # own guards.
+        def _compute_confidence(self, **kw):
+            self.calls.append(("_compute_confidence", kw))
             return self._targeted
 
-        def dream(self, **kw):
-            self.calls.append(("dream", kw))
+        def _dream(self, **kw):
+            self.calls.append(("_dream", kw))
             return self._stabilized
 
-        def get_confidence(self, _pid, **kw):
-            self.calls.append(("get_confidence", kw))
+        def _get_confidence(self, _pid, **kw):
+            self.calls.append(("_get_confidence", kw))
             return {"mean": 0.5}
 
     _CLEAN_TARGETED: ClassVar[dict[str, object]] = {
@@ -458,7 +463,7 @@ class TestF4CaptureGuards:
         # of the fail-closed calibration gate explicitly, or the capture is only
         # hermetic by accident (fresh_sdk's setdefault).
         assert [name for name, _ in duck.calls] == [
-            "compute_confidence", "dream", "get_confidence", "get_confidence"]
+            "_compute_confidence", "_dream", "_get_confidence", "_get_confidence"]
         assert all(kw.get("require_calibration") is False for _, kw in duck.calls)
         assert duck.calls[1][1].get("warm_start") is False  # Epic 903-C4 (#1242)
 
@@ -530,7 +535,7 @@ class TestF4CaptureGuards:
         before = random.getstate()
 
         class _Boom(self._Duck):
-            def dream(self, **kw):
+            def _dream(self, **kw):
                 raise RuntimeError("pass blew up")
 
         with pytest.raises(RuntimeError, match="pass blew up"):

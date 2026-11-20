@@ -536,7 +536,11 @@ class TestTheMcpTagArm:
         )
 
         class _Stub:
-            def query_points_by_tag(self, tag, *, _record_reads=True):
+            # The door calls the PRIVATE seam (`mcp_server.py` →
+            # `_safe(_get_org_sdk()._query_points_by_tag, …)`), so the double must
+            # answer the spelling the class actually holds — a public `def` here
+            # left the assertions running over an AttributeError envelope.
+            def _query_points_by_tag(self, tag, *, _record_reads=True):
                 return [dict(r) for r in TestTheMcpTagArm._ROWS]
 
         monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: _Stub())
