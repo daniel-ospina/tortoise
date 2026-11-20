@@ -4535,9 +4535,15 @@ fly secrets unset TORTOISE_RECORD_ALLOCATE -a tortoise-y4mjjq     # NOT a way ba
 ```
 
 ⛔ **`unset` is NOT the way back to the enumerated replay.** Clearing the flag turns the record path
-OFF for a cut-over graph; the route back to enumeration is `halt` → `seed --journal <path>` →
-`reopen` → `arm`. Removing the **declaration** from `.github/scripts/fly-managed-secrets.txt` is the
-visible one-line change in review — the two operations are different and must not be conflated.
+OFF for a cut-over graph. The route back to a **WORKING (allocating)** record path is `halt` →
+`seed --journal <path>` → `reopen` → `arm` (`CUTOVER_ACK_TEXT` is the authority). ⚠️ **And note what
+that chain does NOT do:** `reopen` is `SET mode='seeded'` **keeping the row and its `seq`**, so the
+`public.record_cursor` row survives it — and `_refuse_an_enumerated_replay` refuses on that ROW in
+every mode (`record_projection.py:7592-7662`), because a `seeded` exemption was measured to
+double-write. **No operator step returns a cut-over graph to enumeration**: the row would have to be
+gone, nothing shipped deletes one, so a de-cutover is a code/migration change and never a
+`fly secrets` operation. Removing the **declaration** from `.github/scripts/fly-managed-secrets.txt`
+is the visible one-line change in review — three different operations, none of them interchangeable.
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 
