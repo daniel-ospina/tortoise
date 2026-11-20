@@ -334,8 +334,12 @@ class Mcp:
             # Falkor read-back (`--verify`: 0 nodes) showed nothing existed.
             if result.get("isError"):
                 msg = _text(result) or "no reason given"
-                if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 5:
-                    time.sleep(min(120, 10 * (attempt + 1)))
+                if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 2:
+                    # A degraded data plane does not heal inside one call: two
+                    # retries, then abort the RUN so the caller can re-probe.
+                    # Grinding through six 60s backoffs per node would spend the
+                    # whole window proving the window is closed.
+                    time.sleep(min(60, 10 * (attempt + 1)))
                     continue
                 raise RuntimeError(f"{tool} FAILED: {msg[:400]}")
             return result
