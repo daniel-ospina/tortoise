@@ -16736,8 +16736,8 @@ _D5_TRIPLE_RE = re.compile(
 #: mis-description (the "NOT a \"D5 formatting guard\"" retraction and the one recording what
 #: the prose used to credit name the class without asserting it, and stay green). Both are
 #: cited by PHRASE and not by line: a self-cite here re-stales on every insert above it —
-#: which is exactly what this commit did to the number it replaced: `:16846` landed on the
-#: unrelated line `f"at {hits}"` inside the very commit removing a re-staled self-cite).
+#: which is exactly what this commit did to the number it replaced, whose `f"at {hits}"` tail
+#: is no longer the line that number names).
 #: And a refutation
 #: on the same line is exempt (`_D5_MISATTRIBUTION_REFUTES`): #13750's own doctrine is that a
 #: guard which reds on TRUE content is a false RED, and the next lane deletes the guard instead
