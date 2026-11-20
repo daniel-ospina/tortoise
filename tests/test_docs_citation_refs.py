@@ -2863,6 +2863,32 @@ def _false_filter_property_restatements(doc: str) -> list[str]:
     return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(doc)]
 
 
+def _norm_for_ban(text: str) -> str:
+    """`text` with case folded and every run of whitespace or commas collapsed to one space.
+
+    ⛔ THE BANS ARE EXACT-TEXT HUNTS, SO EACH IS ONLY AS WIDE AS ITS NORMALISATION — both axes
+    were found by MEASUREMENT, one review round apart, and both are folded here.
+
+    * CASE (#13948 review round 26 for the `_D5_HEAD_BOUND_VERDICTS` arm, round 27 for
+      `_false_filter_descriptions`): a sentence-initial capital is the natural spelling for prose
+      and a one-token edit, and it escaped BOTH bans — the latter over all five of its rows, three
+      of which also escaped the shape arm beside it, so the cell reported GREEN over a restored
+      false description.
+    * LAYOUT (#13948 review round 28): the same sentence re-wrapped across a line break at the
+      document's own prose width, or carrying one inserted comma, restored the retired text with
+      the whole file still at `1 failed, 23 passed` (baseline). This is not hypothetical for this
+      artifact — at `84b94ad74f`, the head the D5 cell grades, the document itself wraps a
+      sentence mid-clause: `git show 84b94ad74f:docs/epics/…/05-verify.md | sed -n '131,132p'`.
+
+    ⛔ WHAT IS STILL NOT CAUGHT, DECLARED rather than chased: a SEMANTIC escape — re-wording the
+    noun, the copula or the verb — is outside what any normalisation can close, and it is the
+    residual each detector's own docstring already names. This arm grades the document's TEXT; it
+    is a tripwire for the retired spellings and their mechanical variations, never a proof that a
+    claim is absent. Widening it into a parser was rejected: the claim is prose.
+    """
+    return re.sub(r"[,\s]+", " ", text).lower()
+
+
 def _false_filter_descriptions(doc: str) -> list[str]:
     """Every retired description of the `#`-only filter still spelled in `doc`.
 
@@ -2877,8 +2903,8 @@ def _false_filter_descriptions(doc: str) -> list[str]:
     RE-INSERTED false description. It is the same false-PASS class this PR closed in
     `_d5_head_bound_verdicts`, one function away; the case axis has its own control below.
     """
-    lowered = doc.lower()
-    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling.lower() in lowered]
+    lowered = _norm_for_ban(doc)
+    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if _norm_for_ban(spelling) in lowered]
 
 
 def _document_filter_patterns(doc: str) -> list[tuple[str, str]]:
@@ -3054,6 +3080,22 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             f"the ledger ban misses the capitalised form of its own row ({cased!r}), so a "
             "sentence-initial restatement of the false description passes it "
             "(#13948 review round 27)")
+    # ⛔ AND THE LAYOUT AXES HAVE THEIR OWN CONTROLS (#13948 review round 28, P2 — MEASURED):
+    # the same sentence RE-WRAPPED across a line break at the document's own prose width, or
+    # carrying one inserted comma, restored the retired text with the whole file still at
+    # baseline. Both are folded in `_norm_for_ban`, so both are pinned here: reverting the fold
+    # reds these rather than leaving the cell silently green.
+    for spelling in _FILTER_FALSE_DESCRIPTIONS:
+        wrapped = spelling.replace(" ", "\n", 3)
+        comma = spelling.replace(" is ", ", is ", 1)
+        assert _false_filter_descriptions(wrapped) == [spelling], (
+            f"the ledger ban misses its own row re-wrapped across a line break ({wrapped!r}) "
+            "— a prose re-wrap would smuggle the retired description past it "
+            "(#13948 review round 28)")
+        if comma != spelling:
+            assert _false_filter_descriptions(comma) == [spelling], (
+                f"the ledger ban misses its own row with one inserted comma ({comma!r}) "
+                "(#13948 review round 28)")
 
     # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
     # with the patterns the DOCUMENT states, so a document that states a different filter is
@@ -3135,8 +3177,8 @@ def _d5_head_bound_verdicts(doc: str) -> list[str]:
     over exactly the per-head verdict it exists to retire — the FALSE-PASS direction this
     file says must never be accepted.
     """
-    lowered = doc.lower()
-    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if spelling.lower() in lowered]
+    lowered = _norm_for_ban(doc)
+    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if _norm_for_ban(spelling) in lowered]
 
 
 def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
@@ -3206,6 +3248,18 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(cased), (
             f"the per-head-verdict ban misses the capitalised form {cased!r}, so a "
             "sentence-initial restatement passes it (#13948 review round 26)")
+    # ⛔ AND THE LAYOUT AXES, the same way (#13948 review round 28, P2 — MEASURED): a re-wrap or
+    # one inserted comma put the retired per-head verdict back with the whole file at baseline.
+    for wrapped, comma in (("at this head the\nFIRST of them prints a path",
+                            "at this head, the FIRST of them prints a path"),
+                           ("and the claim does not\nhold for this head",
+                            "and the claim does not, hold for this head")):
+        assert _d5_head_bound_verdicts(wrapped), (
+            f"the per-head-verdict ban misses {wrapped!r} re-wrapped across a line break "
+            "(#13948 review round 28)")
+        assert _d5_head_bound_verdicts(comma), (
+            f"the per-head-verdict ban misses {comma!r} with one inserted comma "
+            "(#13948 review round 28)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
