@@ -1822,3 +1822,35 @@ def test_a_conninfo_value_containing_a_url_is_not_parsed_as_a_uri(harness):
     rebuilt = harness.app_role_dsn(
         "host=127.0.0.1 dbname=x password=vault://localhost/secret")
     assert "options='" in rebuilt and "?options=" not in rebuilt, rebuilt
+
+def test_a_question_mark_inside_userinfo_is_not_a_query_separator(harness):
+    """libpq resolves the AUTHORITY first; the `?` separator is searched AFTER it.
+
+    Everything from `://` to the first `/` is the authority, and a `?` inside it
+    belongs to the userinfo/password — so `postgresql://127.0.0.1:p?ss@203.0.113.9:1/db`
+    has host `203.0.113.9` (measured: `PQconninfoParse` gives
+    user='127.0.0.1', password='p?ss', host='203.0.113.9', and `psql` DIALS it),
+    while a split at the first `?` anywhere truncates the authority at `127.0.0.1`
+    and certifies the remote store as local. The same rule fixes the inverse
+    over-block: a loopback DSN whose PASSWORD carries a `?` is local.
+    """
+    remote = (
+        "postgresql://127.0.0.1:p?ss@203.0.113.9:1/db",
+        "postgresql://127.0.0.1?@db.prod.example.com/db",
+        "postgresql://127.0.0.1:p?ss@db.prod.example.com:5432/db",
+    )
+    for dsn in remote:
+        hosts = harness._record_dsn_hosts(dsn)
+        assert hosts and all(host != "127.0.0.1" for host in hosts), (dsn, hosts)
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act survives
+
+    # the SPLIT ITSELF, so the rule is stated once and pinned
+    head, query = harness._split_uri("postgresql://u:pa?ss@127.0.0.1:5432/db?host=x")
+    assert head == "postgresql://u:pa?ss@127.0.0.1:5432/db", head
+    assert query == "host=x", query
+
+    # …and the over-block it removes: a `?` in the password of a LOOPBACK DSN.
+    harness._assert_local_record_dsn("postgresql://u:pa?ss@127.0.0.1:5432/db", False)

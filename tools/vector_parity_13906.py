@@ -664,28 +664,59 @@ def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
     return hosts, keys
 
 
+def _split_uri(dsn: str) -> tuple[str, str]:
+    """(text-before-the-query, query) split by LIBPQ's rule, not Python's.
+
+    ⛔ libpq finds the AUTHORITY FIRST — everything after `://` up to the first
+    `/` (or the end of the string) — and only searches for the `?` separator in
+    what FOLLOWS it. A `?` INSIDE the authority is therefore part of the
+    userinfo/password, not a query separator. Measured with `PQconninfoParse`
+    (and `psql` dials it):
+
+        postgresql://127.0.0.1:p?ss@203.0.113.9:1/db
+            -> user='127.0.0.1', password='p?ss', host='203.0.113.9', port='1'
+
+    while splitting at the first `?` anywhere truncates the authority to
+    `127.0.0.1`, so the guard certifies a REMOTE store as local — the same
+    "where does the authority end" disagreement as the `#` case, resolved in the
+    unsafe direction. The same rule fixes the inverse over-block: a loopback DSN
+    whose PASSWORD contains a `?` (`postgresql://u:pa?ss@127.0.0.1/db`) is local.
+    """
+    scheme_end = dsn.find("://")
+    rest = dsn[scheme_end + 3:] if scheme_end != -1 else dsn
+    slash = rest.find("/")
+    authority = rest if slash == -1 else rest[:slash]
+    tail = "" if slash == -1 else rest[slash:]
+    query_at = tail.find("?")
+    if query_at == -1:
+        return dsn, ""
+    cut = (scheme_end + 3 if scheme_end != -1 else 0) + len(authority) + query_at
+    return dsn[:cut], tail[query_at + 1:]
+
+
 def _uri_hosts(dsn: str) -> tuple[list[str], set[str]]:
     """(hosts, keys) named by libpq's URI form.
 
     ⛔ `urlsplit` IS THE WRONG PARSER FOR A libpq URI, twice over:
 
-    * it treats `#…` as a FRAGMENT, while libpq has no fragment concept: libpq
-      parses from the FIRST `?` to the end of the string. So
+    * it treats `#…` as a FRAGMENT, while libpq has no fragment concept — and
+      libpq resolves the AUTHORITY (to the first `/`) BEFORE it looks for the
+      `?` separator, so a `?` inside userinfo is not a separator at all. So
       `postgresql://127.0.0.1/db#?hostaddr=203.0.113.9` has an EMPTY query to
       `urlsplit` and a LIVE `hostaddr` to libpq — measured: `psql` dials
       203.0.113.9 while this function's caller returned only the authority.
 
-    ⛔ THE ANSWER IS TO SPLIT THE QUERY THE WAY LIBPQ DOES — first `?` to the end
-    of the string — rather than to refuse every `#`, which would also over-block
+    ⛔ THE ANSWER IS TO SPLIT THE QUERY THE WAY LIBPQ DOES (`_split_uri`: authority
+    to the first `/`, then the first `?` after it) rather than to refuse every `#`,
+    which would also over-block
     a legal DSN whose userinfo carries one. That split is what makes the
     fragment-hidden query visible; the pinned mutant is reverting it to
     `urlsplit(dsn).query`, which sees an empty query and passes the DSN.
     """
     hosts: list[str] = []
     keys: set[str] = set()
-    base = dsn
-    if "?" in dsn:
-        base, _, query_string = dsn.partition("?")
+    base, query_string = _split_uri(dsn)
+    if query_string:
         # TWO PARSERS, TWO ANSWERS: Python ends the URL at `#`, libpq has no
         # fragment concept. A `#` BEFORE the query means they disagree about
         # where the authority ends, so the shape is refused, not resolved.
@@ -848,7 +879,11 @@ def app_role_dsn(dsn: str) -> str:
     """
     options = f"-c role={APP_ROLE}"
     if _is_uri_dsn(dsn):
-        head, sep, raw_query = dsn.partition("?")
+        # ⛔ THE SAME SPLIT AS THE GUARD: a `?` inside the authority is part of the
+        # userinfo, not a query separator — `partition("?")` would cut the DSN in
+        # the middle of the password and hand libpq a different connection.
+        head, raw_query = _split_uri(dsn)
+        sep = "?" if raw_query or head != dsn else ""
         # ⛔ `parse_qsl` DECODES `+` AS A SPACE; libpq does not. A password or an
         # `application_name` carrying a literal `+` would silently change under the
         # app's own connection, so the pairs are split here and percent-decoded
