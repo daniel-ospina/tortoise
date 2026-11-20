@@ -2000,7 +2000,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
     # the stated residual — "a noun outside both lists" — did not describe them)
     r"|`?tortoise/`?\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
-    r"module\s+set|delta|changes?)[^`]{0,40}?"
+    r"module\s+set|delta|changes?)(?:\s*\([^)]{0,90}\))?[^`]{0,40}?"
     # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
     # document states the answer WITHOUT repeating the command: "at THIS head the command
     # this clause prescribes returns NOTHING AT ALL (the diff carries no `tortoise/`
@@ -2020,7 +2020,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # head, returns NOTHING` were BOTH GREEN through this ban AND its sibling detector, in
     # the depth-1 configuration where the measured leg skips). Six tokens with optional
     # punctuation is still bounded: the POINTER and PAST-TENSE forms must reach no answer.
-    r"(?:\s+there)?(?:\s*,?\s*[\w-]+,?){0,6}\s*"
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
     # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
@@ -2049,6 +2049,10 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
     r"now|still|actually|also)\s+)?"
     r"(?:,\s*[^,.;\n]{1,30},)?\s*"
+    # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
+    # between the command and the verb, and `set (measured with `git diff …`) is empty`,
+    # were GREEN in BOTH arms while the comma and bare forms were refused)
+    r"(?:\([^)]{0,90}\)\s*)?"
     # ⛔ AND THE VERB PARTICLE `back` (`gives back nothing`) (#13802 review, round 12, P2)
     r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
     # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
@@ -2064,7 +2068,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ``the `tortoise/` set is non empty`` was read by NO arm in ANY checkout — measured
     # `ban=False det=[('prints non empty', False)]`. A token the detector reads and this
     # bridge does not is the same hole the verb class was.
-    r"|empty|EMPTY|non[- ]?empty|not[- ]empty"
+    # ⛔ AND AN INDEFINITE ARTICLE BEFORE THE ANSWER (#13802 review, round 14, P1 — MEASURED:
+    # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320`, and the
+    # ban returned False for it; with the `set` anchor NEITHER arm read it, at a head where the
+    # real answer is `nothing`)
+    r"|(?:an?\s+)?(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
     r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
@@ -2288,6 +2296,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` gives us back nothing at this head.",
         "Nothing is in the `tortoise/` set at this head.",
         "Empty is what `-- tortoise/` prints at this head.",
+        # ⛔ AND THE INDEFINITE ARTICLE, AND THE PARENTHETICAL (#13802 review, round 14, P1+P2).
+        # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320` and
+        # the ban returned False for it; the parenthetical is the insertion the document's own
+        # idiom reaches for, and both comma and bare forms of the same sentence were refused.
+        "`-- tortoise/` returns a non-empty set",
+        "the `tortoise/` set returns a non-empty set",
+        "`-- tortoise/` (run at this head) prints nothing",
+        "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
         # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
         # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
