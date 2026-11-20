@@ -196,6 +196,7 @@ import hashlib
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -2783,8 +2784,10 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: whose own text opens with `#` (measured: `tortoise/ranking.py`'s `graph_boost` docstring
 #: carries such a line). An empty result therefore proves that every changed line WHICH
 #: REACHED STAGE 2 opens with `#`; it cannot prove those lines are comments, and it says
-#: nothing at all about a blank-line-only change — stage 1 drops an added line that is just
-#: `+`/`-` and any added line whose content itself opens with `+`/`-` (measured:
+#: nothing at all about a blank-line-only change — stage 1 drops a line that is just
+#: `+`/`-` and any line whose first character after the marker is `+`/`-`, ADDED OR REMOVED
+#: alike (`--counter` is a removed line and stage 1 drops it just the same): the marker is one
+#: character and the test is on the NEXT one, so the class is direction-blind (measured:
 #: `printf '%s\n' '+' '++i' '--counter' | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`
 #: is silent while the input holds three changed lines). That was the over-claim that TWO
 #: separate sentences of the D5 cell made — and the second one was not among the three the
@@ -2806,6 +2809,13 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: SHAPE in the spellings the pattern below covers. It does NOT close the class: the declared
 #: escapes at the pattern are real, and the sentence that used to sit here ("the property cannot
 #: come back in different words") was itself the over-claim round 19 reded.
+#: ⛔ AND ONE ROW IS A PRONOUN BINDING, not a description of the filter's output: the companion
+#: measurement beside the filter was described as "the command that counts them" — the nearest
+#: antecedent being the TWO `+`/`-` sign classes stage 1 drops — while the command it named
+#: (`grep -cE '^\+$'`) counts ONE of them (blank ADDED lines) and misses the sign-opening class
+#: and the blank REMOVED line alike. A reader following it over a blank-removed-only diff read
+#: `0` and concluded nothing was there, which is the false negative this whole cell exists to
+#: stop, so the class is banned the same way its siblings are (#13956 review, P2).
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
     "drops exactly the lines whose first non-space character is `#`",
@@ -2814,12 +2824,42 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "both out",
     "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
     "comment",
+    "a docstring line whose content opens with anything else passes both stages and "
+    "prints",
+    "a docstring or code line whose content opens with anything else WOULD appear in "
+    "its output",
+    # The companion measurement's object, not the filter's: `grep -cE '^\+$'` counts blank
+    # ADDED lines only, so "them" (the two sign classes) is a count it cannot produce.
+    "is the command that counts them at YOUR head",
 )
 
 #: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
 #: filter drops a line because a CHARACTER is `#`; the true one says the character AFTER the diff
-#: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a` `#`
-#: (backticked or not) inside a 400-character window that never names the **marker**.
+#: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a`, then
+#: up to 400 NON-ALPHANUMERIC marks, then `#` — inside a 400-character window that never names
+#: the **marker**. The marks are bounded rather than enumerated on purpose (#13948 review round
+#: 29, MEASURED): enumerating them as "backticked or not" was a FALSE CLAIM — a bold
+#: (`character is **`#`**`) or quoted (`character is '#'`) spelling restored the false property
+#: with the whole file at baseline, because the old tail accepted only whitespace and ONE
+#: backtick. That is the same LAYOUT axis rounds 26-29 closed on the two bans above, and it is
+#: closed here the same way.
+#:
+#: ⛔ AND THE WINDOW IS A LOCALITY BOUND, NOT A LAYOUT BUDGET (#13948 review rounds 33-34).
+#: Two numbers lived in this pattern and only one of them was a mistake:
+#:   · the DELIMITER RUN, copula -> `#`, is now `*`. It WAS a budget (`{0,8}` = seven spaces after
+#:     the needle's backtick, then `{0,400}` = "a second number that can be one space too small",
+#:     which 400 spaces falsified in one round). Layout cannot be counted out, so it is unbounded.
+#:   · the NOUN -> COPULA `{0,400}` is deliberately finite and STAYS: it keeps the match inside
+#:     one sentence, so "character" in one paragraph and "is #" in another cannot pair into a
+#:     false RED. That is locality, not layout.
+#: A restatement padded past 400 characters BETWEEN the noun and the copula is therefore a
+#: DECLARED residual (pinned as an escape below), not a claim that the axis is closed everywhere.
+#: Measured: 8, 9, 390, 400 and 2000 spaces between COPULA and `#` all caught; the real
+#: `05-verify.md` still `[]`.
+#:
+#: ⛔ AND THE COPULA'S OWN WHITESPACE IS `\s+`, NOT A LITERAL SPACE (#13948 review round 34, P1
+#: — MEASURED). `is equal to` / `is a` spelled with ASCII spaces missed a tab or a re-wrap inside
+#: the copula (`is\tequal\tto`, `is\r\nequal to`) — the same layout axis, one token further in.
 #:
 #: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
 #: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
@@ -2847,7 +2887,8 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)\s*`?#`?", re.S | re.I)
+    r"(?:is[^0-9A-Za-z#]+equal[^0-9A-Za-z#]+to|equals|is[^0-9A-Za-z#]+a|is)"
+    r"[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -2860,7 +2901,99 @@ def _false_filter_property_restatements(doc: str) -> list[str]:
     ⛔ Not "every re-wording" — the pattern is a bounded token test and the declared escapes at the
     pattern are restatements it does not match (#13853 review round 19/20).
     """
-    return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(doc)]
+    seen: list[str] = []
+    for haystack in (_fold_unicode(doc), _fold_unicode_cf_as_space(doc)):
+        for match in _FALSE_FILTER_PROPERTY_RE.finditer(haystack):
+            if match.group(0) not in seen:
+                seen.append(match.group(0))
+    return seen
+
+
+def _fold_unicode_cf_as_space(text: str) -> str:
+    """`text` in compatibility form with every format character (Cf) turned into a SPACE.
+
+    ⛔ THE COMPANION TO `_fold_unicode`, AND NOT A SUBSTITUTE FOR IT (#13948 review round 35, P1 —
+    MEASURED). Deleting a Cf is right when it sits INSIDE a token (`char\u200bacter` must stay
+    `character`), and wrong when it sits WHERE A SPACE WAS: `character is\u200bequal to #` then
+    reads `isequal`, the copula's own separator is gone, and the shape arm returned `[]` over a
+    sentence a reader sees verbatim. Neither folding is correct alone, so both are graded and the
+    matches unioned — deletion catches the inside-token case, substitution catches the
+    in-place-of-a-space case.
+    """
+    return "".join(
+        " " if unicodedata.category(ch) == "Cf" else ch
+        for ch in unicodedata.normalize("NFKC", text)
+    )
+
+
+def _fold_unicode(text: str) -> str:
+    """`text` in compatibility form with every format character (Cf) removed.
+
+    ⛔ THE LOOKALIKE AXIS (#13948 review round 30, P2 — MEASURED), the same class as rounds 26-29
+    one layer down: the folds compared CODEPOINTS, so a character that renders as the one the ban
+    names was a different character to it.
+
+    * A FORMAT character (Cf) INSIDE a token split the needle: `char\u200bacter` made the ledger
+      row `… first non-space character is \`#\`` unmatchable while a reader sees it verbatim —
+      MEASURED `[]` (escape) for both bans.
+    * A COMPATIBILITY character was not folded at all: a fullwidth `\uff03` is `#` on screen and
+      was invisible to the shape arm — MEASURED `[]`.
+
+    NFKC normalises the compatibility forms (fullwidth, ligatures, superscripts) to their canonical
+    spelling and Cf is dropped, so what a READER sees is what the arms grade. Applied to the
+    document AND to every needle, and to the shape arm's haystack, so no arm is left on the raw
+    codepoints the way rounds 26-29 each left one behind.
+
+    ⛔ STILL OUT, declared: a CHARACTER SUBSTITUTION that changes the spelling (`chαracter` with a
+    Greek alpha, a combining diacritic on a letter) is a different word, not a mark, and is the
+    declared semantic residual — not something a normalisation can close.
+    """
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKC", text)
+        if unicodedata.category(ch) != "Cf"
+    )
+
+
+def _norm_for_ban(text: str) -> str:
+    """`text` with case folded and every run of whitespace or commas collapsed to one space.
+
+    ⛔ THE BANS ARE EXACT-TEXT HUNTS, SO EACH IS ONLY AS WIDE AS ITS NORMALISATION — both axes
+    were found by MEASUREMENT, one review round apart, and both are folded here.
+
+    * CASE (#13948 review round 26 for the `_D5_HEAD_BOUND_VERDICTS` arm, round 27 for
+      `_false_filter_descriptions`): a sentence-initial capital is the natural spelling for prose
+      and a one-token edit, and it escaped BOTH bans — the latter over all five of its rows, three
+      of which also escaped the shape arm beside it, so the cell reported GREEN over a restored
+      false description.
+    * LAYOUT (#13948 review round 28): the same sentence re-wrapped across a line break at the
+      document's own prose width, or carrying one inserted comma, restored the retired text with
+      the whole file still at `1 failed, 23 passed` (baseline). This is not hypothetical for this
+      artifact — at `84b94ad74f`, the head the D5 cell grades, the document itself wraps a
+      sentence mid-clause: `git show 84b94ad74f:docs/epics/…/05-verify.md | sed -n '131,132p'`.
+
+    ⛔ SO THE FOLD IS TOTAL, NOT ENUMERATED: NFKC first, then Cf removed, then EVERYTHING that is
+    not a letter or a digit is DROPPED on both sides. Case, line breaks, commas, and every other
+    mark are the SAME axis — the layout of an unchanged sentence — and closing them one mark per
+    review round is how this cell spent rounds 26-30.
+
+    ⛔ WHY SPACING IS DROPPED AND NOT COLLAPSED TO A SPACE (#13948 review round 31, P2 —
+    MEASURED): collapsing preserved the need for a space where the needle has one, so an invisible
+    format character SITTING WHERE THE SPACE IS (`at\u00adthis`, a soft hyphen at a line break)
+    removed the separator and the needle stopped matching — 28 measured escapes, mid-token and
+    between words alike. With the spacing dropped from BOTH sides, whether the document has a
+    space, a soft hyphen, or nothing there is the same. MEASURED: `[]` for every row against the
+    real `05-verify.md` (no false red), and zero escapes over newline / tab / comma / em dash /
+    NBSP / ZWSP / soft hyphen / LRM / BOM, inside a token and in place of the space.
+
+    ⛔ WHAT IS STILL NOT CAUGHT, DECLARED rather than chased: a SEMANTIC escape — re-wording the
+    noun, the copula or the verb, or reordering the clause — is outside what any normalisation
+    can close, and it is the residual each detector's own docstring already names. This arm
+    grades the document's TEXT; it is a tripwire for the retired spellings and their mechanical
+    variations, never a proof that a claim is absent. Widening it into a parser was rejected: the
+    claim is prose. If a future round finds another MECHANICAL escape it is a bug in this fold;
+    a re-worded claim is the declared residual and belongs to the human-read arm.
+    """
+    return re.sub(r"[^0-9a-z]+", "", _fold_unicode(text).lower())
 
 
 def _false_filter_descriptions(doc: str) -> list[str]:
@@ -2869,8 +3002,16 @@ def _false_filter_descriptions(doc: str) -> list[str]:
     A substring test, deliberately: this arm grades the document's TEXT and never the tree,
     so it needs no merge base and cannot be skipped in a shallow checkout (the failure mode
     that made the measurement-keyed cut of (c-i) assert nothing — #13807 review, F1).
+
+    ⛔ CASE-INSENSITIVE, deliberately (#13948 review round 27, P2 — MEASURED). As a raw
+    substring test, capitalising the first character of a ledger row — the natural spelling for
+    a SENTENCE of prose, and a one-token edit — escaped it: all five rows went undetected and
+    three also escaped the shape arm beside it, so the whole cell reported GREEN over a
+    RE-INSERTED false description. It is the same false-PASS class this PR closed in
+    `_d5_head_bound_verdicts`, one function away; the case axis has its own control below.
     """
-    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling in doc]
+    lowered = _norm_for_ban(doc)
+    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if _norm_for_ban(spelling) in lowered]
 
 
 def _document_filter_patterns(doc: str) -> list[tuple[str, str]]:
@@ -2904,6 +3045,89 @@ def _comment_filter(payload: str, include: str, exclude: str) -> str:
     return subprocess.run(
         ["grep", "-vE", exclude], input=staged.stdout,
         capture_output=True, text=True, check=False).stdout
+
+
+#: The count command the D5 cell prescribes for the blank-line class, as the cell spells it.
+#: The EXPRESSION is read out of the document and executed, never re-spelled here: the claim
+#: under test is what `grep` does with the expression THAT SENTENCE carries (#13956 review, P2).
+_D5_BLANK_COUNT_RE = re.compile(
+    r"`git diff origin/main\.\.\.HEAD \\\| grep -cE '(?P<expr>[^']+)'` is the command "
+    r"that counts the BLANK ones at YOUR head")
+
+
+#: ANY `grep -c…` prescription in the bundle, whatever command prefix and whatever sentence
+#: follows it, plus the shape that makes a prescription BLANK-class. Keying "exactly one" on
+#: the COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
+#: this row already prescribes `git diff origin/main...HEAD -- tortoise/` five times, so a
+#: second BLANK-class command written that way left the count GREEN while the row carried two
+#: prescriptions — the retired, narrower one among the ungraded ones — and, in the other
+#: direction, it redded a legitimately different command of the same shape
+#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
+#: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
+#: `+`/`-` lines.
+_D5_ANY_COUNT_EXPR_RE = re.compile(r"grep -c[A-Za-z]* '([^']+)'")
+_D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
+
+
+def _d5_blank_count_expression() -> str:
+    """The blank-line count expression as `05-verify.md` states it.
+
+    Loud on zero or many — and MANY is checked TWICE, because "a second command" has two
+    spellings that fail differently: a second copy of the SENTENCE arm (5) grades (the
+    anchored pattern), and a second BLANK-CLASS PRESCRIPTION worded or prefixed differently
+    (the expression-shaped count). Zero would make every assertion below vacuous — an inert
+    arm of exactly the kind (3) refuses for the ledger rows — and MANY would silently grade
+    the first of two prescriptions, which is how a cell ends up asserting one command while
+    its reader follows another.
+    """
+    bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+              / "05-verify.md").read_text(encoding="utf-8")
+    prescriptions = _D5_ANY_COUNT_EXPR_RE.findall(bundle)
+    blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    assert len(blank_prescriptions) == 1, (
+        f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
+        f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
+        "them while a reader follows another")
+    found = _D5_BLANK_COUNT_RE.findall(bundle)
+    assert len(found) == 1, (
+        "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
+        f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
+    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE; THIS ONE BINDS THE
+    # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
+    # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
+    # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
+    # `len(blank_prescriptions) == 1` GREEN while the SENTENCE prescribes a WIDER command, and
+    # `found[0]` — the expression actually executed below — is then never checked against the
+    # class at all. Measured at `280c1899c7`: widen the sentence to `^[+-]` and append a
+    # `^\+$` decoy, and the 447 tests that `tests/test_docs_citation_refs.py` +
+    # `tests/test_7949_capstone_measure.py` collect (24 + 423, re-measured with
+    # `--collect-only -q` at that head) stayed green, while the row's own sentence
+    # ("… and ONLY that class: it does not count the sign-opening one (`++i`, `--counter`,
+    # `+- 2)`)") became FALSE. With this assertion the same two-edit mutant reds HERE.
+    assert _D5_BLANK_CLASS_EXPR_RE.fullmatch(found[0]), (
+        f"05-verify.md's BLANK-line sentence prescribes {found[0]!r} at this head, which is not "
+        "the BLANK class the row names — so the document tells the reader to count a wider "
+        "class than the one it claims to count. A decoy BLANK-class prescription elsewhere in "
+        "the bundle keeps the count above green, which is why the EXECUTED expression has to "
+        "be bound to the class here (#13956 review, P2)")
+    return found[0]
+
+
+def _blank_line_count(diff: str) -> int:
+    """The document's blank-line count command, executed on `diff`.
+
+    Same discipline as `_comment_filter`, and the reason this arm is not a text ban: the
+    text ban for this class cannot see a VALUE change under a stable spelling — the rot this
+    cell records for constants ("a symbol can keep its NAME and change its VALUE"). Running
+    the expression the sentence carries is what reds when the instrument narrows while the
+    wording stays.
+    """
+    out = subprocess.run(
+        ["grep", "-cE", _d5_blank_count_expression()], input=diff,
+        capture_output=True, text=True, check=False)
+    assert out.returncode in (0, 1), (
+        f"grep refused the document's own expression: {out.stderr!r}")
+    return int(out.stdout.strip() or 0)
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
@@ -2960,7 +3184,71 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… whose first non-blank character is # …",
              "character is #"),
             ("… whose first character after its leading spaces is `#` …",
-             "character after its leading spaces is `#`")):
+             "character after its leading spaces is `#`"),
+            # ⛔ THE CASE AXIS NEEDS ITS OWN CONTROL (#13948 review round 25, P2 — MEASURED).
+            # Every probe above is lowercase, so recompiling the identical pattern with `re.S`
+            # alone — i.e. REVERTING the round-24 `re.I` fix — left this whole cell GREEN, while
+            # the comment above claimed the probes stop exactly that. This probe reds without it.
+            ("… whose first non-space Character is `#` — a comment …",
+             "Character is `#`"),
+            # ⛔ THE MARK AXIS (#13948 review round 29, P2 — MEASURED). These three were ESCAPES
+            # at the previous head: a bold or quoted `#` put the false property back while the
+            # whole file reported `1 failed, 23 passed` — baseline — and nothing reded. The tail
+            # accepted only whitespace and one backtick while the comment claimed "backticked or
+            # not", so the over-claim and the hole were the same defect. Each probe is a separate
+            # mark, so a narrowing back to `\s*`?#`?` reds all three.
+            ("… whose first non-space character is **`#`** — a comment …",
+             "character is **`#`**"),
+            ("… whose first non-space character is '#' — a comment …",
+             "character is '#'"),
+            ("… whose first non-space character is \"#\" — a comment …",
+             "character is \"#\""),
+            # ⛔ AND THE COMPATIBILITY LOOKALIKE (#13948 review round 30, P2 — MEASURED): a
+            # fullwidth `＃` is `#` on screen and was invisible to this arm, because the pattern's
+            # `#` is a literal codepoint and the haystack was never normalised. `_fold_unicode`
+            # makes NFKC the arm's input, so every fullwidth/compatibility spelling is graded.
+            ("… whose first non-space character is ＃ — a comment …",
+             "character is #"),
+            # ⛔ AND PADDED LAYOUT, at the size real markdown produces (#13948 review round 32,
+            # P2 — MEASURED). At the old `{0,8}` budget the effective room was SEVEN spaces, so an
+            # aligned table cell or an eight-space list continuation re-inserted the false property
+            # green. Both forms are below; each reds if the bound is narrowed back to single
+            # digits.
+            ("… whose first non-space character is" + " " * 9 + "`#` — a comment …",
+             "character is" + " " * 9 + "`#`"),
+            ("… whose first non-space character is\n\n        `#` — a comment …",
+             "character is\n\n        `#`"),
+            # ⛔ AND BEYOND ANY BUDGET (#13948 review round 33, P2 — MEASURED): at `{0,400}` a
+            # four-hundred-space pad returned `[]`. The run is unbounded now, so these two reds if
+            # anyone reintroduces a finite bound.
+            ("… whose first non-space character is" + " " * 400 + "`#` — a comment …",
+             "character is" + " " * 400 + "`#`"),
+            ("… whose first non-space character is" + " " * 2000 + "`#` — a comment …",
+             "character is" + " " * 2000 + "`#`"),
+            # ⛔ AND THE COPULA'S OWN LAYOUT (#13948 review round 34, P1 — MEASURED): a tab or a
+            # re-wrap INSIDE `is equal to` / `is a` escaped while the copula was spelled with
+            # literal spaces.
+            ("… non-space character\tis\tequal to `#` — a comment …",
+             "character\tis\tequal to `#`"),
+            ("… character is\r\nequal to `#` — a comment …",
+             "character is\r\nequal to `#`"),
+            # ⛔ A FORMAT CHARACTER STANDING IN FOR A SPACE (#13948 review round 35, P1 —
+            # MEASURED). Deleting the Cf joined `is`+`equal` into `isequal` and the arm returned
+            # `[]`; the Cf-as-space folding is what catches it, so this probe reds if that second
+            # haystack is dropped.
+            ("… character is\u200bequal to `#` — a comment …",
+             "character is equal to `#`"),
+            ("… character\u200bis `#` — a comment …",
+             "character is `#`"),
+            # ⛔ AND A MARK INSIDE THE COPULA (#13948 review round 35, P2 — MEASURED): a hyphen or
+            # a non-breaking hyphen in `is equal to` — what a paste from a word processor yields —
+            # escaped while the copula required plain whitespace.
+            ("… character is equal-to `#` — a comment …",
+             "character is equal-to `#`"),
+            ("… character is equal\u2011to `#` — a comment …",
+             # NFKC folds U+2011 NON-BREAKING HYPHEN to U+2010 HYPHEN, and the arm grades the
+             # FOLDED haystack — so the expectation is U+2010, which is what a reader sees.
+             "character is equal\u2010to `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
@@ -2971,7 +3259,17 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     # naming them is the honest half, and the ledger + review are what cover them.
     for escape in (
             "… whose leading printable glyph amounts to `#` …",
-            "… whose first non-space character (the marker word appears as a decoy) is `#` …"):
+            "… whose first non-space character (the marker word appears as a decoy) is `#` …",
+            # ⛔ THE OTHER HALF OF THE ROUND-24 PIN (#13948 review round 25, P2 — MEASURED).
+            # Without these two, reverting `markers?` to `marker` OR dropping `re.I` from the
+            # MARKER side also left the cell green, so the flag was pinned on one axis only.
+            "… whose first non-space character after the diff Marker is `#` …",
+            "… whose first non-space character after the markers is `#` …",
+            # ⛔ THE DECLARED LOCALITY RESIDUAL (#13948 review round 34, P2): the noun -> copula
+            # window is 400 characters on purpose, so a pad BEYOND it is an escape rather than a
+            # silent claim of closure. Pinned here so the prose above cannot drift into claiming
+            # the axis is closed everywhere.
+            "… character" + " " * 401 + "is equal to `#` …"):
         assert _false_filter_property_restatements(escape) == [], (
             f"the arm now catches {escape!r} — good, but then the DECLARED-ESCAPE list above "
             "is stale and must say so (#13853 review round 19)")
@@ -3017,6 +3315,11 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "rules both out",
         "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
         "comment",
+        "a docstring line whose content opens with anything else passes both stages and "
+        "prints",
+        "a docstring or code line whose content opens with anything else WOULD appear in "
+        "its output",
+        "is the command that counts them at YOUR head",
     ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
@@ -3032,6 +3335,49 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             f"the ban's own row {spelling!r} is not detected when injected, so editing it "
             "(even by one character) turns this arm inert — the bypass #13807 review "
             "finding 5 recorded for the membership ledger")
+    # ⛔ AND THE CASE AXIS HAS ITS OWN CONTROL (#13948 review round 27, P2 — MEASURED): every
+    # probe above is lowercase, so reverting the detector to a raw `in` left the cell GREEN
+    # while a sentence-initial cap on any ledger row escaped it — the same treatment the
+    # `_D5_HEAD_BOUND_VERDICTS` sibling got in round 26.
+    for spelling in _FILTER_FALSE_DESCRIPTIONS:
+        cased = spelling[0].upper() + spelling[1:]
+        assert _false_filter_descriptions(cased) == [spelling], (
+            f"the ledger ban misses the capitalised form of its own row ({cased!r}), so a "
+            "sentence-initial restatement of the false description passes it "
+            "(#13948 review round 27)")
+    # ⛔ AND THE LAYOUT AXES HAVE THEIR OWN CONTROLS (#13948 review round 28, P2 — MEASURED):
+    # the same sentence RE-WRAPPED across a line break at the document's own prose width, or
+    # carrying one inserted comma, restored the retired text with the whole file still at
+    # baseline. Both are folded in `_norm_for_ban`, so both are pinned here: reverting the fold
+    # reds these rather than leaving the cell silently green.
+    for spelling in _FILTER_FALSE_DESCRIPTIONS:
+        wrapped = spelling.replace(" ", "\n", 3)
+        comma = spelling.replace(" is ", ", is ", 1)
+        assert _false_filter_descriptions(wrapped) == [spelling], (
+            f"the ledger ban misses its own row re-wrapped across a line break ({wrapped!r}) "
+            "— a prose re-wrap would smuggle the retired description past it "
+            "(#13948 review round 28)")
+        if comma != spelling:
+            assert _false_filter_descriptions(comma) == [spelling], (
+                f"the ledger ban misses its own row with one inserted comma ({comma!r}) "
+                "(#13948 review round 28)")
+        # ⛔ AND A MARK THAT IS NEITHER WHITESPACE NOR A COMMA (#13948 review round 29): the
+        # fold is total on purpose, so a fold narrowed back to `[,\s]+` must RED here. Without
+        # this probe that regression left both cells GREEN (MEASURED: `2 passed`).
+        assert _false_filter_descriptions(spelling.replace(" is ", " — is ", 1)) == [spelling], (
+            "the ledger ban misses its own row with an em dash inserted — the fold must be total "
+            "over punctuation, not comma-only (#13948 review round 29)")
+        # ⛔ AND THE LOOKALIKE / INVISIBLE AXES (#13948 review rounds 30-31, both MEASURED): a
+        # format character INSIDE a token split the needle (`char\u200bacter`), and one SITTING
+        # WHERE THE SPACE IS (`at\u00adthis`) removed the separator — both left the arm green.
+        word, rest = spelling.split(" ", 1)
+        assert _false_filter_descriptions(word[:2] + "\u200b" + word[2:] + " " + rest) == [spelling], (
+            "the ledger ban misses its own row with a zero-width space inside a word "
+            "(#13948 review round 30)")
+        assert _false_filter_descriptions(
+            word + "\u00ad" + rest) == [spelling], (
+            "the ledger ban misses its own row with a soft hyphen in place of a space "
+            "(#13948 review round 31)")
 
     # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
     # with the patterns the DOCUMENT states, so a document that states a different filter is
@@ -3091,15 +3437,30 @@ _D5_HEAD_BOUND_VERDICTS = (
     # "At `2584a86ec1` the FIRST of them prints a path." (measured: that sentence was refused,
     # with a message calling it a verdict "about the head being merged", which would be false of
     # it). A row is a MEASURED SPELLING, never a widened one — the convention the ledger above
-    # this cell states. RESIDUAL, declared: a present-tense restatement that drops `at this head`
-    # altogether can now slip, which is the same bounded-token residual every row here carries.
+    # this cell states. RESIDUAL, declared: a present-tense restatement that re-words the
+    # clause (a different verb or noun) can still slip, which is the same bounded-token residual
+    # every row here carries. ⛔ NOT declared, and CLOSED: CASE — the detector compares
+    # case-insensitively, because a case-SENSITIVE test missed the one-token slip from the shape
+    # this document deliberately requires (`At `2584a86ec1` the FIRST…` -> `At this head the
+    # FIRST of them prints a path.`), i.e. a sentence-initial capital. That was a false PASS
+    # (#13948 review round 26, MEASURED) and it is the same asymmetry round 25 closed one arm
+    # away in `_FALSE_FILTER_PROPERTY_RE`; the case axis has its own control below.
     "at this head the FIRST of them prints a path",
 )
 
 
 def _d5_head_bound_verdicts(doc: str) -> list[str]:
-    """Every retired per-head verdict still spelled in `doc` (#13853 review round 17, P1)."""
-    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if spelling in doc]
+    """Every retired per-head verdict still spelled in `doc` (#13853 review round 17, P1).
+
+    ⛔ CASE-INSENSITIVE, deliberately (#13948 review round 26, P2 — MEASURED). As a plain
+    substring test it missed the sentence-initial slip from the shape this document itself
+    requires: `At this head the FIRST of them prints a path.` passed while
+    `at this head the FIRST of them prints a path` was caught, so the cell reported GREEN
+    over exactly the per-head verdict it exists to retire — the FALSE-PASS direction this
+    file says must never be accepted.
+    """
+    lowered = _norm_for_ban(doc)
+    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if _norm_for_ban(spelling) in lowered]
 
 
 def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
@@ -3159,6 +3520,76 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(probe) == [spelling], (
             f"the ban's own row {spelling!r} is not detected when injected, so editing it "
             "(even by one character) turns this arm inert")
+    # ⛔ AND THE CASE AXIS HAS ITS OWN CONTROL (#13948 review round 26, P2 — MEASURED): every
+    # probe above is lowercase, so reverting the detector to a case-SENSITIVE `in` left this
+    # whole cell GREEN while the sentence-initial slip from the shape the document REQUIRES
+    # (`At this head the FIRST of them prints a path.`) went uncaught. These two reds iff the
+    # detector stays case-insensitive — the same treatment round 25 gave the filter arm.
+    for cased in ("At this head the FIRST of them prints a path.",
+                  "AND THE CLAIM DOES NOT HOLD FOR THIS HEAD."):
+        assert _d5_head_bound_verdicts(cased), (
+            f"the per-head-verdict ban misses the capitalised form {cased!r}, so a "
+            "sentence-initial restatement passes it (#13948 review round 26)")
+    # ⛔ AND THE LAYOUT AXES, the same way (#13948 review round 28, P2 — MEASURED): a re-wrap or
+    # one inserted comma put the retired per-head verdict back with the whole file at baseline.
+    for wrapped, comma in (("at this head the\nFIRST of them prints a path",
+                            "at this head, the FIRST of them prints a path"),
+                           ("and the claim does not\nhold for this head",
+                            "and the claim does not, hold for this head")):
+        assert _d5_head_bound_verdicts(wrapped), (
+            f"the per-head-verdict ban misses {wrapped!r} re-wrapped across a line break "
+            "(#13948 review round 28)")
+        assert _d5_head_bound_verdicts(comma), (
+            f"the per-head-verdict ban misses {comma!r} with one inserted comma "
+            "(#13948 review round 28)")
+    # ⛔ Non-comma, non-whitespace marks too — the fold is total, and a comma-only regression
+    # must RED (#13948 review round 29).
+    for marked in ("at this head — the FIRST of them prints a path",
+                   "and the claim does not; hold for this head"):
+        assert _d5_head_bound_verdicts(marked), (
+            f"the per-head-verdict ban misses {marked!r} with a mark inserted — the fold must be "
+            "total over punctuation, not comma-only (#13948 review round 29)")
+    # ⛔ And the invisible/lookalike axes, as in the ledger cell (#13948 review rounds 30-31).
+    for invisible in ("at this head the FIRST of them prints a pa\u200bth",
+                      "at\u00adthis head the FIRST of them prints a path",
+                      "at this head the FIRST of them prints a pa＃th"):
+        assert _d5_head_bound_verdicts(invisible), (
+            f"the per-head-verdict ban misses {invisible!r} — an invisible format character or a "
+            "compatibility lookalike must be folded (#13948 review rounds 30-31)")
+
+    # (5) THE COUNT COMMAND ITSELF, executed (#13956 review, P2). The cell names the class it
+    # drops as "a diff line that is just `+` or `-`", and prescribes a count for it. The
+    # spelling that stood at `a03c1dd163e` matched only blank ADDED lines: over a diff whose
+    # only change is a blank REMOVED line it printed `0`, which is precisely the false
+    # negative this cell exists to prevent ("a blank-line-ONLY change is invisible to it").
+    # Arm (1) bans the WORDING that said so; this arm holds the instrument, because a regex
+    # can narrow under a correct sentence and no text ban can see that.
+    assert _blank_line_count("+\n") == 1, (
+        "the document's count command no longer counts a blank ADDED line")
+    assert _blank_line_count(" a\n-\n b\n") == 1, (
+        "the document's count command does not count a blank REMOVED line, which is half "
+        "the class the cell names (\"a diff line that is just `+` or `-`\") and the shape "
+        "the superseded spelling read as `0` (#13956 review, P2)")
+    # ⛔ TWO ASSERTIONS WERE DELETED HERE (#13956 review round 7, P3; then round 8, P2 raised
+    # the SECOND one and was right about the reason — measured below):
+    #  • `_blank_line_count("+\n-\n") == 2` was a strict CONSEQUENCE of the two assertions above
+    #    — a `grep -c` counts LINES, so any expression that counts a blank `+` and a blank `-`
+    #    returns 2, and under `^\+$` the REMOVED-line assertion above reds first. Its intent is
+    #    still held, direction by direction, by those two.
+    #  • `_blank_line_count("++i\n--counter\n+- 2)\n") == 0` was DELETED ON A REASON THAT WAS
+    #    FALSE: round 7 claimed no mutation could reach it because the class gate would raise
+    #    its loud ZERO first. Round 8 measured the two-edit mutant — widen the SENTENCE to
+    #    `^[+-]`, append a `^\+$` decoy elsewhere in the bundle — and found the whole suite GREEN
+    #    with this line REINSTATED it reds alone (`assert 3 == 0`) while the two directional
+    #    assertions stay green. So it WAS reachable; what was actually missing was the BINDING
+    #    in `_d5_blank_count_expression()` that the executed expression is the BLANK-class one.
+    #    That binding now exists (see its assertion above), so the sentence's expression is
+    #    provably exactly-one-character and NO mutation can make this line the one that reds:
+    #    a widened sentence reds the binding first. The deleted line's intent is therefore held
+    #    at the root, where the decoy path is closed too — not merely restated here.
+    # ⛔ A dead assertion is not free: it reads as coverage the tree does not have. But neither is
+    # a deleted one that was not dead — which is why the second deletion was re-measured and its
+    # justification replaced with the binding rather than with an argument.
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():

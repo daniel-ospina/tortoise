@@ -595,14 +595,20 @@ def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
     so the declines are appended BEFORE the first mismatch save — which is what
     makes this deterministic rather than order-dependent.
 
-    Mutant: `carried`'s snapshot and the `reobserved` filter are REDUNDANT —
-    either alone prevents the mislabel — so mutating either ONE stays green
-    (measured both ways at #13950 review round 36, and re-measured at this
-    head after the `Retry-After` row was added: each stays fully green — no
-    row reds). Remove BOTH
-    (compute `carried` from `st["failed"]` AND drop the filter) and the original
-    bug is back: this row reds, together with
-    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`.
+    Mutant, and the two guards are NOT interchangeable:
+    compute `carried` from `st["failed"]` (drop the `failed_before` snapshot) —
+    NO row reds, because the `reobserved` filter below prevents the same mislabel
+    on its own and THAT row carries the pin. Remove the FILTER alone instead and
+    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS` reds;
+    remove BOTH and the original bug is back, so THIS row reds too.
+    ⛔ So this row pins the PAIR; the individual guard is pinned by the dedupe row.
+    ⛔ STATED AS ROW NAMES, NOT PASS COUNTS, deliberately — a count rots the moment
+    a test is added, which is how an earlier version of this note came to read
+    "133 passed" for a run that had also reported a failure. Two earlier versions
+    also said "either one alone stays green … each stays fully green — no row
+    reds", which was measured FALSE for the filter (#13950 follow-up): the
+    filter is the load-bearing guard, and it is pinned.
+    Measured at `959c0306` on `main`.
     """
     state_path = tmp_path / "state.json"
 
@@ -1531,6 +1537,85 @@ def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
     assert "MAY HAVE LANDED" in err, err
     assert "edge(s) NOT written" not in err, (
         "an UNCONFIRMED write was reported as NOT written: " + err)
+
+
+def test_a_carried_line_is_printed_under_ITS_OWN_header_not_a_class_heading(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """An earlier run's line must not sit beneath THIS run's class heading.
+
+    The class headings say what to DO: `N edge(s) were DECLINED by the door —
+    nothing was written for them` is followed by a remedy whose first bullet is
+    "delete the line, nothing was written". The carried lines used to be printed
+    AFTER those headings, so an earlier run's line landed underneath whichever
+    class this run had produced — and an operator who reads the heading as the
+    line's class deletes the record of a write that may have LANDED, which is a
+    duplicate non-idempotent write (#10849). Measured at #13950 review round 7:
+    `1 marker(s) from an earlier run are STILL unresolved` -> `1 edge(s) were
+    DECLINED by the door` -> `  ! edge:…: an EARLIER run's wording`.
+
+    Mutant: move `for line in repeated[:10]` back below the class headings — the
+    suite stayed green that way, so the ORDER had no pin at all; this row is it.
+    """
+    class _DeclinesOneEdge(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_edge":
+                return {"structuredContent": {"edge": {"relation": "related"},
+                                              "created": False, "nudges": []}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    carried_line = ("edge:sub:ghost->sub:phantom:holdsRole: an EARLIER run's "
+                    "wording for this marker")
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [],
+        "unconfirmed": [],
+        # A marker neither written nor re-observed this run: it is `carried`.
+        "failed": [carried_line],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _DeclinesOneEdge)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # Both blocks are present, so the order assertion is not about one of them
+    # being absent.
+    assert carried_line in err, err
+    assert "edge(s) were DECLINED" in err, err
+    # ⛔ BOTH HALVES OF THE ORDER, because they fail differently. This assertion
+    # pins the line ABOVE the class headings (the mislabel); the next one pins it
+    # BELOW its own header. The mutant that breaks only the second is moving the
+    # loop ABOVE the header — e.g. above the `markers_carried` computation — where
+    # the line prints right after this run's own `!!` block, detached from the
+    # sentence that says it is an EARLIER run's, so it reads as one more line THIS
+    # run produced; that mutant was measured green (136 passed) until this anchor
+    # existed (#13985 review round 4).
+    # ⛔ A ONE-INDENT DEDENT IS NOT THAT MUTANT. `markers_carried` is empty exactly
+    # when `repeated` is, so lifting the loop out of `if markers_carried:` prints
+    # the same lines in the same place — measured green, and the output is
+    # byte-identical. Naming it here would send a reader to an edit that cannot
+    # fail, which is the defect this file keeps repairing.
+    header = "marker(s) from an earlier run"
+    assert header in err, err
+    # ⛔ AND ONCE. `err.index` reads only the FIRST occurrence, so a SECOND copy of
+    # the line printed below a class heading is invisible to both order
+    # assertions — the hazard survives a merge-conflict resolution that keeps the
+    # new block and re-adds the old one, and that mutant measured green (136
+    # passed) at #13985 review round 5. The two sibling rows in this file already
+    # pin `err.count(...) == 1` for the same reason.
+    assert err.count(carried_line) == 1, (
+        f"the earlier run's line is printed {err.count(carried_line)}x — a second "
+        "copy would sit under a class heading whose remedy says to delete it: " + err)
+    assert err.index(header) < err.index(carried_line), (
+        "an EARLIER run's line is printed OUTSIDE its own header's block, so it "
+        "reads as a line THIS run produced: " + err)
+    assert err.index(carried_line) < err.index("edge(s) were DECLINED"), (
+        "an EARLIER run's line is printed under this run's DECLINED heading, so "
+        "the heading's remedy (\"delete the line, nothing was written\") reads as "
+        "that line's instruction: " + err)
 
 
 def test_the_carried_header_COUNTS_MARKERS_not_lines(
@@ -2797,8 +2882,12 @@ def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
     ⛔ NOT a mutant: the `time.sleep` line's own condition. After that
     normalisation `wait` is `None` or in `[1.0, 120.0]`, so the sleep line can
     never see a falsy non-`None` and mutating its test reds NOTHING (measured at
-    #13950 review round 35: 133 passed). The load-bearing guard is the
-    normalisation, and an earlier version of this docstring named the inert line.
+    #13950 review round 35, and re-measured twice since: on `main` at `959c0306`
+    — where the finding was first filed — and again at this head, where the suite
+    stays fully green with no row reds). The green TOTAL this note used to quote
+    is not repeated, because every row added since has falsified it. The
+    load-bearing guard is the normalisation, and an earlier version of this
+    docstring named the inert line.
     """
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
@@ -3606,7 +3695,17 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
             queries.append(cypher)
             return [0, []]
 
-    fake = types.SimpleNamespace(from_url=lambda _uri: _Graph())
+    # The read-back client is BOUNDED (#13953), so this fake has to accept the
+    # resolver's kwargs and is the one place they can be asserted without a socket:
+    # a regression to the unbounded `from_url(uri)` reds BOTH this and the tree-wide
+    # guard in `test_bounded_raw_clients_3065.py`.
+    from_kwargs: list[dict] = []
+
+    def _from_url(_uri, **kwargs):
+        from_kwargs.append(kwargs)
+        return _Graph()
+
+    fake = types.SimpleNamespace(from_url=_from_url)
     monkeypatch.setitem(sys.modules, "redis", fake)
     monkeypatch.setenv("FALKORDB_CLOUD_URI", "redis://example.invalid:6379/0")
 
@@ -3640,6 +3739,11 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
                     "coalesce(e.idx, -1)",
                     "coalesce(o.direction,'')"):
         assert leading in op_q, (leading, op_q)
+
+    # …and the read-back cannot hang: `redis.from_url` defaults the read bound to
+    # `None`, which is the #3065/#8118 unbounded `recv()` (#13953).
+    assert from_kwargs and from_kwargs[0].get("socket_timeout") is not None, (
+        f"the read-back client was constructed with no read bound: {from_kwargs}")
 
 
 def test_an_UNREADABLE_body_is_an_UNKNOWN_outcome_not_a_refusal(monkeypatch):
