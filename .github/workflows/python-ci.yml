@@ -4412,8 +4412,28 @@ jobs:
         # a `::notice::` where the checkout cannot answer; the strict step above is what
         # turns that state into a red.
         run: python3 tools/surface-guard.py
-      - name: The ordering lint (AC13)
-        run: python3 tools/surface_manifest.py check
+      - name: The ordering lint (AC13), and the committed surface may only shrink with a record
+        # `--base-ref` (#12327) is folded into THIS step rather than a new job or a new step,
+        # for the reason the owner's CI-cost ruling gives (2026-11-20): an assertion inside an
+        # existing job costs nothing, while a job costs a runner, a `pip install -e .` and a
+        # second queue slot on every PR — and this lint already pays the expensive half (the
+        # `build_doc` derivation, ~14 s CPU) that a separate step would pay AGAIN. Zero new
+        # jobs, zero new steps.
+        #
+        # It belongs in THIS job because the comparison reads the MERGE BASE, and `fetch-depth:
+        # 0` above is what makes that resolvable (#9075/#11057: a gate that only runs where it
+        # cannot answer proves nothing). `--base-ref` with no value means "the default branch",
+        # so the step needs no `github.base_ref` interpolation and cannot break on a push run;
+        # an unresolvable ref is a REFUSAL (exit 2), never a quiet pass. It is OFF unless given,
+        # which is what keeps the depth-1 `test` job's `check` at its old meaning.
+        #
+        # ⚠️ ACCEPTED RESIDUAL, the same one the two steps above name: this runs the CHECKOUT'S
+        # OWN `tools/surface_manifest.py`, so a PR that neuters the arm in the same commit that
+        # splices the baseline grades itself. Pinning this file was measured as a DEADLOCK (see
+        # the pin step's note) and `tools/surface-guard.py` — the pinned copy — cannot carry the
+        # rule without a second implementation of `removal_report`'s accounting. A test pins the
+        # wiring so DELETING the flag reds instead of reading as cleanup.
+        run: python3 tools/surface_manifest.py check --base-ref
       - name: The list is generated from the manifest and cannot drift from it
         run: |
           python3 tools/surface_manifest.py render

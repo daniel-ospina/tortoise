@@ -3065,6 +3065,132 @@ def removal_report(
     return problems, accounting
 
 
+# ── the SHRINK direction of the COMMITTED baseline (#12327) ──────────────────────────────
+#
+# `cut`'s removal gate (#12237) grades the transition "the committed row set -> a freshly
+# derived one". Hand-SPLICING the committed artifact does not make that transition at all:
+# delete a row from `config/surface-manifest.yml`, fix the four mechanical cells a splicer
+# already edits (`counts.tools`, `counts.keyword_distribution`, the tool's `response_fields`
+# entry, `config/surface-order.yml`'s `baseline_counts`), and delete the code — and `cut`
+# never runs, so the removal gate never runs. `check` is green because property 12 compares
+# the artifact against a derivation of the code that no longer has the tool, and
+# `tools/surface-guard.py` compares the live class against those same rows and is green by
+# the same construction. Hand-splicing is the RECOMMENDED procedure here (`MEMORY.md`'s
+# `[surface-cut]`: a raw `cut` rewrites the file and drops the curated cells), so the bypass
+# is on the path a careful lane is told to take.
+#
+# The fix is the same one #12402/#12291 needed one artifact over: the reference has to be a
+# version the PR cannot author. That is the MERGE BASE, and `archive_surface.resolve_base`
+# owns the definition so the two gates can never disagree about what they compared. What
+# differs from `cut` is only WHICH comparison is made: `removal_report` is reused UNCHANGED
+# — its eighteen review rounds of accounting rules (archive kind matching, the SDK
+# freeze+map pair, the stale-forward contradiction, qualified vs bare waivers) are the
+# record rule, and a second implementation of it here would be a second answer.
+
+
+def _manifest_at(root: Path, sha: str) -> dict | None:
+    """The surface baseline AS THE GIVEN COMMIT RECORDS IT, `None` when it had no baseline.
+
+    ABSENT is an honest answer only where the file genuinely did not exist (a commit before
+    the baseline landed). An unreadable or malformed one is a REFUSAL: answering "the
+    surface did not shrink" from a base this gate cannot read is the false green the arm
+    exists to prevent, and it is the same distinction `archive_surface._entries_at` draws
+    (asked of the tree, never inferred from a `None` that means both).
+    """
+    rel = MANIFEST_FILE.relative_to(ROOT).as_posix()
+    try:
+        present = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}:{rel}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:  # pragma: no cover - env
+        raise SurfaceEvidenceUnreadable(
+            f"could not ask git whether {sha[:12]} holds {rel}: {exc}"
+        ) from exc
+    if present.returncode != 0:
+        return None
+    blob = subprocess.run(
+        ["git", "show", f"{sha}:{rel}"], cwd=root, capture_output=True, text=True
+    )
+    if blob.returncode != 0:
+        raise SurfaceEvidenceUnreadable(
+            f"could not read {rel} at {sha[:12]} even though that commit holds it — the "
+            "committed baseline at the base cannot be graded from here"
+        )
+    try:
+        doc = yaml.safe_load(blob.stdout)
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"{rel} at {sha[:12]} is not YAML ({exc}) — a base baseline this gate cannot "
+            "read must not read as 'nothing was removed'"
+        ) from exc
+    if not isinstance(doc, dict):
+        raise SurfaceEvidenceUnreadable(
+            f"{rel} at {sha[:12]} is not a mapping — the base baseline is unreadable, so a "
+            "removal cannot be ruled out"
+        )
+    return doc
+
+
+def shrink_report(
+    doc: dict,
+    *,
+    base_ref: str | None,
+    allowed: tuple[str, ...] | list[str] = (),
+    root: Path | None = None,
+) -> tuple[list[str], str]:
+    """`(problems, compared)` for a committed surface that SHRANK with no record (#12327).
+
+    A symbol in the BASE ref's baseline and absent from the COMMITTED one is a removal, and
+    it is accounted for exactly as `cut` would demand: an `archive/MANIFEST.json` entry of
+    the symbol's own kind, or (for an SDK method) that freeze PLUS the retirement-map entry,
+    or a waiver that NAMES the symbol and surface. `removal_report` decides that; this
+    function's only job is to supply a `prior` the PR cannot have authored.
+
+    `base_ref` is `""` for "the default branch, as this clone names it" (the CLI's `const`).
+    An unresolvable ref is a REFUSAL, not an empty removal set.
+
+    `compared` is the human label of what was compared, so a green run says so instead of
+    leaving the reader to assume an arm ran.
+    """
+    root = Path(root or ROOT)
+    try:
+        from tools import archive_surface
+    except Exception as exc:  # pragma: no cover - an env fault is a refusal
+        raise SurfaceEvidenceUnreadable(
+            f"could not import tools/archive_surface.py to resolve the base ref: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        sha, label = archive_surface.resolve_base(root, base_ref)
+    except archive_surface.ArchiveRefused as exc:
+        # The refusal text is already actionable (it names the shallow/unresolvable cause and
+        # the fetch that fixes it), so it is carried rather than re-worded.
+        raise SurfaceEvidenceUnreadable(str(exc)) from exc
+    base_doc = _manifest_at(root, sha)
+    if base_doc is None:
+        # No baseline at the base: nothing to have shrunk. SAID, not silent — a gate that
+        # skipped its own question must not read as one that answered it.
+        return [], f"{label} (which carries no {MANIFEST_FILE.name} — no shrink to grade)"
+    try:
+        prior = surface_symbols(base_doc)
+        derived = surface_symbols(doc)
+    except SurfaceEvidenceUnreadable:
+        raise
+    except Exception as exc:
+        raise SurfaceEvidenceUnreadable(
+            f"could not enumerate the surface symbols on both sides of the comparison: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if prior <= derived:
+        return [], label
+    records = removal_records()
+    problems, _accounting = removal_report(prior, derived, records, allowed=list(allowed))
+    return [str(p) for p in problems], label
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     # ⛔ #11057 review P1: `--commit` was written into the record with NO validation, so
     # `cut --commit main` landed a record that `check` could not distinguish from a verified
@@ -3966,13 +4092,15 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
 
 def cmd_check(args: argparse.Namespace) -> int:
     """AC13's lint: eleven structural properties, a twelfth derived from the code, a
-    thirteenth that the DECLARED surface is the approved one (#10034), and a fourteenth
-    that the recorded `cut_at_commit` RESOLVES (#11057).
+    thirteenth that the DECLARED surface is the approved one (#10034), a fourteenth
+    that the recorded `cut_at_commit` RESOLVES (#11057), and a fifteenth that the
+    committed surface only SHRANK with a record (#12327).
 
     The fourteenth is `--provenance-strict`-gated on purpose: `check` is documented as safe
     to run anywhere, and a `fetch-depth: 1` checkout cannot answer it — so the default arm
     reports the reason (`::notice::`) and the one step that owns its own git depth asks for
-    the strict verdict."""
+    the strict verdict. The fifteenth is `--base-ref`-gated for the same reason and with the
+    same caller (a merge base is not resolvable on a shallow clone either)."""
     try:
         order = load_order()
         doc = _read_manifest()
@@ -4253,6 +4381,24 @@ def cmd_check(args: argparse.Namespace) -> int:
     if _unprovable:
         print(f"::notice::{_unprovable}")
 
+    # 15. the committed surface may only SHRINK with a record (#12327) --------------
+    # Properties 12 and 13 both compare the artifact against a derivation of THIS tree, so a
+    # PR that splices the baseline AND deletes the code is consistent on both sides and green
+    # on both — the #12327 shape. The reference has to be a version the PR cannot author,
+    # which is the merge base (see `shrink_report`).
+    _shrink_compared: str | None = None
+    _base_ref = getattr(args, "base_ref", None)
+    if _base_ref is not None:
+        try:
+            _shrink_problems, _shrink_compared = shrink_report(
+                doc,
+                base_ref=_base_ref,
+                allowed=getattr(args, "allow_surface_shrink", ()) or (),
+            )
+        except SurfaceEvidenceUnreadable as exc:
+            return _refuse(exc)
+        problems.extend(_shrink_problems)
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
@@ -4262,6 +4408,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
         "fourteen properties hold (eleven structural, one derived-from-code, "
         "one declared-vs-approved, one provenance)"
+        + (
+            f"; shrink checked against {_shrink_compared}"
+            if _shrink_compared is not None
+            else ""
+        )
     )
     return 0
 
@@ -4392,7 +4543,53 @@ def main() -> int:
              "a pass)",
     )
     p_check.set_defaults(func=cmd_check)
+    # #12327: the SHRINK pin on the COMMITTED baseline. Off unless given, because `check` is
+    # documented as safe to run anywhere and a `fetch-depth: 1` checkout cannot resolve a
+    # merge base at all — the ONE step that owns its own git depth passes it (the same split
+    # `--provenance-strict` uses, for the same reason).
+    p_check.add_argument(
+        "--base-ref",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REF",
+        help="ALSO grade the SHRINK direction (#12327) against REF (default: the default "
+             "branch), compared at its MERGE BASE with HEAD: a tool or SDK row that left the "
+             "committed baseline must carry a record or a named waiver. Off unless given; an "
+             "unresolvable ref is a REFUSAL, never a pass",
+    )
+    p_check.add_argument(
+        "--allow-surface-shrink",
+        action="append",
+        default=[],
+        metavar="CLASS:SYMBOL",
+        help="waive ONE deliberate removal (repeatable): `tool:<name>` / `sdk:<method>`. "
+             "Needs --base-ref and --allow-surface-shrink-reason, and a waiver that waives "
+             "nothing is reported (a false record is worse than no record)",
+    )
+    p_check.add_argument(
+        "--allow-surface-shrink-reason",
+        default=None,
+        metavar="TEXT",
+        help="WHY the waived removal is legitimate — it belongs in the PR body, not only here",
+    )
     args = parser.parse_args()
+    if getattr(args, "cmd", None) == "check":
+        # The same pairing `archive_surface.py check` refuses. A waiver with no reason is an
+        # unexplained deletion; a waiver with no base ref waives a removal nothing graded.
+        if bool(args.allow_surface_shrink) != bool(args.allow_surface_shrink_reason):
+            print(
+                "REFUSED --allow-surface-shrink and --allow-surface-shrink-reason go "
+                "together: a waiver without a stated reason is an unexplained removal, and "
+                "a reason without a symbol waives nothing"
+            )
+            return 2
+        if args.allow_surface_shrink and args.base_ref is None:
+            print(
+                "REFUSED --allow-surface-shrink needs --base-ref: it waives a removal only "
+                "the shrink arm can see, and that arm is off without a base ref"
+            )
+            return 2
     return args.func(args)
 
 

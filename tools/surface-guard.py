@@ -59,38 +59,16 @@ FAIL-CLOSED
     that cannot read its evidence must not report success — that is how the
     #1382 regression class stayed green for days (see tools/skip-guard.py).
 
-    THE SHRINK PIN (#12327). Step 7 pins GROWTH. Nothing pinned SHRINK — and
-    hand-splicing a row out of the baseline is the RECOMMENDED procedure for a
-    slice surface PR (`MEMORY.md` `[surface-cut]`), so a lane that deletes a row,
-    fixes the mechanical cells and deletes the code gets a green `check` (`cut`
-    never runs, so #12237's removal refusal never runs) and a green guard (it
-    compares the live class against those same rows). Step 8 grades the baseline
-    against the MERGE BASE instead — a version the diff cannot author — so a
-    symbol that left with no archive/retirement record, a count that disagrees
-    with the document's own rows, and a `high_water_counts` pin LOWERED to the
-    live count (which disarms step 7 for every later growth) are all red. It is
-    the same property supply-chain logs get from being append-only and TUF from a
-    monotonic version counter, and it is why the reference is history and not a
-    second artifact the same PR authors.
-
-    A clone that CANNOT answer (shallow — no merge base exists) prints a
-    `::notice::` and skips, exactly like the provenance arm: the depth-1 `test`
-    job runs this file and reding where it cannot answer gets the gate bypassed.
-    The `surface-guard` job checks out at `fetch-depth: 0`, and that is where this
-    arm actually grades; a FULL clone that still cannot name a base is red.
-
     Exit 0 = declaration matches the FROZEN baseline (the freeze is not the approved
     target — see docs/product/canonical-mcp-tools.md and tools/surface-target-check.py).
     Exit 1 = expansion, removal, a served-surface change, an exemption
              transition, a CLAIMED approval that disagrees with
              docs/product/canonical-mcp-tools.md, a live surface grown past the
-             frozen `high_water_counts` pin, a SHRINK with no record (#12327),
-             an unresolvable retired name, or unreadable evidence.
+             frozen `high_water_counts` pin, an unresolvable retired name, or
+             unreadable evidence.
 
 Usage:
     uv run python tools/surface-guard.py [--manifest config/surface-manifest.yml]
-    uv run python tools/surface-guard.py --allow-count-shrink tool:<name> \
-        --allow-count-shrink-reason '<why, and it belongs in the PR body>'
 """
 
 from __future__ import annotations
@@ -108,7 +86,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast as _ast
-import json
 import os
 import subprocess
 import types
@@ -610,348 +587,6 @@ def _source_transforms(path: Path | None = None) -> set[str]:
     return found
 
 
-# ── the SHRINK pin (#12327) ────────────────────────────────────────────────────────────────────
-# `counts:` is re-derived on every `cut`, and step 7 pins it against GROWTH. Nothing pinned it
-# against SHRINK, and the shape that exploits that is not a corner: hand-splicing is the
-# RECOMMENDED procedure for a slice surface PR (`MEMORY.md`'s `[surface-cut]`) because a raw
-# `cut` rewrites the whole file and drops every curated cell. So a lane that deletes a row from
-# `config/surface-manifest.yml`, fixes the four mechanical cells a splicer already edits
-# (`counts.tools`, `counts.keyword_distribution`, the tool's `response_fields` entry, and
-# `config/surface-order.yml` → `baseline_counts`) and deletes the code gets **exit 0** from
-# `surface_manifest.py check` — `cut` never runs, so #12237's removal refusal never runs either,
-# and `surface-guard` compares the live class against those same rows and is green BY
-# CONSTRUCTION. `archive/MANIFEST.json` gains nothing and no retirement is recorded.
-#
-# WHY THE BASE REF AND NOT A COUNT COMPARISON. The counts are edited by the same author as the
-# rows, so a count-only rule is a rule the splicer already satisfies. The reference has to be a
-# version the diff cannot author: the MERGE BASE of HEAD and the default branch. That is the
-# property of every append-only supply-chain record — Sigstore's Rekor, "an immutable,
-# tamper-resistant ledger of metadata generated within a software project's supply chain" — and
-# the reason TUF makes a version counter MONOTONIC: a client that accepts a lower version than
-# the one it already trusts has been rolled back, so it aborts and reports a rollback attack
-# (TUF 1.0 §5.3, §1.5.2). Git history is this repo's log; the merge base is the last version this
-# tree may disagree with, and a symbol that leaves the surface must carry its own record.
-#
-# MERGE BASE, NOT THE BASE TIP: on `refs/pull/N/merge` the merge base IS the base tip, while on a
-# feature branch it is the fork point — the base tip on a stale branch would attribute MAIN's own
-# removals to the PR (the #7628 class in `MEMORY.md`'s `[ci-diff-base]` note).
-#
-# THE SYMBOL IS THE FINDING. The issue asks for a pin on the committed COUNTS; this grades the
-# SET those counts are lengths of (`build_doc`: `counts.tools = len(tools_out)`, etc.), because a
-# count is a symptom and the symbol is what the acceptance requires a red to NAME — and because a
-# count that shrank while no symbol left the set is a document disagreeing with itself, which arm
-# 8b below reds without needing a base ref at all.
-
-#: `{("tool"|"sdk", symbol)}` ← `(archive kind, symbol)` — the kind an archive entry must have to
-#: account for a removal of that class. Deliberately the SAME map as
-#: `tools/surface_manifest.py::ARCHIVE_KIND_BY_CLASS` (a parity test holds the two copies).
-_ARCHIVE_KIND_BY_CLASS = {"tool": "mcp-tool", "sdk": "sdk-method"}
-
-
-def _doc_symbols(doc: dict) -> dict[tuple[str, str], str]:
-    """`{(symbol, class): row name}` for a baseline document — BOTH halves, like
-    `surface_manifest.surface_symbols`.
-
-    The `retired:` half is read too: a retired name is STILL SERVED (#3883), so a retirement is
-    not a removal — the name moved out of `rows:` and is still in the document. Reading only
-    `rows:` would red every legitimate retirement, which is a gate that makes the documented
-    procedure impossible (the 27/40 ruling).
-    """
-    out: dict[tuple[str, str], str] = {}
-    for row in doc.get("rows") or []:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "")
-        if not name:
-            continue
-        if name.startswith("sdk:"):
-            out[(str(row.get("method") or name[4:]), "sdk")] = name
-        else:
-            out[(name, "tool")] = name
-    for row in doc.get("retired") or []:
-        if isinstance(row, dict) and row.get("name"):
-            out[(str(row["name"]), "tool")] = str(row["name"])
-    return out
-
-
-def _doc_row_counts(doc: dict) -> dict[str, int]:
-    """The counts the document's OWN rows imply — what `build_doc` derives `counts:` from."""
-    rows = [r for r in doc.get("rows") or [] if isinstance(r, dict)]
-    tools = [r for r in rows if not str(r.get("name") or "").startswith("sdk:")]
-    sdk = [r for r in rows if str(r.get("name") or "").startswith("sdk:")]
-    retired = [r for r in (doc.get("retired") or []) if isinstance(r, dict)]
-    return {
-        "tools": len(tools),
-        "sdk_public_methods": len(sdk),
-        "retired": len(retired),
-        "keyword_total": len(tools),
-    }
-
-
-def _parse_count_shrink_waiver(text: str) -> tuple[str, str]:
-    """`tool:<name>` / `sdk:<name>` / `pin:<key>` → `(class, name)`; anything else is a REFUSAL.
-
-    A waiver has to name what it waives: a blanket `--allow-count-shrink` would be the flag that
-    makes every finding disappear, which is the definition of a decorative gate.
-    """
-    cls, sep, name = str(text).partition(":")
-    if not sep or not name.strip() or cls not in ("tool", "sdk", "pin"):
-        raise ValueError(
-            f"--allow-count-shrink {text!r} is not `tool:<name>`, `sdk:<name>` or `pin:<key>` "
-            "— a waiver that does not name what it waives cannot be audited"
-        )
-    return cls, name.strip()
-
-
-def _shrink_problems(
-    doc: dict,
-    *,
-    base_doc: dict,
-    archive_keys: set[tuple[str, str]] | frozenset[tuple[str, str]] = frozenset(),
-    retired_sdk: set[str] | frozenset[str] = frozenset(),
-    forward: set[str] | frozenset[str] = frozenset(),
-    allowed: tuple[str, ...] | list[str] = (),
-) -> list[str]:
-    """Every way this baseline SHRANK without a record — pure, so the tests can drive it.
-
-    THREE arms, and they fail differently:
-      8a  a symbol the base document carried and this one does not. That is the removal; its
-          record is an `archive/MANIFEST.json` entry of the matching kind, a retirement-map
-          entry (an SDK departure always needs BOTH halves, but this pin grades whether a record
-          EXISTS — `cut` grades the pairing), or a stated `--allow-count-shrink` waiver.
-      8b  a `counts:` cell that disagrees with the rows in the SAME document. No waiver: a
-          document that disagrees with itself is never a legitimate state, and this arm is the
-          only one that runs in the PINNED copy (the PR can edit `surface_manifest.py`, which is
-          not pinned — see the workflow), so it is the independent measurement of the same lie.
-      8c  a `high_water_counts` pin that was LOWERED. Step 7 above only notices a surface that
-          EXCEEDS the pin, so lowering the pin to the live count disarms it for every later
-          growth — `MEMORY.md`'s `[surface-cut]` records that as a "manual, gate-invisible act".
-          Raising it stays a deliberate edit (growth is a decision); lowering it needs a record.
-    """
-    out: list[str] = []
-    waivers: dict[tuple[str, str], str] = {}
-    for text in allowed:
-        cls, name = _parse_count_shrink_waiver(text)
-        waivers[(cls, name)] = text
-    used: set[tuple[str, str]] = set()
-
-    # ── 8a: a SYMBOL that left the document ────────────────────────────────
-    base_symbols = _doc_symbols(base_doc)
-    head_symbols = _doc_symbols(doc)
-    for (symbol, cls) in sorted(set(base_symbols) - set(head_symbols)):
-        kind = _ARCHIVE_KIND_BY_CLASS[cls]
-        recorded = (kind, symbol) in archive_keys
-        retired_map = symbol in (forward if cls == "tool" else retired_sdk)
-        if recorded or retired_map:
-            continue
-        if (cls, symbol) in waivers:
-            used.add((cls, symbol))
-            continue
-        out.append(
-            f"`{symbol}` ({cls}) is in the BASE baseline and not in this one, and nothing "
-            "records the removal: no `archive/MANIFEST.json` "
-            f"`{kind}` entry and no retirement entry. A symbol spliced out of the baseline "
-            "— with its code deleted and the mechanical cells fixed — leaves `cut` unrun (so "
-            "#12237's removal refusal never sees it), leaves `surface-guard`'s live-surface "
-            "comparison green by construction (it compares against these same rows), and "
-            "gains no archive entry (#12327). REMEDY: freeze it first — restore the source, "
-            f"`uv run python tools/archive_surface.py archive {kind} {symbol} --batch <slug> "
-            "--reason <text>` (for an `sdk` method that freeze is ONE HALF: it also needs "
-            "`RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS`, because the map records the "
-            "departure and the freeze keeps the code) — then re-cut. If the departure is "
-            "already recorded somewhere this gate cannot read, state it: "
-            f"`--allow-count-shrink {cls}:{symbol} --allow-count-shrink-reason <why>`."
-        )
-
-    # ── 8b: a count that disagrees with the document's OWN rows ────────────
-    counts = doc.get("counts") if isinstance(doc.get("counts"), dict) else {}
-    implied = _doc_row_counts(doc)
-    for key in ("tools", "sdk_public_methods", "retired"):
-        stated = counts.get(key)
-        if not isinstance(stated, int) or isinstance(stated, bool):
-            out.append(
-                f"`counts.{key}` is {stated!r}, not an integer — the committed surface count "
-                "cannot be compared, so a shrink cannot be ruled out (#12327). Re-cut the "
-                "baseline."
-            )
-        elif stated != implied[key]:
-            out.append(
-                f"`counts.{key}` says {stated} but the baseline carries {implied[key]} "
-                f"row(s) — the document disagrees with ITSELF, which is what a hand-spliced "
-                f"row leaves behind (#12327). REMEDY: re-cut the baseline "
-                "(`uv run python tools/surface_manifest.py cut`) once the rows are what you "
-                "mean; do not edit a count by hand."
-            )
-    census = counts.get("keyword_distribution")
-    if not isinstance(census, dict):
-        out.append(
-            "`counts.keyword_distribution` is missing or not a mapping — the keyword census is "
-            "the second half of the committed surface count (#12327). Re-cut the baseline."
-        )
-    elif sum(v for v in census.values() if isinstance(v, int)) != implied["keyword_total"]:
-        out.append(
-            f"`counts.keyword_distribution` sums to "
-            f"{sum(v for v in census.values() if isinstance(v, int))} but the baseline carries "
-            f"{implied['keyword_total']} tool row(s) — every tool is filed under exactly one "
-            "keyword at cut time, so a census that does not add up is a spliced cell (#12327)."
-        )
-
-    # ── 8c: the growth pin must not be LOWERED out from under step 7 ───────
-    base_pin = base_doc.get("high_water_counts")
-    head_pin = doc.get("high_water_counts")
-    if isinstance(base_pin, dict) and isinstance(head_pin, dict):
-        for key in ("tools", "sdk_public_methods"):
-            was, now = base_pin.get(key), head_pin.get(key)
-            if not (isinstance(was, int) and isinstance(now, int)) or now >= was:
-                continue
-            if ("pin", key) in waivers:
-                used.add(("pin", key))
-                continue
-            out.append(
-                f"`high_water_counts.{key}` was LOWERED from {was} to {now}. Step 7 only reds "
-                "a live surface that EXCEEDS this pin, so lowering it to the current count "
-                "disarms the growth pin for every later expansion — the baseline stops being "
-                "its own growth control (#12327). REMEDY: restore the pin (a re-cut CARRIES it "
-                "forward, so the change was a manual edit), or state the deliberate "
-                "re-baselining: `--allow-count-shrink pin:"
-                f"{key} --allow-count-shrink-reason <why>`."
-            )
-
-    # A waiver is a RECORD, so one that waived nothing is a false record.
-    for key in sorted(set(waivers) - used):
-        out.append(
-            f"--allow-count-shrink {waivers[key]!r} waives nothing: the base baseline records no "
-            f"such removal ({key[0]}:{key[1]}), so there is nothing to waive. Drop the flag."
-        )
-    return out
-
-
-def _show(root: Path, sha: str, path: str) -> str | None:
-    """`git show <sha>:<path>`, or None when this clone cannot answer."""
-    try:
-        probe = subprocess.run(
-            ["git", "show", f"{sha}:{path}"],
-            cwd=root, capture_output=True, text=True, env=_PROBE_ENV,
-        )
-    except (OSError, ValueError):  # pragma: no cover - env
-        return None
-    return probe.stdout if probe.returncode == 0 else None
-
-
-def _shrink_against_base(
-    doc: dict, *, root: Path | None = None, allowed: tuple[str, ...] | list[str] = (),
-) -> tuple[list[str], str | None]:
-    """`(problems, notice)` for the shrink pin, reading the base baseline from git.
-
-    A `notice` (never a red) is a state THIS CLONE cannot answer — the same split, for the same
-    reason, as `_provenance_problems`: the depth-1 `test` job runs this file too, its merge base
-    is absent by construction, and a gate that reds where it cannot answer gets bypassed rather
-    than obeyed. The `surface-guard` job checks out at `fetch-depth: 0` and is where this arm
-    actually answers; a full clone that still cannot name a base IS red, because that is a
-    base-ref defect and not a shallow checkout.
-    """
-    where = ROOT if root is None else root
-    ref = _default_branch_ref(root)
-    sha: str | None = None
-    if ref is not None:
-        try:
-            probe = subprocess.run(
-                ["git", "merge-base", "HEAD", ref],
-                cwd=where, capture_output=True, text=True, env=_PROBE_ENV,
-            )
-        except (OSError, ValueError):  # pragma: no cover - env
-            probe = None
-        if probe is not None and probe.returncode == 0 and probe.stdout.strip():
-            sha = probe.stdout.strip()
-
-    if sha is None:
-        detail = (
-            "this clone names no default branch (no origin/main, main, origin/master or "
-            "master)"
-            if ref is None
-            else f"the merge base of HEAD and {ref} is not readable"
-        )
-        if _is_shallow(root) is not False:
-            return [], (
-                f"the SHRINK pin did not run: {detail}, and a shallow checkout cannot answer "
-                "(the `surface-guard` job checks out at fetch-depth: 0, which is where this "
-                "arm grades). Nothing was verified about surface removals here."
-            )
-        return [
-            f"the SHRINK pin cannot answer and this is NOT a shallow checkout: {detail}. A "
-            "full clone must be able to name the base it grades against, so this is a defect "
-            "in the checkout (no default-branch ref) rather than a clone-depth limit — "
-            "`git fetch origin <default-branch>` and re-run. Answering nothing here would "
-            "leave #12327's bypass open with a green gate (a gate that runs only where it "
-            "cannot answer is a no-op gate, #9075/#11057)."
-        ], None
-
-    shown = _show(where, sha, "config/surface-manifest.yml")
-    if shown is None:
-        # ABSENT at the base is an honest answer (the base predates the baseline); UNREADABLE is
-        # not. `git cat-file -e` on the commit's tree is the question that separates them —
-        # inferring either from a `git show` that returns nothing would read a corrupt blob as
-        # "no removals".
-        try:
-            present = subprocess.run(
-                ["git", "cat-file", "-e", f"{sha}:config/surface-manifest.yml"],
-                cwd=where, capture_output=True, text=True, env=_PROBE_ENV,
-            ).returncode
-        except (OSError, ValueError):  # pragma: no cover - env
-            present = -1
-        if present != 0:
-            return [], (
-                f"the SHRINK pin did not run: {sha[:12]} carries no "
-                "`config/surface-manifest.yml`, so there is no committed baseline to shrink "
-                "from. Nothing was verified about surface removals here."
-            )
-        return [
-            f"the baseline at {sha[:12]} exists and this clone cannot read it, so the shrink "
-            "pin cannot answer — and an unreadable baseline reads as 'nothing was removed' if "
-            "it is allowed to pass (#12327). Fetch the object (`git fetch origin`) and re-run."
-        ], None
-    if not shown.strip():
-        return [], (
-            f"the SHRINK pin did not run: {sha[:12]} carries no `config/surface-manifest.yml`, "
-            "so there is no committed baseline to shrink from."
-        )
-    try:
-        import yaml
-
-        base_doc = yaml.safe_load(shown)
-    except Exception as exc:  # pragma: no cover - a corrupt base blob
-        return [f"the baseline at {sha[:12]} cannot be parsed ({exc}); the shrink pin cannot answer"], None
-    if not isinstance(base_doc, dict):
-        return [f"the baseline at {sha[:12]} is not a mapping; the shrink pin cannot answer"], None
-
-    # The records a removal can be accounted by, read from the SAME tree the gate grades (the
-    # subject), never from the base ref: a record added by this PR is exactly what accounts for
-    # a removal this PR made.
-    archive_keys: set[tuple[str, str]] = set()
-    manifest_path = where / "archive" / "MANIFEST.json"
-    if manifest_path.exists():
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            archive_keys = {
-                (str(e.get("kind")), str(e.get("symbol")))
-                for e in (data.get("entries") or [])
-                if isinstance(e, dict)
-            }
-        except Exception:  # an unreadable record accounts for NOTHING, never everything
-            archive_keys = set()
-    from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
-    from tortoise.tool_registry import RETIRED_USE_INSTEAD
-
-    return _shrink_problems(
-        doc,
-        base_doc=base_doc,
-        archive_keys=archive_keys,
-        retired_sdk=set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
-        forward=set(RETIRED_USE_INSTEAD),
-        allowed=allowed,
-    ), None
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
@@ -967,30 +602,7 @@ def main(argv: list[str]) -> int:
              "be in the default branch's history (a shallow clone counts as unproven, not "
              "as a pass) — for the step that owns its own git depth",
     )
-    parser.add_argument(
-        "--allow-count-shrink",
-        action="append",
-        default=[],
-        metavar="TARGET",
-        help="waive ONE deliberate shrink of the committed surface: `tool:<name>`, "
-             "`sdk:<name>` or `pin:<tools|sdk_public_methods>`. Needs "
-             "--allow-count-shrink-reason; a waiver that waives nothing is reported",
-    )
-    parser.add_argument(
-        "--allow-count-shrink-reason",
-        default=None,
-        metavar="TEXT",
-        help="WHY the waived shrink is legitimate — it belongs in the PR body, not only here",
-    )
     args = parser.parse_args(argv[1:])
-
-    # An override is a RECORD: it needs a WHY. (An override with no stated reason is how a
-    # gate becomes decoration — the same rule `cut --allow-removal` follows.)
-    if bool(args.allow_count_shrink) != bool(args.allow_count_shrink_reason):
-        return die(
-            "--allow-count-shrink and --allow-count-shrink-reason go together: an override with "
-            "no stated reason is not a record, and a reason with nothing waived waives nothing"
-        )
 
     manifest_path = Path(args.manifest)
     if not manifest_path.exists():
@@ -1651,19 +1263,6 @@ def main(argv: list[str]) -> int:
                     "silently — raise `high_water_counts` explicitly in the PR that "
                     "records the owner's approval for the growth."
                 )
-
-    # --- 8. the SHRINK pin (#12327) ----------------------------------------------
-    # Step 7 pins GROWTH; nothing pinned SHRINK, and hand-splicing a row out of the baseline
-    # (the RECOMMENDED procedure for a slice PR — `MEMORY.md` `[surface-cut]`) leaves `cut`
-    # unrun, so #12237's removal refusal never fires and this gate is green BY CONSTRUCTION
-    # against the rows the splice just rewrote. The reference is the MERGE BASE, a version the
-    # diff under test cannot author (see the block comment above `_ARCHIVE_KIND_BY_CLASS`).
-    shrink_problems, shrink_notice = _shrink_against_base(
-        doc, allowed=args.allow_count_shrink
-    )
-    if shrink_notice:
-        print(f"::notice::{shrink_notice}")
-    problems.extend(shrink_problems)
 
     if problems:
         print(f"::error::{len(problems)} surface violation(s) — the frozen baseline is out of date.")
