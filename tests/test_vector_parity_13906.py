@@ -1574,13 +1574,9 @@ def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
     assert "_require_hnsw_indexdef" in called, sorted(called)
     run_node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                     and n.name == "run")
-    record_arm = [n for n in ast.walk(run_node)
-                  if isinstance(n, ast.Dict)
-                  and any(isinstance(k, ast.Constant) and k.value == "driver"
-                          for k in n.keys)]
-    assert record_arm, "run() no longer publishes an arms.record dict"
-    assert any(isinstance(k, ast.Constant) and k.value == "index"
-               for d in record_arm for k in d.keys), (
+    keys = _arms_dict_keys(run_node, "record")
+    assert keys, "run() no longer assigns report[\"arms\"][\"record\"]"
+    assert "index" in keys, (
         "arms.record does not record the index it measured — the driver name is "
         "an unverified claim without it")
 
@@ -1641,3 +1637,83 @@ def test_the_vector_poison_arm_rereads_its_own_index_params(harness):
     assert reread, ("the vector-poison branch must re-read "
                     "`report[\"arms\"][\"graph_index\"][\"index_params\"]` after "
                     "the ef-diagnostic rebuild")
+    # ⛔ AND `run()` MUST CALL THE GUARD. The decision function above can be
+    # perfectly pinned while nothing calls it: `require_schema()` is the ONLY
+    # caller of `_require_hnsw_indexdef`, and deleting the one line
+    # `record.require_schema()` from `run()` left all 53 pins green (measured in
+    # review). Every other guard here carries a call-site pin for this reason.
+    assert "require_schema" in _called_names(run_node), sorted(_called_names(run_node))
+
+
+def _called_names(node):
+    """Names of every function called anywhere under `node`."""
+    return {(c.func.attr if isinstance(c.func, ast.Attribute)
+             else getattr(c.func, "id", ""))
+            for c in ast.walk(node) if isinstance(c, ast.Call)}
+
+
+def _arms_dict_keys(run_node, arm):
+    """Keys of the dict assigned to `report["arms"][<arm>]` — BY ITS TARGET.
+
+    ⛔ NOT "the first dict in `run()` that has a `driver` key". That locator
+    matched the `graph_scan` arm too, so moving `"index": …` out of the record
+    arm and into the scan arm still satisfied the assertion (measured in review).
+    """
+    for node in ast.walk(run_node):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Subscript):
+            continue
+        inner, outer = target.value, target
+        if (isinstance(inner.slice, ast.Constant) and inner.slice.value == "arms"
+                and isinstance(outer.slice, ast.Constant) and outer.slice.value == arm):
+            return {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
+    return set()
+
+
+def _finally_called_names(run_node):
+    """Names called inside `run()`'s `finally` blocks — the teardown path."""
+    names = set()
+    for node in ast.walk(run_node):
+        if isinstance(node, ast.Try) and node.finalbody:
+            for block in node.finalbody:
+                names |= _called_names(block)
+    return names
+
+
+def test_the_teardown_is_pinned_IN_THE_FINALLY_not_merely_present(harness):
+    """⛔ "run() calls reset() SOMEWHERE" IS NOT "the teardown runs".
+
+    `run()` calls `store.reset()` TWICE — once before seeding (:1228) and once in
+    the `finally` (:1392) — so an `assert "reset" in called` assertion is already
+    satisfied by the PRE-SEED reset and cannot see the teardown removed. Measured
+    in review: replacing the finally's `store.reset()` with `pass` left all 53
+    pins green, and so did replacing `record.teardown()`. Both silent, and both
+    are declaration R1 verbatim: the run prints PARITY, exits 0, and leaves a
+    55-node cypher graph plus its HNSW index and a whole record tenant behind —
+    the residue README §5.1 B1 says can no longer happen, invisible to every gated
+    comparison because cleanup is outside all of them.
+    """
+    run_node = next(n for n in ast.walk(ast.parse(MODULE_PATH.read_text()))
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    in_finally = _finally_called_names(run_node)
+    assert {"teardown", "reset"} <= in_finally, (
+        "run()'s finally block no longer calls both record.teardown() and "
+        f"store.reset() — R1 is unheld. Called in finally: {sorted(in_finally)}")
+
+
+def test_the_graph_store_locality_guard_is_called_by_run(harness):
+    """⛔ The RECORD-side locality guard got a call-site pin; the GRAPH side did not.
+
+    `_assert_loopback(args.graph_host, "graph store", …)` is the only thing
+    between a mistyped `--graph-host` (or an env-derived port pointed at a shared
+    instance) and seeding a 55-node corpus into a graph this run does not own,
+    then deleting it. Measured in review: deleting that call left all 53 pins
+    green — `test_a_non_loopback_store_is_refused_without_an_explicit_opt_in`
+    exercises the function, never the wiring.
+    """
+    run_node = next(n for n in ast.walk(ast.parse(MODULE_PATH.read_text()))
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    called = _called_names(run_node)
+    assert {"_assert_loopback", "_assert_local_record_dsn"} <= called, sorted(called)
