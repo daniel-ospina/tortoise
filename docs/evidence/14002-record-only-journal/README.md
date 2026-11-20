@@ -281,14 +281,18 @@ TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 \
   uv run pytest tests/test_14002_record_only_journal.py -q
 ```
 
-**NINE mutants across TWO legs**: FIVE on the chokepoint
-(`test_the_wiring_gate_reds_when_the_cutover_skip_is_deleted` — the decision
-replaced by a constant, the append moved out of the guard, the helper answering a
-constant, the helper CALLING the record and ignoring the answer, and the decision
-not forwarded to the seam) and FOUR+ door shapes
+**TEN mutants across TWO legs**: FIVE on the chokepoint
+(`test_the_wiring_gate_reds_when_the_cutover_skip_is_deleted`, one parametrized
+case per `_MUTATIONS` key — the decision replaced by a constant, the append moved
+out of the guard, the helper answering a constant, the helper CALLING the record
+and ignoring the answer, and the decision not forwarded to the seam) and FIVE door
+shapes
 (`test_a_door_that_drops_the_flag_is_refused_by_the_gate` — dropped, constant
 `False`, constant `True`, `None`, and a locally bound constant forwarded by name).
 Every one leaves the tree compiling and every other claim of the gate green: the
 shape this repo has already shipped once (#12894's door refused every write while
 the gate printed `WIRED`). ⚠️ Stated ONCE here and cited elsewhere — three
-artifacts quoting three populations was itself a finding (review cycle 4).
+artifacts quoting three populations was itself a finding (review cycle 4), and the
+first unification still said NINE while the code held TEN (five `_MUTATIONS` keys
+plus five door shapes, re-counted at `4cf3e8ce0c` rather than carried from prose).
+A reader diffing this figure should re-count the two populations, not trust it.
