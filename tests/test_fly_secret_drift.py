@@ -3578,8 +3578,13 @@ def _declared_gap_paragraph() -> str:
     paragraph exists only while a gap does.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
+    # The heading must OPEN its line, not merely contain the phrase: the manifest's
+    # own `#13674` entry block REFERS to this paragraph by name (`… the `ONE DECLARED GAP`
+    # paragraph above …`), and a containment match would anchor the reader inside that
+    # block the moment the real paragraph is deleted — which is exactly the stale-removal
+    # case this reader exists to report, so a containment match would make it pass.
     heading = next(
-        (index for index, line in enumerate(lines) if "⚠️ ONE DECLARED GAP" in line),
+        (index for index, line in enumerate(lines) if line.lstrip("#").strip().startswith("⚠️ ONE DECLARED GAP")),
         None,
     )
     if heading is None:
@@ -3718,6 +3723,46 @@ def test_the_reserved_member_paragraph_names_every_fly_only_member():
     assert stated_gaps == len(gap_refs), (
         f"the DECLARED GAP paragraph says {gap_match.group(1).upper()} gap(s), but "
         f"{len(gap_refs)} `fly-only:` ref(s) are named there: {gap_refs}"
+    )
+
+
+def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
+    """A `fly-only:` precondition is a CONTRACT; a contract is not amended to fit a member.
+
+    `#13814` declares a third `fly-only:` member whose ruling does not exist yet.
+    The way to declare that is a GAP named against an UNCHANGED rule. The way not
+    to declare it is to re-word the rule into a status report — which is what this
+    file said at `d63e5a9e8e`, *"THREE members are declared below, and their
+    rulings do NOT all exist yet"*, replacing `origin/main`'s *"each with its own
+    recorded ruling"*. Under the weakened wording a FOURTH member needs no ruling
+    either, and the sentence the token exists to enforce asserts nothing
+    enforceable, so nothing can ever red on it. The member count and the per-ref
+    membership are the sibling test's property; THIS one is the sentence.
+
+    It is written against the regression, not against either review's preferred
+    prose: it is GREEN on `origin/main`'s paragraph (the rule, plus two members
+    that meet it) and on the restored paragraph (the same rule, an explicit gap
+    for the third), and RED only on the `d63e5a9e8e` re-wording. So it neither
+    pre-empts the owner's decision on `#13674` nor needs editing when that
+    decision lands under either outcome — a ruling keeps the entry beside the
+    unchanged rule, and a version-control re-route deletes the entry and leaves
+    the same rule standing.
+
+    What it deliberately does NOT do is check that a ruling EXISTS on the issue
+    the ref names. The checker is hermetic and offline by design — `fly-only:` is
+    SHAPE ONLY, and the manifest's own note assigns the existence half to a
+    reviewer — so a check here could only re-read the same prose it is asserting
+    about, which is how the paragraph drifted twice already.
+    """
+    reserved = _reserved_members_paragraph()
+    assert "each with its own recorded ruling" in reserved, (
+        "the RESERVED-members paragraph no longer carries the precondition that makes "
+        "a `fly-only:` declaration meaningful — that each member's issue carries its "
+        "own RECORDED ruling. A member whose ruling is still owed must be declared as a "
+        "GAP against this unchanged sentence; re-wording the sentence so it admits an "
+        "unruled member makes the one property this paragraph exists for unfalsifiable "
+        "(#13814 review P2: 'their rulings do NOT all exist yet').\n"
+        f"--- paragraph ---\n{reserved}"
     )
 
 
