@@ -1539,13 +1539,28 @@ def test_the_destructive_warning_names_the_width_the_ddl_actually_builds():
 
 
 class _ReadinessCursor:
-    """Answers the coverage read; records the bound and every statement issued."""
+    """Answers the coverage read; records the bound and every statement issued.
+
+    ⛔ THE PRESENCE READ IS ANSWERED, NOT REJECTED (#14002 review cycle 4, P2).
+    `journal_coverage` classifies the journal on EVERY call (one `record_cursor`
+    row plus its savepoint bookkeeping), so a double that raised "unexpected
+    statement" for it would only be exercising `_journal_is_export`'s
+    fail-closed arm on every assertion here — and the swallowed failure would
+    make `journal_is_export` answer `False` for the wrong reason. It answers
+    "no cursor row" instead, which is the same non-export verdict measured
+    rather than stumbled into.
+    """
 
     def __init__(self, state: dict):
         self._state = state
+        self._last = ""
 
     def execute(self, sql: str, params=None):
         self._state["statements"].append(sql)
+        self._last = sql
+        if sql.lstrip().startswith(("SAVEPOINT", "RELEASE SAVEPOINT",
+                                    "ROLLBACK TO SAVEPOINT")):
+            return None
         if "set_config('statement_timeout'" in sql:
             self._state["applied_ms"] = int(params[0])
             return None
@@ -1554,9 +1569,15 @@ class _ReadinessCursor:
             return None
         if "journal_event" in sql:
             return None
+        if "record_cursor" in sql:
+            self._state["presence_statements"] = self._state.get(
+                "presence_statements", 0) + 1
+            return None
         raise AssertionError(f"the readiness gate issued an unexpected statement: {sql}")
 
     def fetchone(self):
+        if "record_cursor" in self._last:
+            return None          # no counter row: this graph is not cut over
         return self._state["row"]
 
     def fetchall(self):

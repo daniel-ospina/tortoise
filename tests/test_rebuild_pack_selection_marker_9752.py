@@ -1451,8 +1451,12 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
     sdk.close()
     _write_journal(events)
 
+    # `journal_is_complete=True`: #14002 refuses a journal rebuild on a
+    # deployment whose `.env` (or env) names a RECORD. This leg is about the
+    # pack-selection marker being REPORTED, not about that gate.
     rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
-                                        db=str(tmp_path / "cli2.db")))
+                                        db=str(tmp_path / "cli2.db"),
+                                        journal_is_complete=True))
     out = capsys.readouterr()
 
     assert rc in (None, 0)
@@ -1466,7 +1470,8 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
     counts.update({"pack_selection_expected": 0, "pack_selection_restored": 0,
                    "pack_selection_state_unknown": True})
     rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
-                                        db=str(tmp_path / "cli3.db")))
+                                        db=str(tmp_path / "cli3.db"),
+                                        journal_is_complete=True))
     out = capsys.readouterr()
 
     assert rc in (None, 0)
@@ -1480,7 +1485,8 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
                    "pack_selection_state_unknown": False,
                    "pack_selection_conflict": True})
     rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
-                                        db=str(tmp_path / "cli4.db")))
+                                        db=str(tmp_path / "cli4.db"),
+                                        journal_is_complete=True))
     out = capsys.readouterr()
 
     assert rc in (None, 0)

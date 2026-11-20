@@ -1362,15 +1362,22 @@ def test_the_sdk_forwarding_hop_requires_the_ordinal(wiring):
     # that changes (it is `-> Any` since #10000, so the write's outcome can travel
     # back to the capture writer and decide a store) must not make the leg miss
     # its own subject. The count assertion is what keeps the pin about the ONE
-    # forwarding hop that owns the ordinal — a second `seq: int | None)` spelling
-    # in sdk.py reddens here instead of being mutated silently at some other site
-    # (#10024's re-point, absorbed per #10021's reconciliation comment).
-    target = "seq: int | None) ->"
+    # forwarding hop that owns the ordinal — a second spelling in sdk.py reddens
+    # here instead of being mutated silently at some other site (#10024's
+    # re-point, absorbed per #10021's reconciliation comment).
+    #
+    # ⚠️ RE-POINTED for #14002, and the reason is on the re-point: the hop gained
+    # a keyword-only `journal_skipped` AFTER the ordinal, so the old target
+    # (`"seq: int | None) ->"`) no longer exists. The subject is unchanged — `seq`
+    # must not default — so the target stops at the comma that now separates the
+    # ordinal from that flag, and the mutation inserts the default at the same
+    # place. Deleting this leg instead would be the #9307 F2 defect restored.
+    target = "seq: int | None, *,"
     assert source.count(target) == 1, (
         "`_write_record_projection`'s `seq` spelling moved or was copied — "
         "re-point this leg, it must mutate the ONE forwarding hop that owns the "
         f"ordinal (found {source.count(target)})")
-    with_default = source.replace(target, "seq: int | None = None) ->", 1)
+    with_default = source.replace(target, "seq: int | None = None, *,", 1)
     fired = module.ordinal_argument_problems(
         ast.parse(with_default, filename="tortoise/sdk.py"), "tortoise/sdk.py")
     assert fired and "WITH A DEFAULT" in fired[0], fired

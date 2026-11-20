@@ -1771,9 +1771,16 @@ def _seed_population(
             tenant=tenant,
             scope_label="claim_dense_leg_13732.seed",
         )
-        if outcome.seq is None:
+        if outcome.seq is None and outcome.appended:
+            # ⛔ `seq is None` HAS TWO CAUSES (#14002) and only one of them is
+            # "unproven". On a cut-over graph the chokepoint does not append at
+            # all — the record owns the ordinal — so the outcome has no journal
+            # position BY DESIGN and reporting it as an unproven position would
+            # turn a healthy record-only write into a false verdict field
+            # (`positions_unproven` gates this tool's own report). The
+            # discriminator is `appended`, not a guess.
             unproven += 1
-        else:
+        elif outcome.seq is not None:
             first_seq = outcome.seq if first_seq is None else first_seq
             last_seq = outcome.seq
         if outcome.applied:

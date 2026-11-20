@@ -308,7 +308,7 @@ names the retired label in order to explain a rule about it — and it is the fi
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
 retirement prose in `tortoise/mcp_server.py:4430`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37392` and `_file_human_approval`'s `:37434`, one line each in a file this population already
+`tortoise/sdk.py:37492` and `_file_human_approval`'s `:37434`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
 DELETED, re-measured at this head: `mcp_server.py:4382` is the `# prop named "error"
 must not suppress the onboarding observation.` comment (not blank) and the

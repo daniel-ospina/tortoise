@@ -205,7 +205,7 @@ def test_the_write_lands_in_the_journal_and_the_record_and_the_cache_declines():
     log, projection = _Log(), _Projection()
     projected: list[tuple] = []
 
-    def _project(event, seq):
+    def _project(event, seq, *, journal_skipped=False):
         projected.append((dict(event), seq))
         return _RecordWrite()
 
@@ -236,7 +236,8 @@ def test_a_write_with_no_verdict_folds_exactly_as_before():
     projection = _Projection()
     outcome = live_write.write({"type": "PointAdded", "id": "p2"},
                                log=_Log(), projection=projection,
-                               project=lambda event, seq: _RecordWrite())
+                               project=lambda event, seq, journal_skipped=False:
+                               _RecordWrite())
 
     assert projection.applied == [{"type": "PointAdded", "id": "p2"}]
     assert outcome.folded is True
@@ -251,7 +252,7 @@ def test_the_verdict_is_consumed_once():
                        truth_carried=True)
 
     projection = _Projection()
-    _project = lambda event, seq: _RecordWrite()  # noqa: E731
+    _project = lambda event, seq, journal_skipped=False: _RecordWrite()  # noqa: E731
     first = live_write.write({"id": "p3"}, log=_Log(), projection=projection,
                              project=_project)
     second = live_write.write({"id": "p4"}, log=_Log(), projection=projection,

@@ -70,9 +70,106 @@ def _markdown_files(root: Path | str) -> list[Path]:
     )
 
 
+def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None:
+    """Why `tortoise rebuild` must REFUSE on this deployment, or ``None`` (#14002).
+
+    ⛔ THE CONSEQUENCE #14002 CREATES, NAMED AT THE DOOR THAT WOULD ACT ON IT.
+    `tortoise rebuild` is a wipe + journal-only replay, and
+    `docs/architecture/STORAGE-ARCHITECTURE.md` §3 states the precondition it
+    relies on verbatim: *"`derived = replay(journal)` holds only if every write is
+    carried by the journal … Journal completeness is a PRECONDITION of this
+    design, not an observation about it"* (the gap is tracked as `#5089`). On a
+    CUT-OVER graph the journal stops being written — the record owns the ordinal
+    and the file is an export — so a rebuild from it would produce a graph as of
+    the arming point and **silently drop every later record**, which is the
+    direction nothing can see: `rebuild_all` prints `Done:` and the counts it
+    prints are the journal's, not the record's.
+
+    ⛔ THE POLARITY IS FAIL-CLOSED ON THE RECORD'S **EXISTENCE**, NOT ON A FLAG
+    (#14002 review cycle 3, P2). The first cut refused only when
+    `TORTOISE_RECORD_ALLOCATE` was set — a WRITER switch that an operator's
+    shell, a cron job and a maintenance one-off do not carry, so the destructive
+    door failed OPEN exactly where the operators who run it live. The condition
+    is now: **a record DSN resolves ⇒ refuse**, and the escape is an explicit
+    acknowledgement of the thing that actually matters — `--journal-is-complete`,
+    i.e. "no graph on this record is cut over, so the file IS the full log".
+    That is a deliberate over-block (it can refuse a rebuild on a configured
+    record with no cutover at all) chosen against the alternative, because the
+    two directions are not symmetric: refused friction is one flag, and a partial
+    rebuild presented as a full one destroys work with no error.
+
+    ⚠️ A MALFORMED DSN IN THE SHELL IS NOT AN ANSWER: it means the shell could not
+    say, so the deployment's `.env` is asked instead — the same second source, for
+    the same reason. Only "no record in the env AND none in the `.env`" allows a
+    journal rebuild.
+    """
+    try:
+        from tortoise import record_writer
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable seam must not
+        # turn a recovery tool into an error; the pre-#14002 behaviour stands.
+        return None
+    try:
+        configured = record_writer.record_dsn() is not None
+    except Exception:  # noqa: BLE001, RUF100 — the shell could not answer
+        # see the docstring: fall through and ask the DEPLOYMENT
+        configured = False
+    if not configured:
+        # ⛔ AND THE SHELL IS NOT THE DEPLOYMENT (#14002 review cycle 4, P2).
+        # `record_dsn()` reads `os.environ` only, and `tortoise rebuild` loads no
+        # `.env` (the daemon does, via `mcp_server._load_dotenv`), so a
+        # FalkorDB-only rebuild run from an operator shell — which has no reason
+        # to export a record DSN — saw "no record" and wiped the graph from a
+        # frozen journal. So the DEPLOYMENT's own `.env` is read too, with the
+        # reader this repo already uses for exactly this (`doctor`), and either
+        # source naming a record is enough.
+        configured = _deployment_names_a_record()
+    if not configured:
+        # No record anywhere: the journal IS this deployment's rebuild source.
+        return None
+    if journal_is_complete:
+        return None
+    return (
+        "this deployment has a RECORD configured, and on any graph that has been "
+        "cut over the record owns the journal's ordinal — the JSONL is an EXPORT "
+        "there, it stops being appended to, and `derived = replay(journal)` no "
+        "longer holds for it (STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
+        "rebuild from it would produce a graph as of the arming point and "
+        "silently drop every later record. Nothing was wiped. If NO graph on this "
+        "record is cut over — so the journal really is the full log — re-run with "
+        "`--journal-is-complete`; otherwise restore the graph from the record's "
+        "own backup, not from the journal"
+    )
+
+
+def _deployment_names_a_record() -> bool:
+    """Does this DEPLOYMENT's `.env` name a record, even if the shell does not?
+
+    `record_dsn()` answers for the PROCESS environment; the daemon and the
+    reporting verbs load `.env` through `dotenv_file`, and a FalkorDB-only
+    maintenance command has no reason to. Reads the same file `doctor` reads, with
+    the same parser, and swallows its own failures: an unreadable `.env` answers
+    "not named here", which leaves the pre-#14002 behaviour rather than turning a
+    recovery tool into an exception.
+    """
+    try:
+        from tortoise import dotenv_file
+
+        values = dotenv_file.parse_dotenv(dotenv_file.dotenv_path())
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return False
+    from tortoise import record_writer
+
+    return bool(values.get(record_writer.RECORD_DSN_ENV))
+
+
 def _cmd_rebuild(args):
     from tortoise.log import TornTailResurrectionError
 
+    refusal = _journal_rebuild_refusal(
+        journal_is_complete=bool(getattr(args, "journal_is_complete", False)))
+    if refusal is not None:
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
     print(f"Rebuilding from {args.dir} → {args.db}")
     proj = None
     try:
@@ -17496,6 +17593,15 @@ def main(argv: list[str] | None = None) -> int:
     rb = sp.add_parser("rebuild", help="Rebuild FalkorDB from all .jsonl files")
     rb.add_argument("--db", required=True)
     rb.add_argument("--dir", default=".")
+    # #14002: a wipe + journal-only replay on a deployment whose RECORD owns the
+    # journal's ordinal drops every record after the cutover point, silently. The
+    # refusal is the default and this flag is the assertion that no graph on the
+    # record is cut over (so the file IS the full log) — an acknowledgement of the
+    # fact that decides it, not a bypass of the check.
+    rb.add_argument(
+        "--journal-is-complete", dest="journal_is_complete", action="store_true",
+        help="Proceed on a deployment with a RECORD configured: assert that NO "
+             "graph is cut over, so the journal is the complete log (#14002)")
     sp.add_parser("demo", help="Run mock extractor on sample transcript")
     sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)").add_argument("--db", required=True, help="Docker URI or file path")
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")

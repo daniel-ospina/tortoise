@@ -2077,6 +2077,15 @@ def test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured(
     graph, and (b) the fix — `#9318`'s journal identity in the key, or a per-graph
     lock spanning append→allocate — has a leg that must change when it lands. If
     this test goes green (three APPLIEDs), the fix has arrived: replace it.
+
+    ⛔ AND IT IS STILL GREEN AFTER #14002, WHICH IS CORRECT AND NOT A STALE PIN.
+    #14002 fixed the production path differently — by REMOVING the second
+    allocator: `live_write.write` does not append on a cut-over graph, so the
+    append/allocation pair this leg interleaves never both happen there. What
+    this leg drives is the DOOR, called directly with an ordinal a caller holds,
+    and the guard must keep refusing that (the issue forbids weakening it). So
+    the wedge is no longer *reachable from production*, while the guard that
+    would report it stays armed — `docs/evidence/14002-record-only-journal/`.
     """
     org, graph = tenant
     _seed_and_arm(app, org, graph, 0)
