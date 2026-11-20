@@ -3095,15 +3095,30 @@ _D5_HEAD_BOUND_VERDICTS = (
     # "At `2584a86ec1` the FIRST of them prints a path." (measured: that sentence was refused,
     # with a message calling it a verdict "about the head being merged", which would be false of
     # it). A row is a MEASURED SPELLING, never a widened one — the convention the ledger above
-    # this cell states. RESIDUAL, declared: a present-tense restatement that drops `at this head`
-    # altogether can now slip, which is the same bounded-token residual every row here carries.
+    # this cell states. RESIDUAL, declared: a present-tense restatement that re-words the
+    # clause (a different verb or noun) can still slip, which is the same bounded-token residual
+    # every row here carries. ⛔ NOT declared, and CLOSED: CASE — the detector compares
+    # case-insensitively, because a case-SENSITIVE test missed the one-token slip from the shape
+    # this document deliberately requires (`At `2584a86ec1` the FIRST…` -> `At this head the
+    # FIRST of them prints a path.`), i.e. a sentence-initial capital. That was a false PASS
+    # (#13948 review round 26, MEASURED) and it is the same asymmetry round 25 closed one arm
+    # away in `_FALSE_FILTER_PROPERTY_RE`; the case axis has its own control below.
     "at this head the FIRST of them prints a path",
 )
 
 
 def _d5_head_bound_verdicts(doc: str) -> list[str]:
-    """Every retired per-head verdict still spelled in `doc` (#13853 review round 17, P1)."""
-    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if spelling in doc]
+    """Every retired per-head verdict still spelled in `doc` (#13853 review round 17, P1).
+
+    ⛔ CASE-INSENSITIVE, deliberately (#13948 review round 26, P2 — MEASURED). As a plain
+    substring test it missed the sentence-initial slip from the shape this document itself
+    requires: `At this head the FIRST of them prints a path.` passed while
+    `at this head the FIRST of them prints a path` was caught, so the cell reported GREEN
+    over exactly the per-head verdict it exists to retire — the FALSE-PASS direction this
+    file says must never be accepted.
+    """
+    lowered = doc.lower()
+    return [spelling for spelling in _D5_HEAD_BOUND_VERDICTS if spelling.lower() in lowered]
 
 
 def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
@@ -3163,6 +3178,16 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(probe) == [spelling], (
             f"the ban's own row {spelling!r} is not detected when injected, so editing it "
             "(even by one character) turns this arm inert")
+    # ⛔ AND THE CASE AXIS HAS ITS OWN CONTROL (#13948 review round 26, P2 — MEASURED): every
+    # probe above is lowercase, so reverting the detector to a case-SENSITIVE `in` left this
+    # whole cell GREEN while the sentence-initial slip from the shape the document REQUIRES
+    # (`At this head the FIRST of them prints a path.`) went uncaught. These two reds iff the
+    # detector stays case-insensitive — the same treatment round 25 gave the filter arm.
+    for cased in ("At this head the FIRST of them prints a path.",
+                  "AND THE CLAIM DOES NOT HOLD FOR THIS HEAD."):
+        assert _d5_head_bound_verdicts(cased), (
+            f"the per-head-verdict ban misses the capitalised form {cased!r}, so a "
+            "sentence-initial restatement passes it (#13948 review round 26)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
