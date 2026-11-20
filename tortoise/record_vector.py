@@ -699,7 +699,9 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: ⛔ AND THE SET NOW COVERS BOTH HALVES OF `:Source` (`document` AND `source`), which
 #: is not a re-cut of the union rule: each half is written by its own fold (`_upsert_document`
 #: / `_upsert_source`), and BOTH ask BOTH types — one `:Source` vector serves both
-#: readings, so either KEEP keeps it and only an agreeing stop retires it.
+#: readings, so either KEEP keeps it and only an agreeing stop retires it. ⛔ THAT STOP IS
+#: A PROPERTY OF THE LABEL, not of one `entity_type`, so this set alone does not decide the
+#: read's no-fallback arm — :func:`label_frozen` is the conjunct that does (`#13854` review).
 #:
 #: ⛔ THE MEMBERSHIP IS PINNED AGAINST THE FOLDS THEMSELVES rather than restated
 #: here: `tests/test_13610_graph_vector_copy.py::
