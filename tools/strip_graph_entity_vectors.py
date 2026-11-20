@@ -2353,7 +2353,7 @@ def _source_holds_the_store_anywhere(node) -> bool:
             #    `.items()` arm now follows the receiver's wrappers too; the value question is
             #    kept BESIDE it, because a mapping that really does place the vector is still a
             #    store. Both directions only ever REFUSE, so neither can widen acceptance.
-            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE **532** FIXTURE ROWS — measured,
+            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE **576** FIXTURE ROWS — measured,
             #    not assumed, and recorded so the next lane does not re-litigate it: for every
             #    spelling in this family the key question is ALSO answered upstream (by the
             #    comprehension terms, or by `_comprehension_key_mentions_the_bound_property` on
@@ -2366,7 +2366,8 @@ def _source_holds_the_store_anywhere(node) -> bool:
             #    `#13788` review round 10), so the count is stated WITH its read recipe instead of
             #    as a fact: re-derive it from the three tuples of
             #    `tests/test_13629_entity_vector_retire.py::test_the_stop_arm_must_not_store_the_vector`
-            #    (397 refused / 132 accepted / 3 over_refused at that head), never from this line.
+            #    (427 refused / 146 accepted / 3 over_refused at the round-12 head — re-measured
+            #    from the three tuples with an AST count, never from this line).
             return (_comprehension_source_pairs_the_property_with_a_value(node)
                     or _mapping_literal_stores_the_vector(node.func.value))
         return False              # `zip(…)`, `map(…)`: the stated residual
@@ -2488,6 +2489,38 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
     #    them placing the property is a store, the same union policy the conditional arm a few
     #    lines up already applies. A receiver this check cannot read contributes nothing.
     if isinstance(mapping, ast.Subscript):
+        # ⛔ A CONSTANT *KEY* INTO A MAPPING IS A MAPPING LOOKUP, NOT A POSITIONAL INDEX
+        #    (`#13788` review round 11, P1, measured through the tool's own
+        #    `_writer_consults_gate`). The arm below answers a const-index into a SEQUENCE
+        #    (`[{"embedding": 1}][0]`, refused since `84d108e8e2`) and this one answers the
+        #    other half — a const-KEY subscript into a MAPPING LITERAL, which selects that
+        #    key's VALUE. Without it the receiver resolved to nothing, the caller abstained,
+        #    and abstention CERTIFIES on a destructive instrument:
+        #
+        #        props |= {k: _encode(ev) for k, _v in [{"embedding": 1}][0].items()}        refused
+        #        props |= {k: _encode(ev) for k, _v in {"a": {"embedding": 1}}["a"].items()}  CERTIFIED
+        #        props |= {k: _encode(ev) for k, _v in {"a": {"b": ("embedding", 1)}}["a"].values()}  CERTIFIED
+        #        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"]}           CERTIFIED
+        #        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"].keys()}   CERTIFIED
+        #        props |= {k: _encode(ev) for k, _v in dict({"a": {"embedding": 1}}["a"]).items()}  CERTIFIED
+        #
+        #    The first row is the LIST twin that was closed in round 9; the five below it are
+        #    the DICT half of the SAME seam, still open, and `d4f3de3ab0`'s commit message
+        #    called that residue closed — the claim-stronger-than-the-code shape this series
+        #    exists to remove. The receiver goes through `_mapping_items_pairs`, so a dict
+        #    literal, a constructor, a merge and a dict comprehension are all answered by the
+        #    ONE mapping vocabulary rather than a sixth copy of it. Refusal-only: it can only
+        #    turn an abstention into pairs, and a pair can only be asked the key question. An
+        #    absent key is a `KeyError` at runtime — it stores nothing — so it stays `None`.
+        if isinstance(mapping.slice, ast.Constant):
+            receiver = _mapping_items_pairs(mapping.value, _depth + 1)
+            if receiver is not None:
+                wanted = mapping.slice.value
+                for key, value in receiver:
+                    if (isinstance(key, ast.Constant) and key.value == wanted
+                            and type(key.value) is type(wanted)):
+                        return _mapping_items_pairs(value, _depth + 1)
+                return None
         options = _sequence_options(mapping, _depth + 1)
         if options is None:
             return None
@@ -2910,6 +2943,32 @@ def _comprehension_source_yields(source, _depth: int = 0):
         return None
     if isinstance(source, ast.Subscript) and _is_full_slice(source.slice):
         return _comprehension_source_yields(source.value, _depth + 1)
+    # ⛔ A CONSTANT *KEY* INTO A MAPPING IS A MAPPING LOOKUP, NOT A POSITIONAL INDEX
+    #    (`#13788` review round 11, P1, measured) — the source-side twin of the arm
+    #    `_mapping_items_pairs` gained in the same commit, and the reason BOTH are needed:
+    #    `for k in {"a": {"embedding": 1}}["a"]` binds `k` to the KEYS of the selected
+    #    mapping, so it places the vector exactly as the bare literal twin does — which is
+    #    refused `_one` container away:
+    #
+    #        props |= {k: _encode(ev) for k in {"embedding": 1}}                    refused
+    #        props |= {k: _encode(ev) for k in [{"embedding": 1}][0]}               refused
+    #        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"]}        CERTIFIED
+    #        props |= {k: _encode(ev) for k in {"a": {"embedding": 1}}["a"].keys()}  CERTIFIED
+    #
+    #    The index arm below answers an INT into a SEQUENCE and passes a string slice to
+    #    nothing, so this spelling abstained and abstention CERTIFIES. The receiver goes
+    #    through `_mapping_items_pairs` — the ONE mapping vocabulary — so a dict literal, a
+    #    constructor, a merge and a dict comprehension all answer here. Refusal-only: an
+    #    absent key is a `KeyError` at runtime and stores nothing, so it stays `None`.
+    if isinstance(source, ast.Subscript) and isinstance(source.slice, ast.Constant):
+        receiver = _mapping_items_pairs(source.value, _depth + 1)
+        if receiver is not None:
+            wanted = source.slice.value
+            for key, value in receiver:
+                if (isinstance(key, ast.Constant) and key.value == wanted
+                        and type(key.value) is type(wanted)):
+                    return _comprehension_source_yields(value, _depth + 1)
+            return None
     # ⛔ AND A CONSTANT INDEX INTO A CONTAINER LITERAL IS THAT ELEMENT (`#13788`, measured):
     # `{k: _encode(ev) for k in [{"embedding": 1}][0]}` iterates the mapping ONE INDEX in and
     # CERTIFIED, while `{k: _encode(ev) for k in {"embedding": 1}}` was refused.
@@ -2983,20 +3042,38 @@ def _comprehension_source_yields(source, _depth: int = 0):
                 #    VALUES are pairs places the vector — and it CERTIFIED while the `.items()`
                 #    twin one keystroke away was refused. Each value is read as a PAIRS ROW (the
                 #    same `_sequence_options` options the pair question already consumes).
-                #    ⛔ NARROW ON PURPOSE: this is the VIEW arm only. A blanket "a values view is
-                #    a pairs sequence" would also refuse `{k: _encode(ev) for k in m.values()}`,
-                #    where the view is the KEY source and nothing is stored — a NAME receiver
-                #    therefore still abstains (`_mapping_items_pairs` returns None), and an
-                #    unreadable value abstains with it.
+                # ⛔ AND THE SAME VIEW READ AS A *KEY* SOURCE IS **NOT** AN HONEST WRITE-STOP
+                #    (`#13788` review round 11, P1, measured). The previous version of this
+                #    comment claimed it was — *"A blanket 'a values view is a pairs sequence'
+                #    would also refuse `{k: _encode(ev) for k in m.values()}`, where the view is
+                #    the KEY source and nothing is stored"* — and that is FALSE: a key-source
+                #    clause binds the VALUE itself, so when the mapping's values are the property
+                #    name the comprehension places the vector just as the `.keys()`/bare-iteration
+                #    twins do, all three refused:
+                #
+                #        props |= {k: _encode(ev) for k in {"embedding": 1}}                refused
+                #        props |= {k: _encode(ev) for k in {"embedding": 1}.keys()}          refused
+                #        props |= {k: _encode(ev) for k in {"a": "embedding"}.values()}      CERTIFIED
+                #        props |= {k: _encode(ev) for k in dict({"a": "embedding"}).values()}  CERTIFIED
+                #        props |= {k: _encode(ev) for k in list({"a": "embedding"}.values())}  CERTIFIED
+                #
+                #    This resolver is shared by BOTH comprehension terms and cannot tell which
+                #    one is asking, so each value is emitted under BOTH readings it can have: the
+                #    pairs rows above (the unpacking position) and the value AS ITSELF, a 1-tuple
+                #    (the key position). Neither consumer can read the other's shape — the pair
+                #    term needs `len(item) >= 2`, the key term a SCALAR yield — so the union adds
+                #    refusals and can never widen acceptance. An unreadable value now abstains
+                #    ONLY as a pairs row instead of failing the whole resolver, because its
+                #    scalar reading is still exact.
                 inner = _mapping_items_pairs(source.func.value, _depth + 1)
                 if inner is None:
                     return None
                 rows: list = []
                 for _key, value in inner:
                     options = _sequence_options(value, _depth + 1)
-                    if options is None:
-                        return None
-                    rows.extend(tuple(option) for option in options if option)
+                    if options is not None:
+                        rows.extend(tuple(option) for option in options if option)
+                    rows.append((value,))
                 return rows or None
             if source.func.attr == "items":
                 # ⛔ THE RECEIVER IS A SOURCE TOO, AND IT GOES THROUGH THE SAME WRAPPERS
