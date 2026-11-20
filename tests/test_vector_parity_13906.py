@@ -796,6 +796,54 @@ def test_a_conninfo_token_starting_with_equals_cannot_spin_forever(harness):
         assert rebuilt.startswith(dsn), (dsn, rebuilt)
 
 
+@pytest.mark.parametrize("trailing", [1, 3], ids=["one", "three"])
+def test_a_value_ending_in_an_ODD_backslash_is_quoted_before_options_is_appended(
+        harness, trailing):
+    """⛔ THE APPEND IS PART OF THE REBUILD, SO THE LAST VALUE MUST BE CLOSED.
+
+    `app_role_dsn` appends ` options='-c role=…'` to whatever `_drop_options_pairs`
+    returns, and that function used to return the caller's bytes VERBATIM when
+    there was no `options` pair and no empty value. In libpq's whitespace form a
+    trailing `\` in an UNQUOTED value escapes the very next character — the
+    separating space — so `dbname=x\ options='-c role=…'` parses as
+    `dbname = "x options='-c"` plus a bogus keyword `role=…'`, and libpq rejects
+    the whole string. Measured on this box with real libpq (psql, exact bytes):
+
+        in      host=127.0.0.1 dbname=x\                -> PARSES (Connection refused)
+        out     host=127.0.0.1 dbname=x\ options='…'    -> invalid connection option "role"
+        out     host=127.0.0.1 dbname='x\\' options='…' -> PARSES (Connection refused)
+
+    The guard CERTIFIES the input (`_assert_local_record_dsn` passes it), so the
+    operator is told the DSN is good while every record query carries a
+    `record_error` — no measurement at all. Fail-closed toward the artifact, which
+    is why it is not a false PASS; the empty-value sibling of the same mechanism
+    was already fixed.
+
+    ⛔ WHY THE ORACLE IS THE MODULE'S OWN PAIR PARSER, NOT `shlex`: `shlex` cannot
+    even tokenise this shape (`shlex.split("host=… dbname=x\\")` raises
+    `No escaped character`), which is exactly how the spelling stayed out of the
+    existing byte-preservation pin's `spellings` tuple.
+    """
+    dsn = "host=127.0.0.1 dbname=x" + "\\" * trailing
+    rebuilt = harness.app_role_dsn(dsn)
+
+    before = harness._conninfo_pairs(dsn)
+    after = harness._conninfo_pairs(rebuilt)
+    # every keyword the caller gave survives, with the SAME value …
+    after_map = {k: v for k, v in after if k is not None}
+    for key, value in before:
+        if key is None:
+            continue
+        assert after_map.get(key) == value, (key, value, rebuilt, after_map)
+    # … and the app role was ADDED
+    assert "role=tortoise_record_app" in (after_map.get("options") or ""), after_map
+    # ⛔ THE SPECIFIC HOLE: the value must be CLOSED before the appended pair, so
+    # the rebuild cannot leave a value ending in a bare odd backslash.
+    dbname_segment = rebuilt[rebuilt.index("dbname="):rebuilt.index("options=")].rstrip()
+    assert dbname_segment.endswith("'"), (
+        f"the rebuilt value is left OPEN before the appended pair: {rebuilt!r}")
+
+
 def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
     """⛔ BYTE-PRESERVATION, asserted structurally — because every tokenising
     rebuild here was wrong in a different way.
