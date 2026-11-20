@@ -396,6 +396,38 @@ def test_a_raise_on_the_record_only_arm_does_not_claim_a_position(
         "the warning named a journal position for a write that never appended")
     assert result.refusal == live_write.PROJECTION_RAISED
     assert result.appended is False
+    # ⛔ AND THE QUANTITY, NOT ONLY THE TEXT (#14002 review cycle 8, F2). This leg
+    # used to assert the log, the token and `appended` — never `unprojected` — so
+    # restoring the pre-#14002 line (`unprojected = 1` on the raise arm) left the
+    # whole DB-free suite green (measured). The consequence is not cosmetic:
+    # `tools/claim_dense_leg_13732.py` counts this write as `record_unprojected`
+    # and its report then asserts "Both are healed by `fold`'s two commands" — a
+    # repair that cannot heal a write in neither store, on the one arm
+    # `live_write` documents as unrecoverable.
+    assert result.unprojected == 0, (
+        "a RAISED record-only projection was counted as an unprojected LINE — "
+        "there is no line, and a LOST write then reads exactly like a "
+        "recoverable one")
+
+
+def test_a_raise_on_the_append_arm_still_IS_an_unprojected_line(monkeypatch):
+    """The contrast that makes the leg above discriminating (#14002 cycle 8, F2).
+
+    Without this, "set it to 0 everywhere" also passes: the append arm's raise is
+    a line the record did not take, and `journal_coverage` must keep counting it.
+    """
+    monkeypatch.setattr(live_write, "_record_owns_position", lambda **_kw: False)
+
+    result = live_write.write({"type": "PointAdded"}, log=_Log(),
+                              project=_project(
+                                  raises=RuntimeError("record is down")))
+
+    assert result.appended is True
+    assert result.refusal == live_write.PROJECTION_RAISED
+    assert result.unprojected == 1, (
+        "the append arm's raise stopped counting as an unprojected line — the "
+        "journal holds a position the record does not, which is exactly what "
+        "`journal_coverage` reports and `record-reconcile --journal` heals")
 
 
 def test_the_real_helper_forwards_the_tenant_and_durable_and_the_DECISION(
@@ -1204,6 +1236,36 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
             "skipped and the write is refused as `position_unverifiable`; True: "
             "allocation is forced on a graph that is not cut over), which is "
             "exactly the false PASS this check exists to stop")
+
+    # ⛔ AND THE FORM A LANE ACTUALLY WRITES: KEEP THE PARAMETER, REBIND IT
+    # (#14002 review cycle 8, F1). The `via a local constant` case above forwards
+    # `_local_constant`, a name bound NOWHERE, so it exercises the no-provenance
+    # arm. The shape that shipped green was the one-assignment-away form the
+    # rule's own docstring forbids: leave `journal_skipped=journal_skipped)` in
+    # place, inject `journal_skipped = True` above it, and the name is in the
+    # SIGNATURE — so the parameter arm accepted it and the provenance check below
+    # never ran. Measured on the pre-fix gate: exit 0 / `WIRED` with the whole
+    # DB-free suite green, forcing allocation on every write on every graph.
+    rebound = source.replace(
+        "        log = self._event_log",
+        "        journal_skipped = True\n        log = self._event_log",
+        1)
+    assert rebound != source, (
+        "the SDK door's body has moved — the parameter-rebind leg must be "
+        "re-pointed at the line it injects above")
+    assert problems_for(rebound), (
+        "the gate certified a door that REBINDS its own `journal_skipped` "
+        "parameter to a constant above the call and forwards it under the same "
+        "name — a name this scope ASSIGNS is not the caller's decision, so the "
+        "parameter arm of the provenance rule must not accept it (#14002 review "
+        "cycle 8, F1)")
+    # The contrast that makes the leg above discriminating: the UNMUTATED door
+    # must still pass, or a rule that simply refuses every parameter would look
+    # green here while breaking both real doors.
+    assert not problems_for(source), (
+        "the gate now refuses the SDK door's own forwarding shape — the fix "
+        "must narrow the parameter arm, not abolish it: "
+        f"{problems_for(source)}")
 
 
 def test_the_cutover_rule_is_ARMED_inside_check(wiring_mod, monkeypatch):
