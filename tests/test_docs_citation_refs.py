@@ -2871,7 +2871,8 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is\s+equal\s+to|equals|is\s+a|is)[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
+    r"(?:is[^0-9A-Za-z#]+equal[^0-9A-Za-z#]+to|equals|is[^0-9A-Za-z#]+a|is)"
+    r"[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -2884,7 +2885,29 @@ def _false_filter_property_restatements(doc: str) -> list[str]:
     ⛔ Not "every re-wording" — the pattern is a bounded token test and the declared escapes at the
     pattern are restatements it does not match (#13853 review round 19/20).
     """
-    return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(_fold_unicode(doc))]
+    seen: list[str] = []
+    for haystack in (_fold_unicode(doc), _fold_unicode_cf_as_space(doc)):
+        for match in _FALSE_FILTER_PROPERTY_RE.finditer(haystack):
+            if match.group(0) not in seen:
+                seen.append(match.group(0))
+    return seen
+
+
+def _fold_unicode_cf_as_space(text: str) -> str:
+    """`text` in compatibility form with every format character (Cf) turned into a SPACE.
+
+    ⛔ THE COMPANION TO `_fold_unicode`, AND NOT A SUBSTITUTE FOR IT (#13948 review round 35, P1 —
+    MEASURED). Deleting a Cf is right when it sits INSIDE a token (`char\u200bacter` must stay
+    `character`), and wrong when it sits WHERE A SPACE WAS: `character is\u200bequal to #` then
+    reads `isequal`, the copula's own separator is gone, and the shape arm returned `[]` over a
+    sentence a reader sees verbatim. Neither folding is correct alone, so both are graded and the
+    matches unioned — deletion catches the inside-token case, substitution catches the
+    in-place-of-a-space case.
+    """
+    return "".join(
+        " " if unicodedata.category(ch) == "Cf" else ch
+        for ch in unicodedata.normalize("NFKC", text)
+    )
 
 
 def _fold_unicode(text: str) -> str:
@@ -3109,7 +3132,24 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… non-space character\tis\tequal to `#` — a comment …",
              "character\tis\tequal to `#`"),
             ("… character is\r\nequal to `#` — a comment …",
-             "character is\r\nequal to `#`")):
+             "character is\r\nequal to `#`"),
+            # ⛔ A FORMAT CHARACTER STANDING IN FOR A SPACE (#13948 review round 35, P1 —
+            # MEASURED). Deleting the Cf joined `is`+`equal` into `isequal` and the arm returned
+            # `[]`; the Cf-as-space folding is what catches it, so this probe reds if that second
+            # haystack is dropped.
+            ("… character is\u200bequal to `#` — a comment …",
+             "character is equal to `#`"),
+            ("… character\u200bis `#` — a comment …",
+             "character is `#`"),
+            # ⛔ AND A MARK INSIDE THE COPULA (#13948 review round 35, P2 — MEASURED): a hyphen or
+            # a non-breaking hyphen in `is equal to` — what a paste from a word processor yields —
+            # escaped while the copula required plain whitespace.
+            ("… character is equal-to `#` — a comment …",
+             "character is equal-to `#`"),
+            ("… character is equal\u2011to `#` — a comment …",
+             # NFKC folds U+2011 NON-BREAKING HYPHEN to U+2010 HYPHEN, and the arm grades the
+             # FOLDED haystack — so the expectation is U+2010, which is what a reader sees.
+             "character is equal\u2010to `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
