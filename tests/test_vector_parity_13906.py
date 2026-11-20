@@ -661,12 +661,25 @@ def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
     its own.
     """
     import re as _re
+    import shlex
 
-    def core(text: str) -> str:
-        """The DSN with any `options` pair removed, whitespace-normalised."""
-        stripped = _re.sub(r"""(?<![A-Za-z0-9_])options\s*=\s*(?:'[^']*'|\S+)""",
-                           " ", text, flags=_re.IGNORECASE)
-        return " ".join(stripped.split())
+    def pairs(text: str, *, drop_options: bool = True) -> list[tuple[str, str]]:
+        """(keyword, value) pairs by a parser INDEPENDENT of the one under test.
+
+        ⛔ NOT the same regex the code uses. The first version of this pin did
+        exactly that, so it certified a rebuild libpq REJECTS (`password='options=zzz'`
+        came back as `password=' options='-c role=…'` while the helper called it
+        "equal outside the options pair"). Normalising `\s*=\s*` and letting
+        `shlex` unquote gives an oracle the scanner has to AGREE with, not one it
+        defines.
+        """
+        normalised = _re.sub(r"\s*=\s*", "=", text)
+        out = []
+        for token in shlex.split(normalised):
+            key, _, value = token.partition("=")
+            if not drop_options or key.lower() != "options":
+                out.append((key, value))
+        return sorted(out)
 
     spellings = (
         # the plain form, and every spacing libpq admits around `=`
@@ -683,16 +696,28 @@ def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
         "options ='-c search_path=a' host=127.0.0.1",
         "options='-c search_path=a' host=127.0.0.1",
         "host=127.0.0.1 options='-c role=old' dbname=x",
+        # ⛔ TWO SPELLINGS A REGEX CANNOT SURVIVE (measured with libpq in review):
+        # an ESCAPED SPACE in an unquoted value, which `(\S+)` truncated so its
+        # remainder became a bogus keyword; and `options=` INSIDE another
+        # keyword's quoted value, which a quote-blind match deleted — mutating a
+        # password in one case and unbalancing its quote in the other.
+        "host=127.0.0.1 options=-c\\ search_path=a",
+        "host=127.0.0.1 password='options=zzz'",
+        "host=127.0.0.1 password='a options=b c'",
     )
     for dsn in spellings:
         out = harness.app_role_dsn(dsn)
         assert out.rstrip().endswith(
             f"options='-c role={harness.APP_ROLE}'"), (dsn, out)
-        # the harness owns `options` and NOTHING else
-        assert core(out) == core(dsn), (
+        # the harness owns `options` and NOTHING else: same keywords, same values
+        assert pairs(out) == pairs(dsn), (
             "the rebuilt conninfo differs from the caller's outside the options "
-            f"pair — a tokenising rebuild corrupts a legal spelling: {dsn!r} -> {out!r}")
-        assert out.count("options") == 1, (dsn, out)
+            f"pair: {dsn!r} -> {out!r}")
+        # exactly ONE top-level `options` pair — `str.count` would also see the
+        # word inside a password value (`password='options=zzz'`), which is the
+        # case the deletion must NOT touch
+        assert sum(1 for k, _v in pairs(out, drop_options=False)
+                   if k.lower() == "options") == 1, (dsn, out)
         assert harness._conninfo_hosts(out)[0] == harness._conninfo_hosts(dsn)[0], (
             f"the rebuild changed the hosts the guard would re-check: {dsn!r} -> {out!r}")
 
