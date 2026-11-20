@@ -2190,6 +2190,18 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
       readiness asks only ``unprojected`` and ``present``. Issuing it would
       spend the read's budget on a fact nobody consumes.
 
+    ⛔ AND IT IS ``_FIRST_GAP_SQL`` AND NOTHING ELSE THAT ``want_gap`` SWITCHES
+    OFF (#14002 review cycle 4, P3-3). Every coverage read still issues
+    ``CURSOR_PRESENCE_SQL`` (plus its savepoint bookkeeping) to classify the
+    journal, because ``unprojected`` — the ONE thing this gate reads — depends on
+    that classification: :attr:`JournalCoverage.unprojected_unknown_reason`
+    refuses ``present > enumerated`` unless the record owns the ordinal, and on a
+    cut-over graph that shape is the HEALTHY one. Gating the classification on
+    ``want_gap`` would therefore re-arm the cycle-2 P1 this change exists to
+    close (the dense leg disarmed for ever on every cut-over graph), so the cost
+    of this gate is two statements plus the savepoint, never one. Stated because
+    the budget rule here is what the neighbouring refusals cite.
+
     ⛔ AND THE JOURNAL IS COUNTED READ-ONLY (#13331 review F2).
     `EventLog.position_readonly()` is `position()` without its side effects: no
     append lock (so a wedged peer cannot park this call, and a timeout here can
@@ -2257,6 +2269,13 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
     # #13371/#13345 P2/F2). The `None` cannot come
     # from an uncountable journal here — that arm returned above — so it is
     # exactly that contradiction, and it is REPORTED rather than silently off.
+    # ⛔ AND IT IS NOT THAT CONTRADICTION ON A CUT-OVER GRAPH (#14002): there the
+    # journal stops being appended to while the record keeps gaining positions, so
+    # `present > enumerated` is the HEALTHY shape and `journal_coverage` answers
+    # `unprojected == 0` (`JournalCoverage.journal_is_export`). Without that, this
+    # gate read the cutover as a contradiction and kept the graph branch for ever —
+    # disarming the very leg the record exists to serve, with a WARNING claiming
+    # the journal could not have fed the record.
     if cov.unprojected is None:
         _warn_readiness_contradictory(path, cov)
         return False

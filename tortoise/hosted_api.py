@@ -22698,7 +22698,8 @@ def _narrative_carrier(story_arc, summary, *, session_id: str,
 NARRATIVE_NOT_RECORDED = "narrative_not_recorded"
 
 
-def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
+def _report_narrative_home(*, session_id: str, outcome, journalled,
+                          journal_skipped: bool = False) -> str:
     """State WHERE this commit's narrative landed; NAME it when it landed nowhere.
 
     #10000 deleted the two node writes that used to hold the S1 narrative
@@ -22712,7 +22713,12 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
     reached when no journal is configured (its `if log is None:` arm calls
     `_record_write_without_journal` and returns before the record) or when the
     journal append RAISED (its per-call `return False`; the caller's
-    `record_sink` then stays empty). Measured consequence before this report
+    `record_sink` then stays empty). #14002 adds a THIRD arm with the same
+    consequence and a different cause: on a cut-over graph the append is SKIPPED
+    (the record owns the ordinal), so there is no journal line to fall back on
+    and `journalled` answers for the RECORD instead — which is why the caller
+    passes `journal_skipped` separately, from the chokepoint's own `LiveWrite`.
+    Measured consequence before this report
     existed: the commit answered 200 with the narrative in no store at all,
     which is the state the sibling pin calls out — "with the node write gone
     (#10000) the narrative would then be stored NOWHERE".
@@ -22735,7 +22741,16 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
       line on the next replay. A ``no_durable_journal`` refusal is deliberately
       NOT this case: a scratch buffer is not a journal, and nothing about it
       survives the process.
-    * ``"nowhere"`` — neither store holds the text.
+    * ``"nowhere"`` — neither store holds the text. TWO shapes reach it, and
+      they have DIFFERENT remedies, so the ERROR below names the one that
+      applies (#14022 review cycle 7, FINDING 1):
+
+      - no journal / no durable journal — the remedy is to arm one; and
+      - ``journal_skipped`` — the deployment IS cut over (`#14002`), so the
+        journal append was **skipped** because the record owns the ordinal. The
+        journal exists and is deliberately not being written, so "arm the
+        journal and replay it" is advice this operator cannot act on: the
+        remedy is the record itself.
 
     ⛔ WHY THIS REPORTS RATHER THAN FAILING THE COMMIT. The graph writes of
     steps 1-2 above have already committed when this runs (step 3's `:Event`
@@ -22787,6 +22802,27 @@ def _report_narrative_home(*, session_id: str, outcome, journalled) -> str:
             "same nothing, so replay cannot heal it — the narrative is LOST "
             "unless the source is re-distilled (#10000).", session_id)
         return "unfiled"
+    if journal_skipped:
+        #: ⛔ THE ARM #14002 ADDS. On a cut-over graph the chokepoint does not
+        #: append, so `journalled` is False for a reason that has nothing to do
+        #: with an operator failing to arm a journal — and the `nowhere` ERROR
+        #: below, which is the one written for that other shape, would tell them
+        #: to arm the journal they already have and replay a line that is never
+        #: going to exist. Separate the remedy or the report misdirects the fix
+        #: (the class #10389 review P3-1 named: a refusal must not name a
+        #: remediation that cannot remediate).
+        _logger.error(
+            "commit of session %s: §9.1's S1 narrative reached NO store — the "
+            "record did not take the `SessionNarrated` carrier (refusal=%s) "
+            "AND the journal append was SKIPPED because the record owns the "
+            "ordinal (#14002), so nothing holds the prose and no replay can "
+            "heal it: there is no line to replay. The graph writes that used to "
+            "hold it are deleted (#10000). ⛔ THE REMEDY IS THE RECORD, not the "
+            "journal — read the counter's mode with "
+            "`tools/record_allocator_cli.py status` and re-emit once it is "
+            "healthy; a skipped-appended write cannot be recovered from a file "
+            "that never received it.", session_id, refusal or "seam not reached")
+        return "nowhere"
     if journalled and refusal != NON_DURABLE_JOURNAL_REFUSAL:
         _logger.warning(
             "commit of session %s: the record did not take the S1 narrative "
@@ -23220,12 +23256,20 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         #: writers (#5612), so the outcome has to travel with the call or "did
         #: THIS commit's narrative land" is unanswerable.
         _narrative_record: list = []
+        #: ⛔ THE CHOKEPOINT'S OWN RESULT, per call (#14022 review cycle 7). The
+        #: boolean `_emit_event` returns answers "did this land?" and says
+        #: nothing about WHICH store — and on a cut-over graph the journal is not
+        #: the answer a refusal may point at. `LiveWrite.appended` is.
+        _narrative_writes: list = []
         _journalled = sdk._emit_event(
-            NARRATIVE_RECORD_TYPE, record_sink=_narrative_record, **_carrier)
+            NARRATIVE_RECORD_TYPE, record_sink=_narrative_record,
+            write_sink=_narrative_writes, **_carrier)
         _home = _report_narrative_home(
             session_id=session_id,
             outcome=(_narrative_record[0] if _narrative_record else None),
-            journalled=_journalled)
+            journalled=_journalled,
+            journal_skipped=bool(_narrative_writes
+                                 and not _narrative_writes[0].appended))
         if _home != "record":
             # Caller-visible, not log-only (#7819's additive `warnings[]`): a
             # client that reads `warnings` is told §9.1's narrative is not (yet)
