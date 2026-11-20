@@ -1449,6 +1449,102 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
         f"the ORACLE must stay on the unperturbed corpus; `record.seed` receives "
         f"{[arg for arg, _ in oracle]!r} — poisoning the oracle too measures "
         "nothing, because both legs are then read from the same wrong data")
+    # ⛔ ...AND THE ORACLE MUST NOT BE SEEDED FROM POISONED DATA. That assertion
+    # alone is a check on a NAME: rebinding `rows` to the perturbation's result
+    # above the seeding block keeps `record.seed(rows)` literal while handing the
+    # oracle the POISONED corpus, and every other assertion in this pin stays
+    # green (measured on the pre-fix pin: 82 passed with both legs seeded from the
+    # rebound name).
+    #
+    # ⛔ A NODE-IDENTITY SCAN IS NOT ENOUGH, and four review rounds proved it one
+    # alias at a time. Two easy spellings walked straight through it and left the
+    # oracle poisoned with the pin green:
+    #     perturbed = perturb_for_vector_poison(rows) if ... else rows
+    #     rows = perturbed                         # rebinding an INTERMEDIATE name
+    #     p = perturb_for_vector_poison ; rows = p(rows)      # a CALLABLE ALIAS
+    # So the scan below is a small TRANSITIVE dataflow over `run()`'s bindings —
+    # seed it with the perturbation's call and any alias of it, then close over
+    # assignments until a fixpoint — and the assertion is on the SET of names that
+    # hold poisoned rows, not on one shape of expression.
+    #
+    # ⛔ IT ALSO REFUSES WHAT IT CANNOT READ. A rebinding this scan cannot follow
+    # (`rows: list = …`, `rows += …`, `rows[:] = …`, a loop target) is reported as
+    # exactly that, instead of falling through to the carrier assertion's message
+    # ("its result has nowhere to go"), which was FALSE about those programs.
+    perturb_name = getattr(perturbs[0].func, "id", "")
+    oracle_line = min(line for _arg, line in oracle)
+
+    # every binding in `run()` as (line, [unparsed targets], value)
+    binds: list[tuple[int, list[str], ast.AST]] = []
+    for node in ast.walk(run):
+        if isinstance(node, ast.Assign):
+            binds.append((node.lineno,
+                          [ast.unparse(t) for t in node.targets], node.value))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            binds.append((node.lineno, [ast.unparse(node.target)], node.value))
+        elif isinstance(node, ast.For):
+            binds.append((node.lineno, [ast.unparse(node.target)], node.iter))
+    binds.sort(key=lambda b: b[0])
+
+    # ⛔ LINE-AWARE, not a whole-body fixpoint: a name poisoned at line 1810 must
+    # not retro-poison a binding at line 1700 that merely mentions it. Getting
+    # this wrong produces false POSITIVES (`queries`, `report` were reported as
+    # holding the perturbation's output) and, worse, a red the author cannot act on.
+    callables = {perturb_name}
+    poisoned_at: dict[str, int] = {}
+    for _ in range(len(binds) + 1):
+        grew = False
+        for line, targets, value in binds:
+            if line >= oracle_line:
+                continue
+            ids = set(targets)
+            if isinstance(value, ast.Name) and value.id in callables:
+                if not ids <= callables:
+                    callables |= ids
+                    grew = True
+                continue
+            carrier_hit = False
+            for sub in ast.walk(value):
+                if (sub is perturbs[0]
+                        or (isinstance(sub, ast.Name)
+                            and poisoned_at.get(sub.id, 10**9) < line)):
+                    carrier_hit = True
+                elif isinstance(sub, ast.Call):
+                    fn = (getattr(sub.func, "id", "")
+                          or getattr(sub.func, "attr", ""))
+                    if fn in callables and fn != perturb_name:
+                        carrier_hit = True
+            if carrier_hit:
+                for name in ids:
+                    if name not in poisoned_at or line < poisoned_at[name]:
+                        poisoned_at[name] = line
+                        grew = True
+        if not grew:
+            break
+
+    # ⛔ REFUSE SHAPES THIS SCAN CANNOT FOLLOW, instead of letting them fall
+    # through to a message that is false about them.
+    unreadable = sorted({
+        target for line, targets, _value in binds if line < oracle_line
+        for target in targets
+        if target != "rows" and re.split(r"[\[. ]", target)[0] == "rows"})
+    assert not unreadable, (
+        f"this pin cannot follow the rebinding(s) of `rows` at {unreadable!r} "
+        "(a subscript, attribute, annotated or augmented target). That is a "
+        "LIMITATION OF THE PIN, not necessarily a defect in `run()` — extend the "
+        "scan to read this shape rather than deleting the assertion, because it "
+        "is what proves the ORACLE is seeded from the corpus and not from the "
+        "perturbation's output")
+
+    poisoned_at_oracle = sorted(
+        (line, arg) for arg, line in oracle
+        if poisoned_at.get(arg, 10**9) < line)
+    assert not poisoned_at_oracle, (
+        f"the ORACLE is seeded from POISONED rows at {poisoned_at_oracle!r} — "
+        f"{sorted(poisoned_at)!r} hold the perturbation's output by then (this "
+        "includes via an intermediate name or a callable alias). Both legs then "
+        "read the same wrong data and `--poison vector` can never diverge, which "
+        "is the blindness this pin exists to prevent")
 
 
 def test_a_none_distance_is_not_a_verified_one(harness):
