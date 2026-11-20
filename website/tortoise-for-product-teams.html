@@ -349,11 +349,20 @@
     }
     #beat-hero .hero-links a:not(:last-child)::after {
       /* The `·` is generated content inside an <a>, and generated content
-         participates in NAME-FROM-CONTENT: the plain `content: "\00b7"` made
-         every link's accessible name read "Browse the docs → ·" and put the
-         dot inside the click target. The second value is CSS ALT TEXT, which
-         removes it from the name (Chrome 97+/Safari 16+); browsers without the
-         syntax degrade to exactly the previous behaviour. */
+         participates in NAME-FROM-CONTENT: a plain `content: "\00b7"` makes
+         every link's accessible name read "Browse the docs → ·" and puts the
+         dot inside the click target. The second value below is CSS ALT TEXT,
+         which removes it from the name.
+
+         ⛔ TWO DECLARATIONS, and the first is not redundant: an engine that
+         does not understand alt-text syntax DROPS the declaration at parse
+         time (`content` computes to `normal`, measured), so with only the
+         alt-text form the separator would VANISH on Chrome <77, Firefox <128
+         and Safari 16–17.3 — it does not "degrade to the previous behaviour",
+         and there is no single-value fallback syntax. The plain declaration is
+         therefore the fallback, and supporting engines override it with the
+         alt-text form. (Feature is Newly Available, not Baseline.) */
+      content: "\00b7";
       content: "\00b7" / "";
       margin-left: 0.5rem;
       color: var(--text-dim);

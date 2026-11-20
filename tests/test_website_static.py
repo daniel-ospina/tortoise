@@ -10496,6 +10496,32 @@ class TestProductTeamsCopy:
             "`.hero-links` is not a flex row on the copy column's left edge — "
             "the `·` separators are `::after` on non-last links, a layout that "
             "only holds as a row (#13696 item 1)")
+        # The separator must keep BOTH declarations, in this order: the plain one
+        # is the fallback for engines that drop alt-text syntax at parse time;
+        # the alt-text one removes `·` from the accessible name. Reverting to the
+        # plain form alone silently re-leaks `·` into all three names, and
+        # dropping the fallback makes the dot VANISH on Chrome<77 / Firefox<128 /
+        # Safari 16–17.3 (measured, #14020 review).
+        sep_rules = _css_rule_preludes(
+            css, "#beat-hero .hero-links a:not(:last-child)::after")
+        assert sep_rules, "the hero `::after` separator rule is gone"
+        sep_all = "".join(body for _prelude, body in sep_rules)
+        # ⛔ Count `content:` declarations, not occurrences of the WORD: a
+        # narrow-viewport rule sets `content: none` on this same selector to
+        # switch the separators off, so a `count("content:") >= 2` guard is
+        # satisfied by the dot rule PLUS that one and would pass with the
+        # fallback deleted (measured — the first version of this row did).
+        assert 'content: "\\00b7" / ""' in sep_all, (
+            "the separator lost its CSS ALT TEXT (`content: \"\\00b7\" / \"\"`), "
+            "so `·` is back in every link's accessible name")
+        assert 'content: "\\00b7";' in sep_all, (
+            "the separator has no single-value fallback declaration. Without it "
+            "an engine that cannot parse alt-text syntax drops the declaration "
+            "entirely and the `·` disappears (Chrome<77, Firefox<128, Safari "
+            "16–17.3) — the fallback is not redundant")
+        assert sep_all.index('content: "\\00b7";') < sep_all.index('content: "\\00b7" / ""'), (
+            "the fallback declaration must come BEFORE the alt-text one, or it "
+            "overrides it and `·` returns to the accessible name")
 
     def test_the_compute_claim_carries_the_owner_ruled_correction(self):
         """The PDF's singular "make decision" ships as "make decisions" — RULED.
