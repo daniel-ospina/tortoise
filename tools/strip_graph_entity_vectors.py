@@ -1196,13 +1196,16 @@ def _container_call_operand(node):
 #: PARAGRAPH NAMES WHICH LEG: if **leg 3** stops answering a family name, or if a family name is
 #: added to `_CONTAINER_CALLS` without being asked at this seam,
 #: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
-#: losing the legs that were doing the work. **LEG 1 IS SILENT IN ONE DIRECTION ONLY: removing or
-#: weakening it cannot redden the test** (measured at `f2e5e3a98f` over this same 60-row sample:
-#: `leg1 AND NOT leg3` is **0** rows, so deleting leg 1 outright moves `upstream` nowhere and the
-#: test stays green). It is NOT invisible outright — leg 1 is a disjunct of `upstream`, so a mutant
-#: that STRENGTHENS it to answer a sole-decider row reddens `assert upstream is False`, correctly.
-#: Read this as "no removal of leg 1 is a regression the suite can see", never "leg 1 is
-#: unwitnessed". That asymmetry is DISCLOSED rather than repaired: deleting a leg is the one
+#: losing the legs that were doing the work. **LEG 1 IS SILENT HERE IN ONE DIRECTION ONLY:
+#: removing or weakening it cannot redden the FAMILY test** (measured at `f2e5e3a98f` over this
+#: same 60-row sample: `leg1 AND NOT leg3` is **0** rows, so deleting leg 1 outright moves
+#: `upstream` nowhere and the family test stays green). ⛔⛔ **THAT IS A FACT ABOUT THE FAMILY TEST,
+#: NOT ABOUT THE SUITE — do not widen it.** Leg 1 is a disjunct of `upstream`, so a mutant that
+#: STRENGTHENS it to answer a sole-decider row reddens `assert upstream is False`; and REMOVING
+#: leg 1 is caught by `test_the_stop_arm_must_not_store_the_vector` in the same file — measured at
+#: this head, leg 1 disabled reddens it, because the plain-pair stop arm that leg 1 alone refuses
+#: then certifies. So leg 1 is a duplicate AT THIS SEAM, not an unwitnessed leg, and this record
+#: must not be quoted as "leg 1 removal is invisible". That asymmetry is DISCLOSED rather than repaired: deleting a leg is the one
 #: direction that can widen acceptance, so leg 1 stays and this record says plainly that it is a
 #: duplicate at this seam — naming it as a guard would be the inert-enforcer shape this file's
 #: doctrine removes.

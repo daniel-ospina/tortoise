@@ -9920,14 +9920,18 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
     * the redundancy the record claims still HOLDS WHERE IT WAS MEASURED, and is asserted NOT to
       hold for the sole-decider class — so a later lane cannot cite the record as cover for those
       rows. Thin leg 3 and the first half reddens instead of the record quietly describing a set
-      of legs that no longer read those wrappers. ⛔ **Leg 1 cannot redden this test by REMOVAL or
-      WEAKENING, and that is the only direction it is silent in** (measured at `f2e5e3a98f`: over
-      this 60-row sample `leg1 AND NOT leg3` is 0 rows — leg 1 is a subset of leg 3 here — so
-      deleting leg 1 outright moves `upstream` nowhere and this test stays green). It is NOT
-      unwitnessed in every direction: leg 1 is a disjunct of the `upstream = (… or …)` expression
-      below, so a future mutant that STRENGTHENS leg 1 to answer a sole-decider row reddens its
-      `assert upstream is False` — correctly, and with the message that says so. Read this as
-      "no removal of leg 1 is a regression the suite can see", never as "leg 1 is invisible".
+      of legs that no longer read those wrappers. ⛔ **Leg 1 cannot redden THIS test by REMOVAL or
+      WEAKENING** (measured at `f2e5e3a98f`: over this 60-row sample `leg1 AND NOT leg3` is 0 rows —
+      leg 1 is a subset of leg 3 here — so deleting leg 1 outright moves `upstream` nowhere and
+      this test stays green). ⛔⛔ **THAT IS A FACT ABOUT THIS TEST, NOT ABOUT THE SUITE — do not
+      widen it.** Leg 1 is a disjunct of the `upstream = (… or …)` expression below, so a mutant
+      that STRENGTHENS leg 1 to answer a sole-decider row reddens its `assert upstream is False`;
+      and removing leg 1 is caught by a DIFFERENT test in this same file — measured at this head,
+      leg 1 disabled on `tools.strip_graph_entity_vectors` reddens
+      `test_the_stop_arm_must_not_store_the_vector` (`the plain-pair stop arm that leg 1 alone
+      refuses certifies once leg 1 cannot answer`). So leg 1 is a duplicate AT THE FAMILY SEAM,
+      not an unwitnessed leg: scope this paragraph to the family test or it becomes the
+      "protection nothing can redden" claim this whole file exists to remove.
       ⛔ Both cites in this paragraph are by CONSTRUCT, not by line number, on purpose: an earlier
       revision pinned `:9990` / `:9994` and both were wrong within one commit (a string fragment
       and a blank line) — see `tests/test_12184_shifted_cites.py`, written for exactly that
