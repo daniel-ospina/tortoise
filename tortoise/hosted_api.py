@@ -6230,6 +6230,18 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
         spent = stages.get("stages_ms")
         if spent:
             props["read_stages_ms"] = spent
+        # #10893 second cycle: the `pre_handler` decomposition. Published under
+        # its own key rather than folded into `read_stages_ms`, because the
+        # stage table and the part table are different questions asked of the
+        # same request — and a reader must never have to infer which is which
+        # from the key names inside one mapping. Validated against the closed
+        # part vocabulary for the same reason `read_stage` is.
+        from tortoise.read_stages import (
+            PRE_HANDLER_PART_SET as _PART_SET,
+        )
+        parts = stages.get("pre_handler_parts")
+        if parts and all(k in _PART_SET for k in parts):
+            props["read_pre_handler_parts"] = parts
 
     def _write() -> None:
         try:
@@ -6580,6 +6592,17 @@ class WaitBoundMiddleware:
             if request_stages is not None:
                 _bindings.enter_context(_bind_read_stages(request_stages))
             task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+            # #10893 second cycle: the first boundary of the `pre_handler`
+            # decomposition — arrival → the handler task EXISTS. After this line
+            # the request is waiting for the loop to schedule that task, which
+            # is the `dispatch` part; before it, the middleware chain and this
+            # request's own share of any loop saturation are all there is. Noted
+            # INSIDE the binding (the note is a no-op when nothing is bound) and
+            # BEFORE the await, because a note is only meaningful while
+            # `pre_handler` is still open.
+            if request_stages is not None:
+                from tortoise.read_stages import note as _note_stage
+                _note_stage("middleware")
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
             # ``wait_for`` is a single deadline around ``await fut``, and the two
@@ -10469,10 +10492,19 @@ async def _data_sdk_offloaded(org: dict, *,
     connect it does not use.
     """
     _bind_actor_context(org)
-    if attach_projection:
-        return await _graph_offload(
-            lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
-    return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
+    # #10893 second cycle: close the `dispatch`/`sdk_open` boundary. The graph
+    # lane's SDK open + cold projection attach is a real WAIT this request owns,
+    # and it is one of the three mechanisms a six-second `pre_handler` can be.
+    from tortoise.read_stages import note as _note_stage
+    try:
+        if attach_projection:
+            sdk = await _graph_offload(
+                lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
+        else:
+            sdk = await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
+    finally:
+        _note_stage("sdk_open")
+    return sdk
 
 
 def _require_scope(org: dict, scope: str, surface: str) -> None:
@@ -10485,7 +10517,18 @@ def _require_scope(org: dict, scope: str, surface: str) -> None:
       scopes — C3); a deleg=0 key with no data scope stays 403 here.
 
     Never post-filter: the check is the FIRST statement of a data handler.
+
+    #10893 second cycle: it is also where the `dispatch` boundary of
+    ``pre_handler`` is closed. A data handler runs on a task the transport seam
+    created, so everything between arrival and THIS line — the middleware
+    chain, the credential/org dependency stack, and any time the task sat
+    unscheduled behind another request's synchronous work — is the wait before
+    the handler could start. It is noted here rather than per-route because this
+    function's placement is already the contract above, so a new data route
+    inherits the attribution instead of having to remember it.
     """
+    from tortoise.read_stages import note as _note_stage
+    _note_stage("dispatch")
     if org.get("legacy_full_access") or org.get("key_id") is None:
         return
     have = set(org.get("scopes") or [])
@@ -13229,6 +13272,12 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     task and re-awaits THAT task after draining.
     """
     bound = read_offload_timeout_s() if timeout is None else timeout
+    # #10893 second cycle: everything up to the hand-off is the handler's own
+    # work (`read_submit`); everything after it, up to the read path's FIRST
+    # stage mark, is the wait for a read-lane worker (`read_lane` — the #13528
+    # starvation shape). Two boundaries, because they need opposite fixes.
+    from tortoise.read_stages import note as _note_stage
+    _note_stage("read_submit")
     # #4055: the identity + clock the exemption compares against. ``owner`` is
     # whatever this request bound as its one-time-load owner (``None`` unarmed,
     # which never exempts — ``_cold_setup_ran_during`` enforces that).
@@ -41486,6 +41535,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # apply to it; `read_stages_ms` is a nested ``{stage: float}`` mapping, which
     # the PII filter passes because it tests top-level keys only.
     "read_stage", "read_stages_ms",
+    # #10893 second cycle: the DECOMPOSITION of `read_stages_ms`'s
+    # `pre_handler` entry, so a six-second pre-handler wait names its mechanism
+    # instead of inviting an inference. Nested ``{part: float}`` mapping over a
+    # closed vocabulary (``read_stages.PRE_HANDLER_PARTS``), validated at the
+    # emit site; the PII filter tests top-level keys only, so it passes whole.
+    "read_pre_handler_parts",
     # #3675: the result-bearing half of the SAME row. Without it the
     # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
     # 8 points from one that returned nothing — both are ``status: "ok"`` —
