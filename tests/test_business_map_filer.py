@@ -1907,6 +1907,121 @@ def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     assert filer._seconds_or_none(10**400) is None
 
 
+def test_an_EMPTY_200_summary_says_MAY_HAVE_LANDED(tmp_path, monkeypatch, map_doc,
+                                                   capsys):
+    """An `UnknownOutcome` is NEVER summarised as "NOT written".
+
+    `empty response (HTTP 200)` raised `UnknownOutcome` — whose whole meaning is
+    that the write MAY have landed, and whose intent `write_once` deliberately
+    KEEPS — but the exit summary classified by PROSE against a marker tuple, and
+    the empty-response spelling was not in it. Measured at #13950 review round 4:
+    51 operators hitting it printed `51 edge(s) NOT written`, directly beneath
+    `!!` lines saying they may have landed. That is the state that invites a
+    hand-edit of `written`, i.e. the #10849 double-count.
+
+    Classifying by TYPE at the append site is the fix: a new raise site cannot
+    drift out of an `isinstance` test the way it drifts out of a string list.
+
+    Mutant: classify the summary by prose again (e.g. `"outcome UNKNOWN" in f`) —
+    this reds on the empty-response spelling.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _EmptyBodyOnOperator(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_operator":
+                    # The 2xx-with-no-body shape: accepted, outcome UNKNOWN.
+                    return (200, None, {})
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": True}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _EmptyBodyOnOperator)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "MAY HAVE LANDED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "an UNCONFIRMED write was reported as NOT written: " + err)
+
+
+def test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE(monkeypatch):
+    """Both exhausted-transport arms must raise `UnknownOutcome`, not `RuntimeError`.
+
+    `write_once` decides by TYPE: `UnknownOutcome` keeps the intent, a bare
+    `RuntimeError` falls through its generic path. These arms raised
+    `RuntimeError`, so the ledger kept the intent (correct) while the summary read
+    the prose and said "NOT written" (wrong) — the line and the type disagreed
+    (#13950 review round 4). `UnknownOutcome` subclasses `RuntimeError`, so the
+    type is asserted exactly.
+
+    Mutant: revert either arm to `raise RuntimeError(...)` — this reds.
+    """
+    monkeypatch.setattr(filer.time, "sleep", lambda _s: None)
+
+    def _post(_body):
+        raise TimeoutError("the socket died after the request was sent")
+
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_subject", {})
+    assert type(excinfo.value) is filer.UnknownOutcome, (
+        f"an exhausted transport raised {type(excinfo.value).__name__}, which "
+        "`write_once` does not classify")
+    assert "outcome UNKNOWN" in str(excinfo.value), excinfo.value
+
+
+def test_a_SUB_SECOND_retry_after_is_FLOORED(monkeypatch):
+    """Fractional `Retry-After` is legal, and it must not become a hammer.
+
+    Measured at #13950 review round 4: `Retry-After: 0.001` produced 6 posts in
+    **14.5 ms** — six back-to-back POSTs at a door that had just answered 429,
+    exactly the retry storm an earlier version of the code's own comment claimed
+    could not happen. The wait is floored at 1 s so the server's intent survives
+    while the hammer does not, and the cap still applies above that.
+
+    Mutant: `min(120, max(1.0, wait))` → `min(120, wait)` — this reds.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(advertised: str):
+        sleeps.clear()
+        hdrs = email.message.Message()
+        hdrs["Retry-After"] = advertised
+
+        def _post(_b, _h=hdrs):
+            raise urllib_error.HTTPError("http://x", 429, "x", _h, None)
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps)
+
+    assert drive("0.001") == [1.0] * 5, drive("0.001")
+    assert drive("1e-9") == [1.0] * 5, drive("1e-9")
+    # And the floor does not swallow advice that is above it.
+    assert drive("7") == [7.0] * 5
+    # …nor does it lift the 120 s cap.
+    assert drive("900") == [120] * 5
+
+
 def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
     """A non-positive `Retry-After` must not turn the retry loop into a hammer.
 
