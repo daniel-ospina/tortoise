@@ -664,6 +664,13 @@ def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
     return hosts, keys
 
 
+def _first_of(text: str, *chars: str) -> int:
+    """Index of the first of *chars* in *text*, or ``len(text)``."""
+    found = [text.find(char) for char in chars]
+    found = [index for index in found if index != -1]
+    return min(found) if found else len(text)
+
+
 def _split_uri(dsn: str) -> tuple[str, str]:
     """(text-before-the-query, query) split by LIBPQ's rule, not Python's.
 
@@ -906,7 +913,13 @@ def _drop_options_pairs(dsn: str) -> str:
         if word.lower() == "options":
             out.append(" ")                      # drop the pair entirely
         else:
-            out.append(f"{word}={value}")
+            # ⛔ AN EMPTY VALUE MUST BE QUOTED. `dbname=` at the end of a
+            # conninfo is legal (libpq: `dbname=''`), but re-emitting it bare and
+            # then appending ` options=…` makes libpq skip whitespace AFTER the
+            # `=` and read `options='-c` as dbname's value — the tail then becomes
+            # the bogus keyword `role=tortoise_record_app'` (`invalid connection
+            # option "role"`). Measured in review.
+            out.append(f"{word}={value if value else chr(39) * 2}")
         i = j
     return "".join(out)
 
