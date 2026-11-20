@@ -571,20 +571,10 @@ _TAG = (r'<(?:"(?:[^"\n]|' + _SOFT + r')*"|\'(?:[^\'\n]|' + _SOFT + r')*\''
 #: is the same ordering rule as the tag's quoted value: the escape is tried first so the
 #: `]` it protects cannot end the run.
 _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
-#: ⛔ ONE GAP, UNITS ONLY — NO PROSE (#13900 verification, MEASURED). A prose-crossing gap
-#: was tried and it flags FIVE live-document sentences, two of them QUOTATIONS of refuted
-#: claims ("`prints nothing` would over-claim") which the arm's contract says must not be read
-#: as assertions: telling a quotation from an assertion is semantics, not punctuation, and no
-#: gap can do it. It also LATCHED on the `is`/`has`/`:` inside its own separator and dropped
-#: the claim, and it backtracked exponentially where `[` began two units (16 × `[\]` = 22.8 s).
-#: So a WORD between the command and the verb is NOT DETECTED — a declared limit, pinned by a
-#: witness, and the four unit kinds below are what may sit there instead (each with a unique
-#: first character, which is what makes the run linear).
-_OPEN_BRACKET = r"\[(?![^\]\n]*\])"
-_GAP = (r"(?:[^\w<&[\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP + r"|" + _OPEN_BRACKET
-        + r"|" + _SOFT + r")*")
-_GAP_FULL = _GAP
-_GAP_ABBREV = _GAP
+_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+             + r"|" + _SOFT + r"){0,40}?")
+_GAP_ABBREV = (r"(?:[^\w&\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+               + r"|" + _SOFT + r")*")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -668,26 +658,61 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # at all; the live document states those as PAST TENSE with their head named, which is
     # a convention kept by reading, not by an assertion (the label exemption that tried to
     # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
-    # ⛔ RETRY AT THE NEXT VERB, AND RESPECT THE GAP (#13900 verification, MEASURED). With a gap
-    # that admitted prose, a separator containing a listed verb (`… — the row that IS measured
-    # above — prints TWO paths`) latched that `is`, failed the answer-head test, and the whole
-    # occurrence was DROPPED — the LIVE document stayed `592 passed` over a FALSE claim; a URL in
-    # the gap did the same through its `protocol:`. A verb candidate whose preceding text is not a
-    # FULL gap match is not this occurrence's verb, so the scan continues to the next one.
-    _cmd_pat = re.compile(
-        r"`?" + re.escape(cmd)
-        + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV), re.IGNORECASE)
-    _gap_full = re.compile(_GAP, re.IGNORECASE)
-    _verb_pat = re.compile(
-        r"(?:(?:still|now|actually|also)\s+)?"
-        r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
-        r"names|includes|contains|has|->|→|is|=|:)", re.IGNORECASE)
-    for _cm in _cmd_pat.finditer(doc):
-      for match in _verb_pat.finditer(doc, _cm.end(), min(len(doc), _cm.end() + 200)):
-        if not _gap_full.fullmatch(doc[_cm.end():match.start()]):
-            continue
-        if re.search(r"\n[^\S\n]*\n", doc[_cm.end():match.start()]):
-            break
+    for match in re.finditer(
+            r"`?" + re.escape(cmd)
+            # ⛔ THE SEPARATOR CLASS ADMITS A TABLE CELL AND A PARENTHETICAL (#13900
+            # review, finding 2, MEASURED): with `` [`_\s*]* `` alone,
+            # `| `-- tortoise/` | prints ONE path at this head |` and
+            # `(`-- tortoise/`) prints ONE path at this head.` both returned `[]` — and the
+            # table-cell spelling is the natural one for this bundle, whose own D5 row is a
+            # table row. Widening the class is the difference between "every occurrence" and
+            # "every occurrence with no punctuation after it", which is not a closure at all.
+            # ⛔ AND NO ENUMERATION OF PUNCTUATION CAN CLOSE IT (#13900 review, cycle 9
+            # P1, MEASURED at `eec3593423`). Adding `|` and `)` moved the same hole to
+            # `—`, `–`, `;`, `,`, `/`, `(`, `…`, `[^1]`, a quote character and an inline tag:
+            # all returned `[]`, and an em-dash claim appended to the LIVE document left the
+            # file GREEN — this document uses `—` 402 times, so that spelling is natural here.
+            # A list of separators is the same mistake as a list of skips: closed only
+            # against what someone thought of. So the separator is NOT enumerated — it is any
+            # run of non-word characters, plus the two FORMS through which a word character
+            # legitimately reaches a separator (an inline tag, a footnote marker). Words
+            # cannot cross it, so a sentence such as
+            # "`-- tortoise/` — see the row below — prints …" is deliberately NOT graded as
+            # an answer: admitting prose there is how a rule loses the ability to tell a
+            # claim from a sentence about one.
+            # `_` IS A WORD CHARACTER in Python's `\w`, so markdown emphasis spelled with
+            # underscores has to be named here or this rule loses the `_prints_` family the
+            # older, enumerated class used to admit (measured: `2 failed` when it was left
+            # out — a closure that drops a form the previous rule already had is a
+            # regression wearing a widening's clothes).
+            # ⛔ NO SEPARATOR GRAMMAR AT ALL (#13900 review, cycles 9-11, MEASURED). Three
+            # attempts to describe the gap between the command and the verb each left a hole the
+            # next cycle measured, because a described gap is an enumeration however it is spelled:
+            #   * an enumerated set (`[`_\s*|)]`) missed `—`, `;`, `,`, `/`, `(`, `…`, a quote
+            #     character (cycle 9);
+            #   * a repetition BOUND (`{0,4}`) missed five and six spaces — a REGRESSION against
+            #     `origin/main`, whose class was unbounded — and a table cell that spent the budget
+            #     (cycle 10);
+            #   * a bounded tag/footnote FORM missed `<span class="x">`, `[^1234]` and `&nbsp;`,
+            #     all three of which left the LIVE document GREEN (cycle 11).
+            # So the gap is not a grammar of SPELLINGS. It is the four UNIT KINDS stated at the
+            # constants, repeated: 40 of them for the wide gap (`;`, `|` and the blank line stop
+            # it; a `.` does NOT), unbounded for the narrow one, and lazy either way so a match
+            # starts at the reported occurrence and stops at the first listed verb.
+            # That admits prose between the command and the verb, which is deliberate and is the
+            # correct side to err on: a sentence that names the command and then states an answer
+            # IS a claim about the command, and this file's own rule is that a false PASS costs
+            # more than an over-block (D5: `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`).
+            # A true history sentence is written in the PAST TENSE, which is outside the verb list
+            # and therefore outside this matcher — that is the one half of the convention measured
+            # to work, and it is stated as a RESIDUAL at THIS function's head (the
+            # "RESIDUAL, stated" note immediately above the `rest = doc[...]` slice below) rather
+            # than pointed at by line number: a `:NNNN` here was measured to have drifted onto a
+            # bare assignment (#13900 review, verification round, P2).
+            + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV)
+            + r"(?:(?:still|now|actually|also)\s+)?"
+              r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
+              r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
         # cycle 3, P1). The short form a caller may pass is a SUBSTRING of every longer
         # `git diff … -- <pathspec>` invocation, so the tail of a sentence the writer fixed
@@ -840,7 +865,6 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             if negated:
                 claims_empty = not claims_empty
         answers.append((window, claims_empty))
-        break
     return answers
 
 
@@ -1674,19 +1698,11 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # that forms no entity STOPPED the gap and this claim went GREEN. `_AMP`'s second branch is
     # what keeps the character the previous rule already had.
     _seen_amp = _typed_answers_to_tortoise_cmd(
-        f"`{_full_subject}` & prints TWO paths", _full_subject)
+        f"`{_full_subject}` R&D prints TWO paths", _full_subject)
     assert _seen_amp and _seen_amp[0][1] is False, (
-        "the arm SKIPPED a bare `&` that forms no entity — `&` is a character the previous "
-        "rule already admitted, so the entity unit must not narrow the gap below it "
-        "(#13900 review, cycles 9-13)")
-    # ⛔ `R&D` PUTS A WORD BETWEEN THEM, which is this gap's declared out-of-scope form
-    # (#13900 verification): `R` and `D` are word characters. Pinned so the limit is MEASURED —
-    # it was graded while the gap admitted prose, and that same width flagged five live-document
-    # sentences, two of them quotations of refuted claims.
-    assert _typed_answers_to_tortoise_cmd(
-        f"`{_full_subject}` R&D prints TWO paths", _full_subject) == [], (
-        "a WORD between the command and the verb is now detected — that contradicts the "
-        "declared limit at `_GAP`, so the declaration must change with it")
+        "the arm SKIPPED a bare `&` that forms no entity (`R&D`) — it was graded at "
+        "`ff83caa198`, so the entity unit narrowed the gap below what the previous rule "
+        "admitted (#13900 review, cycles 9-13)")
     # ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT TOO, AND EACH UNIT KIND GETS ITS OWN WITNESS
     # (#13900 review, verification round, P2, MEASURED). The comment beside `_TAG` / `_BRACKET`
     # says "three holes, each reproduced on the LIVE document" — and before this block NOTHING
@@ -1704,14 +1720,12 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "a tag's quoted value, a bare apostrophe in a tag and an ESCAPED character in a "
             "label are each one unit; each was measured `[]` when its unit was narrowed "
             "(#13900 review, verification round, P2)")
-    # …AND A `;` INSIDE A BRACKET DOES NOT END THE GAP: the bracketed run is ONE unit, so this
-    # claim parses only if `_BRACKET` is consumed whole. Dropping it reds this row and nothing
-    # else (measured). (#13900 verification: this row used to carry prose — "in the note [a; b]
-    # above" — which is the declared out-of-scope form now that the gap is units-only, so the
-    # prose is gone and the property it was testing, the bracket unit, is what remains.)
+    # …AND THE BRACKET UNIT IS IN THE **WIDE** GAP TOO, which no row reached either: `;` STOPPS
+    # the wide gap, so this claim parses ONLY if the bracketed run is one unit there. Dropping
+    # `_BRACKET` from `_GAP_FULL` reds this row and nothing else (measured).
     assert _typed_answers_to_tortoise_cmd(
-        f"`{_full_subject}` [a; b] prints TWO paths", _full_subject), (
-        "a `;` inside a bracket ended the gap — the bracketed run must be one unit "
+        f"`{_full_subject}` in the note [a; b] above prints TWO paths", _full_subject), (
+        "the WIDE gap's bracketed unit is gone — a `;` inside a bracket must not stop the gap "
         "(#13900 review, verification round, P2)")
     # ⛔ A SOFT BREAK IS GRADED, A PARAGRAPH BREAK IS THE BOUNDARY (kept from `7557a52cf5`,
     # whose measurement this replaces the earlier "hard wrap is a residual" pin with a measured
