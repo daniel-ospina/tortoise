@@ -2967,6 +2967,22 @@ def _d5_blank_count_expression() -> str:
     assert len(found) == 1, (
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
         f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
+    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE; THIS ONE BINDS THE
+    # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
+    # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
+    # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
+    # `len(blank_prescriptions) == 1` GREEN while the SENTENCE prescribes a WIDER command, and
+    # `found[0]` — the expression actually executed below — is then never checked against the
+    # class at all. Measured at `280c1899c7`: widen the sentence to `^[+-]` and append a
+    # `^\+$` decoy, and the whole 447-test suite stayed green while the row's own sentence
+    # ("… and ONLY that class: it does not count the sign-opening one (`++i`, `--counter`,
+    # `+- 2)`)") became FALSE. With this assertion the same two-edit mutant reds HERE.
+    assert _D5_BLANK_CLASS_EXPR_RE.fullmatch(found[0]), (
+        f"05-verify.md's BLANK-line sentence prescribes {found[0]!r} at this head, which is not "
+        "the BLANK class the row names — so the document tells the reader to count a wider "
+        "class than the one it claims to count. A decoy BLANK-class prescription elsewhere in "
+        "the bundle keeps the count above green, which is why the EXECUTED expression has to "
+        "be bound to the class here (#13956 review, P2)")
     return found[0]
 
 
@@ -3259,20 +3275,26 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         "the document's count command does not count a blank REMOVED line, which is half "
         "the class the cell names (\"a diff line that is just `+` or `-`\") and the shape "
         "the superseded spelling read as `0` (#13956 review, P2)")
-    # ⛔ TWO ASSERTIONS WERE DELETED HERE (#13956 review round 7, P3 — MEASURED; the mutation
-    # pass's rule 3 is a FINDING, never a nit): `_blank_line_count("+\n-\n") == 2` was a strict
-    # CONSEQUENCE of the two assertions above — a `grep -c` counts LINES, so any expression that
-    # counts a blank `+` and a blank `-` returns 2, and under `^\+$` the REMOVED-line assertion
-    # above reds first, so this line could never execute its own failure. And
-    # `_blank_line_count("++i\n--counter\n+- 2)\n") == 0` was unreachable for the same reason one
-    # layer up: `_D5_BLANK_CLASS_EXPR_RE` admits only the exactly-one-character shapes, so
-    # widening the document to the expression that WOULD count `++i`/`--counter` makes
-    # `_d5_blank_count_expression()` raise its loud ZERO ("prescribes 0 BLANK-line count
-    # commands") before this arm runs. Both intents are still held by arms that CAN fail — the
-    # ADDED and REMOVED directions above, each red under its own narrowing, and that loud-ZERO /
-    # MANY count. A dead assertion is not free: it reads as coverage the tree does not have.
-    # ⛔ If the CLASS gate is ever widened to admit wider expressions, this boundary loses its
-    # only reader and the reachable form must come back with the widening.
+    # ⛔ TWO ASSERTIONS WERE DELETED HERE (#13956 review round 7, P3; then round 8, P2 raised
+    # the SECOND one and was right about the reason — measured below):
+    #  • `_blank_line_count("+\n-\n") == 2` was a strict CONSEQUENCE of the two assertions above
+    #    — a `grep -c` counts LINES, so any expression that counts a blank `+` and a blank `-`
+    #    returns 2, and under `^\+$` the REMOVED-line assertion above reds first. Its intent is
+    #    still held, direction by direction, by those two.
+    #  • `_blank_line_count("++i\n--counter\n+- 2)\n") == 0` was DELETED ON A REASON THAT WAS
+    #    FALSE: round 7 claimed no mutation could reach it because the class gate would raise
+    #    its loud ZERO first. Round 8 measured the two-edit mutant — widen the SENTENCE to
+    #    `^[+-]`, append a `^\+$` decoy elsewhere in the bundle — and found the whole suite GREEN
+    #    with this line REINSTATED it reds alone (`assert 3 == 0`) while the two directional
+    #    assertions stay green. So it WAS reachable; what was actually missing was the BINDING
+    #    in `_d5_blank_count_expression()` that the executed expression is the BLANK-class one.
+    #    That binding now exists (see its assertion above), so the sentence's expression is
+    #    provably exactly-one-character and NO mutation can make this line the one that reds:
+    #    a widened sentence reds the binding first. The deleted line's intent is therefore held
+    #    at the root, where the decoy path is closed too — not merely restated here.
+    # ⛔ A dead assertion is not free: it reads as coverage the tree does not have. But neither is
+    # a deleted one that was not dead — which is why the second deletion was re-measured and its
+    # justification replaced with the binding rather than with an argument.
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
