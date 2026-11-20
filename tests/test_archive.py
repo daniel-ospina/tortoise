@@ -39,14 +39,19 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ── fixtures ────────────────────────────────────────────────────────────────────
 
-def _surface(tools=(), methods=(), forward=(), sdk_retired=(), modules=()) -> dict:
-    return {
+def _surface(
+    tools=(), methods=(), forward=(), sdk_retired=(), modules=(), modules_with_body=None
+) -> dict:
+    surface = {
         "tools": set(tools),
         "methods": set(methods),
         "forward": set(forward),
         "sdk_retired": set(sdk_retired),
         "modules": set(modules),
     }
+    if modules_with_body is not None:
+        surface["modules_with_body"] = set(modules_with_body)
+    return surface
 
 
 def _entry(kind: str, symbol: str, *, batch: str = "batch-a", file: str | None = None) -> dict:
@@ -1568,22 +1573,182 @@ def test_a_row_dropped_for_a_RESTORED_module_is_green(tree: Path) -> None:
     assert any("REMOVED from archive/MANIFEST.json" in p for p in lost), lost
 
 
+def _sdk_entry_with_a_real_body(tree: Path, name: str = "old_method") -> dict:
+    """An `sdk-method` row whose recorded block is the body that actually lives in `sdk.py`.
+
+    ⛔ The earlier fixture built the row with `_entry(...)`, which records NO blocks and wrote no
+    live `sdk.py` at all — so the restore credit was granted by the NAME and the body question
+    was unreachable (round-8 review). A restore fixture has to contain the code that came back.
+    """
+    text = f"class TortoiseSDK:\n    def {name}(self):\n        return 1\n"
+    (tree / "tortoise" / "sdk.py").write_text(text, encoding="utf-8")
+    _commit(tree, "tortoise/sdk.py")
+    segment = arch.expected_block(arch.SDK_METHOD, name, "tortoise/sdk.py", text)
+    assert segment is not None, "the fixture must hold the shape the extractor keys"
+    row = {
+        "path": "tortoise/sdk.py",
+        "node": None,
+        "sha256": arch._sha256(segment.strip("\n")),
+    }
+    return dict(
+        _entry(arch.SDK_METHOD, name),
+        blocks=[row],
+        sources=["tortoise/sdk.py"],
+    )
+
+
 def test_a_row_dropped_for_a_RESTORED_sdk_method_is_green(tree: Path) -> None:
-    """The same rule for the other two kinds: liveness is per-kind, not module-only."""
-    entry = _entry(arch.SDK_METHOD, "old_method")
+    """The same rule for the other two kinds: liveness is per-kind, not module-only.
+
+    And the credit is the BODY, not the name — `test_a_row_dropped_for_a_STUBBED_sdk_method`
+    is the negative control (round-8 review: the body check was unreachable for `sdk-method`
+    and `mcp-tool`, because `live_return` returns a SYMBOL for those kinds and the old code
+    tried to read a file named after it).
+    """
+    entry = _sdk_entry_with_a_real_body(tree)
     arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
     frozen = tree / entry["file"]
     frozen.parent.mkdir(parents=True, exist_ok=True)
-    frozen.write_text("def old_method(self):\n    return 1\n", encoding="utf-8")
+    frozen.write_text("def old_method():\n    return 1\n", encoding="utf-8")
     _commit(tree, ".")
     arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
     _commit_drop(tree, entry["file"])
 
     assert arch.shrink_violations(
         tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
-    ) == []
+    ) == [], "a verbatim restore of the recorded body IS the restore"
     assert arch.shrink_violations(tree, base_ref="HEAD~1", surface=_surface()), (
         "without the method live again the row drop is unrecorded code loss"
+    )
+
+
+def test_a_row_dropped_for_a_STUBBED_sdk_method_is_a_loss(tree: Path) -> None:
+    """A live NAME whose body is not the recorded one is a STUB, not the code coming back.
+
+    Measured in round-8 review: the credit was name-only for `sdk-method` / `mcp-tool` (the
+    carrier `live_return` returns is a SYMBOL, so the body check read a file named `old_method`
+    and every one of those rows fell into "cannot tell"), so dropping the row and the frozen
+    file while leaving a three-line stub destroyed the record with every arm green.
+    Mutation: make `_live_body_is_the_recorded_one` return None instead of False for an
+    unreadable path -> RED here.
+    """
+    entry = _sdk_entry_with_a_real_body(tree)
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def old_method():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    subprocess.run(["git", "rm", "-q", entry["file"]], cwd=tree, check=True)
+    (tree / "tortoise" / "sdk.py").write_text(
+        "class TortoiseSDK:\n    def old_method(self):  # re-added as a stub\n        ...\n",
+        encoding="utf-8",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the name is back and the BODY is not — the frozen record is the only copy of what was "
+        f"removed: {problems}"
+    )
+
+
+def test_a_MULTI_block_restore_needs_EVERY_block_back(tree: Path) -> None:
+    """A two-block row restored verbatim in ONE file is not a restore (round-8 review).
+
+    Only `rows[0]` was compared, and all four committed `mcp-tool` rows are two-block
+    (`tool_registry.py` `ToolDefinition` + `mcp_server.py` handler). Measured: registry block
+    restored verbatim, the handler nowhere in the tree, `_live_body_is_the_recorded_one: True`.
+    Mutation: `for row in rows` -> `for row in rows[:1]` -> RED here.
+    """
+    registry_text = 'TOOL = ToolDefinition(name="old_tool", description="x")\n'
+    handler = "def old_tool():\n    return 1"
+    (tree / "tortoise" / "tool_registry.py").write_text(registry_text, encoding="utf-8")
+    _commit(tree, "tortoise/tool_registry.py")
+    registry_segment = arch.expected_block(
+        arch.MCP_TOOL, "old_tool", "tortoise/tool_registry.py", registry_text,
+        "ToolDefinition:old_tool",
+    )
+    assert registry_segment is not None, "the fixture must hold the shape the extractor keys"
+    rows = [
+        {"path": "tortoise/tool_registry.py", "node": "ToolDefinition:old_tool",
+         "sha256": arch._sha256(registry_segment.strip("\n"))},
+        {"path": "tortoise/mcp_server.py", "node": "FunctionDef:old_tool",
+         "sha256": arch._sha256(handler)},
+    ]
+    entry = dict(
+        _entry(arch.MCP_TOOL, "old_tool"),
+        blocks=rows,
+        sources=["tortoise/tool_registry.py", "tortoise/mcp_server.py"],
+    )
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("# frozen\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(tools={"old_tool"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the handler block is not in the tree at all, so this is not a restore: " f"{problems}"
+    )
+
+
+def test_a_restore_whose_recorded_FILE_is_gone_is_not_a_restore(tree: Path) -> None:
+    """A row whose own source file is not in the tree is not back (round-8 review).
+
+    The credit branch reads each row's `path`; an absent file is `False`, not "cannot tell" —
+    `None` there was credit, and for `sdk-method` / `mcp-tool` it was ALWAYS `None` because
+    `live_return` returns a SYMBOL for those kinds, so the body check was unreachable for 110
+    of the archive's 111 entries.
+    Mutation: `if text is None: return None` -> RED here.
+    """
+    entry = dict(
+        _entry(arch.SDK_METHOD, "old_method"),
+        blocks=[{"path": "tortoise/gone_sdk.py", "node": None, "sha256": "0" * 64}],
+        sources=["tortoise/gone_sdk.py"],
+    )
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("# frozen\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the recorded source file is not in the tree, so nothing came back: " f"{problems}"
+    )
+
+
+def test_a_module_left_behind_as_an_EMPTY_file_is_not_a_return(tree: Path) -> None:
+    """Direction one must agree with arm 1b: a leftover emptied file is not the code (round-8).
+
+    Arm 1b calls an emptied module a removal; `live_return` used to credit it as "the module
+    came back", so carrying out arm 1b's own printed remedy (archive it, delete the body again)
+    RED the sibling arm on the leftover file — a red with no CI-passable route.
+    Mutation: drop the `root is not None` content check in `live_return` -> RED here.
+    """
+    (tree / "tortoise" / "splitmod.py").write_text("def body():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/splitmod.py")
+    (tree / "tortoise" / "splitmod.py").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/splitmod.py")
+    entry = dict(_entry(arch.MODULE, "tortoise.splitmod"), blocks=[], sources=[])
+
+    surface = _surface(modules={"tortoise/splitmod.py"}, modules_with_body=set())
+    assert arch.live_return(entry, surface, tree) is None, (
+        "an emptied leftover file is not the module coming back"
+    )
+    assert arch.surface_violations([entry], surface, tree) == [], (
+        "and direction one must not red the file arm 1b's remedy leaves behind"
     )
 
 

@@ -605,7 +605,7 @@ def anchor_unverified(root: Path | None = None) -> list[str]:
 
 # ── violations: the surface half (pure — no filesystem) ─────────────────────────
 
-def live_return(entry: dict, surface: dict) -> str | None:
+def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | None:
     """WHERE this entry's symbol is LIVE again, or `None` — the ONE definition of "came back".
 
     Both directions read this, because the two arms grade the same event from opposite sides:
@@ -640,11 +640,20 @@ def live_return(entry: dict, surface: dict) -> str | None:
                 continue
             if carriers is not None and symbol not in carriers:
                 continue  # scaffolding only: the name resolves, the module's BODY is not here
+            if root is not None:
+                text = _file_text(root, candidate)
+                if text is not None and not _init_carries_a_body(text):
+                    # A leftover EMPTY / docstring-only file is not the module coming back: arm
+                    # 1b just called it a removal, and crediting it here would red the very
+                    # remedy arm 1b prints (round-8 review).
+                    continue
             return candidate
     return None
 
 
-def surface_violations(entries: list[dict], surface: dict) -> list[str]:
+def surface_violations(
+    entries: list[dict], surface: dict, root: Path | None = None
+) -> list[str]:
     """Every way an archived symbol can be back on the live surface, or mis-recorded.
 
     Pure on purpose: `tests/test_archive.py` calls it with a synthetic surface to prove
@@ -662,7 +671,7 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
         if kind not in KINDS:
             out.append(f"{symbol or '<no symbol>'}: unknown kind {kind!r} (expected one of {KINDS})")
             continue
-        back = live_return(entry, surface)
+        back = live_return(entry, surface, root)
         if kind == MCP_TOOL:
             if back is not None:
                 out.append(
@@ -1211,23 +1220,41 @@ def _live_body_is_the_recorded_one(root: Path, entry: dict, carrier: str) -> boo
     block the extractor cannot key, is not evidence of a loss, and this arm's job is to report
     losses.
     """
-    text = _file_text(root, carrier)
     rows = entry.get("blocks")
-    if text is None or not isinstance(rows, list) or not rows:
-        return None
-    row = rows[0]
-    if not isinstance(row, dict):
-        return None
-    expected = expected_block(
-        str(entry.get("kind") or ""),
-        str(entry.get("symbol") or ""),
-        str(row.get("path") or ""),
-        text,
-        row.get("node"),
-    )
-    if expected is None:
-        return None
-    return _sha256(expected.strip("\n")) == row.get("sha256")
+    if not isinstance(rows, list) or not rows:
+        return None  # nothing recorded to compare: absence is not evidence of a loss
+    kind = str(entry.get("kind") or "")
+    symbol = str(entry.get("symbol") or "")
+    targets: list[tuple[dict, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        path = str(row.get("path") or "")
+        if kind == MODULE and len(rows) == 1 and carrier and _file_text(root, carrier) is not None:
+            path = carrier  # a module may live at a different path after a split
+        targets.append((row, path))
+    for row, path in targets:
+        text = _file_text(root, path)
+        if text is None:
+            # ⛔ The row's OWN source file is not in the tree, so the code cannot be back. This
+            # is `False`, not `None`: for `mcp-tool` / `sdk-method` the carrier `live_return`
+            # returns is a SYMBOL, not a path, so the old code tried to read a file named
+            # `get_entity` and every one of those 110 rows fell into "cannot tell" and kept the
+            # credit — the body check was unreachable for all but the single `module` row
+            # (round-8 review).
+            return False
+        expected = expected_block(kind, symbol, str(row.get("path") or ""), text, row.get("node"))
+        if expected is None:
+            # ⛔ NOT a "cannot tell". The live file does not yield this block (the node key is not
+            # in it, or the kind branch finds no such symbol), so the code the row recorded is
+            # not in the tree — which is the whole question. The earlier `None` here read as
+            # "cannot tell" and the credit branch treats anything but False as credit, so a
+            # multi-block `mcp-tool` row whose handler was nowhere in the tree still earned the
+            # restore (round-8 review, measured).
+            return False
+        if _sha256(expected.strip("\n")) != row.get("sha256"):
+            return False
+    return True
 
 
 def _reanchor_is_verified(
@@ -1470,7 +1497,10 @@ def shrink_violations(
             if key in waivers:
                 used.add(key)
                 continue
-            if surface is not None and (carrier := live_return(base_entry, surface)) is not None:
+            if (
+                surface is not None
+                and (carrier := live_return(base_entry, surface, root)) is not None
+            ):
                 # A RESTORE, not a loss: the row left because the code came BACK (direction
                 # one reds the row if it stays — archived ⇔ absent), so there is nothing the
                 # archive promised that the product no longer carries. Recognising it here is
@@ -1632,7 +1662,7 @@ def check(
             "an empty manifest means the archived code was deleted, not that there is none"
         )
     problems += file_violations(entries, root / "archive", root)
-    problems += surface_violations(entries, surface)
+    problems += surface_violations(entries, surface, root)
     problems += package_violations(root)
     problems += index_violations(entries, root)
     if base_ref is not None:
