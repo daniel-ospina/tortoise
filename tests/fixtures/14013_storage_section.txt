@@ -1,0 +1,25 @@
+How your data is stored and searched If you arrived here from a note about your search layer
+filling up, this is the full explanation behind it — no architecture required. Everything you save
+is kept Your data is kept in a Postgres database. Postgres is ordinary, inexpensive storage, so we
+can keep all of it: every point, every connection, every session that captured it. This copy is
+your record, and it is the complete one — everything else is built from it. A second copy, for the
+things you use most On top of the record we run a graph database. It mirrors a slice of your data
+in a shape that makes two things quick: finding things by meaning rather than by exact wording,
+and following the connections between them — so a search can bring back what is related to what
+you asked for, not only what matches it. That graph database is expensive to run and holds far
+less than the record does, so it is reserved for what matters most: the items you search for and
+use most often, and the items that other things hang off. Everything else stays in the record.
+What happens when the fast layer fills Nothing is lost, and nothing is deleted. Everything you
+have saved stays searchable. What changes is how quickly some older items come back. When the fast
+layer is full, the items used least step out of it and stay in the record. Search keeps working
+across everything: items outside the fast layer are fetched when you search for them, so they can
+take a moment longer to answer. That is the whole effect — you can lose speed on the items you use
+least; you never lose the items. What can be done about it Add capacity. More fast capacity can be
+added to your account at any time — write to support@premiselabs.co. This makes the fast layer
+bigger; it is not a different plan. Keep this resident. The things you rely on can be kept in the
+fast layer, together with the things connected to them, so they do not have to be fetched back
+when you return to them. Keeping things resident has a limit, so it can never take over the fast
+layer. See what is outside. What has stepped out of the fast layer can be listed — how much of it,
+roughly when, and what it was about — so what is outside is something you can look at rather than
+a black box. All three act on the fast layer, never on your record. None of them deletes anything:
+whatever you choose, everything you have saved is still there.
