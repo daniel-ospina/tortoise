@@ -101,8 +101,10 @@ continuously), scaled down to a deterministic count.
 
 Run: `TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 uv run pytest
 tests/test_14002_record_only_journal.py -q` →
-**26 passed** (21 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
-reports **21 passed, 5 skipped**, which is the split the `core` matrix leg sees.
+**28 tests** (23 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
+reports **23 passed, 5 skipped** — measured at this head, and the split the `core`
+matrix leg sees; `--collect-only -q` prints `28 tests collected`, which is the
+number to diff if this counts claim ever stops reproducing.
 
 **Red-first, the same window with the fix disabled** (`journal_skipped = False`
 in the chokepoint — the pre-#14002 tree, everything else identical):
@@ -267,7 +269,9 @@ cutover by the same window. The measured cost above is the alternative.
 
 ```bash
 # the DB-free legs (a deletion reds these without a database)
-uv run pytest tests/test_14002_record_only_journal.py -q
+# ⛔ TORTOISE_TEST_CARVE_OUT=1 is REQUIRED for a URI-less run (epic #1647 P4):
+# without it the session gate refuses once per collected test.
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_14002_record_only_journal.py -q
 
 # the wiring gate: the append is behind the decision, and every door forwards it
 uv run python tools/record_wiring_check.py
