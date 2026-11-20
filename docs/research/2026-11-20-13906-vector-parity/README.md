@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (77 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (79 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -28,7 +28,8 @@ returns — same ids, same order, same recall@k, same distances?**
   *unavailable*, not skipped. The external pass was made against the Perplexity
   API directly with `"model": "sonar"` named on every request (the research
   skill's cheap rung; no `sonar-deep-research`, no `sonar-reasoning-pro`), key
-  from `/home/cmux/keys.env` (mode 0600). **2 queries, both returned, no 429,
+  read from the `PERPLEXITY_API_KEY` environment variable on the developer box
+  (never committed, never echoed). **2 queries, both returned, no 429,
   total billed $0.01134.**
 - **The live hosted graph could not be read**: this worktree carries no
   `TORTOISE_DB_URI` and no record DSN, so nothing here re-measures the live
@@ -462,7 +463,13 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **77 passed**.
+tests/test_vector_parity_13906.py -q` → **79 passed**.
+
+⚠️ The `--json-out` line above is the recipe that PRODUCED the committed
+artifacts, and it no longer re-produces them: at the shipped corpus size the
+record read plans as a `Seq Scan`, which `assert_index_scan` now refuses with
+exit 2. §7 states that limit and what regenerating would need; read it before
+treating this recipe as a reproduction step.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
