@@ -2235,8 +2235,12 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # :2747-2749 (+9). The field previously put the +2 BEFORE #11517 and reported
     # `:2726-2728` — a position this window never occupied — so this set pins what the
     # commits actually did (`git show <c>:probes/capstone_measure.py` at each, measured).
+    # ⛔ AND A FIFTH: `#11695`'s `E6` producer inserted the sixth row's builder above this
+    # window, moving the live cite `:2747-2749 -> :2800-2802` (+53). The four historical
+    # positions stay — they are what those commits actually did — and the live slot is the
+    # last one, so the set grows by exactly one on each such insertion.
     _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2736-2738",
-                        "2738-2740", "2747-2749"}
+                        "2738-2740", "2747-2749", "2800-2802"}
     assert cited_ranges == _expected_ranges, (
         "the record's cited ranges are "
         f"{sorted(cited_ranges)}; missing={sorted(_expected_ranges - cited_ranges)} "
@@ -2259,9 +2263,9 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert re.search(r"a1dff7cec8[^:]{0,40}:2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
         "the record must attribute the FIRST move to a1dff7cec8 — the SHA in the same clause "
         "as the ranges — at the intermediate position it actually reached")
-    assert read_back.count(":2747-2749") >= 2, (
-        f"the record states :2747-2749 {read_back.count(':2747-2749')} time(s): the last "
-        "move (#11534's) supplies one mention and the LIVE cite must supply the other")
+    assert read_back.count(":2800-2802") >= 2, (
+        f"the record states :2800-2802 {read_back.count(':2800-2802')} time(s): the LAST "
+        "move (#11695's) supplies one mention and the LIVE cite must supply the other")
     # ⛔ The SECOND move, with the same SHA binding as the first — not a count. When `main`
     # merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
     # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2724-2726 -> :2736-2738`
@@ -2285,7 +2289,15 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # credit any later commit with the LIVE position and every row here stayed green — the same
     # defect the first-move arm's comment records for `a1dff7cec8`.
     assert re.search(r"#11534[^:]{0,120}:2738-2740\s*(?:->|→|to)\s*:2747-2749\b", read_back), (
-        "the record must attribute this branch's move to #11534 — the issue in the same "
+        "the record must attribute #11534's move to #11534 — the issue in the same "
+        "clause as the ranges — at the position that change actually reached")
+    # ⛔ AND THE FIFTH MOVE, which is the one that makes the LIVE cite right at this head:
+    # `#11695`'s E6 producer inserted the sixth row's builder above the census window
+    # (`:2747-2749 -> :2800-2802`, +53). Bound to the ISSUE for the same reason as #11534's:
+    # without it the field could credit any later commit with the live position and every
+    # row here stayed green.
+    assert re.search(r"#11695[^:]{0,160}:2747-2749\s*(?:->|→|to)\s*:2800-2802\b", read_back), (
+        "the record must attribute the E6 producer's move to #11695 — the issue in the same "
         "clause as the ranges — at the position the live tree actually reached")
     # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
     # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
@@ -2293,13 +2305,13 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # never reached it (measured, agent-infra#3442 rule 3: an assertion that can never be
     # the row that reds is not attribution, it is dead weight). The set pin's message
     # already names the missing range, so nothing is lost by deleting it.
-    assert probe[2747 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2747 reads {probe[2747 - 1].strip()!r}, not the census call")
+    assert probe[2800 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2800 reads {probe[2800 - 1].strip()!r}, not the census call")
     # Equality, like its two siblings above: a substring let the closing line's SHAPE
     # change while the row stayed green (measured: renaming the `AS anchored` alias broke
     # the very unpacking this arm consumes, and nothing reddened).
-    assert probe[2749 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
-        f"capstone_measure.py:2749 reads {probe[2749 - 1].strip()!r}, not the "
+    assert probe[2802 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
+        f"capstone_measure.py:2802 reads {probe[2802 - 1].strip()!r}, not the "
         "anchored count that closes the query")
 
 
