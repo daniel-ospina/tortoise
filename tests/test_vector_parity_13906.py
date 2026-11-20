@@ -244,10 +244,11 @@ def test_a_distance_change_with_identical_ids_is_a_divergence(harness):
     """⛔ The case an id-only comparison calls parity — measured, not invented.
 
     The first `--poison vector` run negated one stored vector: its distance to
-    the query moved from 0.0 to 2.0 while every unrelated row in the corpus sat
-    15-25 away, so the returned IDS and their ORDER were unchanged and the
-    harness reported "no divergence". A store can hand back the same list with
-    different values, and that is a different store.
+    the query moved from 0.0 to 2.000, while the eligible rows that are not
+    near-copies sat 7.224-47.653 away under euclidean (the scan's metric), so the
+    returned IDS and their ORDER were unchanged and the harness reported "no
+    divergence". A store can hand back the same list with different values, and
+    that is a different store.
     """
     truth_rows = [("a", 0.10), ("b", 0.20), ("c", 0.30)]
     same = harness.compare(truth_rows, ["a", "b", "c"],
@@ -458,12 +459,22 @@ def test_the_vector_poison_moves_the_victim_beyond_the_whole_corpus(harness):
     moved = next(r for r in perturbed if r.key == "anchor")
     assert moved.embedding != victim.embedding
     query = harness._unit(0)
-    far = harness._cosine_distance(moved.embedding, query)
-    others = [harness._cosine_distance(r.embedding, query) for r in rows
-              if r.key not in ("anchor",) and r.eligible(len(query))]
-    assert far > max(others), (
-        "the perturbed row is still inside the corpus' distance range, so it "
-        "would not leave the window and the poison would be invisible")
+    # ⛔ ASSERT THE EUCLIDEAN LEG TOO — a cosine-only assertion cannot tell `-100`
+    # from the pre-fix negation. Cosine is scale-invariant, so EVERY negative
+    # multiple of the victim scores exactly 2.0 (measured: `-1` and `-100` both
+    # 2.000 cosine), while only `-100` clears the corpus under euclidean
+    # (`-1` = 2.000, inside the 7.224-47.653 range the scan ranks against).
+    # A cosine-only pin left the pre-fix mutant 28/28 green.
+    others = [r for r in rows
+              if r.key != "anchor" and r.eligible(len(query))]
+    far_eu = harness._euclidean_distance(moved.embedding, query)
+    far_co = harness._cosine_distance(moved.embedding, query)
+    assert far_co > max(harness._cosine_distance(r.embedding, query) for r in others), (
+        "the perturbed row is still inside the corpus' COSINE range, so the "
+        "index arm would keep it in the window")
+    assert far_eu > max(harness._euclidean_distance(r.embedding, query) for r in others), (
+        "the perturbed row is still inside the corpus' EUCLIDEAN range — the "
+        "metric the gated scan arm ranks by — so the poison is invisible there")
     # …and it does not touch any other row.
     assert [r.key for r in perturbed] == [r.key for r in rows]
     assert all(a.embedding == b.embedding for a, b in zip(perturbed, rows)

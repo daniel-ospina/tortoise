@@ -179,10 +179,19 @@ unperturbed corpus — a real store divergence rather than a synthetic one.
 
 **How `vector` earned the harness a fix.** On its first run it reported
 `POISON NOT DETECTED`: negating one stored vector moved its distance from 0.0 to
-2.0, while the corpus' unrelated rows sat between **0.6 and 47.6** away from that
-query (median ≈ 27.8, measured) — so the negated row stayed comfortably inside
-the top-10 and both the ids AND their order were unchanged. An id-only comparison called a genuinely different
-store "parity". `compare()` now takes the candidates' distances and reports
+exactly **2.000** under both metrics, while for `q_anchor` the eligible corpus
+rows that are not near-copies of the query sat **7.224–47.653** away under
+**euclidean** (median 28.283) and **0.897–1.148** under **cosine** (recomputed
+from `build_corpus(seed=13906)`; an earlier draft of this paragraph quoted an
+unreproducible "0.6–47.6" that mixed the two metrics).
+
+That single fact explains the silent run, and it is worth being exact about
+which arm was quiet: under **euclidean — the scan, the arm that is GATED —
+2.000 is nearer than every other row**, so the negated row stayed comfortably
+inside the top-10 and its ids and order were unchanged. Under **cosine** 2.000 is
+*further* than every row, so the index arm's ids would have moved — but that arm
+is reported **informational, never gated** (§3), so nothing redid. The gated arms
+said nothing, and a genuinely different store was called "parity". `compare()` now takes the candidates' distances and reports
 `distance.ok` / `max_delta` / `worst`, `_verdict` fails on a distance-only
 divergence, and the poison now pushes the row beyond the whole corpus. Pinned by
 `test_a_distance_change_with_identical_ids_is_a_divergence`.
@@ -263,7 +272,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **25 passed**.
+tests/test_vector_parity_13906.py -q` → **28 passed**.
 
 ## 7. What this artifact does NOT establish
 
