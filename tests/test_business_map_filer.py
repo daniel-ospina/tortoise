@@ -855,7 +855,10 @@ def _edge_rows(doc: dict,
                     ({"content": filer.doc_by_ref(doc, e["to"])["content"]}
                      if idents[e["to"]][0] == "Event" else None))
         if "op" in e:
-            nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
+            # The node key carries mechanism+direction: two DIFFERENT operators
+            # over one endpoint pair are two nodes, not one (#13913 round 10).
+            key = "|".join([e["from"], e["to"], e["op"], str(e.get("direction"))])
+            nid = op_index.setdefault(key, [f"op{len(op_index)}"])
             # idx 0 IS the source, idx >= 1 ARE the targets (the fold writes one
             # edge per slot with `idx`) — the read-back matches on the SLOT — and
             # the DIRECTION the write declares rides the operator node too, so a
@@ -1320,16 +1323,21 @@ def test_no_save_persists_an_intent_without_its_unconfirmed_flag(
     assert filer.write_map(map_doc) == 0
     capsys.readouterr()
 
-    at = first_operator_seen["at"]
-    assert at is not None and at > 0, "no operator call observed"
-    # Only OPERATOR markers are non-idempotent intents; a structural edge is
-    # idempotent and is marked after its call.
-    op_markers = {filer.edge_marker(e) for e in map_doc["edges"] if "op" in e}
-    for written, unconfirmed in snapshots[:at]:
-        intents = [m for m in written if m in op_markers]
-        assert set(intents) <= set(unconfirmed), (
-            "a snapshot persisted an operator marker with no unconfirmed flag — "
-            "a resume in that window would call it a completed write")
+    assert first_operator_seen["at"] is not None, "no operator call observed"
+    # The invariant is per ENTRY, not per snapshot: a non-idempotent marker (an
+    # operator edge or an Event) must never APPEAR in `written` without its
+    # `unconfirmed` flag, because it appears exactly once — at intent time. A
+    # structural edge/point/subject is idempotent and is marked after its call.
+    non_idempotent = {filer.edge_marker(e) for e in map_doc["edges"] if "op" in e}
+    non_idempotent |= {f"event:{e['ref']}" for e in map_doc["events"]}
+    previous: set[str] = set()
+    for written, unconfirmed in snapshots:
+        new_entries = {m for m in written if m not in previous}
+        assert {m for m in new_entries if m in non_idempotent} <= set(unconfirmed), (
+            "a snapshot persisted a non-idempotent marker with no unconfirmed "
+            f"flag — a resume in that window would call it a completed write: "
+            f"{sorted(new_entries - set(unconfirmed))[:3]}")
+        previous = set(written)
 
 
 def test_the_direction_expectation_is_the_DOOR_s_OWN_resolution(map_doc):
@@ -1947,3 +1955,91 @@ def test_an_UNCLASSIFIED_exception_never_retires_the_intent(tmp_path, monkeypatc
     recorded = json.loads(state.read_text())
     ops = {filer.edge_marker(e) for e in map_doc["edges"] if "op" in e}
     assert ops & set(recorded["written"]), "the intent was retired by an unknown error"
+
+
+def test_a_resume_does_NOT_erase_a_failure_it_did_not_re_observe(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """`failed` is a DIAGNOSIS, and a resume that re-observed nothing keeps it.
+
+    A mechanism INVERSION (`mechanism_mismatch`) is a real finding that
+    `--verify` cannot see by this module's own declared limitation. Measured
+    pre-fix (#13913 review round 10): run 1 failed loudly, then a resume printed
+    `all nodes and edges written`, exited 0 and erased the only record of it.
+    A failure clears only when THIS run re-wrote its marker successfully.
+
+    Mutant: `st["failed"] = failures` unconditionally.
+    """
+    state = tmp_path / "state.json"
+
+    class _Mismatch(_StubMcp):
+        """The door reports the inverted mechanism it filed (warn-not-block)."""
+
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self.warn = True
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                self._n += 1
+                content = {"id": f"{tool}:{self._n}"}
+                if tool == "tortoise_create_operator" and self.warn:
+                    content["warnings"] = [{
+                        "code": "mechanism_mismatch",
+                        "message": "IMPL wire labelled refutes stores NAND",
+                    }]
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": content}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Mismatch)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    recorded = json.loads(state.read_text())
+    assert any("mechanism" in f for f in recorded["failed"]), recorded["failed"][:2]
+
+    # The RESUME: a clean door, nothing re-written for the inverted operator.
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1, (
+        "the resume reported success while an earlier, unresolved failure stood")
+    capsys.readouterr()
+    after = json.loads(state.read_text())
+    assert any("mechanism" in f for f in after["failed"]), (
+        "the resume erased a diagnosis it did not re-observe")
+
+
+def test_a_legitimate_IMPL_and_NAND_pair_is_not_a_duplicate(map_doc):
+    """Two declared mechanisms over ONE endpoint pair are not a duplicate.
+
+    The census compares holders against the number of operator edges the map
+    DECLARES over that pair, so a future map that states support AND a refutation
+    over one pair is legitimate — and a naive `> 0` census would false-refuse it
+    (#13913 review round 10: the real map declares no such pair, so that branch
+    was untested against the artifact it protects).
+
+    Mutant: `if len(ids) > 0` — this fixture is refused.
+    """
+    doc = json.loads(json.dumps(map_doc))
+    a, b = doc["points"][0]["ref"], doc["points"][1]["ref"]
+    doc["edges"] = [e for e in doc["edges"]
+                    if not (e.get("from") == a and e.get("to") == b)]
+    doc["edges"].append({"from": a, "to": b, "op": "IMPL", "direction": "->",
+                         "label": "supports"})
+    doc["edges"].append({"from": a, "to": b, "op": "NAND", "direction": "->",
+                         "label": "refutes"})
+    _structural, op_rows = _edge_rows(doc)
+    assert filer.duplicate_operators(doc, op_rows) == [], (
+        "a legitimate IMPL+NAND pair over one pair was reported as a duplicate")
+
+    # And the baseline still bites: a THIRD node over the same pair, beyond what
+    # the map declares, is a duplicate.
+    dup_id = op_rows[-1][0]
+    third = [*op_rows, *[[f"{row[0]}~dup", *row[1:]]
+                         for row in op_rows if row[0] == dup_id]]
+    assert filer.duplicate_operators(doc, third), "a third operator over the pair was invisible"
