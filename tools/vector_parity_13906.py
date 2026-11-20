@@ -667,13 +667,6 @@ def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
     return hosts, keys
 
 
-def _first_of(text: str, *chars: str) -> int:
-    """Index of the first of *chars* in *text*, or ``len(text)``."""
-    found = [text.find(char) for char in chars]
-    found = [index for index in found if index != -1]
-    return min(found) if found else len(text)
-
-
 def _split_uri(dsn: str) -> tuple[str, str]:
     """(text-before-the-query, query) split by LIBPQ's rule, not Python's.
 
