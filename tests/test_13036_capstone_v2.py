@@ -1109,8 +1109,12 @@ class TestGraphOverviewSections:
         status, out = door.call("tortoise_graph_overview", args)
         assert status == 200
         # An ERROR envelope is a dict, so a bare isinstance check would accept
-        # `{"error": …}` for every dict-shaped arm — the arms whose only
-        # assertion is this one (taxonomy, tags, stale, graphs, namespaces).
+        # `{"error": …}` for every dict-shaped arm. This parametrized type check
+        # is the ONLY assertion for `structure_check` (the one WRAP `list[dict]`
+        # member) — and for no other arm: `tags` asserts its exact empty value
+        # (`out == []`), and taxonomy / structure / pointkinds / status / sources /
+        # namespaces / graphs / topics / health / stale / validate_domain / audit
+        # each have a content test below that reads the seeded graph back out.
         assert not (isinstance(out, dict) and "error" in out), (
             f"section={section!r} answered an error envelope: {out!r}")
         assert isinstance(out, expected), (
