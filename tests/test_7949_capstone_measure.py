@@ -17086,6 +17086,150 @@ def test_the_D5_row_names_every_hit_of_the_literal_it_calls_the_only_one():
         "(#13956 review, F1)")
 
 
+#: The TWO D5 clauses that state a PAIR of current addresses, each pair named by the
+#: sentence itself — and neither had a reader (#13956 review, MEASURED twice).
+#:
+#: ⛔ WHY THEY ARE NOT `_D5_CURRENT_CLAIMS` ENTRIES: that tuple carries ONE named `n` per
+#: entry, and each of these clauses asserts TWO numbers in one sentence, so a per-entry row
+#: could grade at most half of it — and a half-graded pair is exactly the state that let both
+#: of these ship unread. Each entry is (label, a pattern naming `a` and `b`, the
+#: `_EPIC_CITE_SOURCES` key, the fragment `a`'s line must carry, the fragment `b`'s): the
+#: number and the anchor it denotes are read by the same regex, so a re-point that moves one
+#: number onto the other's slot reds here instead of passing.
+#:
+#: ⛔ A NEEDLE IS ONE LINE'S TEXT, OR A TUPLE OF CONSECUTIVE LINES, AND THE TUPLE EXISTS
+#: BECAUSE OF A MEASURED FALSE PASS (#13956 review, round 6, P3 — MEASURED): the empty-gate
+#: return dict's `"provider": None, "route": None, "failover_used": False,` line is written
+#: FOUR times in `sdk.py`, and one of those copies sits inside `_extract_session_llm` itself,
+#: far from the docstring the row pairs it with — so a single-line needle accepted addresses
+#: the row does not name (that function's own copy, and the FIRST copy in the file, which is
+#: in unrelated code) and both stayed GREEN under the very arm that exists to stop that. The
+#: lines that FOLLOW the fragment are what make it unique (`"warnings": [], "mode": "empty",
+#: "stats": {},` occurs once in the file). ⚠️ NO ADDRESSES ARE TYPED HERE ON PURPOSE
+#: (#14003 review, cycle 2, P3 — MEASURED: nothing reads a number in a comment, and four of
+#: them plus the intra-function distance were exactly the unread quartet a re-derivation
+#: leaves stale). The COUNT is the durable fact; the arm reads the addresses.
+#:
+#: ⛔ AND UNIQUENESS IS ASSERTED, NOT ASSUMED (#14003 review, cycle 2, P2 — MEASURED): this
+#: arm originally asked only `number in hits`, so MEMBERSHIP passed while the needle occurred
+#: anywhere — measured by appending a second copy of the 3-line tuple and re-pointing the row
+#: at it, where all six D5 arms stayed GREEN over an address whose own sentence says "beside
+#: it". The needle's whole discriminating power IS uniqueness, so the arm requires the single
+#: hit it names and reports the extras when they appear.
+_D5Needle = str | tuple[str, ...]
+
+
+def _fragment_hits(lines: list[str], fragment: tuple[str, ...]) -> list[int]:
+    """The 1-based lines where `fragment` occurs, each member on its own consecutive line."""
+    return [
+        n for n in range(1, len(lines) - len(fragment) + 2)
+        if all(part in lines[n - 1 + k] for k, part in enumerate(fragment))
+    ]
+
+
+_D5_PINNED_PAIRS: tuple[tuple[str, str, str, _D5Needle, _D5Needle], ...] = (
+    (
+        "the alreadyDecided / _dedup_content_candidates pair",
+        r"the same two symbols read `:(?P<a>\d+)` and `:(?P<b>\d+)`",
+        "sdk",
+        '"IMPL", pid, [prior], label="alreadyDecided",',
+        "def _dedup_content_candidates",
+    ),
+    (
+        "the _extract_session_llm docstring / empty-gate return dict pair",
+        r"is at `:(?P<a>\d+)`, and the empty-gate return dict beside it "
+        r"\(`[^`]+`\) is at `:(?P<b>\d+)`",
+        "sdk",
+        "Runs the two-stage LLMExtractor on the conversation transcript",
+        (
+            '"provider": None, "route": None, "failover_used": False,',
+            '"errors": ["no extractable content — empty or blank conversation"],',
+            '"warnings": [], "mode": "empty", "stats": {},',
+        ),
+    ),
+)
+
+#: The labels `_D5_PINNED_PAIRS` must still carry, one per entry. ⛔ THE SAME REASON
+#: `_D5_CURRENT_CLAIM_LABELS` EXISTS (#13879 review, cycle 2), and it cost one review round to
+#: learn it here too (#14003 review, round 2, P2 — MEASURED): the table's only reader walks
+#: whatever entries it FINDS, so DELETING an entry returns that pair to unread with NO red
+#: anywhere — and the pair-2 entry is the harder one to restore, so it is the one a lane under
+#: merge pressure drops. Compared as a SET (a drop and an undeclared addition both red) plus a
+#: LENGTH arm (the set comparison alone cannot see a duplicate).
+_D5_PINNED_PAIR_LABELS = frozenset({
+    "the alreadyDecided / _dedup_content_candidates pair",
+    "the _extract_session_llm docstring / empty-gate return dict pair",
+})
+
+
+def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
+    """Two D5 pairs #13988 re-pointed had no reader at all (#13956 review).
+
+    ⛔ MEASURED, which is why this is an arm and not a comment: #13988 (`4326d7f146`)
+    re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
+    docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
+    value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 270 of
+    them. A row whose own thesis is that a typed line number rots cannot re-point a figure
+    and leave it unread; that is the class #13879 review named when a reverted address
+    "reddened no arm at all".
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    # ⛔ THE TABLE IS CENSUSED BEFORE IT IS READ. This arm walks the entries it FINDS, so a
+    # DROPPED entry converts a graded pair back to an ungraded one with no red anywhere — the
+    # defect `_D5_CURRENT_CLAIM_LABELS` was created for, and the one this table reproduced
+    # (#14003 review, round 2, P2). A duplicate label satisfies a set comparison while one
+    # entry is never read, which is what the length arm is for.
+    labels = [label for label, _pattern, _key, _a, _b in _D5_PINNED_PAIRS]
+    dropped = sorted(_D5_PINNED_PAIR_LABELS - set(labels))
+    undeclared = sorted(set(labels) - _D5_PINNED_PAIR_LABELS)
+    assert not dropped and not undeclared, (
+        f"`_D5_PINNED_PAIRS` and its declared label set disagree — dropped={dropped}, "
+        f"added_without_declaring={undeclared}. Re-derive the entry for this head rather "
+        "than removing it, and declare a new entry's label in `_D5_PINNED_PAIR_LABELS` in "
+        "the SAME commit")
+    assert len(labels) == len(_D5_PINNED_PAIR_LABELS), (
+        f"`_D5_PINNED_PAIRS` carries {len(labels)} entries for "
+        f"{len(_D5_PINNED_PAIR_LABELS)} declared labels — a duplicate label satisfies the "
+        f"set comparison while one entry is never read: {labels}")
+    sources = {key: path.read_text(encoding="utf-8").splitlines()
+               for key, path in _EPIC_CITE_SOURCES.items()}
+
+    failures: list[str] = []
+    for label, pattern, source_key, needle_a, needle_b in _D5_PINNED_PAIRS:
+        found = re.search(pattern, d5[0])
+        if found is None:
+            failures.append(
+                f"D5 no longer states {label!r} in the shape this pin reads "
+                f"({pattern!r}) — re-derive the sentence and update the row, do not drop "
+                "it: an unread present-tense pair is what rotted here")
+            continue
+        lines = sources[source_key]
+        for slot, needle in (("a", needle_a), ("b", needle_b)):
+            number = int(found.group(slot))
+            fragment = (needle,) if isinstance(needle, str) else needle
+            hits = _fragment_hits(lines, fragment)
+            # ⛔ NOT `number not in hits` — MEMBERSHIP IS NOT THE PIN (#14003 review, cycle
+            # 2, P2 — MEASURED). With a second copy of a needle in the file, membership
+            # accepted a re-point to the copy the row does not name, which is the exact
+            # false pass the tuple was introduced to close. Compare to the ONE hit.
+            if hits != [number]:
+                actual = lines[number - 1].strip()[:90] if 0 < number <= len(lines) else ""
+                failures.append(
+                    f"D5 states {label} with `{slot}` at `:{number}`, but "
+                    f"{fragment!r} occurs at {hits} in `{source_key}` — the pin binds "
+                    f"the ONE occurrence it names, so a duplicate needle is a red too. "
+                    f"`: {number}` is {actual!r}")
+    assert not failures, (
+        "D5's present-tense PAIRS are not the lines they name (#13956 review):\n  - "
+        + "\n  - ".join(failures))
+
+
 def test_one_markdown_line_carries_one_pair_for_one_cite():
     """`03-test-design.md:142` stated TWO different pairs for ONE `sdk.py` cite (#13602 F2).
 
