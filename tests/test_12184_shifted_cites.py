@@ -162,6 +162,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
     # paragraph follow the same convention — `sdk.py:31347` is the literal while `:31346` is the call).
     (_AUDIT, "`mcp_server.py:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
+    # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
+    # (`` `mcp_server.py:5184`/`:8206`/`:11281` ``), and the §2.5 token above cannot see a bare
+    # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11281` -> `:11280`)
+    # left every arm green — `_PINS` counts were unchanged (63/63), `_TOKEN_OCCURRENCES`' key count
+    # stayed 1 (the §2.5 spelling is a different key), `_REDEFINED_13854` was untouched and the
+    # `_resolved_pairs` census was identical (223 pairs) — so the document could name two addresses
+    # for one reader with nothing red. That is the false pass this file exists to stop, and it is the
+    # `#13466` shape (four header entries re-pointed, nothing red). Its siblings on the same header
+    # line are pinned per SITE for exactly this reason: `` `:8206` `` and `` `:5654` `` each carry a
+    # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
+    # §2.5 row left behind.
+    (_AUDIT, "`:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
@@ -324,6 +336,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11281`'): 1,
+    # 1: the header's BARE spelling of the same address, counted as its own site. Measured at this
+    # head: `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
@@ -950,7 +965,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281`, re-derived from the
     # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2666`
     # rows above.
-    assert len(_PINS) == 63
+    # 63 -> 64 at the #13992 review (P2): the SAME address is written TWICE in the document, and the
+    # row above pins only the §2.5 spelling (`mcp_server.py:11281`) — the header enumerates it BARE as
+    # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
+    # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
+    # line are the neighbours that already carry their own bare-token row.
+    assert len(_PINS) == 64
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
