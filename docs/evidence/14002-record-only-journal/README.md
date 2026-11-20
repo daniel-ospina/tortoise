@@ -201,9 +201,11 @@ cutover by the same window. The measured cost above is the alternative.
    claiming the journal could not have fed the record — and (ii) made
    `record-reconcile --journal` unable to report clean on a healthy pair, which is
    the arming step `journal_ready` tells an operator to run. So the reading now
-   carries `journal_is_export` — the ROW ALONE, in mode `active`, decides, and
-   the mode is what separates "export" from "still an input" — and that shape
-   answers `unprojected == 0` instead. ⚠️ `record_owns_position` additionally
+   carries `journal_is_export` — the ROW ALONE, in mode `active`, decides — and
+   that shape answers `unprojected == 0` instead. (The mode is what separates a
+   CUT-OVER graph from a journal that is still an input; the flag is a separate
+   fact, which is why the door can still append on a row-`active` graph whose
+   flag is not rolled yet.) ⚠️ `record_owns_position` additionally
    requires the deployment to be ARMED; that difference is deliberate (#14002
    cycle 3 P2): a reader does not carry a writer's flag, and a reading keyed on
    it reported a healthy cut-over pair as an impossible journal. ⚠️ **The reading asks the RECORD, never the reading process's
