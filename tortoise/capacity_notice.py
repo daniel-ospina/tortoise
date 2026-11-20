@@ -517,17 +517,34 @@ def claim_notice(cp, org_id: str, threshold: int,
 #: Columns this module reads from the orgs row. One read, so the marker and the
 #: address are always the same snapshot (a mark read from one row and an email
 #: from another is a bug with no cause to find).
-#: The org-row facts one notice needs. `deleted_at` is read for the LIVENESS
-#: predicate, not for display: the fleet enumeration (`billing._enumerate_billed_orgs`)
-#: deliberately does NOT filter soft-deleted orgs — "a soft-deleted org can still
-#: be BILLED, and excluding it would hide a live charge" (`billing.py`) — which is
-#: the right predicate for a Stripe mirror and the WRONG one for a customer email.
-#: The copy says "nothing is lost or deleted. Everything you've saved stays
-#: searchable", and the stamp is once-ever, so mailing an account inside its
-#: deletion grace window would both state something false and burn the one notice
-#: it can ever get (#14038 review, P2 — found independently by two reviewers).
+#: The org-row facts one notice needs. `deleted_at`/`suspended_at` are read for
+#: the LIVENESS predicate, not for display: the fleet enumeration
+#: (`billing._enumerate_billed_orgs`) deliberately does NOT filter soft-deleted
+#: orgs — "a soft-deleted org can still be BILLED, and excluding it would hide a
+#: live charge" (`billing.py`) — which is the right predicate for a Stripe mirror
+#: and the WRONG one for a customer email. The copy says "nothing is lost or
+#: deleted. Everything you've saved stays searchable", and the stamp is once-ever,
+#: so mailing an account inside its deletion grace window would both state
+#: something false and burn the one notice it can ever get (#14038 review, P2 —
+#: found independently by two reviewers). #1853's suspension is the same class:
+#: the org's calls 403 but its inbox is still open to us.
 _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
                    "suspended_at")
+
+#: Columns in `_ACCOUNT_SELECT` whose ABSENCE must DEGRADE, not stop the pass.
+#: `suspended_at` is migration **0015** — an additive tier (`_ORG_ADDITIVE_0015_TIER`),
+#: NOT a base column, so the #1096 doctrine applies: a schema one migration behind
+#: reads it as NULL and stays un-suspended instead of taking the feature down.
+#:
+#: ⛔ `storage_notice_pct` and `deleted_at` are DELIBERATELY NOT here: the mark is
+#: the LEDGER, and an unreadable ledger must refuse to send
+#: (`notice-mark-unavailable`) rather than mean "never notified" — the provider
+#: idempotency key collapses only a replay of the SAME threshold, so an unledgered
+#: pass re-sends the one-shot notice every interval forever. Deletion is the
+#: fail-closed direction too (#1096: a deletion column is never an additive tier).
+#: A single PostgREST 400 does not say WHICH column it rejected, which is why
+#: `read_account` retries without these and re-raises when the retry also fails.
+_ACCOUNT_DRIFT_SOFT = ("suspended_at",)
 
 
 @dataclass(frozen=True)
@@ -543,9 +560,34 @@ class Account:
 
 
 def read_account(cp, org_id: str) -> Account | None:
-    """Read one account's address + mark, or ``None`` when the row is gone."""
-    rows = cp.query("organizations", select=list(_ACCOUNT_SELECT),
-                    filters=[("id", "eq", org_id)])
+    """Read one account's address, mark and liveness columns; ``None`` if gone.
+
+    ONE select, so the mark, the address and the two liveness columns are one
+    snapshot. The retry exists because those columns carry DIFFERENT failure
+    contracts (#1096): a schema missing `suspended_at` (0015, additive) must
+    degrade to "not suspended" and keep the pass alive, while a schema missing
+    `storage_notice_pct` (the ledger) or `deleted_at` (base, fail-closed) must
+    stop this account's send. A single 400 does not say which, so the retry
+    without the drift-soft columns is what separates the two: it succeeds only
+    when the drift is theirs, and its failure re-raises the original error into
+    `notify_account`'s ``notice-mark-unavailable`` path.
+    """
+    try:
+        rows = cp.query("organizations", select=list(_ACCOUNT_SELECT),
+                        filters=[("id", "eq", org_id)])
+    except Exception as first:
+        soft_select = [c for c in _ACCOUNT_SELECT if c not in _ACCOUNT_DRIFT_SOFT]
+        try:
+            rows = cp.query("organizations", select=soft_select,
+                            filters=[("id", "eq", org_id)])
+        except Exception:
+            raise first from None
+        logger.warning(
+            "capacity notice: the orgs read for %s rejected %s (schema older "
+            "than 0015) — retried without %s and treating the account as not "
+            "suspended; the ledger/base columns are still required (%s)",
+            org_id, list(_ACCOUNT_DRIFT_SOFT), list(_ACCOUNT_DRIFT_SOFT),
+            type(first).__name__)
     if not rows:
         return None
     row = rows[0]
@@ -572,8 +614,9 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     Resend path, budget-guarded and idempotency-keyed. Tests pass a fake.
 
     Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
-    ``no-email``, ``notice-mark-unavailable`` (the ledger column has not been
-    migrated yet), ``below-threshold``/``no-reading``/``no-allowance`` (the
+    ``no-email``, ``deleted-org``, ``suspended-org``, ``notice-mark-unavailable``
+    (the ledger column has not been migrated yet), ``below-threshold``/
+    ``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
     them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
 
