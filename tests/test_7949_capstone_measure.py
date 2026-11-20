@@ -17069,7 +17069,14 @@ def test_the_D5_row_names_every_hit_of_the_literal_it_calls_the_only_one():
         f"reads ({_D5_ONLY_LITERAL_RE.pattern!r}) — re-derive the sentence and update the "
         "row, do not drop it: an unread present-tense number is what rotted here")
     literal = found.group("literal")
-    stated = sorted({int(found.group("a")), int(found.group("b"))})
+    # ⛔ A LIST, not a set (#13956 review, round 5, P3 — MEASURED): `set` collapses a
+    # DUPLICATED pair to one element, so a row that re-types the same number twice (a
+    # plausible slip in the exact clause F1 re-pointed both halves of) fires the assert
+    # below and then raises `IndexError` on `stated[1]` — the arm reds with a traceback
+    # instead of the diagnostic that says which number is wrong (agent-infra#3442
+    # rule 2: an unattributable mutant is not a pin). Sorted so a reversed pair still
+    # compares equal to the measured one.
+    stated = sorted([int(found.group("a")), int(found.group("b"))])
     sdk = _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines()
     live = [n for n, line in enumerate(sdk, 1) if literal in line]
     assert stated == live, (
