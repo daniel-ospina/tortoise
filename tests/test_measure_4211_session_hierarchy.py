@@ -1084,3 +1084,105 @@ def test_r6_the_store_arm_opens_the_COPY_and_never_the_users_original(
         "read-only COPY, and an embedded RDB open rewrites the file it opens")
     assert src.read_bytes() == b"rdb-bytes", (
         "the user's original store was rewritten by this measurement")
+
+
+# ── #13919 review round 7 ───────────────────────────────────────────────────
+def test_r7_the_instrument_note_is_DERIVED_from_the_kinds_it_measured(monkeypatch):
+    """R7 (P2): the note named ONE writer for a population the artifact shows is mixed.
+
+    The committed receipt's `arms.instrument.note` (and this tool's source comment)
+    attributed all 37,605 CONTAINS targets to
+    ``tools/ask_spotcheck.seed_capture_turn_store``, while the same artifact's
+    ``contains_targets_by_kind`` is event=24999 / session-transcript=12606 — and
+    ``tortoise/retrieval.py`` records ``session-transcript`` as written ONLY by the
+    eval ingest lane, "⚠️ NOR the ask-fixture seeder" (which hardcodes ``"k":
+    "event"``). An asserted attribution is what the receipt is supposed to be cured
+    of, so the note is now a function of what the arm measured.
+    """
+    class _MixedKinds(_FakeInstrumentGraph):
+        """The population the committed receipt actually censused: turns AND chunks."""
+
+        def query(self, cypher: str, params=None) -> _Result:
+            if "pointKind, count(*)" in cypher:
+                return _Result([["event", 7], ["session-transcript", 3]])
+            return super().query(cypher, params)
+
+    # ⛔ Drive the ARM, not the helper: a pin that calls `_instrument_note` directly
+    # stays green when the arm goes back to a hardcoded literal (verified — the
+    # first version of this test survived exactly that mutant).
+    body = _instrument(monkeypatch, {"g": _MixedKinds(sessions=2, turns=7)})
+    note = body["note"]
+    # It can only carry these counts if it was derived from the kinds MEASURED here.
+    assert "event=7" in note and "session-transcript=3" in note, note
+    assert "10 total" in note, note
+    # It does NOT attribute the chunk kind to the ask-fixture seeder…
+    assert "not one writer" in note.lower(), note
+    # …and still names the eval ingest lane, which is what actually writes them.
+    assert "eval ingest lane" in note, note
+
+    # A population of turns only: the note must not invent a chunk writer either.
+    turns_only = mod._instrument_note({"event": 10})
+    assert "10 event / 0 session-transcript" in turns_only, turns_only
+    assert "12606" not in turns_only
+    assert "eval ingest lane" in turns_only
+
+    # An EMPTY breakdown measured nothing about writers — say so, do not attribute.
+    empty = mod._instrument_note({})
+    assert "says nothing" in empty, empty
+    assert "eval ingest lane" not in empty
+
+
+def test_r7_the_writer_queries_failed_describes_BOTH_reads(monkeypatch):
+    """R7 (P2): `queries_failed` read only the AFTER side while the verdict read both.
+
+    ``measure_writer`` publishes ``queries_failed: _failed_keys(after)`` but its
+    verdict is ``_failed_keys(after) or _failed_keys(before)``, so a run whose BEFORE
+    read raised produced an artifact saying ``unmeasurable: "... not readable
+    (points_total, turns_total, …)"`` AND ``queries_failed: []`` — a consumer reading
+    the empty list reads "all 36 queries ran".
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    err = {"error": "TimeoutError: Timeout reading from socket"}
+    keys = ("points_total", "turns_total", "contains_edges", "sessions_total",
+            "objects_total", "aboutObject_by_endpoint", "turns_with_aboutObject",
+            "sessions_with_aboutObject")
+    before_raised = {k: dict(err) for k in keys}
+    after_ok = {k: 0 for k in keys}
+    seq = iter([dict(before_raised), dict(after_ok)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 0, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    body = mod.measure_writer()
+
+    assert body.get("unmeasurable"), "an unreadable BEFORE read was not a verdict"
+    assert isinstance(body["queries_failed"], dict), (
+        "the writer publishes ONE side's failures; the two fields of the artifact "
+        "then disagree")
+    assert body["queries_failed"]["after"] == []
+    assert "turns_total" in body["queries_failed"]["before"], (
+        "the side that actually failed must be named — otherwise "
+        "`queries_failed: []` reads as 'every query ran'")

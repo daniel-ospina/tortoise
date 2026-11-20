@@ -1304,7 +1304,7 @@
      ]
     }
    ],
-   "note": "these stores are written by the fixture seeder (tools/ask_spotcheck.seed_capture_turn_store), which writes the Session->turn CONTAINS edges but does NOT run the entity-link pass \u2014 so 0 aboutObject here is the SEEDER's shape, not the writer's"
+   "note": "CONTAINS targets by kind, MEASURED here: event=24999, session-transcript=12606 (37605 total; 24999 event / 12606 session-transcript). This population is not one writer's output — `tortoise/retrieval.py` records that `session-transcript` is written only by the eval ingest lane, and `tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes `\"k\": \"event\"`, so it writes none of them. Neither writer runs the entity-link pass, which is why 0 `aboutObject` here describes THEM and not the product's capture path — that path is what the `writer` arm measures, before and after, on a fresh graph."
   },
   "corpus": {
    "source": "/Users/danielospina/.tortoise/session-events",
@@ -1357,6 +1357,12 @@
     "uri_field_shape": "arms.live.uri and arms.instrument.uri were the --live-uri STRING verbatim, and the writer wrote uri.rsplit('/', 1)[-1] (on a path-less URI that slice returns the whole authority, i.e. the password). Both read arms now publish the URI with its userinfo STRIPPED and the writer publishes the PARSED graph segment. This run's URI was docker://:@localhost:16379/tortoise — EMPTY userinfo — so no credential was ever in this artifact; a re-run emits it as docker://localhost:16379/tortoise."
    },
    "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement."
+  },
+  "round_7_note_correction": {
+   "why": "A round-7 review found that `arms.instrument.note` -- the artifact's endorsed explanation for its headline zero -- asserted an ATTRIBUTION this same artifact refutes.",
+   "what_was_wrong": "The note named ONE writer (`tools/ask_spotcheck.seed_capture_turn_store`) for the whole 37,605-target population, and the tool's `contains_targets_by_kind` comment said that seeder 'writes a `session-transcript` Point per session'. Both are false for this population: `contains_targets_by_kind` here is event=24999, session-transcript=12606, and `tortoise/retrieval.py` records that `session-transcript` is written ONLY by the eval ingest lane and explicitly NOT by that seeder, which hardcodes `k: event` (tools/ask_spotcheck.py). The 12,606 chunk targets are therefore not the seeder's, and a reader re-deriving this census was sent to the wrong writer.",
+   "fix": "The note is now DERIVED from `contains_targets_by_kind` by the tool's own `_instrument_note()`, so it can only say what the artifact measured; the two source comments were corrected too. The note was updated in place because it is an ASSERTION about the population, not a measured value -- every number in this artifact is untouched.",
+   "what_survives": "The conclusion the note supports is unchanged and is independently reproduced by the `writer` arm: the stores this arm censuses are not the product's capture path, and none of their writers runs the entity-link pass, which is why `aboutObject` reads 0 there."
   }
  },
  "warnings": []

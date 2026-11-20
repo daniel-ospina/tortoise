@@ -204,9 +204,15 @@ QUERIES: list[tuple[str, str]] = [
      "MATCH (s:Session)-[:CONTAINS]->(:Point) "
      "RETURN count(DISTINCT s) AS n"),
     # A session CONTAINS-wires MORE than its turns: the extraction lane wires claim
-    # Points into the same session, and the fixture seeder writes a
-    # 'session-transcript' Point per session (both ``is_episodic``). Without this
-    # breakdown a turn count and a CONTAINS count look like they disagree.
+    # Points into the same session, and a chunk writer wires ``session-transcript``
+    # Points (an ``is_episodic`` kind the TURN discriminator deliberately excludes).
+    # Without this breakdown a turn count and a CONTAINS count look like they
+    # disagree. ⛔ Do NOT name a writer for it here: the population this arm reads is
+    # NOT one writer's output — ``tortoise/retrieval.py`` records that
+    # ``session-transcript`` is written ONLY by the eval ingest lane, "⚠️ NOR the
+    # ask-fixture seeder" (``tools/ask_spotcheck.py::seed_capture_turn_store``
+    # hardcodes ``"k": "event"``). The breakdown is the measurement; the attribution
+    # is what this arm refuses to assert (#13919 review round 7).
     ("contains_targets_by_kind",
      "MATCH (:Session)-[:CONTAINS]->(p:Point) "
      "RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, "
@@ -214,8 +220,8 @@ QUERIES: list[tuple[str, str]] = [
     # ⛔ A key NAMED `*turn*` applies the turn discriminator, and the any-kind reading is
     # reported BESIDE it (``sessions_with_gt1_contains_point``) — the same discipline as
     # ``turns_total`` / ``episodic_points_any_kind`` above. Without the filter these keys
-    # count a session's claim Points and its 'session-transcript' Point as turns, so on a
-    # graph of one turn + one claim Point per session the gate's own falsifier
+    # count a session's claim Points and its non-turn ``is_episodic`` chunks as turns, so
+    # on a graph of one turn + one claim Point per session the gate's own falsifier
     # (``sessions_with_gt1_contains_turn ≈ 0``) could never fire.
     ("sessions_with_gt1_contains_turn",
      f"MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE {TURN} "
@@ -755,11 +761,52 @@ def measure_instrument(uri: str) -> dict:
                             "SHRUNKEN denominator, never a complete census. "
                             "`per_graph_omitted` says how many rows the list does not "
                             "carry, so the aggregate stays re-derivable",
-        "note": "these stores are written by the fixture seeder "
-                "(tools/ask_spotcheck.seed_capture_turn_store), which writes the "
-                "Session->turn CONTAINS edges but does NOT run the entity-link pass — "
-                "so 0 aboutObject here is the SEEDER's shape, not the writer's",
+        # ⛔ The note is DERIVED from what this arm measured, not from a writer it
+        # assumes (#13919 review round 7). The previous text named one writer
+        # (``tools/ask_spotcheck.seed_capture_turn_store``) for the whole population,
+        # while the arm's OWN ``contains_targets_by_kind`` shows a third of the CONTAINS
+        # targets are ``session-transcript`` — a kind ``tortoise/retrieval.py`` records
+        # as written ONLY by the eval ingest lane and explicitly NOT by that seeder
+        # (which hardcodes ``"k": "event"``). Naming one writer for a mixed population
+        # sent a reader looking for the wrong one, which is the asserted-vs-measured
+        # class this PR already fixed for ``role_evidence.uri_source``.
+        "note": _instrument_note(kinds),
     })
+
+
+def _instrument_note(kinds: dict[str, int]) -> str:
+    """The instrument arm's attribution, derived from the breakdown it MEASURED.
+
+    #13919 review round 7: the note used to name one writer for the whole population,
+    "the fixture seeder ... writes the Session->turn CONTAINS edges". The arm's own
+    ``contains_targets_by_kind`` refutes that — on the censused population 12,606 of
+    37,605 CONTAINS targets are ``session-transcript``, and ``tortoise/retrieval.py``
+    records that kind as written ONLY by the eval ingest lane, "⚠️ NOR the ask-fixture
+    seeder" (which hardcodes ``"k": "event"``). So the population is NOT one
+    writer's output, and the honest note is the split this arm computed.
+
+    What survives, and is what the note is FOR: neither of those writers runs the
+    entity-link pass, so 0 ``aboutObject`` describes THEM. The writer arm measures the
+    product's own capture path separately, which is why the gate's answer does not
+    depend on this note.
+    """
+    total = sum(kinds.values())
+    if not total:
+        return ("no CONTAINS targets were measured, so this run says nothing about "
+                "which writer produced the population")
+    parts = ", ".join(f"{kind}={cnt}" for kind, cnt in kinds.items())
+    turn_n = kinds.get("event", 0)
+    chunk_n = kinds.get("session-transcript", 0)
+    return (
+        f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
+        f"{turn_n} event / {chunk_n} session-transcript). This population is not one "
+        "writer's output — `tortoise/retrieval.py` records that "
+        "`session-transcript` is written only by the eval ingest lane, and "
+        "`tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes `\"k\": \"event\"`, "
+        "so it writes none of them. Neither writer runs the entity-link pass, which is "
+        "why 0 `aboutObject` here describes THEM and not the product's capture path — "
+        "that path is what the `writer` arm measures, before and after, on a fresh "
+        "graph.")
 
 
 def _mark_shrunken_denominator(body: dict) -> dict:
@@ -968,7 +1015,13 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
             # Which queries the arm could not run — the writer was the one arm with no
             # such accounting, so an unreadable population was invisible here while it
             # was published by `measure_live` and `measure_store` (#13919 round 6).
-            "queries_failed": _failed_keys(after),
+            # ⛔ BOTH sides, tagged (#13919 round 7): the verdict below reads
+            # `_failed_keys(after) or _failed_keys(before)`, so reporting only `after`
+            # let one artefact say `unmeasurable: "...not readable (before-side keys)"`
+            # AND `queries_failed: []` — a consumer reading the empty list reads "all "
+            # queries ran".
+            "queries_failed": {"before": _failed_keys(before),
+                               "after": _failed_keys(after)},
             # The extraction MODE per session, recorded so a reader can tell a mocked
             # extraction from a keyless one without re-running (#13919 review F1).
             "extraction_modes": modes,
