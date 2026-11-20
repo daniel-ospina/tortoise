@@ -13536,6 +13536,40 @@ def _read_stored_number(value, default):
         return default
 
 
+def _usage_record(label: str, rows: "list[dict] | None") -> None:
+    """#14011: feed the window-local USAGE counter (a serve, not a measurement).
+
+    ⛔ **THIS IS NOT THE READ LEDGER, AND THE DIFFERENCE IS A RECORDED DECISION.**
+    The adjacent :func:`_ledger_record` feeds `tortoise/read_ledger.py`, which is a
+    TENANT-WIDE measurement of `f`. `docs/architecture/SEARCH-ARCHITECTURE.md` §7
+    (policy row *"window-local touch counters + admission control"*) states that
+    the counter an eviction score consumes must be **window-local cache state — a
+    different artifact** from that ledger, and that `STORAGE-ARCHITECTURE.md`
+    §17.4.6 names reading the ledger for any product decision a *violation*.
+    Consensus in the surrounding prose does not move that: the ledger's byte bound
+    stops recording permanently, and a frozen counter would age every
+    recently-served node into "cold" — an eviction pass would then delete the
+    hottest nodes. So the two calls sit side by side and write to two artifacts
+    with two bounds and two purposes.
+
+    OFF by default and never imported when off: one env lookup (the #4097 truthy
+    contract), and a write failure is swallowed inside the module (a policy input
+    may not break the read it observes).
+    """
+    if not rows:
+        return
+    if not is_truthy(os.environ.get("TORTOISE_USAGE_SIGNAL")):
+        return
+    try:
+        from . import usage_signal
+    except Exception:  # pragma: no cover — a broken install must not break a read
+        return
+    try:
+        usage_signal.record_serves(label, rows)
+    except Exception:  # pragma: no cover — belt and braces; the module swallows too
+        return
+
+
 def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
                    seed: str | None = None) -> None:
     """#7983/#13084: feed the READ LEDGER (the instrument for `f` and the mix).
@@ -13588,6 +13622,13 @@ def _ledger_record(label: str, rows: list[dict], *, kind: str | None = None,
     rows = rows or []
     if not rows and kind is None:
         return
+    # #14011: the SAME served-row event feeds the window-local usage counter, into
+    # ITS OWN artifact (`SEARCH-ARCHITECTURE.md` §7: the ledger is a measurement
+    # and may not be a product input — §17.4.6 calls reading it for a product
+    # decision a violation). Called BEFORE the ledger's own gate on purpose: the
+    # two flags arm independently, so an instance may want a residency signal
+    # without a measurement ledger, or the reverse.
+    _usage_record(label, rows)
     if not is_truthy(os.environ.get("TORTOISE_READ_LEDGER")):
         return
     try:
@@ -46404,6 +46445,14 @@ class TortoiseSDK:
                     label=label,
                     returned=len(rows or ()),
                 )
+            # #14011: the serve counter observes the same event, into its own
+            # artifact. ⛔ Outside the ledger block above, because that block is
+            # skipped entirely when the measurement flag is off — the two flags
+            # arm independently. ⛔ It DOES respect `_record_reads`: a candidate
+            # POOL is not a serve, and counting one would mark a node the caller
+            # never saw as used (the flattering direction for a residency score).
+            if _record_reads:
+                _usage_record(label, rows)
             return rows
 
         def _with_claim_class(rows: list[dict],
