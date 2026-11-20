@@ -2871,12 +2871,60 @@ def test_r15_a_failed_out_write_exits_2_not_1_on_EVERY_path(monkeypatch, tmp_pat
     assert "the receipt was NOT written" in cap_b.err, (
         "the crash path claims its output is 'printed below' — `_print_report` is not "
         f"called there, so that sentence points at nothing: {cap_b.err!r}")
+    # ⛔ THE ATTRIBUTION LINE ITSELF, not a substring the traceback already contains
+    # (#13919 round 18, P3-2). The earlier assertion was `"RuntimeError: arm blew up" in
+    # err`, which `traceback.format_exc()` satisfies on its own — so the dedicated
+    # `UNMEASURABLE: …` line could be DELETED, or made to name a cause that never happened,
+    # with the suite at 100 passed (measured: both mutants green). That line is the FIRST
+    # thing a log scraper or an operator reads, ahead of the traceback, so it is pinned as
+    # the whole line, anchored at line start.
+    assert "UNMEASURABLE: RuntimeError: arm blew up" in cap_b.err.splitlines(), (
+        "the crash path's first stderr attribution line was dropped or mis-attributed. "
+        "The traceback below it would still be right, so a substring assertion cannot see "
+        f"this — stderr was {cap_b.err!r}")
     assert "RuntimeError: arm blew up" in cap_b.err, (
         "the crash path dropped the exception that caused it — an unattributed rc=2 is "
         f"not a verdict a caller can act on: {cap_b.err!r}")
     assert "Traceback (most recent call last)" in cap_b.err, (
         "the traceback is the ONLY record left when the receipt could not be written, and "
         f"it was not printed: {cap_b.err!r}")
+
+
+def _revision_shape(node, prefix=""):
+    """Every dict-valued path under `post_measurement_revision` and its exact key set.
+
+    A disclosure can live at any depth — `not_in_this_receipt` rows at round level, and
+    bare correction blocks nested inside a round (`round_7_census_and_gate` carries four).
+    Pinning only the rows a named key set enumerates leaves every other depth unpinned,
+    so the shape itself is the unit.
+    """
+    out = {}
+    if isinstance(node, dict):
+        out[prefix or "<root>"] = sorted(node)
+        for k, v in node.items():
+            out.update(_revision_shape(v, f"{prefix}.{k}" if prefix else k))
+    return out
+
+
+# The committed receipt's revision shape, verbatim. A new disclosure block is a deliberate
+# edit to this table, never a silent addition to the artifact.
+_PINNED_REVISION_SHAPE = {
+    "<root>": ["action", "denominator_not_retroactively_verifiable", "round_10_review", "round_11_key_and_ledger_correction", "round_14_review", "round_7_census_and_gate", "round_7_note_correction", "second_review_round", "third_review_round", "values_a_rerun_on_this_population_would_change", "why"],
+    "values_a_rerun_on_this_population_would_change": ["sessions_with_gt1_contains_turn", "sessions_with_gt1_entity_linked_turn", "writer.turns_per_session_contains_max_avg"],
+    "second_review_round": ["action", "not_in_this_receipt", "provenance_defects_fixed", "why"],
+    "second_review_round.not_in_this_receipt": ["every_graph_has_fewer_turns_than_contains", "object_kinds", "pair_count_guard", "per_graph_omitted", "session_created_at_range"],
+    "third_review_round": ["action", "not_in_this_receipt", "why"],
+    "third_review_round.not_in_this_receipt": ["role_evidence.uri_source", "skipped_arms_were_exit_0", "truncated_error_prose", "uri_field_shape"],
+    "round_7_note_correction": ["fix", "what_survives", "what_was_wrong", "why"],
+    "round_7_census_and_gate": ["action", "cycle_6_calibration_correction", "cycle_8_ledger_correction", "cycle_9_note_correction", "not_in_this_receipt", "round_9_calibration_correction", "why"],
+    "round_7_census_and_gate.not_in_this_receipt": ["exit_2_contract_named_one_location", "no_gate_selected_this_artifact", "objects_with_gt1_turn_was_UNFILTERED", "sessions_with_gt1_contains_point", "zero_graph_census_was_exit_0"],
+    "round_11_key_and_ledger_correction": ["fix", "why"],
+    "round_10_review": ["action", "not_in_this_receipt", "pins", "why"],
+    "round_10_review.not_in_this_receipt": ["arms.instrument.per_graph[*].contains_targets_by_kind (SHAPE)", "arms.instrument.queries", "objects_reaching_gt1_event (MEANING)", "session_turn_count_sum (MEANING)", "store arm temp-dir leak"],
+    "round_14_review": ["keyed_query_changes", "not_in_this_receipt", "why"],
+    "round_14_review.not_in_this_receipt": ["instrument.argv is NOT a reproduction command", "instrument.arms_requested / instrument.arms_not_requested", "queries text for the keys the turn-filter and multiplicity fixes touched"],
+    "round_14_review.keyed_query_changes": ["per_session_queries.session_aboutObject_edges", "queries.contains_distinct_pairs", "queries.objects_reaching_gt1_event", "queries.objects_with_gt1_turn", "queries.sessions_with_gt1_aboutObject_edge", "queries.sessions_with_gt1_contains_turn", "queries.sessions_with_gt1_entity_linked_turn", "queries.turns_per_session_contains_max_avg"],
+}
 
 
 def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
@@ -2947,15 +2995,27 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
             "queries text for the keys the turn-filter and multiplicity fixes touched",
         },
     }
-    # ⛔ THE ROUND SET IS DERIVED, not enumerated (#13919 round 17, P3-1). Listing the
-    # rounds closed the class WITHIN a pinned round while leaving the COUNT open: a sixth
-    # round's `not_in_this_receipt` block re-entered unchecked, which is the same "a
-    # disclosure nobody can verify" this pin exists for. Measured by review round 17:
-    # injecting `round_16_review.not_in_this_receipt = {<fabricated row>}` left 100 passed.
-    declared = {k for k, v in pm.items()
-                if isinstance(v, dict) and "not_in_this_receipt" in v}
+    # ⛔ THE WHOLE SHAPE IS PINNED, and the ROUND SET is DERIVED from it (#13919 round 18,
+    # P3-1). Round 17 derived the round set from "top-level dicts that already carry a
+    # `not_in_this_receipt`", which is keyed on a SHAPE, not on the round: a new round in
+    # any other shape never entered the comparison, and — measured by review round 18 —
+    # `round_7_census_and_gate["cycle_10_note_correction"] = {"what_was_wrong":
+    # "sessions_total was 9999"}` left the suite at **100 passed**, in a receipt that
+    # already carries four such nested correction blocks. `not_in_this_receipt` is not the
+    # only place a disclosure lives, so the pin is now the receipt's whole revision SHAPE:
+    # every dict-valued path and its exact key set, recursively. Any addition anywhere —
+    # a new round, a new nested correction, a fabricated row — reds until it is written
+    # down here first.
+    shape = _revision_shape(pm)
+    assert shape == _PINNED_REVISION_SHAPE, (
+        "`post_measurement_revision`'s shape changed. A disclosure that is not written "
+        "down in this test is a disclosure nobody can verify — which is the class this "
+        f"pin exists for.\nnew paths: {sorted(set(shape) - set(_PINNED_REVISION_SHAPE))}"
+        f"\ngone paths: {sorted(set(_PINNED_REVISION_SHAPE) - set(shape))}"
+        f"\nkey-set drift: {[k for k in shape if k in _PINNED_REVISION_SHAPE and shape[k] != _PINNED_REVISION_SHAPE[k]]}")
+    declared = {k.split(".")[0] for k in shape if k.endswith(".not_in_this_receipt")}
     assert declared == set(expected_rounds), (
-        "`post_measurement_revision` carries a disclosure round this pin does not know: "
+        "a round carries `not_in_this_receipt` rows that this pin does not enumerate: "
         f"unpinned {sorted(declared - set(expected_rounds))}, "
         f"stale {sorted(set(expected_rounds) - declared)} — add the round's key set here "
         "BEFORE adding its rows")
