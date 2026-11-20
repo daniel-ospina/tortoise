@@ -6780,7 +6780,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9715` at this head (⛔ `:9683` was its value at `4df5a14635`; the row's OTHER statement of the same line was already corrected, so one present-tense fact must not carry two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> 10271, 10324) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9722` at this head (⛔ `:9683` was its value at `4df5a14635`; the row's OTHER statement of the same line was already corrected, so one present-tense fact must not carry two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> 10271, 10324) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
@@ -6795,7 +6795,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # suite GREEN (measured: `:9999` in both twins -> 422 passed) while the row asserted two
     # numbers for one `git grep` hit, which is exactly the defect `count == 1` exists to
     # catch. `count == 2` makes a half-move red (1) and an all-move red (0).
-    _twin = "sits at `:9715` at this head and on `origin/main` alike"
+    _twin = "sits at `:9722` at this head and on `origin/main` alike"
     assert _d5.count(_twin) == 2, (
         f"05-verify.md states the `register_source(..., raw_state=...)` line at `:9715` in this "
         f"phrasing {_d5.count(_twin)} time(s), and it must be stated exactly twice. Re-derive "
@@ -6812,7 +6812,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 269 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 270 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -6842,7 +6842,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
     # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28395` (the only hit), while
-    # `sed -n '28067p'` -> a docstring line of `entity_identity.resolve_entity_id`.
+    # `sed -n '28067p'` -> a docstring line of `_belief_timeline` (opens `:28048`) naming `entity_identity.resolve_entity_id`, not a line of that module.
     # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes FOUR commits, not
     # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
     # `:28178` (main's `#13724`), `:28178` -> `:28395` (`#13854`) — each hop measured on
@@ -16492,7 +16492,7 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 270 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
     any commit moving the line off `269` reds instead of leaving four comments behind (a
@@ -16706,7 +16706,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 269 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 270 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -16739,7 +16739,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 269 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 270 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
