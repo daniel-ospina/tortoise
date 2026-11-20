@@ -3057,6 +3057,18 @@ _D5_BLANK_COUNT_RE = re.compile(
 
 #: Every `grep` prescription whose `-`-anchored flag words are immediately followed by a quoted
 #: expression, plus the shape that makes a prescription BLANK-class.
+#: ⛔ AND THE CLASS IS THE MATCH SET THAT SURVIVES THE FLAGS, NOT THE EXPRESSION ALONE
+#: (#13995 review round 4, P2 — MEASURED on GNU grep 3.11). A `-`-anchored `c` does not by itself
+#: say a command counts THIS class: `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the
+#: NON-blank lines (measured: on the 4-line probe `+`, `-`, blank, `++`, `-c` gives 2 and `-vc`
+#: gives the 2 lines that are not `+`/`-` — same number, different class), and `-l`, `-L` and
+#: `-q` WIN over `-c` entirely (`-lc` prints the FILENAME, `-Lc` prints the files WITHOUT a match,
+#: `-qc` prints nothing — all measured). So the flags are read for what they do to the count: an
+#: INVERTED count is SEEN (`_d5_count_prescriptions`) and deliberately NOT graded against the
+#: positive class (`_d5_blank_class_prescriptions`), and a word carrying a count-SUPPRESSING flag
+#: is not a count request at all (`_requests_a_count`). Grading a complement count as this class
+#: would red a document that prescribes the blank count AND its complement — the false RED on a
+#: correct document this file treats as the worse direction.
 #: ⛔ THAT SENTENCE IS A SHAPE AND NOT A PROMISE ABOUT SPELLING (#13995 review, P2 — MEASURED).
 #: Earlier cuts claimed EVERY count prescription in the bundle regardless of how it was prefixed
 #: or worded, which is the false-PASS guarantee #13962 was filed against. That claim is FALSE in
@@ -3178,6 +3190,69 @@ _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
 #: an argument" — the list is the whole set, not a sample.
 _ARG_TAKING_SHORT_FLAGS = "efmABCdD"
 
+#: GNU grep's short flags that SUPPRESS a count, or replace its output with something else —
+#: measured on GNU grep 3.11: `-lc` prints the FILENAME, `-Lc` prints the files WITHOUT a match,
+#: `-qc` prints nothing at all. They WIN over `-c` whatever the cluster order (`-cl` is the same
+#: command as `-lc`), so a word carrying one of them is not a count request however the rest of
+#: its cluster is spelled (#13995 review round 4, P2).
+_D5_COUNT_SUPPRESSING_SHORT_FLAGS = frozenset("lLq")
+
+
+def _short_flag_head(word: str) -> str:
+    """The part of a short-flag cluster that is FLAGS — up to the first flag that takes an
+    argument (`-A2`: only `A` is a flag, `2` is its argument; `-ec`: `c` is `-e`'s pattern).
+
+    Shared by `_requests_a_count` and `_suppresses_the_count` so the two cannot disagree about
+    where a word stops being a run of flags (#13995 review round 4, P2).
+    """
+    head = []
+    for char in word[1:]:
+        if char in _ARG_TAKING_SHORT_FLAGS:
+            break  # the remainder of this word is that flag's argument
+        head.append(char)
+    return "".join(head)
+
+
+def _suppresses_the_count(word: str) -> bool:
+    """Does this ONE grep flag word suppress the count (`-l`, `-L`, `-q` in its FLAG part)?
+
+    Only the part before an argument-taking flag is examined: `-A2l` carries an `l` inside `-A`'s
+    argument, which is not a flag at all. Long words (`--count`, `--color=never`, `--`) cannot
+    carry a short cluster and are answered `False`.
+
+    ⛔ A SHORT WORD THAT CARRIES AN ATTACHED VALUE IS A DECLARED RESIDUAL, NOT A GUESS. A value
+    attached to a short flag is read as part of the cluster (`-f/tmp/pats`), so a path holding an
+    `l`, `L` or `q` makes this answer `True`. That spelling is already listed as unread in
+    `_D5_ANY_COUNT_EXPR_RE`'s residual block, and answering it `False` here keeps the reader on
+    the side of NOT grading it — the direction this file calls the worse one is a false RED on a
+    correct document, not a miss.
+    """
+    return (
+        word.startswith("-")
+        and not word.startswith("--")
+        and any(ch in _D5_COUNT_SUPPRESSING_SHORT_FLAGS for ch in _short_flag_head(word))
+    )
+
+
+def _inverts_the_match_set(flags: str) -> bool:
+    """Does this run of grep flags INVERT the match set (`-v` / `--invert-match`)?
+
+    A count under `-v` counts the COMPLEMENT of the expression, so the expression is not the class
+    that was counted — `grep -vc '^[+-]$'` counts the NON-blank lines. It is still a count of the
+    same SHAPE, and a document may legitimately prescribe both, so this is answered separately
+    from `_requests_a_count` rather than folding the two into one predicate: the inversion is
+    carried to `_d5_blank_class_prescriptions`, which declines to grade it against the positive
+    class (#13995 review round 4, P2 — MEASURED).
+    """
+    for word in flags.split():
+        if word == "--invert-match":
+            return True
+        if word.startswith("--") or not word.startswith("-"):
+            continue
+        if "v" in _short_flag_head(word):
+            return True
+    return False
+
 
 def _requests_a_count(flags: str) -> bool:
     r"""Does this run of grep flags ask for a COUNT?
@@ -3197,18 +3272,73 @@ def _requests_a_count(flags: str) -> bool:
     A long flag is a count only
     as the one long spelling, `--count` — which is why `--` (end of flags) and `--color=never`
     are correctly not counts.
+
+    ⛔ BUT "HAS A `c`" IS NOT THE SAME AS "COUNTS THIS CLASS", IN TWO DIRECTIONS
+    (#13995 review round 4, P2 — MEASURED on GNU grep 3.11). A flag can leave the count's SHAPE
+    intact while changing WHAT is counted, or can suppress the count outright:
+
+      * `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the NON-blank lines. That IS a
+        count and is answered `True` here — the inversion travels with the flags to
+        `_d5_blank_class_prescriptions`, which refuses to grade it against the positive class
+        (`grep -vc '^[+-]$'` counts a DIFFERENT class, not a second prescription of this one).
+      * `-l`, `-L` and `-q` WIN over `-c`: `-lc` prints the FILENAME, `-Lc` prints the files
+        WITHOUT a match, `-qc` prints nothing. None of them counts anything, so a word carrying
+        one — the whole set lives on `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` — is answered `False`
+        however its cluster is ordered (`-cl` is the same command as `-lc`).
     """
-    for word in flags.split():
+    words = flags.split()
+    # The suppressor check runs over the WHOLE run, not word by word in order: `--count -q` is
+    # `-q` winning over a long-spelled count, so an early `return True` at `--count` would read a
+    # command that prints nothing as a count (#13995 review round 4, P2).
+    if any(_suppresses_the_count(word) for word in words):
+        return False
+    for word in words:
         if word == "--count":
             return True
         if word.startswith("--") or not word.startswith("-"):
             continue
-        for char in word[1:]:
-            if char == "c":
-                return True
-            if char in _ARG_TAKING_SHORT_FLAGS:
-                break  # the remainder of this word is that flag's argument
+        if "c" in _short_flag_head(word):
+            return True
     return False
+
+
+def _d5_count_commands(bundle: str) -> list[tuple[str, str]]:
+    """`(flags, expression)` for every count command `_D5_ANY_COUNT_EXPR_RE` sees and
+    `_requests_a_count` then admits.
+
+    Split out so the two consumers below cannot disagree about what was seen: the FLAGS have to
+    travel with the expression, because a count under `-v` is a count of a different class and is
+    not decidable from the expression alone (#13995 review round 4, P2).
+    """
+    return [
+        (match.group("flags"), match.group("expr"))
+        for match in _D5_ANY_COUNT_EXPR_RE.finditer(bundle)
+        if _requests_a_count(match.group("flags"))
+    ]
+
+
+def _d5_blank_class_prescriptions(bundle: str) -> list[str]:
+    """The expressions of the count commands that count THIS class — positive match set only.
+
+    A `-v`-bearing count is deliberately EXCLUDED even when its expression is the BLANK class: it
+    counts the complement, i.e. a different class, so it is not a second prescription of this
+    one. Grading it would red a correct document that prescribes the blank count and its
+    complement together — with "so this arm would execute one of them while a reader follows
+    another", a sentence that is false in that case — and a false RED on a correct document is
+    the failure mode this file treats as the worse one (#13995 review round 4, P2 — MEASURED).
+
+    ⛔ THE EXCLUSION HAS A RESIDUAL AND IT IS STATED, NOT IMPLIED: because the test is on the
+    FLAGS, an inverted command whose expression is NOT the blank-class literal is unread even when
+    it would count the blank lines (`grep -vc '^[+-][^+-]'`). That is a shape this arm does not
+    read — pinned as `[]` in
+    `test_the_d5_count_reader_does_not_grade_a_complement_or_suppressed_count_as_this_class` —
+    never a claim that the class is prescribed once in the document. A guard may be narrow, but may
+    not describe itself as complete (this file's own rule).
+    """
+    return [
+        expr for flags, expr in _d5_count_commands(bundle)
+        if not _inverts_the_match_set(flags) and _D5_BLANK_CLASS_EXPR_RE.fullmatch(expr)
+    ]
 
 
 def _d5_count_prescriptions(bundle: str) -> list[str]:
@@ -3228,14 +3358,16 @@ def _d5_count_prescriptions(bundle: str) -> list[str]:
 
     The count flag is what makes a `grep` a prescription to be counted, so the filter is
     `_requests_a_count`, never a spelling of the flag run. Measured control: each of #13962's
-    SEVEN mutants returns exactly one BLANK-class expression here, and the two filter stages in
-    the same cell (`grep -E`, `grep -vE`) return none.
+    SEVEN mutants returns exactly one expression here and exactly one BLANK-class expression from
+    `_d5_blank_class_prescriptions`, and the two filter stages in the same cell (`grep -E`,
+    `grep -vE`) return none.
+
+    ⛔ THIS IS THE SEEN SET, NOT THE GRADED SET, and that is deliberate: a `-v` count is seen here
+    (`grep -vc '^[+-]$'` IS a count command) and excluded by `_d5_blank_class_prescriptions`,
+    because it counts the complement rather than this class. Keeping it visible is what lets the
+    exclusion be falsifiable — the cell pins both halves (#13995 review round 4, P2).
     """
-    return [
-        match.group("expr")
-        for match in _D5_ANY_COUNT_EXPR_RE.finditer(bundle)
-        if _requests_a_count(match.group("flags"))
-    ]
+    return [expr for _flags, expr in _d5_count_commands(bundle)]
 
 
 def _d5_blank_count_expression() -> str:
@@ -3252,7 +3384,10 @@ def _d5_blank_count_expression() -> str:
     bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
               / "05-verify.md").read_text(encoding="utf-8")
     prescriptions = _d5_count_prescriptions(bundle)
-    blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    # ⛔ NOT `[e for e in prescriptions if fullmatch(e)]`: the EXPRESSION alone does not say what
+    # was counted. `grep -vc '^[+-]$'` is a count of the COMPLEMENT, so it must not be graded
+    # against the positive class — the filter owns the flags too (#13995 review round 4, P2).
+    blank_prescriptions = _d5_blank_class_prescriptions(bundle)
     # ⛔ ZERO AND MANY ARE TWO DIFFERENT DEFECTS AND GET TWO DIFFERENT MESSAGES (#13962). The
     # single `== 1` this replaces rendered the ZERO case as "prescribes 0 BLANK-line count
     # commands ([] of […]), so this arm would execute one of them while a reader follows
@@ -3450,6 +3585,86 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "a concatenated expression must be read as its FIRST fragment only — if it is now read "
         "whole, the comment's concatenation bullet is stale; if it is not read at all, the "
         "fragment claim is stale (#13995 review rounds 1-2)")
+
+
+def test_the_d5_count_reader_does_not_grade_a_complement_or_suppressed_count_as_this_class():
+    """#13995 review round 4 — a count is graded on WHAT IT COUNTS, not on `c` alone.
+
+    ⛔ MEASURED ON THE PRE-FIX READER, BOTH DIRECTIONS (GNU grep 3.11). `_requests_a_count`
+    answered `True` to every short cluster holding a `c`, which is false in two ways:
+
+      * `-l`, `-L` and `-q` WIN over `-c` — `-lc` prints the FILENAME, `-Lc` prints the files
+        WITHOUT a match, `-qc` prints nothing. No count, yet each was read as a count command.
+      * `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the NON-blank lines — a
+        DIFFERENT class — yet it was graded as a BLANK-class prescription. A document that
+        legitimately prescribes the blank count AND its complement therefore made
+        `len(blank_prescriptions) == 2`, and `_d5_blank_count_expression` redded a CORRECT
+        document with "so this arm would execute one of them while a reader follows another",
+        which is false in that case — the false RED on a correct document this file calls the
+        worse direction.
+
+    Non-vacuity: making `_requests_a_count` ignore `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` reds every
+    row in the first loop; dropping the flags from the graded filter
+    (`_d5_blank_class_prescriptions` → the expression-only list) reds every row in the second loop
+    and the control below.
+    """
+    # (1) A word carrying a count-SUPPRESSING flag is not a count request at all — `-c` is there,
+    # and it does not win. One measured spelling per suppressor, plus the order-reversed pair.
+    for suppressed in (
+        "grep -lc '^\\+$'",            # `-l` wins: prints the filename
+        "grep -Lc '^\\+$'",            # `-L` wins: prints the files WITHOUT a match
+        "grep -qc '^\\+$'",            # `-q` wins: prints nothing
+        "grep -cl '^\\+$'",            # …same command, cluster ordered the other way
+        "grep -c -q '^\\+$'",          # …same, flags split
+        "grep --count -l '^\\+$'",     # …same, long count form beside the suppressor
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{suppressed}`\n") == [], (
+            f"{suppressed!r} does not COUNT anything — `-l`/`-L`/`-q` win over `-c` (measured on "
+            "GNU grep 3.11) — so it is not a count prescription the reader may report, and it "
+            "certainly cannot be graded as this class (#13995 review round 4, P2)")
+
+    # (2) An INVERTED count IS a count, and it counts the COMPLEMENT — so the reader must SEE it
+    # and must NOT grade it against the positive class. Both halves are asserted: dropping it from
+    # the seen set would hide the command, and grading it would red a correct document.
+    for inverted in (
+        "grep -vc '^[+-]$'",              # `-v` clustered with `c`
+        "grep -cv '^[+-]$'",              # …same command, cluster ordered the other way
+        "grep -c -v '^[+-]$'",            # …same, flags split
+        "grep -Evc '^[+-]$'",             # …same, beside another short flag
+        "grep -c --invert-match '^[+-]$'",  # …same, the long spelling
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{inverted}`\n") == ["^[+-]$"], (
+            f"{inverted!r} IS a count command, so the reader must see it — the exclusion from "
+            "the graded set is what handles the inversion, not an omission from the seen set "
+            "(#13995 review round 4, P2)")
+        assert _d5_blank_class_prescriptions(f"a prescription: `{inverted}`\n") == [], (
+            f"{inverted!r} counts the COMPLEMENT of `^[+-]$`, i.e. a different class — counting "
+            "it as a BLANK-class prescription would red a document that prescribes the blank "
+            "count and its complement together (#13995 review round 4, P2)")
+        # …and the exclusion's RESIDUAL, stated so nothing here claims more than it does: the graded
+        # set never sees a `-v` count, so a command that counts the blank lines by inverting the
+        # NON-blank class (`grep -vc '^[+-][^+-]'`) is not graded here either. That is a shape this
+        # arm does not read — it is pinned, not glossed, so a future widening reds here.
+        assert _d5_blank_class_prescriptions(
+            "a prescription: `grep -vc '^[+-][^+-]'`\n") == [], (
+            "an inverted count is never graded against the positive class — which means the one "
+            "inverted spelling that WOULD count the blank lines is unread as well. Keep that "
+            "declared in the helper's docstring rather than implying the exclusion is lossless "
+            "(#13995 review round 4, P2)")
+
+    # (3) THE CONTROL — a document MAY carry both, and the arm still sees exactly ONE BLANK-class
+    # prescription. This is the false RED the fix removes, asserted as an outcome rather than as a
+    # rewrite of the predicate.
+    both = (
+        "- BLANK lines: `git diff origin/main...HEAD | grep -c '^[+-]$'`\n"
+        "- and the complement: `git diff origin/main...HEAD | grep -vc '^[+-]$'`\n")
+    assert _d5_count_prescriptions(both) == ["^[+-]$", "^[+-]$"], (
+        "both prescriptions are counts and both must be SEEN")
+    assert _d5_blank_class_prescriptions(both) == ["^[+-]$"], (
+        "a document prescribing the blank count AND its complement must yield exactly ONE "
+        "BLANK-class prescription — two would red it with 'so this arm would execute one of "
+        "them while a reader follows another', which is false for a complement count "
+        "(#13995 review round 4, P2 — the worse direction is a false RED on a correct document)")
 
 
 #: The completeness claims about `_D5_ANY_COUNT_EXPR_RE` that #13995's reviews retired, each
