@@ -2928,16 +2928,35 @@ _D5_BLANK_COUNT_RE = re.compile(
     r"that counts the BLANK ones at YOUR head")
 
 
+#: ANY count prescription of that shape in the bundle, whatever sentence follows it. This is
+#: what makes "exactly one" a property of the ROW rather than of one SPELLING (#13956 review,
+#: P2): the anchored pattern above is keyed to a fixed trailing phrase, so a SECOND
+#: prescription worded differently is invisible to it. Measured: re-inserting the superseded
+#: `^\+$` as its own sentence left the anchored extraction at `['^[+-]$']` and the arm GREEN
+#: while the row carried two BLANK-class count commands — the narrower one among them. A text
+#: ban cannot see that either, which is the same reason arm (5) exists at all.
+_D5_COUNT_COMMAND_RE = re.compile(
+    r"`git diff origin/main\.\.\.HEAD \\\| grep -cE '(?P<expr>[^']+)'`")
+
+
 def _d5_blank_count_expression() -> str:
     """The blank-line count expression as `05-verify.md` states it.
 
-    Loud on zero or many. Zero would make every assertion below vacuous — an inert arm of
-    exactly the kind (3) refuses for the ledger rows — and MANY would silently grade the
-    first of two prescriptions, which is how a cell ends up asserting one command while its
-    reader follows another.
+    Loud on zero or many — and MANY is checked TWICE, because it has two spellings that fail
+    differently. The ANCHORED pattern pins the sentence arm (5) grades; the SHAPE-ONLY one
+    counts every command of this form in the bundle, so a second prescription worded
+    differently cannot stand beside the graded one and go unread. Zero would make every
+    assertion below vacuous — an inert arm of exactly the kind (3) refuses for the ledger
+    rows — and MANY would silently grade the first of two prescriptions, which is how a cell
+    ends up asserting one command while its reader follows another.
     """
     bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
               / "05-verify.md").read_text(encoding="utf-8")
+    prescriptions = _D5_COUNT_COMMAND_RE.findall(bundle)
+    assert len(prescriptions) == 1, (
+        f"05-verify.md states {len(prescriptions)} count commands of this shape "
+        f"({prescriptions!r}), so this arm would grade one of them while a reader follows "
+        "another")
     found = _D5_BLANK_COUNT_RE.findall(bundle)
     assert len(found) == 1, (
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
