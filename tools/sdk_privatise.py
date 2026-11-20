@@ -312,14 +312,16 @@ SWEEP_NAMES = 66
 #: main is a red gate on every PR that touches nothing in this population (#14062).
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
 #:
-#: RE-CUT DOWN (11831, "…") → (11825, "539914480e400722") by the `#14001` lane, measured on
-#: `origin/main` `f392bb67d5`'s own tree. ⛔ THE SOURCE OF THIS RE-CUT IS `main`'S **TREE**, NOT ITS
-#: **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut at `d4a8dddc4e`) but
-#: `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as "11829 → 11825, delta −6" is
-#: arithmetically FALSE (11829 − 6 is 11823, and 11823 is the pair this lane first pasted before it
-#: measured). The drift is the one `#14062` documents and it recurs here: the pin is graded on PULL
-#: REQUESTS only, `main` merged `#14065` with nothing grading it, and `--check` is therefore RED on
-#: `main` today. `--repin` on THIS tree is the only source of the pair below.
+#: RE-CUT DOWN (11831, "1aef9c61f81faf39") → (11825, "539914480e400722") by the `#14001` lane,
+#: measured on `origin/main` `f392bb67d5`'s own tree. ⛔ THE SOURCE OF THIS RE-CUT IS `main`'S
+#: **TREE**, NOT ITS **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut at
+#: `d4a8dddc4e`) but `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as
+#: "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and 11823 is the pair this
+#: lane first pasted before it measured). Both `main` pairs here are `--repin` output, not
+#: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
+#: `11825, "539914480e400722"` is what THIS tree derives. The drift is the one `#14062` documents and
+#: it recurs here: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
+#: grading it, and `--check` is therefore RED on `main` today.
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
@@ -341,17 +343,6 @@ SWEEP_NAMES = 66
 #: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
 #: differs. Nothing else moved in either direction.
-#: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
-#: only states the count is what this block forbids. `main` re-cut to 11829 at `d4a8dddc4e`, then
-#: DRIFTED a further +2 before `f392bb67d5` — so `main`'s own tree measures 11831 against its own
-#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
-#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
-#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
-#: added by `ac57b2d38a` (`#14065`) — a concurrent merge between this pin and this tree. Both sit on
-#: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
-#: (`typed references still pointing at a public name: 0` on this tree).
-#: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
-#: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
 #: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
 #: only states the count is what this block forbids. `main` re-cut to 11829 at `d4a8dddc4e`, then
 #: DRIFTED a further +2 before `f392bb67d5` — so `main`'s own tree measures 11831 against its own
