@@ -2030,28 +2030,99 @@ class TestRelationshipsAndRemainingReads:
                                 {"id": mit["id"], "type": "point"})
         assert got.get("id") == mit["id"], got
 
-    def test_review_link_candidates_answers_both_directions(self, seeded):
+    def test_review_link_candidates_answers_both_directions(self, seeded,
+                                                            monkeypatch):
         """`add` is a LIST OF CANDIDATES, so a key-presence check proves only
-        that the envelope exists (`#13886` r6, F3). The seeded claim pair is
-        semantically related and unconnected, so the arm must PROPOSE it: an
-        endpoint of an `add` row is the seeded claim, and that row names the
-        relation it suggests. `prune` stays empty — nothing superseded is
-        seeded — and is asserted as the list a crash would break."""
-        door, s, _ = seeded
+        that the envelope exists (`#13886` r6, F3). Both directions are driven:
+        a related-but-UNCONNECTED pair is PROPOSED, and a pair the graph already
+        connects is NOT — even when it scores higher.
+
+        ⛔ The pre-fix row asserted `claim2`, an endpoint of the fixture's `IMPL`,
+        and its docstring called that pair unconnected. It is not: the seed
+        creates the operator (`create_operator("IMPL", claim, [claim2])` below),
+        and `_review_add` drops every pair `_connected_pairs` reports —
+        operator-mediated pairs included (`sdk.py:38110-38111`; the same fact the
+        `create_operator` case states 900 lines above). The row passed only
+        because two UNRELATED seeded sentences happened to clear the 0.72
+        paraphrase band on a box carrying the embedding weights (MEASURED:
+        `calibrated ↔ claim2` = 0.765 — that was the sole `add` row), so it was
+        measuring the embedder, not this arm. On the TF-IDF fallback
+        (`embeddings._encode` degrades when the model is unavailable, #399) the
+        whole pool ceilings at ~0.22, so `add == []` and the row reds on every
+        lane without the `embeddings` extra — and the file is registered on the
+        `core` surface (`config/ci-surfaces.yml`).
+
+        The pair this row proposes is therefore seeded HERE — deliberately
+        unconnected and meant to be proposed — and the pairwise SCORE is INJECTED.
+        The score source is not what this row owns (the embedder has its own
+        suites); the arm's own selection is: the floor it applies, the
+        connected-pair skip, the ordering, and the payload. Injecting the score
+        makes all four measurable on any box, with or without the model, and the
+        0.88 entry makes the SKIP an assertion instead of a coincidence.
+        """
+        from tortoise.embeddings import DEFAULT_THRESHOLD
+
+        door, s, sdk = seeded
+        # Seeded INSIDE the case, so no other arm's candidate pool changes.
+        src = sdk.create_point(
+            "statement",
+            "The review queue should propose a missing edge between two related "
+            "nodes.")["id"]
+        dst = sdk.create_point(
+            "statement",
+            "A review queue proposes an edge between two related nodes before "
+            "the graph asserts it.")["id"]
+        #: similarity by UNORDERED pair — the arm's business, never the embedder's
+        injected_scores = {
+            frozenset((src, dst)): 0.91,                    # unconnected → proposed
+            frozenset((s["claim"], s["claim2"])): 0.88,     # ALREADY IMPL-linked
+            frozenset((s["claim"], s["calibrated"])): 0.74,  # unconnected, over the floor
+        }
+
+        def _injected_pairwise_similarity(points):
+            ids = [p["id"] for p in points]
+            return {(a, b): injected_scores.get(frozenset((a, b)), 0.05)
+                    for i, a in enumerate(ids) for b in ids[i + 1:]}
+
+        # Same seam shape as the `_TRANSPORT_WAIT_BOUND_S` patch above: the
+        # call site reads it as a CLASS attribute at call time
+        # (`sim_fn = similarity_fn or self._default_pairwise_similarity`,
+        # `sdk.py:38103`), so a scoped attribute patch reaches the door's own
+        # per-request SDK instance.
+        monkeypatch.setattr(TortoiseSDK, "_default_pairwise_similarity",
+                            staticmethod(_injected_pairwise_similarity))
+
         status, out = door.call("tortoise_review_link_candidates", {})
         assert status == 200
         assert isinstance(out, dict), out
         add = out.get("add")
         assert isinstance(add, list) and add, out
-        endpoints = {member for row in add if isinstance(row, dict)
-                     for member in (row.get("from"), row.get("to"))}
-        assert s["claim2"] in endpoints, (
-            "the seeded unconnected pair is not proposed by the link-candidate "
-            f"read: {out}")
-        proposed = [row for row in add if isinstance(row, dict)
-                    and s["claim2"] in (row.get("from"), row.get("to"))]
-        assert proposed, out
-        assert all(row.get("suggested_relation") for row in proposed), out
+        proposed = [(row.get("from"), row.get("to")) for row in add
+                    if isinstance(row, dict)]
+        # 1. the pair the seed MEANT to propose, in the arm's ordered (a, b) shape
+        assert (min(src, dst), max(src, dst)) in proposed, (
+            f"the seeded unconnected pair is not proposed: {out}")
+        # 2. the pair the graph ALREADY connects, at a HIGHER score, is not —
+        #    the skip `_connected_pairs` exists for, now measured
+        assert not any({s["claim"], s["claim2"]} == set(pair)
+                       for pair in proposed), (
+            "`add` proposed a pair `_connected_pairs` reports as connected: "
+            f"{out}")
+        # 3. the floor is the PRODUCT's default, not whatever the caller gets
+        assert all(float(row["similarity"]) >= DEFAULT_THRESHOLD
+                   for row in add if isinstance(row, dict)), out
+        # 4. most similar first — a caller reading the head of the queue sees
+        #    the best candidate
+        similarities = [float(row["similarity"]) for row in add
+                        if isinstance(row, dict)]
+        assert similarities == sorted(similarities, reverse=True), out
+        # 5. the payload names the relation it suggests AND the score it measured
+        row = next(r for r in add
+                   if {r.get("from"), r.get("to")} == {src, dst})
+        assert row["suggested_relation"] == "IMPL", out
+        assert f"{float(row['similarity']):.2f}" in row["reason"], out
+        # 6. `prune` stays empty — nothing superseded is seeded — and is asserted
+        #    as the list a crash would break
         assert isinstance(out.get("prune"), list), out
         assert out["prune"] == [], out
 
