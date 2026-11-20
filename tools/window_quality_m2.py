@@ -826,10 +826,12 @@ def run(args: argparse.Namespace) -> int:
         snapshot invalidation and returns before any EP work.
 
         ⚠️ This is a WINDOW requirement, not a test detail — §7's window may not
-        serve a node it has demoted, on ANY leg. Recorded in the evidence record
-        and filed as its own issue, because the shipped egress executor
-        (``tortoise/cache_evictor.py`` ``_delete_nodes``) issues the same bare
-        ``DETACH DELETE`` and inherits the same staleness.
+        serve a node it has demoted, on ANY leg. Recorded in the evidence record, and
+        filed as its own issue **(#13123 — since LANDED)**: the shipped egress executor
+        (``tortoise/cache_evictor.py`` ``_delete_nodes``) issued the same bare
+        ``DETACH DELETE``, and now invalidates the snapshot itself on every delete
+        route, so this instrument's own call is belt-and-braces rather than the only
+        thing standing between a demoted node and the degraded tier.
         """
         try:
             cur["sdk"]._mark_dirty([])

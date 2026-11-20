@@ -388,6 +388,25 @@ def main(argv: list[str] | None = None) -> int:
     }
     _emit(body, args.out)
 
+    # ⛔ #13123: THE INVALIDATION THIS PASS DID IS PROCESS-LOCAL, and this verb is the
+    # one that runs in a DIFFERENT process from the API it is sweeping for. The eviction
+    # path drops the degraded-fallback corpus snapshot itself (so a deleted node cannot
+    # be served back for the snapshot TTL), but that store is in-memory in the process
+    # that holds it — a sweep driven from here cannot reach a serving process's copy.
+    # Saying so is not fatalism: it is the one fact an operator scheduling this verb
+    # needs, because the alternative reading is "the eviction invalidated the cache".
+    if report.deleted:
+        print(
+            f"#13123: {len(report.deleted)} node(s) were removed and the degraded "
+            f"snapshot of THIS process was invalidated "
+            f"(degraded_snapshot_invalidated="
+            f"{report.metric()['degraded_snapshot_invalidated']}). The snapshot store "
+            f"is PROCESS-LOCAL: a separate serving process still holds its own copy "
+            f"for up to the snapshot TTL. Run the sweeper in the process that serves "
+            f"degraded reads (#13103) if that bound is not acceptable.",
+            file=sys.stderr,
+        )
+
     # ⛔ EXIT 0 MEANS "NOTHING WAS EVICTED". A completed sweep that DID delete nodes
     # must not share it, or a scheduler cannot tell "nothing to do" from "deleted a
     # batch" — and the destructive half is the half it needs. An UNMEASURED after-count

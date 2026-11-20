@@ -733,7 +733,8 @@ epic exists to prevent is minted — but it is not a difference the window makes
 — `fallback_snapshot`'s 60 s
 in-memory corpus — is invalidated explicitly by the instrument (the record still serves *anchored* reads
 of a demoted node by design; what it cannot do is mint one as a candidate). So the zero is evidence for the
-invalidation hook (Finding 6, `#13123`), not proof that no compensating leg could ever exist. The
+invalidation hook (Finding 6, `#13123` — since **landed** on the eviction path itself, see
+`tortoise/cache_evictor.py::_delete_nodes`), not proof that no compensating leg could ever exist. The
 stronger reading would need a run in which a demotion is performed WITHOUT that invalidation.
 
 **No static eviction policy is a lever — and recency is UNTESTED here.** A smarter static ranking recovers

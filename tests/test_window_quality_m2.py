@@ -3154,17 +3154,19 @@ def test_every_quoted_figure_is_bound_to_its_own_arm(artifact):
         + "\n  ".join(missing))
 
 
-def test_the_evictor_still_does_not_invalidate_the_degraded_snapshot():
-    """The record's `#13123` claim is about CODE THIS PR DOES NOT CHANGE.
+def test_the_record_state_is_bound_to_whether_the_evictor_invalidates_the_snapshot():
+    """The record's `#13123` claim must match the CODE, in whichever direction.
 
-    ⛔ Measured: `grep -c 'fallback_snapshot\\|cache_evictor\\|record_serve'` on this
-    module was **0** (#13126 round 3), so the claim was true at this head purely
-    by luck of the tree. The verdict paragraph tells a reader the loss is silent
-    TODAY because `cache_evictor._delete_nodes` issues a bare `DETACH DELETE` and
-    never invalidates `fallback_snapshot` — the day `#13123` lands, that callout
-    is false and nothing reds. This pin makes the record red in that PR instead of
-    letting it rot green, the same binding `test_the_record_quotes_the_current_
-    wording_of_the_honesty_item` already does for §7's prose.
+    ⛔ This pin was written NEGATIVE (“the evictor still does not invalidate”), because
+    the record told a reader the loss was silent TODAY and nothing would red the day
+    that stopped being true — measured: `grep -c` for the eviction path's own tokens on
+    this module was **0** (#13126 round 3), so the claim held only by luck of the tree.
+    #13123 has now landed, so the pin is INVERTED: the evictor DOES invalidate, and the
+    record says so.
+
+    Both halves are checked, so neither can drift alone. A tree where the eviction path
+    stops invalidating, and a record that still claims the loss is silent, are the two
+    ways this goes stale — and each reds here instead of rotting green.
     """
     src = (ROOT / "tortoise" / "cache_evictor.py").read_text(encoding="utf-8")
     assert "_delete_nodes" in src, (
@@ -3172,11 +3174,18 @@ def test_the_evictor_still_does_not_invalidate_the_degraded_snapshot():
         "claim rather than editing this pin")
     delete_path = src[src.index("def _delete_nodes"):]
     delete_path = delete_path[:delete_path.find("\ndef ", 10) if "\ndef " in delete_path[10:] else len(delete_path)]
-    for token in ("fallback_snapshot", "_mark_dirty", "invalidate"):
-        assert token not in delete_path, (
-            f"`cache_evictor._delete_nodes` now mentions {token!r} — #13123 may have "
-            f"landed, which makes the record's 'the loss is silent' callout stale; "
-            f"correct the record in that PR and then relax this pin")
+    assert "_invalidate_degraded_snapshot" in delete_path, (
+        "`cache_evictor._delete_nodes` no longer invalidates the degraded snapshot — "
+        "an evicted node would be returnable for up to 60 s (#13123), and the record "
+        "now tells a reader the opposite")
+    readme = (ROOT / "docs" / "evidence" / "12186-m2-windowed-quality" /
+              "README.md").read_text(encoding="utf-8")
+    assert "never invalidates" not in readme, (
+        "the record still says the evictor never invalidates `fallback_snapshot` — "
+        "#13123 landed, so that callout is stale and a reader would take the shipped "
+        "path for one that serves demoted nodes")
+    assert "#13123" in readme and "landed" in readme, (
+        "the record no longer states where the eviction-path invalidation lives")
 
 
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):
