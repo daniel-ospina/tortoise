@@ -55,6 +55,10 @@ explicit comment says so, and its leg gate FAILS on any skip, #9551), while the
 sharded ``test`` job arms a graph and no record DSN. So the cross-store equality
 (``missing_in_cache: 0`` on the read name) executes on a lane that has both
 stores and nowhere else; the plumbing that would break it is covered above.
+⛔ **Tracked as #14077**, because arming it is a CI-infrastructure change
+(provision both stores in one job + live with #9551's any-skip gate), not a test
+edit — and a claim that reads as covered while nothing executes it is the
+false-confidence direction.
 
 ⛔ What is NOT here, named so the absence is visible: the write path does not
 gain a control-plane read (a per-write lookup would put a network call on the hot
