@@ -1587,6 +1587,31 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\] = old$',
         r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", f"\{uri\}_\{uuid\.uuid4\(\)\.hex\[:10\]\}"\)$'],
+    # ── test_13557_13558_reachable_reads.py — DELIBERATE_URI, one SET site ──
+    # `1231060fd2` (#13833) landed this module with its one mutation site
+    # untriaged, so this register is RED on `main` for it (#13903) — the same
+    # "module lands a URI mutation, the census is not updated" shape as #13416
+    # and #13267 above, and #12521 / #9664 before them. The site is the `sdk`
+    # fixture:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", _uri())
+    # and it PINS the lane the module's own availability probe already found,
+    # exactly as `test_13302_ended_read.py`'s site does: `_probe([...])` tries
+    # the ambient value, the docker seam and the legacy seam in turn and returns
+    # the FIRST one that answered, as `_WORKING_URI`; `_uri()` prefers the
+    # ambient value, then that measured lane, then the docker seam. The whole
+    # module is `_docker_only` (it SKIPS when neither seam answered), and its
+    # assertions are live Cypher reads over a real store — so without the setenv
+    # the `TortoiseSDK(...)` construction below would inherit whatever the box
+    # holds and could land somewhere the probe never verified, which would make
+    # an embedded fake certify a docker-lane claim. The mutation is the lane PIN
+    # (DELIBERATE_URI), not a silent downgrade.
+    # `monkeypatch` is the fixture param, so pytest auto-restores it and the
+    # restoration guard is satisfied without any save/restore pair.
+    # ⛔ Anchored to the whole stripped line, like every row above: a future
+    # setenv of a DIFFERENT expression in this file is a different site and
+    # must be triaged rather than riding along on this arm (#11083).
+    "test_13557_13558_reachable_reads.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
