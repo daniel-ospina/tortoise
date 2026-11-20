@@ -383,16 +383,24 @@ def write(event: Mapping[str, Any], *,
     ``fold=False`` lets the SDK's door keep its own fold decision while still
     getting the append→record ordering and the named outcome from here.
 
-    ⚠️ ``tenant`` is consumed ONLY by the DEFAULT project — the ``project is
-    None`` arm, where this module builds `record_writer.write_live_record` and
-    hands the pair to it (#13345 review P3-2). A door that supplies its OWN
-    ``project=`` must carry the tenant THROUGH that callable; a ``tenant=``
-    passed alongside it is IGNORED, so passing one there reads as load-bearing
-    while doing nothing. The SDK door is the live example: it passes
-    ``project=self._write_record_projection``, and that callable reads
-    ``self._record_tenant`` itself — the tenant reaches the seam by value from
-    there, not from a ``tenant=`` on this call (#9192's class if a future door
-    got that wrong: MIS-SCOPED rows, filed silently).
+    ⛔ ``tenant`` IS CONSUMED ON EVERY ARM SINCE #14002, and the paragraph that
+    used to sit here said the opposite ("consumed ONLY by the DEFAULT project …
+    IGNORED … reads as load-bearing while doing nothing", naming the SDK door as
+    the example). The pre-append cutover decision is asked with THIS pair
+    (:func:`record_writer.record_owns_position`), and it must be asked about the
+    graph the write is going to land on — so a door that supplies its own
+    ``project=`` must pass ``tenant=`` AS WELL AS carrying the pair through its
+    callable. The SDK door is the example of the CORRECT shape: it passes
+    ``tenant=self._record_tenant`` and ``project=self._write_record_projection``,
+    which reads the same attribute, so one request's decision and its allocation
+    cannot be about two graphs. Removing that argument (the conclusion #13345
+    P3-2 originally reached — it was true then) makes the decision resolve the
+    AMBIENT tenant while the seam allocates for the door's own pair: the append is
+    skipped for graph A while the row is allocated on graph B — #9192's
+    mis-scoping class, or a write in neither store, filed silently. When
+    ``tenant`` is ``None`` the resolution is the seam's own
+    (`record_tenant_effective`: carried > scope > env pair), the same one the
+    default project uses, so the two halves still agree.
 
     ⛔ A FAILED APPEND PROPAGATES. The callers already turn it into their own
     accounting (`_emit_event` counts `tortoise_journal_write_failures_total`

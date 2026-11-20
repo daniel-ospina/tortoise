@@ -7809,6 +7809,17 @@ class JournalCoverage:
     #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
     #: reason `RecordReconcileResult.journal` is.
     gap_measured: bool = True
+    #: Does the RECORD own the ordinal on this graph — i.e. is the journal an
+    #: EXPORT rather than an input (#14002)? ``True`` means the write path does
+    #: not append (:func:`record_writer.record_owns_position` answered yes: the
+    #: deployment is armed and the graph's `record_cursor` row is `active`), so
+    #: the file stops growing while `public.journal_event` keeps gaining rows.
+    #: ⛔ THAT MAKES ``present > enumerated`` THE HEALTHY STATE, not the
+    #: contradiction :attr:`unprojected_unknown_reason` was written to refuse —
+    #: see its docstring. Default ``False`` keeps every pre-cutover reading (and
+    #: every hand-built `JournalCoverage` in a test) byte-identical. APPENDED
+    #: LAST for the same positional-rebind reason as the field above.
+    journal_is_export: bool = False
 
     @property
     def unprojected_unknown_reason(self) -> str | None:
@@ -7846,6 +7857,19 @@ class JournalCoverage:
         """
         if self.enumerated is None:
             return "the journal could NOT be counted"
+        if self.journal_is_export:
+            # ⛔ NOT A CONTRADICTION ON A CUT-OVER GRAPH (#14002). The arm below
+            # is right about a journal that is still an INPUT — a record cannot
+            # hold a position its journal never issued. But where the RECORD owns
+            # the ordinal the append stops and `public.journal_event` keeps
+            # growing, so `present > enumerated` is the NORMAL, healthy state and
+            # the file is behind by construction. Reporting it as impossible
+            # disarmed the dense leg (`record_vector._measure_readiness` reads
+            # this `None` as "contradiction" and falls back to the graph for
+            # ever) and made `record-reconcile --journal` unable to report clean
+            # on a healthy cut-over pair — the arming step `journal_ready`'s own
+            # docstring tells an operator to run.
+            return None
         if int(self.present) > int(self.enumerated):
             if int(self.enumerated) == 0:
                 return (f"the journal enumerates NO records while the record "
@@ -7903,6 +7927,7 @@ class JournalCoverage:
             "unprojected": self.unprojected,
             "contiguous": self.contiguous,
             "gap_measured": self.gap_measured,
+            "journal_is_export": self.journal_is_export,
         }
 
 
@@ -7956,6 +7981,7 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
             if gap_row:
                 gap = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
                 gap = None if gap is None else int(gap)
+        export = _journal_is_export(cursor, org_id, graph_id)
     finally:
         cursor.close()
     return JournalCoverage(
@@ -7963,7 +7989,39 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
         first_gap=gap,
         enumerated=None if enumerated is None else int(enumerated),
         gap_measured=bool(want_gap),
+        journal_is_export=export,
     )
+
+
+def _journal_is_export(cursor: Any, org_id: str, graph_id: str) -> bool:
+    """Does the RECORD own this graph's ordinal — so the file is an EXPORT (#14002)?
+
+    The same two facts :func:`record_writer.record_owns_position` requires — the
+    deployment is armed AND the graph's `record_cursor` row is `active` — read
+    on the caller's ALREADY-SCOPED cursor, so this costs one SELECT on a
+    connection the reading holds anyway and never a second `scope_connection`.
+
+    ⚠️ A READ THAT FAILS ANSWERS ``False``, and the direction is deliberate: the
+    pre-#14002 reading then stands (a `present > enumerated` file is treated as
+    the contradiction it always was). The other way round would let a failed
+    read quietly bless a rotated journal — a false CLEAN on the one surface that
+    exists to detect it. The cost is that a transient failure keeps the dense leg
+    on the graph branch for this request, which is exactly what an unreadable
+    record does today.
+    """
+    try:
+        from . import record_writer
+
+        if not record_writer.record_live_allocate():
+            return False
+        cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
+        row = cursor.fetchone()
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring's fail-closed note
+        return False
+    if not row:
+        return False
+    mode = row["mode"] if isinstance(row, Mapping) else row[1]
+    return str(mode) == MODE_ACTIVE
 
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,

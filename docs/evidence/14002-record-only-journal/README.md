@@ -91,6 +91,7 @@ continuously), scaled down to a deterministic count.
 | `record_writes_applied` delta | **+120** (1:1 with the writes) |
 | JSONL size / mtime over the window | **unchanged** (0 bytes → 0 bytes, same `st_mtime_ns`) |
 | `LiveWrite.appended` | `False` for all 120 |
+| `JournalCoverage.journal_is_export` (a real scoped read) | `True`, and `unprojected == 0` — not the contradiction arm |
 
 Run: `TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 uv run pytest
 tests/test_14002_record_only_journal.py -q` →
@@ -166,14 +167,25 @@ cutover by the same window. The measured cost above is the alternative.
    (`recover_from_log` is gated on `self._is_embedded and not is_prod`) and an
    armed hosted box does not run them. If that ever stops being true, this gate
    belongs in `FalkorProjection.rebuild_all`, where all three would inherit it.
-2. **`unprojected_journal` is the wrong question on a cut-over graph.**
-   `record-reconcile --journal` and `journal_coverage` compare the journal's
-   enumeration with `journal_event`; once the file stops growing it is *behind
-   the record by construction*, and an enumerated replay there is refused
-   anyway. The record's own readers are the ones to use. `LiveWrite.unprojected`
-   is `0` on the skip arm for the same reason (`0` = no line was missed), and
-   the loss case — if the record refuses a skip-arm write — is the pair
-   `appended=False, applied=False`.
+2. **`present > enumerated` is the HEALTHY cut-over shape, and every reader of
+   coverage had to be told so.** `journal_coverage` compares the journal's
+   enumeration with `journal_event`; once the file stops growing the record holds
+   positions its journal never issued, which `JournalCoverage.
+   unprojected_unknown_reason` used to refuse as a CONTRADICTION ("that file
+   cannot be the journal that fed this record"). That arm was right while both
+   allocators advanced together and it is wrong now: read as impossible it
+   (i) disarmed the dense leg for ever — `record_vector._measure_readiness` reads
+   the `None` as a contradiction and keeps the GRAPH branch, with a WARNING
+   claiming the journal could not have fed the record — and (ii) made
+   `record-reconcile --journal` unable to report clean on a healthy pair, which is
+   the arming step `journal_ready` tells an operator to run. So the reading now
+   carries `journal_is_export` (the same two facts `record_owns_position` asks:
+   armed + an `active` cursor row), and that shape answers `unprojected == 0`
+   instead. **Found by review cycle 2, not by the lane** — the module text it
+   contradicts said "every healthy graph satisfies it … so no correct deployment
+   is refused by this", which was true before this change. `LiveWrite.unprojected`
+   `0` on the skip arm is the same fact one layer down, and the loss case — if the
+   record refuses a skip-arm write — is the pair `appended=False, applied=False`.
 3. **A skip-arm record refusal is not replay-healable.** There is no line. The
    door counts it (`record_write_failures`) and WARNs that the write is in
    NEITHER store, naming the remedy (the allocator's own status/repair), not a

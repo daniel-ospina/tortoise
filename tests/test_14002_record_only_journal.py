@@ -401,12 +401,75 @@ def test_the_seam_refuses_an_unproven_position_unless_the_append_was_skipped():
         "the enumerated arm with no ordinal at all")
 
 
-def test_the_guard_itself_is_untouched():
-    """⛔ THE ISSUE FORBIDS FIXING THIS BY WEAKENING THE GUARD.
+class _GuardConn:
+    """A connection double that records the guard's rollback."""
 
-    The divergence check must still run for any ordinal a caller holds (a direct
-    caller, a pre-cutover graph, `backfill_copy_turns`). The fix removes the
-    second allocator; it does not relax the comparison.
+    def __init__(self):
+        self.rolled_back = 0
+        self.committed = 0
+        self.closed = 0
+
+    def rollback(self):
+        self.rolled_back += 1
+
+    def commit(self):
+        self.committed += 1
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_divergence_guard_still_REFUSES_a_caller_held_ordinal(
+        monkeypatch):
+    """⛔ THE ISSUE FORBIDS FIXING THIS BY WEAKENING THE GUARD, AND THIS IS
+    BEHAVIOURAL, not a source-substring check (#14002 review cycle 2, P3).
+
+    The check must still fire for any ordinal a caller HOLDS — a direct caller, a
+    pre-cutover graph, `backfill_copy_turns` — and must still roll the allocation
+    back. MEASURED-REWRITTEN: an earlier cut of this leg asserted two substrings of
+    `write_live_record`'s source, and a mutant that turned the guard's own test
+    into `if False:` kept BOTH substrings intact — i.e. the pin passed with the
+    guard fully disabled. So this drives the door: the allocation is stubbed to
+    issue a DIFFERENT number than the ordinal handed in, and the door must answer
+    REFUSED, roll back, and never commit.
+    """
+    from tortoise import monitoring
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+    monkeypatch.setenv(rw.RECORD_ALLOCATE_ENV, "1")
+    conn = _GuardConn()
+    monkeypatch.setattr(rw, "_live_write_verdict",
+                        lambda **_kw: (None, ("org", "graph"), None))
+    monkeypatch.setattr(rw, "_default_connect", lambda _dsn: conn)
+
+    def _write_records(records, **kwargs):
+        # The counter issues 4 while the caller holds the journal's 9.
+        return SimpleNamespace(applied=True, first_seq=4, last_seq=4,
+                               connection=conn, statements=1, events=1,
+                               written_bytes=1, written_rows=1)
+    monkeypatch.setattr(rw, "write_records", _write_records)
+
+    before = dict(monitoring.record_write_failure_counts())
+    result = rw.write_live_record(RECORD, durable=True, seq=9,
+                                  tenant=("org", "graph"), allocate=True)
+    after = dict(monitoring.record_write_failure_counts())
+
+    assert result is not None and not result.applied, (
+        "the door APPLIED a write whose ordinal (9) disagrees with the number "
+        "the allocator issued (4) — the divergence guard is disabled, and the "
+        "journal line and its position row would sit at different numbers")
+    assert result.refusal == "write_failed"
+    assert conn.rolled_back == 1, (
+        "the allocation was not rolled back — the position would be BURNED")
+    assert conn.committed == 0, "a refused divergent write was committed"
+    assert after.get("write_failed", 0) == before.get("write_failed", 0) + 1
+
+
+def test_the_guard_still_COMPARES_on_the_source():
+    """The supplement: the comparison is spelled with `seq is not None`.
+
+    Kept BESIDE the behavioural leg above, not instead of it — this one catches a
+    reformat quickly, the behavioural one catches a disabled guard.
     """
     import inspect
 
@@ -415,7 +478,42 @@ def test_the_guard_itself_is_untouched():
         "the cutover invariant's comparison was changed — the guard is right "
         "and is the only thing that kept the record honest while both "
         "allocators existed (#14002 explicitly forbids weakening it)")
-    assert "position_divergence" in source
+
+
+def test_a_cut_over_reading_is_not_reported_as_an_impossible_journal():
+    """⛔ THE P1 OF REVIEW CYCLE 2, AS A LEG: the skip makes `present >
+    enumerated` the HEALTHY shape.
+
+    `JournalCoverage.unprojected_unknown_reason` treats "the record holds a
+    position its journal never issued" as a contradiction. That was right while
+    the append and the counter advanced together — and #14002 makes it the normal
+    state of every cut-over graph, because `ALLOCATION_SQL` keeps INSERTing into
+    `public.journal_event` while the JSONL stops growing. Read as a
+    contradiction, it (i) disarmed the dense leg for ever
+    (`record_vector._measure_readiness` returns `False`, with a WARNING claiming
+    the journal could not have fed the record) and (ii) made
+    `record-reconcile --journal` unable to report clean on a healthy pair — the
+    arming step `journal_ready` tells an operator to run.
+    """
+    from tortoise.record_projection import JournalCoverage
+
+    export = JournalCoverage(present=120, high_seq=120, min_seq=1,
+                             within_prefix=0, enumerated=0,
+                             journal_is_export=True)
+    assert export.unprojected_unknown_reason is None, (
+        "a cut-over reading was refused as a contradiction — the dense leg and "
+        "`record-reconcile` are then permanently unable to pass on the very "
+        "graphs #14002 cut over")
+    assert export.unprojected == 0
+    assert export.as_dict()["journal_is_export"] is True
+
+    # A truncated and REGROWN journal is still the contradiction it always was:
+    # the only difference between the two shapes is whether the record OWNS the
+    # ordinal on this graph, which is what the flag carries.
+    truncated = JournalCoverage(present=120, high_seq=120, min_seq=1,
+                                within_prefix=3, enumerated=3)
+    assert truncated.unprojected is None
+    assert "cannot hold a position" in (truncated.unprojected_unknown_reason or "")
 
 
 # ── 4. the rebuild door: the journal is no longer the rebuild source ─────
@@ -848,6 +946,61 @@ def test_the_falsifier_an_appending_cut_over_graph_wedges_and_grows_the_file(
     assert counter is not None and counter[0] == 1, (
         "the refused write moved the counter — the rollback is the half that "
         "keeps the position from being burned")
+
+
+@pytestmark_live
+def test_the_coverage_reading_knows_the_journal_is_an_export_here(
+        monkeypatch, record_schema, tmp_path):
+    """⛔ THE REVIEW-CYCLE-2 P1, EXECUTED AGAINST A REAL RECORD (#14002).
+
+    After a handful of record-only writes the record holds positions its journal
+    never enumerated (the file was never appended). The reading must say so —
+    `journal_is_export` — and must NOT report the contradiction, because
+    `record_vector._measure_readiness` reads a `None` `unprojected` as "this
+    journal cannot have fed this record" and keeps the GRAPH branch for ever,
+    and `record-reconcile --journal` cannot report clean. Both are the surfaces a
+    hosted cutover exists to serve.
+
+    The contrast leg is the same reading on a graph the record does NOT own: the
+    contradiction arm is still armed there (`tests/test_14002…::
+    test_a_cut_over_reading_is_not_reported_as_an_impossible_journal` covers it
+    DB-free).
+    """
+    from tortoise.record_projection import journal_coverage
+
+    journal = tmp_path / "events.jsonl"
+    journal.write_text("")
+    log = _journal(journal)
+
+    with _graph(monkeypatch, record_schema) as live:
+        for i in range(5):
+            live_write.write(_record(i), log=log, tenant=(live.org, live.graph))
+        # A REAL, SCOPED READER, the way `record_vector._measure_readiness` asks.
+        psycopg2 = pytest.importorskip("psycopg2")
+        from tests.test_9078_record_written_by_production_path import _app_role_dsn
+
+        reader = psycopg2.connect(
+            _app_role_dsn(os.environ["TEST_RECORD_DB_URI"]))
+        try:
+            cov = journal_coverage(reader, org_id=live.org,
+                                   graph_id=live.graph,
+                                   enumerated=log.position_readonly(),
+                                   want_gap=False)
+        finally:
+            reader.rollback()
+            reader.close()
+
+    assert journal.stat().st_size == 0, "the append happened on a cut-over graph"
+    assert cov.present == 5 and cov.enumerated == 0, (
+        f"the reading is not the cut-over shape: present={cov.present} "
+        f"enumerated={cov.enumerated}")
+    assert cov.journal_is_export is True, (
+        "the coverage reading did not recognise that this graph's record OWNS "
+        "the ordinal, so `present > enumerated` will be read as a contradiction")
+    assert cov.unprojected_unknown_reason is None and cov.unprojected == 0, (
+        f"a healthy cut-over pair read as unmeasurable "
+        f"({cov.unprojected_unknown_reason!r}) — the dense leg would disarm and "
+        "`record-reconcile` could never pass")
 
 
 @pytestmark_live
