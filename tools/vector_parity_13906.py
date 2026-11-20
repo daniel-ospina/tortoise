@@ -750,7 +750,20 @@ def run(args) -> dict:
         rows_ours = [r for r in rows if r.tenant == "ours"]
 
         # ── record arm ────────────────────────────────────────────────────
-        rec_answers = {qid: record.read(qvec, k) for qid, qvec in queries}
+        # ⛔ A record-leg FAILURE must arrive as a NAMED divergence, not a
+        # traceback: an uncaught `VectorShortfall` / `RecordVectorError` /
+        # `RecordVectorDeclined` escapes `main` as a stack trace and exits **1**,
+        # which this module's table defines as "a comparison diverged" — right
+        # answer, no diagnosis, and indistinguishable from a crash in the harness
+        # itself. `_verdict` fails any query carrying a `record_error`.
+        rec_answers: dict[str, list] = {}
+        rec_errors: dict[str, str] = {}
+        for qid, qvec in queries:
+            try:
+                rec_answers[qid] = record.read(qvec, k)
+            except Exception as e:  # noqa: BLE001 — record_vector's four, by name
+                rec_answers[qid] = []
+                rec_errors[qid] = f"{type(e).__name__}: {e}"
         report["arms"]["record"] = {"driver": "pgvector HNSW, cosine"}
 
         # ── graph arms: scan first (production today), then indexed ──────
@@ -831,6 +844,7 @@ def run(args) -> dict:
 
             entry = {
                 "query": qid,
+                "record_error": rec_errors.get(qid),
                 "truth_cosine": [key for key, _ in t_cos],
                 # ⛔ DISTANCES ARE ALWAYS PASSED, never conditionally. An earlier
                 # cut skipped them whenever the candidate list had been poisoned
@@ -844,8 +858,15 @@ def run(args) -> dict:
                 "graph_index": compare(
                     t_cos, idx_ids, k=k,
                     candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]),
+                # ⛔ A LOOSER TOLERANCE FOR THE SCAN, and it is arithmetic rather
+                # than indulgence: the scan reports `1/(1+d)` and this harness
+                # inverts it, so a relative float32 error `eps` in the score
+                # becomes `(1+d)·eps/s ≈ (1+d)²·eps` in the distance. At d≈100
+                # that is ~1e-3, i.e. the record arm's 1e-4 tolerance would report
+                # a FALSE RED on a corpus whose rows are far apart. The record and
+                # index arms carry a distance directly (`<=>`, `1-d`) and keep 1e-4.
                 "graph_scan_vs_euclidean": compare(
-                    t_euc, scan_ids, k=k,
+                    t_euc, scan_ids, k=k, distance_tol=1e-3,
                     candidate_distances=[d for _k2, d in scan_answers[qid]["rows"]]),
                 "graph_scan_vs_cosine": compare(t_cos, scan_ids, k=k,
                                                 candidate_distances=None),
@@ -940,6 +961,8 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         # dropped its `candidate_distances=` kwarg would delete the only
         # value-level check with every DB-free pin still green (measured in
         # review). A required arm must be MEASURED and agree.
+        if entry.get("record_error"):
+            failures.append(f"{q}: the record leg FAILED — {entry['record_error']}")
         dist_ok = (cmp_.get("distance") or {}).get("ok")
         if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
                 or cmp_["recall"] is None or dist_ok is not True):

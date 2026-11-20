@@ -201,6 +201,8 @@ here, and each has a DB-free pin.
 | **B1** the Cypher graph was never torn down — 20 stale `g13906parity*` graphs on the lane's instance, while the record rows were removed | `GRAPH.LIST` | `store.reset()` in the `finally`; verified `graphs after run: []` |
 | **D1** `--n-random 0` and `--queries 0` raised `IndexError` (the second AFTER both stores were seeded) | read the lines | `_validate_args` refuses before either store is touched |
 | **E1** no `durations:` row and no `ROWED_BY_THIS_FOLD` entry, so the fold-rule pin could not see this file | loaded the manifest | both added |
+| **E3** a `record.read` failure (`VectorShortfall` / `RecordVectorError` / `RecordVectorDeclined`) escaped `main` as a traceback — exit **1**, with no diagnosis and indistinguishable from a crash in the harness | read the call | captured per query as `record_error`; `_verdict` fails it by name (`test_a_record_leg_failure_is_a_named_divergence_not_a_traceback`) |
+| **E4** the scan arm inverted `1/(1+d)` and was compared at the record arm's `1e-4` tolerance — a relative float32 error `eps` in the score is ~`(1+d)²·eps` in the distance, i.e. ~1e-3 at d≈100, so a CORRECT scan would have been a FALSE RED on any far-apart corpus | arithmetic, pinned | the scan arm compares at `1e-3` with the reason stated (`test_the_scan_arm_tolerates_the_inversion_it_performs`) |
 | **E2** `raise SystemExit("cannot run: …")` exits **1**, which this module's own table defines as "a comparison diverged" — so a poisoned repro loop that could not measure printed `exit=1`, i.e. "falsifier confirmed" | read the contract | a typed `CannotRun` → exit **2**, pinned by `test_the_cli_refuses_argument_shapes_that_cannot_measure` |
 
 ### The two evidence errors this section exists to correct
@@ -243,7 +245,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **23 passed**.
+tests/test_vector_parity_13906.py -q` → **25 passed**.
 
 ## 7. What this artifact does NOT establish
 

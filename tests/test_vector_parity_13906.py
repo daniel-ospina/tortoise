@@ -378,3 +378,39 @@ def test_the_cli_refuses_argument_shapes_that_cannot_measure(harness):
     A.queries, A.n_random = 6, 0
     with pytest.raises(harness.CannotRun):
         harness._validate_args(A())
+
+
+def test_a_record_leg_failure_is_a_named_divergence_not_a_traceback(harness):
+    """`VectorShortfall`/`RecordVectorError` escape `main` as exit 1 — the code
+    this module reserves for "a comparison diverged", with no diagnosis."""
+    report = {"queries": [{"query": "q0",
+                           "record_error": "VectorShortfall: 8 of 10",
+                           "record": {"ids_equal": True, "order": "exact",
+                                      "recall": 1.0,
+                                      "distance": {"ok": True, "max_delta": 0.0}},
+                           "graph_index": {"ids_equal": True, "order": "exact",
+                                           "recall": 1.0},
+                           "graph_scan_vs_euclidean": {
+                               "ids_equal": True, "order": "exact",
+                               "recall": 1.0,
+                               "distance": {"ok": True, "max_delta": 0.0}},
+                           "metric_divergence_ids": []}]}
+    v = harness._verdict(report, poisoned=None)
+    assert v["ok"] is False
+    assert any("record leg FAILED" in f for f in v["failures"])
+
+
+def test_the_scan_arm_tolerates_the_inversion_it_performs(harness):
+    """`1/(1+d)` inverted is ill-conditioned for large d — a false RED otherwise.
+
+    A relative float32 error `eps` in the score becomes ~`(1+d)^2 * eps` in the
+    distance: at d = 100 that is ~1e-3, so the record arm's 1e-4 tolerance would
+    fail a CORRECT scan on any corpus whose rows are far apart.
+    """
+    truth_rows = [("a", 100.0), ("b", 101.0)]
+    ok = harness.compare(truth_rows, ["a", "b"],
+                         candidate_distances=[100.0008, 101.0008], distance_tol=1e-3)
+    assert ok["distance"]["ok"] is True
+    strict = harness.compare(truth_rows, ["a", "b"],
+                             candidate_distances=[100.0008, 101.0008], distance_tol=1e-4)
+    assert strict["distance"]["ok"] is False
