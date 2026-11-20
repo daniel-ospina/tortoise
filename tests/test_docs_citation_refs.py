@@ -2807,20 +2807,31 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "comment",
 )
 
-#: ⛔ THE SHAPE ARM, AND WHAT KEY IT ON. The false property claims the filter drops a line
-#: because a CHARACTER is `#`; the true one says the character **after the diff marker** is `#`.
-#: So the arm bans "`character` … is `#`" whenever the word **marker** does not appear in
-#: between — that is the property, not a spelling of it, and it is why this arm catches a
-#: RE-WORDED restatement (`first non-blank character is `#``) that no row of the tuple above
-#: matches (#13853 review round 17, P2-2; widened at round 18, which measured the escape).
-#: ⛔ DECLARED RESIDUAL, not a silent one (round 18, P2): the key is the WORD `marker`, this
-#: document's own vocabulary for the diff prefix. A writer who paraphrases the qualifier as
-#: well ("after the `+`/`-` prefix") gets a FALSE RED — the remedy is to name the marker, and
-#: the arm's message says so. Narrowing the key back to "after" re-opens the measured escape
-#: (`first non-blank character is `#`` passed 466 tests), which is the direction that fails
-#: OPEN, so the false-red direction is the one this arm accepts.
+#: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
+#: filter drops a line because a CHARACTER is `#`; the true one says the character AFTER the diff
+#: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a` `#`
+#: (backticked or not) inside a 400-character window that never names the **marker**.
+#:
+#: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
+#: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
+#: `marker` anywhere in the window — as a decoy, not as the qualifier — is NOT detected. Round 19
+#: measured six such escapes and this text exists because claiming otherwise was itself the
+#: defect: a permissive heuristic over prose is a FALSE PASS by this file's own policy, and no
+#: bounded regex closes a semantic class. So the mechanisms are three, and each is named:
+#:   · THIS shape ban — the property in the vocabulary this document actually uses;
+#:   · THE ROW LEDGER below — every spelling a review MEASURED, banned verbatim and pinned whole;
+#:   · REVIEW — new prose is judged, not grepped.
+#: Add a measured spelling as a ROW. Never widen this arm's claim to "the property cannot come
+#: back in different words": it cannot, and saying it can is the over-claim #13853 round 17/18/19
+#: each reded in turn.
+#:
+#: ⛔ THE FALSE-RED DIRECTION IS ACCEPTED AND STATED: a TRUE sentence that does not use the word
+#: `marker` ("after the `+`/`-` prefix") reds; reword it to name the marker. A false PASS on prose
+#: that misdescribes the filter is the failure this cell exists to retire, so the false red is the
+#: direction to accept.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
-    r"character(?:(?!\bmarker\b).){0,160}?is `#`", re.S)
+    r"\bchar(?:acter)?\b(?:(?!\bmarker\b).){0,400}?"
+    r"(?:is equal to|equals|is a|is)\s*`?#`?", re.S)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -2904,21 +2915,43 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "character is always `+` or `-` at that stage; the marker-qualified form is the true "
         "one. If this is an honest paraphrase, name the marker (#13853 review round 17, P2-2; "
         "round 18, P2)")
-    # ...and the shape arm must be able to FIRE, on every spelling of the false property the
-    # review MEASURED — the row list alone left the re-worded `non-blank` form green.
+    # ...and the shape arm must be able to FIRE, on every spelling of the false property a
+    # review has MEASURED — the row list alone left the re-worded `non-blank` form green, and
+    # round 19 measured six more. Each probe below is one of those, kept as a positive control so
+    # a later narrowing of the pattern cannot silently re-open it.
     for probe, expected in (
             ("… whose first non-space character is `#` — a comment …",
              "character is `#`"),
             ("… whose first non-blank character is `#` — a comment …",
              "character is `#`"),
+            ("… whose first non-space character equals `#` …",
+             "character equals `#`"),
+            ("… whose first non-space character is equal to `#` …",
+             "character is equal to `#`"),
+            ("… whose first non-space char is `#` …",
+             "char is `#`"),
+            ("… whose first non-blank character is a `#` …",
+             "character is a `#`"),
+            ("… whose first non-blank character is # …",
+             "character is #"),
             ("… whose first character after its leading spaces is `#` …",
              "character after its leading spaces is `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
-            "restatement would pass it (#13853 review round 17, P2-2; round 18, P2)")
-    # ...and the QUALIFIER keeps an honest sentence legal, which is the half the round-18
-    # review measured as a false red: naming the marker in any wording exempts the sentence.
+            "restatement would pass it (#13853 review rounds 17/18/19)")
+    # ⛔ AND THE ESCAPES THAT ARE *DECLARED*, pinned as escapes so this text cannot drift into
+    # claiming class closure again: a restatement that re-words the NOUN or COPULA, or that only
+    # MENTIONS `marker` (a decoy, not the qualifier), is NOT detected. Round 19 measured these;
+    # naming them is the honest half, and the ledger + review are what cover them.
+    for escape in (
+            "… whose leading printable glyph amounts to `#` …",
+            "… whose first non-space character (the marker word appears as a decoy) is `#` …"):
+        assert _false_filter_property_restatements(escape) == [], (
+            f"the arm now catches {escape!r} — good, but then the DECLARED-ESCAPE list above "
+            "is stale and must say so (#13853 review round 19)")
+    # ...and the QUALIFIER keeps an honest sentence legal, which is the other half round 18
+    # measured as a false red: naming the marker in any wording exempts the sentence.
     for exempt in ("… whose first non-space character **after that marker** is `#` …",
                    "… whose first non-space character (ignoring the marker) is `#` …"):
         assert _false_filter_property_restatements(exempt) == [], (
