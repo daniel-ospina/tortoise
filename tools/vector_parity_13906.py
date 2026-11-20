@@ -378,8 +378,10 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     count_equal = len(cand) == len(truth_ids)
 
     distance_of = {key: dist for key, dist in truth_rows}
-    # ⛔ BUCKETING, AND ITS ERROR IS DELIBERATELY FAIL-CLOSED. `round(dist /
-    # TIE_TOL)` is COARSER than "within `TIE_TOL` of each other": two distances
+    # ⛔ BUCKETING, AND ITS ERROR IS DELIBERATELY FAIL-CLOSED. The bucket key is
+    # STRICTER — not coarser — than "within `TIE_TOL` of each other": a bucket
+    # spans exactly `TIE_TOL`, so bucket equality is a STRICT SUBSET of the
+    # tolerance relation and excuses FEWER pairs, never more. Two distances
     # 2e-10 apart that straddle a bucket boundary (4.999e-7 and 5.001e-7 round to
     # 0 and 1) land in different buckets, so a swap between them reports
     # `diverged` — measured on this harness, and NOT a rare corner: a same-bucket

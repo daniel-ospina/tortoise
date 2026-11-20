@@ -1247,8 +1247,10 @@ def test_run_routes_the_required_scan_arm_through_the_seam(harness):
 def test_a_straddling_pair_fails_CLOSED_never_as_a_tie(harness):
     """The tie GROUPS are rounded buckets, and their error is one-directional.
 
-    `compare()` groups truth rows by `round(dist / TIE_TOL)`, which is COARSER
-    than "within `TIE_TOL` of each other": two distances 2e-10 apart that
+    `compare()` groups truth rows by `round(dist / TIE_TOL)`, which is STRICTER
+    (finer) than "within `TIE_TOL` of each other" — bucket equality is a strict
+    SUBSET of that relation, so it excuses FEWER pairs, never more: two distances
+    2e-10 apart that
     straddle a bucket boundary (`4.999e-7` -> bucket 0, `5.001e-7` -> bucket 1)
     are placed in DIFFERENT groups, so a swap between them is reported
     `diverged` even though the two are far inside the tolerance. Measured, not
@@ -1322,9 +1324,13 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
           unpoisoned rows the moment the store is already seeded)
       B4  send the perturbation to `record.seed(...)` and seed the GRAPH with the
           unperturbed rows (the oracle is poisoned, the arm under test is not)
-    Both are the defect this pin names. So it now asserts the RECEIVER is the
+      B5  drop the `args.poison == "vector"` guard (the store is poisoned on
+          EVERY run, so `--poison none` reports `diverged` against an
+          unperturbed baseline — invisible to receiver, order and oracle)
+    All three are the defect this pin names. So it now asserts the RECEIVER is the
     graph `store`, that the assignment PRECEDES the `store.seed(...)` statement,
-    and that the ORACLE still receives the unperturbed `rows`. This is the same
+    that the ORACLE still receives the unperturbed `rows`, and that the binding
+    is GUARDED by `args.poison == "vector"`. This is the same
     rule the teardown pin states: "`run()` calls `reset()` SOMEWHERE" is not
     "the teardown runs".
     """
@@ -1341,6 +1347,7 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
     # the name the perturbation is bound to, and WHERE that binding happens
     carrier: str | None = None
     carrier_line = -1
+    carrier_node: ast.Assign | None = None
     for node in ast.walk(run):
         if not isinstance(node, ast.Assign):
             continue
@@ -1348,10 +1355,28 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
             continue
         for target in node.targets:
             if isinstance(target, ast.Name):
-                carrier, carrier_line = target.id, node.lineno
-    assert carrier is not None, (
+                carrier, carrier_line, carrier_node = target.id, node.lineno, node
+    assert carrier is not None and carrier_node is not None, (
         "`perturb_for_vector_poison(...)` is not assigned to a name in `run()` — "
         "its result has nowhere to go, so no seed can receive it")
+
+    # ⛔ ...and it must be GUARDED by `args.poison == "vector"`. That is the
+    # condition `run()`'s own comment says the mutation is applied under, and no
+    # other assertion here can see it: dropping the guard leaves the carrier on
+    # the graph `store`, before `store.seed(...)`, with the oracle untouched —
+    # every check above stays green while the store is poisoned on EVERY run and
+    # the harness reports `diverged` for `--poison none`.
+    assert isinstance(carrier_node.value, ast.IfExp), (
+        f"`{carrier}` is assigned unconditionally (a "
+        f"{type(carrier_node.value).__name__}, not a conditional) — the store "
+        "poison must be guarded by `args.poison == \"vector\"`, or every "
+        "`--poison none` run reports `diverged`")
+    guard = ast.unparse(carrier_node.value.test)
+    assert "poison" in guard and "vector" in guard, (
+        f"the guard on `{carrier}` is `{guard}`, which does not test "
+        "`args.poison == \"vector\"` — an unguarded store poison makes every "
+        "`--poison none` run report `diverged`, i.e. the falsifier fires on the "
+        "unperturbed baseline it exists to compare against")
 
     # every `.seed(<name>)` call in `run()`, by RECEIVER, with its position
     seeds: list[tuple[str, str | None, int]] = [
