@@ -2818,8 +2818,14 @@ _FILTER_FALSE_DESCRIPTIONS = (
 
 #: ⛔ THE SHAPE ARM — AND AN HONEST STATEMENT OF WHAT IT CANNOT DO. The false property says the
 #: filter drops a line because a CHARACTER is `#`; the true one says the character AFTER the diff
-#: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a` `#`
-#: (backticked or not) inside a 400-character window that never names the **marker**.
+#: marker is `#`. This arm reds any `char`/`character` … `is`/`equals`/`is equal to`/`is a`, then
+#: up to eight NON-ALPHANUMERIC marks, then `#` — inside a 400-character window that never names
+#: the **marker**. The marks are bounded rather than enumerated on purpose (#13948 review round
+#: 29, MEASURED): enumerating them as "backticked or not" was a FALSE CLAIM — a bold
+#: (`character is **`#`**`) or quoted (`character is '#'`) spelling restored the false property
+#: with the whole file at baseline, because the old tail accepted only whitespace and ONE
+#: backtick. That is the same LAYOUT axis rounds 26-29 closed on the two bans above, and it is
+#: closed here the same way.
 #:
 #: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
 #: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
@@ -2847,7 +2853,7 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)\s*`?#`?", re.S | re.I)
+    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z]{0,8}#[`*_'\"]{0,3}", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -3009,7 +3015,19 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             # alone — i.e. REVERTING the round-24 `re.I` fix — left this whole cell GREEN, while
             # the comment above claimed the probes stop exactly that. This probe reds without it.
             ("… whose first non-space Character is `#` — a comment …",
-             "Character is `#`")):
+             "Character is `#`"),
+            # ⛔ THE MARK AXIS (#13948 review round 29, P2 — MEASURED). These three were ESCAPES
+            # at the previous head: a bold or quoted `#` put the false property back while the
+            # whole file reported `1 failed, 23 passed` — baseline — and nothing reded. The tail
+            # accepted only whitespace and one backtick while the comment claimed "backticked or
+            # not", so the over-claim and the hole were the same defect. Each probe is a separate
+            # mark, so a narrowing back to `\s*`?#`?` reds all three.
+            ("… whose first non-space character is **`#`** — a comment …",
+             "character is **`#`**"),
+            ("… whose first non-space character is '#' — a comment …",
+             "character is '#'"),
+            ("… whose first non-space character is \"#\" — a comment …",
+             "character is \"#\"")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
