@@ -10437,13 +10437,21 @@ class TestProductTeamsCopy:
     def test_the_outcomes_grid_is_never_wider_than_the_prose_above_it(self):
         """#13696 item 3: ONE measure, and no flat override in the narrow block.
 
-        The defect this pins is not the shared measure (that was right) but a
-        FLAT `.outcomes { max-width: 660px }` inside `@media (max-width: 760px)`
-        which overrode it for every width from 670 to 760 — at 760 the grid box
-        was 660px against a 605.9px prose box, 54.1px wider (27.1px out on each
-        side), which is exactly what the owner reported. It regressed once
-        INSIDE the fix that was meant to close it, so it is pinned twice: the
-        shared measure must exist, and no max-width block may re-declare one.
+        The owner's item 3 was a grid WIDER than the prose above it: on
+        `origin/main` (`5ff1466ddc`) `.outcomes` carried a FLAT `max-width:
+        760px` (:349) while the prose carried a FLAT `max-width: 660px`
+        (`#beat-intro p { max-width: 660px }`, :336) — no `ch` term existed
+        anywhere, so from 660px up the grid box stood 54.1px wider than the text
+        above it (27.1px out on each side).
+
+        The shared `min(660px, 74ch)` closes that, and the shape it regressed
+        into ONCE — inside this branch's own first fix commit (`e11914c020d`) —
+        was a FLAT `.outcomes { max-width: 660px }` inside `@media (max-width:
+        760px)`, which restored the same 54.1px overhang at 760. ⛔ Those are two
+        different states and the attribution matters: the owner reported the
+        `origin/main` one; the media-block one was ours. So it is pinned twice:
+        the shared measure must exist, and no max-width block may re-declare
+        one.
         """
         css = _product_teams_html()
         shared = _css_declarations(
