@@ -430,11 +430,22 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
 # the stub, not derived by AST — so a new public read either handler starts
 # reaching is a red, in EITHER direction.
 #
-# Keyed by entry name; the value is the exact set of PUBLIC SDK names the handler
+# Keyed by entry name; the value is the exact set of SDK method names the handler
 # must READ. The map is CLOSED: every listed entry is asserted exact, and a key
 # that names no callable registry entry fails at import time (see the collection
 # gate at the foot of this module).
-_EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
+#
+# ⛔ #12901 FINAL batch: this map used to be `_EXPECTED_PUBLIC_READS`, and the arm
+# below filtered the recorded reads on `not r.startswith("_")` — the leading
+# underscore WAS the "public vs internal" discriminator, which is how the original
+# pin said "reaches the SDK capability, not `_get_proj`". The batch privatised every
+# SDK capability, so that filter now selects NOTHING on ANY entry: measured, the
+# expectation held both names while `observed` was `[]` and `reads` held both. That
+# is a vacuous pass by construction — the guard would have stayed green through any
+# new reach. Pinning the FULL recorded set is strictly STRONGER than the old pin
+# (it can no longer ignore a read), and on the one entry still listed the two sets
+# are identical because the handler reads nothing else.
+_EXPECTED_SDK_READS: dict[str, frozenset[str]] = {
     # ``tortoise_traverse`` used to sit here with an EMPTY expectation: the #3904
     # divergence was that it DECLARED ``traverse`` — a live but unrelated method,
     # signature ``(id, relationship_type, direction)`` — which its handler never
@@ -451,7 +462,10 @@ _EXPECTED_PUBLIC_READS: dict[str, frozenset[str]] = {
     # #4282 Phase 2: re-pointed from the retired MCP name `tortoise_operator_action` to
     # the container that now owns the entry, `tortoise_adjust_relationship`. Same
     # handler, same two reads.
-    "tortoise_adjust_relationship": frozenset({"mitigate_operator", "annotate_operator"}),
+    # #12901 FINAL batch: both were PRIVATISED — the body (and therefore the READ) is
+    # unchanged; only the spelling the handler calls moved. The expectation is the set
+    # of reads the handler makes, so it moves with them.
+    "tortoise_adjust_relationship": frozenset({"_mitigate_operator", "_annotate_operator"}),
 }
 
 
@@ -576,10 +590,10 @@ def test_entry_consumes_its_declared_sdk_binding(entry, record_property):
     assert violation is None, _describe(violation)
 
 
-def test_declared_public_read_set_is_exact():
+def test_declared_sdk_read_set_is_exact():
     """The exact PUBLIC SDK read set is pinned for the entries this gate declares.
 
-    ``_EXPECTED_PUBLIC_READS`` is a CLOSED map, asserted in BOTH directions:
+    ``_EXPECTED_SDK_READS`` is a CLOSED map, asserted in BOTH directions:
 
       * an entry whose recorded public reads differ from its expectation fails —
         a NEW read, a dropped read, or a changed dispatch branch (an expectation
@@ -595,7 +609,7 @@ def test_declared_public_read_set_is_exact():
     """
     registry_names = {e.name for e in TOOL_REGISTRY}
     mismatches: list[str] = []
-    for name, expected in sorted(_EXPECTED_PUBLIC_READS.items()):
+    for name, expected in sorted(_EXPECTED_SDK_READS.items()):
         if name not in registry_names:
             mismatches.append(f"{name}: expectation names no registry entry (stale map)")
             continue
@@ -604,7 +618,9 @@ def test_declared_public_read_set_is_exact():
             mismatches.append(f"{name}: no callable handler to drive")
             continue
         result = drive_handler(name, fn)
-        observed = frozenset(r for r in result.reads if not r.startswith("_"))
+        # The full recorded read set — see the map's note: the leading-underscore
+        # filter that used to sit here is exactly what the privatisation emptied.
+        observed = frozenset(result.reads)
         if observed != expected:
             mismatches.append(
                 f"{name}: expected public reads {sorted(expected)} but recorded "
@@ -659,7 +675,9 @@ def test_drive_swallows_handler_exceptions_and_reports_the_census():
 # ── mutation proof ───────────────────────────────────────────────────────────
 
 _MUTATION_TARGET = "tortoise_query"          # declares sdk_method="query"; handler reads .query
-_MUTATION_WRONG_LIVE_METHOD = "create_point"  # a DIFFERENT live method (not inert)
+# #12901 FINAL batch: `create_point` was PRIVATISED. The mutation must still point at a
+# LIVE, DIFFERENT method — `_create_point` is live and is not the declaration under test.
+_MUTATION_WRONG_LIVE_METHOD = "_create_point"  # a DIFFERENT live method (not inert)
 _MUTATION_INERT_METHOD = "inert_stub_3904"    # added to TortoiseSDK by the mutation
 
 
@@ -761,7 +779,7 @@ assert not _ORPHANED_OVERRIDES, (
     f"orphaned drive overrides: {_ORPHANED_OVERRIDES} — the registry renamed or removed "
     "them without re-pointing the override"
 )
-_ORPHANED_EXPECTATIONS = sorted(set(_EXPECTED_PUBLIC_READS) - _REGISTRY_NAMES)
+_ORPHANED_EXPECTATIONS = sorted(set(_EXPECTED_SDK_READS) - _REGISTRY_NAMES)
 assert not _ORPHANED_EXPECTATIONS, (
     f"orphaned public-read expectations: {_ORPHANED_EXPECTATIONS} — the registry renamed "
     "or removed them without re-pointing the expectation"
