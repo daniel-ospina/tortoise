@@ -637,12 +637,16 @@ def test_existing_mcp_tool_relays_the_field_without_a_surface_change(
     """
     import inspect
 
-    from tortoise.mcp_server import _transport_mode, tortoise_events_poll
+    from tortoise.mcp_server import _transport_mode, tortoise_events_poll, \
+        tortoise_poll_events
     from tortoise.sdk import TortoiseSDK
 
-    assert list(inspect.signature(tortoise_events_poll).parameters) == [
-        "after", "types", "limit",
-    ]
+    # Both spellings carry the SAME three parameters: the retired name is a forwarder,
+    # so a migrating client cannot lose an argument (and the shim answers identically).
+    for handler in (tortoise_poll_events, tortoise_events_poll):
+        assert list(inspect.signature(handler).parameters) == [
+            "after", "types", "limit",
+        ], handler
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt-mcp.db"))
     monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
     token = _transport_mode.set("stdio")
@@ -1054,7 +1058,9 @@ def test_indicator_3_cost_is_a_recorded_response_field_not_a_tool_or_verb():
     manifest = yaml.safe_load(
         (root / "config" / "surface-manifest.yml").read_text())
     rows = {(r["response"], r["field"]) for r in manifest["response_fields"]}
-    assert ("tortoise_events_poll", "changes") in rows
+    # #11609 lane P7: the LIVE door carries the approved target spelling, and the
+    # response_fields record follows the SERVED, ADVERTISED tool.
+    assert ("tortoise_poll_events", "changes") in rows
     assert ("sdk:poll_events", "changes") in rows
 
     # NAMED symbols, not a name-substring sweep: a sweep for "change" is a
@@ -1062,7 +1068,7 @@ def test_indicator_3_cost_is_a_recorded_response_field_not_a_tool_or_verb():
     # / `delta_for_point` contain no "change" prefix match failure the sweep
     # would catch) and a false red for any unrelated future `exchange_*` name.
     assert [t.name for t in TOOL_REGISTRY
-            if t.sdk_method == "poll_events"] == ["tortoise_events_poll"]
+            if t.sdk_method == "poll_events"] == ["tortoise_poll_events"]
     assert not [t for t in TOOL_REGISTRY
                 if t.sdk_method in {"aggregate_changes", "what_changed"}]
     for sym in ("what_changed", "aggregate_changes", "aggregate_change_feed"):
