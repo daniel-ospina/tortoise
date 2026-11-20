@@ -635,7 +635,27 @@ def _conninfo_pairs(dsn: str) -> list[tuple[str | None, str | None]]:
         j = i
         while j < n and dsn[j].isspace():
             j += 1
-        if not word or j >= n or dsn[j] != "=":
+        if not word:
+            # ⛔ THE SCAN STOPPED ON `=` ITSELF, AND THIS BRANCH MUST ADVANCE.
+            # `word` is empty here (`=x host=127.0.0.1`, a leading `=`, a bare `=`
+            # between keywords) — libpq parses those far enough to report `host`,
+            # so the locality guard CERTIFIES them and they reach `app_role_dsn`.
+            # A branch that re-emitted `dsn[word_start:i]` (the empty string) and
+            # `continue`d without moving `i` left `while i < n` in an UNBOUNDED
+            # SPIN: no refusal, no traceback, no exit, and a lane watchdog kills
+            # it with no diagnosis (measured at `49d056291d`:
+            # `app_role_dsn("host=127.0.0.1 dbname=x = ")` never returned; killed
+            # by `timeout 5`, exit 124 — the defect `f18cc736bc` fixed in the
+            # token loop this walker replaced, so it must be fixed here too).
+            # The whole `=value` run becomes ONE bare token, which is what libpq
+            # reports (an empty keyword) and what the rebuild re-emits verbatim.
+            start = i
+            i += 1
+            while i < n and (dsn[i] == "\\" or not dsn[i].isspace()):
+                i += 2 if dsn[i] == "\\" else 1
+            pairs.append((None, dsn[start:i]))
+            continue
+        if j >= n or dsn[j] != "=":
             pairs.append((None, word))
             continue
         j += 1                                    # consume `=`
@@ -935,14 +955,28 @@ def _drop_options_pairs(dsn: str) -> str:
     `=`, so a bare `dbname=` followed by ` options=…` would take `options='-c` as
     dbname's value (`invalid connection option "role"`).
     """
+    pairs = _conninfo_pairs(dsn)
+    # ⛔ IF NOTHING NEEDS REPAIR, DO NOT REWRITE — return the caller's bytes.
+    # A rebuild is only ever needed to (a) delete an `options` pair or (b) quote
+    # an EMPTY value (see below). Normalising a string that needs neither is how
+    # a "byte-preserving" rebuild still corrupts a legal spelling: `" ".join`
+    # collapses the one-sided and doubled spacings libpq admits, so
+    # `host=127.0.0.1  =  dbname=x` came back as `host=127.0.0.1 = dbname=x`.
+    if not any(key == "options" or (key is not None and not value)
+               for key, value in pairs):
+        return dsn
     out: list[str] = []
-    for key, value in _conninfo_pairs(dsn):
+    for key, value in pairs:
         if key is None:
-            continue                              # a bare token: libpq rejects it anyway
+            # A BARE TOKEN (`=x`, `=`) — libpq rejects it, but DROPPING it is the
+            # M/N class this rebuild exists to avoid: a different DSN handed to
+            # psycopg2 than the one that was certified. Re-emit it verbatim.
+            out.append(value or "")
+            continue
         if key == "options":
             continue
         out.append(f"{key}={_quote_conninfo_value(value)}")
-    return " ".join(out)
+    return " ".join(part for part in out if part)
 
 
 def _quote_conninfo_value(value: str | None) -> str:

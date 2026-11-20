@@ -480,3 +480,10 @@ contract, not decoration:
 - It does not remove, stop writing, or migrate any graph copy. The destructive
   half of #13906 needs this parity evidence **and** a restore drill, in a
   separate PR.
+
+### Round 16: a non-progress branch in the options rewrite is an unbounded spin
+
+| finding | verified how | fix |
+|---|---|---|
+| **S1** `_drop_options_pairs` never advanced `i` when a conninfo token STARTED with `=` (`=x host=127.0.0.1`): the word scan stopped immediately, `word` was `""`, and the `not word` branch re-emitted the empty string and `continue`d in place — `while i < n` spun forever, with no refusal, no traceback and no exit. The locality guard CERTIFIES these strings (`_conninfo_hosts` still finds `host=127.0.0.1`), so they reach `app_role_dsn` | `app_role_dsn("host=127.0.0.1 dbname=x = ")` never returned; killed by `timeout 5` → **exit 124**. Reproduced for a leading `=`, a trailing bare `=`, and a bare `=` between keywords. Through `run()` it was masked only because `RecordStore.__init__` connects first and libpq rejects the string (`invalid connection option ""`) — reachable from the module's API and from this suite, not from a live run | the branch consumes the character that stopped the scan, so every path advances; pinned by `test_a_conninfo_token_starting_with_equals_cannot_spin_forever`, which carries `@pytest.mark.timeout(10)` so the mutation FAILS with a stack instead of hanging the suite (pytest-timeout is a declared test dependency). Mutant: the progress branch removed ⇒ that pin reds in ~13s, restored green |
+| **S2** the URI userinfo rule was documented as `LAST @` "measured with `PQconninfoParse`" while libpq ends userinfo at the **FIRST** `@` | `PQconninfoParse("postgresql://u:p@ss@127.0.0.1:1/db")` → `host='ss@127.0.0.1'` | ⛔ **already fixed by the concurrent lane** (`b9242c7f02`) at this head — recorded here so the next round does not re-derive it. No remote write followed either way: libpq's host keeps the extra `@`, so it cannot resolve |
