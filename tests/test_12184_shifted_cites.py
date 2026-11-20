@@ -451,8 +451,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # the count is here to red. Measured: `grep -o 'live.py:667' <the document> | wc -l` -> 3.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15787'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
+    # #14043 review (P2, `hosted_backup.py` file-scoped drift): `hosted_backup.py:844` is now TWO sites,
+    # and both are deliberate. §2.7's `:GraphEventMeta` row carries the statement; §2.6's rule sentence
+    # must NAME the same address, because its claim is "all three of which §2.7 cites" — a cross-reference
+    # that could not be resolved by grep while it named the census's `:842`. Measured:
+    # `grep -o 'hosted_backup.py:844' <the document> | wc -l` -> 2.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 2,
 }
 
 
