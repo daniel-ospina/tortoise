@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-13998-emails-1795200827-p3637769-82fd7f17",
+  "_sha": "d12a669062db5529025c319e331761584981cdc6",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/13998-emails.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/13998-threshold-emails"
+    },
+    {
+      "kind": "sha",
+      "value": "f8923892012cbbae9b7c32d0e3448d30adbbf70d"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/13998-emails"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 11148,
+  "ended_at": 1795211975,
+  "exit_code": 0,
+  "heartbeat_at": 1795211975,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13998-emails-1795200827-p3637769-82fd7f17",
+  "lease_until": 1795248575,
+  "pid": 3637769,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795200827,
+  "state": "DONE",
+  "tag": "13998-emails",
+  "worktree": "/home/cmux/tortoise/.worktrees/13998-emails"
+}
