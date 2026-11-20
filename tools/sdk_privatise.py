@@ -375,7 +375,20 @@ SWEEP_NAMES = 66
 #: nothing in this merge adds a row of its own. ⛔ That attribution is three measurements, not an
 #: arithmetic check: the +1 is named because `main`'s OWN tree prints it, not because 11834 − 11833
 #: equals 1.
-SWEEP_RESIDUE = (11834, "0253a625dee4ed86")
+#:
+#: RE-CUT ONTO `origin/main` `d4a8dddc4e` (#14043/#14045/#14050/#14010/#14020/#14032/#14022…) —
+#: re-measured on the merged tree with `--repin`, never computed: `(11841, "53273cee50de5834")`. The
+#: two trees were measured separately on the same instrument, and the ROW LIST was diffed row by row
+#: (`--report --base 28ca66878d --top 5000` on each): `origin/main` `d4a8dddc4e` prints **11829**, this
+#: tree prints **11841**, and the twelve rows between them are exactly the four this branch has
+#: carried since the seed work — `proj.g.query` 3637 → 3642 (+5), `g.query` 1490 → 1492 (+2),
+#: `surface.create_subject` 4 → 7 (+3) and `surface.create_edge` absent → 2 (+2). No new shape comes
+#: from the merge: 11829 + 12 = 11841, and 11829 is `main`'s own measurement, not its pin.
+#: ⛔ `main`'s pin still reads 11821 on that tree, so `main`'s own `--check` is RED by EIGHT — that is
+#: `main`'s number to fix, and this pin takes the MEASUREMENT (11829) rather than `main`'s stale pin,
+#: so none of that drift is attributed to this PR. `--check` on this tree exits 0 with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11841, "53273cee50de5834")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
