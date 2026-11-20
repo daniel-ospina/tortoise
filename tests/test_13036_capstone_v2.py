@@ -377,8 +377,48 @@ def seeded(tmp_path, monkeypatch):
         yield _Door(tc), s, sdk
 
 
+@pytest.fixture
+def sources_state(monkeypatch):
+    """The onboarding projection the two ``manage_sources`` arms read, INJECTED.
+
+    Same seam, and the same reason, as ``tests/test_mcp_http.py``'s
+    ``test_gate_cache_no_refetch_within_ttl``: the real projection's graph leg
+    reports ``unavailable`` when the embedded store is contended, and under a
+    loaded box the dispatch can breach the 10 s transport wait bound — MEASURED
+    on this row, one red in a full-file run of this module:
+
+        transport wait bound (10s) exceeded: MCP tools/call tortoise_manage_sources
+
+    That refusal is produced by the ENVIRONMENT, so it says nothing about the
+    payload this row exists to assert — and it reds a file every PR inherits.
+
+    The WRITER is stubbed onto the SAME dict rather than the read alone, so the
+    ``disable`` -> ``list`` round trip below stays a real round trip through the
+    tool's own write and the tool's own projection. What is removed is the
+    ambient dependency (the registry probe's latency), not the assertion.
+    """
+    from tortoise import hosted_api
+
+    state: dict[str, object] = {}
+    writes: list[dict[str, object]] = []
+
+    def _projection(_org_id):
+        return state
+
+    def _write(_org_id, _echo=True, **fields):
+        writes.append(dict(fields))
+        state.update(fields)
+        return state
+
+    monkeypatch.setattr(hosted_api, "_get_onboarding_projection", _projection)
+    monkeypatch.setattr(hosted_api, "_update_onboarding_state", _write)
+    return state, writes
+
+
 def _ids(rows):
     """Every id-shaped field in a collection, for containment assertions."""
+
+
     out = set()
     for row in rows or []:
         if isinstance(row, dict):
@@ -1524,22 +1564,51 @@ class TestRelationshipsAndRemainingReads:
         assert off.get("recording") is False, off
         assert off.get("graph_id") == on.get("graph_id"), (on, off)
 
-    def test_manage_sources_lists_the_configured_sources(self, seeded):
+    def test_manage_sources_lists_the_configured_sources(self, seeded,
+                                                         sources_state):
+        """Asserts the VALUES, not the key set.
+
+        Both GitHub sources go through ONE ``_index_state`` helper, so reading
+        the wrong state key keeps every key present and only the values move —
+        the failure `tests/test_manage_sources_3540.py` records. The injected
+        state is therefore deliberately NOT the product default.
+        """
+        state, _writes = sources_state
+        state["github_indexed"] = True
+        state["github_docs_indexed"] = False
+        state["docs_enabled"] = False
         door, _s, _ = seeded
         status, out = door.call("tortoise_manage_sources", {"action": "list"})
         assert status == 200
         assert isinstance(out, dict), out
-        assert isinstance(out.get("sources"), dict) and out["sources"], out
-        for row in out["sources"].values():
+        sources = out.get("sources")
+        assert isinstance(sources, dict), out
+        assert set(sources) == {"github_issues", "github_documents",
+                                "agent_sessions"}, sources
+        for row in sources.values():
             assert {"label", "enabled"} <= set(row), row
+        # each GitHub source from ITS OWN index key and ITS OWN intent flag
+        assert sources["github_issues"]["indexed"] is True, sources
+        assert sources["github_documents"]["indexed"] is False, sources
+        assert sources["github_issues"]["enabled"] is True, sources
+        assert sources["github_documents"]["enabled"] is False, sources
+        # the raw projection rides along, so nothing is hidden behind the tool's
+        # own interpretation of the state
+        assert out.get("onboarding") == state, out
 
-    def test_manage_sources_disable_arm_lands_and_is_read_back(self, seeded):
+    def test_manage_sources_disable_arm_lands_and_is_read_back(self, seeded,
+                                                               sources_state):
         """The `action=` discriminator has more than one arm; `disable` writes an
         intent that `list` must then report — a shape-only check on `list`
         would not see a disabled write that went nowhere.
 
+        The intent flag is pinned by NAME: a write that set `github_connected`
+        (or the sibling's flag) would also switch the other source off and pass
+        any test that only read `enabled` back.
+
         MEASURED: `enable` cannot be driven on this lane — it requires a
         connected GitHub account — so it is recorded in ARM_GAPS, not faked."""
+        _state, writes = sources_state
         door, _s, _ = seeded
         status, off = door.call("tortoise_manage_sources",
                                 {"action": "disable",
@@ -1547,8 +1616,14 @@ class TestRelationshipsAndRemainingReads:
         assert status == 200
         assert off.get("status") == "disabled", off
         assert off.get("source") == "github_documents", off
+        assert off.get("connection_untouched") is True, off
+        assert writes == [{"docs_enabled": False}], writes
         status, listed = door.call("tortoise_manage_sources", {"action": "list"})
+        assert status == 200
         assert listed["sources"]["github_documents"]["enabled"] is False, listed
+        # the SIBLING keeps its own intent (#1924: one connection, per-source
+        # flags) — the write above must not have touched it
+        assert listed["sources"]["github_issues"]["enabled"] is True, listed
 
     def test_approve_merge_refuses_a_missing_candidate_by_name(self, seeded):
         """Nothing in the seed is a merge CANDIDATE, so the correct payload for an
