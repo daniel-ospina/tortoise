@@ -12761,6 +12761,43 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
     }
 
 
+def _published_cache_fold_denial():
+    """CONSUME the derived cache's over-cap verdict for the write in flight.
+
+    ``allowance_gate.cache_fold_denial`` is the gate's published verdict (#13829),
+    and a missing/unimportable meter module must never fail a write whose journal
+    line and record row are ALREADY committed — that is the hazard the guarded
+    imports in ``live_write.py`` and ``mcp_server.py`` each cite as their reason
+    for existing. This is the same guard, in one place, so the SDK's call sites
+    cannot drift from it (PR #13835 review, P3: one of them was bare, and it ran
+    after the outbox commit).
+
+    Answers ``None`` on every write whose door published nothing — the unarmed,
+    un-tenanted (stdio/operator) and not-truth-carried cases alike.
+    """
+    try:
+        from .allowance_gate import cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable gate must not fail a committed write
+        return None
+    return cache_fold_denial()
+
+
+def _discard_published_cache_fold_denial() -> None:
+    """Forget a published verdict on a write arm that never touches the cache.
+
+    A verdict is published for exactly ONE write; an arm that writes nothing to
+    the cache has no consumer, so the verdict would outlive the write it
+    describes and deny the NEXT fold in this context (#13829, PR #13835 review
+    P2: a bare dedup hit is that arm). Guarded for the same reason as
+    :func:`_published_cache_fold_denial`.
+    """
+    try:
+        from .allowance_gate import clear_cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — a gate that will not import cannot publish
+        return
+    clear_cache_fold_denial()
+
+
 def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
     """Merge the #9202 shaping RECEIPT into a write-door reply (in-band).
 
@@ -17639,6 +17676,16 @@ class TortoiseSDK:
                     # betrayal the ruling's §0 orders refused (#9202).
                     # `temporal_not_applied` is the honest signal here, and
                     # it rides this same reply.
+                    # ⛔ #13829 (review P2, PR #13835) — THIS ARM WRITES NOTHING,
+                    # SO IT MUST NOT KEEP THE VERDICT. It returns NORMALLY to the
+                    # caller (unlike a raise, which the door's own consume and the
+                    # MCP door-entry clear bound), and it is reachable under a
+                    # published verdict: an over-cap tenant re-writing a TERMINAL
+                    # claim with a temporal prop lands here. Left set, the verdict
+                    # would deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge the
+                    # sibling `else:` arm below closes for the bare/refused hit.
+                    _discard_published_cache_fold_denial()
                     return _with_end_receipt({
                         **self.get_point(pid),
                         **_merge_advisories(
@@ -17986,6 +18033,14 @@ class TortoiseSDK:
                         "Revise it deliberately with "
                         "update_point(%r, ...), the addressed door.",
                         pid, _terminal, pid)
+                # ⛔ #13829 (review P2b, PR #13835): KEEP THIS DOOR'S REPLY. On
+                # the denied arm `update_point` answers the RECORD's view (the
+                # cache row as last held, overlaid with the properties it just
+                # recorded); discarding it and re-serving `get_point` reported the
+                # PRE-revision values in a success reply for a revision the record
+                # holds. On the normal arm it returns the same snapshot this
+                # reply already carried, so nothing moves.
+                _revision_applied = {}
                 if (props and not _terminal_fold_refused) or _word_applied:
                     # Only touch the existing point when the caller passed
                     # other props (or an applied word) — a pure dedup hit (no
@@ -18010,11 +18065,27 @@ class TortoiseSDK:
                     # (tortoise#11863). `None` money members were dropped above,
                     # because a CREATE never deletes.
                     try:
-                        self.update_point(pid, **props)
+                        # ⛔ #13829 (review P2, PR #13835): this verb's own cache
+                        # leg consumes the published verdict — that is what makes
+                        # the cap bind on THIS arm (the default MCP dedup shape)
+                        # instead of being skipped by it. Its RETURN is kept for
+                        # the reply below (review P2b): on the denied arm it is the
+                        # RECORD's view, not the stale cache row.
+                        _revision_applied = self.update_point(pid, **props) or {}
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
+                else:
+                    # ⛔ #13829 (review P2, PR #13835) — NO CACHE WRITE ON THIS
+                    # ARM. A bare dedup hit (no props, no applied word) only READS
+                    # the cache, and a terminal-refused hit writes nothing, so the
+                    # published verdict has no consumer here. Left set, it would
+                    # deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge
+                    # `enforce_allowances`' own `except BaseException` arm exists to
+                    # close.
+                    _discard_published_cache_fold_denial()
                 return _with_end_receipt(
-                    {**self.get_point(pid),
+                    {**self.get_point(pid), **_revision_applied,
                      # `_merge_advisories`, never a second `**` splat: BOTH the
                      # kind↔layer note and the #10368 refusal ride the one
                      # `advisories` key, and a splat would REPLACE the list and
@@ -18514,56 +18585,119 @@ class TortoiseSDK:
         # uses, so without the scope an armed handle refuses the create hot
         # path. The declaration is a lane, not an exemption — the append above
         # is the commit point and every write here follows it.
-        with _live_write_scope("create_point"):
-            self._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-                    params=_create_params,
-                ),
-                what="create_point CREATE(:Point)",
+        #
+        # ⛔ #13829 — THIS IS THE FOLD, and it ASKS BEFORE IT TOUCHES THE CACHE.
+        # This door writes the cache by hand instead of through
+        # `live_write`'s fold leg, so it is the one that must consume the
+        # derived-cache verdict itself: when the org's `graph_storage` reading is
+        # at/over its hard stop, the allowance gate no longer refuses the write at
+        # the door (the door declared `truth_carried=True`) — it publishes a
+        # `CacheFoldDenial`, and this block is what makes that a cache SKIP rather
+        # than an unenforced cap.
+        #
+        # Why SKIPPING the whole block is the correct granularity, and not a
+        # per-statement decision: a half-folded event is worse than an unfolded
+        # one. The Point CREATE, the TAGGED edges, the extractedFrom edges and the
+        # EP dirty-mark are ONE event's projection; writing some of them would
+        # leave the cache holding an edge to a node it does not have, which no
+        # replay-shaped read can interpret. Declining all of them leaves the cache
+        # exactly as it was before this write, and the record holds the event, so
+        # `derived = replay(journal)` folds the whole event later, atomically.
+        #
+        # ⚠️ Nothing is lost and nothing is refused: the journal line and the
+        # record row are already committed above (the `WriteNotLandedError` gate
+        # two lines up proves the record took it), reads for this point fall back
+        # to the record, and the outcome is NAMED on the returned `LiveWrite`
+        # (`cache_fold`) rather than being silent. #10976 is untouched — no byte is
+        # deleted here, the cache simply stops growing.
+        # ⚠️ The import lives in `_published_cache_fold_denial`, GUARDED, and for
+        # the same reason the sibling sites in `live_write.py` / `mcp_server.py`
+        # guard theirs: this line runs AFTER the outbox commit, so an
+        # `ImportError` here would hand the caller an error for a write that
+        # landed (PR #13835 review, P3).
+        _cache_denial = _published_cache_fold_denial()
+        # ⛔ #13829 — THE SKIP NEEDS PROOF, NOT JUST A VERDICT.
+        # `truth_carried=True` is the DOOR's declaration; `_record_committed` is
+        # the ANSWER, and it is `None` on a journal-less deployment: `_emit_event`
+        # returns before the record projection runs (`_write_record_projection`
+        # is inside the append's own `live_write.write`), so neither the journal
+        # nor the record holds the write. There the CACHE is its ONLY durable
+        # home and skipping it would destroy the write while reporting success —
+        # the one shape #13829 forbids ("fail-closed by construction: an unproven
+        # path keeps the refusal"). So the refusal the gate would have raised on
+        # an unproven door is raised here, reconstructed from the figures the gate
+        # COMPARED so `quota_refusal_payload`'s shape and the prose are the same
+        # ones the protective arm produces (`_safe` -> `ERR_QUOTA`).
+        if _cache_denial is not None and _record_committed is not True:
+            from .quota import QuotaExceededError, with_limit_contact
+            raise QuotaExceededError(
+                with_limit_contact(_cache_denial.detail),
+                resource=_cache_denial.dimension,
+                used=(int(_cache_denial.used)
+                      if float(_cache_denial.used).is_integer()
+                      else _cache_denial.used),
+                limit=(int(_cache_denial.limit)
+                       if float(_cache_denial.limit).is_integer()
+                       else _cache_denial.limit),
+                estimated=True if _cache_denial.estimated else None,
             )
-            # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
-            # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
-            # a per-query race and `proj` is as valid after a retry as before it
-            # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
-            # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
-            #
-            # #7209: the follow-up writes of a fresh create ride the SAME bounded
-            # retry as the CREATE above. Before this they were bare `proj.g.query`
-            # calls, so a rebuild's per-query abort landing here aborted the write
-            # AFTER the Point had already landed — leaving a half-materialized
-            # point (no TAGGED / no extractedFrom edges), which is a finding that
-            # provenance and tag reads cannot reach: the same "the map loses a
-            # finding" outcome by a narrower route. Every statement in these two
-            # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
-            # documented no-op on re-run), so re-issuing one after an engine ABORT
-            # cannot duplicate anything — the abort means the statement did not
-            # land, exactly the contract `retryable_aborted_write` is built on.
-            tags = props.get("tags") or []
-            if isinstance(tags, (list, tuple)):
+        if _cache_denial is not None:
+            _logger.warning(
+                "create_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                "The journal and the record hold the write; the point is served "
+                "from the record until a replay folds it.",
+                pid, getattr(_cache_denial, "detail", _cache_denial))
+        else:
+            with _live_write_scope("create_point"):
                 self._graph_write_with_retry(
-                    lambda: self._sync_tags(proj, pid, tags),
-                    what="create_point TAGGED edges",
+                    lambda: proj.g.query(
+                        "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                        params=_create_params,
+                    ),
+                    what="create_point CREATE(:Point)",
                 )
-            # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
-            if props.get("extractedFrom"):
-                self._graph_write_with_retry(
-                    lambda: proj._link_source(pid, props["extractedFrom"],
-                                              source_versions=_source_versions),
-                    what="create_point extractedFrom edges",
-                )
-                # Inheritance gate dirty-mark: a freshly-sourced point is always
-                # inherit-eligible on the next EP run (no interval wait, #398).
-                # #2952: a born point carries no `inherited_at` stamp, so the
-                # `REMOVE n.inherited_at` the generic helper
-                # (`_invalidate_inheritance_gate`) issues is a no-op on the final
-                # state — and a no-op write on the node still costs a fulltext
-                # re-add. The `extractedFrom` invalidation therefore happens in
-                # the PROPS (see the up-front pop of `inherited_at` above): a
-                # caller-supplied stamp is dropped BEFORE the CREATE map is built
-                # instead of being written and then taken back out, so this path
-                # is ONE graph write too. The EP dirty-marking half is issued once
-                # below.
+                # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+                # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+                # a per-query race and `proj` is as valid after a retry as before it
+                # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
+                # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+                #
+                # #7209: the follow-up writes of a fresh create ride the SAME bounded
+                # retry as the CREATE above. Before this they were bare `proj.g.query`
+                # calls, so a rebuild's per-query abort landing here aborted the write
+                # AFTER the Point had already landed — leaving a half-materialized
+                # point (no TAGGED / no extractedFrom edges), which is a finding that
+                # provenance and tag reads cannot reach: the same "the map loses a
+                # finding" outcome by a narrower route. Every statement in these two
+                # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+                # documented no-op on re-run), so re-issuing one after an engine ABORT
+                # cannot duplicate anything — the abort means the statement did not
+                # land, exactly the contract `retryable_aborted_write` is built on.
+                tags = props.get("tags") or []
+                if isinstance(tags, (list, tuple)):
+                    self._graph_write_with_retry(
+                        lambda: self._sync_tags(proj, pid, tags),
+                        what="create_point TAGGED edges",
+                    )
+                # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
+                if props.get("extractedFrom"):
+                    self._graph_write_with_retry(
+                        lambda: proj._link_source(pid, props["extractedFrom"],
+                                                  source_versions=_source_versions),
+                        what="create_point extractedFrom edges",
+                    )
+                    # Inheritance gate dirty-mark: a freshly-sourced point is always
+                    # inherit-eligible on the next EP run (no interval wait, #398).
+                    # #2952: a born point carries no `inherited_at` stamp, so the
+                    # `REMOVE n.inherited_at` the generic helper
+                    # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+                    # state — and a no-op write on the node still costs a fulltext
+                    # re-add. The `extractedFrom` invalidation therefore happens in
+                    # the PROPS (see the up-front pop of `inherited_at` above): a
+                    # caller-supplied stamp is dropped BEFORE the CREATE map is built
+                    # instead of being written and then taken back out, so this path
+                    # is ONE graph write too. The EP dirty-marking half is issued once
+                    # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -18631,7 +18765,23 @@ class TortoiseSDK:
         # TRUTH holds a record the cache has not materialised — a replay heals
         # it (the ordering contract's replay-healable window) — so this raise
         # must NEVER be read as "the write is gone": the record stands.
-        _snapshot = self.get_point(pid)
+        # ⛔ #13829 — EXCEPT ON THE DECLINED ARM, which has no cache row to read
+        # back at all. There the write-landed proof is the committed RECORD
+        # (`_record_committed` above — this line is only reachable past its gate):
+        # the door declared `truth_carried=True`, the `PointAdded` append is the
+        # commit point, and the skipped cache write is projection lag that
+        # `derived = replay(journal)` heals. A cache read-back on that arm would
+        # report a write the record HOLDS as lost — `WriteNotLandedError` out of
+        # `tortoise_create_point`, i.e. an ERROR to the MCP caller on exactly the
+        # over-cap path this change exists to open (review P1, PR #13835).
+        # The snapshot we serve on that arm is the record's OWN — `_intended`,
+        # the same payload the journal carries, built from the write intent
+        # through `_stored_prop_value`. It deliberately omits the DERIVED
+        # `search_keys` alias, which only ever reaches the CACHE (#8933): a
+        # replay re-derives it from `content`, and the cache row this arm would
+        # have read does not exist to hold it either.
+        _snapshot = (dict(_intended) if _cache_denial is not None
+                     else self.get_point(pid))
         if not _snapshot:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
@@ -22845,6 +22995,14 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ⛔ #13829 (review P2, PR #13835) — ASK BEFORE THIS DOOR TOUCHES THE
+        # CACHE. Consumed ONCE, here, at the top of the method, so every exit of
+        # this verb — the absent/no-op returns included — leaves no verdict
+        # behind, and the cache leg below honours it. `update_point` writes the
+        # derived graph directly (`SET n += $props`, `_sync_tags`,
+        # `_mark_dirty`) and never goes through `live_write`'s fold, so the
+        # chokepoint's consumer does NOT cover it.
+        _cache_fold_denial = _published_cache_fold_denial()
         # ⛔ #13143 review (F1, P1): FIRST, before any of this door's own
         # `'status' in props` arms — they test the LITERAL name while the
         # transport applies `str(key)`, so a renderer-named key was written as
@@ -23654,6 +23812,43 @@ class TortoiseSDK:
                 raise WriteNotLandedError(
                     id, getattr(proj, "graph_name", None),
                     operation="update_point")
+
+        # ⛔ #13829 (review P2, PR #13835) — THE CACHE DECLINES HERE TOO.
+        # The verdict published for this write had two holes on the DEFAULT MCP
+        # door: `create_point(dedup=True)` (the default shape) folds a dedup hit
+        # through THIS verb and returns ~500 lines above `create_point`'s own
+        # consumption, so an over-cap cache kept taking writes — the cap was
+        # skipped, not enforced — and the verdict stayed set for a later fold in
+        # this context to consume. Consuming it at this verb's cache leg closes
+        # both: the record already holds the revision (the append above is the
+        # commit point, #7951), so the cache may lag and `derived = replay(
+        # journal)` heals it.
+        #
+        # The reply on that arm is the record's view — the point as the cache last
+        # held it, overlaid with the properties this call RECORDED — because the
+        # cache row was deliberately not written.
+        #
+        # ⚠️ STATED RESIDUAL: the PROMOTE arm (`status` in props) is APPLY-FIRST by
+        # decision (#8830). Its record is appended only after a guarded `SET` that
+        # can legitimately match nothing, so skipping the cache there would drop
+        # the transition with NO record at all — a worse defect than a stale
+        # cache. That arm therefore consumes the verdict and proceeds: the cap
+        # does not bind for it.
+        if _cache_fold_denial is not None:
+            if _promote_arm:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The status arm is APPLY-FIRST (#8830), so its cache write "
+                    "rides through: the cap does not bind on that arm.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+            else:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The record holds the revision; the point is served from the "
+                    "record until a replay folds it.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+                return _with_end_receipt(
+                    {**self.get_point(id), **emit_props}, _end_receipt)
 
         # #7405: the property writes below ride the bounded write retry —
         # `update_point` is the SDK's most common mutation door
