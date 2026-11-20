@@ -3524,7 +3524,10 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
                 # shape this slice still hands back as a value that is not itself an argv element
                 # — a declared residual, stripped downstream by `_d5_quoted_literal` and rejected
                 # by the class test, so no verdict depends on it (`-ce'^[+-]$'` and `-ce^[+-]$`
-                # both end as `['^[+-]$']`).
+                # both end as `['^[+-]$']`). ⛔ THE READER HAS NO BACKSLASH MODEL, SO THIS RULE IS
+                # NARROWER THAN "quotes the shell removed": `grep -c -ec"it's"` is the word
+                # `-ecit's`, whose value is `cit's`, and the quote-strip here answers `cits`
+                # (verdict-neutral — neither string is the class — but not an argv element either).
                 if value and value[0] not in "'\"":
                     value = value.replace("'", "").replace('"', "")
                 return option[:split_at + 1], value
@@ -5124,14 +5127,13 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
         "flag word with an attached value; grep runs it (rc 1, nothing matches). Pinned `None` "
         "before the split, which is the model that hid `-cDread` (#14027 round 9, P2 — MEASURED)")
     # ⛔ AND THE SPELLING THAT MOTIVATED THE SPLIT IS GRADED, NOT MERELY DESCRIBED (#14027 round 9,
-    # P3 — MEASURED, and this row is what makes the fix itself witnessed): the two pins above move
-    # shapes whose VERDICT is neutral, so a partial revert that splits only when the cluster's
-    # FIRST flag is the argument-taking one left the suite GREEN while
-    # `_d5_count_prescriptions("grep -c -cDread '^[+-]$'")` went back to `[]` — the false PASS the
-    # round-9 message names, invisible again. `grep -c -Dread '^[+-]$'` really counts the blank
-    # class (`2` on the probe, rc 0), and `-cDread` is the same argv with `-c` in front of it
-    # (`2`, rc 0), so both must be READ: treating `-cDread` as ONE name leaves the quoted expression
-    # to be consumed as `-D`'s value and answers `[]`.
+    # P3 — MEASURED): no earlier row pinned `-Dread`/`-cDread` as READ, so the fix's own outcome was
+    # unwitnessed and a revert could not be told from a regression. `grep -c -Dread '^[+-]$'` really
+    # counts the blank class (`2` on the probe, rc 0), and `-cDread` is the same argv with `-c` in
+    # front of it (`2`, rc 0), so both must be READ. Under the one-name model this row refuses,
+    # `-cDread` is a single word whose LAST character (`d`, directories) is the one still awaiting a
+    # value (`_d5_needs_a_separate_value("-cDread")` is `True`), so the quoted expression is
+    # consumed there and the invocation answers `[]`.
     for read_spelling in ("grep -c -Dread '^[+-]$'", "grep -c -cDread '^[+-]$'"):
         assert _d5_blank_class_prescriptions(f"a count: `{read_spelling}`\n") == ["^[+-]$"], (
             f"{read_spelling!r} counts the blank class — `-D` takes `read` as its value and `-c` "
