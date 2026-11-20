@@ -7812,8 +7812,13 @@ class JournalCoverage:
     #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
     #: reason `RecordReconcileResult.journal` is.
     gap_measured: bool = True
-    #: Does the RECORD own the ordinal on this graph — i.e. is the journal an
-    #: EXPORT rather than an input (#14002)? ``True`` means the write path does
+    #: Does the RECORD own the ordinal on this graph — so the journal is no longer
+    #: an INPUT (#14002)? ⚠️ **THE NAME IS HISTORICAL AND THE FILE IS NOT AN
+    #: EXPORT**: nothing writes it on a cut-over graph (no drainer ships), so it is
+    #: a FROZEN PREFIX of the journal, not a rendered copy — see
+    #: :func:`_journal_is_export`. The name and the ``as_dict()`` key are kept
+    #: because that key is a payload surface a rename would break.
+    #: ``True`` means the write path does
     #: not append (:func:`record_writer.record_owns_position` answered yes: the
     #: deployment is armed and the graph's `record_cursor` row is `active`), so
     #: the file stops growing while `public.journal_event` keeps gaining rows.
