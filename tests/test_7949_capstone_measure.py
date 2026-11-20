@@ -17153,6 +17153,16 @@ def test_every_D5_current_claim_is_still_present() -> None:
     commit — the set is the census, and a census that is not compared is prose.
     """
     labels = [label for label, _pattern, _source_key, _needle in _D5_CURRENT_CLAIMS]
+    # ⛔ THE CENSUS BELOW COMPARES THE TABLE WITH ITS OWN DECLARED LABEL SET, so emptying BOTH
+    # sides agrees trivially (`dropped`/`undeclared` are both empty, `0 == 0`) and every claim
+    # returns to ungraded with no red anywhere — the MAXIMAL case of the very defect this census
+    # was added for (MEASURED: `_D5_CURRENT_CLAIMS = ()` + `_D5_CURRENT_CLAIM_LABELS = frozenset()`
+    # passed this arm green before this assertion; #14030). The table IS the census, so an empty
+    # one grades nothing and has to say so.
+    assert labels, (
+        "`_D5_CURRENT_CLAIMS` is EMPTY — this table is the census, and an empty census agrees "
+        "with an empty label set, so every D5 current claim returns to ungraded with no red "
+        "anywhere. Re-derive the entries for this head; never empty this table.")
     dropped = sorted(_D5_CURRENT_CLAIM_LABELS - set(labels))
     undeclared = sorted(set(labels) - _D5_CURRENT_CLAIM_LABELS)
     assert not dropped and not undeclared, (
@@ -17517,6 +17527,16 @@ def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
     # (#14003 review, round 2, P2). A duplicate label satisfies a set comparison while one
     # entry is never read, which is what the length arm is for.
     labels = [label for label, _pattern, _key, _a, _b in _D5_PINNED_PAIRS]
+    # ⛔ THE CENSUS BELOW COMPARES THE TABLE WITH ITS OWN DECLARED LABEL SET, so emptying BOTH
+    # sides agrees trivially (`dropped`/`undeclared` are both empty, `0 == 0`) and every pair
+    # returns to unread with no red anywhere — the MAXIMAL case of the very defect this census
+    # was added for (MEASURED: `_D5_PINNED_PAIRS = ()` + `_D5_PINNED_PAIR_LABELS = frozenset()`
+    # passed this arm green before this assertion; #14003 review, round 3, P3 / #14030). The table
+    # IS the census, so an empty one grades nothing and has to say so.
+    assert labels, (
+        "`_D5_PINNED_PAIRS` is EMPTY — this table is the census, and an empty census agrees "
+        "with an empty label set, so both D5 pairs return to unread with no red anywhere. "
+        "Re-derive the entries for this head; never empty this table.")
     dropped = sorted(_D5_PINNED_PAIR_LABELS - set(labels))
     undeclared = sorted(set(labels) - _D5_PINNED_PAIR_LABELS)
     assert not dropped and not undeclared, (
