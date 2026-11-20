@@ -86,7 +86,9 @@ __all__ = [
     "coverage_verified",
     "cutover_armed",
     "journal_ready",
+    "knn_statement",
     "mirror_required",
+    "mirror_verdict",
     "reset_coverage_cache",
     "searcher",
 ]
@@ -481,9 +483,10 @@ class RecordVectorWithoutFallback(RecordVectorError):
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
     ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
-    :data:`MIRROR_RETIRED_LABELS` have a fold that stops encoding, so only they
-    raise this. The other five are still mirrored after their count verifies, so
-    a graph answer for them is a complete copy and they keep the named fallback.
+    :data:`MIRROR_RETIRED_LABELS` have writers that stop storing, so only they
+    raise this. `point` and `operator` are still mirrored after their count
+    verifies (a `:Point`'s vector is record TRUTH and no fold derives it), so a
+    graph answer for them is a complete copy and they keep the named fallback.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the
@@ -570,8 +573,53 @@ class Coverage:
     graph can serve, so retiring the graph's copy loses no row that the record has
     not got.
 
+    ⚠️ A FOURTH residual is the ``trivial`` verdict's own, and it is the SAME one-way
+    contract rather than a new one: a trivially-verified label is cached exactly like
+    any other VERIFIED verdict — stickily, for the life of the process
+    (``_cached_coverage``) — so a label that was empty when it was measured inherits
+    the gain-case residual above (a graph that later gains vector-bearing nodes is
+    not re-measured until a restart). It is stated here because the marker is what
+    makes that state visible: an operator who sees ``trivial`` on a label they are
+    about to populate should not read the verdict as a backfill certificate.
+
     ⚠️ ``reason`` is the one-line account for the trace/log, never a substitute
     for the counts.
+
+    ⛔ ``trivial`` IS THE NON-VACUITY MARKER, and it exists because
+    ``record_vectors >= graph_vectors`` has a degenerate TRUE (#13798): ``0 >= 0``
+    holds for a label that holds nothing in EITHER store, so an unseeded deployment
+    reported the SAME ``verified`` as a fully backfilled one — and *"the record
+    caught up"* became a finding the count never established
+    (`tools/claim_dense_leg_13732.py` hit it first: an unseeded population PASSES
+    the gate, and WHICH leg then serves it depends on the label — for the two the
+    contract retired (``MIRROR_RETIRED_LABELS``: ``object``/``subject``) the
+    record's sealed-empty arm answers ``mechanism=pgvector, reason=empty_results,
+    degraded=False``, the SAME token a backfilled label's empty read records, so
+    nothing said WHICH; for every other gated label the empty record answer FALLS
+    THROUGH to the graph, which records ``mechanism=scan_fallback,
+    reason=no_embeddings, degraded=True``). So the
+    two-zero case is reported **``verified=True, trivial=True``** — the RELATION
+    holds, the EVIDENCE does not — while every other satisfied count is
+    ``verified=True, trivial=False``. A gate that compares two things needs a
+    non-vacuity witness; this field is that witness, defaulted and additive so no
+    consumer's verdict moves.
+
+    ⛔ ADDITIVE ON PURPOSE, and the reason is not politeness: the two-zero state is
+    a REAL state this gate must keep serving. With nothing in either store the two
+    stores answer identically, so refusing it would change deployment behaviour for
+    a harmless state (`#13798`), and the consumer that must refuse — a MEASUREMENT —
+    already does, on its own terms. What changes here is that the state is
+    TELLABLE: a consumer that may not read a vacuous pass as evidence asks
+    ``verdict.verified and not verdict.trivial``.
+
+    The invariant is **``trivial`` ⇒ ``verified``** — three reachable states, not
+    four: SUBSTANTIVE (verified, not trivial), TRIVIAL (verified, trivial) and
+    UNVERIFIED (not verified, never trivial, because one side being unmeasurable is
+    ``None`` and never ``0``). It is enforced at this module's ONE construction site
+    (:func:`coverage`) and the dataclass does not police a hand-built verdict — a
+    direct ``Coverage(verified=False, trivial=True)`` is nonsense this type does not
+    raise on, and no in-tree site builds one. The unmeasurable arms are pinned NOT
+    to be swallowed by the marker.
     """
 
     label: str
@@ -579,6 +627,9 @@ class Coverage:
     record_vectors: int | None
     graph_vectors: int | None
     reason: str
+    #: Did ``verified`` come from a comparison with nothing on either side?
+    #: ``0 >= 0`` is arithmetically true and evidentially empty (#13798).
+    trivial: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -587,6 +638,7 @@ class Coverage:
             "record_vectors": self.record_vectors,
             "graph_vectors": self.graph_vectors,
             "reason": self.reason,
+            "trivial": self.trivial,
         }
 
 
@@ -610,11 +662,18 @@ class Coverage:
 #: is complete precisely because :func:`mirror_required` keeps writing it — so the
 #: wide set is the safe direction, and the narrow one is the silent one.
 #:
-#: The WRITE half is narrower, and deliberately: only `_upsert_subject` /
-#: `_upsert_object` consult :func:`mirror_required` today, so the other five keep
-#: their graph vector even after their coverage verifies. That is option 2's
-#: transitional double-storage, not a gap in the proof: the round trip here is
-#: "the read stops trusting the graph last", never "the write stops first".
+#: ⛔ THE WRITE HALF IS NOW EVERY WRITER OF A COVERAGE-GATED LABEL (#13626). Option
+#: 2's transitional double-storage was produced by the READ gating a label before the
+#: WRITES did, and it is over: the folds (`_upsert_subject`, `_upsert_object`,
+#: `_upsert_event`, `_upsert_document`, `_upsert_source`, `_event_plain_merge`) and the
+#: writers outside them (`sdk::_update_entity`, `sdk::_event_raw_write_door`,
+#: `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`, `sdk::_ingest_corpus`,
+#: `session_indexer::main`, `hosted_backup::restore_graph`) each ask this same predicate
+#: before they store `embedding`. A single ungated writer would re-add the vector on its
+#: next call and make :mod:`tools.strip_graph_entity_vectors`'s strip pointless — which
+#: is why that tool's census, not this comment, is the authority on whether a label may be
+#: stripped: it reads every declared writer's own source and refuses a label while one of
+#: them still stores unconditionally.
 #: ⚠️ AND THE CONTRACT IS NARROWER STILL — :data:`MIRROR_RETIRED_LABELS`, the next
 #: declaration. This set answers "may the record decline to the graph"; the
 #: no-fallback arm asks the stronger question and must not be read off this one.
@@ -629,15 +688,21 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: nothing. The CONTRACT claims something stronger — *the graph copy has been
 #: FROZEN since coverage verified, so a graph answer would be a SMALLER cohort
 #: presented as the answer* (:class:`RecordVectorWithoutFallback`) — and that
-#: premise is produced by exactly ONE thing: the fold consulting
-#: :func:`mirror_required` before it encodes. Only `_upsert_subject` and
-#: `_upsert_object` do (`projection/entities.py:4906`, `:5112`);
-#: `_upsert_event` / `_upsert_document` still call `derived_embedding.encode`
-#: unconditionally, and a `:Point`'s vector is RECORD TRUTH (`#5004`), never
-#: gated. So for those five the graph is not stale — it is a complete,
-#: still-maintained copy, and refusing it on a record blip would empty the dense
-#: leg for `point` (the primary retrieval label) on the DEFAULT posture, where
-#: `main` answered from that same copy.
+#: premise is produced by exactly ONE thing: the writer consulting
+#: :func:`mirror_required` before it stores. `#13626` wired that for every writer of
+#: `object`, `subject`, `event`, `document` and `source`, so those five are here; a
+#: `:Point`'s vector is RECORD TRUTH (`#5004`) and is never derived, and `operator`
+#: (a `:Point` subset, `#13630`) has no fold of its own — nothing answers the gate
+#: for either, so their graph copy is still maintained and refusing it on a record
+#: blip would empty the dense leg for `point` (the primary retrieval label) on the
+#: DEFAULT posture, where `main` answered from that same copy.
+#:
+#: ⛔ AND THE SET NOW COVERS BOTH HALVES OF `:Source` (`document` AND `source`), which
+#: is not a re-cut of the union rule: each half is written by its own fold (`_upsert_document`
+#: / `_upsert_source`), and BOTH ask BOTH types — one `:Source` vector serves both
+#: readings, so either KEEP keeps it and only an agreeing stop retires it. ⛔ THAT STOP IS
+#: A PROPERTY OF THE LABEL, not of one `entity_type`, so this set alone does not decide the
+#: read's no-fallback arm — :func:`label_frozen` is the conjunct that does (`#13854` review).
 #:
 #: ⛔ THE MEMBERSHIP IS PINNED AGAINST THE FOLDS THEMSELVES rather than restated
 #: here: `tests/test_13610_graph_vector_copy.py::
@@ -649,7 +714,8 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: a third fold WIDENS this set by test failure rather than
 #: leaving that label with a fallback it no longer has — or, in the other
 #: direction, silently taking away a fallback it still has.
-MIRROR_RETIRED_LABELS: frozenset[str] = frozenset({"object", "subject"})
+MIRROR_RETIRED_LABELS: frozenset[str] = frozenset(
+    {"object", "subject", "event", "document", "source"})
 
 #: How long one tenant's UNVERIFIED coverage verdict is trusted (seconds).
 #:
@@ -758,6 +824,14 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
     *"are the two sets equal"* (`#11395`'s step 2 is a coverage claim; the two
     stores' vectors are the same function of the same datum, pinned by
     `tests/test_13220_record_label_embeddings.py`).
+
+    ⛔ A SATISFIED COUNT FROM TWO ZEROES IS MARKED ``trivial`` (#13798), because
+    ``0 >= 0`` is a vacuous pass: an unseeded population satisfies this gate just as
+    a backfilled one does, and before the marker both read as ``verified=True``. The
+    verdict still comes back VERIFIED — refusing would change deployment behaviour
+    for a state where the two stores answer identically — but the reason and
+    :attr:`Coverage.trivial` now say the evidence was two zeroes, so *"the record
+    caught up"* is not a reading this count can be given by mistake.
     """
     cached = _cached_coverage(label, scope, record_dsn)
     if cached is not None:
@@ -781,11 +855,39 @@ def coverage(label: str, scope: _Scope, *, graph_vectors: int | None = None,
                                reason="the record's vector count could not be measured")
         else:
             verified = record_vectors >= graph_vectors
+            # ⛔ 0 >= 0 IS TRUE, AND IT IS NOT EVIDENCE (#13798). The comparison is
+            # kept — with nothing in either store the two stores answer
+            # identically, so there is nothing here to refuse — and the vacuity is
+            # MARKED instead, so "verified because both sides are zero" cannot be
+            # read as "the record caught up". Both sides zero is the only way to
+            # reach it: a zero record against a non-zero graph is a genuine
+            # shortfall, and an unmeasurable side is ``None`` above, never ``0``.
+            trivial = verified and record_vectors == 0 and graph_vectors == 0
+            # ⛔ THE COUNT IS A MEASUREMENT, AND THE PROSE SAYS SO (#13812 review P2).
+            # `reason` outlives the instant it describes: a VERIFIED verdict is
+            # served from `_cached_coverage` stickily for the life of the process
+            # (`#13799`), and an UNVERIFIED one for `COVERAGE_TTL_SECONDS`. Every
+            # consumer renders this string LATER — the TRIVIALLY trace line, the
+            # unverified DECLINE line and its `RecordVectorDeclined` text,
+            # `tools/claim_dense_leg_13732.py`'s `coverage_unverified` refusal (which
+            # lands in that run's artifact and on stderr), and
+            # `Coverage.as_dict()`, which a caller may render — so a present-tense
+            # "the record holds N, the graph serves M" is read as a
+            # claim about NOW while the read answering with it may return rows the
+            # count never saw (the normal fresh-tenant lifecycle: measure 0/0,
+            # then write). Past tense plus "measured" dates the number, which is
+            # what the TRIVIALLY trace's own measurement-time framing
+            # (`searcher()`'s `if verdict.trivial` block) already promises.
+            reason = (f"the count measured {record_vectors} vector(s) in the "
+                      f"record for {label} against {graph_vectors} in the graph")
+            if trivial:
+                reason += (
+                    " — BOTH SIDES ARE EMPTY, so this verification is TRIVIAL: the "
+                    "count compared two zeroes and did not show the record holds "
+                    "anything")
             verdict = Coverage(
                 label=label, verified=verified, record_vectors=record_vectors,
-                graph_vectors=graph_vectors,
-                reason=(f"the record holds {record_vectors} vector(s) for "
-                        f"{label}, the graph serves {graph_vectors}"))
+                graph_vectors=graph_vectors, reason=reason, trivial=trivial)
     key = _coverage_key(label, scope, record_dsn)
     if key is not None:
         # ⛔ A VERIFIED VERDICT IS STICKY, AND THAT IS A STATED RESIDUAL, not an
@@ -819,9 +921,10 @@ def _record_vector_count(label: str, scope: _Scope, *,
     `document` ⊂ `public.source`, and the SERVE applies `LABEL_SERVED[label][2]`
     (`if kind_filter: where.append(kind_filter)` in :func:`vector_search`) — so a
     numerator taken over the whole table would let a record holding only plain
-    points verify `operator` on a SURPLUS of plain points, and the kind-filtered
-    read would then be served from the record with zero rows of that kind while
-    reporting `mechanism=pgvector, reason=ok`. One-sided on purpose: the graph
+    points verify `operator` on a SURPLUS of plain points, and the record's
+    kind-filtered answer would hold zero rows of that kind while the COUNT called the
+    label covered (the graph answers the read, `search_engine.py:4179`, so nothing on
+    the record leg reports its shortfall). One-sided on purpose: the graph
     DENOMINATOR is the whole label (the graph has no per-kind vector property to
     count), so the comparison for those two labels is not merely HARDER to pass —
     for `document`/`source` it is UNREACHABLE whenever the other kind carries an
@@ -900,23 +1003,226 @@ def arm_is_explicit() -> bool:
         return False
 
 
-def coverage_verified(label: str, scope: _Scope | None = None,
+def coverage_verified(label: str, scope: _Scope | tuple[str, str] | None = None,
                       record_dsn: str | None = None) -> bool:
-    """Is this label's coverage VERIFIED for ``scope``? Read-only, cached.
+    """Is this label's coverage VERIFIED for ``scope``? Read-only, CACHE-ONLY.
 
-    The one predicate the WRITE side asks, and the reason the two sides cannot
-    disagree: :func:`mirror_required` is its negation, so the graph write is
-    retained exactly while the graph branch is the answering leg.
+    ⛔ **IT IS A VIEW, NOT A DECISION — do not decide anything from it.** It answers only
+    "was a verified verdict already taken for this (dsn, tenant, label)", and it applies
+    NONE of :func:`mirror_verdict`'s two DECISION gates: `COVERAGE_GATED_LABELS` (does the
+    record even serve this label?) and :func:`cutover_armed` (is the arm still on?). Those
+    are the two that can make a cached ``verified`` verdict survive into a permission it no
+    longer licenses — a rolled-back deployment, or a label nobody gates — so a caller that
+    reads this as *the* predicate would act on exactly those two stale states. It DOES
+    apply the tenant and record-leg resolution, conservatively
+    (:func:`_declared_scope` returning ``None``, or an unresolvable DSN inside
+    :func:`_coverage_key`, both answer ``False``), so it never answers ``True`` for a
+    tenant or a record it could not scope.
+
+    That is why the WRITE path asks :func:`mirror_required` — which is
+    :func:`mirror_verdict`'s boolean — and why it is `mirror_verdict`'s cache-only arm that
+    repeats this function's two-line body rather than calling it: the arm needs the
+    verdict's ``reason`` too, and a second read of the cache to fetch it would be a second
+    chance to disagree (`#13796`).
+
+    ⛔ IT NEVER MEASURES, so it answers ``False`` for a process that has taken no verdict
+    yet — correct for a WRITE (the mirror stays) and wrong for an operator tool that holds
+    the handle and its own tenant. That caller must ask :func:`mirror_verdict` and pass a
+    ``graph_population`` supplier (`#13796`).
+
+    ``scope`` may be declared by a caller that holds its own tenant: no scope given means
+    "resolve the ambient one", and :func:`_declared_scope` is the ONE resolver both doors
+    use, so a declared tenant and a request's tenant cannot be read two ways.
     """
-    if scope is None:
-        scope = _resolve_scope()
-    if scope is None:
+    resolved = _declared_scope(scope)
+    if resolved is None:
         return False
-    cached = _cached_coverage(label, scope, record_dsn)
+    cached = _cached_coverage(label, resolved, record_dsn)
     return bool(cached is not None and cached.verified)
 
 
-def mirror_required(entity_type: str) -> bool:
+def label_frozen(entity_type: str, scope: _Scope | tuple[str, str] | None = None, *,
+                 graph_population: Callable[[str], int | None] | None = None,
+                 record_dsn: str | None = None,
+                 timeout_ms: int | None = None) -> bool:
+    """Has the GRAPH copy of ``entity_type``'s **LABEL** been frozen? (`#13854` review)
+
+    The no-fallback arm (:class:`RecordVectorWithoutFallback`) claims something the
+    per-type :func:`coverage` verdict cannot establish on its own: *the graph copy
+    has been FROZEN since the contract, so a graph answer would be a SMALLER cohort
+    presented as the answer*. That premise is produced by the WRITERS, and **a writer
+    stops for a LABEL, not for an `entity_type`** — the four writers of `:Source`
+    (`_upsert_document`, `_upsert_source`, `hosted_backup.restore_graph` and
+    `sdk._update_entity`) each ask BOTH halves of the one shared node and store while
+    EITHER answers KEEP, so the graph is only frozen once **every** type addressing
+    the label has verified.
+
+    ⛔ WHAT THIS FUNCTION EXISTS TO STOP. Reading the contract off the current type
+    alone claimed a freeze the writers had not performed. `:Source` is served by two
+    `entity_type`s (`LABEL_SERVED`: `document` is `document_kind IS NOT NULL`,
+    `source` is `IS NULL`) against ONE graph label whose count has no kind predicate,
+    so the two halves verify INDEPENDENTLY — and the ordinary deployment verifies one
+    of them. In that state `contracted("document")` was ``True`` while the `:Source`
+    copy was still being written by the `source`-KEEP arm (and the strip, which asks
+    the same AND, had not run), so a record blip turned a COMPLETE graph answer into
+    `RecordVectorWithoutFallback`: an availability regression on the default posture
+    for the two types that share the label, in the one direction the contract must
+    never take.
+
+    The consequence is deliberately not a hard-coded exclusion. While the graph
+    denominator is label-wide, `record_vectors >= graph_vectors` cannot be satisfied
+    by both halves at once (:func:`_record_vector_count`: one `public.source` table
+    splits into two kind-filtered numerators against the whole-label denominator), so
+    this answers ``False`` for `:Source` — which is CORRECT, because that is exactly
+    the state where a writer is still storing. A kind-aware denominator, should one
+    ever exist, widens the answer without touching this rule.
+
+    Conservative in every unknown: an unmeasurable sibling answers unverified, which
+    keeps the named fallback (the graph is complete while a writer still writes).
+    """
+    served = LABEL_SERVED[entity_type][0]
+    for sibling, (sibling_served, *_rest) in LABEL_SERVED.items():
+        if sibling_served != served:
+            continue
+        if not coverage(sibling, scope, graph_population=graph_population,
+                        record_dsn=record_dsn, timeout_ms=timeout_ms).verified:
+            return False
+    return True
+
+
+def _declared_scope(scope: _Scope | tuple[str, str] | None) -> _Scope | None:
+    """The scope a caller DECLARED, else the ambient one this process carries.
+
+    ``None`` is "nobody declared one, so resolve it the way the request lanes do",
+    never "no tenant": a caller that wants the ambient resolution omits the
+    argument, and a caller that holds its own tenant passes it. That distinction is
+    the whole reason this function exists — :func:`mirror_required`'s scope question
+    is *"which tenant's record is this process talking about?"*, and an operator
+    tool that declared its tenant on the command line must not be answered with the
+    ambient `None` (see :func:`mirror_verdict`).
+
+    A malformed declaration (a one-element tuple, a non-string, an empty string) is
+    answered ``None`` — the same "half a tenant is refused" rule
+    :func:`_resolve_scope` applies, because a mis-scoped read returns ZERO rows under
+    RLS with no error (#10024).
+    """
+    if scope is None:
+        return _resolve_scope()
+    if isinstance(scope, _Scope):
+        return scope
+    if isinstance(scope, tuple) and len(scope) == 2:
+        org_id, graph_id = scope
+        if isinstance(org_id, str) and org_id and isinstance(graph_id, str) and graph_id:
+            return _Scope(org_id=org_id, graph_id=graph_id)
+    return None
+
+
+def mirror_verdict(entity_type: str, *,
+                   scope: _Scope | tuple[str, str] | None = None,
+                   record_dsn: str | None = None,
+                   graph_population: Callable[[str], int | None] | None = None,
+                   graph_vectors: int | None = None) -> tuple[bool, str]:
+    """``(mirror_required, reason)`` — the predicate AND the account behind it.
+
+    :func:`mirror_required` is this function's first element; this is the one place
+    the answer is decided, so the write path and an operator tool cannot hold two
+    readings of one verdict.
+
+    ⛔ WHY THE ACCOUNT IS PART OF THE ANSWER (#13796). The question *"may the graph copy
+    be stripped?"* has an answer AND a reason, and they were only separable by
+    re-deriving the gate's own internals — which is how a second predicate is born. A
+    caller that must PRINT why (the stripper's plan, and its refusal when the record is
+    short) reads the reason here instead, and the measured arm below names both counts.
+
+    ⛔ THE TWO OPTIONAL DOORS, and why each is needed rather than convenient:
+
+    * ``scope`` — a NON-REQUEST caller has no ambient tenant. The write folds run inside
+      an SDK request that installs one (``use_record_tenant`` / ``_record_tenant``), but
+      ``tools/strip_graph_entity_vectors.py`` is a fresh operator process: it declares
+      ``--org-id``/``--graph-id`` on its command line and holds no ContextVar, so the
+      ambient resolution answers *"no tenant"* forever and ``mirror_required`` answers
+      ``True`` (keep the mirror) for EVERY label. That is #13796's second half: the gate
+      was unsatisfiable from the only tool that runs it. A declared scope is the caller's
+      own tenant, exactly as the SDK's carried tenant is the request's.
+    * ``graph_population`` / ``graph_vectors`` — the denominator lives ON THE GRAPH and
+      only a caller holding a handle can count it (#13610). Without one, the verdict is
+      taken CACHE-ONLY (:func:`coverage_verified`), which is correct for a write fold —
+      re-counting on every write would put a full-label aggregate behind each one — and
+      wrong for an operator tool that runs once and holds the handle it is about to
+      strip. Supplying one makes the verdict MEASURED on a cache miss and, because
+      :func:`coverage` caches what it took, still free on a hit. ⛔ IT IS NEVER A
+      PERMISSION: the supplier is asked for a COUNT, and the comparison it feeds is the
+      same ``record_vectors >= graph_vectors`` the read path uses. A hard-coded override
+      or an operator's "yes I backfilled" boolean would be the asserted gate this whole
+      design exists to avoid.
+
+    ``record_dsn`` is the record leg the caller means, when it did not come from the
+    ambient ``TORTOISE_RECORD_DSN`` (the stripper's ``--record-dsn``); it is resolved by
+    the same :func:`tortoise.record_writer.record_dsn` the cache key uses, so the verdict
+    taken here is the verdict a later cache-only ask in the same process reads.
+
+    Every conservative answer the predicate has — a label nobody gates, a rolled-back
+    arm, no record leg, no tenant, an unmeasurable graph — is preserved verbatim, and
+    each says so in the reason rather than answering a bare ``True``.
+    """
+    if entity_type not in COVERAGE_GATED_LABELS:
+        return True, (
+            f"{entity_type!r} is not a coverage-gated label, so the record has never "
+            "been asked to cover it — the graph copy is the only copy")
+    if not cutover_armed():
+        return True, (
+            f"the record dense leg is ROLLED BACK ({ARMING_ENV} is explicitly falsy), so "
+            "every graph write is retained whatever the record holds")
+    try:
+        from .record_writer import record_dsn as _resolve
+
+        dsn = _resolve(record_dsn)
+    except Exception as exc:  # noqa: BLE001, RUF100 — unarmed, so the mirror stays
+        return True, (
+            f"the record leg could not be resolved ({type(exc).__name__}: {exc}), so "
+            "the graph copy is kept")
+    if not dsn:
+        return True, (
+            "no record leg is configured, so nothing can prove coverage and the graph "
+            "copy is kept")
+    resolved = _declared_scope(scope)
+    if resolved is None:
+        # ⛔ A DECLARED BUT INCOMPLETE TENANT IS A DIFFERENT ANSWER FROM NO DECLARATION
+        # (review round 6). `_declared_scope` refuses a half pair by design, and this
+        # sentence used to describe that refusal as *"no tenant … and none was declared"* —
+        # false in both clauses for a caller that DID declare one and may well run with an
+        # ambient tenant installed. The refusal is right either way; the account has to be
+        # too, or the operator is sent to look for a missing env var that is not the
+        # problem.
+        if scope is not None:
+            return True, (
+                "the tenant this caller DECLARED is not a whole (org_id, graph_id) pair, "
+                "so it is refused rather than silently resolved against the ambient "
+                "tenant — a mis-scoped read returns zero rows under RLS with no error")
+        return True, (
+            "no tenant is installed on this process and none was declared, so the "
+            "record cannot be asked about a label")
+    if graph_population is None and graph_vectors is None:
+        # The WRITE path's door: cache only. See `coverage_verified` on why an operator
+        # that holds a handle should supply a population instead.
+        cached = _cached_coverage(entity_type, resolved, record_dsn)
+        if cached is not None and cached.verified:
+            return False, cached.reason
+        if cached is not None:
+            return True, cached.reason
+        return True, (
+            f"the record has not proved it holds this label's vectors in this process "
+            f"(no coverage verdict was taken for {entity_type!r} since boot)")
+    verdict = coverage(entity_type, resolved, graph_population=graph_population,
+                       graph_vectors=graph_vectors, record_dsn=record_dsn)
+    return (not verdict.verified), verdict.reason
+
+
+def mirror_required(entity_type: str, *,
+                    scope: _Scope | tuple[str, str] | None = None,
+                    record_dsn: str | None = None,
+                    graph_population: Callable[[str], int | None] | None = None,
+                    graph_vectors: int | None = None) -> bool:
     """Must the GRAPH still store this label's derived vector? (#13610, option 2)
 
     ``True`` — write it, because the graph is (or may be) this label's answering
@@ -956,21 +1262,18 @@ def mirror_required(entity_type: str) -> bool:
     is deliberate — re-taking the count on the write path would put a full-label
     aggregate on every write — and it is bounded by the first dense read for the
     label.
-    """
-    if entity_type not in COVERAGE_GATED_LABELS:
-        return True
-    if not cutover_armed():
-        return True
-    try:
-        from .record_writer import record_dsn as _resolve
 
-        if not _resolve():
-            return True
-    except Exception:  # noqa: BLE001, RUF100 — unarmed, so the mirror stays
-        return True
-    if _resolve_scope() is None:
-        return True
-    return not coverage_verified(entity_type)
+    ⛔ THE CACHE-ONLY RULE IS THE WRITE PATH'S, NOT THE PREDICATE'S (#13796). A caller
+    that is NOT a request — an operator tool holding the graph handle and its own tenant
+    — passes ``scope`` and a ``graph_population`` supplier and gets a MEASURED verdict,
+    because "this process has served no dense read" is not a fact about the record. See
+    :func:`mirror_verdict`, which is where the decision lives; this function is its
+    boolean, and both doors are spelled the same way so no caller needs a second
+    predicate to ask a second question.
+    """
+    return mirror_verdict(
+        entity_type, scope=scope, record_dsn=record_dsn,
+        graph_population=graph_population, graph_vectors=graph_vectors)[0]
 
 
 @dataclass(frozen=True)
@@ -2171,6 +2474,15 @@ def searcher(
         #     fallback. ⛔ CARRYING THE CONTRACT OVER TO THESE FIVE would empty the
         #     dense leg for `point` on the default posture — a regression against
         #     `main` on the label the product retrieves by (`#13617` review F1).
+        #
+        # ⛔ AND "THE GRAPH HAS BEEN FROZEN" IS A CLAIM ABOUT THE **LABEL**, not about
+        # this `entity_type` (#13854 review). A writer stops for a label: the four
+        # writers of `:Source` ask BOTH halves and store while EITHER answers KEEP, so
+        # `document` verifying while `source` has not proves nothing about the copy a
+        # graph answer would return — it is still complete and still being fed. The
+        # membership test alone read the contract off the type, which is why
+        # `label_frozen` is the conjunct and why the two `:Source` halves cannot both
+        # clear it while the graph denominator is label-wide.
         contracted = False
         if entity_type in COVERAGE_GATED_LABELS:
             verdict = coverage(entity_type, scope,
@@ -2196,9 +2508,49 @@ def searcher(
                 raise RecordVectorDeclined(
                     f"the record's `{entity_type}` vector coverage is not proven "
                     f"({verdict.reason}) — the graph branch answers")
+            if verdict.trivial:
+                # ⛔ THE VACUOUS PASS IS REPORTED ON THE PATH THAT SERVES IT (#13798).
+                # The branch above logs its `reason` only when it DECLINES, which a
+                # verified verdict never reaches — so a label holding nothing in
+                # either store was served by a leg whose trace never said WHICH state
+                # it was in: where the contract owns the label (`object`/`subject`)
+                # the record answers `mechanism=pgvector, reason=empty_results`, the
+                # SAME token a backfilled label's empty read records, and everywhere
+                # else the empty answer FALLS THROUGH and the GRAPH records
+                # `mechanism=scan_fallback, reason=no_embeddings, degraded=True`.
+                # This line is the difference, and it
+                # DECIDES NOTHING: the read proceeds exactly as before, because with
+                # both sides empty the two stores answer identically (which is why
+                # the two-zero case is marked rather than refused).
+                # ⛔ IT STATES A **MEASUREMENT-TIME** FACT, NOT A PRESENT-TENSE ONE
+                # (#13799 review). `verdict` here is frequently CACHED — a verified
+                # verdict is sticky for the life of the process (`_cached_coverage`),
+                # and a trivial one is verified — so between taking the verdict and
+                # this read the tenant may have WRITTEN: the record grows, the mirror
+                # stays off (`mirror_required` is already False, because a trivial
+                # verdict is verified), and this read RETURNS ROWS. A line reading
+                # "this read is empty because the POPULATION is empty" would then be
+                # false on every such read — the trace that lies, and it would
+                # mislabel the caught-up case the line exists to distinguish from the
+                # vacuous one. Nothing needs emitting after the query for this: the
+                # line's subject is the VERDICT's provenance (why the gate passed),
+                # and `reason`'s own prose is already measurement-time ("BOTH SIDES
+                # ARE EMPTY"), so the framing below is what keeps the two aligned.
+                logging.getLogger(LOG_NAME).debug(
+                    "record dense leg: `%s` coverage was verified TRIVIALLY (%s) — "
+                    "that verdict was TAKEN when both stores held no vector for "
+                    "this label, so it is evidence about that MEASUREMENT and not "
+                    "about this read's population",
+                    entity_type, verdict.reason)
             # ⛔ THE CONTRACT IS THE NARROW SET, not the gate's set: only a label
-            # whose fold actually stops writing has a graph worth refusing.
-            contracted = entity_type in MIRROR_RETIRED_LABELS
+            # whose fold actually stops writing has a graph worth refusing. And the
+            # narrow set is per LABEL — membership here names a fold, not a frozen
+            # graph, so the freeze is measured over every type that shares it.
+            contracted = (entity_type in MIRROR_RETIRED_LABELS
+                          and label_frozen(entity_type, scope,
+                                           graph_population=graph_population,
+                                           record_dsn=record_dsn,
+                                           timeout_ms=timeout_ms))
         try:
             rows = vector_search(scope, entity_type, query_vec, limit,
                                  record_dsn=record_dsn,
@@ -2260,6 +2612,59 @@ def _safe_population(graph_population: Callable[[str], int | None],
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def knn_statement(
+    entity_type: str,
+    scope: _Scope,
+    query_vec: Sequence[float],
+    limit: int,
+    *,
+    where: Sequence[str] | None = None,
+    key_params: Sequence[Any] = (),
+) -> tuple[str, tuple[Any, ...]] | None:
+    """The kNN SELECT this module runs, as ``(sql, params)`` — ONE definition.
+
+    ⛔ WHY A NAMED BUILDER AND NOT A LOCAL. The statement's SHAPE is evidence
+    about WHICH PLAN answered the read, and an instrument that re-spells the
+    SELECT to plan it can only ever prove something about its own spelling. That
+    is the reviewed defect exactly (`tools/vector_parity_13906.py` proved an HNSW
+    index was LISTED while an EXACT SEQ SCAN answered), so the parity harness
+    plans **this** statement: `vector_search` and the caller that EXPLAINs it
+    share one string, and neither can drift from the other.
+
+    ``where``/``key_params`` let a caller supply a predicate it has already built
+    (the folded-status arm's terminal-key exclusion). Omitted, the DEFAULT
+    predicate for the label is built here, which is the column-filtered arm —
+    ``point`` included, the label the parity harness reads.
+    """
+    mapping = LABEL_SERVED.get(entity_type)
+    if mapping is None:
+        return None
+    table, id_column, kind_filter, recency_columns = mapping
+    vec = [float(x) for x in query_vec]
+    if limit <= 0 or not vec:
+        return None
+    literal = "[" + ",".join(repr(v) for v in vec) + "]"
+    if where is None:
+        built = ["t.embedding_vec IS NOT NULL"]
+        if kind_filter:
+            built.append(kind_filter)
+        built.extend(_status_predicates(entity_type, None))
+        where, key_params = built, ()
+    sql = (
+        f"SELECT t.{id_column}, "
+        f"(t.embedding_vec <=> %s::vector) AS distance, "
+        f"{_recency_sql(recency_columns)} AS recency "
+        f"FROM public.{table} AS t "
+        f"WHERE t.org_id = %s AND t.graph_id = %s "
+        f"AND {' AND '.join(where)} "
+        f"ORDER BY t.embedding_vec <=> %s::vector "
+        f"LIMIT %s"
+    )
+    params = (literal, scope.org_id, scope.graph_id, *key_params,
+              literal, int(limit))
+    return sql, params
 
 
 def vector_search(
@@ -2345,7 +2750,7 @@ def vector_search(
         # A label no record table serves. NOT an empty result: the caller's graph
         # branch is this label's real path and always was.
         return None
-    table, id_column, kind_filter, recency_columns = mapping
+    table, id_column, kind_filter, _recency_columns = mapping
     if limit <= 0:
         return []
     vec = [float(x) for x in query_vec]
@@ -2355,7 +2760,8 @@ def vector_search(
     from .record_projection import scope_connection
     from .record_serve import open_record
 
-    literal = "[" + ",".join(repr(v) for v in vec) + "]"
+    # ⛔ THE VECTOR LITERAL IS `knn_statement`'s NOW (it is the one place the
+    # SELECT and its binds may be spelled), so it is not built here.
     # ⛔ THE DIVISOR IS DECIDED HERE, BEFORE ANY STATEMENT RUNS, because the DOOR
     # applies it: a folded label issues :data:`FOLD_ARM_STATEMENTS` data statements
     # (its two prefetches, then the kNN) against the column arm's
@@ -2449,18 +2855,16 @@ def vector_search(
                     key_params.append(terminal_keys)
             else:
                 where.extend(_status_predicates(entity_type, excluded_statuses))
+            # ⛔ THE STATEMENT COMES FROM `knn_statement`, the single definition
+            # the parity harness also EXPLAINs — see its docstring. The shortfall
+            # `count(*)` below reuses the same PREDICATE, so the two statements
+            # cannot disagree about which rows were selected.
             predicate = " AND ".join(where)
-            sql = (
-                f"SELECT t.{id_column}, "
-                f"(t.embedding_vec <=> %s::vector) AS distance, "
-                f"{_recency_sql(recency_columns)} AS recency "
-                f"FROM public.{table} AS t "
-                f"WHERE t.org_id = %s AND t.graph_id = %s AND {predicate} "
-                f"ORDER BY t.embedding_vec <=> %s::vector "
-                f"LIMIT %s"
-            )
-            params = (literal, scope.org_id, scope.graph_id, *key_params,
-                      literal, int(limit))
+            statement = knn_statement(entity_type, scope, vec, limit,
+                                      where=where, key_params=key_params)
+            if statement is None:          # unreachable: both were checked above
+                return []
+            sql, params = statement
             # ⛔ TRANSACTION-LOCAL and set BEFORE the read: the default returns a
             # SHORT answer on a selective filter (0 rows where 152 exist —
             # measured, see HNSW_ITERATIVE_SCAN), and a short answer is

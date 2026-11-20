@@ -74,14 +74,14 @@ def fresh_sdk(graph_name=None):
 
 
 def make_point(sdk, content, kind="statement", tier=None):
-    p = sdk.create_point(kind, content, status="live")
+    p = sdk._create_point(kind, content, status="live")
     if tier is not None:
-        sdk.set_point_baseline(p["id"], *tier)
+        sdk._set_point_baseline(p["id"], *tier)
     return p
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL"):
-    return sdk.create_operator(op_type, source_id, [target_id])
+    return sdk._create_operator(op_type, source_id, [target_id])
 
 
 def run_ep(sdk):
@@ -124,7 +124,7 @@ class TestMitigationDampensImply:
         op_id, claim_id = self.build_imply_chain(sdk)
 
         conf_unmit = get_conf(run_ep(sdk), claim_id)
-        sdk.mitigate_operator(op_id, "Major counter-evidence", 0.50)
+        sdk._mitigate_operator(op_id, "Major counter-evidence", 0.50)
         conf_strong = get_conf(run_ep(sdk), claim_id)
 
         assert conf_strong < conf_unmit, (
@@ -145,7 +145,7 @@ class TestMitigationDampensImply:
         confs = {}
         for strength in (0.10, 0.30, 0.50):
             # Idempotent update: same mitigation point, new strength.
-            sdk.mitigate_operator(op_id, f"mitigate at {strength}", strength)
+            sdk._mitigate_operator(op_id, f"mitigate at {strength}", strength)
             confs[strength] = get_conf(run_ep(sdk), claim_id)
 
         # Monotone: higher strength -> LOWER downstream confidence.
@@ -174,7 +174,7 @@ class TestMitigationDampensImply:
         nand_op = make_operator(sdk, attacker["id"], target["id"], "NAND")
 
         conf_target_before = get_conf(run_ep(sdk), target["id"])
-        sdk.mitigate_operator(op_id, "dampen the IMPL only", 0.50)
+        sdk._mitigate_operator(op_id, "dampen the IMPL only", 0.50)
         conf_target_after = get_conf(run_ep(sdk), target["id"])
         # Same graph except the IMPL operator's strength — NAND pair settles
         # to the same fixed point (damping convergence, tol 1e-3).
@@ -195,7 +195,7 @@ class TestMitigatedNandDampensNotRefutes:
         nand_op = make_operator(sdk, attacker["id"], target["id"], "NAND")
 
         conf_unmit = get_conf(run_ep(sdk), target["id"])
-        sdk.mitigate_operator(nand_op["id"], "Attack overstated", 0.50)
+        sdk._mitigate_operator(nand_op["id"], "Attack overstated", 0.50)
         conf_mit = get_conf(run_ep(sdk), target["id"])
 
         # Dampened: the 0.50 mitigation weakens the attack (target higher).
@@ -220,7 +220,7 @@ class TestMitigatedBySchemaRule:
         sdk = fresh_sdk()
         plain = make_point(sdk, "A plain claim — not an operator")
         with pytest.raises(ValueError, match="not an operator"):
-            sdk.mitigate_operator(plain["id"], "must fail", 0.30)
+            sdk._mitigate_operator(plain["id"], "must fail", 0.30)
         # No (op)-[:mitigated_by]->(m) edge may exist after the rejection.
         proj = sdk._get_proj()
         rows = proj.g.query("MATCH (:Point)-[:mitigated_by]->(:Point) RETURN count(*)").result_set
@@ -229,7 +229,7 @@ class TestMitigatedBySchemaRule:
     def test_mitigate_operator_rejects_missing_point(self):
         sdk = fresh_sdk()
         with pytest.raises(ValueError, match="not found"):
-            sdk.mitigate_operator("does-not-exist", "nope", 0.30)
+            sdk._mitigate_operator("does-not-exist", "nope", 0.30)
 
     def test_generic_create_edge_cannot_write_mitigated_by(self):
         """mitigated_by is not in the create_edge allowlist (§3.9)."""
@@ -237,4 +237,4 @@ class TestMitigatedBySchemaRule:
         a = make_point(sdk, "A")
         b = make_point(sdk, "B")
         with pytest.raises(ValueError, match="Unknown predicate"):
-            sdk.create_edge("mitigated_by", a["id"], b["id"])
+            sdk._create_edge("mitigated_by", a["id"], b["id"])

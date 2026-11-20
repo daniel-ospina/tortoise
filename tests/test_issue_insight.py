@@ -56,24 +56,24 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     """Seed prior knowledge the github indexer would have written."""
     obs_101 = None
     if include_repo_a:
-        obs_101 = sdk.create_point(
+        obs_101 = sdk._create_point(
             kind="observation",
             content="owner/a #101: auth refresh token rotation failed in prod",
             source="github", github_repo="owner/a", github_number=101, github_state="closed",
         )
-        sdk.create_point(
+        sdk._create_point(
             kind="observation",
             content="owner/a #102: plan JWT rotation rollout to all services",
             source="github", github_repo="owner/a", github_number=102, github_state="open",
         )
     # repo b — must never bleed into owner/a scoped queries
-    sdk.create_point(
+    sdk._create_point(
         kind="observation",
         content="owner/b #7: unrelated payment retry backoff tuning",
         source="github", github_repo="owner/b", github_number=7, github_state="open",
     )
     # cross-session decision (the semantic "aha" — non-GitHub-covered space)
-    decision = sdk.create_point(
+    decision = sdk._create_point(
         kind="decision",
         content=GRAPH_TOPIC,
     )
@@ -258,7 +258,7 @@ class TestIssueInsightE2E:
         def _boom(*args, **kwargs):
             raise RuntimeError("graph down")
 
-        monkeypatch.setattr(sdk, "issue_insight", _boom)
+        monkeypatch.setattr(sdk, "_issue_insight", _boom)
 
         result = ms.tortoise_issue_insight(title="x", repo="owner/a")
 
@@ -273,7 +273,7 @@ class TestIssueInsightSDK:
         sdk = _sdk(tmp_path)
         _seed_graph(sdk)
 
-        result = sdk.issue_insight(title="")
+        result = sdk._issue_insight(title="")
 
         assert result["has_prior"] is False
         assert result["data_points"] == []

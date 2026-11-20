@@ -439,6 +439,7 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
     that the hint arm could therefore never see.
     """
     from tortoise.sdk_retired import (
+        FINAL_DELETION_DESTINATIONS,
         SURPLUS_DELETION_DESTINATIONS,
         WAVE1_DELETION_DESTINATIONS,
         WAVE2_DELETION_DESTINATIONS,
@@ -449,6 +450,7 @@ def test_every_surplus_destination_is_the_one_the_record_records() -> None:
         ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
         ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
         ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
+        ("FINAL_DELETION_DESTINATIONS", FINAL_DELETION_DESTINATIONS),
     ):
         missing = sorted(n for n in cell if n not in inventory)
         assert not missing, (
@@ -484,6 +486,7 @@ def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
     wave-1 name WITH a recorded destination must carry a claim, and one WITHOUT must not.
     """
     from tortoise.sdk_retired import (
+        FINAL_DELETION_DESTINATIONS,
         REMOVED_SDK_METHODS,
         SURPLUS_DELETION_DESTINATIONS,
         WAVE1_DELETION_DESTINATIONS,
@@ -495,6 +498,7 @@ def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
         ("SURPLUS_DELETION_DESTINATIONS", SURPLUS_DELETION_DESTINATIONS),
         ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
         ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
+        ("FINAL_DELETION_DESTINATIONS", FINAL_DELETION_DESTINATIONS),
     ):
         for name, dests in cell.items():
             if name not in REMOVED_SDK_METHODS:
@@ -522,6 +526,7 @@ def test_every_deletion_reason_states_only_its_recorded_destination() -> None:
     for cell_name, cell in (
         ("WAVE1_DELETION_DESTINATIONS", WAVE1_DELETION_DESTINATIONS),
         ("WAVE2_DELETION_DESTINATIONS", WAVE2_DELETION_DESTINATIONS),
+        ("FINAL_DELETION_DESTINATIONS", FINAL_DELETION_DESTINATIONS),
     ):
         claiming = {
             name for name in cell
@@ -549,6 +554,7 @@ def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
     has stopped being live (a stale excuse).
     """
     from tortoise.sdk_retired import (
+        FINAL_DELETION_DESTINATIONS,
         RETIRED_SDK_METHODS,
         SURPLUS_DELETION_DESTINATIONS,
         UNHINTED_LIVE_DESTINATIONS,
@@ -561,6 +567,7 @@ def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
         **SURPLUS_DELETION_DESTINATIONS,
         **WAVE1_DELETION_DESTINATIONS,
         **WAVE2_DELETION_DESTINATIONS,
+        **FINAL_DELETION_DESTINATIONS,
     }
     live_unhinted = {
         name: dest

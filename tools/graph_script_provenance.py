@@ -154,6 +154,12 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
         # would be a false provenance statement, so it takes the residue side and
         # the ceiling moves with it (below).
         "11070_repair_session_source_prose.py",
+        # #13880: the LIVE door that files the business map (see JUDGEMENT.md in
+        # that directory). Same side, same reason as #4125's CLI and #11070's
+        # runbook command above — every declared spelling asserts the script does
+        # not run, and this one is meant to be run. Keyed by its path RELATIVE to
+        # `graph-scripts/`, because it is the corpus's first nested script.
+        "business_map_13880/file_map.py",
         "2146_e2e_live_orphan_cleanup.py",
         "2146_falkordb_graph_cleanup.py",
         "2199_baseline_source_rename.py",
@@ -199,7 +205,13 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
 #: 35 -> 36 (#11070): `11070_repair_session_source_prose.py` is the same shape —
 #: a live operator path, not a historical artefact — so it is declared residue
 #: rather than mislabelled, and the ratchet is raised in the diff that adds it.
-UNMARKED_CEILING = 36
+#: 36 -> 37 (#13880): `business_map_13880/file_map.py` is the LIVE door that files
+#: the business map through the MCP tools — the same shape as #4125/#11070, and
+#: for the same reason: every declared spelling asserts the script does not run,
+#: while this one is told to run. It is also the corpus's first NESTED script,
+#: which is why `scan()` now recurses (a nested script the flat glob cannot see
+#: escaped this contract entirely — measured on #13880's review).
+UNMARKED_CEILING = 37
 
 #: Scripts that assert a price **of this product**. #4830's sharpest gap: both
 #: ``bp_approach_cycle3``/``cycle4`` assert non-canonical tiers as ours and
@@ -356,21 +368,31 @@ class Scan:
 def scan(
     root: Path = GRAPH_SCRIPTS, spellings: tuple[str, ...] = MARKER_SPELLINGS
 ) -> Scan:
-    """Read every ``*.py`` in *root* and report its marker state."""
+    """Read every ``*.py`` under *root* and report its marker state.
+
+    ⛔ RECURSIVE, keyed by the path RELATIVE to *root*: the contract is "every
+    tracked script", and a flat ``glob`` silently omitted the first nested
+    script that arrived (``graph-scripts/business_map_13880/file_map.py``,
+    #13880) — the gate reported clean over a file it had never read. A corpus
+    that can grow invisibly is the fail-open, not a missing filename.
+    """
     corpus: list[str] = []
     marked: dict[str, str] = {}
     unmatched: list[tuple[str, int, str]] = []
-    for path in sorted(root.glob("*.py")):
-        corpus.append(path.name)
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(root).as_posix()
+        corpus.append(rel)
         source = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in header_lines(source):
             if not MARKER_CANDIDATE_RE.match(line):
                 continue
             spelling = declared_spelling(line, spellings)
             if spelling is None:
-                unmatched.append((path.name, lineno, line.strip()))
+                unmatched.append((rel, lineno, line.strip()))
             else:
-                marked.setdefault(path.name, spelling)
+                marked.setdefault(rel, spelling)
     return Scan(tuple(corpus), MappingProxyType(marked), tuple(unmatched))
 
 
@@ -436,9 +458,10 @@ def violations(
     # The price-bearing declaration must EQUAL what the trigger detects, so a
     # new price-naming script cannot be quietly left out of (b).
     detected = {
-        path.name
-        for path in sorted(root.glob("*.py"))
-        if names_a_price(path.read_text(encoding="utf-8", errors="replace"))
+        path.relative_to(root).as_posix()
+        for path in sorted(root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+        and names_a_price(path.read_text(encoding="utf-8", errors="replace"))
     }
     for name in sorted(detected - set(price_bearing)):
         problems.append(

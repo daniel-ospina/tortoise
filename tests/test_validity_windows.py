@@ -34,7 +34,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, content: str = "test content", **kw):
-    return sdk.create_point(
+    return sdk._create_point(
         kw.pop("kind", "statement"), content, **kw
     )
 
@@ -87,7 +87,7 @@ def test_supersede_valid_from_is_the_sole_source_when_successor_is_undated(sdk):
     valid_from wins" is no longer an unconditional claim (ONTOLOGY.md §4.7)."""
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm")
-    result = sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    result = sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
     # return shape unchanged (additive regression)
     assert result == {"invalidated": True, "id": old["id"],
                       "corrected_by": new["id"], "edges_transferred": 0}
@@ -106,7 +106,7 @@ def test_supersede_reads_successor_valid_from(sdk):
     """Kwarg absent → read the successor's validFrom property."""
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     assert _props(sdk, old["id"])["validTo"] == "2026-06-14"
 
 
@@ -115,7 +115,7 @@ def test_supersede_fallback_to_successor_created_at(sdk):
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm")
     created = new["createdAt"]
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     assert _props(sdk, old["id"])["validTo"] == created
 
 
@@ -127,7 +127,7 @@ def test_supersede_fallback_to_now(sdk):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.createdAt",
         params={"id": new["id"]})
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     vt = _props(sdk, old["id"])["validTo"]
     assert vt  # non-empty now-iso
     assert vt.startswith("20")  # sane ISO year prefix
@@ -141,7 +141,7 @@ def test_supersede_undated_legacy_pair_still_supersedes(sdk):
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) REMOVE n.validFrom, n.validTo",
             params={"id": pid})
-    result = sdk.supersede_point(old["id"], new["id"])
+    result = sdk._supersede_point(old["id"], new["id"])
     assert result["invalidated"] is True
     assert _props(sdk, old["id"])["status"] == "superseded"
     assert _props(sdk, old["id"]).get("validTo")  # from createdAt/now fallback
@@ -157,7 +157,7 @@ def test_supersede_successor_valid_from_contiguity(sdk):
     ``test_supersede_fallback_to_successor_created_at``.)"""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-10")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
     assert _props(sdk, new["id"])["validFrom"] == "2026-06-10"
 
@@ -184,10 +184,10 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
 
     # (a) kwarg EARLIER than the stored value → would GAP (06-05, 06-10)
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-05")
+        sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-05")
     # (b) kwarg LATER than the stored value → would OVERLAP [06-10, 06-20]
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-20")
+        sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-20")
 
     # Fail-closed: no mutation on either refusal.
     op = _props(sdk, old["id"])
@@ -209,7 +209,7 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
     # and the chain it writes is CONTIGUOUS — the gap instant resolves to the
     # predecessor, the post-transition instant resolves to the successor with
     # no ambiguity.
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-10")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
     at_gap = sdk.get_historical_knowledge(new["id"], "2026-06-07")
     assert at_gap["found"] is True
@@ -228,7 +228,7 @@ def test_supersede_valid_from_format_difference_is_agreement(sdk):
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T00:00:00Z")
-    sdk.supersede_point(old["id"], new["id"],
+    sdk._supersede_point(old["id"], new["id"],
                         valid_from="2026-06-10T00:00:00+00:00")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
 
@@ -246,7 +246,7 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T00:00:00+00:00")
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-09")
+        sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-09")
 
 
 def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
@@ -289,14 +289,14 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T12:00:00+00:00")
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"],
+        sdk._supersede_point(old["id"], new["id"],
                             valid_from="2026-06-10T00:00:00+00:00")
     op = _props(sdk, old["id"])
     assert op.get("status") != "superseded"
     assert "validTo" not in op
 
     # (b) same instant, -04:00 encoding → accepted, caller's text persisted
-    sdk.supersede_point(old["id"], new["id"],
+    sdk._supersede_point(old["id"], new["id"],
                         valid_from="2026-06-10T08:00:00-04:00")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10T08:00:00-04:00"
 
@@ -305,12 +305,12 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     new2 = _make_point(sdk, content="claim v4",
                        validFrom="2026-06-10T12:00:00.100000+00:00")
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old2["id"], new2["id"],
+        sdk._supersede_point(old2["id"], new2["id"],
                             valid_from="2026-06-10T12:00:00.900000+00:00")
     assert "validTo" not in _props(sdk, old2["id"])
 
     # (d) same instant, fractional seconds AND a non-zero offset → accepted
-    sdk.supersede_point(old2["id"], new2["id"],
+    sdk._supersede_point(old2["id"], new2["id"],
                         valid_from="2026-06-10T08:00:00.100000-04:00")
     assert (_props(sdk, old2["id"])["validTo"]
             == "2026-06-10T08:00:00.100000-04:00")
@@ -320,7 +320,7 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     new3 = _make_point(sdk, content="claim v6",
                        validFrom="2026-06-10T12:00:00.000001+00:00")
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old3["id"], new3["id"],
+        sdk._supersede_point(old3["id"], new3["id"],
                             valid_from="2026-06-10T12:00:00+00:00")
     assert "validTo" not in _props(sdk, old3["id"])
 
@@ -329,7 +329,7 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     old4 = _make_point(sdk, content="claim v7", validFrom="2026-06-01")
     new4 = _make_point(sdk, content="claim v8",
                        validFrom="2026-06-10T12:00:00.000000+00:00")
-    sdk.supersede_point(old4["id"], new4["id"],
+    sdk._supersede_point(old4["id"], new4["id"],
                         valid_from="2026-06-10T12:00:00+00:00")
     assert _props(sdk, old4["id"])["validTo"] == "2026-06-10T12:00:00+00:00"
 
@@ -355,7 +355,7 @@ def test_supersede_valid_from_below_microsecond_disagreement_refused(sdk):
     new = _make_point(sdk, content="claim v10", validFrom=5e-10)
     assert _props(sdk, new["id"])["validFrom"] == 5e-10
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"],
+        sdk._supersede_point(old["id"], new["id"],
                             valid_from="1970-01-01T00:00:00+00:00")
     # fail-closed: nothing written
     assert "validTo" not in _props(sdk, old["id"])
@@ -377,7 +377,7 @@ def test_supersede_numeric_epoch_kwarg_refused(sdk):
                       validFrom="2026-06-10T00:00:00+00:00")
     # 2026-06-10T00:00:00Z as an epoch — the same instant, unserializable form
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"], valid_from=1781049600.0)
+        sdk._supersede_point(old["id"], new["id"], valid_from=1781049600.0)
     # fail-closed: nothing written
     assert "validTo" not in _props(sdk, old["id"])
 
@@ -407,14 +407,14 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
     new_zero = _make_point(sdk, content="claim v2", validFrom=0)
     assert _props(sdk, new_zero["id"])["validFrom"] == 0
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new_zero["id"],
+        sdk._supersede_point(old["id"], new_zero["id"],
                             valid_from="2026-06-10")
     assert "validTo" not in _props(sdk, old["id"])
     # empty string: present but unparseable ⇒ not orderable by _covers
     new_empty = _make_point(sdk, content="claim v3", validFrom="")
     assert _props(sdk, new_empty["id"])["validFrom"] == ""
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new_empty["id"],
+        sdk._supersede_point(old["id"], new_empty["id"],
                             valid_from="2026-06-14")
     assert "validTo" not in _props(sdk, old["id"])
 
@@ -430,7 +430,7 @@ def test_supersede_unparseable_valid_from_refused(sdk):
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T00:00:00+00:00")
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
+        sdk._supersede_point(old["id"], new["id"], valid_from="not-a-date")
     assert "validTo" not in _props(sdk, old["id"])
 
 
@@ -450,7 +450,7 @@ def test_supersede_numeric_stored_valid_from_agrees_with_iso_kwarg(sdk):
     new = _make_point(sdk, content="claim v2", validFrom=1781049600.0)
     assert _props(sdk, new["id"])["validFrom"] == 1781049600.0
     # numeric stored + ISO kwarg naming the SAME instant → accepted
-    sdk.supersede_point(old["id"], new["id"],
+    sdk._supersede_point(old["id"], new["id"],
                         valid_from="2026-06-10T00:00:00+00:00")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
 
@@ -460,7 +460,7 @@ def test_supersede_numeric_stored_valid_from_agrees_with_iso_kwarg(sdk):
     old2 = _make_point(sdk, content="claim v3", validFrom="2026-06-01")
     new2 = _make_point(sdk, content="claim v4", validFrom=1781049600.0)
     with pytest.raises(ValueError, match="disagrees"):
-        sdk.supersede_point(old2["id"], new2["id"], valid_from=1781049600.0)
+        sdk._supersede_point(old2["id"], new2["id"], valid_from=1781049600.0)
     assert "validTo" not in _props(sdk, old2["id"])
 
 
@@ -480,7 +480,7 @@ def test_supersede_both_sides_unparseable_refused(sdk):
                           validFrom="2026-06-01")
         new = _make_point(sdk, content=f"claim v2 {bad!r}", validFrom=bad)
         with pytest.raises(ValueError, match="disagrees"):
-            sdk.supersede_point(old["id"], new["id"], valid_from=bad)
+            sdk._supersede_point(old["id"], new["id"], valid_from=bad)
         assert "validTo" not in _props(sdk, old["id"])
 
 
@@ -529,7 +529,7 @@ def test_supersede_no_kwarg_unparseable_stored_start_is_normalised(sdk):
     new = _make_point(sdk, content="unord v2", validFrom="not-a-date")
     assert _props(sdk, new["id"])["validFrom"] == "not-a-date"
 
-    sdk.supersede_point(old["id"], new["id"])  # NO kwarg — the unguarded path
+    sdk._supersede_point(old["id"], new["id"])  # NO kwarg — the unguarded path
 
     end = _props(sdk, old["id"])["validTo"]
     assert _created_sort_key(end)[0] == 0, (
@@ -570,7 +570,7 @@ def test_supersede_string_kwarg_with_no_stored_start_is_normalised(sdk):
     new = _make_point(sdk, content="unord kw v2")  # NO stored validFrom
     assert _props(sdk, new["id"]).get("validFrom") is None
 
-    sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
+    sdk._supersede_point(old["id"], new["id"], valid_from="not-a-date")
 
     end = _props(sdk, old["id"])["validTo"]
     assert _created_sort_key(end)[0] == 0, (
@@ -600,7 +600,7 @@ def test_supersede_unparseable_successor_created_at_is_normalised(sdk):
     new = _make_point(sdk, content="unord ca v2", createdAt="not-a-date")
     assert _props(sdk, new["id"])["createdAt"] == "not-a-date"
 
-    sdk.supersede_point(old["id"], new["id"])  # NO kwarg
+    sdk._supersede_point(old["id"], new["id"])  # NO kwarg
 
     end = _props(sdk, old["id"])["validTo"]
     assert _created_sort_key(end)[0] == 0, (
@@ -614,7 +614,7 @@ def test_supersede_no_kwarg_orderable_stored_start_is_still_used(sdk):
     through unconditionally would pass the test above and fail here)."""
     old = _make_point(sdk, content="ord v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="ord v2", validFrom="2026-06-10")
-    sdk.supersede_point(old["id"], new["id"])  # NO kwarg
+    sdk._supersede_point(old["id"], new["id"])  # NO kwarg
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
 
 
@@ -623,7 +623,7 @@ def test_invalidate_point_stamps_withdrawal(sdk):
     terminates the window at withdrawal time — E7 DELETE-soft posture)."""
     old = _make_point(sdk, content="claim to withdraw")
     repl = _make_point(sdk, content="replacement")
-    res = sdk.invalidate_point(old["id"], repl["id"])
+    res = sdk._invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["outdated"] is True
@@ -637,7 +637,7 @@ def test_supersede_event_payload_gains_window_fields(sdk):
     from tortoise.event_store import read_after
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     events = read_after(sdk._get_proj(), 0, types=["PointSuperseded"])
     assert events, "PointSuperseded event missing"
     payload = events[-1].get("payload") or events[-1]
@@ -680,7 +680,7 @@ def test_restore_two_session_gym_chain(sdk):
     the 6pm point; current = the 5pm point (E2E-9 core)."""
     old = _make_point(sdk, content="gym at 6pm", validFrom="2026-06-10")
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
     out = sdk.get_historical_knowledge(new["id"], "2026-06-12")
     assert out["found"] is True
@@ -704,7 +704,7 @@ def test_restore_legacy_undated_old_point_covers(sdk):
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.validFrom, n.validTo",
         params={"id": old["id"]})
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
     out = sdk.get_historical_knowledge(new["id"], "2020-01-01")
     assert out["found"] is True
@@ -716,7 +716,7 @@ def test_restore_before_earliest_window_honest_absence(sdk):
     negative — never a fabricated answer)."""
     old = _make_point(sdk, content="gym at 6pm", validFrom="2026-06-10")
     new = _make_point(sdk, content="gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
     out = sdk.get_historical_knowledge(new["id"], "2020-01-01")
     assert out["found"] is False
@@ -1103,7 +1103,7 @@ def test_the_two_un_datable_spellings_stay_distinguishable(sdk):
     # The literal-end spelling is a PRE-RULING row (see the helper); the declared
     # spelling is what the door itself now produces.
     stored = _legacy_un_datable_end(sdk, "TBD", content="stored junk end")
-    declared = sdk.create_point("statement", "declared un-datable end",
+    declared = sdk._create_point("statement", "declared un-datable end",
                                 validFrom="2024-01-01",
                                 validToPrecision="unknown")
 
@@ -1254,10 +1254,10 @@ def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
     # silent by accident: a plain update that INTRODUCES an unparseable start
     # is the write, and it must speak. (Without this, deleting the update leg's
     # warning would leave every assertion above green.)
-    sdk.update_point(first["id"], validFrom="2026-06-01")  # back to a real date
+    sdk._update_point(first["id"], validFrom="2026-06-01")  # back to a real date
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        sdk.update_point(first["id"], validFrom="")
+        sdk._update_point(first["id"], validFrom="")
     hits = [r for r in caplog.records if "no instant" in r.getMessage()]
     assert len(hits) == 1, (
         "an update that introduces an unparseable start must warn once — the "
@@ -1266,7 +1266,7 @@ def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
     # … and re-writing the value it ALREADY carries introduces nothing.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        sdk.update_point(first["id"], validFrom="")
+        sdk._update_point(first["id"], validFrom="")
     assert not [r for r in caplog.records if "no instant" in r.getMessage()], (
         "an unrelated re-write of the value the point already stores must not "
         "re-warn"
@@ -1475,7 +1475,7 @@ def test_the_refusal_repair_is_true_on_the_door_that_raises_it(sdk):
                          validFrom="2024-01-01", validTo="2024-06-01")
 
     with pytest.raises(ValueError) as refused:
-        sdk.update_point(target["id"], validTo="2026-02-30")
+        sdk._update_point(target["id"], validTo="2026-02-30")
     message = str(refused.value)
 
     assert "update_point" in message and "OMITTING validTo" in message, (
@@ -1491,12 +1491,12 @@ def test_the_refusal_repair_is_true_on_the_door_that_raises_it(sdk):
     )
 
     # …and the store keeps the end when the field is omitted, clears it on None.
-    sdk.update_point(target["id"], content="an unrelated edit")
+    sdk._update_point(target["id"], content="an unrelated edit")
     assert _props(sdk, target["id"])["validTo"] == "2024-06-01", (
         "omitting validTo on update_point leaves the STORED end — the sentence "
         "the refusal used to carry promised the opposite"
     )
-    sdk.update_point(target["id"], validTo=None)
+    sdk._update_point(target["id"], validTo=None)
     assert _props(sdk, target["id"]).get("validTo") is None
 
 
@@ -1606,14 +1606,14 @@ def test_the_end_shaping_is_scoped_like_the_start_warning(sdk, caplog):
     # shaping would leave the create-path assertions above green.)
     p = _make_point(sdk, content="end becomes undatable",
                     validFrom="2024-01-01", validTo="2024-02-01")
-    out = sdk.update_point(p["id"], validTo="TBD")
+    out = sdk._update_point(p["id"], validTo="TBD")
     assert out["valid_to_shaped"] == {"sent": "TBD", "validTo": None,
                                      "validToPrecision": "unknown"}
     assert _props(sdk, p["id"]).get("validTo") is None
     assert _props(sdk, p["id"]).get("validToPrecision") == "unknown"
 
     # Clearing the end of an already-canonical row changes nothing to report.
-    out = sdk.update_point(p["id"], validTo=None)
+    out = sdk._update_point(p["id"], validTo=None)
     assert "valid_to_shaped" not in out, (
         "there is no token to echo when the caller already declared nothing"
     )
@@ -1650,7 +1650,7 @@ def test_the_end_shaping_is_scoped_like_the_start_warning(sdk, caplog):
         "a row written before the shaping door keeps its literal end and keeps "
         "reading 'unknown' — no backfill, no re-validation"
     )
-    sdk.update_point(legacy["id"], content="unrelated edit")
+    sdk._update_point(legacy["id"], content="unrelated edit")
     assert _props(sdk, legacy["id"])["validTo"] == "TBD", (
         "an unrelated update must not migrate a legacy row's end"
     )
@@ -1677,7 +1677,7 @@ def test_superseding_a_shaped_end_dates_it_without_leaving_the_marker(sdk):
     predecessor = _make_point(sdk, content="shaped predecessor end",
                               validFrom="2024-01-01", validTo="TBD")
     successor = _make_point(sdk, content="successor", validFrom="2026-01-01")
-    sdk.supersede_point(predecessor["id"], successor["id"])
+    sdk._supersede_point(predecessor["id"], successor["id"])
 
     stored = _props(sdk, predecessor["id"])
     assert stored.get("validTo") is not None, "supersession dates the predecessor"
@@ -1692,7 +1692,7 @@ def test_superseding_a_shaped_end_dates_it_without_leaving_the_marker(sdk):
     un_datable = _make_point(sdk, content="stays un-datable", validFrom="2024-01-01",
                              validTo="unknown")
     successor2 = _make_point(sdk, content="successor 2", validFrom="2026-01-01")
-    sdk.supersede_point(un_datable["id"], successor2["id"],
+    sdk._supersede_point(un_datable["id"], successor2["id"],
                         valid_to_precision="unknown")
     stored2 = _props(sdk, un_datable["id"])
     assert stored2.get("validTo") is None and stored2.get(
@@ -1719,8 +1719,8 @@ def test_restore_chain_guard_bounded(sdk):
     pts = [_make_point(sdk, content=f"claim v{i}", validFrom=f"2026-06-0{i}")
            for i in (1, 2, 3)]
     # v2 supersedes v1, then v3 supersedes v2 — chain v3→v2→v1
-    sdk.supersede_point(pts[0]["id"], pts[1]["id"], valid_from="2026-06-02")
-    sdk.supersede_point(pts[1]["id"], pts[2]["id"], valid_from="2026-06-03")
+    sdk._supersede_point(pts[0]["id"], pts[1]["id"], valid_from="2026-06-02")
+    sdk._supersede_point(pts[1]["id"], pts[2]["id"], valid_from="2026-06-03")
     out = sdk.get_historical_knowledge(pts[2]["id"], "2026-06-01")
     assert out["found"] is True
     assert out["valid_point"]["id"] == pts[0]["id"]
@@ -1916,7 +1916,7 @@ def test_supersede_refuses_epoch0_successor_over_a_dated_predecessor(sdk):
     )
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(old["id"], new["id"])  # NO valid_from kwarg
+        sdk._supersede_point(old["id"], new["id"])  # NO valid_from kwarg
 
     # No half-write: the predecessor still carries its original window and is
     # not superseded, so a caller can retry with a repair rather than having
@@ -2048,7 +2048,7 @@ def test_unparseable_predecessor_start_matches_the_sibling_5358(sdk):
     old = _make_point(sdk, content="legacy claim", validFrom="TBD")
     new = _make_point(sdk, content="corrected claim", validFrom="2026-06-01")
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     op = _props(sdk, old["id"])
     assert op["validFrom"] == "TBD", (
@@ -2113,7 +2113,7 @@ def test_supersede_retroactive_successor_refused(sdk):
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
 
     op = _props(sdk, old["id"])
     assert "validTo" not in op
@@ -2135,7 +2135,7 @@ def test_supersede_retroactive_successor_agreeing_kwarg_refused(sdk):
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-01")
+        sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-01")
 
     assert "validTo" not in _props(sdk, old["id"])
     assert _corrects_out(sdk, new["id"]) == 0
@@ -2155,14 +2155,14 @@ def test_supersede_refuses_when_a_DUPLICATE_predecessor_node_is_late(sdk):
     corruption, silently, and with the verdict depending on server row order.
     """
     dup = "pt_dup_4021"
-    sdk.create_point("statement", "claim v1 early", id=dup,
+    sdk._create_point("statement", "claim v1 early", id=dup,
                      validFrom="2026-06-01")
-    sdk.create_point("statement", "claim v1 late", id=dup,
+    sdk._create_point("statement", "claim v1 late", id=dup,
                      validFrom="2026-06-20")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(dup, new["id"])
+        sdk._supersede_point(dup, new["id"])
 
     # Fail-closed: NEITHER node was stamped, and no CORRECTS edge landed.
     rows = sdk._get_proj().g.query(
@@ -2192,7 +2192,7 @@ def test_supersede_equal_start_allowed(sdk):
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-10")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
 
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-10")
 
     op = _props(sdk, old["id"])
     assert op["validTo"] == op["validFrom"] == "2026-06-10"
@@ -2210,7 +2210,7 @@ def test_supersede_future_dated_predecessor_refused(sdk):
     new = _make_point(sdk, content="undated claim")
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
 
     assert "validTo" not in _props(sdk, old["id"])
     assert _corrects_out(sdk, new["id"]) == 0
@@ -2226,7 +2226,7 @@ def test_supersede_numeric_stored_start_no_kwarg_raw_end(sdk):
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom=1781049600.0)
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     vt = _props(sdk, old["id"])["validTo"]
     assert vt == 1781049600.0
@@ -2239,7 +2239,7 @@ def test_get_historical_knowledge_forward_supersede_window_not_inverted(sdk):
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
 
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-10")
 
     out = sdk.get_historical_knowledge(old["id"], "2026-06-05")
     assert out["found"] is True
@@ -2262,7 +2262,7 @@ def test_get_historical_knowledge_after_refusal_predecessor_window_intact(sdk):
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
 
     with pytest.raises(ValueError, match="inverted window"):
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
 
     out = sdk.get_historical_knowledge(old["id"], "2026-06-15")
     assert out["found"] is True, "predecessor became unreachable"
@@ -2287,14 +2287,14 @@ def test_supersede_refusal_message_survives_scrub(sdk):
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-01")
 
     with pytest.raises(ValueError, match="inverted window") as excinfo:
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
 
     msg = str(excinfo.value)
     assert "inverted window" in msg
     assert _scrub_error(msg) == msg, f"scrub rewrote the message: {_scrub_error(msg)}"
     # the remedy is named, and it exists
     assert "retract_point" in msg
-    assert hasattr(sdk, "retract_point")
+    assert hasattr(sdk, "_retract_point")
 
 
 # ---------------------------------------------------------------------------
@@ -2363,10 +2363,10 @@ def test_no_end_receipt_when_the_shaped_end_was_never_STORED(sdk):
     never entering the branch.
     """
     content = "end-receipt on a refused fold"
-    first = sdk.create_point("statement", content, status="superseded")
+    first = sdk._create_point("statement", content, status="superseded")
     assert first.get("id"), first
 
-    reply = sdk.create_point("statement", content, status="superseded",
+    reply = sdk._create_point("statement", content, status="superseded",
                              dedup=True, validTo="TBD",
                              validFrom="2024-02-02")
 
@@ -2401,7 +2401,7 @@ def test_a_missing_id_takes_no_receipt_and_stays_empty(sdk):
     # A real point first, so the epoch baseline is a real number rather than
     # the cold-start ``None`` — a delta assertion against ``None`` would pass
     # for a door that never touched the epoch at all.
-    sdk.create_point("statement", "anchor for the absent-id contract")
+    sdk._create_point("statement", "anchor for the absent-id contract")
 
     # ⛔ WIRE THE JOURNAL, or the row assertions below are VACUOUS. This
     # fixture's SDK has no ``event_log_path``, so ``_emit_event`` returns
@@ -2472,14 +2472,14 @@ def _assert_absent_takes_no_work(sdk, _journal_path):
     # `_TEMPORAL_RESTAMP_PROPS`), so it is the only shape whose side effects
     # this fix newly closes. Without it, a regression that re-scopes the gate
     # leaves this test green.
-    assert sdk.update_point(missing, confidence=0.5) == {}
+    assert sdk._update_point(missing, confidence=0.5) == {}
     _assert_no_side_effects(missing)
 
     # the non-shaping case pins the pre-existing contract, so a failure below
     # cannot be blamed on the verb having changed shape generally
-    assert sdk.update_point(missing, validTo="2026-06-10") == {}
+    assert sdk._update_point(missing, validTo="2026-06-10") == {}
 
-    reply = sdk.update_point(missing, validTo="TBD")
+    reply = sdk._update_point(missing, validTo="TBD")
 
     assert reply == {}, f"an absent id returned a truthy reply: {reply!r}"
     assert "valid_to_shaped" not in reply
@@ -2498,9 +2498,9 @@ def _assert_absent_takes_no_work(sdk, _journal_path):
     # ── the positive control: a REAL revision still journals + advances ──
     # Without this, every assertion above would also pass for a door that had
     # simply stopped journalling and stopped advancing the epoch at all.
-    real = sdk.create_point("statement", "a real revision target")["id"]
+    real = sdk._create_point("statement", "a real revision target")["id"]
     _ep_real_before = _ep_version()
-    sdk.update_point(real, confidence=0.42)
+    sdk._update_point(real, confidence=0.42)
     assert len(_journal_rows(real)) == 1, (
         "a real revision did not journal — the absent-id assertions above "
         "are then not measuring the guard")

@@ -66,7 +66,7 @@ def bare_sdk(monkeypatch):
     """An SDK with only the legs the ARM uses — no graph, no persistence."""
     recorder = _Recorder()
     sdk = TortoiseSDK.__new__(TortoiseSDK)
-    monkeypatch.setattr(TortoiseSDK, "create_point", recorder, raising=True)
+    monkeypatch.setattr(TortoiseSDK, "_create_point", recorder, raising=True)
     monkeypatch.setattr(TortoiseSDK, "_nudge_candidates",
                         lambda _self, _text, exclude_ids=None: [], raising=True)
     return sdk, recorder
@@ -162,7 +162,7 @@ class TestTheArmDispatches:
 class TestTheArmStoresWhatTheDoorStored:
     def test_a_point_through_the_arm_is_the_point_the_door_makes(self, sdk_factory):
         sdk = sdk_factory()
-        door = sdk.create_point("hypothesis", "the door's claim about widgets")
+        door = sdk._create_point("hypothesis", "the door's claim about widgets")
         arm = sdk.create_entity(
             "point", "the arm's claim about widgets",
             props={"pointKind": "hypothesis"})["node"]
@@ -170,8 +170,8 @@ class TestTheArmStoresWhatTheDoorStored:
         _assert_is_a_point(sdk, door["id"])
         _assert_is_a_point(sdk, arm["id"])
 
-        stored_door = sdk.get_point(door["id"])
-        stored_arm = sdk.get_point(arm["id"])
+        stored_door = sdk._get_point(door["id"])
+        stored_arm = sdk._get_point(arm["id"])
         assert stored_door["pointKind"] == stored_arm["pointKind"] == "hypothesis", (
             "the two paths stored different kinds — the arm did not absorb the door")
         assert stored_door["content"] == "the door's claim about widgets"
@@ -185,15 +185,15 @@ class TestTheArmStoresWhatTheDoorStored:
     def test_a_diary_entry_through_the_arm_is_the_entry_the_door_makes(
             self, sdk_factory):
         sdk = sdk_factory()
-        door = sdk.diary_write("agent-1", "the door's entry", topic="t", wing="w")
+        door = sdk._diary_write("agent-1", "the door's entry", topic="t", wing="w")
         arm = sdk.create_entity("diary", "the arm's entry", props={
             "authoredBy": "agent-1", "topic": "t", "wing": "w"})["node"]
 
         _assert_is_a_point(sdk, door["id"])
         _assert_is_a_point(sdk, arm["id"])
 
-        stored_door = sdk.get_point(door["id"])
-        stored_arm = sdk.get_point(arm["id"])
+        stored_door = sdk._get_point(door["id"])
+        stored_arm = sdk._get_point(arm["id"])
         for key, want in (("pointKind", "diary"), ("authoredBy", "agent-1"),
                           ("topic", "t"), ("wing", "w")):
             assert stored_door.get(key) == stored_arm.get(key) == want, (
@@ -298,7 +298,7 @@ class TestTheRetiredNamesStillAnswer:
         node = sdk.create_entity(
             "point", "the ship date holds",
             props={"pointKind": "goal", "goalState": "unmet"})["node"]
-        assert sdk.get_point(node["id"])["goalState"] == "unmet", (
+        assert sdk._get_point(node["id"])["goalState"] == "unmet", (
             "`goalState` did not survive the container: `tortoise_create_point` "
             "declared it as a parameter (#13110), so a migrating caller's goal "
             "state would be silently dropped by the arm")
@@ -330,7 +330,7 @@ class TestTheIngestGateStaysClosed:
         bundle = {"points": [{"content": "a claim in the same bundle"}],
                   "entities": [{"ref": "e1", "type": declared, "name": "y"}]}
         with pytest.raises(ValueError) as exc:
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         assert not isinstance(exc.value, Phase2Error), (
             f"an entities[] item typed {declared!r} reached step 3, so the points it "
             f"was bundled with were already committed: {exc.value} — Phase 1 must "

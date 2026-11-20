@@ -164,7 +164,7 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 ## Why no row can be GREEN — the structural cap, re-verified here
 
 `tools/capstone_verdict_check.py:192` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:751`) refuses a GREEN row whose
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:779`) refuses a GREEN row whose
 run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
 observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
 cites are deliberately NOT line numbers — #10215's own review rounds moved them twice
@@ -183,7 +183,7 @@ quote behind. Stated here so "swept" is never read into a number nothing re-chec
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:21679` is the meta fold — while the extractor builds
+`tortoise/sdk.py:21887` is the meta fold — while the extractor builds
 `result["classify_later"]` (`tortoise/extractor_v2.py:15701`) and `result["vet"]`
 (`tortoise/extractor_v2.py:15711`) on the extractor's OWN return.
 

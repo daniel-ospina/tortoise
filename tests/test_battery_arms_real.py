@@ -201,7 +201,7 @@ class TestA4Graph:
         # update_point(status="live"), NOT the reviewer-gated promote_point —
         # so the evidence is live but carries NEITHER the fabricated derived
         # reviewer flag nor a promotedAt stamp (promote_point sets both).
-        evidence = [p for p in a._sdk(scenarios[0]).query(content="finding")
+        evidence = [p for p in a._sdk(scenarios[0])._query(content="finding")
                     if not p.get("is_operator")]
         assert evidence, "record must persist the live evidence point"
         for p in evidence:

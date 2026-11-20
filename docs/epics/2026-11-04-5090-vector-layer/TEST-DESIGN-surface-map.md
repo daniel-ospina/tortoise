@@ -487,8 +487,17 @@ prose inside a docstring; `flag_in_shipped_configs` is `:911`), and it attribute
 `03-scope.md:66` only).
 
 **F2 — `docs/architecture/SUBSTRATE-REBUILD-MAP.md` states the opposite of this artifact's existence**
-(`:84` *"No test-design issue and no capstone exist for E4"*, `:322` ❌, `:375` D6). That was true when
-it was cut (`4f68a2aa7`); **#11084 now exists and this is its artifact.** Recorded here rather than
+(`:84` *"No test-design issue and no capstone exist for E4"*, the "test-design / integration-surface
+map: ❌ none" row at `:385`, and the **D6** row at `:438` — *"no epic has a test-design map or a
+capstone"*). ⛔ All three are re-derived by CONTENT at this head, never by an offset. At the cut head
+the three cites this row used to carry (`:84`/`:322`/`:375`) were **right**; what rotted is that the
+map grew under them, and then this PR's own §5 insert moved every line below `:252` a further `+2`.
+By `main` the ❌ row was already `:383` and `:375` already a blank line — the re-derivation sentence
+that the old `:322` now reads as sat at `:270` at the cut head and at `:322` on `main`
+(`grep -n 're-derives both numbers'`; `:324` here). So each anchor is named as well as numbered:
+`:84`/`:385`/`:438` at this head.
+**That the map states the opposite was true when this artifact was cut (`af864a42a`)**;
+**#11084 now exists and this is its artifact.** Recorded here rather than
 edited into a dated, test-guarded cut — a lane reading the substrate map should follow the pointer, not
 find a second, competing status cell. The capstone half of the claim **remains true** (`#11089` is
 filed but not yet an artifact).
@@ -514,7 +523,7 @@ version would have sent a lane to add a timeout that is already there.
 | fact | command / source |
 |---|---|
 | no test-design artifact existed for this epic | `ls docs/epics/2026-11-04-5090-vector-layer/` → `01-align.md`…`05-decompose.md`, no test-design file; the only `#11084` commits at the time of this check were `e91c4e0a5` (the decomposition) and `f2c6f1bce` (its review pass) — `git show --stat --format='%h %s' e91c4e0a5 f2c6f1bce` shows both touch only the epic's prose (01–05 + two storage docs), so neither is a test-design artifact. ⚠️ Deliberately a **dated measurement on named shas**, not a live `--grep`: a `--grep` count moves as commits land (this branch's own commits match, and its squash subject matches after landing), and scoping it `--not <this branch>` cannot work either — `e91c4e0a5` is in this branch's ancestry, so that form excludes the very commit it names |
-| the substrate map's contrary claim | `docs/architecture/SUBSTRATE-REBUILD-MAP.md:84,322,375` |
+| the substrate map's contrary claim | `docs/architecture/SUBSTRATE-REBUILD-MAP.md` — the **E4** row (`:84`), the "test-design / integration-surface map: ❌ none" row (`:385`), and the **D6** row (`:438`) — **the same three anchors the F2 claim above names**, re-derived by CONTENT. Named as well as numbered because `#13754`'s §5 hunk inserted two lines above them and every number below it moved `+2` (`:383`→`:385`, D6's `:436`→`:438`; `:84` is above the insert and unmoved) |
 | every `SF` row's anchor resolves at this head | `rg -n` on each cited path at `af864a42a` |
 | the map's own claims parse | `uv run python tools/test_design_map_check.py` |
 | no MCP tool / public SDK method added or removed | this change is one document + one read-only checker; `git diff --stat` |

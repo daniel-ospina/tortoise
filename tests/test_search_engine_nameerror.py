@@ -40,7 +40,7 @@ def _seed_matching_point(sdk):
     short-circuit before the malformed input is ever parsed — leaving the guard
     vacuous. Seed a match so the branch under test actually executes.
     """
-    sdk.create_point("statement", "test content")
+    sdk._create_point("statement", "test content")
 
 
 class TestSearchNameError:
@@ -53,7 +53,7 @@ class TestSearchNameError:
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     query="test",
                     relationship_filter="badformat",
                 )
@@ -68,7 +68,7 @@ class TestSearchNameError:
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     query="test",
                     relationship_filter=":target",
                 )
@@ -83,7 +83,7 @@ class TestSearchNameError:
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     query="test",
                     relationship_filter="predicate:",
                 )
@@ -98,7 +98,7 @@ class TestSearchNameError:
         _seed_matching_point(sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     query="test",
                     traversal_path="Product->Feature",
                 )
@@ -113,9 +113,9 @@ class TestSearchNameError:
         _seed_matching_point(sdk)
         # The traversal branch is gated on a non-empty result set — assert the
         # seeded point is retrievable so the branch under test is reachable.
-        assert sdk.tortoise_fts_query(query="test")
+        assert sdk._tortoise_fts_query(query="test")
         try:
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 query="test",
                 traversal_path="Product→Feature",
             )

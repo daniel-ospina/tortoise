@@ -72,7 +72,7 @@ def test_required_read_path_raises_not_fts_only(sdk_factory, monkeypatch):
         with pytest.raises(EmbedderUnavailableError) as ei:
             # A plain text query classifies to the vector strategy, so the read
             # path actually asks for the embedder (classify_query → vector=True).
-            sdk.tortoise_fts_query("alpha beta gamma", limit=3)
+            sdk._tortoise_fts_query("alpha beta gamma", limit=3)
         assert ei.value.failure_kind == "load_failed"
         assert ei.value.context  # attributable without reading code
     finally:
@@ -92,7 +92,7 @@ def test_required_read_path_refuses_with_opt_in_surfaces(sdk_factory, monkeypatc
         trace: list[dict] = []
         out: dict = {}
         with pytest.raises(EmbedderUnavailableError):
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 "alpha beta gamma", limit=3, leg_trace=trace,
                 read_status_out=out)
         assert not [e for e in trace if e.get("reason") == "no_embedder"]
@@ -135,7 +135,7 @@ def test_unset_read_path_still_degrades_to_keyword_only(sdk_factory, monkeypatch
     try:
         _arm_unavailable(monkeypatch, kind="not_installed")
         trace: list[dict] = []
-        rows = sdk.tortoise_fts_query("alpha beta gamma", limit=3, leg_trace=trace)
+        rows = sdk._tortoise_fts_query("alpha beta gamma", limit=3, leg_trace=trace)
         assert isinstance(rows, list)  # no raise
         vec = next(e for e in trace if e["leg"] == "vector")
         assert vec["ran"] is False and vec["degraded"] is True

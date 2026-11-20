@@ -149,8 +149,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
-    name_key_space_same_entity,
+    ambiguous_holder_ids as _ambiguous_holder_ids, attachment_target_ids,
+    entity_create_lock, name_key_space_same_entity,
     resolve_document_target_id, resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
@@ -230,6 +230,13 @@ from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     filter_source_props,
 )
+# #13626: the ONE write-gate ask for the DERIVED entity vectors. It is the same helper
+# the folds use, imported rather than re-spelled: `#13610` says there is exactly one
+# predicate (`record_vector.mirror_required`), so an sdk-local spelling would be a second
+# one — and it is the helper rather than the predicate itself because `_derived_mirror_required`
+# is the arm that answers "keep the graph copy" when the gate cannot be read at all, which
+# a WRITE path needs (an unreadable arming module must never take a write down).
+from .projection.entities import _derived_mirror_required
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
 # owns the Point prop contract (`_POINT_DECLARED_PROPS` / `_POINT_LIST_PROPS` /
 # `_upsert_point_props`). The SDK write doors below call it under their
@@ -11771,7 +11778,7 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                 params={"ids": promoted_claims},
             )
             for pid in promoted_claims:
-                sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+                sdk._emit_event("PointPromoted", point=sdk._get_point(pid))
         # 2. Operators of the captured claims -> live (draft-only guard),
         # then REBUILD-DURABLE via OperatorPromoted (the R16 shape — its arm in
         # `FalkorProjection.apply` restores live on replay). Mirror
@@ -11813,7 +11820,7 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
                 params={"oid": oid},
             )
             sdk._emit_event("OperatorPromoted", id=oid,
-                            point=sdk.get_point(oid))
+                            point=sdk._get_point(oid))
             promoted_ops.append(oid)
         # 3. Write-trigger dirty-mark (claims + reverse-BFS neighbors).
         sdk._mark_dirty(list(claim_ids))
@@ -11831,7 +11838,7 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         # explicit budget caps the request-time EP work — this capture's
         # claims calibrate well within it; any overflow stays dirty for the
         # scheduler's epoch-guarded sweep).
-        sdk.dream(mode="local", require_calibration=False,
+        sdk._dream(mode="local", require_calibration=False,
                   warm_start=False, budget=100)
     except Exception as e:  # noqa: BLE001, RUF100
         _logger.warning(
@@ -12759,6 +12766,43 @@ def _shape_or_refuse_caller_end(props: dict) -> dict | None:
         "validTo": None,
         "validToPrecision": PRECISION_UNKNOWN,
     }
+
+
+def _published_cache_fold_denial():
+    """CONSUME the derived cache's over-cap verdict for the write in flight.
+
+    ``allowance_gate.cache_fold_denial`` is the gate's published verdict (#13829),
+    and a missing/unimportable meter module must never fail a write whose journal
+    line and record row are ALREADY committed — that is the hazard the guarded
+    imports in ``live_write.py`` and ``mcp_server.py`` each cite as their reason
+    for existing. This is the same guard, in one place, so the SDK's call sites
+    cannot drift from it (PR #13835 review, P3: one of them was bare, and it ran
+    after the outbox commit).
+
+    Answers ``None`` on every write whose door published nothing — the unarmed,
+    un-tenanted (stdio/operator) and not-truth-carried cases alike.
+    """
+    try:
+        from .allowance_gate import cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable gate must not fail a committed write
+        return None
+    return cache_fold_denial()
+
+
+def _discard_published_cache_fold_denial() -> None:
+    """Forget a published verdict on a write arm that never touches the cache.
+
+    A verdict is published for exactly ONE write; an arm that writes nothing to
+    the cache has no consumer, so the verdict would outlive the write it
+    describes and deny the NEXT fold in this context (#13829, PR #13835 review
+    P2: a bare dedup hit is that arm). Guarded for the same reason as
+    :func:`_published_cache_fold_denial`.
+    """
+    try:
+        from .allowance_gate import clear_cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — a gate that will not import cannot publish
+        return
+    clear_cache_fold_denial()
 
 
 def _with_end_receipt(reply: dict, receipt: dict | None) -> dict:
@@ -15392,7 +15436,7 @@ class TortoiseSDK:
             self._event_log = EventLog(self._event_log_path)
         return self._event_log
 
-    def test_guard(self) -> None:
+    def _test_guard(self) -> None:
         """Assert the connected graph is safe for destructive test teardowns.
 
         Raises RuntimeError if the graph appears to be a production graph
@@ -15991,7 +16035,7 @@ class TortoiseSDK:
                 proj = self._get_proj()
                 ensure_event_schema(proj)
                 seq = next_seq(proj)
-                append_event(proj, seq, type_, graph_payload, self.ulid())
+                append_event(proj, seq, type_, graph_payload, self._ulid())
             except Exception as exc:  # noqa: BLE001, RUF100
                 # #9208: this leg stays BEST-EFFORT — `_emit_event` is the
                 # outbox's commit signal for the JSONL journal below, and a
@@ -16876,6 +16920,21 @@ class TortoiseSDK:
                 "where the vector lands, so the bound reads the aliases the statement WRITES TO, "
                 "not only the labels it mentions (#11641)."
             )
+        # ── #13626: the WRITE-STOP for the vector this door carries ──
+        # The statement is the CALLER's (declared grammar, `#11641`), and it names no
+        # vector of its own: every one of this product's statements spells the vector as
+        # `set_embedding_clause`, whose only vector is the `$embedding` parameter. So the
+        # stop is exactly the parameter — answering "not required" makes the clause write
+        # none (the CASE is null-guarded and `clear_then_set_prefix` only clears when the
+        # incoming vector is non-null), while `$props` — the ROW — is passed through
+        # untouched. The journal follows the same value: a record that carried a vector
+        # the node did not receive would replay it back on the next rebuild.
+        # ⛔ `mirror_required` answering "unknown" (unarmed, no tenant, unmeasured) keeps
+        # the vector, which is the gate's own contract rather than a second judgement here.
+        caller_vector = embedding
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = caller_vector
         if self._journal_event_raw_write(
                 event_id, props, graph=getattr(proj, "g", None),
                 event_kind=event_kind, embedding=embedding) is False:
@@ -16993,7 +17052,7 @@ class TortoiseSDK:
         self._refuse_unapproved_kinds_in_record(built, graph)
         return self._journal_entity_event(built)
 
-    def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
+    def _create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
                       claim_class: str | None = None,
                       **props) -> dict:
@@ -17639,15 +17698,25 @@ class TortoiseSDK:
                     # betrayal the ruling's §0 orders refused (#9202).
                     # `temporal_not_applied` is the honest signal here, and
                     # it rides this same reply.
+                    # ⛔ #13829 (review P2, PR #13835) — THIS ARM WRITES NOTHING,
+                    # SO IT MUST NOT KEEP THE VERDICT. It returns NORMALLY to the
+                    # caller (unlike a raise, which the door's own consume and the
+                    # MCP door-entry clear bound), and it is reachable under a
+                    # published verdict: an over-cap tenant re-writing a TERMINAL
+                    # claim with a temporal prop lands here. Left set, the verdict
+                    # would deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge the
+                    # sibling `else:` arm below closes for the bare/refused hit.
+                    _discard_published_cache_fold_denial()
                     return _with_end_receipt({
-                        **self.get_point(pid),
+                        **self._get_point(pid),
                         **_merge_advisories(
                             self._temporal_not_applied_advisory(pid),
                             _kind_layer_advisory(_layer_note, pid)),
                     }, None)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
-                    _existing = self.get_point(pid)
+                    _existing = self._get_point(pid)
                     if _key_hits:
                         # The KEY resolved the dedup. If the content differs, the
                         # incoming content is NOT stored (the key is the
@@ -17857,7 +17926,7 @@ class TortoiseSDK:
                         AUTHOR_ASSERTION_WEAK_PC,
                         canonical_tier,
                     )
-                    _existing = self.get_point(pid)
+                    _existing = self._get_point(pid)
                     _word_label = canonical_tier(credibility)
                     _existing_label = _existing.get("credibility")
                     _bl_src = _existing.get("baseline_source")
@@ -17947,7 +18016,7 @@ class TortoiseSDK:
                         _drop_note = (
                             f"already exists with a {_bl_src!r} baseline")
                     if _apply_word:
-                        self.set_point_baseline(
+                        self._set_point_baseline(
                             pid, _base_a + AUTHOR_ASSERTION_WEAK_PC,
                             _base_b, source=BASELINE_SOURCE_SET_BY_AUTHOR)
                         # #7951: the word LABEL and the #2199 birth marker are
@@ -17986,6 +18055,14 @@ class TortoiseSDK:
                         "Revise it deliberately with "
                         "update_point(%r, ...), the addressed door.",
                         pid, _terminal, pid)
+                # ⛔ #13829 (review P2b, PR #13835): KEEP THIS DOOR'S REPLY. On
+                # the denied arm `update_point` answers the RECORD's view (the
+                # cache row as last held, overlaid with the properties it just
+                # recorded); discarding it and re-serving `get_point` reported the
+                # PRE-revision values in a success reply for a revision the record
+                # holds. On the normal arm it returns the same snapshot this
+                # reply already carried, so nothing moves.
+                _revision_applied = {}
                 if (props and not _terminal_fold_refused) or _word_applied:
                     # Only touch the existing point when the caller passed
                     # other props (or an applied word) — a pure dedup hit (no
@@ -18010,11 +18087,27 @@ class TortoiseSDK:
                     # (tortoise#11863). `None` money members were dropped above,
                     # because a CREATE never deletes.
                     try:
-                        self.update_point(pid, **props)
+                        # ⛔ #13829 (review P2, PR #13835): this verb's own cache
+                        # leg consumes the published verdict — that is what makes
+                        # the cap bind on THIS arm (the default MCP dedup shape)
+                        # instead of being skipped by it. Its RETURN is kept for
+                        # the reply below (review P2b): on the denied arm it is the
+                        # RECORD's view, not the stale cache row.
+                        _revision_applied = self._update_point(pid, **props) or {}
                     finally:
                         _WARN_SUPPRESS.reset(_tok)
+                else:
+                    # ⛔ #13829 (review P2, PR #13835) — NO CACHE WRITE ON THIS
+                    # ARM. A bare dedup hit (no props, no applied word) only READS
+                    # the cache, and a terminal-refused hit writes nothing, so the
+                    # published verdict has no consumer here. Left set, it would
+                    # deny the NEXT fold in this context a cache write nobody
+                    # capped — the "publish without a guaranteed consumer" edge
+                    # `enforce_allowances`' own `except BaseException` arm exists to
+                    # close.
+                    _discard_published_cache_fold_denial()
                 return _with_end_receipt(
-                    {**self.get_point(pid),
+                    {**self._get_point(pid), **_revision_applied,
                      # `_merge_advisories`, never a second `**` splat: BOTH the
                      # kind↔layer note and the #10368 refusal ride the one
                      # `advisories` key, and a splat would REPLACE the list and
@@ -18514,56 +18607,119 @@ class TortoiseSDK:
         # uses, so without the scope an armed handle refuses the create hot
         # path. The declaration is a lane, not an exemption — the append above
         # is the commit point and every write here follows it.
-        with _live_write_scope("create_point"):
-            self._graph_write_with_retry(
-                lambda: proj.g.query(
-                    "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
-                    params=_create_params,
-                ),
-                what="create_point CREATE(:Point)",
+        #
+        # ⛔ #13829 — THIS IS THE FOLD, and it ASKS BEFORE IT TOUCHES THE CACHE.
+        # This door writes the cache by hand instead of through
+        # `live_write`'s fold leg, so it is the one that must consume the
+        # derived-cache verdict itself: when the org's `graph_storage` reading is
+        # at/over its hard stop, the allowance gate no longer refuses the write at
+        # the door (the door declared `truth_carried=True`) — it publishes a
+        # `CacheFoldDenial`, and this block is what makes that a cache SKIP rather
+        # than an unenforced cap.
+        #
+        # Why SKIPPING the whole block is the correct granularity, and not a
+        # per-statement decision: a half-folded event is worse than an unfolded
+        # one. The Point CREATE, the TAGGED edges, the extractedFrom edges and the
+        # EP dirty-mark are ONE event's projection; writing some of them would
+        # leave the cache holding an edge to a node it does not have, which no
+        # replay-shaped read can interpret. Declining all of them leaves the cache
+        # exactly as it was before this write, and the record holds the event, so
+        # `derived = replay(journal)` folds the whole event later, atomically.
+        #
+        # ⚠️ Nothing is lost and nothing is refused: the journal line and the
+        # record row are already committed above (the `WriteNotLandedError` gate
+        # two lines up proves the record took it), reads for this point fall back
+        # to the record, and the outcome is NAMED on the returned `LiveWrite`
+        # (`cache_fold`) rather than being silent. #10976 is untouched — no byte is
+        # deleted here, the cache simply stops growing.
+        # ⚠️ The import lives in `_published_cache_fold_denial`, GUARDED, and for
+        # the same reason the sibling sites in `live_write.py` / `mcp_server.py`
+        # guard theirs: this line runs AFTER the outbox commit, so an
+        # `ImportError` here would hand the caller an error for a write that
+        # landed (PR #13835 review, P3).
+        _cache_denial = _published_cache_fold_denial()
+        # ⛔ #13829 — THE SKIP NEEDS PROOF, NOT JUST A VERDICT.
+        # `truth_carried=True` is the DOOR's declaration; `_record_committed` is
+        # the ANSWER, and it is `None` on a journal-less deployment: `_emit_event`
+        # returns before the record projection runs (`_write_record_projection`
+        # is inside the append's own `live_write.write`), so neither the journal
+        # nor the record holds the write. There the CACHE is its ONLY durable
+        # home and skipping it would destroy the write while reporting success —
+        # the one shape #13829 forbids ("fail-closed by construction: an unproven
+        # path keeps the refusal"). So the refusal the gate would have raised on
+        # an unproven door is raised here, reconstructed from the figures the gate
+        # COMPARED so `quota_refusal_payload`'s shape and the prose are the same
+        # ones the protective arm produces (`_safe` -> `ERR_QUOTA`).
+        if _cache_denial is not None and _record_committed is not True:
+            from .quota import QuotaExceededError, with_limit_contact
+            raise QuotaExceededError(
+                with_limit_contact(_cache_denial.detail),
+                resource=_cache_denial.dimension,
+                used=(int(_cache_denial.used)
+                      if float(_cache_denial.used).is_integer()
+                      else _cache_denial.used),
+                limit=(int(_cache_denial.limit)
+                       if float(_cache_denial.limit).is_integer()
+                       else _cache_denial.limit),
+                estimated=True if _cache_denial.estimated else None,
             )
-            # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
-            # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
-            # a per-query race and `proj` is as valid after a retry as before it
-            # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
-            # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
-            #
-            # #7209: the follow-up writes of a fresh create ride the SAME bounded
-            # retry as the CREATE above. Before this they were bare `proj.g.query`
-            # calls, so a rebuild's per-query abort landing here aborted the write
-            # AFTER the Point had already landed — leaving a half-materialized
-            # point (no TAGGED / no extractedFrom edges), which is a finding that
-            # provenance and tag reads cannot reach: the same "the map loses a
-            # finding" outcome by a narrower route. Every statement in these two
-            # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
-            # documented no-op on re-run), so re-issuing one after an engine ABORT
-            # cannot duplicate anything — the abort means the statement did not
-            # land, exactly the contract `retryable_aborted_write` is built on.
-            tags = props.get("tags") or []
-            if isinstance(tags, (list, tuple)):
+        if _cache_denial is not None:
+            _logger.warning(
+                "create_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                "The journal and the record hold the write; the point is served "
+                "from the record until a replay folds it.",
+                pid, getattr(_cache_denial, "detail", _cache_denial))
+        else:
+            with _live_write_scope("create_point"):
                 self._graph_write_with_retry(
-                    lambda: self._sync_tags(proj, pid, tags),
-                    what="create_point TAGGED edges",
+                    lambda: proj.g.query(
+                        "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
+                        params=_create_params,
+                    ),
+                    what="create_point CREATE(:Point)",
                 )
-            # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
-            if props.get("extractedFrom"):
-                self._graph_write_with_retry(
-                    lambda: proj._link_source(pid, props["extractedFrom"],
-                                              source_versions=_source_versions),
-                    what="create_point extractedFrom edges",
-                )
-                # Inheritance gate dirty-mark: a freshly-sourced point is always
-                # inherit-eligible on the next EP run (no interval wait, #398).
-                # #2952: a born point carries no `inherited_at` stamp, so the
-                # `REMOVE n.inherited_at` the generic helper
-                # (`_invalidate_inheritance_gate`) issues is a no-op on the final
-                # state — and a no-op write on the node still costs a fulltext
-                # re-add. The `extractedFrom` invalidation therefore happens in
-                # the PROPS (see the up-front pop of `inherited_at` above): a
-                # caller-supplied stamp is dropped BEFORE the CREATE map is built
-                # instead of being written and then taken back out, so this path
-                # is ONE graph write too. The EP dirty-marking half is issued once
-                # below.
+                # No post-CREATE re-resolve: the `falkordb` Graph is STATELESS (it
+                # re-issues `GRAPH.QUERY <name>` per call), so a replaced-graph abort is
+                # a per-query race and `proj` is as valid after a retry as before it
+                # (#7405 review P1-2). `_sync_tags` / `_link_source` below reuse it.
+                # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
+                #
+                # #7209: the follow-up writes of a fresh create ride the SAME bounded
+                # retry as the CREATE above. Before this they were bare `proj.g.query`
+                # calls, so a rebuild's per-query abort landing here aborted the write
+                # AFTER the Point had already landed — leaving a half-materialized
+                # point (no TAGGED / no extractedFrom edges), which is a finding that
+                # provenance and tag reads cannot reach: the same "the map loses a
+                # finding" outcome by a narrower route. Every statement in these two
+                # helpers is a MERGE (plus a read-guarded canonicalUrl adopt, itself a
+                # documented no-op on re-run), so re-issuing one after an engine ABORT
+                # cannot duplicate anything — the abort means the statement did not
+                # land, exactly the contract `retryable_aborted_write` is built on.
+                tags = props.get("tags") or []
+                if isinstance(tags, (list, tuple)):
+                    self._graph_write_with_retry(
+                        lambda: self._sync_tags(proj, pid, tags),
+                        what="create_point TAGGED edges",
+                    )
+                # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
+                if props.get("extractedFrom"):
+                    self._graph_write_with_retry(
+                        lambda: proj._link_source(pid, props["extractedFrom"],
+                                                  source_versions=_source_versions),
+                        what="create_point extractedFrom edges",
+                    )
+                    # Inheritance gate dirty-mark: a freshly-sourced point is always
+                    # inherit-eligible on the next EP run (no interval wait, #398).
+                    # #2952: a born point carries no `inherited_at` stamp, so the
+                    # `REMOVE n.inherited_at` the generic helper
+                    # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+                    # state — and a no-op write on the node still costs a fulltext
+                    # re-add. The `extractedFrom` invalidation therefore happens in
+                    # the PROPS (see the up-front pop of `inherited_at` above): a
+                    # caller-supplied stamp is dropped BEFORE the CREATE map is built
+                    # instead of being written and then taken back out, so this path
+                    # is ONE graph write too. The EP dirty-marking half is issued once
+                    # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -18631,7 +18787,23 @@ class TortoiseSDK:
         # TRUTH holds a record the cache has not materialised — a replay heals
         # it (the ordering contract's replay-healable window) — so this raise
         # must NEVER be read as "the write is gone": the record stands.
-        _snapshot = self.get_point(pid)
+        # ⛔ #13829 — EXCEPT ON THE DECLINED ARM, which has no cache row to read
+        # back at all. There the write-landed proof is the committed RECORD
+        # (`_record_committed` above — this line is only reachable past its gate):
+        # the door declared `truth_carried=True`, the `PointAdded` append is the
+        # commit point, and the skipped cache write is projection lag that
+        # `derived = replay(journal)` heals. A cache read-back on that arm would
+        # report a write the record HOLDS as lost — `WriteNotLandedError` out of
+        # `tortoise_create_point`, i.e. an ERROR to the MCP caller on exactly the
+        # over-cap path this change exists to open (review P1, PR #13835).
+        # The snapshot we serve on that arm is the record's OWN — `_intended`,
+        # the same payload the journal carries, built from the write intent
+        # through `_stored_prop_value`. It deliberately omits the DERIVED
+        # `search_keys` alias, which only ever reaches the CACHE (#8933): a
+        # replay re-derives it from `content`, and the cache row this arm would
+        # have read does not exist to hold it either.
+        _snapshot = (dict(_intended) if _cache_denial is not None
+                     else self._get_point(pid))
         if not _snapshot:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
@@ -18693,7 +18865,7 @@ class TortoiseSDK:
         return _with_end_receipt(_snapshot, _end_receipt)
     # ── Resolution helper (Issue #52) ──
 
-    def resolve_id(self, id_str: str) -> dict | None:
+    def _resolve_id(self, id_str: str) -> dict | None:
         """Resolve any Point ID (legacy / numeric / ULID) to the canonical point.
 
         Returns the Point dict if found, None otherwise.
@@ -18719,7 +18891,7 @@ class TortoiseSDK:
             params={"id": id_str},
         ).result_set
         if rows:
-            return self.get_point(rows[0][0])
+            return self._get_point(rows[0][0])
 
         # 2. If numeric, try finding a point whose properties reference it
         #    (best-effort — many numeric IDs are native node IDs and would have
@@ -18736,7 +18908,7 @@ class TortoiseSDK:
                     "resolve_id: numeric %r not found as direct id; "
                     "returning best-match point %r", id_str, rows[0][0]
                 )
-                return self.get_point(rows[0][0])
+                return self._get_point(rows[0][0])
 
         return None
     def _commit_session_v2(self, conversation, session_id, extractor_model,
@@ -19407,7 +19579,7 @@ class TortoiseSDK:
             # eventId, so the second concurrent writer's create is an
             # idempotent no-op.
             try:
-                event = self.create_event(
+                event = self._create_event(
                     f"session_{session_id}", "sessionCaptured",
                     _server_id=_session_capture_event_id(session_id),
                     startedAt=now, endedAt=now, sessionId=session_id,
@@ -21147,7 +21319,7 @@ class TortoiseSDK:
                             f"for '{content[:60]}' (§4.7: an absent start is "
                             "reported, never invented)")
 
-                    _created = self.create_point(
+                    _created = self._create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
                         is_episodic=False, status="draft",
@@ -21233,6 +21405,12 @@ class TortoiseSDK:
                             # disposition for this site): a resolver call here
                             # would REFUSE on two live same-name carriers where
                             # capture writes, silently losing an attachment.
+                            # ⛔ #12244: and that disposition is NOT the same
+                            # question as "ONE entity, two rows". The rows are
+                            # collapsed per ENTITY below before anything is
+                            # attached (see the note at the query), so the two
+                            # DISTINCT carriers this disposition protects still
+                            # both keep their edge.
                             _space, _space_params = name_key_space_same_entity(
                                 "o", _n)
                             if _subject_fold_only and _space:
@@ -21246,14 +21424,44 @@ class TortoiseSDK:
                                 "RETURN o.id",
                                 params=_space_params).result_set
                                 if _space else [])
-                            _idless = False
-                            for _row in _oid_rows:
-                                _oid = _row[0] if _row else None
-                                if isinstance(_oid, str) and _oid:
-                                    link_entity(proj, "Point", pid,
-                                                _oid, sdk=self)
-                                else:
-                                    _idless = True
+                            # ⛔ #12244: the MERGE-COLLAPSE half, on top of the
+                            # writer's SPELLING space above. `apply_entity_merge`
+                            # is non-destructive, so a merged pair is ONE entity
+                            # with TWO live rows under one folded key and the
+                            # space matches BOTH — attaching to every row wrote a
+                            # second edge onto the carrier the merge retired,
+                            # which `resolve_or_mint` would never return. The
+                            # holders are mapped through
+                            # `entity_identity.attachment_target_ids`, so ONE
+                            # edge lands, on the survivor. Attach-to-every-carrier
+                            # for every DISTINCT entity is UNCHANGED (the collapse
+                            # only dedupes rows the merge's own pointer joins), and
+                            # the id-less arm below still reads the same space (a
+                            # stub carries no `resolved_from` evidence and no id
+                            # to attach by).
+                            _holder_ids = [(_row[0] if _row else None)
+                                           for _row in _oid_rows]
+                            _idless = any(
+                                not (isinstance(_h, str) and _h)
+                                for _h in _holder_ids)
+                            try:
+                                _targets = attachment_target_ids(
+                                    proj.g, "Object", _holder_ids)
+                            except Exception as _col_exc:  # noqa: BLE001, RUF100
+                                # A collapse that cannot be computed must not sink
+                                # the capture (the point is already durable); it
+                                # degrades to the pre-#12244 attachment set and
+                                # says so — never to silence.
+                                _targets = [_h for _h in _holder_ids
+                                            if isinstance(_h, str) and _h]
+                                warnings.append(
+                                    "about-entity collapse failed for "
+                                    f"{_n!r}: {type(_col_exc).__name__}: "
+                                    f"{_col_exc} — attached to every matched "
+                                    "carrier")
+                            for _oid in _targets:
+                                link_entity(proj, "Point", pid,
+                                            _oid, sdk=self)
                             if _idless:
                                 # An id-less name stub (hosted_api.py mints
                                 # these with `MERGE (o:Object {name:$name})`)
@@ -21515,7 +21723,7 @@ class TortoiseSDK:
                 # as a fold input and `_persist_extra_props` never stores it.
                 # NOTE: it is NOT materialized as an `about*` edge on this path
                 # (a separate, pre-existing gap — #8653).
-                self.create_event(
+                self._create_event(
                     content[:80],
                     str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
                     sessionId=session_id, is_episodic=True,
@@ -22187,7 +22395,7 @@ class TortoiseSDK:
     # to them, so behavior is bit-identical for existing callers while the
     # consolidated surface stays the canonical entry.
 
-    def update(self, id: str, **props) -> dict:
+    def _update(self, id: str, **props) -> dict:
         """One update for a Point OR an entity (epic #888 W2).
 
         A graph operator IS a Point (``is_operator=true``), so it takes the
@@ -22226,10 +22434,10 @@ class TortoiseSDK:
         if not resolved:
             return {}
         if resolved[0]["label"] == "Point":
-            return self.update_point(id, **props)
+            return self._update_point(id, **props)
         return self._update_entity_any(id, **props)
 
-    def delete(self, id: str) -> bool:
+    def _delete(self, id: str) -> bool:
         """One delete for a Point OR an entity (epic #888 W2).
 
         An operator IS a Point (``is_operator=true``), so
@@ -22264,8 +22472,8 @@ class TortoiseSDK:
         if not resolved:
             return False
         if resolved[0]["label"] == "Point":
-            return self.delete_point(id)
-        return self.delete_entity(id)
+            return self._delete_point(id)
+        return self._delete_entity__svc(id)
 
     # ── Phase 2.2 (#4282) — the four merges INTO the approved 40 ──────────
     #
@@ -22500,7 +22708,7 @@ class TortoiseSDK:
         if rel == "references" and entity_label:
             return _dispatch(
                 "link_source_to_entity",
-                lambda: self.link_source_to_entity(
+                lambda: self._link_source_to_entity(
                     source_url=from_id, entity_id=to_id,
                     entity_label=entity_label,
                     source_kind=source_kind or "document"))
@@ -22509,13 +22717,13 @@ class TortoiseSDK:
             # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
             return _dispatch(
                 "create_derivation",
-                lambda: self.create_derivation(from_id, to_id))
+                lambda: self._create_derivation(from_id, to_id))
 
         upper = rel.upper()
         if upper in ("IMPL", "NAND") and operator is not True:
             return _dispatch(
                 "create_direct_edge",
-                lambda: self.create_direct_edge(
+                lambda: self._create_direct_edge(
                     upper, from_id, to_id, direction=direction,
                     confidence=confidence, weight=weight, label=label,
                     batch_id=batch_id, promote_source=promote_source))
@@ -22561,7 +22769,7 @@ class TortoiseSDK:
 
             return _dispatch(
                 "create_operator",
-                lambda: self.create_operator(
+                lambda: self._create_operator(
                     SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
                     direction=direction or "bidirectional",
                     promote_source=promote_source, semantics=meaning))
@@ -22582,13 +22790,13 @@ class TortoiseSDK:
         if operator is True:
             return _dispatch(
                 "create_operator",
-                lambda: self.create_operator(
+                lambda: self._create_operator(
                     upper, from_id, [to_id], label=label,
                     direction=direction or "bidirectional",
                     promote_source=promote_source))
 
         return _dispatch(
-            "create_edge", lambda: self.create_edge(rel, from_id, to_id))
+            "create_edge", lambda: self._create_edge(rel, from_id, to_id))
 
     def update_knowledge(self, id: str, *, valid_until: str | None = None,
                          invalid_at: str | None = None,
@@ -22703,7 +22911,7 @@ class TortoiseSDK:
                     f"of it: an annotation and a revision are two different "
                     f"changes, so send them as two calls (this is the same rule "
                     f"`link_entities` applies to a keyword its arm cannot record).")
-            return self.annotate_operator(id, **annotation)
+            return self._annotate_operator(id, **annotation)
 
         # The temporal field IS the window end, so it must reach the writer that
         # stamps `validTo`. It used to gate the branch and then be thrown away:
@@ -22752,8 +22960,8 @@ class TortoiseSDK:
                     f"window, in that order (a terminal claim refuses a temporal "
                     f"re-stamp, #7819).")
             if corrected_by_id:
-                return self.invalidate_point(id, corrected_by_id, valid_to=end)
-            return self.retract_point(id, valid_to=end)
+                return self._invalidate_point(id, corrected_by_id, valid_to=end)
+            return self._retract_point(id, valid_to=end)
 
         if corrected_by_id:
             raise ValueError(
@@ -22787,10 +22995,10 @@ class TortoiseSDK:
         exactly what the narrow doors raise (``WriteNotLandedError`` on an
         unconfirmed destruction) — a merge must not soften a guarantee.
         """
-        return self.delete(id)
+        return self._delete(id)
 
     @_declares_apply_first_write_lane("update_point")
-    def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
+    def _update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
 
         Implementation behind update(id, ...) — the consolidated Point/entity
@@ -22809,6 +23017,14 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ⛔ #13829 (review P2, PR #13835) — ASK BEFORE THIS DOOR TOUCHES THE
+        # CACHE. Consumed ONCE, here, at the top of the method, so every exit of
+        # this verb — the absent/no-op returns included — leaves no verdict
+        # behind, and the cache leg below honours it. `update_point` writes the
+        # derived graph directly (`SET n += $props`, `_sync_tags`,
+        # `_mark_dirty`) and never goes through `live_write`'s fold, so the
+        # chokepoint's consumer does NOT cover it.
+        _cache_fold_denial = _published_cache_fold_denial()
         # ⛔ #13143 review (F1, P1): FIRST, before any of this door's own
         # `'status' in props` arms — they test the LITERAL name while the
         # transport applies `str(key)`, so a renderer-named key was written as
@@ -23184,7 +23400,7 @@ class TortoiseSDK:
             if _cur_status and _cur_status[0][0] == 'live':
                 if len(props) == 1:
                     # status-only: a true no-op — no write, no event.
-                    return _with_end_receipt(self.get_point(id), _end_receipt)
+                    return _with_end_receipt(self._get_point(id), _end_receipt)
                 # Other props still belong to the caller; drop only the
                 # already-satisfied status and let the non-status write path
                 # below apply them (never silently discard caller data).
@@ -23619,6 +23835,43 @@ class TortoiseSDK:
                     id, getattr(proj, "graph_name", None),
                     operation="update_point")
 
+        # ⛔ #13829 (review P2, PR #13835) — THE CACHE DECLINES HERE TOO.
+        # The verdict published for this write had two holes on the DEFAULT MCP
+        # door: `create_point(dedup=True)` (the default shape) folds a dedup hit
+        # through THIS verb and returns ~500 lines above `create_point`'s own
+        # consumption, so an over-cap cache kept taking writes — the cap was
+        # skipped, not enforced — and the verdict stayed set for a later fold in
+        # this context to consume. Consuming it at this verb's cache leg closes
+        # both: the record already holds the revision (the append above is the
+        # commit point, #7951), so the cache may lag and `derived = replay(
+        # journal)` heals it.
+        #
+        # The reply on that arm is the record's view — the point as the cache last
+        # held it, overlaid with the properties this call RECORDED — because the
+        # cache row was deliberately not written.
+        #
+        # ⚠️ STATED RESIDUAL: the PROMOTE arm (`status` in props) is APPLY-FIRST by
+        # decision (#8830). Its record is appended only after a guarded `SET` that
+        # can legitimately match nothing, so skipping the cache there would drop
+        # the transition with NO record at all — a worse defect than a stale
+        # cache. That arm therefore consumes the verdict and proceeds: the cap
+        # does not bind for it.
+        if _cache_fold_denial is not None:
+            if _promote_arm:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The status arm is APPLY-FIRST (#8830), so its cache write "
+                    "rides through: the cap does not bind on that arm.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+            else:
+                _logger.warning(
+                    "update_point: the DERIVED cache DECLINED %s (#13829) — %s. "
+                    "The record holds the revision; the point is served from the "
+                    "record until a replay folds it.",
+                    id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
+                return _with_end_receipt(
+                    {**self._get_point(id), **emit_props}, _end_receipt)
+
         # #7405: the property writes below ride the bounded write retry —
         # `update_point` is the SDK's most common mutation door
         # (`annotate_operator` delegates here), so a rebuild's per-query abort
@@ -23782,7 +24035,7 @@ class TortoiseSDK:
                     # through to the tail would run `_mark_dirty`, advancing
                     # the graph-wide EP epoch and persisting `ep_dirty` for a
                     # promote that matched nothing (#8854 review r9 P2).
-                    return _with_end_receipt(self.get_point(id), _end_receipt)
+                    return _with_end_receipt(self._get_point(id), _end_receipt)
                 # LANDED: record it HERE, before the tag sync and `_mark_dirty`
                 # below can strand it (#7951 2b — see `_record_promote`).
                 _record_promote()
@@ -23835,7 +24088,7 @@ class TortoiseSDK:
                     # #1088: see the :Object arm above — the same idempotent
                     # no-op, answered with no writes rather than through the
                     # tail's `_mark_dirty` EP advance.
-                    return _with_end_receipt(self.get_point(id), _end_receipt)
+                    return _with_end_receipt(self._get_point(id), _end_receipt)
                 # LANDED: see the `:Object` arm above — same commit point, same
                 # reason (#7951 2b).
                 _record_promote()
@@ -23972,7 +24225,7 @@ class TortoiseSDK:
             # `test_a_vanished_tagged_target_issues_no_tag_sync` and the
             # negative control `test_a_LANDED_update_still_runs_the_ep_side_
             # effects`.
-            return self.get_point(id)
+            return self._get_point(id)
 
         # Tag sync (#485): keep TAGGED edges consistent with the n.tags
         # property — update_point previously set the property but left edges
@@ -24083,7 +24336,7 @@ class TortoiseSDK:
                 witness=_sync_witness)
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
-        result = self.get_point(id)
+        result = self._get_point(id)
         # The PROMOTE arm's record is NOT emitted here any more (#7951 2b): it
         # commits where the promote lands, inside the arm, so the tag sync and
         # `_mark_dirty` below it cannot strand a landed promotion. The unguarded
@@ -24129,7 +24382,7 @@ class TortoiseSDK:
     # behaviour: under an armed handle `delete_point` completes and appends its
     # record, while a raw `DETACH DELETE` with no lane is still REFUSED.
     @_declares_apply_first_write_lane("delete_point")
-    def delete_point(self, id: str) -> bool:
+    def _delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
@@ -24431,9 +24684,9 @@ class TortoiseSDK:
         self._get_ep().invalidate_messages()
         return True
 
-    def delete_point_wrapped(self, id: str) -> dict:
+    def _delete_point_wrapped(self, id: str) -> dict:
         """Delete a Point. Returns dict for MCP tool consumption."""
-        found = self.delete_point(id)
+        found = self._delete_point(id)
         return {"deleted": found, "id": id}
 
     def _delete_landed_anyway(self, proj, point_id: str,
@@ -24832,7 +25085,7 @@ class TortoiseSDK:
                 ) from None
 
     @_declares_live_write_lane("invalidate_point")
-    def invalidate_point(self, id: str, corrected_by_id: str,
+    def _invalidate_point(self, id: str, corrected_by_id: str,
                          *, valid_to_precision: str | None = None,
                          valid_to: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
@@ -25183,8 +25436,8 @@ class TortoiseSDK:
                     f"invalidate_point(id, corrected_by_id) for the window-agnostic "
                     f"invalidation."
                 )
-            return self.invalidate_point(old_id, new_id)
-        return self.supersede_point(old_id, new_id, valid_from=valid_from,
+            return self._invalidate_point(old_id, new_id)
+        return self._supersede_point(old_id, new_id, valid_from=valid_from,
                                     valid_to_precision=valid_to_precision)
 
     def _supersession_label(self, node_id: str) -> str | None:
@@ -25545,7 +25798,7 @@ class TortoiseSDK:
                 "superseded_by": successor_name, "superseded_at": instant}
 
     @_declares_live_write_lane("supersede_point")
-    def supersede_point(self, old_id: str, new_id: str,
+    def _supersede_point(self, old_id: str, new_id: str,
                         *, valid_from: str | None = None,
                         valid_to_precision: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
@@ -27148,7 +27401,7 @@ class TortoiseSDK:
         }
 
     @_declares_live_write_lane("retract_point")
-    def retract_point(self, id: str, *, valid_to: str | None = None) -> dict:
+    def _retract_point(self, id: str, *, valid_to: str | None = None) -> dict:
         """Tombstone-retract a Point: status='retracted' (point stays in graph).
 
         §17.1 LANE (#9124): JOURNAL-FIRST, declared. `PointRetracted` is
@@ -27319,7 +27572,7 @@ class TortoiseSDK:
 
     # ── Promotion (Phase-4 EP-safe lifecycle, #785) ────────────────
 
-    def promote_point(self, point_id: str) -> dict:
+    def _promote_point(self, point_id: str) -> dict:
         """Reviewer-gated draft→live promotion (plan §6.1, J-5, DE2E-8).
 
         The ONLY path a draft extraction Point may go live — never via the
@@ -27466,7 +27719,7 @@ class TortoiseSDK:
         )
         if not r.result_set:
             # Raced with a concurrent promote — re-read and report the outcome.
-            re = self.get_point(point_id)
+            re = self._get_point(point_id)
             if not re:
                 # The node is GONE (deleted, or a second replacement between
                 # this call's two reads). That is not a state verdict, and
@@ -27535,7 +27788,7 @@ class TortoiseSDK:
                 params={"cand": point_id, "prior": prior},
             ).result_set
             if not exists or exists[0][0] == 0:
-                self.create_operator(
+                self._create_operator(
                     "IMPL", point_id, [prior], label="alreadyDecided",
                     direction="unidirectional")
                 dedup_wired = True
@@ -27597,7 +27850,7 @@ class TortoiseSDK:
         if live_targets and point.get("temporal_replacement"):
             for tgt in live_targets:
                 try:
-                    self.supersede_point(tgt, point_id)
+                    self._supersede_point(tgt, point_id)
                     superseded = True
                 except ValueError as exc:
                     # #5365: the same fail-open skip as commit_ops — the
@@ -27634,7 +27887,7 @@ class TortoiseSDK:
                         point_id, tgt)
                     continue
                 try:
-                    self.create_operator("NAND", point_id, [tgt])
+                    self._create_operator("NAND", point_id, [tgt])
                     temporal_wired = True
                 except ValueError as exc:
                     # A racing delete between validation and create must
@@ -27658,7 +27911,7 @@ class TortoiseSDK:
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
 
-        self._emit_event("PointPromoted", point=self.get_point(point_id))
+        self._emit_event("PointPromoted", point=self._get_point(point_id))
         result = {"id": point_id, "status": "live", "promoted": True,
                   "reviewed": True,
                   "operator_nodes_promoted": promoted_ops}
@@ -27786,13 +28039,13 @@ class TortoiseSDK:
                 continue  # lost a race — another promote already flipped it
             # Full snapshot for JSONL rebuild parity (#548, review #944).
             self._emit_event("OperatorPromoted", id=oid,
-                             point=self.get_point(oid))
+                             point=self._get_point(oid))
             promoted.append(oid)
         return promoted
 
     # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
 
-    def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
+    def _belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
         """Dated, ordered belief chain for a topic (plan §6.1, J-4, DE2E-6).
 
         Returns decision Points aboutObject-connected to the topic entity,
@@ -28090,14 +28343,14 @@ class TortoiseSDK:
                     boundary_blocked += 1
                 elif sdk_for_wiring is not None:
                     # Variant A: draft-to-draft "already decided" IMPL.
-                    sdk_for_wiring.create_operator(
+                    sdk_for_wiring._create_operator(
                         "IMPL", pid, [prior], label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
                     wired += 1
             else:
                 # Live prior: defer to promotion (Variant C).
                 deferred += 1
-            self._emit_event("DedupeRecorded", point=self.get_point(pid))
+            self._emit_event("DedupeRecorded", point=self._get_point(pid))
         return {"hits": hits, "wired_draft_to_draft": wired,
                 "deferred_live_prior": deferred,
                 "boundary_blocked": boundary_blocked}
@@ -28286,10 +28539,10 @@ class TortoiseSDK:
             )
             if action == "reject":
                 self._emit_event("DedupeRejected",
-                                 point=self.get_point(candidate_id))
+                                 point=self._get_point(candidate_id))
             else:
                 self._emit_event("DedupeRecorded",
-                                 point=self.get_point(candidate_id))
+                                 point=self._get_point(candidate_id))
             return {"candidate_id": candidate_id, "action": action,
                     "candidate_type": "temporal",
                     "wired": False,
@@ -28316,7 +28569,7 @@ class TortoiseSDK:
                     params={"cand": candidate_id, "prior": target_id},
                 ).result_set
                 if not exists or exists[0][0] == 0:
-                    self.create_operator(
+                    self._create_operator(
                         "IMPL", candidate_id, [target_id],
                         label="alreadyDecided",
                         direction="unidirectional", promote_source=False)
@@ -28326,9 +28579,9 @@ class TortoiseSDK:
             else:
                 deferred = True  # wired at promotion (Variant C)
         if action == "reject":
-            self._emit_event("DedupeRejected", point=self.get_point(candidate_id))
+            self._emit_event("DedupeRejected", point=self._get_point(candidate_id))
         else:
-            self._emit_event("DedupeRecorded", point=self.get_point(candidate_id))
+            self._emit_event("DedupeRecorded", point=self._get_point(candidate_id))
         return {"candidate_id": candidate_id, "action": action,
                 "wired": wired, "deferred_to_promotion": deferred,
                 "target_id": target_id}
@@ -28528,7 +28781,7 @@ class TortoiseSDK:
     # ── Operators ─────────────────────────────────────────────────
 
     @_declares_apply_first_write_lane("create_operator")
-    def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
+    def _create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
                         direction: str = "bidirectional",
                         promote_source: bool = True,
@@ -29343,7 +29596,7 @@ class TortoiseSDK:
         # promote arm documents). Neither write is needed to state the record:
         # both are derived-cache housekeeping over a write that has already
         # landed, so a failure there is recoverable while a lost record is not.
-        result = self.get_point(pid)
+        result = self._get_point(pid)
         # #1934: merge the structured warnings into the result (warn-not-block
         # contract — consumers may surface or ignore; the shape is stable).
         if warnings:
@@ -29395,7 +29648,7 @@ class TortoiseSDK:
         """
         from .weights import ANNOTATION_TERM_NEUTRAL as _neutral
 
-        point = self.get_point(operator_id)
+        point = self._get_point(operator_id)
         if not point:
             raise ValueError(f"Operator {operator_id!r} not found")
         if not point.get("id"):
@@ -29420,7 +29673,7 @@ class TortoiseSDK:
             if value is None:
                 existing = current[term]
                 requested[term] = _neutral if existing is None else existing
-        return self.annotate_operator(
+        return self._annotate_operator(
             operator_id,
             bias=requested["bias"],
             precision=requested["precision"],
@@ -29428,7 +29681,7 @@ class TortoiseSDK:
             directness=requested["directness"],
         )
 
-    def annotate_operator(self, id: str, bias: float, precision: float,
+    def _annotate_operator(self, id: str, bias: float, precision: float,
                           consistency: float, directness: float) -> dict:
         """Annotate an operator Point with structured epistemic dimensions.
 
@@ -29465,7 +29718,7 @@ class TortoiseSDK:
 
         Raises ValueError if id not found, not an operator, or dims out of [0,1].
         """
-        point = self.get_point(id)
+        point = self._get_point(id)
         if not point:
             raise ValueError(f"Operator {id!r} not found")
         if not point.get("is_operator"):
@@ -29500,11 +29753,11 @@ class TortoiseSDK:
         }, id=id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
-        return self.update_point(id,
+        return self._update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
 
-    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5,
+    def _mitigate_operator(self, id: str, reason: str, strength: float = 0.5,
                           credibility: str | int | float | None = None) -> dict:
         """Create a mitigation Point that modulates an operator's edge strength.
 
@@ -29591,7 +29844,7 @@ class TortoiseSDK:
         _reject_unrepresentable_number("strength", strength)
         if not 0 <= strength <= 1:
             raise ValueError(f"strength must be 0-1, got {strength}")
-        point = self.get_point(id)
+        point = self._get_point(id)
         if not point:
             raise ValueError(f"Operator {id!r} not found")
         if not point.get("is_operator"):
@@ -29686,7 +29939,7 @@ class TortoiseSDK:
                     "mitigation Point an id, or drop that unaddressable "
                     "mitigation and call mitigate_operator again to mint an "
                     "addressable one (#9754).")
-            self.update_point(mid, content=f"[MITIGATION] {reason}",
+            self._update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
             # (never silently ignored). No credibility → keep whatever the
@@ -29697,7 +29950,7 @@ class TortoiseSDK:
             # documented first-run EP). Heal it with the system default so a
             # legacy mitigation becomes rankable on the next re-mitigation.
             if author_prior is not None:
-                self.set_point_baseline(
+                self._set_point_baseline(
                     mid, author_prior[0], author_prior[1],
                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
                 # #6151 review P2: persist the word LABEL and the recorded
@@ -29715,9 +29968,9 @@ class TortoiseSDK:
                 self._stamp_authored_word(
                     mid, label=canonical_tier(credibility),
                     system_default=True)
-            elif not self.get_point(mid).get("baseline_set"):
+            elif not self._get_point(mid).get("baseline_set"):
                 alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
-                self.set_point_baseline(
+                self._set_point_baseline(
                     mid, alpha, beta,
                     source=BASELINE_SOURCE_SYSTEM_DEFAULT)
                 # The healed legacy mitigation carries the recorded #2199
@@ -29737,7 +29990,7 @@ class TortoiseSDK:
             # re-mitigation, and they are computed, not assumed (#5566 review
             # P2).
             self._mark_dirty([mid])
-            return self.get_point(mid)
+            return self._get_point(mid)
         # Create new mitigation Point
         mid = ulid()
         from datetime import datetime, timezone
@@ -29792,7 +30045,7 @@ class TortoiseSDK:
         else:
             alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             source = BASELINE_SOURCE_SYSTEM_DEFAULT
-        self.set_point_baseline(mid, alpha, beta, source=source)
+        self._set_point_baseline(mid, alpha, beta, source=source)
         # #6151 review P2/P3: persist BOTH the word LABEL (so a later real
         # source displaces the weak body through the recompute instead of the
         # mitigation freezing) and the recorded #2199 birth marker (so the
@@ -29813,7 +30066,7 @@ class TortoiseSDK:
         # not sweepable and would pin the dream mode to 'local'.
         self._mark_dirty([mid])
         # #548: emit events for rebuild parity
-        self._emit_event("PointAdded", point=self.get_point(mid))
+        self._emit_event("PointAdded", point=self._get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
         # recreated on replay. The payload's `operator` descriptor is ALSO the
         # carrier `projection/edges.py::_create_edges` keys on to rebuild the
@@ -29823,10 +30076,10 @@ class TortoiseSDK:
         # (`is_operator` false / no `op_type`) survives replay through
         # `_upsert_point_props`'s explicit-False arm, and a revised strength
         # folds through `_revise_point` / `_apply_one`.
-        mit_point = self.get_point(mid)
+        mit_point = self._get_point(mid)
         mit_point["operator"] = {"op_type": "IMPL", "inputs": [id]}
         self._emit_event("OperatorAdded", point=mit_point)
-        return self.get_point(mid)
+        return self._get_point(mid)
 
     # ── Query ─────────────────────────────────────────────────────
 
@@ -29866,7 +30119,7 @@ class TortoiseSDK:
             return []
         return ["(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL"]
 
-    def query(self, kind: str | None = None,
+    def _query(self, kind: str | None = None,
               *, include_retracted: bool = False,
               _record_reads: bool = True,
               **filters) -> list[dict]:
@@ -29928,7 +30181,7 @@ class TortoiseSDK:
             _ledger_record("Point", points, kind="lookup")
         return points
 
-    def paginated_query(self, kind: str | None = None,
+    def _paginated_query(self, kind: str | None = None,
                         skip: int = 0, limit: int = 20,
                         *, include_retracted: bool = False,
                         **filters) -> dict:
@@ -30024,7 +30277,7 @@ class TortoiseSDK:
 
         return {"results": results, "total": total, "hasMore": skip + limit < total}
 
-    def get_point(self, id: str, *, served_out: dict | None = None) -> dict:
+    def _get_point(self, id: str, *, served_out: dict | None = None) -> dict:
         """Get a Point by ID. Returns dict of all properties, or ``{}`` if absent.
 
         Two absent SHAPES, which are not two verdicts: ``{}`` — returned BOTH
@@ -30328,9 +30581,9 @@ class TortoiseSDK:
         if section == "taxonomy":
             return self._taxonomy()
         if section == "structure":
-            return self.summarize_structure()
+            return self._summarize_structure()
         if section == "structure_check":
-            return self.check_structure()
+            return self._check_structure()
         if section == "pointkinds":
             return self._list_pointkinds()
         if section == "tags":
@@ -30342,9 +30595,9 @@ class TortoiseSDK:
         if section == "status":
             return self._status()
         if section == "stale":
-            return self.stale_points(days=days, limit=limit)
+            return self._stale_points(days=days, limit=limit)
         if section == "dream_health":
-            return self.dream_health_check()
+            return self._dream_health_check()
         if section == "validate_domain":
             if not domain:
                 raise ValueError(
@@ -30352,7 +30605,7 @@ class TortoiseSDK:
                     "— name the domain whose validators to run")
             return self._validate_domain(domain)
         if section == "audit":
-            return self.audit(point_kinds=point_kinds)
+            return self._audit__svc(point_kinds=point_kinds)
         if section == "topics":
             if not entity_id:
                 raise ValueError(
@@ -30427,7 +30680,7 @@ class TortoiseSDK:
                 f"search_knowledge: unknown mode {mode!r}. Valid modes: "
                 f"{', '.join(self.SEARCH_KNOWLEDGE_MODES)}")
         if mode == "hybrid":
-            return self.tortoise_fts_query(
+            return self._tortoise_fts_query(
                 query=query, kind=kind, entity_type=entity_type,
                 min_confidence=min_confidence, order_by=order_by,
                 limit=10 if limit is None else limit, threshold=threshold,
@@ -30451,7 +30704,7 @@ class TortoiseSDK:
             # not happen”); recording nothing would leave the served rows
             # unrecorded. The MCP tag arm performs the same two steps
             # (`mcp_server.tortoise_query`), and the two must measure one thing.
-            rows = self.query_points_by_tag(tag, _record_reads=False)
+            rows = self._query_points_by_tag(tag, _record_reads=False)
             # `query_points_by_tag` has no terminal-status exclusion of its own
             # (it returns `properties(p)` for the whole tag population), so the
             # `include_retracted=` this container DECLARES has to be applied
@@ -30490,7 +30743,7 @@ class TortoiseSDK:
             raise ValueError(
                 "search_knowledge(mode='issue_insight') requires title= (or "
                 "query=) — the insight is matched against a would-be issue")
-        return self.issue_insight(
+        return self._issue_insight(
             subject, body=body, repo=repo, limit=2 if limit is None else limit)
 
     #: The `kind=` values :meth:`list_knowledge` dispatches on.
@@ -30544,7 +30797,7 @@ class TortoiseSDK:
                 f"list_knowledge: unknown kind {kind!r}. Valid kinds: "
                 f"{', '.join(self.LIST_KNOWLEDGE_KINDS)}")
         if kind == "claim":
-            return self.paginated_query(
+            return self._paginated_query(
                 kind=point_kind, skip=offset, limit=limit,
                 include_retracted=include_retracted, **filters)
         if kind == "source":
@@ -30554,11 +30807,11 @@ class TortoiseSDK:
                 raise ValueError(
                     "list_knowledge(kind='source_reliability') requires url= "
                     "— the reliability is derived for one Source")
-            return self.get_source_reliability(url)
+            return self._get_source_reliability(url)
         if kind == "batch":
             if id:
-                return self.list_batch(id)
-            return self.list_batches(limit=limit)
+                return self._list_batch(id)
+            return self._list_batches(limit=limit)
         if kind == "namespace":
             return self._list_namespaces()
         if kind == "topic":
@@ -30741,7 +30994,7 @@ class TortoiseSDK:
                     f"the {armed[0]} arm and would DROP them with no error — send "
                     f"the {other} call separately.")
         if recompute:
-            return self.compute_confidence(
+            return self._compute_confidence(
                 factors, evidence, anchors=anchors,
                 max_hops=1 if max_hops is None else max_hops,
                 rel_filter="IMPL|NAND" if rel_filter is None else rel_filter,
@@ -30762,7 +31015,7 @@ class TortoiseSDK:
             # and `recall_state`'s own signature defaults ARE that preset
             # (1.0 / 1.0 / 0.10) — so passing the resolved value through is the
             # same call for both, with `custom` simply never overriding it.
-            return self.recall_state(
+            return self._recall_state(
                 query, kind=kind,
                 limit=10 if limit is None else limit,
                 include_superseded=(False if include_superseded is None
@@ -30777,7 +31030,7 @@ class TortoiseSDK:
                                    if centrality_weight is None
                                    else centrality_weight))
         if claim_id:
-            view = self.get_confidence(
+            view = self._get_confidence(
                 claim_id, require_calibration=require_calibration)
             if not include_provenance:
                 return view
@@ -30786,12 +31039,12 @@ class TortoiseSDK:
                 "provenance": self._provenance(claim_id),
             }
         if topic:
-            return self.belief_timeline(
+            return self._belief_timeline(
                 topic, limit=50 if limit is None else limit)
         if session:
-            return self.session_context()
+            return self._session_context()
         # calibrate=True, and the no-selector default: the graph-wide view.
-        return self.calibrate_summary()
+        return self._calibrate_summary()
 
     def explore_connections(self, node_id: str | None = None, *,
                             query: str | None = None,
@@ -30883,20 +31136,20 @@ class TortoiseSDK:
         if kind == "connections":
             extra = {} if limit is None else {
                 "add_limit": limit, "prune_limit": limit}
-            return self.review_connections(mode=mode, scope=scope, **extra)
+            return self._review_connections(mode=mode, scope=scope, **extra)
         if kind == "dedup":
             extra = {} if limit is None else {"limit": limit}
             return self._list_dedup_candidates(
                 candidate_type=candidate_type, **extra)
         extra = {} if limit is None else {
             "max_candidates": limit, "top_k": min(limit, CROSS_LENS_ANN_TOP_K)}
-        return self.get_cross_lens_candidates(
+        return self._get_cross_lens_candidates(
             threshold=DEFAULT_THRESHOLD if threshold is None else threshold,
             **extra)
 
     # ── Chain Integrity ───────────────────────────────────────────
 
-    def check_structure(self) -> list[dict]:
+    def _check_structure(self) -> list[dict]:
         """Check Gate 0→4 chain integrity. Thin delegation wrapper over the
         domain-validator registry (issue #405): runs the product-strategy
         graph-surface validator and maps its enriched output back to the
@@ -30930,7 +31183,7 @@ class TortoiseSDK:
             "drift": drift,
         }
 
-    def audit(self, point_kinds: list[str] | None = None) -> dict:
+    def _audit__svc(self, point_kinds: list[str] | None = None) -> dict:
         """Audit graph wiring quality — structured JSON report (epic #348).
 
         Runs the audit checks (missing sourceKind point-level legacy + Source-
@@ -30958,7 +31211,7 @@ class TortoiseSDK:
         proj = self._get_proj()
         return audit_graph(proj, point_kinds=point_kinds).to_dict()
 
-    def summarize_structure(self) -> dict:
+    def _summarize_structure(self) -> dict:
         """Structure summary — counts over the WHOLE graph (#2205), not just
         the product-strategy gate kinds.
 
@@ -31098,7 +31351,7 @@ class TortoiseSDK:
         ).result_set
         return [{"name": row[0], "count": row[1]} for row in rows]
 
-    def query_points_by_tag(self, tag: str, *,
+    def _query_points_by_tag(self, tag: str, *,
                             _record_reads: bool = True) -> list[dict]:
         """Return Points connected via TAGGED edge to the given Tag name.
 
@@ -31137,7 +31390,7 @@ class TortoiseSDK:
         from .taxonomy import list_topics as _list_topics
         return _list_topics(self._get_proj(), entity_id)
 
-    def topic_summarize(
+    def _topic_summarize(
         self,
         topic: str,
         *,
@@ -35041,9 +35294,9 @@ class TortoiseSDK:
         verbatim for the same reason — a re-shaped argument list is that drift with
         extra steps.
         """
-        return self.ingest(bundle, granularity, promotion_policy=promotion_policy)
+        return self._ingest(bundle, granularity, promotion_policy=promotion_policy)
 
-    def ingest(self, bundle: dict, granularity: str = "bulk", *,
+    def _ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
         """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
 
@@ -35491,7 +35744,7 @@ class TortoiseSDK:
             # (docs/INGEST_CONTRACT.md — empty for a bare statement point),
             # so forcing the draft in place would report a status the caller
             # never passed.
-            point = self.create_point(kind, content, dedup=True, **write_item)
+            point = self._create_point(kind, content, dedup=True, **write_item)
             pid = point["id"]
             if ref:
                 _register_ref(ref, pid, "points")
@@ -35537,20 +35790,20 @@ class TortoiseSDK:
                 # the item declared (the door re-labels by the kind). See
                 # `_existing_entity_ids`.
                 existed = _existing_entity_ids(proj.g, etype, item, name)
-                node = self.create_subject(name, **item)
+                node = self._create_subject(name, **item)
                 canonical = node.get("id") or name
             elif etype == "object":
                 existed = _existing_entity_ids(proj.g, etype, item, name)
-                node = self.create_object(name, **item)
+                node = self._create_object(name, **item)
                 canonical = node.get("id") or name
             elif etype == "event":
                 event_kind = item.pop("eventKind", None)
-                node = self.create_event(name, event_kind, **item)
+                node = self._create_event(name, event_kind, **item)
                 canonical = node.get("eventId") or node.get("id") or name
                 existed = []  # Event records are append-only — never deduped
             elif etype == "document":
                 doc_kind = item.pop("documentKind", None)
-                node = self.create_document(name, doc_kind, **item)
+                node = self._create_document(name, doc_kind, **item)
                 canonical = node.get("id") or name
                 existed = []  # Document records are append-only — never deduped
             else:
@@ -35714,7 +35967,7 @@ class TortoiseSDK:
                         f"`reify: true` to make the intent explicit."
                     )
                 if _route == "direct":
-                    edge_res = self.create_direct_edge(
+                    edge_res = self._create_direct_edge(
                         op_type, src, dsts[0],
                         label=label,
                         direction=direction,
@@ -35886,14 +36139,14 @@ class TortoiseSDK:
                     self._append_warning(
                         "partial_operator_residue:"
                         + ",".join(existing.get("candidates") or []))
-                    op = self.create_operator(op_type, src, dsts,
+                    op = self._create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
                                               promote_source=(promotion_policy == "auto"))
                     oid = op["id"]
                     created["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": False}
                 else:
-                    op = self.create_operator(op_type, src, dsts,
+                    op = self._create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
                                               promote_source=(promotion_policy == "auto"))
                     oid = op["id"]
@@ -36138,7 +36391,7 @@ class TortoiseSDK:
 
     # ── batch audit surface (epic #902 A13, §4.2 audit row) ──────────
 
-    def list_batch(self, batch_id: str) -> dict:
+    def _list_batch(self, batch_id: str) -> dict:
         """Audit the stamped artifacts of ONE bundle (epic #902 A13).
 
         Returns the bundle's STAMPED set — every Point carrying this
@@ -36215,7 +36468,7 @@ class TortoiseSDK:
                 "counts": {"points": len(points),
                             "direct_edges": len(edges)}}
 
-    def list_batches(self, limit: int = 20) -> list[dict]:
+    def _list_batches(self, limit: int = 20) -> list[dict]:
         """Batch discovery — the most recent distinct batch_ids (A13).
 
         Returns ``[{batch_id, points, direct_edges}]`` ordered by the newest
@@ -36267,7 +36520,7 @@ class TortoiseSDK:
         return items[:limit]
 
     @_declares_apply_first_write_lane("create_direct_edge")
-    def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
+    def _create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
                            direction: str | None = None,
                            confidence: float | None = None,
                            weight: float | None = None,
@@ -36965,7 +37218,7 @@ class TortoiseSDK:
             # discarded by the caller (`ingest`).
             _ids = [row[0] for row in prior if row[0]]
             return min(_ids) if _ids else None
-        mid = self.mitigate_operator(
+        mid = self._mitigate_operator(
             operator_id, reason=reason, strength=strength)["id"]
         _prior_row = (_current or prior or [None])[0]
         if _prior_row is not None:
@@ -37048,7 +37301,7 @@ class TortoiseSDK:
             raise ValueError(f"choice={choice} out of range [0, {len(options)-1}]")
 
         # 1. Create decision point
-        decision = self.create_point(
+        decision = self._create_point(
             "decision",
             f"Decision: {options[choice]}",
             status="live",
@@ -37058,26 +37311,26 @@ class TortoiseSDK:
         # 2. Create option points + IMPL edges from decision
         option_ids = []
         for i, opt in enumerate(options):
-            opt_point = self.create_point(
+            opt_point = self._create_point(
                 "option",
                 f"Option {i+1}: {opt}",
                 status="live",  # options are targets, not sources — explicit live
             )
             option_ids.append(opt_point["id"])
             # IMPL edge: decision -> option ("decision considers option")
-            self.create_operator("IMPL", decision_id, [opt_point["id"]])
+            self._create_operator("IMPL", decision_id, [opt_point["id"]])
 
         # 3. Create evidence points + IMPL edges to the chosen option
         evidence_ids = []
         chosen_id = option_ids[choice]
         for ev in evidence:
-            ev_point = self.create_point(
+            ev_point = self._create_point(
                 "evidence",
                 ev,
             )
             evidence_ids.append(ev_point["id"])
             # IMPL edge: evidence -> chosen option ("evidence supports choice")
-            self.create_operator("IMPL", ev_point["id"], [chosen_id])
+            self._create_operator("IMPL", ev_point["id"], [chosen_id])
 
         return {
             "decision_id": decision_id,
@@ -37220,7 +37473,7 @@ class TortoiseSDK:
 
         # 4. Decision Point (pointKind humanApproval) — epistemic weight carrier
         content = decision_content or f"Approved: {artifact_ref}"
-        decision = self.create_point(
+        decision = self._create_point(
             "humanApproval",
             content,
             status="live",
@@ -37229,7 +37482,7 @@ class TortoiseSDK:
         decision_id = decision["id"]
 
         # 5. Event (eventKind humanApproval) — the occurrence record
-        event = self.create_event(
+        event = self._create_event(
             name=f"human approval of {artifact_ref}",
             eventKind="humanApproval",
             startedAt=now,
@@ -37248,7 +37501,7 @@ class TortoiseSDK:
         #    create_operator defaults to bidirectional — direction must be
         #    explicit so EP never back-propagates claim weakness into the
         #    approval point.
-        op = self.create_operator(
+        op = self._create_operator(
             "IMPL", decision_id, point_ids,
             label="approvedBy", direction="unidirectional",
         )
@@ -37275,7 +37528,7 @@ class TortoiseSDK:
         # on the decision Point, so there is no uncalibrated evidence input to
         # demand. Deliberate, never a silent swallow, and it does not relax the
         # gate for any other caller: each one opts out explicitly or not at all.
-        self.compute_confidence(evidence={decision_id: (10, 1)},
+        self._compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
         after = {
             bd_id: bd.confidence_mean
@@ -37305,7 +37558,7 @@ class TortoiseSDK:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def list_graphs(self) -> list[str]:
+    def _list_graphs(self) -> list[str]:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
 
@@ -37406,7 +37659,7 @@ class TortoiseSDK:
 
     def _provenance(self, point_id: str) -> dict:
         """Provenance chain — "Who decided this?" Point → Subject → delegation."""
-        point = self.get_point(point_id)
+        point = self._get_point(point_id)
         if not point:
             return {"error": f"Point {point_id} not found"}
         author = point.get("authoredBy", "")
@@ -37473,7 +37726,7 @@ class TortoiseSDK:
     # ── #7045: about edges backfill (Ontology v2.1) ──────────
     # ── P1-3: Staleness ─────────────────────────────────────────
 
-    def stale_points(self, days: int = 30, limit: int = 50) -> dict:
+    def _stale_points(self, days: int = 30, limit: int = 50) -> dict:
         """Return Points not updated in N days. Returns {stale: [...], count: N, cutoff: '...'}."""
         proj = self._get_proj()
         stale = proj.stale_points(days=days, limit=limit)
@@ -37482,7 +37735,7 @@ class TortoiseSDK:
 
     # ── Connection review (#913 W6) ─────────────────────────────────
 
-    def review_connections(
+    def _review_connections(
         self,
         mode: str = "both",
         scope: str | None = None,
@@ -37622,7 +37875,7 @@ class TortoiseSDK:
 
     # ── Cross-lens candidate discovery (#438, BYOA) ───────────────────────
 
-    def get_cross_lens_candidates(
+    def _get_cross_lens_candidates(
         self,
         *,
         threshold: float = DEFAULT_THRESHOLD,
@@ -37981,10 +38234,10 @@ class TortoiseSDK:
         pool = {pid: {k: v for k, v in meta.items() if k != "updated_at"}
                 for pid, meta in pool.items()}
 
-        resolved = self.resolve_id(scope)
+        resolved = self._resolve_id(scope)
         query_text = (resolved or {}).get("content") or scope
         try:
-            results = self.tortoise_fts_query(
+            results = self._tortoise_fts_query(
                 query_text, entity_type="point", limit=200,
                 _record_reads=False,  # #7983: a review pool, not a caller read
                 # #8487 (review round 6, P2): this pool is consumed as a
@@ -38613,7 +38866,7 @@ class TortoiseSDK:
                 self._retry_backoff_until.pop(g, None)
                 self._stale_unresolved.pop(g, None)
 
-    def dream_health_check(self) -> dict:
+    def _dream_health_check(self) -> dict:
         """Epic 903-C7 (#1245): the zero-output silent-death alarm +
         observability record (embedded evaluator — call-triggered, no
         daemon per #176; the hosted surface is /v1/dream/health).
@@ -38725,7 +38978,7 @@ class TortoiseSDK:
             alarm_reason = "coverage_unavailable"
         else:
             alarm_reason = "zero_coverage_with_backlog"
-        state = self.dream_health_state()
+        state = self._dream_health_state()
         stale_backlog = sum(  # noqa: F841
             1 for _ in self._dirty_roots)  # non-empty check below
         return {
@@ -39172,7 +39425,7 @@ class TortoiseSDK:
         if not result.get("converged", result.get("converged_all", True)):
             self._dream_metrics["failure_count"] += 1
 
-    def dream_health_state(self) -> dict:
+    def _dream_health_state(self) -> dict:
         """C5-emitted region_attempts record (consumed by 903-C7's health
         surface): per-root attempt count + backoff state + stale_unresolved.
         """
@@ -39792,7 +40045,7 @@ class TortoiseSDK:
     #: avoid — so it must stay far below the production floor.
     _AUTO_FULL_OPERATOR_THRESHOLD = 50
 
-    def dream(self, dirty_only: bool = True, full: bool = False,
+    def _dream(self, dirty_only: bool = True, full: bool = False,
               max_hops: int = 2,
               require_calibration: bool | None = None,
               stamp_dreamed_at: bool = True,
@@ -40721,8 +40974,8 @@ class TortoiseSDK:
         """
         if scope == "changed":
             if claims:
-                return self.compute_confidence(anchors=list(claims))
-            return self.compute_confidence()
+                return self._compute_confidence(anchors=list(claims))
+            return self._compute_confidence()
         if scope == "graph":
             anchors: list[str] = []
             offset = 0
@@ -40741,7 +40994,7 @@ class TortoiseSDK:
             # to "the whole graph", reported as ``no_factors`` over zero anchors.
             # The no-arg path would answer about the dirty roots instead — a different,
             # narrower question wearing the whole-graph label.
-            return self.compute_confidence(anchors=anchors)
+            return self._compute_confidence(anchors=anchors)
         raise ValueError(
             f"Unknown confidence scope {scope!r}. Row 26 defines exactly two: "
             "'changed' (the dirty roots) and 'graph' (every live claim). The scope is "
@@ -40749,7 +41002,7 @@ class TortoiseSDK:
             "defaulted."
         )
 
-    def compute_confidence(self, factors=None, evidence=None,
+    def _compute_confidence(self, factors=None, evidence=None,
                            anchors: list[str] | None = None,
                            max_hops: int = 1,
                            rel_filter: str = "IMPL|NAND",
@@ -41026,7 +41279,7 @@ class TortoiseSDK:
             # deterministic pass below owns the answer, and the dream's only
             # contribution to it is its selection report, which lands on the
             # bound ``dreamer``.
-            self.dream(dirty_only=True, stamp_dreamed_at=False,
+            self._dream(dirty_only=True, stamp_dreamed_at=False,
                        warm_start=False,
                        require_calibration=require_calibration)
             # #6211: the fail-safe dream runs its OWN operator selection (the
@@ -41362,7 +41615,7 @@ class TortoiseSDK:
             params=params,
         )
 
-    def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
+    def _set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
                            source: str = BASELINE_SOURCE_SET_BY_AUTHOR) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately.
 
@@ -41695,7 +41948,7 @@ class TortoiseSDK:
         )
         self._mark_dirty(point_ids)
 
-    def get_confidence(self, claim_id: str,
+    def _get_confidence(self, claim_id: str,
                        require_calibration: bool | None = None) -> dict:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}.
 
@@ -41727,7 +41980,7 @@ class TortoiseSDK:
             # the scope never excuses the thing asked for.
             self._ensure_calibrated("get_confidence", scope={claim_id})
         if claim_id in self._dirty_roots:
-            self.dream(dirty_only=True,
+            self._dream(dirty_only=True,
                        require_calibration=require_calibration,
                        stamp_dreamed_at=False,  # read path — never stamps (epic 903-C2)
                        warm_start=False)  # from-scratch reads (epic 903-C4)
@@ -42314,7 +42567,7 @@ class TortoiseSDK:
                 self._touch_inherited_at(pid, now)
                 continue
 
-            self.set_point_baseline(pid, alpha, beta, source=BASELINE_SOURCE_INHERITED)
+            self._set_point_baseline(pid, alpha, beta, source=BASELINE_SOURCE_INHERITED)
             self._touch_inherited_at(pid, now)
 
     def _touch_inherited_at(self, point_id: str, now) -> None:
@@ -42325,7 +42578,7 @@ class TortoiseSDK:
             params={"id": point_id, "ts": now.isoformat()},
         )
 
-    def calibrate_summary(self) -> list[dict]:
+    def _calibrate_summary(self) -> list[dict]:
         """Audit graph calibration state. Returns per-point guidance.
         
         Checks baseline_set flag on non-operator Points. For uncalibrated
@@ -43063,7 +43316,7 @@ class TortoiseSDK:
             resolve_source_versions,
         )
         proj = self._get_proj()
-        existing = self.get_point(pid)
+        existing = self._get_point(pid)
         if not missing:
             # The caller already filtered the refs the Point holds. A record
             # emitted here would be a no-op in the graph and a permanent entry
@@ -43610,7 +43863,7 @@ class TortoiseSDK:
         duplicates += len(to_check) - len(to_file)
 
         for item, ch in to_file:
-            p = self.create_point(
+            p = self._create_point(
                 "checkpoint-item", item["content"],
                 wing=item.get("wing", ""),
                 room=item.get("room", ""),
@@ -43719,7 +43972,7 @@ class TortoiseSDK:
         return [(item, ch) for i, (item, ch) in enumerate(candidates)
                 if max_sims[i] < threshold]
 
-    def diary_write(self, agent_name: str, entry: str,
+    def _diary_write(self, agent_name: str, entry: str,
                     topic: str | None = None, wing: str | None = None) -> dict:
         """Write an agent diary entry. Returns the created Point."""
         from datetime import datetime, timezone  # noqa: F401
@@ -43729,7 +43982,7 @@ class TortoiseSDK:
         # P1 #49: use wing property only — context is deprecated
         if wing:
             props["wing"] = wing
-        return self.create_point("diary", entry, **props)
+        return self._create_point("diary", entry, **props)
 
     def _diary_read(self, agent_name: str, last_n: int = 10,
                    wing: str | None = None) -> list[dict]:
@@ -43770,7 +44023,7 @@ class TortoiseSDK:
             result["namespace"] = self._namespace
         return result
 
-    def ingest_corpus(self, directory: str, eventKind: str = "DocumentCreated",
+    def _ingest_corpus(self, directory: str, eventKind: str = "DocumentCreated",
                       extract_metadata: bool = False, llm_model: str | None = "gpt-5-mini",
                       progress_file: str | None = None) -> dict:
         """Batch ingestion — walk directory, parse YAML frontmatter,
@@ -44095,10 +44348,17 @@ class TortoiseSDK:
     
                         # #244: (re)compute the session embedding from the merged
                         # surface and store as vecf32 — None when model unavailable.
-                        embedding = self._session_embedding(
-                            update_props["name"], metadata.get("summary", ""),
-                            merged_keywords, update_props["topics"],
-                        )
+                        # ⛔ #13626: and NONE when the record has proved it holds this
+                        # label's vectors — the FROZEN legacy branch is a declared writer of
+                        # `:Event` (`embed_tortoise.embed_writer_register`), so leaving it
+                        # ungated would let one legacy ingest put back the vector a strip
+                        # just removed.
+                        embedding = None
+                        if _derived_mirror_required("event"):
+                            embedding = self._session_embedding(
+                                update_props["name"], metadata.get("summary", ""),
+                                merged_keywords, update_props["topics"],
+                            )
                         # #9122 (§17.1): this writer reached the cache with no
                         # journal record. Journal-first, then the handle inside
                         # the sanctioned scope (see `_event_raw_write_door`).
@@ -44204,10 +44464,13 @@ class TortoiseSDK:
                         # #244: compute the session embedding (name + summary +
                         # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
-                        embedding = self._session_embedding(
-                            props["name"], metadata.get("summary", ""),
-                            props["keywords"], props["topics"],
-                        )
+                        # ⛔ #13626: the same write-stop as the update arm above.
+                        embedding = None
+                        if _derived_mirror_required("event"):
+                            embedding = self._session_embedding(
+                                props["name"], metadata.get("summary", ""),
+                                props["keywords"], props["topics"],
+                            )
                         # #9122 (§17.1): journal the new session Event before
                         # the handle write (see `_event_raw_write_door`).
                         try:
@@ -44440,7 +44703,7 @@ class TortoiseSDK:
             # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
             # dropped by the max_rrf gate and the rest reranked below, so what
             # the caller receives is recorded at the return instead.
-            fts_results = self.tortoise_fts_query(
+            fts_results = self._tortoise_fts_query(
                 q, limit=limit, _record_reads=False,
                 # #8487: the fallback's rows are re-scored into a confidence
                 # band below, so this is another candidate pool whose order the
@@ -44476,7 +44739,7 @@ class TortoiseSDK:
 
     # ── Session Context (#6989) ──────────────────────────────
 
-    def session_context(self) -> dict:
+    def _session_context(self) -> dict:
         """Return 'what happened last session' — diary entries, Points, Events, confidence changes.
         Returns structured dict with explicit 'no_prior_sessions' when graph is empty.
 
@@ -44544,7 +44807,7 @@ class TortoiseSDK:
     _ISSUE_INSIGHT_MIN_SHARED_TOKENS = 2
     _ISSUE_INSIGHT_TOKEN_RE = re.compile(r"[a-z0-9']+")
 
-    def issue_insight(self, title: str, body: str | None = None,
+    def _issue_insight(self, title: str, body: str | None = None,
                       repo: str | None = None, limit: int = 2) -> dict:
         """Return a compact 'there's more in the graph' insight for a would-be issue.
 
@@ -44658,7 +44921,7 @@ class TortoiseSDK:
             # only move which ids survive that cut. Same shape as
             # recall_state's opt-out.
             pool_limit = max(limit * 5, 20)
-            semantic_hits = self.tortoise_fts_query(
+            semantic_hits = self._tortoise_fts_query(
                 text, entity_type="point", limit=pool_limit,
                 _record_reads=False,  # #7983: a candidate pool
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
@@ -44715,7 +44978,7 @@ class TortoiseSDK:
 
         repo_points: list[dict] = []
         if repo:
-            repo_points = self.query(
+            repo_points = self._query(
                 kind="observation", source="github", github_repo=repo,
                 _record_reads=False,  # #7983: an internal population scan
             )
@@ -44948,7 +45211,7 @@ class TortoiseSDK:
 
     # ── Ask-path hit annotation (#1987 Task 4) ──────────────────
 
-    def annotate_ask_hits(self, hits: list[dict]) -> list[dict]:
+    def _annotate_ask_hits(self, hits: list[dict]) -> list[dict]:
         """Ask-path-local hit annotation: close the ``SearchResult.to_dict()``
         gap (sessionId present, ``session_date``/``speaker`` absent) so
         ``render_context``'s date markers + speaker decoration and the
@@ -45103,7 +45366,7 @@ class TortoiseSDK:
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
     @_metered_query
-    def tortoise_fts_query(
+    def _tortoise_fts_query(
         self,
         query: str | None = None,
         kind: str | None = None,
@@ -45136,8 +45399,14 @@ class TortoiseSDK:
         exclude_turn_echo_session: str | None = None,
         include_terminal: bool = False,
         # #13302: the ENDED SCOPE — the read whose QUESTION is "what ended, and
-        # how?". Default False = byte-identical (every existing caller keeps the
-        # current-picture read it has). When True the population is the OTHER
+        # how?". Default False = the current-picture read it has always been, WITH
+        # ONE ADDITION (#13558): a plain question about endings reaches this same
+        # population without the flag (a `query` routed by
+        # ``tortoise/state_intent.py``). ⛔ An earlier version of this comment said
+        # the default keeps "every existing surface answering exactly what it
+        # answered before" — that stopped being true when the routing landed, and
+        # a reader trusting it would conclude the default is byte-identical, which
+        # is exactly what #13558 asked to change. When True the population is the OTHER
         # half of the one determinant (design §6): the records
         # ``live._terminal_expression`` treats as ended, served with the ending
         # the record itself carries (its lifecycle word, the successor it names,
@@ -45361,6 +45630,46 @@ class TortoiseSDK:
         is nowhere for the marking to go, so it raises the store's error
         instead of returning a bare `[]` that would claim "nothing of that
         family ever ended" (#13302 review round 2).
+
+        ── #13557 / #13558: a STATE QUESTION is routed to its population ────
+        Two questions the capstone (#13038) measured as UNREACHABLE are answered
+        from state rather than from words, with no NEW argument and no new tool —
+        the sentence alone reaches them: `search('current commitments', object)`
+        answered **0 rows**
+        while the live launch plan sat in the same graph (#13557), and the
+        sentence "has anything we relied on been withdrawn" answered with two
+        rows that shared no word with it (#13558) while the ended records were
+        only reachable by calling this method with no text at all. So a `query`
+        is mapped to the state population it is about
+        (`tortoise/state_intent.py`; the cue table is question SHAPES, never a
+        noun-to-state assignment), and the population is then read from the
+        determinants the model already fixes: for a commitment question, the
+        commitment kinds of ONTOLOGY §5 (`strategy`/`plan`/`goal`/`target`, read
+        by kind + stage — `tortoise/commitments.py`), and for an ending question
+        the SAME `ended_scope` population described above (`tortoise/ended.py`),
+        served WITHOUT the caller passing the flag. The text is then the
+        SELECTOR of the population, not a term ranked against it.
+        ⛔ The route is taken only for a PLAIN question: a call that supplied a
+        retrieval knob (`threshold`, `min_confidence`, `order_by`, …) is asking a
+        relevance read and keeps it, un-routed and un-refused — the knob list is
+        the SAME closed list `ended_scope` refuses by. An explicit
+        `ended_scope=True` or `include_terminal=True` always wins over the
+        inference. The family contract holds: a commitment question selects the
+        OBJECT population (its kinds are Object kinds), so a `point`-scoped one
+        keeps the relevance read it had; an ending question selects the ended
+        population only for a family that HAS a lifecycle (an Event has none,
+        design §8). Both populations are bounded and degrade the same way
+        `ended_scope` does — a scan that could not answer marks the leg and the
+        truncation when a sink exists and raises when none does, never an
+        unmarked `[]` that would claim "nothing is committed" / "nothing ended".
+        ⚠️ The family boundary is stated rather than smoothed over: the commitment
+        kinds are OBJECT kinds, so a commitment question read with
+        `entity_type='point'` (this method's DEFAULT) keeps the relevance read —
+        on the capstone's Q1 that half already answered with the live claims — and
+        the kind+stage population is reached by asking for objects. Widening the
+        arm to answer a `point`-scoped question with Objects would hand a caller a
+        family it did not ask for, which is a different (and larger) surface
+        decision than making the question reach its answer.
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -45642,8 +45951,17 @@ class TortoiseSDK:
         # read and stay served; the sink/plumbing keywords (``leg_trace``,
         # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
         # how the caller receives or times the answer, not what it contains.
-        if ended_scope:
-            _refused_ended = sorted(
+        def _retrieval_knobs() -> list[str]:
+            """The retrieval keywords THIS call supplied — the ONE closed list.
+
+            Two readers, one list (#13557/#13558): the ended-scope arm REFUSES
+            these beside a state enumeration, and the state-question router
+            serves a population only for a call that supplied NONE of them. A
+            second, hand-written list at the router would be the #2901 defect
+            (a call-site subset silently omitting a knob) one level up — a knob
+            added here is therefore classified for both readers at once.
+            """
+            return sorted(
                 name for name, _supplied in (
                     ("query", query is not None),
                     ("threshold", threshold not in (0.0, 0)),
@@ -45671,6 +45989,90 @@ class TortoiseSDK:
                     ("w4_enrich", w4_enrich is not True),
                 ) if _supplied
             )
+
+        # ── #13557 / #13558: A STATE QUESTION IS ROUTED TO ITS POPULATION ─────
+        # The capstone measured two questions whose answer is a STATE population
+        # and whose reach was a text match: `search('current commitments',
+        # object)` → 0 rows while the live plan sat in the graph (#13557), and
+        # `search(None, ended_scope=True)` → the ended records while the sentence
+        # "has anything we relied on been withdrawn" reached nothing (#13558).
+        # `current commitments` shares no word with the plan; the withdrawal
+        # question shares no word with the retracted claim. So the QUESTION is
+        # mapped to the population it is about (``tortoise/state_intent.py``),
+        # and the population is then read from the determinants the model already
+        # has — the commitment kinds + the shared currency predicate — never from
+        # the words (which is why `query` is then consumed as the SELECTOR rather
+        # than ranked).
+        #
+        # ⛔ ROUTED ONLY FOR A PLAIN QUESTION. Every retrieval knob changes WHICH
+        # rows a caller receives (shrink/expand/re-rank/re-weight/time-scope), and
+        # a state population cannot apply any of them — so a call that supplied
+        # one is asking a relevance read and keeps it, un-routed and un-refused.
+        # That is the same closed list the ended arm refuses by, read here as a
+        # guard rather than as an error: a caller who typed `threshold=0.3` did
+        # not ask for a population.
+        #
+        # ⛔ And an EXPLICIT scope always wins: `ended_scope=True` is the caller
+        # naming the population themselves, and `include_terminal=True` is the
+        # caller asking for the complete view — neither is overridden by a guess
+        # about their words.
+        #
+        # OVERRIDES (#1745, recorded 2026-10-18 on #8487): this read-path lever
+        # ships DEFAULT ON, where #1745's fail-safe convention keeps a new lever
+        # OFF until a measured delta adopts it (`entity_key_expansion` and
+        # `time_aware` above follow that default). The measured delta is why a
+        # flag is the wrong shape HERE: #13557 and #13558 are defects of REACH on
+        # the DEFAULT call — `search('current commitments', object)` returned 0
+        # rows while the live plan sat in the graph, and the withdrawal sentence
+        # reached nothing — so a route that ships OFF leaves both issues
+        # unimplemented for the caller who filed them. The delta is on the record
+        # rather than assumed: the capstone scoreboard moved 3 right / 3 wrong at
+        # 9e9fc232 to 6 right / 0 wrong, Q1 and Q6 flipped and Q2–Q5 held. And
+        # the escape hatch needs no flag, which is the narrower departure rather
+        # than a wider one: the route fires only for a plain question, so any
+        # retrieval knob, `include_terminal=True` or an explicit `ended_scope=`
+        # keeps exactly the read that caller asked for — a caller who has never
+        # heard of a flag still gets their relevance read. Its correctness rests
+        # on the module's own PRECISION contract (`state_intent.py`: where a
+        # shape could go either way it does not fire), whose falsifier is the
+        # pinned `NOT_SELECTED` table rather than this comment.
+        _scope_from_question: str | None = None
+        _commitment_scope = False
+        if (query is not None and not ended_scope and not include_terminal
+                and not [k for k in _retrieval_knobs() if k != "query"]):
+            from .state_intent import COMMITMENTS, ENDED, detect_state_question
+
+            _state_q = detect_state_question(query)
+            if _state_q.population == ENDED:
+                # The ended population exists for the families with a lifecycle
+                # (an Event has none — design §8). For any other family the
+                # question keeps the relevance read rather than being answered
+                # with a population that does not exist for it.
+                from .ended import FAMILIES as _ENDED_FAMILIES
+
+                if entity_type in _ENDED_FAMILIES:
+                    ended_scope = True
+                    _scope_from_question = query
+            elif _state_q.population == COMMITMENTS:
+                # The commitment kinds are OBJECT kinds (ONTOLOGY §5), and the
+                # arm below intersects them with the caller's own `kind` — so a
+                # `point`-scoped commitment question keeps the text read that
+                # already answers it (the capstone's Q1 point half returns the
+                # live pricing/uptime claims), and never receives Objects it did
+                # not ask for.
+                if entity_type == "object":
+                    _commitment_scope = True
+                    _scope_from_question = query
+
+        if ended_scope:
+            _refused_ended = _retrieval_knobs()
+            # ⛔ A `query` is refused beside an EXPLICIT scope and NOT when this
+            # read derived the scope from it: in the second case the text was
+            # APPLIED (it selected the population), not dropped. The distinction
+            # is the whole of #13558 — a capability that must be invoked with the
+            # caller's special words is not a read surface.
+            if _scope_from_question is not None:
+                _refused_ended = [k for k in _refused_ended if k != "query"]
             if _refused_ended:
                 raise ValueError(
                     f"ended_scope is a STATE enumeration, not a relevance read, "
@@ -46164,6 +46566,61 @@ class TortoiseSDK:
             _trunc["candidates"] = len(_fatter)
             _trunc["exact"] = len(_fatter) <= limit
             return _with_read_status(_ended_rows)
+
+        # ── #13557: the COMMITMENTS question, answered by KIND + STAGE ────────
+        # The other half of the same routing decision above. The population is
+        # the live commitment-state family (``tortoise/commitments.py``), read by
+        # the kinds ONTOLOGY §5 declares and the position each record stands on —
+        # so "what are we committed to" reaches the launch plan without the word
+        # "commitment" occurring in its text.
+        #
+        # ⛔ The kinds are EXPANDED, never spelled here: each commitment kind goes
+        # through `_read_filter_kinds`, the same expansion every read filter uses,
+        # so `core:plan` (the graph's stored spelling) and `plan` (the ontology's)
+        # and a pack subclass are one kind to this arm (#11679/#13128's class of
+        # defect is a read that knows one spelling).
+        if _commitment_scope:
+            from . import commitments as _commitments
+
+            _commit_kinds: list[str] = []
+            for _ck in _commitments.COMMITMENT_OBJECT_KINDS:
+                for _spelling in self._read_filter_kinds(_ck):
+                    if ((expanded_kinds is None or _spelling in expanded_kinds)
+                            and _spelling not in _commit_kinds):
+                        _commit_kinds.append(_spelling)
+            # The caller narrowed to a kind that is NOT a commitment kind (or to a
+            # population this read does not enumerate): the question is not
+            # answerable by this population for THAT filter, so the call keeps the
+            # relevance read it asked for instead of being told nothing is
+            # committed. `query` is still intact — only the ended arm consumes it.
+            if _commit_kinds:
+                try:
+                    _fatter = _commitments.enumerate_live_commitments(
+                        graph, kinds=_commit_kinds, limit=limit + 1,
+                        # ONE row beyond the page for the same reason the ended
+                        # arm asks for one: a truncated page must be PROVEN, not
+                        # guessed. `None` keeps the module's own budget (the
+                        # read's `_elevated_timeout_ms` always wins when set), so
+                        # this arm binds no second fallback in this method.
+                        timeout_ms=_elevated_timeout_ms)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    # The SAME carry-or-raise contract as the ended arm above, and
+                    # for the same reason: `[]` here is the factual claim "nothing
+                    # is currently committed", so it may only be served when a
+                    # sink exists to carry the marking that forbids reading it as
+                    # complete. With no sink the store's error rises.
+                    if status_trace is None:
+                        raise
+                    _logger.warning(
+                        "commitments enumeration could not answer (%s) — degraded", e)
+                    status_trace.append(_trace_entry(
+                        "commitments", ran=True, degraded=True,
+                        reason="query_failed", count=0))
+                    _trunc["incomplete"] = True
+                    return _with_read_status([])
+                _trunc["candidates"] = len(_fatter)
+                _trunc["exact"] = len(_fatter) <= limit
+                return _with_read_status(_fatter[:limit])
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
@@ -46699,7 +47156,7 @@ class TortoiseSDK:
                     _decorated = _decorate_fallback_hits(snap_hits, graph)
                     _mark_read_stage(STAGE_RESPONSE)
                     return _with_read_status(_decorated)
-                points = self.query(kind=kind,
+                points = self._query(kind=kind,
                                     include_retracted=include_terminal,
                                     # #7983: these hits are recorded ONCE, by
                                     # `_with_read_status` below — a second record
@@ -49383,7 +49840,7 @@ class TortoiseSDK:
     # ranking.ABOUT_EDGE_TYPES and supersede_point's about* structural rels).
     _ABOUT_TYPES = "aboutSubject|aboutObject|aboutAction|aboutEvent|aboutPoint|aboutDocument"
 
-    def recall_state(
+    def _recall_state(
         self,
         query: str | None = None,
         *,
@@ -49544,7 +50001,7 @@ class TortoiseSDK:
         # therefore be discarded, leaving only its pool-composition effect,
         # which is a behaviour change nothing measures. Same reasoning as the
         # eval lane's opt-out (#8487 review; ``_valid_time_rerank`` docstring).
-        point_results = self.tortoise_fts_query(
+        point_results = self._tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
             _valid_time_rerank=False,  # #8487: caller re-owns the order
@@ -49561,7 +50018,7 @@ class TortoiseSDK:
             leg_trace=leg_trace,
             read_status_out=_point_status)
         object_results = (
-            self.tortoise_fts_query(
+            self._tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
                 _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
                 _valid_time_rerank=False,  # #8487: caller re-owns the order
@@ -49728,7 +50185,7 @@ class TortoiseSDK:
     # Response mirrors the §3.2.2 contract: {pointers, why, surfaced, block,
     # degraded_reason}.
 
-    def volunteer_context(
+    def _volunteer_context(
         self,
         window: list[dict],
         session_id: str | None = None,
@@ -49768,7 +50225,7 @@ class TortoiseSDK:
             # before the cut, so a pre-cut re-pick moves MEMBERSHIP only.
             # Passed as a kwargs SEAM rather than at a call site, which is why
             # the AST census over ``.tortoise_fts_query(`` calls cannot see it.
-            _search_fn=self.tortoise_fts_query,
+            _search_fn=self._tortoise_fts_query,
             _search_kwargs={"_rerank_candidates": False},
         )
 
@@ -49923,7 +50380,7 @@ class TortoiseSDK:
                 {"id": pid, "content": content or "", "point_kind": pkind or ""})
         return out
 
-    def recall_gaps(
+    def _recall_gaps(
         self,
         query: str | None = None,
         *,
@@ -49998,7 +50455,7 @@ class TortoiseSDK:
             # retrieval layer's 10000 limit (P2: a valid large limit must
             # not blow the internal pool past it).
             pool = min(max(limit * 3, 50), 10000)
-            results = self.tortoise_fts_query(
+            results = self._tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
                 include_terminal=include_superseded,
@@ -50026,7 +50483,7 @@ class TortoiseSDK:
             # operators + terminal statuses; include_retracted surfaces
             # superseded/deprecated for the opt-in — retracted is then
             # re-filtered below by excluded_set).
-            nodes = self.query(kind=kind,
+            nodes = self._query(kind=kind,
                                include_retracted=include_superseded,
                                _record_reads=False)  # #7983: a population scan
             pool_results = []
@@ -50061,7 +50518,7 @@ class TortoiseSDK:
         _ledger_record("Point", ranked, kind="traversal")
         return ranked
 
-    def recall_subgraph(self, seed: str, *,
+    def _recall_subgraph(self, seed: str, *,
                         depth: int = 2,
                         completeness: str = "full",
                         max_nodes: int = 500) -> dict:
@@ -50135,7 +50592,7 @@ class TortoiseSDK:
             return [row[0] for row in rows]
         # Topic text → hybrid retrieval (points about the topic are the seeds;
         # the expansion pulls in the entities they touch).
-        return [r["id"] for r in self.tortoise_fts_query(
+        return [r["id"] for r in self._tortoise_fts_query(
             seed.strip(), entity_type="point", limit=5,
             _record_reads=False,  # #7983: a seed lookup, not a caller read
             # #8487 (review round 6, P2): these ids are an expansion SEED SET
@@ -50172,7 +50629,7 @@ class TortoiseSDK:
     # Do NOT re-publicise one of these names without the owner's approval (AGENTS.md →
     # "MCP/SDK Surface Approval").
 
-    def org_create(self, name: str, *, idempotency_key: str | None = None,
+    def _org_create(self, name: str, *, idempotency_key: str | None = None,
                     mint_key: bool = True, owner_user_id: str | None = None) -> dict:
         """Create an org with its own graph namespace.
 
@@ -55687,7 +56144,52 @@ class TortoiseSDK:
                     _folded_new = normalize_entity_name(props["name"])
                     if _folded_new:
                         props.setdefault("canonical_name", _folded_new)
+            # ⛔ ONE DICT, FIVE LABELS — so the gate's decision is resolved into a
+            # PER-LABEL dict, never a pop on the shared one (#13828 review, P1). `props`
+            # is visited by every label in this loop (`SET n += $props`, and the non-Point
+            # branch journals it as `state`), and the label the write ACTUALLY lands on
+            # is only known later, from whichever `MATCH` returns rows — so a pop taken
+            # for the FIRST label whose gate says stop removed the vector from a write
+            # the gate had called KEEP for its own label (measured: with `object` KEEP and
+            # `subject` STOP, an `:Object` update landed the row and lost the vector, the
+            # "vector in neither store" state the gate's conservatism forbids). Every
+            # iteration therefore STARTS from the caller's dict and rebinds `props` to a
+            # vector-free COPY only when THIS label's gate says not-required; nothing that
+            # is not the vector is ever dropped — the status fold, the `EntityMutated`
+            # journal (its `state` is built from the same per-label dict, so replay cannot
+            # re-add the vector) and the return read all run as before.
+            _props_base = props
             for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
+                # ── #13626: the coverage-gated labels' graph vector is retired ──
+                # `embedding` is a caller-settable property on every one of these labels
+                # (`_sanitize_props` deliberately admits it, PR #3018), and this door
+                # writes it straight through `SET n += $props`. With the record proved to
+                # hold this label's vectors, keeping the graph copy would make a strip
+                # pointless: the very next `update_entity(<id>, embedding=…)` would put
+                # it back — the class `#13610` option 2 forbids.
+                # ⛔ ONE ASK PER LABEL, never one boolean for five: a single top-of-method
+                # answer would drop an Object's vector on `event` coverage (or keep an
+                # Event's on `object` coverage) while the census saw a gate that "covered"
+                # the writer. The `:Source` arm asks BOTH `document` and `source` and
+                # retires only when both answer stop — the same rule
+                # `hosted_backup.restore_graph` applies, and for the same reason: one
+                # `:Source` vector serves both halves of the node (a document's own vector
+                # and the provenance source's), the two counters are over different
+                # populations, and either answer alone is evidence about only half of it.
+                props = _props_base
+                if label == "Subject" and not _derived_mirror_required("subject"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if label == "Object" and not _derived_mirror_required("object"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if label == "Event" and not _derived_mirror_required("event"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if (label == "Source" and not _derived_mirror_required("document")
+                        and not _derived_mirror_required("source")):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
                 # #4649: a canonical label's identity is an OR-SET, not one key.
                 # NOTE: the primary key is not read here any more — `id_keys` below
                 # is derived THROUGH `_entity_identity_probes()`, so the write and the
@@ -56460,7 +56962,7 @@ class TortoiseSDK:
             # nested-props flattens (pre-Phase F behavior restored).
             eid = _server_id
             if not isinstance(eid, str) or not eid:
-                eid = self.ulid()
+                eid = self._ulid()
             about_subject = props.pop("aboutSubject", None)
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)
@@ -56610,7 +57112,7 @@ class TortoiseSDK:
             if not documentKind:
                 raise ValueError(
                     "create_entity(type='document') requires documentKind")
-            did = self.ulid()
+            did = self._ulid()
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind, **props},
                 "DocumentCreated", is_episodic=is_episodic)
@@ -57152,7 +57654,7 @@ class TortoiseSDK:
             # not acquire one: it keeps `create_point`'s default, which is what
             # the door did.
             props.setdefault("dedup", True)
-        point = self.create_point(
+        point = self._create_point(
             point_kind, name, is_episodic=is_episodic, **props)
         return self._absorbed_point_result(point, name, guard)
 
@@ -57219,7 +57721,7 @@ class TortoiseSDK:
                 node[_key] = result[_key]
         return node
 
-    def create_subject(self, name: str, subjectKind: str | None = None,
+    def _create_subject(self, name: str, subjectKind: str | None = None,
                        *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2.
 
@@ -57261,7 +57763,7 @@ class TortoiseSDK:
         return self._flat_entity_result(
             self.create_entity("subject", name, **_kw))
 
-    def create_object(self, name: str, objectKind: str | None = None,
+    def _create_object(self, name: str, objectKind: str | None = None,
                       *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2.
 
@@ -57295,7 +57797,7 @@ class TortoiseSDK:
         return self._flat_entity_result(
             self.create_entity("object", name, **_kw))
 
-    def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
+    def _create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
         """Create an Event node (alias for create_entity(type='event')).
 
@@ -57383,7 +57885,7 @@ class TortoiseSDK:
         # Generous candidate pool — agent/topics/temporal filters drop rows
         # post-retrieval, so fetch beyond the caller's limit + offset.
         candidate_limit = max(limit * 5, 50) + offset
-        hybrid = self.tortoise_fts_query(
+        hybrid = self._tortoise_fts_query(
             query, kind="AgentSession", entity_type="event",
             limit=candidate_limit,
             _record_reads=False,  # #7983: a candidate pool, sliced before return
@@ -57511,7 +58013,7 @@ class TortoiseSDK:
         _ledger_record("Event", out)  # #7983: a served page, not a pool
         return out
 
-    def get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
+    def _get_events(self, eventKind: str | None = None, limit: int = 20) -> list[dict]:
         """Get recent Events, optionally filtered by eventKind."""
         proj = self._get_proj()
         if eventKind:
@@ -57528,7 +58030,7 @@ class TortoiseSDK:
         _ledger_record("Event", out)  # #7983: a served page, not a pool
         return out
 
-    def get_session(self, session_id: str) -> dict | None:
+    def _get_session(self, session_id: str) -> dict | None:
         """Get a single agent session by session_id.
 
         TWO lanes share this read, and they write DIFFERENT node kinds:
@@ -58501,9 +59003,18 @@ class TortoiseSDK:
                 # (every later run reports skipped and the embedding never
                 # heals). Election-suppressed (non-primary) units are
                 # Source-existence-only — no Event exists to hold e.embedding.
+                # ⛔ #13626: AND NOT WHEN THE GRAPH NO LONGER OWNS THE VECTOR. This
+                # clause exists so a session indexed during an embedder outage heals
+                # later; once the record has proved it holds every `event` vector, a
+                # missing graph vector is the TARGET design rather than an outage, and
+                # leaving the clause on would take the repair path on every sweep, spend
+                # a model call to re-derive a vector the graph must not store, and report
+                # the file `healed` for ever. Same predicate as the writers, so the
+                # completeness accounting and the write-stop cannot disagree.
                 embedding_incomplete = bool(
                     classifier == "agent_session" and extract_metadata
-                    and gate["entity"] and gate["embedding"] is None)
+                    and gate["entity"] and gate["embedding"] is None
+                    and _derived_mirror_required("event"))
                 complete = base_complete and not embedding_incomplete
             # single-file duplicate-sessionId rule (W4 row; no election context)
             single_dup = False
@@ -58551,6 +59062,11 @@ class TortoiseSDK:
                         gate["marker"])
                     if attempt == "healed":
                         repair_work = True
+                    elif attempt == "retired":
+                        # the record serves this label's vectors: nothing was
+                        # written and nothing is owed — fall through and let the
+                        # SOURCE MERGE decide the status, never a repair claim.
+                        pass
                     else:
                         # failed OR suppressed → skipped embedding-unavailable
                         # (a failed repair performs NO unit-completion write →
@@ -58873,14 +59389,27 @@ class TortoiseSDK:
         # embedding — short-circuited to None under extract_metadata=False
         # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
         # write surface (never rides $props).
-        embedding = None
+        # ⛔ #13626: `computed` is what this write RETURNS to its caller (the sweep
+        # reads None as "embedding unavailable" and records the repair marker on an
+        # existing Event), while `embedding` is what the graph write and the journal
+        # RECEIVE. The two part company on exactly one verdict: `mirror_required("event")`
+        # answering False, i.e. the record has proved it holds this label's vectors — then
+        # the ROW is still MERGEd (every prop in `$props`), the vector clause writes none
+        # and leaves a stored vector alone, and the journal carries no vector for a
+        # rebuild to re-add. Folding the gate into the COMPUTE instead would make a gated
+        # deployment look like an outage to the caller and mark every session unit
+        # retryable for ever, which is the one direction that must not happen.
+        computed = None
         if extract_metadata:
             try:
-                embedding = self._session_embedding(
+                computed = self._session_embedding(
                     props["name"], metadata.get("summary", ""),
-                    props["keywords"], props["topics"])
+                    props["keywords"], metadata.get("topics", []))
             except Exception:  # noqa: BLE001, RUF100
-                embedding = None
+                computed = None
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = computed
         # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
         # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
         # (additive props WITHOUT the timestamps), so a repair re-run of a
@@ -58904,7 +59433,7 @@ class TortoiseSDK:
         self._emit_event("EventRecorded", id=event_id, **{
             **payload, "embedding": embedding, "eventId": event_id,
             "eventKind": "AgentSession"})
-        return embedding
+        return computed
 
     def _record_embedding_marker(self, event_id: str) -> None:
         """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
@@ -59064,7 +59593,7 @@ class TortoiseSDK:
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:
         """Embedding repair (sessions; §5.1 pin (a) cycle-6/7/8). Returns
-        (attempt, marker_ts): 'healed' | 'suppressed' | 'failed'.
+        (attempt, marker_ts): 'healed' | 'retired' | 'suppressed' | 'failed'.
 
         Backoff: a FAILED repair attempt records e.embeddingRepairFailedAt
         (targeted SET touching no other key) and reports skipped
@@ -59086,6 +59615,24 @@ class TortoiseSDK:
             except (TypeError, ValueError):
                 pass  # unparseable marker → re-attempt
         proj = self._get_proj()
+        # ⛔ #13626: a repair is a WRITE too, so it asks the gate. The heal exists
+        # because an Event's vector could be missing while the graph was the answering
+        # leg; once the record has proved it holds this label's vectors, re-deriving one
+        # for the graph is rent and the next strip would have to remove it again. The
+        # answer is a WRITE-STOP, not a failure: no repair marker is written and no
+        # model call is spent — where treating it as "failed" would retry this file for
+        # ever. It is ALSO not work: `retired` is its own verdict because a caller that
+        # reads `healed` as "something was written" reports the unit `updated` for a run
+        # that wrote neither the Event nor a vector (#13826 review).
+        # ⚠️ DEFENSIVE, and stated rather than implied (#13854 review cycle 4, P2): today's
+        # ONLY caller is reached from `_embedding_incomplete`, which already requires this
+        # same answer to be TRUE — so this arm cannot fire from that path, and a falsifier
+        # can only drive the function directly. It stays because that reachability is a
+        # property of the completeness clause, not of this function: relaxing the clause
+        # (e.g. so a unit is still repaired when only the graph copy is missing) would put
+        # a gated write straight back on this path, and the arm is one line of rent.
+        if not _derived_mirror_required("event"):
+            return ("retired", None)
         try:
             metadata = _kw_fallback(text)
             embedding = self._session_embedding(
@@ -59247,12 +59794,12 @@ class TortoiseSDK:
         unchanged); see its docstring for the ``extract_metadata``
         flag-semantics divergence (W3, §6.1).
         """
-        return self.ingest_corpus(directory, eventKind="AgentSession",
+        return self._ingest_corpus(directory, eventKind="AgentSession",
                                   extract_metadata=extract_metadata,
                                   llm_model=llm_model,
                                   progress_file=progress_file)
 
-    def session_index_health(self, directory: str | None = None) -> dict:
+    def _session_index_health(self, directory: str | None = None) -> dict:
         """Compare session .md files against indexed AgentSession Events.
 
         #280 item 2 — the ``tortoise doctor`` health surface. Scans the
@@ -59338,7 +59885,7 @@ class TortoiseSDK:
                 "up_to_date": up_to_date,
                 "duplicates": duplicates}
 
-    def reconcile_sessions(self, directory: str | None = None,
+    def _reconcile_sessions(self, directory: str | None = None,
                            extract_metadata: bool = False,
                            llm_model: str | None = "gpt-5-mini") -> dict:
         """Reconciliation sweep (#280 item 3) — scan for unindexed session
@@ -59359,10 +59906,10 @@ class TortoiseSDK:
         from .session_indexer import session_corpus_dir
 
         directory = str(Path(directory or session_corpus_dir()).resolve())
-        health = self.session_index_health(directory)
+        health = self._session_index_health(directory)
         result: dict = {}
         if health["unindexed"] or health["stale"]:
-            result = self.ingest_corpus(
+            result = self._ingest_corpus(
                 directory, eventKind="AgentSession",
                 extract_metadata=extract_metadata, llm_model=llm_model,
             )
@@ -59510,7 +60057,7 @@ class TortoiseSDK:
         return connected
 
 
-    def create_document(self, title: str, documentKind: str, **props) -> dict:
+    def _create_document(self, title: str, documentKind: str, **props) -> dict:
         """Thin alias for create_entity(type='document') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P2): this door routes `extractedFrom` to the SAME
@@ -59525,7 +60072,7 @@ class TortoiseSDK:
         # cannot honour must not be accepted in silence.
         _validate_extracted_from(props, door="create_document")
 
-        did = self.ulid()
+        did = self._ulid()
         result = self._create_entity("Document", did, {"title": title, "documentKind": documentKind, **props}, "DocumentCreated")
         # #394: provenance parity with create_point — link the document Source
         # → Source via extractedFrom (Ontology v3.3) when the caller passes a
@@ -60364,7 +60911,7 @@ class TortoiseSDK:
 
     # ── Entity Derivation (#122 Part 2) ──────────────────────────
 
-    def create_derivation(self, src_id: str, dst_id: str) -> dict:
+    def _create_derivation(self, src_id: str, dst_id: str) -> dict:
         """Create a wasDerivedFrom edge: (dst)-[:wasDerivedFrom]->(src).
 
         PROV-O entity derivation — dst was derived from src. Distinct from
@@ -60445,7 +60992,7 @@ class TortoiseSDK:
             "beta": beta,
         }
 
-    def get_source_reliability(self, url: str) -> dict:
+    def _get_source_reliability(self, url: str) -> dict:
         """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
 
         Returns {"url", "reliability" (float 0-1 or None), "components",
@@ -60586,7 +61133,7 @@ class TortoiseSDK:
             raise ValueError("url is required")
 
         from datetime import datetime, timezone
-        rep = self.compute_reputation(str(assessor))["mean"]
+        rep = self._compute_reputation(str(assessor))["mean"]
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         proj = self._get_proj()
@@ -60595,7 +61142,7 @@ class TortoiseSDK:
         # point active and the old one active — the read path dedupes
         # latest-per-(url, assessor) by createdAt, so no double-count; a failure
         # before the mark leaves the previous assessment intact, not orphaned).
-        p = self.create_point(
+        p = self._create_point(
             "assessment", str(rationale).strip(),
             props={
                 "targetSource": url,
@@ -60698,7 +61245,7 @@ class TortoiseSDK:
 
     # ── Reputation (#122 Part 4) ─────────────────────────────────
 
-    def compute_reputation(self, subject_id: str) -> dict:
+    def _compute_reputation(self, subject_id: str) -> dict:
         """Derive reputation score for a Subject from event outcomes.
 
         Traverses: Subject -[:performs]-> Event -[:IMPL|NAND]-> Point
@@ -61050,14 +61597,14 @@ class TortoiseSDK:
         return self._update_entity(id_val, _reserved_supplied=_reserved,
                                    **props)
 
-    def delete_entity(self, id_val: str) -> bool:
+    def _delete_entity__svc(self, id_val: str) -> bool:
         """Delete any entity by ID. Implementation behind delete(id) — the
         consolidated Point/entity delete (epic #888 W2)."""
         return self._delete_entity(id_val)
 
     # ── Typed structural edges (epic #888 W2, reification rule v3.5 §8) ──
 
-    def create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
+    def _create_edge(self, relation: str, from_id: str, to_id: str) -> dict:
         """Create a typed structural edge (epic #888 W2, PR #912).
 
         Reification rule (ontology v3.5 §8): structural edges stay PLAIN — no
@@ -61134,7 +61681,7 @@ class TortoiseSDK:
 
     # ── Query Helpers ─────────────────────────────────────────────
 
-    def get_owned_entities(self, subject_id: str) -> list:
+    def _get_owned_entities(self, subject_id: str) -> list:
         """Return all entities owned by a Subject (governance query)."""
         proj = self._get_proj()
         # Issue #327: start from the labeled, indexed Subject and traverse
@@ -61155,7 +61702,7 @@ class TortoiseSDK:
             params={"sid": resolved_sid},
         )
         return [dict(row[0]) for row in r.result_set]
-    def link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
+    def _link_source_to_entity(self, source_url: str, entity_id: str, entity_label: str, source_kind: str = "document") -> None:
         """Create Source → Entity references edge (Ontology v3.1 §3.4).
 
         Auto-creates the Source node if it doesn't exist (MERGE + ON CREATE SET)
@@ -61209,7 +61756,7 @@ class TortoiseSDK:
         # honoured ON CREATE, so existence is not ours to predict.
         self._refuse_unapproved_kind("sourceKind", source_kind)
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
-    def ulid(self) -> str:
+    def _ulid(self) -> str:
         from .ids import ulid as _ulid
         return _ulid()
 

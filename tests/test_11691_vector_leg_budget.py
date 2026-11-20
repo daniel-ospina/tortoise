@@ -858,7 +858,10 @@ DECLARED_LEG_BUDGETS: dict[str, tuple[str, str, tuple[str, str] | None]] = {
         # `if ended_scope:` inside `tortoise_fts_query`, the arm that RETURNS
         # before the retrieval machinery runs. Pinned to the statement, so the
         # same name at any joined site is an offender rather than a pass.
-        ("tortoise_fts_query", "_ended_bound")),
+        # #12901 FINAL batch: `tortoise_fts_query` was PRIVATISED to
+        # `_tortoise_fts_query` (body unchanged, public spelling a tombstone). The
+        # ADMISSION is keyed to the enclosing `def`, so it moves with the def.
+        ("_tortoise_fts_query", "_ended_bound")),
 }
 
 
@@ -1125,7 +1128,7 @@ def test_a_declared_budget_is_admitted_only_at_the_site_that_earns_it():
     """
     base = textwrap.dedent(
         '''\
-        def tortoise_fts_query(self):
+        def _tortoise_fts_query(self):
             _probe = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
             _residency = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
             _bm25 = int(_elevated_timeout_ms or VECTOR_LEG_BUDGET_MS)
@@ -1161,7 +1164,7 @@ def test_a_declared_budget_is_admitted_only_at_the_site_that_earns_it():
         _budget_fallback_offenders(renamed))
 
     # …and a statement in ANOTHER function is not the admitted one either.
-    moved = base.replace("def tortoise_fts_query(self):",
+    moved = base.replace("def _tortoise_fts_query(self):",
                          "def some_other_read(self):")
     assert len(_budget_fallback_offenders(moved)) == 1, (
         _budget_fallback_offenders(moved))

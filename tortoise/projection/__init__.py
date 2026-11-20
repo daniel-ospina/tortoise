@@ -12096,10 +12096,40 @@ class FalkorProjection(
         full-but-healthy server refuses writes with an ``OOM``/``maxmemory``
         reply, and that reply must not be reported as corruption (#2981) —
         which requires keeping it rather than collapsing it to a bool.
+
+        ⛔ THE PROBE MUST NOT AGGREGATE, AND ITS RESULT IS NEVER READ (#13722).
+        This used to issue ``MATCH (n) RETURN count(n) LIMIT 1`` — an UNBOUNDED
+        node scan (`count()` is an aggregation, so ``LIMIT 1`` bounds the ROW,
+        not the work) whose value was then discarded: the only caller-visible
+        facts are the boolean and ``_probe_error``, and the lost-graph (0-node)
+        decision this docstring's sibling makes is taken by
+        ``recover_from_log``, which counts nodes itself. Measured on docker
+        FalkorDB 4.20.6: 0.9 ms @1k nodes, 7.6 ms @100k, **21.7 ms @300k** —
+        linear in the graph, and paid **on every projection construction**. On
+        the hosted lane that is not once per process: a fresh ``TortoiseSDK``
+        opens a fresh projection per request, and a capture constructs ~12 of
+        them (#4465's recorded measurement). #13722 measured a single store
+        round trip at ~320 ms in the degraded window, so per-open work that is
+        proportional to the tenant's graph is the amplifier that turns one slow
+        round trip into a breached request.
+
+        ``MATCH (n) RETURN 1 LIMIT 1`` keeps what this probe is FOR — a
+        REACHABILITY test over the store's node iterator — at O(1): ``LIMIT 1``
+        stops that iterator after the first row and ``RETURN 1`` decodes no
+        node payload, so measured 0.4-0.6 ms **flat** from 1k to 300k nodes.
+        ⛔ Say what that buys and no more: what still fails here is a graph the
+        store cannot walk at all (unresponsive graph, ``Timeout argument``, a
+        store-level error raised before the first row). A CORRUPT NODE PAST THE
+        FIRST ROW IS NO LONGER REACHED by this statement — that is the price of
+        O(1), not a claim this docstring can make — and a property-decode error
+        was never what ``RETURN <constant>`` surfaced. Graph-wide corruption
+        detection is ``recover_from_log``'s node count, not this probe's. The
+        empty-graph case is unchanged in both directions (0 rows, no error),
+        which is what keeps this a reachability probe rather than a data check.
         """
         self._probe_error = None
         try:
-            self.g.query("MATCH (n) RETURN count(n) LIMIT 1")
+            self.g.query("MATCH (n) RETURN 1 LIMIT 1")
             return True
         except Exception as exc:
             self._probe_error = exc
@@ -20354,13 +20384,27 @@ class FalkorProjection(
         it is a full-label scan. Left unbounded it inherits the door's default
         while every other graph statement on that path carries the read's budget
         (`run_vector_query` passes `timeout=_graph_timeout_ms`) — the exact
-        30x-mismatch class `#11691` closed for the record half. ``None`` leaves the
-        door's own bound in place, unchanged — the default, and today UNUSED: this
-        method was added by `#13610` and has ONE production caller
-        (`sdk._record_vector_searcher`, which always supplies the read's own budget
-        when the read has one), so there is no reconstruction caller here to keep
-        unbounded. A health/restore sweep that legitimately needs seconds would
-        have to be given this argument deliberately when it arrives.
+        30x-mismatch class `#11691` closed for the record half.
+
+        ⛔ THERE ARE NOW TWO PRODUCTION CALLERS, AND ONLY ONE OF THEM PASSES A BUDGET —
+        the split is deliberate, and the earlier cut of this comment ("today UNUSED …
+        ONE production caller") went stale the moment the second one landed (`#13796`):
+
+        * ``sdk._record_vector_searcher`` — the READ path — always supplies the read's own
+          budget when the read has one. That is what the paragraph above requires.
+        * ``tools/strip_graph_entity_vectors.py::graph_vector_population`` — the operator
+          stripper — binds this method and lets :func:`record_vector._safe_population` call
+          it with the LABEL and no timeout (``graph_population(entity_type)``, so
+          ``timeout_ms=None``), which leaves the door's own bound. That is the correct
+          choice there and not an oversight: the tool takes one aggregate per label for a
+          whole run, so a short budget would not protect a hot path — it would only convert
+          a slow count into ``None``, and ``None`` is
+          UNVERIFIED, which makes the strip gate refuse a label whose record may well
+          cover it. A tool that refuses on its own measurement's latency is useless; an
+          operator tool waiting for one honest count is not.
+
+        A third caller that needs seconds (a health or restore sweep) still has to be given
+        this argument deliberately — nothing here infers it.
         """
         from ..security import ENTITY_TYPE_LABELS, entity_label
 

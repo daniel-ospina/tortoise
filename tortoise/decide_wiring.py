@@ -251,7 +251,7 @@ def resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
                         "LABEL — not reused (the label is part of the operator "
                         "identity, so this is a second claim); an UNLABELLED "
                         "bridge is created")
-    op = sdk.create_operator(op_type, source_id, [target_id], label=label,
+    op = sdk._create_operator(op_type, source_id, [target_id], label=label,
                              **(create_kwargs or {}))
     cache[key] = op["id"]
     return op["id"], False, note

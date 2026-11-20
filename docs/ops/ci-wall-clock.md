@@ -179,7 +179,7 @@ this job. The first response was to raise the cap to 50 over a SUM that included
 that arm is now VOID, because #11063 removed the save from this job.** It runs
 `actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
 steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
-`.[test,postgres]` downloads (`python-ci.yml:4751` — the `Install package + the postgres extra` step
+`.[test,postgres]` downloads (`python-ci.yml:4774` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
 **20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
@@ -356,7 +356,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4743-4745` — its `Restore pip dependency
+  `test-record-postgres` mounts that path (`python-ci.yml:4766-4768` — its `Restore pip dependency
   caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
   so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
   and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
@@ -653,7 +653,7 @@ measured p50, which the row above puts at 8.9 m; a projection is not a measureme
 not conflate them), so its band goes ~8.2 m → ~16.4 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.35 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.18 m` per leg → **`16.36 m`** from the
 committed `durations` map (re-derived from the map, not restated: registering
 `test_10371_nonpoint_lifecycle_guard.py` in `slow_files` moved this projection from the `8.64 m` →
 `17.28 m` it read before that entry — the `slow_files` membership takes the file out of the fast pool
@@ -752,7 +752,9 @@ If the pool grows, invariant 2 permits a larger cap — and that move is not fre
 `measured_pool` literal in the test is the one input that must be edited with the caps (below). If
 a shard's wall grows, the accepted regression grows with it, because each added wave costs one
 shard wall: recompute `waves × wall` for each capped matrix (at cap 3: fast `3 × 10.5 m ≈ 31.5 m`,
-slow `2 × 8.1767 m ≈ 16.35 m` (the `8.18` above is that per-leg figure rounded), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
+slow `2 × 8.18 m ≈ 16.36 m` (the `8.18` above is that per-leg figure rounded; `#13685`'s
+`slow_files` entry moved the job wall `8.1767 × 2 ≈ 16.35 m` → `16.36 m` by adding one 2.0-weight
+file to the pool, and the pin recomputes both halves), carve-out `1 × 8.8 m ≈ 8.8 m`) and compare each against that same
 matrix's uncapped band before trusting the +17.9 m figure above.
 
 ⛔ **Re-measuring the pool is not only a reason to move a cap — it is an edit to the pin.**

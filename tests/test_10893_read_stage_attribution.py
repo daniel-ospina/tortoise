@@ -78,14 +78,14 @@ def _decode(messages: list) -> dict:
 
 
 def _fts_query_fn():
-    """``ast.FunctionDef`` for ``tortoise_fts_query`` in ``tortoise/sdk.py``.
+    """``ast.FunctionDef`` for ``_tortoise_fts_query`` in ``tortoise/sdk.py``.
 
     Both store-window pins parse the same function; parsing it in one place keeps
     them from drifting into different notions of what the read path IS.
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     return next(n for n in ast.walk(tree)
-                if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+                if isinstance(n, ast.FunctionDef) and n.name == "_tortoise_fts_query")
 
 
 def _mentions_store(node) -> bool:
@@ -346,7 +346,7 @@ def test_the_graph_ordering_branch_still_reaches_the_terminal_stage():
 
 
 def _post_retrieval_returns():
-    """``(returns, fn)`` — every ``return`` in ``tortoise_fts_query``, paired with
+    """``(returns, fn)`` — every ``return`` in ``_tortoise_fts_query``, paired with
     the nearest ``_mark_read_stage`` in **its own block**, plus the function node.
 
     The CALLER filters to the post-retrieval ones (a line comparison against the
@@ -363,7 +363,7 @@ def _post_retrieval_returns():
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "tortoise_fts_query")
+              if isinstance(n, ast.FunctionDef) and n.name == "_tortoise_fts_query")
 
     def mark_name(stmt):
         if isinstance(stmt, ast.Expr):
@@ -1027,7 +1027,7 @@ class _Done:
 # ── 6. the read path actually marks ────────────────────────────────────────
 
 def _marks_inside_fts_query() -> set[str]:
-    """AST pass: the ``_mark_read_stage(...)`` call sites in ``tortoise_fts_query``.
+    """AST pass: the ``_mark_read_stage(...)`` call sites in ``_tortoise_fts_query``.
 
     Structural on purpose. The alternative is to drive a real hybrid read, which
     needs a live graph AND the embeddings extra — and would then pass on a tree
@@ -1037,7 +1037,7 @@ def _marks_inside_fts_query() -> set[str]:
     """
     tree = ast.parse(_SDK.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "tortoise_fts_query":
+        if isinstance(node, ast.FunctionDef) and node.name == "_tortoise_fts_query":
             marks: set[str] = set()
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call)
@@ -1047,7 +1047,7 @@ def _marks_inside_fts_query() -> set[str]:
                         and isinstance(inner.args[0], ast.Name)):
                     marks.add(inner.args[0].id)
             return marks
-    raise AssertionError("tortoise_fts_query not found in tortoise/sdk.py")
+    raise AssertionError("_tortoise_fts_query not found in tortoise/sdk.py")
 
 
 def test_the_search_path_marks_every_stage_the_issue_asked_about():

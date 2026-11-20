@@ -1026,11 +1026,11 @@ def test_production_guard_is_narrow_by_design(monkeypatch):
     stub = types.SimpleNamespace(_get_proj=lambda: prod_graph)
 
     _set(monkeypatch, "TORTOISE_ALLOW_PRODUCTION", "1")
-    assert TortoiseSDK.test_guard(stub) is None
+    assert TortoiseSDK._test_guard(stub) is None
     for raw in _NARROW_REJECTED_PADDED:
         _set(monkeypatch, "TORTOISE_ALLOW_PRODUCTION", raw)
         with pytest.raises(RuntimeError, match="SAFETY GUARD"):
-            TortoiseSDK.test_guard(stub)
+            TortoiseSDK._test_guard(stub)
 
 
 def test_abuse_kill_switch_is_narrow_by_design(monkeypatch):

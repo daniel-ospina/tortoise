@@ -63,7 +63,7 @@
 #   silently skipped. `_preserve_labels` drops both but reads NO flag.
 #   `ubuntu-latest` is in neither class (it carries no version) and is always kept.
 #   ⚠️ THE FLAG HAS TWO SIDES IN THIS TREE AND THEY READ THE SAME THREE VALUES. The WRITER is
-#   `resolve_os_label` (`:306`), reached from `resolve_labels` — i.e. from install, repair and
+#   `resolve_os_label` (`:483`), reached from `resolve_labels` — i.e. from install, repair and
 #   `--print-labels` — and called by `--status` to READ the intent (it registers nothing) — so
 #   a runner this script registers under `on|auto` carries `ubuntu-24.04`; the autoscaler's `runner_autoscale.py::_os_labels` mirrors the same rule for the ORPHANED
 #   re-registration path, and `tools/install-runner-autoscale-schedule.sh` renders the value into the
@@ -197,6 +197,25 @@ DISK_PER_RUNNER_GB="${CI_RUNNER_DISK_PER_RUNNER_GB:-8}"   # checkout (~0.2G) + u
 DISK_RESERVE_GB="${CI_RUNNER_DISK_RESERVE_GB:-20}"        # keeps the agent lanes' worktrees safe
 MEM_PER_RUNNER_GB="${CI_RUNNER_MEM_PER_RUNNER_GB:-2}"
 MEM_RESERVE_GB="${CI_RUNNER_MEM_RESERVE_GB:-4}"
+# ── the runner unit's OWN survival keys (tortoise#13774) ────────────────────────────────────────
+# ⛔ `svc.sh install` writes a unit with NO `Restart=` (its template carries ExecStart/User/
+# WorkingDirectory/KillMode/KillSignal/TimeoutStopSec only), so systemd's default `Restart=no`
+# applies: a runner that dies for any reason other than a clean 0 exits 0, systemd calls it "no
+# retry needed", and the unit sits `failed` until a human starts it — measured on this fleet's
+# units (`Restart=no`, `MemoryMax=infinity`). These four knobs are written into a drop-in instead
+# of forking that template, so every runner version bump stays upstream's problem.
+#
+# ⛔ THE MEMORY BOUND IS A TAIL BOUND, NOT A CALIBRATION. `MEM_PER_RUNNER_GB` above is the box
+# SIZING unit **and the operand of this bound** (it feeds the headroom arithmetic AND `MEM_MAX_GB=`),
+# so lowering it to pass the headroom gate ALSO tightens a live unit's `MemoryMax=` by this factor on
+# `daemon-reload`, no restart needed. `× this factor` is a per-unit cap, so ONE runaway job dies
+# inside the runner's own cgroup instead of the kernel choosing among co-tenants. The default (4) is
+# above the fleet's worst case (5.2 GB, a `test (k)` shard; only record: pi-cell-4's drop-in header —
+# unvalidated); it bounds nothing at box level — docker containers run in `docker-*.scope`.
+RESTART_SEC="${CI_RUNNER_RESTART_SEC:-30s}"
+START_LIMIT_INTERVAL="${CI_RUNNER_START_LIMIT_INTERVAL:-1h}"
+START_LIMIT_BURST="${CI_RUNNER_START_LIMIT_BURST:-20}"
+MEM_MAX_FACTOR="${CI_RUNNER_MEM_MAX_FACTOR:-4}"
 FORKS_PER_RUNNER="${CI_RUNNER_FORKS_PER_RUNNER:-400}"     # a pytest job + its docker children ≈ 400 procs
 # The lane jobs need these on PATH; the runner registration needs the others. #9018 is the
 # class where a pool runner lacks one and the job exits 2 (a false red, not a queue delay).
@@ -246,17 +265,175 @@ case "$COUNT" in
 esac
 # The sizing overrides get the same treatment: a bound nobody can read must be REFUSED, never
 # arithmetically coerced into a number ($(( )) turns 'x' into 0, i.e. silently into no bound).
-for _size in CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB \
-             DISK_RESERVE_GB MEM_PER_RUNNER_GB MEM_RESERVE_GB FORKS_PER_RUNNER; do
+for _size in COUNT CORES_PER_RUNNER CORES_RESERVED_FOR_AGENT_LANES DISK_PER_RUNNER_GB \
+             DISK_RESERVE_GB MEM_PER_RUNNER_GB MEM_RESERVE_GB FORKS_PER_RUNNER \
+             START_LIMIT_BURST MEM_MAX_FACTOR; do
   case "${!_size}" in
     ''|*[!0-9]*) die "$_size must be a non-negative integer (got '${!_size}')" 1 ;;
   esac
+  # ⛔ AND A LENGTH BOUND, because "all digits" still lets a value THROUGH that bash then WRAPS:
+  # `$(( 10#18446744073709551617 * 4 ))` is `4` — a real, spurious 4 GB cap written onto a running
+  # job — and `$(( 10#36893488147419103232 * 4 ))` is `0`, the bound silently gone. Nine digits is far
+  # above every legitimate value here and far below the wrap point, so no product can leave the range
+  # the derived-bound guard checks.
+  _size_val="${!_size}"
+  [ "${#_size_val}" -le 9 ] || die "$_size must be at most 9 digits (got '$_size_val')" 1
+  # ⛔ AND REBUILT IN BASE 10 HERE, ONCE, FOR EVERY CONSUMER. "All digits" is NOT "safe in $(( ))":
+  # bash reads a leading zero as OCTAL, so `08`/`09` are an ARITHMETIC ERROR — and ⚠️ its consequence
+  # is NOT a silent pass, which three earlier rounds recorded. MEASURED (bash 5.2.21, this file's own
+  # `set -uo pipefail`): `mem_need_gb=$(( COUNT * 08 + 0 ))` errors and LEAVES `mem_need_gb` UNSET, so
+  # the next line's `"$mem_need_gb"` is a `set -u` violation and the installer ABORTS with exit 1 — a
+  # loud abort on a USAGE code with the memory refusal never reached, not a vanished guard over a zero
+  # exit. ⛔ `COUNT` IS IN THIS LIST, and it was the one value the class still had: the `case` above
+  # checks it is digits, and FOUR headroom gates (forks, disk, cpu, memory) read it as
+  # `$(( COUNT * … ))`. Left out, `--count 010` sized the box for OCTAL 8 while `seq 1 010`
+  # installed TEN — an oversubscribed install that every gate had approved, with the printed line
+  # saying `010x2` beside a need computed from 8. Normalising in ONE place closes the class for the
+  # count, forks, disk, cpu, memory and the derived bound — instead of hardening the four `$(( ))`
+  # sites one review at a time.
+  printf -v "$_size" '%d' "$(( 10#$_size_val ))"
 done
+# ⛔ THE TWO UNIT VALUES THAT ARE NOT INTEGERS GET THEIR OWN VALIDATION, because the digits-only loop
+# above would refuse them outright (a systemd timespan such as `1h` is not a number). An UNVALIDATED
+# bad value is the same failure class this block exists for, one step later: systemd silently DROPS a
+# key it cannot parse, so a typo in either would quietly restore the 10 s restart window (interval)
+# or the 100 ms restart delay (`RestartSec=`), i.e. a guard that looks present and is not.
+for _unit_val in RESTART_SEC START_LIMIT_INTERVAL; do
+  _ts_val="${!_unit_val}"
+  case "$_ts_val" in
+    ''|*[!0-9a-z]*) die "$_unit_val must be a systemd timespan such as 30s or 1h (got '$_ts_val')" 1 ;;
+  esac
+  # ⛔ A GLOB LIKE `[0-9]*s` IS NOT A VALIDATION, and this shipped that way for one review round: the
+  # `*` matches ANY trailing run, so `30sm`, `30secs` and `30mss` all passed — and systemd then
+  # DROPPED the value ("Failed to parse sec value, ignoring: 30sm"), leaving `RestartSec` at its
+  # 100 ms default and burning `StartLimitBurst` in ~2 s, which is the exact state this drop-in
+  # exists to prevent. Split into an ALL-DIGITS magnitude and an EXACT suffix, both checked.
+  _ts_body="${_ts_val%%[a-z]*}"
+  _ts_suffix="${_ts_val#"$_ts_body"}"
+  case "$_ts_body" in
+    ''|*[!0-9]*) die "$_unit_val must start with a whole number (got '$_ts_val')" 1 ;;
+  esac
+  case "$_ts_suffix" in
+    ms|s|sec|min|m|hr|h|d) : ;;
+    *) die "$_unit_val has a suffix systemd would DROP (use ms/s/sec/min/m/hr/h/d, got '$_ts_val')" 1 ;;
+  esac
+  # ⛔ AND THE MAGNITUDE HAS A CEILING — ONE PER SUFFIX, because systemd's limit is on the RESULT, not
+  # on the digit count: `999999999d` is nine digits and is DROPPED ("Numerical result out of range")
+  # while `999999999h` parses, so a flat 13-digit bound let days, hours and minutes through to be
+  # silently ignored — the same end state a bad suffix produced. Measured ceilings on systemd 255, one
+  # digit more fails in each case: ms 16, s/sec 13, m/min 11, h/hr 9, d 8.
+  case "$_ts_suffix" in
+    ms) _ts_max=16 ;;
+    s|sec) _ts_max=13 ;;
+    m|min) _ts_max=11 ;;
+    h|hr) _ts_max=9 ;;
+    d) _ts_max=8 ;;
+  esac
+  [ "${#_ts_body}" -le "$_ts_max" ] || die "$_unit_val magnitude is beyond what systemd can parse (got '$_ts_val'; at most $_ts_max digits for that suffix)" 1
+done
+
+# ⛔ THE DERIVED BOUND IS COMPUTED ONCE, HERE, AND BOTH READERS USE IT (the dry-run plan and the
+# drop-in writer). Computing it lazily in two places is how they drifted: the dry-run's own
+# `$(( MEM_PER_RUNNER_GB * MEM_MAX_FACTOR ))` read `08` as OCTAL; the error left `MEM_MAX_GB` UNSET
+# for the guard below's `set -u` reference. Same loud abort, not a silent pass. `10#` forces base 10:
+# unit that produces a non-positive GIGABYTE product (an absurd knob wrapping negative) is REFUSED —
+# the whole point of this file's validator is that a bound nobody can read never quietly becomes no
+# bound at all.
+MEM_MAX_GB=$(( 10#$MEM_PER_RUNNER_GB * 10#$MEM_MAX_FACTOR ))
+if [ "$(( 10#$MEM_PER_RUNNER_GB ))" -gt 0 ] && [ "$MEM_MAX_GB" -le 0 ]; then
+  MEM_MAX_GB=       # make the invalidity unmissable to any later read
+  die "MemoryMax would not be a positive number of GB from MEM_PER_RUNNER_GB=$MEM_PER_RUNNER_GB x MEM_MAX_FACTOR=$MEM_MAX_FACTOR — refusing to write a bound that is not one" 1
+fi
+# ⛔ AND A CEILING AT SYSTEMD'S OWN, because a product that parses fine in bash can still be one
+# systemd DROPS. `MemoryMax=` is a uint64 of BYTES, so anything at or above 17179869184G is
+# "Numerical result out of range" and the key is IGNORED — a drop-in that reads as a bound while
+# the unit runs unbounded, which is the same deception the `0G` sentinel arm (R9) refuses. The
+# operand length bound does NOT imply this one: each operand may be 9 digits, so the product can
+# reach 999999999 x 999999999 = 999999998000000001G, far past systemd's maximum (measured on
+# systemd 255.4: `17179869184G` is refused, `17179869183G` is accepted).
+MEM_MAX_GB_MAX=17179869183
+if [ "$MEM_MAX_GB" -gt "$MEM_MAX_GB_MAX" ]; then
+  die "MemoryMax would be $MEM_MAX_GB from MEM_PER_RUNNER_GB=$MEM_PER_RUNNER_GB x MEM_MAX_FACTOR=$MEM_MAX_FACTOR, beyond what systemd can parse (max ${MEM_MAX_GB_MAX}G) — refusing to write a bound systemd will IGNORE" 1
+fi
 
 runner_dir() { # $1 = instance number: instance 1 keeps the base dir, the rest get -<n>
   if [ "$1" = 1 ]; then printf '%s' "$BASE"; else printf '%s-%s' "$BASE" "$1"; fi
 }
 unit_for() { printf 'actions.runner.%s.%s.service' "$(printf '%s' "$REPO" | tr '/' '-')" "$1"; }
+
+# ── the unit's survival drop-in (tortoise#13774) ────────────────────────────────────────────────
+# The unit `svc.sh install` writes has NO `Restart=` at all, so systemd's default `Restart=no`
+# applies: a runner that dies for any reason but a clean 0 never comes back and never alarms. This
+# writes ONE drop-in instead of forking GitHub's template — the template stays upstream's problem,
+# and a runner version bump cannot silently revert our keys.
+#
+# ⛔ `daemon-reload` APPLIES THESE TO AN ALREADY-RUNNING UNIT, immediately, with no restart
+# (measured on systemd 255: a live unit's runtime `memory.max` flips on reload, MainPID unchanged).
+# That is why this is safe to run against a serving runner — nothing is restarted — AND why
+# `MemoryMax=` must never be computed as a value that kills a working job: see the `0` sentinel
+# below, where the key is OMITTED rather than written as `0G`. ⚠️ MEASURED, and it corrects the first
+# version of this comment: systemd 255 reads `MemoryMax=0G` as UNSET, not as "no memory at all" (a
+# throwaway unit with `MemoryMax=0G` + reload showed `MemoryMax: infinity` and cgroup `memory.max` =
+# `max`). So omitting the key and writing `0G` are the SAME runtime state — the reason to omit is that
+# a written `0G` LOOKS like a bound to every later reader (and to a grep), while the omission states
+# plainly that none is set.
+#
+# ⛔ THE `[Unit]`-vs-`[Service]` TRAP: `StartLimitIntervalSec`/`StartLimitBurst` are `[Unit]` keys
+# since systemd v229. Under `[Service]` the burst still applies and the INTERVAL is silently
+# ignored, leaving the 10 s default window — 20 restarts in ten seconds looks like a configured
+# guard and is not one. Verify with `systemctl show -p StartLimitIntervalUSec`, never by reading
+# the file back.
+write_unit_dropin() { # $1 = instance name, e.g. pi-runner-x64-1
+  local name="$1" unit dir tmp mem_max_gb
+  unit="$(unit_for "$name")"
+  dir="$UNIT_DIR/$unit.d"
+  mem_max_gb="$MEM_MAX_GB"   # validated and base-10-normalised once, at startup
+  tmp="$(mktemp)" || die "cannot create a temp file for the unit drop-in" 3
+  {
+    printf '# written by tools/install-ci-runner-x64.sh — see docs/ops/ci-runner-x64.md\n'
+    printf '# a runner that dies must come back, and ONE runaway job must die inside its own cgroup\n'
+    printf '[Unit]\n'
+    printf 'StartLimitIntervalSec=%s\n' "$START_LIMIT_INTERVAL"
+    printf 'StartLimitBurst=%s\n' "$START_LIMIT_BURST"
+    printf '\n[Service]\n'
+    printf 'Restart=on-failure\n'
+    printf 'RestartSec=%s\n' "$RESTART_SEC"
+    printf 'OOMPolicy=stop\n'
+    # ⛔ THE `0` SENTINEL MEANS "NO SIZING", NEVER "NO MEMORY". `MEM_PER_RUNNER_GB=0` is a real
+    # value (the capacity gate reads it as "do not size from memory", and the test harness pins it),
+    # so the computed bound is 0 and this key is OMITTED. ⚠️ MEASURED: `MemoryMax=0G` is read by
+    # systemd 255 as UNSET (`infinity`), so the two are the same RUNTIME state — the omission is
+    # chosen because a written `0G` reads as a bound to every later reader while the omission says
+    # plainly that none is set.
+    if [ "$mem_max_gb" -gt 0 ]; then printf 'MemoryMax=%sG\n' "$mem_max_gb"; fi
+  } >"$tmp" || { rm -f "$tmp"; die "cannot write the unit drop-in for $name" 3; }
+  if [ -f "$dir/10-restart-and-memory.conf" ] && cmp -s "$tmp" "$dir/10-restart-and-memory.conf"; then
+    rm -f "$tmp"
+    say "unit drop-in already current for $name ($unit.d/10-restart-and-memory.conf)"
+    return 0
+  fi
+  sudo install -D -m 0644 "$tmp" "$dir/10-restart-and-memory.conf" || { rm -f "$tmp"; die "cannot install the unit drop-in for $name (is sudo available?)" 3; }
+  rm -f "$tmp"
+  sudo systemctl daemon-reload || die "wrote the drop-in for $name but could not reload systemd — run: sudo systemctl daemon-reload" 3
+  say "unit drop-in installed for $name: Restart=on-failure, RestartSec=$RESTART_SEC, StartLimit=${START_LIMIT_BURST}/${START_LIMIT_INTERVAL}$( [ "$mem_max_gb" -gt 0 ] && printf ', MemoryMax=%sG' "$mem_max_gb" )"
+}
+
+# Remove OUR drop-in only. ⛔ NEVER `rm -rf` the `.d` directory: other drop-ins may live there and
+# removing one is not this installer's decision (pi-cell-4 carries a hand-written `restart.conf` in
+# exactly that directory, which sorts AFTER `10-` and wins every shared key). ⚠️ NOTHING ON THE
+# MISSING-`.d` PATH MAKES rc=3 REACHABLE — the terminal `return 0` below is what reports a clean
+# uninstall as 0, with or without the `[ -d ]` guard or `rmdir`'s `|| true` (measured: delete the
+# guard and this still returns 0; delete the guard AND the `|| true` and it STILL returns 0). But the
+# two `return 3` arms below are LIVE failed-removal paths, and the guard only spares a `sudo`.
+remove_unit_dropin() { # $1 = unit name (NOT the instance name)
+  local unit="$1" dropin
+  dropin="$UNIT_DIR/$unit.d/10-restart-and-memory.conf"
+  [ -d "$UNIT_DIR/$unit.d" ] || return 0
+  sudo rm -f "$dropin" || { say "WARNING: could not remove $dropin"; return 3; }
+  sudo rmdir --ignore-fail-on-non-empty "$UNIT_DIR/$unit.d" 2>/dev/null || true
+  [ -e "$dropin" ] && { say "WARNING: $dropin survived removal — remove it by hand"; return 3; }
+  return 0
+}
 # Is this directory PROVABLY a runner install? Only such a directory may be deleted by
 # `--uninstall`; see the uninstall block for why "it is a directory" is not enough.
 #
@@ -1323,7 +1500,13 @@ if [ "$MODE" = install ]; then
   # cpu capacity bound it CAN refuse on a loaded box (measured 2026-10-22: 6G available refused
   # `--count 2`, which needs 8G). That is deliberate fail-closed — two runners starting into 6G
   # would OOM-kill the agent lanes' FalkorDB — but it must not be described as a capacity bound.
-  mem_free_gb=$(awk '/MemAvailable/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)
+  # `CI_RUNNER_MEM_AVAILABLE_GB` is a seam for the same reason `CI_RUNNER_NCPU` is one: a live
+  # reading cannot be exercised from a test without it, and a reading that is not exercised is how
+  # this leg's refusal went untested while the other three each had an arm.
+  mem_free_gb="${CI_RUNNER_MEM_AVAILABLE_GB:-$(awk '/MemAvailable/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null)}"
+  case "$mem_free_gb" in
+    ''|*[!0-9]*) die "cannot read available memory (/proc/meminfo has no MemAvailable and CI_RUNNER_MEM_AVAILABLE_GB is '${CI_RUNNER_MEM_AVAILABLE_GB:-}') — refusing to size against an unread bound" ;;
+  esac
   mem_need_gb=$(( COUNT * MEM_PER_RUNNER_GB + MEM_RESERVE_GB ))
   [ "${mem_free_gb:-0}" -ge "$mem_need_gb" ] || die "memory headroom: ${mem_free_gb:-0}G available against ${mem_need_gb}G needed for $COUNT runners (+${MEM_RESERVE_GB}G reserve)"
   say "headroom: cpu ok (${COUNT}x${CORES_PER_RUNNER} + ${CORES_RESERVED_FOR_AGENT_LANES} reserved = ${cpu_need} of ${ncpu} cores; ${mem_free_gb:-0}G mem free, ${mem_need_gb}G needed)"
@@ -1374,7 +1557,7 @@ if [ "$MODE" = uninstall ]; then
   done
   if [ "${#orphan_units[@]}" -gt 0 ]; then
     for u in "${orphan_units[@]}"; do
-      say "WARNING: $u is still installed but its runner directory is gone, so there is no svc.sh here to uninstall it with — remove it by hand: sudo systemctl disable --now $u && sudo rm -f $UNIT_DIR/$u"; rc=3
+      say "WARNING: $u is still installed but its runner directory is gone, so there is no svc.sh here to uninstall it with — remove it by hand: sudo systemctl disable --now $u && sudo rm -f $UNIT_DIR/$u && sudo rm -f $UNIT_DIR/$u.d/10-restart-and-memory.conf"; rc=3
     done
   fi
   if [ "${#uninstall_dirs[@]}" -eq 0 ]; then
@@ -1406,8 +1589,21 @@ if [ "$MODE" = uninstall ]; then
         say "WARNING: could not remove the systemd unit $unit — LEFT $d and its registration intact so this can be retried. Remove it by hand: sudo $d/svc.sh uninstall"; rc=3; continue
       fi
       say "removed the systemd unit $unit (if it was installed)"
+      # ⛔ OUR DROP-IN GOES WITH THE UNIT, and ONLY ours (see `remove_unit_dropin`): a leftover
+      # `10-restart-and-memory.conf` would silently govern a future unit of the same name, while
+      # deleting the whole `.d` directory would take another operator's drop-in with it.
+      remove_unit_dropin "$unit" || rc=3
     elif [ -e "$UNIT_DIR/$unit" ]; then
-      say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand, then re-run"; rc=3; continue
+      # ⛔ THIS ARM CANNOT FINISH, SO IT MUST NOT TOUCH THE DROP-IN. The unit file is STILL INSTALLED
+      # here — that is the whole condition — so our `Restart=`/`StartLimit*`/`MemoryMax=` keys are LIVE
+      # on a live unit, and removing them would quietly UNBOUND a serving runner while reporting only a
+      # warning. (An attested round shipped exactly that: the teardown was put on this arm and missing
+      # from the arm that completes.) The drop-in goes on the paths that actually remove the unit: the
+      # `svc.sh` arm above, and the delete arm below, whose unit is already gone. This arm NAMES both
+      # files instead, because the operator has to do that removal by hand.
+      # ⛔ AND NO BACKTICKS IN THIS `say`: the string is double-quoted, so a backticked command would
+      # be SUBSTITUTED — a hand-removal hint that strips the unit file before the operator reads it.
+      say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand (sudo rm -f $UNIT_DIR/$unit) and our drop-in with it (sudo rm -f $UNIT_DIR/$unit.d/10-restart-and-memory.conf), then re-run"; rc=3; continue
     fi
     tok="${uninstall_tokens[$i]}"
     # ⛔ A FAILED DEREGISTRATION IS AN OPERATION FAILURE, AND IT STOPS THE DELETE FOR THIS TARGET —
@@ -1427,6 +1623,11 @@ if [ "$MODE" = uninstall ]; then
       last="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
       say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status${last:+ (last output: $last)}"; rc=3; continue
     fi
+    # ⛔ THE UNIT IS ALREADY GONE ON THIS PATH (no `svc.sh` and no unit file — otherwise the arm above
+    # bailed out), so OUR DROP-IN IS DEBRIS AND GOES WITH THE DIRECTORY. Without this, the run that
+    # COMPLETES the uninstall was the one that left `10-restart-and-memory.conf` on disk to govern a
+    # future unit of the same name — the exact artifact `remove_unit_dropin` exists to remove.
+    remove_unit_dropin "$unit" || rc=3
     if ! sudo rm -rf "$d"; then
       # ⛔ THE DELETE IS THE LAST DESTRUCTIVE STEP AND ITS STATUS IS THE ONE THAT USED TO BE
       # DISCARDED. `set -e` is off and `rc` was untouched, so a `sudo rm` that failed reported
@@ -1458,7 +1659,7 @@ done
 for i in $(seq 1 "$COUNT"); do
   d="$(runner_dir "$i")"; name="$NAME_PREFIX-$i"
   say "── runner $i: name=$name dir=$d labels=$LABELS"
-  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --unattended --url https://github.com/$REPO --token <minted> --name $name --labels $LABELS --work _work --replace, then svc.sh install+start"; continue; fi
+  if [ "$DRY" = 1 ]; then say "dry-run: would download $url, verify sha256, then run config.sh --unattended --url https://github.com/$REPO --token <minted> --name $name --labels $LABELS --work _work --replace, then svc.sh install, then write $UNIT_DIR/$(unit_for "$name").d/10-restart-and-memory.conf (Restart=on-failure, RestartSec=$RESTART_SEC, StartLimitIntervalSec=$START_LIMIT_INTERVAL, StartLimitBurst=$START_LIMIT_BURST, OOMPolicy=stop$( [ "$MEM_MAX_GB" -gt 0 ] && printf ', MemoryMax=%sG' "$MEM_MAX_GB" )), then svc.sh start"; continue; fi
   need gh; need curl; need tar; need sha256sum
 
   if [ ! -f "$d/.runner" ]; then
@@ -1488,6 +1689,13 @@ for i in $(seq 1 "$COUNT"); do
   if [ ! -f "$UNIT_DIR/$(unit_for "$name")" ]; then
     ( cd "$d" && sudo ./svc.sh install "$actor" ) || die "svc.sh install failed for $name" 3
   fi
+  # ⛔ THE DROP-IN IS WRITTEN HERE — AFTER the install guard's `fi` and BEFORE `svc.sh start`, so it
+  # applies to BOTH branches: a fresh unit starts WITH the keys, and an already-installed unit (the
+  # only branch this fleet's boxes take) gets them via `daemon-reload`, which applies `Restart=` and
+  # `MemoryMax=` to a RUNNING unit without restarting it (measured; see `write_unit_dropin`). Putting
+  # the call INSIDE the guard would leave every already-installed runner unbounded-and-unretried,
+  # which is the very state this closes.
+  write_unit_dropin "$name"
   ( cd "$d" && sudo ./svc.sh start ) || die "svc.sh start failed for $name" 3
   say "started $name"
 done

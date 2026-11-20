@@ -533,6 +533,48 @@ def test_problem_map_guard_runs_on_the_diffs_it_guards():
     assert "test_problem_map_2820.py" in index["test_files"]
 
 
+def test_a_vector_parity_harness_only_diff_selects_its_pins():
+    """#13914 review (P1): the `CORE_ALSO` arm ITSELF, not just its pin.
+
+    `tools/vector_parity_13906.py` is the comparator that is ALLOWED to say "the
+    two dense legs agree"; its pins live in `tests/test_vector_parity_13906.py`
+    (registered `core`). `tools/` is a flat `NON_PYTHON_PREFIXES` swallow, so a
+    harness-only diff filters to `changed == []` and takes the docs-only early
+    return — measured BEFORE the entry: `surfaces: []`, `full: False`, and the
+    pin file ABSENT from `test_files`, i.e. tier-1 smoke only.
+
+    ⛔ THIS TEST IS THE ARM THE ENTRY'S OWN COMMENT USED TO CLAIM. The entry
+    cited `tests/test_vector_parity_13906.py::test_each_poison_makes_the_
+    comparison_fail` and `::test_a_distance_change_with_identical_ids_is_a_
+    divergence` as its coverage, and those are falsifiers of the COMPARATOR —
+    neither calls `select()`, so neither could see the entry deleted. Measured
+    control: removing the entry leaves every one of them green while a tools-only
+    diff collapses to `surfaces: []`, which is the silent-drop class the entry
+    exists to close (#4309). `test_problem_map_2820.py`'s sibling pin is the
+    shape, and its comment records the same defect found by reading a test
+    against its own comment.
+
+    Selected on the diff that could delete the entry: a change to
+    `tools/ci_selection.py` resolves `full: True` (measured), so this file runs
+    whatever the entry says.
+    """
+    r = _sel(["tools/vector_parity_13906.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        "a harness-only diff must select the comparator's own falsifiers — "
+        "`tools/` is swallowed by NON_PYTHON_PREFIXES, so the `CORE_ALSO` entry "
+        "is the only thing keeping this out of the docs-only early return "
+        f"(#4309); got {r['surfaces']!r}"
+    )
+    assert "test_vector_parity_13906.py" in r["test_files"], (
+        "the entry exists so the comparator's DB-free pins run on the one diff "
+        "class that can weaken them (a widened tie tolerance, a dropped distance "
+        "check, a poison that stopped being detectable) — a green parity "
+        "artifact from an unverified comparator is the exact failure this file "
+        "guards"
+    )
+
+
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
@@ -10326,6 +10368,15 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #13685 — the BACKFILL that unblocks that retirement
+    # (`tools/entity_vector_backfill.py`): the additive half of the same contract, which
+    # copies the graph's vectors into the record so the strip is finally allowed to run.
+    # A file this fold ADDED, registered on `core` plus a `CORE_ALSO` entry (a tools-only
+    # diff otherwise selects `surfaces: []`) and on `slow_files` (its acceptance leg mints
+    # a throwaway `pgvector/pgvector:pg16`). Listed here for the reason every row above
+    # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed
+    # has no `durations:` row and nothing reds.
+    "test_13685_entity_vector_backfill.py",
     # #13665 — the Sentry STARTUP seam. A file this fold ADDED, registered on `api`
     # because the behaviour it pins is a call made from `_lifespan` in
     # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES the
@@ -10334,6 +10385,61 @@ ROWED_BY_THIS_FOLD = (
     # row states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
     # listed has no `durations:` row and nothing reds.
     "test_13665_sentry_init_off_loop.py",
+    # #13722 - the projection-open probe round-trip/flat-cost pins, a file this fold
+    # ADDED. Listed for the reason #13629 and #13665 rows state: the ENTRY-RULE pin
+    # iterates this EXPLICIT tuple, so a file nobody listed has no `durations:` row and
+    # deleting the row this PR adds reds nothing.
+    "test_13722_projection_open_round_trips.py",
+    # #12186 capstone (PR #13680) - the measurement record pins. A file this fold ADDED,
+    # registered on `core` AND on `tier1` because every subject it guards
+    # (`tools/capstone_12186_recall.py`, `docs/evidence/12186-capstone/{README.md,
+    # measurement.json,queries.json}`) is under `NON_PYTHON_PREFIXES` and measures
+    # `surfaces: []` - a tools-or-docs-only diff takes the tier-1 early return, so without the
+    # rows these pins ran ZERO times on the one change class that can re-stale the record.
+    # The row is here for the same reason as the one above: the ENTRY-RULE pin iterates this
+    # EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
+    "test_capstone_12186_recall.py",
+    # #13826 — the write gate's falsifiers: every writer of a coverage-gated label asks
+    # `record_vector.mirror_required`, keeping the ROW and never the VECTOR on the stop arm.
+    # A file this fold ADDED, and it shipped with NO surface registration and NO
+    # `durations:` row at all — the #13854 review's blocking finding, found by rebuilding
+    # `integrity()`'s predicate from the head manifest rather than by reading the diff.
+    # Listed here for the reason every row above states: the ENTRY-RULE pin iterates this
+    # EXPLICIT tuple, so a file nobody listed has no row and nothing reds. ⛔ The missing
+    # registration was the more expensive half: `select()` computes `test_files` FROM the
+    # surfaces, so an unregistered file is never SELECTED, and its 11 falsifiers would have
+    # been dead weight even after the red check was silenced.
+    "test_13826_write_gate.py",
+    # #13036 row V2 (PR #13886) - the capstone payload contract for the live MCP
+    # surface, a file this fold ADDED. Dual-registered `api` + `core`: the `core`
+    # row is the SELECTION half (a diff whose only python change is this file takes
+    # the `core` fallback, and a fallback selects the core MEMBER list, which this
+    # file was absent from - measured pre-fix: 921 files, file not among them), the
+    # `api` row is the tenant-door half (`tortoise/mcp_auth.py` is an EXACT `api`
+    # SOURCE_PATTERNS match that REPLACES the core fallback - measured pre-fix:
+    # `surfaces: ['api']`, file absent). Listed here for the reason every row above
+    # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody
+    # listed has no `durations:` row and deleting the row this PR adds reds nothing.
+    "test_13036_capstone_v2.py",
+    # #13880/#13913 - the business map's FILE DOOR. A file this fold ADDED,
+    # registered on `core` because `graph-scripts/` selects `core` (the
+    # default/fallback surface) and the pins it carries are the three legs
+    # `--dry-run` cannot reach: the write path executing at all (the `_resolve`
+    # binding that raised a TypeError), `Mcp.call` raising on `result.isError`,
+    # `_resolve`'s name-is-not-an-id refusal, and the identity-scoped read-back
+    # verdict that replaced a whole-graph count. Listed here for the reason every
+    # row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds.
+    "test_business_map_filer.py",
+    # #13906 — the dense-leg QUERY-parity comparator (`tools/vector_parity_13906.py`),
+    # a file this fold ADDED. `core` plus a `CORE_ALSO` entry (a tools-only diff
+    # otherwise selects `surfaces: []`) and, since #13914 review round 5, an arm pin
+    # of its own (`test_a_vector_parity_harness_only_diff_selects_its_pins`) — the
+    # entry had cited two comparator falsifiers as its coverage, and neither calls
+    # `select()`. Listed here for the reason every row above states: the ENTRY-RULE
+    # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
+    # row and nothing reds.
+    "test_vector_parity_13906.py",
 )
 
 

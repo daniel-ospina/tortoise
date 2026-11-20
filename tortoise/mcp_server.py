@@ -3663,7 +3663,7 @@ def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
     return carry_resolved_allowances(limits)
 
 
-def _enforce_quota(resource: str = "points") -> None:
+def _enforce_quota(resource: str = "points", *, truth_carried: bool = False) -> None:
     """#329: fail-closed org quota pre-write for MCP write tools.
 
     HTTP mode: limits come from the middleware-resolved ContextVar (same
@@ -3674,9 +3674,25 @@ def _enforce_quota(resource: str = "points") -> None:
     resolved by ``quota.resolve_org_limits`` — this lane's ContextVar carries
     none in Supabase mode, and an uncarried allowance is UNLIMITED to the gate
     (see ``_carry_allowances`` and ``tortoise/allowance_gate.py``).
+
+    ``truth_carried`` (#13829) is the DOOR's declaration that the tool it guards
+    reaches the record before it touches the derived cache — see
+    ``allowance_gate.enforce_allowances``. It defaults to ``False`` because the
+    default is the protection: only a door whose cache write consumes
+    ``allowance_gate.cache_fold_denial()`` may set it, or the over-cap cache
+    would simply keep growing on a path that never asks.
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
     from tortoise.quota import enforce_org_limit, resolve_org_limits
+    # ⛔ FRESH PER DOOR CALL: a verdict published for the PREVIOUS write in this
+    # context must not be consumable by this one. Cleared before the early
+    # returns too, so a no-org (stdio) call cannot leave a stale verdict behind.
+    try:
+        from tortoise.allowance_gate import clear_cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — a gate that will not import cannot publish
+        clear_cache_fold_denial = None
+    if clear_cache_fold_denial is not None:
+        clear_cache_fold_denial()
     org_id = _current_org_id.get()
     if not org_id:
         return  # stdio/operator — no org context
@@ -3692,7 +3708,8 @@ def _enforce_quota(resource: str = "points") -> None:
               else _carry_allowances(limits, resource))
     # Count on the SAME org SDK the tool writes to (identical connection),
     # so the count and the write can never target different databases.
-    enforce_org_limit(limits, resource, sdk=_get_org_sdk())
+    enforce_org_limit(limits, resource, sdk=_get_org_sdk(),
+                      truth_carried=truth_carried)
 
 
 def _alert_unmetered(lane: str, org_id: str | None,
@@ -3722,7 +3739,8 @@ def _alert_unmetered(lane: str, org_id: str | None,
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
 
-def _quota_gated(fn, resource: str = "points", abuse_weight=None):
+def _quota_gated(fn, resource: str = "points", abuse_weight=None,
+                 truth_carried: bool = False):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_org_sdk().name, ...)):
@@ -3742,9 +3760,17 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     fixed weight, or callable(result, args, kwargs) -> int for bulk ops
     (ingest/checkpoint/file_decision). Tools that do not create Points pass
     None and record nothing (an edit/update burst must never trip R1).
+
+    ``truth_carried`` (#13829) is passed through to ``_enforce_quota`` and is
+    OPT-IN PER DOOR: it asserts that ``fn``'s write reaches the record (journal
+    append + record projection) before it touches the derived cache, and that
+    the cache write it guards consumes ``allowance_gate.cache_fold_denial()``.
+    Set it only where both halves are true and tested — an unproven door keeps
+    the door-level refusal on the derived-cache dimension, which is the correct
+    behaviour where the cache may be the write's only durable copy.
     """
     def _gated(*args, **kwargs):
-        _enforce_quota(resource)
+        _enforce_quota(resource, truth_carried=truth_carried)
         try:
             from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
@@ -4330,7 +4356,28 @@ def tortoise_create_point(kind: str, content: str,
     # the signature so no existing positional argument rebinds.
     if goalState is not None:
         merged["goalState"] = goalState
-    result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    # ⛔ #13829 — THE ONE DOOR OPTED IN SO FAR, and the proof it rests on. The
+    # derived cache's cap (`graph_storage`) must not refuse the RECORD's write;
+    # it moves to the cache FOLD instead. That is only sound here because BOTH
+    # halves hold, measured in this tree:
+    #   1. TRUTH FIRST — `TortoiseSDK._create_point` (the method this branch
+    #      privatised; `create_point` before #13899) calls `_emit_event`
+    #      (`journal append + record projection`) BEFORE its `CREATE (:Point)`
+    #      block, so the record holds the write before the cache is touched, and
+    #      `PointAdded` is one of the 11 journal-carried types `rebuild_all`
+    #      replays. A `_record_committed is False` raise lands before any graph
+    #      write at all.
+    #   2. THE CACHE WRITE ASKS — that same block is guarded by
+    #      `allowance_gate.cache_fold_denial()`: an over-cap reading makes it SKIP
+    #      the fold and record the named decline, so the cache does not simply
+    #      keep growing on a door that never consumes the verdict.
+    # Every other `_quota_gated` site keeps `truth_carried=False` — including
+    # every path that has not been shown to reach the record — because there the
+    # derived store may be the write's only durable copy and refusing is correct.
+    # The enumeration is in the PR for #13829; a door is opted in with its own
+    # proof, never by inheriting this one.
+    result = _safe(_quota_gated(_get_org_sdk()._create_point, "points",
+                                abuse_weight=1, truth_carried=True), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
     # prop named "error" must not suppress the onboarding observation.
     if not isinstance(result, _SafeError):
@@ -5085,7 +5132,7 @@ def tortoise_query(kind: str | None = None,
         # filter below, so it would count Points the caller never receives
         # (f HIGH, the direction that must not happen), and the two tag modes
         # would measure different things.
-        rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
+        rows = _safe(_get_org_sdk()._query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
         # #12502: this arm used to carry its OWN tombstone test
@@ -5133,7 +5180,7 @@ def tortoise_query(kind: str | None = None,
         # signal. The fts leg already has the knob (`include_terminal`, an
         # EXISTING parameter — no surface change), and its documented semantics
         # are exactly this flag (sdk.py:40915-40924).
-        return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
+        return _safe(_get_org_sdk()._tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance",
@@ -5179,7 +5226,7 @@ def tortoise_query(kind: str | None = None,
         eff_offset = offset if offset is not None else 0
         if page is not None:
             eff_offset = (page - 1) * eff_limit
-        return _safe(_get_org_sdk().paginated_query, kind, skip=eff_offset,
+        return _safe(_get_org_sdk()._paginated_query, kind, skip=eff_offset,
                      limit=eff_limit, include_retracted=include_retracted,
                      # #7983: the SAME underscore drop as the plain path below,
                      # so one filter dict cannot be a private switch here and a
@@ -5206,7 +5253,7 @@ def tortoise_query(kind: str | None = None,
     # slicing the full list here, which would still pay the unbounded read.
     # (`_filters` was computed once, above the paginated branch — this path does
     # not recompute it; one dict, one meaning.)
-    bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
+    bounded = _safe(_get_org_sdk()._paginated_query, kind, skip=0, limit=eff_limit,
                     include_retracted=include_retracted,
                     **_filters)
     # `_safe` returns an `_SafeError` (a dict SUBCLASS) instead of raising, so
@@ -5263,7 +5310,7 @@ def tortoise_paginated_query(kind: str | None = None,
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs).
     Alias → graph_overview(section='structure_check') (epic #888 W3)."""
-    return _safe(_get_org_sdk().check_structure)
+    return _safe(_get_org_sdk()._check_structure)
 
 
 def tortoise_validate_domain(domain: str) -> dict:
@@ -5284,7 +5331,7 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
     summary + exit_code (0 clean, 1 issues). Same surface as the
     `tortoise audit` CLI — both wrap the shared SDK audit() method.
     """
-    return _safe(_get_org_sdk().audit, point_kinds=point_kinds)
+    return _safe(_get_org_sdk()._audit__svc, point_kinds=point_kinds)
 
 
 def tortoise_summarize_structure() -> dict:
@@ -5293,7 +5340,7 @@ def tortoise_summarize_structure() -> dict:
     total counts every non-operator kind (statements, observations, decisions,
     ...), not just the product-strategy gates; operators is reported
     separately. Alias → graph_overview(section='structure') (epic #888 W3)."""
-    return _safe(_get_org_sdk().summarize_structure)
+    return _safe(_get_org_sdk()._summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
@@ -5316,12 +5363,12 @@ def tortoise_list_namespaces() -> list[dict]:
 
 def tortoise_list_batch(batch_id: str) -> dict:
     """Audit one ingest bundle's stamped artifacts (epic #902 A13)."""
-    return _safe(_get_org_sdk().list_batch, batch_id)
+    return _safe(_get_org_sdk()._list_batch, batch_id)
 
 
 def tortoise_list_batches(limit: int = 20) -> list[dict]:
     """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
-    return _safe(_get_org_sdk().list_batches, limit=limit)
+    return _safe(_get_org_sdk()._list_batches, limit=limit)
 
 
 def tortoise_list_tags() -> list[dict]:
@@ -5385,7 +5432,7 @@ def _read_point_served(id: str) -> dict:
     from tortoise.residency import RESIDENCY_FIELD
 
     served: dict = {}
-    out = _safe(_get_org_sdk().get_point, id, served_out=served)
+    out = _safe(_get_org_sdk()._get_point, id, served_out=served)
     if not isinstance(out, dict) or isinstance(out, _SafeError):
         return out
     if not out:
@@ -5483,7 +5530,7 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         # confidence-DESC sort lives in the SDK lane it mirrors,
         # ``search_knowledge(mode='entry_points')``, which opts out for its own
         # reason.
-        results = _safe(_get_org_sdk().tortoise_fts_query, query,
+        results = _safe(_get_org_sdk()._tortoise_fts_query, query,
                         kind=kind_filter, limit=limit,
                         _rerank_candidates=False)
         # #3926: a _safe failure is an _SafeError (never a list), so the
@@ -5534,6 +5581,36 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
+    Two question shapes are answered from STATE instead of from the words, because
+    their answer is a population and not a match set (#13557/#13558):
+    a commitment question ("current commitments", "what are we committed to")
+    reads the live commitments by KIND + STAGE — so it returns a plan/goal/target
+    whose text never says "commitment" — and an ending question ("has anything
+    been withdrawn", "what ended") reads the ended records, each with how it
+    ended (its lifecycle word, the successor it names, or its terminal stage and
+    outcome). No new argument and no new tool is needed for the ending question:
+    the sentence reaches it. ⛔ THE COMMITMENT ONE HAS A FAMILY BOUNDARY, and it is
+    a real caller obligation: the commitment kinds are OBJECT kinds (ONTOLOGY §5),
+    so this call must pass `entity_type='object'` to receive them — with this
+    tool's default `entity_type='point'` a commitment question still returns
+    Points (the capstone's own Q1 point read, which already answered with the live
+    claims). A single call does not return both families. The route is also taken
+    only for a plain question: pass any retrieval knob (`threshold`,
+    `min_confidence`, `order_by`, …) and this stays the relevance read it always
+    was.
+
+    ⛔ AND THE BOUNDARY IS THE WHOLE QUESTION, inclusive of what it must give up:
+    the sentence is matched as a SHAPE, so an ending question with a trailing
+    adverb or an added constraint keeps the relevance read instead of routing —
+    `what has ended recently`, `have any claims been retracted in Q3` and
+    `which claims were retracted by legal` are all RELEVANCE reads. That is
+    deliberate, not an oversight: the population read cannot apply a narrowing,
+    so routing would serve the whole ended set as if the caller's `in Q3` had
+    been honoured. If you want the population, ask the question in its
+    unqualified form (`what ended`, `have any claims been retracted`); if you want
+    the narrowing applied, keep the qualified wording and this is the relevance
+    read you asked for.
+
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
     else persisted prior mean) — and ``null`` with ``ep.ep_state: "absent"``
@@ -5572,7 +5649,7 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     Use threshold > 0 to filter out very weak matches; the old 0.3 default would
     reject nearly all RRF results. (#20)
     """
-    return _safe(_get_org_sdk().tortoise_fts_query, query, kind=kind,
+    return _safe(_get_org_sdk()._tortoise_fts_query, query, kind=kind,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
                  min_confidence=min_confidence, order_by=order_by,
@@ -5670,7 +5747,7 @@ def tortoise_recall(query: str | None = None,
 
     if mode == "gaps":
         results = _safe(
-            _get_org_sdk().recall_gaps, query, kind=kind,
+            _get_org_sdk()._recall_gaps, query, kind=kind,
             limit=limit if limit is not None else 20,
             min_load=min_load if min_load is not None else _RECALL_GAPS_DEFAULTS["min_load"],
             max_support=max_support if max_support is not None else _RECALL_GAPS_DEFAULTS["max_support"],
@@ -5678,7 +5755,7 @@ def tortoise_recall(query: str | None = None,
         )
     elif mode == "subgraph":
         results = _safe(
-            _get_org_sdk().recall_subgraph, seed or query,
+            _get_org_sdk()._recall_subgraph, seed or query,
             depth=depth if depth is not None else _RECALL_SUBGRAPH_DEFAULTS["depth"],
             completeness=completeness if completeness is not None else _RECALL_SUBGRAPH_DEFAULTS["completeness"],
             max_nodes=max_nodes if max_nodes is not None else 500,
@@ -5686,7 +5763,7 @@ def tortoise_recall(query: str | None = None,
     elif mode == "custom":
         # Raw params, full control — no preset clamping.
         results = _safe(
-            _get_org_sdk().recall_state, query, kind=kind,
+            _get_org_sdk()._recall_state, query, kind=kind,
             limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
@@ -5697,7 +5774,7 @@ def tortoise_recall(query: str | None = None,
     else:  # state
         defaults = _RECALL_STATE_DEFAULTS
         results = _safe(
-            _get_org_sdk().recall_state, query, kind=kind,
+            _get_org_sdk()._recall_state, query, kind=kind,
             limit=limit if limit is not None else 10,
             include_superseded=include_superseded,
             min_confidence=min_confidence,
@@ -5764,7 +5841,7 @@ def tortoise_compute_confidence(factors: Any = None,
     factors = _parse(factors)
     evidence = _parse(evidence)
     anchors = _parse(anchors)
-    return _safe(_get_org_sdk().compute_confidence, factors, evidence,
+    return _safe(_get_org_sdk()._compute_confidence, factors, evidence,
                  anchors=anchors,
                  max_hops=max_hops, rel_filter=rel_filter,
                  direction=direction,
@@ -5773,7 +5850,7 @@ def tortoise_compute_confidence(factors: Any = None,
 
 def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dict:
     """Set Beta prior evidence for a claim."""
-    return _safe(_get_org_sdk().set_point_baseline, claim_id, alpha, beta)
+    return _safe(_get_org_sdk()._set_point_baseline, claim_id, alpha, beta)
 
 
 def tortoise_get_confidence(claim_id: str,
@@ -5786,13 +5863,13 @@ def tortoise_get_confidence(claim_id: str,
     posture TORTOISE_EP_REQUIRE_CALIBRATION (default True, post-#344); pass
     False explicitly to opt out.
     """
-    return _safe(_get_org_sdk().get_confidence, claim_id,
+    return _safe(_get_org_sdk()._get_confidence, claim_id,
                  require_calibration=require_calibration)
 
 
 def tortoise_calibrate_summary() -> list[dict]:
     """Audit graph calibration state. Returns per-point guidance."""
-    return _safe(_get_org_sdk().calibrate_summary)
+    return _safe(_get_org_sdk()._calibrate_summary)
 
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
@@ -5828,7 +5905,7 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
         return _SafeError({"error": (
                        f"unknown dream mode {mode!r} — expected one of "
                        "'local', 'stale-first', 'full'"), "code": ERR_INVALID})
-    return _safe(_get_org_sdk().dream, dirty_only=dirty_only, full=full,
+    return _safe(_get_org_sdk()._dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops,
                  require_calibration=require_calibration,
                  mode=mode, budget=budget)
@@ -5841,7 +5918,7 @@ def tortoise_dream_health() -> dict:
     (no daemon per #176)."""
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_org_sdk().dream_health_check)
+    return _safe(_get_org_sdk()._dream_health_check)
 
 
 def tortoise_update_point(id: str, props: Any) -> dict:
@@ -5886,7 +5963,7 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
         return _SafeError({"error": f"create_operator target_ids exceed the cap "
                                     f"({MAX_OPERATOR_TARGETS})",
                            "code": ERR_QUOTA})
-    return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
+    return _safe(_quota_gated(_get_org_sdk()._create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction, semantics=semantics)
 
 
@@ -5899,7 +5976,7 @@ def tortoise_annotate_operator(id: str, bias: float, precision: float,
     consistency: 0-1 — stability across contexts.
     directness: 0-1 — how directly source bears on target.
     """
-    return _safe(_get_org_sdk().annotate_operator, id, bias, precision, consistency, directness)
+    return _safe(_get_org_sdk()._annotate_operator, id, bias, precision, consistency, directness)
 
 
 def tortoise_get_operator(id: str) -> dict:
@@ -5989,7 +6066,7 @@ def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
     call mints a NEW mitigation Point and returns its id, because a retraction
     is terminal (#432/#2422) and is never revived by a re-assertion.
     """
-    return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
+    return _safe(_quota_gated(_get_org_sdk()._mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
@@ -6060,7 +6137,7 @@ def tortoise_delete_point(id: str, dry_run: bool = False) -> dict:
     """
     if dry_run:
         return _safe(_preview_delete_point, _get_org_sdk(), id)
-    return _safe(_get_org_sdk().delete_point_wrapped, id)
+    return _safe(_get_org_sdk()._delete_point_wrapped, id)
 
 
 def tortoise_invalidate(id: str, corrected_by_id: str,
@@ -6075,7 +6152,7 @@ def tortoise_invalidate(id: str, corrected_by_id: str,
     """
     if dry_run:
         return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
-    return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"), id, corrected_by_id)
+    return _safe(_quota_gated(_get_org_sdk()._invalidate_point, "points"), id, corrected_by_id)
 
 
 def tortoise_supersede(old_id: str, new_id: str, transfer_edges: bool | None = None,
@@ -6133,7 +6210,7 @@ def tortoise_retract_point(id: str, dry_run: bool = False) -> dict:
     """
     if dry_run:
         return _safe(_preview_retract_point, _get_org_sdk(), id)
-    return _safe(_quota_gated(_get_org_sdk().retract_point, "points"), id)
+    return _safe(_quota_gated(_get_org_sdk()._retract_point, "points"), id)
 
 
 def tortoise_events_poll(after: str | None = None, types: Any = None,
@@ -6310,7 +6387,7 @@ def tortoise_diary_write(agent_name: str, entry: str,
     """Write an agent diary entry (AAAK format suggested).
     Creates a Point with pointKind=diary, authoredBy=agent.
     """
-    return _safe(_quota_gated(_get_org_sdk().diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
+    return _safe(_quota_gated(_get_org_sdk()._diary_write, "points", abuse_weight=1), agent_name, entry, topic=topic, wing=wing)
 
 
 def tortoise_diary_read(agent_name: str, last_n: int = 10,
@@ -6337,7 +6414,7 @@ def tortoise_list_graphs() -> list[str]:
     from a namespace-prefix test: `org_<id>_` is also the prefix of a DIFFERENT
     org whose id begins with `<id>_`, and a prefix test would leak that
     tenant's graph name."""
-    graphs = _safe(_get_org_sdk().list_graphs)
+    graphs = _safe(_get_org_sdk()._list_graphs)
     if not isinstance(graphs, list):
         return graphs
     if _transport_mode.get() == "http":
@@ -6656,7 +6733,7 @@ def tortoise_session_context() -> dict:
     """Return 'what happened last session' — diary entries, recent Points, Events, confidence changes.
     Returns {no_prior_sessions, diary_entries, recent_points, recent_events, confidence_changes}.
     """
-    return _safe(_get_org_sdk().session_context)
+    return _safe(_get_org_sdk()._session_context)
 
 
 def tortoise_issue_insight(title: str, body: str | None = None,
@@ -6669,7 +6746,7 @@ def tortoise_issue_insight(title: str, body: str | None = None,
     no_prior_knowledge; populated graph + repo with zero indexed points ->
     repo_not_indexed. Returns {has_prior, data_points, insight, more_in_graph}.
     """
-    return _safe(_get_org_sdk().issue_insight, title, body=body, repo=repo, limit=limit)
+    return _safe(_get_org_sdk()._issue_insight, title, body=body, repo=repo, limit=limit)
 
 
 def tortoise_ingest_corpus(directory: str) -> dict:
@@ -6682,7 +6759,7 @@ def tortoise_ingest_corpus(directory: str) -> dict:
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_org_sdk().ingest_corpus, directory)
+    return _safe(_get_org_sdk()._ingest_corpus, directory)
 
 # ── Taxonomy ─────────────────────────────────────────────────
 
@@ -6725,7 +6802,7 @@ def tortoise_topic_summarize(topic: str,
         {topic, total_points, significant: [...], contested: [...],
          disputed_pairs: [...], argument_structure: {...}, meta: {...}}
     """
-    return _safe(_get_org_sdk().topic_summarize, topic,
+    return _safe(_get_org_sdk()._topic_summarize, topic,
                  max_seeds=max_seeds, max_hops=max_hops,
                  include_relationships=include_relationships)
 
@@ -6762,7 +6839,7 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
 
     Never mutates the graph.
     """
-    return _safe(_get_org_sdk().review_connections, mode=mode, scope=scope)
+    return _safe(_get_org_sdk()._review_connections, mode=mode, scope=scope)
 
 
 def tortoise_find_cross_lens_candidates(
@@ -6784,7 +6861,7 @@ def tortoise_find_cross_lens_candidates(
     inflate the per-cycle recall budget. Empty results (not errors) when
     there is nothing to see (D8). Never mutates the graph.
     """
-    return _safe(_get_org_sdk().get_cross_lens_candidates,
+    return _safe(_get_org_sdk()._get_cross_lens_candidates,
                  threshold=threshold, max_candidates=max_candidates,
                  routing=routing, top_k=top_k)
 
@@ -6839,7 +6916,7 @@ def tortoise_org_create(name: str) -> dict:
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
-    return _safe(_get_org_sdk().org_create, name)
+    return _safe(_get_org_sdk()._org_create, name)
 
 
 # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
@@ -6978,7 +7055,7 @@ def tortoise_delete(id: str, dry_run: bool = False,
     # protocol means the default path returns before the write, so a read that
     # lived only in the delete branch would leave `sdk_method="delete"` declared
     # but never consumed on the call an agent actually makes first.
-    delete = sdk.delete
+    delete = sdk._delete
     if confirmation is None or dry_run:
         preview = _safe(_preview_delete, sdk, id)
         if isinstance(preview, _SafeError):
@@ -7051,7 +7128,7 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
                 f"{', '.join(stray)} — those belong to the 'annotate' arm. "
                 "ONE arm per call: a silent partial write is indistinguishable "
                 "from a full one.")})
-        return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
+        return _safe(_quota_gated(_get_org_sdk()._mitigate_operator, "points", abuse_weight=1),
                      id, reason, 0.5 if strength is None else strength, credibility)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
@@ -7066,7 +7143,7 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
                 f"operator_action(action='annotate') cannot record "
                 f"{', '.join(stray)} — those belong to the 'mitigate' arm. "
                 "ONE arm per call.")})
-        return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
+        return _safe(_quota_gated(_get_org_sdk()._annotate_operator, "points"),
                      id, *dims)
     return _SafeError({"error": f"operator_action: unknown action {action!r} — "
                                  f"must be 'mitigate' or 'annotate'"})
@@ -7078,7 +7155,7 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk()._create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str,
                           props: Any = None,
@@ -7122,7 +7199,7 @@ def tortoise_create_object(name: str, objectKind: str,
     # validates whichever value won, so an unknown word is refused either way.
     if goalState is not None:
         props = {**(props or {}), "goalState": goalState}
-    return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk()._create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
@@ -7130,18 +7207,18 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().create_event, "points"), name, eventKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk()._create_event, "points"), name, eventKind, **(props or {}))
 
 
 def tortoise_get_events(eventKind: str | None = None, limit: int = 20) -> list[dict]:
     """Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
     Alias → get(id, type='events', limit=) (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_events, eventKind=eventKind, limit=limit)
+    return _safe(_get_org_sdk()._get_events, eventKind=eventKind, limit=limit)
 
 def tortoise_get_session(session_id: str) -> dict:
     """Get a single agent session Event by session_id.
     Alias → get(id, type='session') (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_session, session_id)
+    return _safe(_get_org_sdk()._get_session, session_id)
 
 def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_model: str | None = None) -> dict:
     """Index session .md files as AgentSession Events. Returns {ingested, updated, skipped, failed, errors}.
@@ -7206,7 +7283,7 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     _reject = _reject_server_managed_props(props)
     if _reject:
         return _SafeError({"error": _reject, "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().create_document, "points"), title, documentKind, **(props or {}))
+    return _safe(_quota_gated(_get_org_sdk()._create_document, "points"), title, documentKind, **(props or {}))
 
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                            sourceDate: str | None = None, props: Any = None) -> dict:
@@ -7241,7 +7318,7 @@ def tortoise_get_source_reliability(url: str) -> dict:
     unassessed → None. NOTE: refreshes the documented reliability cache on the
     Source node (write-through projection), so this tool is not read-only.
     """
-    return _safe(_get_org_sdk().get_source_reliability, url)
+    return _safe(_get_org_sdk()._get_source_reliability, url)
 
 
 # #2204: decorator removed — registry adapter owns registration (see
@@ -7555,7 +7632,7 @@ def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
     """
     if dry_run:
         return _safe(_preview_delete_entity, _get_org_sdk(), id)
-    return _safe(_get_org_sdk().delete_entity, id)
+    return _safe(_get_org_sdk()._delete_entity__svc, id)
 
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
     """Create a typed structural edge between two entities (reification rule).
@@ -7566,7 +7643,7 @@ def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict
     Returns {edge, created, nudges}. (Param order kept from the legacy surface:
     source_id, target_id, predicate → SDK create_edge(relation, from_id, to_id).)
     """
-    return _safe(_quota_gated(_get_org_sdk().create_edge, "points"),
+    return _safe(_quota_gated(_get_org_sdk()._create_edge, "points"),
                  predicate, source_id, target_id)
 
 
@@ -7631,14 +7708,14 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
                                          f"or keep draft and promote via "
                                          f"update_point(status='live')",
                                "code": ERR_INVALID})
-    return _safe(_quota_gated(_get_org_sdk().ingest, "points",
+    return _safe(_quota_gated(_get_org_sdk()._ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)
 
 def tortoise_get_governance(subject_id: str) -> list:
     """Get all entities owned by a Subject.
     Alias → get(id, type='governance') (epic #888 W3)."""
-    return _safe(_get_org_sdk().get_owned_entities, subject_id)
+    return _safe(_get_org_sdk()._get_owned_entities, subject_id)
 
 
 # ── Orient / Direct consolidation (epic #888 W3) ─────────────────────
@@ -8496,7 +8573,7 @@ def tortoise_update_knowledge(id: str, props: Any = None,
         end = invalid_at if invalid_at is not None else valid_until
         if dry_run:
             return _safe(_preview_invalidate, _get_org_sdk(), id, corrected_by_id)
-        return _safe(_quota_gated(_get_org_sdk().invalidate_point, "points"),
+        return _safe(_quota_gated(_get_org_sdk()._invalidate_point, "points"),
                      id, corrected_by_id, valid_to=end)
 
     if arms["temporal"]:
@@ -8511,7 +8588,7 @@ def tortoise_update_knowledge(id: str, props: Any = None,
         end = invalid_at if invalid_at is not None else valid_until
         if dry_run:
             return _safe(_preview_retract_point, _get_org_sdk(), id)
-        return _safe(_quota_gated(_get_org_sdk().retract_point, "points"),
+        return _safe(_quota_gated(_get_org_sdk()._retract_point, "points"),
                      id, valid_to=end)
 
     if dry_run:
@@ -8889,7 +8966,7 @@ def _get_auto_detect(id: str) -> dict:
         resolved = []
     if resolved:
         return dict(resolved[0]["properties"])
-    session = _safe(sdk.get_session, id)
+    session = _safe(sdk._get_session, id)
     if isinstance(session, dict) and session:
         return session
     return {}
@@ -8931,7 +9008,7 @@ def tortoise_get(id: str, type: str | None = None,
     if t == "event":
         return tortoise_get_entity(id)  # Event nodes resolve via get_entity
     if t == "session":
-        return _safe(_get_org_sdk().get_session, id)
+        return _safe(_get_org_sdk()._get_session, id)
     if t == "governance":
         return tortoise_get_governance(id)
     return _SafeError({"error": f"get: unknown type {type!r}. "
@@ -9053,7 +9130,7 @@ def tortoise_promote_point(point_id: str) -> dict:
     operators once all endpoints are live (R16), and wires deferred
     dedup/temporal links (Variant C / W-4).
     """
-    return _safe(_get_org_sdk().promote_point, point_id)
+    return _safe(_get_org_sdk()._promote_point, point_id)
 
 
 def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
@@ -9074,7 +9151,7 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
     byte-identical (no owner approval owed) and gives the client one shape.
     Pinned by `tests/test_12364_mcp_list_return_annotations.py`.
     """
-    rows = _safe(_get_org_sdk().belief_timeline, topic, limit=limit)
+    rows = _safe(_get_org_sdk()._belief_timeline, topic, limit=limit)
     if isinstance(rows, _SafeError):
         return rows  # the failure channel stays _safe's, never an envelope
     return {"result": rows}

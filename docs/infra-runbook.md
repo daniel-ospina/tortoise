@@ -1148,6 +1148,131 @@ On `serve_health`'s `/metrics` the series is
 `tortoise_wait_bound_starved_total{surface="mcp"|"rest"}`, both children declared
 at import for the same absent-vs-zero reason.
 
+### 4.1.1d The embedder's load state — `embedder` (#13674)
+
+**Symptom this exists for.** Hybrid (keyword + vector) retrieval is OFF in production and every
+published surface says `"status": "ok"`. The dense leg contributes nothing, reads silently fall back
+to keyword-only, and the only evidence was a `fly logs` line — `embedder warm-up FAILED
+(load_timeout)` — that nobody was watching for. Measured 2026-11-19: the boot load needs **156.5 s of
+imports alone** on the production box against a **90 s** bound, and each abandoned attempt was never
+reclaimed, which is what reached **3.66 GB** and got the process OOM-killed (the model is 432 MB —
+not the cause).
+
+The body carries
+
+```json
+"embedder": {"model": "BAAI/bge-small-en-v1.5", "available": true, "state": "ready",
+             "last_error": null, "failure_kind": null, "cooldown_remaining_s": 0.0,
+             "threads": {"threads": 1, "source": "default", "previous": null,
+                         "applied": true, "env_vars": ["OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                                                     "OPENBLAS_NUM_THREADS"]},
+             "load_timeout_s": 300.0, "load_elapsed_s": 39.3,
+             "load_in_progress": false, "load_in_progress_s": null}
+```
+
+⛔ **It is REPORTED, never folded into `status`** — the same rule as `wait_bound_breaches` and
+`capture`. An embedder that is loading or on cooldown means **keyword-only reads**, which is a state
+the product is designed to survive and which #2952 already requires each read to DECLARE
+(`declared_retrieval_kind`). Folding it in would pin a deployment degraded for the life of the
+process after one failed load (#10185) and put a restart loop's worth of `503`s on the deploy gate.
+
+Four properties, because each is a different misread:
+
+- **`load_in_progress_s` is the field to read DURING a slow start.** `load_in_progress` is a bool, so
+a 4 s attempt and a 290 s attempt of the same 300 s bound render identically — and they call for
+opposite decisions. `load_in_progress_s` is the in-flight attempt's elapsed seconds (`null` when none
+is running, `null` after a FINISHED load too — the start timestamp outlives its attempt, so the
+running thread is the authority). It is the in-flight attempt's OWN elapsed time; the bound to compare
+it against is `load_timeout_s`, which is the CLASS default — an attempt a caller started with
+`get(load_timeout=…)` runs under THAT bound instead (`embeddings.py::status`). True and harmless on
+the shipped path (the pre-warm takes the default), but the comparison is only exact there.
+- **`load_in_progress_s` PAST `load_timeout_s` means the attempt was ABANDONED** — the caller already
+returned `None` at the bound and the loader is still importing. The guard then refuses to start a
+second attempt for as long as that thread lives, and the leg stays keyword-only. The tuple to match
+is `failure_kind: "load_timeout"` + `load_in_progress: true` + `load_in_progress_s` past the bound —
+**whichever of the two `state` words accompanies it**: `cooldown` while the 60 s negative-cache
+window is live, and `unavailable` once it expires with no `get()` in between, which is the reading a
+quiet box shows because a `/health` poll never re-stamps it. ⛔ A `get()` **inside** the window is
+refused by the outer negative cache (`embeddings.py:1210-1215`) and does NOT touch the stamp, so
+traffic running inside the window does not hold it open: it is re-armed by the first `get()` AFTER
+expiry, i.e. the reclaim refusal (`:1245`) — which is what makes `cooldown` recur on a busy box.
+⛔ Do not read the in-flight bullet's
+“wait, it is RUNNING” mapping on this tuple: `load_in_progress_s` past the bound is the one case
+where the attempt is already dead to its caller. This resolves BY ITSELF when the thread exits (the
+guard clears, and the next `get()` retries once the cooldown has passed).
+
+A reading that stays past the bound for minutes is a WEDGED import, and that does not resolve without
+`fly machine restart` — read the boot log for the bound it hit, then check the image layer/page-cache
+path, not the app. ⛔ But establish that it is wedged from OUTSIDE this block first: the elapsed time
+is wall-clock since the attempt started, so `status()` cannot tell a slow-but-advancing import from a
+stuck one, and a starved loader may legitimately overrun (`#13674`'s bound exists because the measured
+COLD cost is 195.8 s — 156.5 s of imports alone plus a 39.3 s construct — and 300.0 ≈ 195.8 × 1.53).
+
+⛔ **Three routes that look like evidence here and are not.** (1) **An absence of further `embedder:`
+lines.** The LOADER logs nothing between the timeout line and the load finishing or its overrun
+ending — silence is the expected state either way. The one line an overrun produces WHILE IT IS STILL
+RUNNING comes from the READ path, not the loader (`a previous load attempt is STILL RUNNING
+(<elapsed>) — refusing to start a second one`, at most once per 60 s cooldown while traffic asks for
+an embedding), and its growing `elapsed` is the same wall-clock — so seeing it repeat is NOT progress.
+(2) **`faulthandler`.** Nothing here enables it: no `faulthandler.enable()`, `PYTHONFAULTHANDLER`
+unset in `fly.toml`/`Dockerfile.hosted`/`entrypoint.sh`, and the repo's only registrar
+(`tools/embedder_provision.py`) is a CI tool that is not in the image — so a fatal signal prints no
+Python traceback either, and `kill -ABRT` kills the PROCESS (a machine exit and a cold start), not
+just the load. (3) **An in-process `sys._current_frames()` dump from a fresh interpreter** sees its
+OWN frames; `monitoring.py`'s capture samples the LOOP thread and only after
+`LOOP_BLOCK_SAMPLE_AFTER_S`, while the load runs on its own `tortoise-embedder-load` thread.
+
+The route that works is a stack from OUTSIDE the process. `py-spy` is what this runbook has used
+elsewhere, but ⛔ **the image does not ship it** (no dependency in `requirements.txt`,
+`Dockerfile.hosted` or `entrypoint.sh`), so install it on the machine first —
+`fly ssh console -a tortoise-y4mjjq -C "pip install py-spy && py-spy dump --pid <uvicorn pid>"` — which
+needs runtime egress to PyPI (the same sandbox that could hang a runtime HF download,
+`Dockerfile.hosted`). A restart on this reading throws away an import that may be about to finish and
+re-pays the whole cold cost, so get the stack first.
+
+- **`state` is the summary; `failure_kind` is the cause.** `ready` / `cooldown` / `unavailable`, with
+`failure_kind` a member of `FAILURE_KINDS` (`tortoise/exceptions.py`) — as THIS surface publishes it,
+`load_failed` (the common one: an import/construct failure in an installed dependency chain),
+`load_timeout` or `not_installed` — or `null` before any attempt records a cause. Point at that
+declaration rather than re-typing a copy here: it is the ONE set the producer literals are pinned
+against. `model_unavailable` is a member of the vocabulary but NOT a value THIS field holds — it is
+the translation fallback (`embeddings.py::_as_failure_kind`), i.e. the kind a REFUSAL carries when
+nothing was recorded; likewise `no_embedder` / `load_in_flight` are LEG-TRACE words translated at that
+same seam, not failure kinds — publishing one of those here is the #5275/#13528 conflation. `oom` is
+not a member at all: a process killed for memory records nothing, so read the machine for that, not
+this field. `unavailable` with `failure_kind: null` is TWO states, and `load_in_progress` separates
+them — `load_in_progress: false` means no attempt has run in THIS process yet (a fresh boot before
+the pre-warm landed) and is not a failure, while `load_in_progress: true` means a first load is
+RUNNING at this very moment and `load_in_progress_s` is the number to read. A fresh deploy's first
+read lands in that second state (the pre-warm is a thread started at lifespan), so calling it "no
+attempt yet" sends an operator hunting a pre-warm that is 190 s into its own 300 s bound.
+- **`load_timeout_s` is the bound the PROCESS applies**, and it must read `300.0` on this image. A
+`90.0` here is a pre-#13692 binary still deployed, which is the whole outage.
+- **`threads` is the intra-op pin** (#10296), published for the same "why is this host slow" question;
+`null` before any load attempt.
+
+⛔ **`available: null` is NOT "the model is unavailable" — it is "this block could not be read".**
+If `status()` itself raises (an embeddings import half-written by a deploy, a partial wheel), the
+block still arrives — with the SAME key set, every value `null`, plus `error`
+(`hosted_api.py::_embedder_health`, its never-raise arm) — and `/health` is still a **200**. Read it
+as INCONCLUSIVE: `available: false` means the dense leg is down **and measured** (then read `state`
+and `failure_kind`), while `available: null` means the reading failed and this process knows
+nothing about the leg. Check `error` and the process's own logs; do NOT page on `available` alone,
+and do not read `null` as "no attempt yet" — that reading is `available: false` with
+`state: "unavailable"`, `failure_kind: null` and `load_in_progress: false`. All four terms are
+needed: drop `failure_kind` and the same tuple describes a load that FAILED and whose 60 s
+cooldown has since expired (#13819 review).
+
+```bash
+curl -sS https://api.premiselabs.co/health \
+  | jq '.embedder | {available, state, failure_kind, load_timeout_s, load_in_progress_s}'
+```
+
+The boot half of the same question is a log line, not this block: `entrypoint.sh`'s
+`_prewarm_embedder` prints `embedder boot pre-warm OK` with a staged breakdown (`torch_import_s` /
+`st_import_s` / `construct_s` / `encode_s`), or a WARNING naming the bound it hit. `fly logs` is the
+only reader for THAT — the block above is what answers "is the leg up NOW".
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.
@@ -4259,6 +4384,136 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 | TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
+| TORTOISE_EMBEDDER_WARMUP | ✅ **The embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — the value is **version-controlled** in `fly.toml [env]` (`TORTOISE_EMBEDDER_WARMUP = "0"`, production's live value) and declared `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (#13923 / #13926), so flipping it is a merged `[env]` edit, not an out-of-band secret. ⛔ **While a Fly secret of this name is on the app it SHADOWS `[env]`** — true as of **2026-11-20**, and a VOLATILE fact, so re-measure (`flyctl secrets list -a tortoise-y4mjjq`) rather than trusting this sentence — so the versioned value is dead until that secret is unset **after** a deploy applied `[env]` — the four steps and their failure modes live in the manifest's route-(b) block, and the transition is tracked in #13923. See §"The embedder warm-up switch" below | — | — (no GitHub secret, and it must stay OUT of the deploy payload: the manifest's own VCS declaration is the source) |
+
+### The embedder warm-up switch — `TORTOISE_EMBEDDER_WARMUP` (#13674)
+
+> ⛔ **This is a WARM-UP switch, not a request-path kill switch.** With it `0`, the app still loads
+> the model on the **first request that needs an embedding**, cold, under its own bound. Turning it
+> off MOVES the cost to that first request; it does not remove it. The check is
+> `tortoise/embeddings.py::_embedder_warmup_enabled` (`:40-50`, `env_flag(..., True)` — shipped
+> default **ON**), and it gates **five** read sites:
+>
+> 1. the SDK engine-init warm-up — `tortoise/embeddings.py::start_warm_up`, gated at `:1361`;
+> 2. the SDK **write-path** bound — `tortoise/embeddings.py::await_write_ready_reason`,
+>    `:1466` (#13224);
+> 3. the SDK **read-path** bound — `tortoise/embeddings.py::await_read_ready_reason`,
+>    `:1592` (#13528);
+> 4. the **HOSTED (production) lifespan pre-warm** — `tortoise/hosted_api.py::_lifespan`,
+>    `:3225-3235` (the reader that runs on the deployed box);
+> 5. the boot pre-warm in the shell — `entrypoint.sh::_prewarm_embedder`, `:426-446`, the `_flag`
+>    read at `:432`.
+>
+> ⛔ Count these in the right UNIT: **three warm-up surfaces** (1, 4, 5) **+ two readiness bounds**
+> (2, 3) **= five read sites**. "Five warm-up surfaces" is wrong; "three read sites" omits the bound
+> pair. The **function names** are the invariant — the line numbers are a convenience and they move
+> whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **This copy is the only line-citing
+> one left, and it is pinned:** `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
+> resolves each cite above by NAME↔NUMBER, so a merge that moves the code reds instead of rotting it
+> silently. The manifest used to carry a sibling copy and its own pin; **this change** deletes the
+> `fly-only:#13674` block that carried it (#13926 had already taken the name to route (b), and that
+> block landed on top of it seven minutes later — which is what produced the duplicate), so there is
+> no second copy to keep in step: do not reintroduce one without its own arm.
+>
+> ⛔ **What that arm does NOT cover.** Its region stops at the "When to flip it" sentence, so the three
+> timing/cold-load cites further down this section — the `_prewarm_embedder` window in `entrypoint.sh`,
+> the cold-load timing in `embeddings.py`, and the boot override beside it — are read by NO test and rot
+> silently: re-pinning one to a neighbouring line leaves the suite green (measured). The manifest
+> paragraph that used to disclose this went with the `fly-only:` block, so the disclosure lives here now.
+>
+> Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
+> path, so a box that looks quiet to an SDK-based check can still be paying the load.
+> Number 2 and 3 are the second most likely to be missed, and they change behaviour: with the flag
+> `0` each returns `None` immediately (`:1466-1470`, `:1592-1593`), so the write and read paths fall
+> back to the **synchronous in-request load** — that fallback is part of what flipping the switch
+> chooses.
+
+**When to flip it.** #13674 Scope item 3 records the `0` value verbatim — *"`TORTOISE_EMBEDDER_WARMUP=0`
+is the *emergency* switch it is, not the steady state"*. Production has run it at `0` while the
+embedder could not load (`entrypoint.sh:427-430`): paying boot cost for a model the app will not load
+is pure cost. The cost context is why the lever exists: a ~432 MB model on a 2 cpu / 4096 MB box. ⛔
+Quote the **cold load**, not the import: imports alone measured **156.5 s** (`import torch` 24.1 s +
+`sentence_transformers` 132.4 s), but a cold load is ≈ 156.5 + 39.3 = **195.8 s**
+(`embeddings.py:894`, `entrypoint.sh:422-423`). Quoting 156.5 s understates what setting `=0` stops
+by 39.3 s.
+
+```bash
+# Flipping it is a MERGED change — the value is version-controlled:
+#   fly.toml [env]                           TORTOISE_EMBEDDER_WARMUP = "0"   # or "1" for the shipped default (ON)
+#   .github/scripts/fly-managed-secrets.txt  TORTOISE_EMBEDDER_WARMUP        fly-toml-env
+# ⛔ NOT `fly secrets set`: that creates a Fly secret, and a Fly secret SHADOWS `[env]`,
+#    so the versioned value would be dead — the gate refuses exactly that state (below).
+```
+
+⚠️ **While a Fly secret of this name is on the box it SHADOWS `[env]`** — measured **2026-11-20**, and this is a
+VOLATILE production fact, not a property of the tree: re-measure `flyctl secrets list -a tortoise-y4mjjq`
+before relying on it. Until that secret is unset,
+the versioned value is not what the app reads, so the provenance gate is RED on this name by design.
+⛔ **The ORDER is not this section's to restate** — the manifest's route-(b) block owns the four steps
+and their failure modes: `[env]` must be **on the machine before the unset**, because until a deploy
+applies it the box is running the pre-`[env]` `fly.toml`, and a flag unset on that release falls back to
+the shipped default (ON) until one does — ~196 s of extra boot on every boot in the window, measured and
+recorded on #13926, **not** an outage and **not** the ~5 h absence of #4568 (which is a different flag,
+and the *shape* to avoid: a value missing from the MERGED `fly.toml`). Follow that block; the transition
+is tracked in #13923.
+
+Two red states an operator will meet while moving this name. **Both are expected states, not a
+regression** — the first is the interval the sanctioned transition passes through, the second is what a
+revert split across two changes looks like — and neither can be cleared by editing prose:
+
+| state | what the gate prints |
+|---|---|
+| the `fly-toml-env` declaration stands while the Fly secret is still live | `STALE DECLARATION — 'TORTOISE_EMBEDDER_WARMUP' is declared fly-toml-env but is also a Fly secret, which shadows [env] (declare the real source instead; for a sanctioned fly-toml-env transition the shadow is unset LAST, after [env] is on the machine — docs/infra-runbook.md §8.4)` |
+| the declaration is deleted while the Fly secret is still live | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
+
+The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second by
+restoring the declaration — and note that an unset ALONE clears the violation while leaving the name
+declared NOWHERE, which the shipped-artifacts test reds on (`no longer declared at all`): an unset is
+not a substitute for the declaration.
+⛔ **The unset itself is not a third red — it is the one step that is GREEN.** Unsetting the secret while
+the `fly-toml-env` declaration stands produces **no violation for this name** (`fly.toml [env]` alone
+satisfies the declaration), so an unset that lands BEFORE `[env]` is on the machine is **not** caught
+here: its cost is behavioural (flag unset ⇒ warm-up ON ⇒ the ~196 s cold load, #13926's recorded
+correction) and the order is prescribed by the manifest's route-(b) block, **not enforced by a red**.
+Do not read a green run as permission to unset first. What is NOT green, and must never be merged as
+if it were, is DELETING the declaration while the secret lives — that is row 2 above, `UNDECLARED`.
+The quotes above are bound to the messages the gate **actually prints** by
+`tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
+violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
+
+⛔ **And the transition must be PERFORMED AND VERIFIED — but it cannot START from `main`, and that is
+the requirement the LANDING satisfies.** While the manifest is
+unparseable (`main`'s duplicate pair) every `deploy-hosted` run dies at exit **2**, and exit 2 has no
+bypass at all (`deploy-hosted.yml:743` gates RC=1 only) — so no release can carry `[env]` to the box
+and #13923's steps 2–4 cannot begin. Its own status comment states it: *"Steps 2-4 are
+blocked until the duplicate is removed."* Removing the duplicate is therefore the PRECONDITION of the transition,
+not a substitute for it: follow the manifest's route-(b) block for the four steps (the deploy must be the
+`deploy-api` JOB's Deploy step, not the run, and step 4 requires BOTH `flyctl secrets list` and
+`printenv`), then re-measure. ⛔ What must not happen is
+anyone reading the exit-1 state as done — it is the bypassable class, not the green one. ⛔ **A green suite is not that
+verification:** the three states measure differently and only one is green — `main`'s duplicate pair
+is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
+the REJECTED direction — `fly-only:#13674` with the `[env]` row removed, i.e. reverting #13926, which is
+an owner decision (#13923) and not a lane's — is exit **0**, but only while the secret is LIVE: withhold
+it and `fly-only:` reds with a STALE declaration (its message is the `fly-only:`-specific one — no test
+binds that wording, so it is deliberately not quoted here), because that token requires a real
+out-of-band secret (#13941's direction check, measured 2026-11-20). ⛔ The false green is the
+other way round: THIS route-(b) state reads exit **0** for this name if the secret list is seeded
+WITHOUT it, which is exactly what a fixture that models the transition away does.
+The route-(b) PAIR — exit 1 with the shadow, exit 0 with it withheld — is pinned by
+`tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+(it seeds this name as the live shadow, so this state cannot be reported as clean again). The rejected
+direction's exit 0 is a HAND measurement above and is NOT pinned — that test reds first on its
+`open_route_b` guard (`… is recorded here as an OPEN route-(b) transition but this manifest declares
+it 'fly-only:#13674'`), before the gate even runs. The exit-2 half is pinned by
+`::test_duplicate_declaration_is_exit_2`, on a fixture manifest — which is why the duplicate must never
+be re-created.
+
+⛔ **The `fly-toml-env` declaration is NOT `fly-only:` and must not be rewritten as one.** `fly-only:`
+is RESERVED for a deliberate, PERMANENT out-of-band secret whose issue carries a recorded `OVERRIDES:`
+ruling; this value is non-secret config whose source is version control, which is the `fly-toml-env`
+route. The checker also refuses a `fly-only:` line for an `[env]` key
+(`tests/test_fly_secret_drift.py::test_fly_only_on_a_fly_toml_env_key_is_stale`).
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 

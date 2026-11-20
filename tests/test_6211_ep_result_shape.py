@@ -104,7 +104,7 @@ def test_a_capped_selection_is_distinguishable_in_the_result():
     sdk = _fresh_sdk()
     try:
         anchor, _other = _hub(sdk, DEFAULT_OP_CAP + 60)
-        result = sdk.compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
+        result = sdk._compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
         assert result["truncated"] is True, (
             f"a pass whose operator selection hit the cap must say so; result was {sorted(result)}"
         )
@@ -140,7 +140,7 @@ def test_the_noarg_dirty_path_reports_its_dream_selections_cap():
         _hub(sdk, DEFAULT_OP_CAP + 60)
         sdk._mark_dirty(["c0", "c1"])
         assert sdk._dirty_roots, "precondition: the roots are dirty"
-        result = sdk.compute_confidence(require_calibration=False)
+        result = sdk._compute_confidence(require_calibration=False)
         assert result["truncated"] is True, (
             "the dream pass that shaped these priors selected "
             f"{DEFAULT_OP_CAP} of >{DEFAULT_OP_CAP} operators; result was "
@@ -163,7 +163,7 @@ def test_an_uncapped_selection_reports_truncated_false():
     sdk = _fresh_sdk()
     try:
         anchor, _other = _hub(sdk, 2)
-        result = sdk.compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
+        result = sdk._compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
         assert result["truncated"] is False, (
             f"an uncapped pass must report truncated=False; got {sorted(result)}"
         )
@@ -180,7 +180,7 @@ def test_the_explicit_factors_path_reports_its_own_selection():
     sdk = _fresh_sdk()
     try:
         _anchor, _other = _hub(sdk, 3)
-        result = sdk.compute_confidence(factors=["op0", "op1"], require_calibration=False)
+        result = sdk._compute_confidence(factors=["op0", "op1"], require_calibration=False)
         assert result["truncated"] is False
         assert result["operators_seen"] == 2
         assert result["operators_used"] == 2
@@ -518,7 +518,7 @@ def test_a_small_graph_still_converges_without_the_typed_error():
         ep = TortoiseEP(sdk._get_proj())
         affected = ep._affected_claims([anchor], 2)
         assert {"c0", "c1"} <= affected
-        result = sdk.compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
+        result = sdk._compute_confidence(anchors=[anchor], max_hops=1, require_calibration=False)
         assert result["converged"] is True
         assert result["confidences"]
         assert result["truncated"] is False

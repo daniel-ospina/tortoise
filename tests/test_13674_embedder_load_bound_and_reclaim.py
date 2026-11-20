@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import inspect
 import logging
 import os
 import subprocess
@@ -98,6 +99,24 @@ class _Sentinel:
     def __init__(self, mb: int):
         self.buf = _touch(bytearray(mb * 1024 * 1024))
         self.mb = mb
+
+
+class _RecordingLock:
+    """A lock wrapper that records how many times it is currently held."""
+
+    def __init__(self, real):
+        self.real = real
+        self.held = 0
+
+    def __enter__(self):
+        self.real.acquire()
+        self.held += 1
+        return self
+
+    def __exit__(self, *exc):
+        self.held -= 1
+        self.real.release()
+        return False
 
 
 class _Frame:
@@ -258,6 +277,15 @@ class TestReclaimBeforeRetry:
 
         assert EmbeddingModel.get(load_timeout=0.1) is None
         assert EmbeddingModel._last_failure_kind == "load_timeout"
+        # ⛔ The WRITER, not just the reader: the F3 row below sets
+        # `_load_attempt_timeout_s` by hand, so deleting this assignment from
+        # `__init__` left the whole file green (#13819 review of the fix). The
+        # attempt must RECORD the bound it runs under, or the reclaim warning
+        # silently falls back to the class default.
+        assert EmbeddingModel._load_attempt_timeout_s == 0.1, (
+            "the attempt did not record its own bound — the reclaim warning "
+            "will quote the class default (F3)"
+        )
         assert EmbeddingModel.load_attempt_in_flight() is True, (
             "the abandoned attempt must still be tracked, or the guard below "
             "has nothing to refuse"
@@ -283,6 +311,48 @@ class TestReclaimBeforeRetry:
         )
         thread = EmbeddingModel._load_attempt_thread
         assert thread is not None and thread.is_alive()
+
+    def test_the_reclaim_refusal_decides_and_logs_from_one_reading(
+            self, monkeypatch, clean_embedder, caplog):
+        """The guard's CONDITION and its message must be the same read.
+
+        `get()` called `load_attempt_in_flight()` and then
+        `_describe_load_attempt()`, which reads the thread a SECOND time — so a
+        loader dying between the two logged "a previous load attempt is STILL
+        RUNNING (elapsed unknown, bound 300s)": liveness and an unknown elapsed
+        asserted in one clause, on the diagnosis an operator reads during a cold
+        boot (#13819 review of the fix — F1's class on the log path).
+
+        The fake answers in-flight ONCE and then reports a dead thread; the call
+        count pins that the guard asked only once.
+        """
+        reads = {"n": 0}
+
+        def _once_then_dead(cls):
+            reads["n"] += 1
+            if reads["n"] == 1:
+                return (True, 42.0, 300.0)
+            return (False, None, 300.0)
+
+        monkeypatch.setattr(EmbeddingModel, "load_attempt_snapshot",
+                            classmethod(_once_then_dead))
+        monkeypatch.setattr(EmbeddingModel, "_instance", None)
+        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", None)
+
+        with caplog.at_level("WARNING", logger=embeddings_mod.logger.name):
+            assert EmbeddingModel.get() is None
+
+        lines = [r.getMessage() for r in caplog.records
+                 if "STILL RUNNING" in r.getMessage()]
+        assert lines, f"the reclaim guard never refused: {caplog.text!r}"
+        assert "elapsed 42.0s" in lines[-1], (
+            f"the guard decided on one reading and logged another: {lines[-1]!r}"
+        )
+        assert "elapsed unknown" not in lines[-1]
+        assert reads["n"] == 1, (
+            f"the guard took {reads['n']} readings of the attempt thread — its "
+            "condition and its message can disagree"
+        )
 
     @pytest.mark.skipif(not os.path.exists("/proc/self/status"),
                         reason="needs /proc for the RSS measurement")
@@ -378,6 +448,129 @@ class TestTheBoundAndElapsedAreObservable:
 
         assert EmbeddingModel.get(load_timeout=0.05) is None
         assert EmbeddingModel.status()["load_in_progress"] is True
+
+    def test_a_first_load_reads_unavailable_while_it_is_still_in_flight(
+            self, monkeypatch, clean_embedder):
+        """THE OPERATOR CONTRACT THIS PIN EXISTS FOR (#13674 review round 4, F1).
+
+        `state` has three values and is derived from `_instance`/`_model` alone,
+        and `_instance` is assigned only AFTER the constructor returns — so the
+        FIRST attempt of a process, which is the production cold-boot load this
+        issue is about, reads `unavailable` with `failure_kind: null` while it
+        is loading. That tuple does NOT mean "no attempt has run": the
+        discriminator is `load_in_progress`. The runbook's table says exactly
+        that, and this row is what makes it un-revertable — the in-flight row
+        above samples the ABANDONED state, where `state` is already `cooldown`,
+        so nothing pinned the live first-attempt window before this.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0, hold_s=1.5)
+
+        # A caller that is still WAITING for the load: generous bound, own
+        # thread, so the attempt is in flight while this test samples `status()`
+        # (a short bound would abandon it and land in `cooldown` instead).
+        waiter = threading.Thread(
+            target=lambda: EmbeddingModel.get(load_timeout=30.0), daemon=True)
+        waiter.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while frame.calls < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert frame.calls == 1, "the fake loader never started"
+
+            status = EmbeddingModel.status()
+            assert status["load_in_progress"] is True
+            assert status["available"] is False
+            assert status["failure_kind"] is None
+            assert status["state"] == "unavailable", (
+                f"a load IN FLIGHT reads state={status['state']!r}; the runbook "
+                "tells the operator to read `unavailable` + `load_in_progress: "
+                "true` as IN FLIGHT, and a fourth state would contradict it"
+            )
+            assert status["load_in_progress_s"] is not None
+        finally:
+            waiter.join(timeout=60)
+        assert not waiter.is_alive(), "the stubbed load never finished"
+        assert EmbeddingModel.status()["state"] == "ready"
+
+    def test_status_reads_the_attempt_thread_once_not_twice(
+            self, monkeypatch, clean_embedder):
+        """ONE snapshot, so the pair cannot tear (#13819 review F1).
+
+        The bug: `status()` read the thread once for `load_in_progress` and
+        then AGAIN (through a helper) for `load_in_progress_s`. A loader that
+        dies between the two reads published
+        `load_in_progress: true` beside `load_in_progress_s: null` — a pair no
+        state of the machine produces, on the surface #13674 exists to make
+        readable.
+
+        The discriminator is a thread whose `is_alive()` answers True then
+        False: with a second read the two fields disagree, and the call count
+        pins that only ONE read happened.
+        """
+
+        class _DiesOnSecondRead:
+            def __init__(self):
+                self.reads = 0
+
+            def is_alive(self):
+                self.reads += 1
+                return self.reads == 1
+
+            def join(self, timeout=None):  # the fixture's teardown joins it
+                return None
+
+        attempt = _DiesOnSecondRead()
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", attempt)
+        monkeypatch.setattr(EmbeddingModel, "_load_started_at",
+                            time.monotonic() - 12.0)
+
+        status = EmbeddingModel.status()
+
+        assert attempt.reads == 1, (
+            f"status() read the attempt thread {attempt.reads} times — the two "
+            "published fields can disagree, which is the torn pair this fixes"
+        )
+        assert status["load_in_progress"] is True
+        assert status["load_in_progress_s"] is not None, (
+            "`load_in_progress: true` beside `load_in_progress_s: null` — the "
+            "torn pair is back (#13819 review F1)"
+        )
+        assert 11.0 < status["load_in_progress_s"] < 60.0
+
+    def test_the_reclaim_warning_names_the_attempts_own_bound(
+            self, monkeypatch, clean_embedder):
+        """The refusal quotes the bound the ATTEMPT runs under (#13819 F3).
+
+        `_describe_load_attempt` interpolated `cls._LOAD_TIMEOUT_S`, so an
+        attempt a caller had bounded at 7 s was described as \"of its 300s
+        bound\" — the same class-default misdirection the timeout log had
+        (pinned above by `test_the_timeout_log_names_the_bound_that_fired`),
+        in the other warning an operator reads during a cold boot. Latent on
+        the shipped path (the lifespan pre-warm takes the default), wrong the
+        moment a caller passes `load_timeout`.
+        """
+
+        class _Alive:
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):  # the fixture's teardown joins it
+                return None
+
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", _Alive())
+        monkeypatch.setattr(EmbeddingModel, "_load_started_at",
+                            time.monotonic() - 3.0)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_timeout_s", 7.0)
+
+        line = EmbeddingModel._describe_load_attempt()
+        assert "7s bound" in line, (
+            f"the reclaim warning names a bound the attempt did not use: {line!r}"
+        )
+        assert f"{EmbeddingModel._LOAD_TIMEOUT_S:.0f}s" not in line, (
+            f"the pre-fix defect is back — the line names the CLASS default: "
+            f"{line!r}"
+        )
 
     def test_the_timeout_log_names_the_bound_that_fired(self, monkeypatch,
                                                        clean_embedder, caplog):
@@ -505,9 +698,9 @@ class TestTheDeclarationReachesTheQueryPath:
             classmethod(lambda cls, load_timeout=None: encoder))
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            sdk.tortoise_fts_query("alpha beta gamma", read_status_out=out,
+            sdk._tortoise_fts_query("alpha beta gamma", read_status_out=out,
                                    limit=5)
             assert out.get("retrieval") == RETRIEVAL_HYBRID, (
                 "a query with a loaded embedder must DECLARE the dense leg it "
@@ -523,9 +716,9 @@ class TestTheDeclarationReachesTheQueryPath:
             classmethod(lambda cls, load_timeout=None: None))
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            sdk.tortoise_fts_query("alpha beta gamma", read_status_out=out,
+            sdk._tortoise_fts_query("alpha beta gamma", read_status_out=out,
                                    limit=5)
             assert out.get("retrieval") == RETRIEVAL_KEYWORD_ONLY, (
                 f"a keyword-only read must not leave the leg to be inferred; "
@@ -566,6 +759,171 @@ class TestTheReclaimGuardDoesNotLeakAcrossResets:
             "read as 'a previous attempt is still running' (#13674 F5)"
         )
         assert EmbeddingModel.load_attempt_in_flight() is False
+
+    def test_the_attempt_clear_happens_under_the_publish_lock(
+            self, monkeypatch, clean_embedder):
+        """The clear must contend on the lock the PUBLISHER holds (#13841).
+
+        `get()` publishes the attempt record while holding `cls._lock` (it holds
+        it across the `cls(load_timeout=…)` call, i.e. across `__init__`'s
+        write). Clearing outside that lock left a window in which a reset could
+        read a published-but-not-yet-started thread (`is_alive()` False), drop
+        the record, and leave a LIVE loader unreferenced: the reclaim guard
+        disarmed, and the block reporting `load_in_progress: false` while a
+        loader runs (a silent false negative).
+
+        Nothing pinned it — re-indenting the block out of `with cls._lock:` left
+        every row green. This row records whether the lock was HELD at the
+        moment `is_alive()` is consulted.
+        """
+        proxy = _RecordingLock(EmbeddingModel._lock)
+        seen = {}
+
+        class _DeadStub:
+            def is_alive(self):
+                seen["held"] = proxy.held
+                return False
+
+        monkeypatch.setattr(EmbeddingModel, "_lock", proxy)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", _DeadStub())
+
+        EmbeddingModel._reset()
+
+        assert seen.get("held") == 1, (
+            "the attempt record was cleared with `_lock` NOT held — a reset can "
+            "race the publisher (`get()` holds it across `__init__`'s write) and "
+            "leave a live loader unreferenced, disarming the reclaim guard "
+            f"(held={seen.get('held')!r})"
+        )
+
+    def test_a_live_attempt_keeps_its_own_bound_across_a_reset(
+            self, monkeypatch, clean_embedder):
+        """The LIVE mirror of the dead-attempt row below (#13841 review).
+
+        Clearing the bound is conditional on the attempt being DEAD: a live
+        overrunning loader must keep the bound IT ran under, because
+        `_describe_load_attempt()` quotes it in the reclaim refusal. Hoisting the
+        `_load_attempt_timeout_s = None` line out of the `if attempt is None or
+        not attempt.is_alive():` block left every row green (measured), and it
+        resurrects #13819 F3 — the warning would name the class default instead
+        of the bound that actually fired.
+        """
+        release = threading.Event()
+        live = threading.Thread(target=release.wait, daemon=True)
+        live.start()
+        try:
+            deadline = time.monotonic() + 15.0
+            while not live.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert live.is_alive(), "the stub thread never started"
+
+            EmbeddingModel._reset()
+            EmbeddingModel._load_attempt_thread = live
+            EmbeddingModel._load_attempt_timeout_s = 7.0
+            EmbeddingModel._reset()
+
+            _in_flight, _elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+            assert bound == 7.0, (
+                f"a LIVE attempt's bound was reset away ({bound!r}s) — the "
+                f"reclaim refusal would then quote the class default instead of "
+                f"the bound this attempt ran under (#13819 F3)"
+            )
+        finally:
+            release.set()
+            live.join(30)
+            EmbeddingModel._load_attempt_thread = None
+            EmbeddingModel._reset()
+
+    def test_the_attempts_clock_is_published_before_its_thread(self):
+        """The WRITER's order is what makes the lock-free reader consistent.
+
+        `load_attempt_snapshot()` takes no lock (it must not: `get()` holds
+        `cls._lock` for the whole load) and reads `_load_attempt_thread` BEFORE
+        `_load_started_at`. Published the other way round, a reader preempted
+        between those two reads pairs the new thread with the PREVIOUS attempt's
+        start — a huge elapsed — or with `None`, publishing
+        `load_in_progress: true` beside `load_in_progress_s: null`: the pair the
+        snapshot exists to make impossible, and the reading an operator uses to
+        decide whether to restart a machine mid-import.
+
+        The invariant is TWO-SIDED — the snapshot's own docstring says reordering
+        *either* side restores the tear — so BOTH sides are pinned here, and the
+        reader's THREE field reads are pinned pairwise against the field the
+        writer publishes LAST. Swapping any reader read ahead of the THREAD read
+        left every row green (measured: the clock swap at #13841 review, and the
+        bound swap at #13841 round 5) — the same class of tear, and the reason the
+        bound is pinned explicitly rather than assumed covered by the clock
+        assertion. A reader that reads the BOUND first pairs a live NEW thread
+        with the PREVIOUS attempt's bound (or with `None` → the 300 s default),
+        which is the #13819 F3 misdirection back on the reclaim warning path.
+
+        Pinned as an ORDER IN THE SOURCE, the same way
+        `test_the_call_sits_before_the_topology_sentinel` pins `entrypoint.sh`: a
+        class-attribute write cannot be intercepted by a descriptor (``type(self)
+        ._load_started_at = …`` goes through the metaclass, not the class dict),
+        so the pins are the order of the statements in each function's source.
+        """
+        source = inspect.getsource(EmbeddingModel.__init__)
+        clock = source.index("_load_started_at = _attempt_started_at")
+        thread = source.index("_load_attempt_thread = t")
+        bound = source.index("_load_attempt_timeout_s = timeout")
+        assert clock < thread, (
+            "the attempt's THREAD is published before its CLOCK — "
+            "`load_attempt_snapshot()` takes no lock and reads the thread "
+            "FIRST, so it can pair a live thread with the PREVIOUS attempt's "
+            "start time (a huge elapsed) or with None: `load_in_progress: "
+            "true` beside `load_in_progress_s: null` (#13841 review)"
+        )
+        assert bound < thread, (
+            "the attempt's BOUND is published AFTER its thread — the reader "
+            "reads thread then clock then bound, so a lock-free read can pair a "
+            "live NEW thread with the PREVIOUS attempt's bound (or with None → "
+            "the 300 s default, which is the #13819 F3 misdirection back on the "
+            "warning path). Write the bound FIRST (#13841 review)"
+        )
+
+        reader = inspect.getsource(EmbeddingModel.load_attempt_snapshot)
+        read_thread = reader.index("thread = cls._load_attempt_thread")
+        read_clock = reader.index("started = cls._load_started_at")
+        read_bound = reader.index("bound = cls._load_attempt_timeout_s")
+        assert read_thread < read_clock, (
+            "`load_attempt_snapshot()` reads the CLOCK before the THREAD — the "
+            "writer publishes clock-then-thread, so a reader that reads in that "
+            "same order can pair the PREVIOUS attempt's start with the NEW "
+            "attempt's live thread: a `load_in_progress_s` far past the bound, "
+            "i.e. a false ABANDONED verdict on a load that just started "
+            "(#13841 review)"
+        )
+        assert read_thread < read_bound, (
+            "`load_attempt_snapshot()` reads the BOUND before the THREAD — the "
+            "writer publishes the bound FIRST, precisely so a lock-free reader "
+            "that can already see the thread sees that attempt's own bound. "
+            "Read in the other order, a reader preempted between the two reads "
+            "pairs a live NEW thread with the PREVIOUS attempt's bound (or with "
+            "None → the 300 s default), publishing the WRONG bound on the "
+            "reclaim warning: the #13819 F3 misdirection (#13841 review)"
+        )
+
+    def test_a_reset_drops_the_dead_attempts_bound_too(
+            self, monkeypatch, clean_embedder):
+        """The attempt's own bound must not outlive the attempt (#13819 review).
+
+        `_reset()` clears the record of a DEAD attempt; the bound recorded with
+        that attempt is part of the record, or a later snapshot quotes a stale
+        override that no longer applies. Nothing pinned the line, so deleting it
+        left the whole file green — measured, not assumed.
+        """
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_thread", None)
+        monkeypatch.setattr(EmbeddingModel, "_load_attempt_timeout_s", 7.0)
+
+        EmbeddingModel._reset()
+
+        _in_flight, elapsed, bound = EmbeddingModel.load_attempt_snapshot()
+        assert (_in_flight, elapsed) == (False, None)
+        assert bound == EmbeddingModel._LOAD_TIMEOUT_S, (
+            f"a dead attempt's bound ({bound!r}s) outlived `_reset()` — the next "
+            f"diagnosis would quote it as the bound in force"
+        )
 
     def test_a_live_attempt_survives_a_reset(self):
         """The mirror of the assertion above: a live importer is not reset away.
@@ -787,8 +1145,22 @@ class TestTheBootPrewarm:
             self, tmp_path):
         """#13674 review F3 — the switch gates WARM-UP; `get()` is NOT gated.
 
-        `TORTOISE_EMBEDDER_WARMUP` gates exactly `start_warm_up`, `warm_up`, the
-        write-path warm-up and the hosted lifespan pre-warm. `EmbeddingModel.get()`
+        `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites, and this docstring
+        names them by FUNCTION because the names are the invariant (line numbers
+        rot on every merge that grows `embeddings.py`): `start_warm_up` (the SDK
+        engine-init warm-up), `await_write_ready_reason` and
+        `await_read_ready_reason` (the write- and read-path bounds), the hosted
+        lifespan pre-warm (`tortoise.hosted_api._lifespan`), and
+        `entrypoint.sh::_prewarm_embedder` (the boot pre-warm). `warm_up` is NOT
+        one of the five — it never reads the flag itself; `start_warm_up` is what
+        gates it. Three warm-up surfaces plus two readiness bounds is the unit: a
+        "four readers" count drops the read-path bound and the shell, which is
+        what this docstring said until #13941 re-derived it. The line-citing copy
+        of that list is `docs/infra-runbook.md` §"The embedder warm-up switch",
+        re-pinned on a merge by
+        `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
+        — do not add a second line-citing copy.
+        `EmbeddingModel.get()`
         — the request path — is not gated, and `tortoise/mcp_auth.py` says so
         verbatim: "``TORTOISE_EMBEDDER_WARMUP`` does NOT gate this path, and that
         is the point". The pre-fix skip message claimed "the in-process load is
@@ -853,4 +1225,222 @@ class TestTheBootPrewarm:
             "the pre-warm call moved BELOW the #1677 sentinel — the worker-gate "
             "tests lift and execute that block, so they would run a REAL "
             "embedder load (196 s) on every gate test"
+        )
+
+
+#: Every key `/health`'s `embedder` block must carry, on the healthy AND the
+#: degraded arm. Written here (not imported from the app) so a rename in
+#: `hosted_api` reds a test instead of silently moving the operator's key.
+_EXPECTED_EMBEDDER_HEALTH_KEYS = {
+    "model", "available", "state", "last_error", "failure_kind",
+    "cooldown_remaining_s", "threads", "load_timeout_s", "load_elapsed_s",
+    "load_in_progress", "load_in_progress_s",
+}
+
+
+def _health_body(monkeypatch) -> dict:
+    """`GET /health`'s payload, with everything it reads besides the embedder
+    neutralised (the `test_9548_record_arming_health.py` pattern): the DB verdict
+    is a snapshot from a background refresher, so a cold probe would answer for
+    the wrong reason and say nothing about this change.
+    """
+    import asyncio
+
+    import tortoise.hosted_api as hosted_api
+
+    verdict = {"ok": True, "latency_ms": 0.1, "error": None}
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(verdict),
+                            raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER", None, raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER_START_ERROR", None, raising=False)
+    monkeypatch.setattr(hosted_api, "_WATCHER_EXPECTED", False, raising=False)
+    return asyncio.run(hosted_api.health())
+
+
+class TestTheBoundIsReadableFromTheProduct:
+    """#13674 (B): an instrument with no reader is not an observable bound.
+
+    `status()` was the whole of the "make the bound OBSERVABLE" requirement, and
+    nothing in `tortoise/` read it — the product could be 290 s into a 300 s
+    bound, or permanently on `cooldown`, with every published surface saying
+    "ok" and no datum saying otherwise. These rows pin the READ, so a revert that
+    drops the `/health` block fails here rather than in the next outage.
+    """
+
+    def test_status_publishes_how_far_into_the_bound_the_attempt_is(
+            self, monkeypatch, clean_embedder):
+        """`load_in_progress` is a BOOL; the operator's question is "how far in".
+
+        A 4 s attempt and a 290 s attempt of the same 300 s bound render
+        identically under a bool, and they call for opposite decisions.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0, hold_s=0.8)
+
+        assert EmbeddingModel.get(load_timeout=0.05) is None
+        assert EmbeddingModel.status()["load_in_progress"] is True
+
+        first = EmbeddingModel.status()["load_in_progress_s"]
+        assert first is not None, (
+            "an attempt IS in flight but `load_in_progress_s` is None — the "
+            "bound is not observable WHILE it runs (#13674)"
+        )
+        assert 0.0 <= first < EmbeddingModel._LOAD_TIMEOUT_S
+        time.sleep(0.2)
+        second = EmbeddingModel.status()["load_in_progress_s"]
+        assert second > first, (
+            f"the in-flight elapsed time did not advance ({first} -> {second}): "
+            "it is reading a frozen timestamp, not the running attempt"
+        )
+
+    def test_a_finished_attempt_publishes_no_in_progress_time(
+            self, monkeypatch, clean_embedder):
+        """`_load_started_at` OUTLIVES the attempt — so it must not be trusted.
+
+        Reading the timestamp alone would report a "load in progress" that grows
+        forever after a successful load, which is the mirror defect: a surface
+        that is always alarming is as unreadable as one that is always green.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0)
+
+        assert EmbeddingModel.get() is not None
+        status = EmbeddingModel.status()
+        assert status["load_in_progress"] is False
+        assert status["load_in_progress_s"] is None, (
+            "a FINISHED load still reports an in-progress elapsed time"
+        )
+
+    def test_health_carries_the_embedder_block_with_the_declared_bound(
+            self, monkeypatch, clean_embedder):
+        """The block must be on the SURFACE, not only on the class.
+
+        This is the row that would have caught the actual state of main: a
+        complete, tested `status()` dict that no route published.
+        """
+        frame = _Frame()
+        _patch_loader(monkeypatch, frame, mb=0)
+        assert EmbeddingModel.get() is not None
+
+        body = _health_body(monkeypatch)
+        assert "embedder" in body, (
+            "/health carries no `embedder` block — the load bound this P1 "
+            f"raised is unreadable from outside the process: {sorted(body)}"
+        )
+        block = body["embedder"]
+        assert set(block) == _EXPECTED_EMBEDDER_HEALTH_KEYS
+        # ⛔ THE PRODUCER SIDE (#13819 review): `_embedder_health()` builds the
+        # block as `{key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}`, so
+        # the assertion above compares the app's own tuple with itself and
+        # cannot notice a rename in `status()` — `/health` would publish a
+        # permanently `null` key (e.g. the documented `threads`) while every row
+        # here stayed green.
+        assert set(EmbeddingModel.status()) == _EXPECTED_EMBEDDER_HEALTH_KEYS, (
+            "`status()` and the published key set have drifted — the operator's "
+            "`jq .embedder.<key>` now resolves to null"
+        )
+        assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
+        assert block["available"] is True
+        assert block["state"] == "ready"
+        assert block["model"] == embeddings_mod.EMBEDDING_MODEL
+
+    def test_an_unavailable_embedder_is_reported_without_folding_into_status(
+            self, monkeypatch, clean_embedder):
+        """The state that mattered in production: the dense leg is OFF.
+
+        Before this block, "hybrid retrieval is off" was invisible from every
+        surface the product publishes; `state: "unavailable"` plus a
+        `failure_kind` is the operator's cue. The 'must NOT 5xx' half of that
+        contract is measured by `test_the_unavailable_response_is_a_200_not_a_5xx`
+        — THIS row calls `health()` and reads the dict, so it cannot fail on a
+        status code, and its name must not claim otherwise (#13819 review).
+        """
+        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", time.monotonic())
+        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_timeout")
+
+        body = _health_body(monkeypatch)
+        block = body["embedder"]
+        assert block["available"] is False
+        assert block["state"] == "cooldown"
+        assert block["failure_kind"] == "load_timeout"
+        assert block["cooldown_remaining_s"] > 0.0
+        assert block["load_timeout_s"] == EmbeddingModel._LOAD_TIMEOUT_S
+        # ── THE `status` ROW, ON THE STATE THAT CAN DISCRIMINATE IT (#13674
+        # review F2). "Reported, NEVER folded into `status`" is only pinned by
+        # a row where the two verdicts DIFFER: every other term is `ok` here
+        # (the DB snapshot and the watcher are stubbed, the record is unarmed
+        # — its documented, `ok` default), so the fold-into-`status` mutation
+        # turns this into "degraded" and reds the line. Asserted next to the
+        # degraded block rather than in the ready row, where both values would
+        # have been "ok" and the assertion could never fail (#10185/#10620 is
+        # the rule: one failed load must not pin the deployment degraded).
+        assert body["status"] == "ok", (
+            "an embedder on cooldown folded into `/health`'s `status` — a "
+            "keyword-only deployment is a DECLARED degraded read (#2952), not "
+            "a dying process, and one failed load must not pin it degraded "
+            "for the life of the process (#10185/#10620)"
+        )
+
+    def test_the_degraded_arm_publishes_the_same_keys(self, monkeypatch):
+        """An unreadable `status()` must not shorten the block (#12992/#12482).
+
+        A dashboard doing `jq .embedder.load_timeout_s` on the arm an operator
+        reaches during an incident is the exact path a short dict 500s.
+        """
+        import tortoise.hosted_api as hosted_api
+
+        def _boom():
+            raise RuntimeError("embeddings module half-written")
+
+        monkeypatch.setattr(EmbeddingModel, "status", classmethod(lambda cls: _boom()))
+        block = hosted_api._embedder_health()
+        assert set(block) == _EXPECTED_EMBEDDER_HEALTH_KEYS | {"error"}
+        assert "half-written" in block["error"]
+        assert block["available"] is None
+
+    def test_the_unavailable_response_is_a_200_not_a_5xx(
+            self, monkeypatch, clean_embedder):
+        """THE ROW ABOVE NEVER MEASURED A STATUS CODE (#13819 review F2).
+
+        `_health_body` calls `health()` directly and inspects the dict, so the
+        test named "does not 5xx" could not fail for the reason it names: the
+        route could raise past the handler (a sibling arm, a middleware, a
+        dependency) and the dict assertions would still pass on whatever
+        `health()` returned.
+
+        This row mounts the REAL handler on a bare app and reads the STATUS
+        through the ASGI stack, on the state that mattered in production (the
+        dense leg OFF). `verdict_client` is the repo's client seam, so a
+        wait-bound refusal arrives as the contract's skip rather than a
+        load-dependent failure.
+        """
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as hosted_api
+        from tests._verdict import verdict_client
+
+        monkeypatch.setattr(EmbeddingModel, "_last_failed_at", time.monotonic())
+        monkeypatch.setattr(EmbeddingModel, "_last_failure_kind", "load_timeout")
+        # Apply the same neutralisation `_health_body` does (the DB snapshot and
+        # the watcher), so the only variable left is the degraded embedder.
+        _health_body(monkeypatch)
+
+        probe = FastAPI()
+        probe.get("/health")(hosted_api.health)
+        with verdict_client(probe) as client:
+            response = client.get("/health")
+
+        assert response.status_code == 200, (
+            "a DEGRADED embedder took /health off 200 — that fails the deploy "
+            f"gate over a declared degraded read (#2952): {response.status_code} "
+            f"{response.text[:200]}"
+        )
+        block = response.json()["embedder"]
+        assert block["state"] == "cooldown"
+        assert block["available"] is False
+        assert response.json()["status"] == "ok", (
+            "the degraded read must not fold into /health's status "
+            f"(#10185/#10620): {response.json()['status']!r}"
         )

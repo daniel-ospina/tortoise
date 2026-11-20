@@ -127,7 +127,7 @@ def test_create_point_appends_the_record_before_the_cache_write(env, monkeypatch
 
     monkeypatch.setattr(type(proj.g), "query", spy_query)
 
-    point = sdk.create_point("statement", "a journal-first claim")
+    point = sdk._create_point("statement", "a journal-first claim")
     assert point.get("id"), f"create_point returned no id: {point!r}"
 
     assert order.count("journal") == 1, (
@@ -167,7 +167,7 @@ def test_a_failed_append_does_not_write_the_cache(env, monkeypatch):
     monkeypatch.setattr(log, "append", _boom)
 
     with pytest.raises(WriteNotLandedError) as ei:
-        sdk.create_point("statement", "a claim whose record cannot be written")
+        sdk._create_point("statement", "a claim whose record cannot be written")
 
     assert ei.value.record_committed is False, (
         "the append FAILED, so the record is not committed and the cache must "
@@ -286,7 +286,7 @@ def test_the_journaled_payload_matches_the_live_node_and_replays(env, monkeypatc
             params={"u": source_url, "h": "hash-7951"},
         )
 
-    point = sdk.create_point(
+    point = sdk._create_point(
         "statement", "a sourced, tagged claim",
         tags=["alpha"], extractedFrom=source_url,
         credibility="gold",
@@ -295,7 +295,7 @@ def test_the_journaled_payload_matches_the_live_node_and_replays(env, monkeypatc
     assert captured, "no PointAdded payload was captured"
 
     payload = captured[-1]
-    live = dict(sdk.get_point(pid))
+    live = dict(sdk._get_point(pid))
     assert live, "the live Point is not readable"
 
     # Every live node property is carried by the record (payload metadata that
@@ -316,7 +316,7 @@ def test_the_journaled_payload_matches_the_live_node_and_replays(env, monkeypatc
 
     proj.rebuild_all(str(events), confirm_destructive=True)
 
-    replayed = dict(sdk.get_point(pid))
+    replayed = dict(sdk._get_point(pid))
     assert replayed, "rebuild_all did not materialise the Point from the record"
 
     _skip = {
@@ -370,7 +370,7 @@ def test_a_failed_cache_write_leaves_the_record_replayable(env, monkeypatch):
     # re-raises a non-abort error unchanged) — the point here is that the
     # RECORD was already committed before the cache write was attempted.
     with pytest.raises(RuntimeError, match="simulated write failure"):
-        sdk.create_point("statement", "a claim whose cache write will fail")
+        sdk._create_point("statement", "a claim whose cache write will fail")
 
     added = _point_added(events)
     assert len(added) == 1, (
@@ -395,7 +395,7 @@ def test_a_fresh_create_appends_exactly_one_record(env):
     one) reddens here rather than growing the journal silently.
     """
     sdk, events = env
-    sdk.create_point("statement", "one claim", dedup=False)
+    sdk._create_point("statement", "one claim", dedup=False)
     assert len(_point_added(events)) == 1, (
         f"a fresh create must append exactly one PointAdded: {_point_added(events)!r}")
 
@@ -437,7 +437,7 @@ def test_a_non_json_encodable_prop_does_not_destroy_the_write(env, propname, val
     sdk, events = env
     proj = sdk._get_proj()
 
-    point = sdk.create_point("statement", "a claim with a hostile prop",
+    point = sdk._create_point("statement", "a claim with a hostile prop",
                              **{propname: value})
 
     assert point.get("id"), f"create_point returned no id: {point!r}"
@@ -474,10 +474,10 @@ def test_the_record_states_only_what_the_store_will_hold(env):
     from tortoise.consistency import check_consistency
 
     sdk, events = env
-    pid = sdk.create_point("statement", "a claim with a nested prop",
+    pid = sdk._create_point("statement", "a claim with a nested prop",
                            extra={"k": {"inner": 1}})["id"]
 
-    live = dict(sdk.get_point(pid))
+    live = dict(sdk._get_point(pid))
     payload = _point_added(events)[0]["point"]
     assert "extra" not in live, (
         "the engine dropped the map — the live half of this test is vacuous "
@@ -502,10 +502,10 @@ def test_a_driver_coerced_number_is_recorded_as_the_store_holds_it(env):
     `WriteNotLandedError` before the comparisons.
     """
     sdk, events = env
-    pid = sdk.create_point("statement", "a claim with a Decimal",
+    pid = sdk._create_point("statement", "a claim with a Decimal",
                            amount=Decimal("1.5"))["id"]
 
-    live = dict(sdk.get_point(pid))
+    live = dict(sdk._get_point(pid))
     payload = _point_added(events)[0]["point"]
     assert live["amount"] == 1.5, "the store half of the comparison is vacuous"
     assert payload["amount"] == 1.5, (

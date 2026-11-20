@@ -269,8 +269,8 @@ def test_fresh_match_survives_the_tie_at_every_corpus_size():
         sdk = _sdk()
         graph = sdk._get_proj().g
         for content in _lookalikes(n):
-            sdk.create_point("statement", content)
-        fresh = sdk.create_point("statement", QUERY)["id"]
+            sdk._create_point("statement", content)
+        fresh = sdk._create_point("statement", QUERY)["id"]
 
         rows = _fts_rows(graph, QUERY, limit=10)
         ids = [pid for pid, _ in rows]
@@ -294,8 +294,8 @@ def test_the_tie_ranks_the_fresh_match_first_not_last():
     sdk = _sdk()
     graph = sdk._get_proj().g
     for content in _lookalikes(20):
-        sdk.create_point("statement", content)
-    fresh = sdk.create_point("statement", QUERY)["id"]
+        sdk._create_point("statement", content)
+    fresh = sdk._create_point("statement", QUERY)["id"]
 
     rows = _fts_rows(graph, QUERY, limit=25)
     assert rows, "FIXTURE NOT REACHED: the query matched nothing"
@@ -397,7 +397,7 @@ def test_legacy_ids_do_not_outrank_a_freshly_minted_point():
             "pointKind:'statement'})",
             params={"id": pid},
         )
-    fresh = sdk.create_point("statement", QUERY)["id"]
+    fresh = sdk._create_point("statement", QUERY)["id"]
 
     rows = _fts_rows(graph, QUERY, limit=10)
     ids = [pid for pid, _ in rows]
@@ -494,7 +494,7 @@ def test_writers_stamp_zero_padded_iso_timestamps():
     import re
 
     sdk = _sdk()
-    pid = sdk.create_point("statement", "a point whose stamps are pinned")["id"]
+    pid = sdk._create_point("statement", "a point whose stamps are pinned")["id"]
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$i}) RETURN n.createdAt, n.updatedAt",
         params={"i": pid}).result_set
@@ -544,8 +544,8 @@ def test_bm25_arm_keeps_the_newest_match_in_its_own_window():
     sdk = _sdk()
     graph = sdk._get_proj().g
     for content in _lookalikes(20):
-        sdk.create_point("statement", content)
-    fresh = sdk.create_point("statement", QUERY)["id"]
+        sdk._create_point("statement", content)
+    fresh = sdk._create_point("statement", QUERY)["id"]
 
     rows = run_bm25_query(graph, QUERY, limit=5, excluded_statuses=())
     ids = [pid for pid, _ in rows]

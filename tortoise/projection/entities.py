@@ -94,9 +94,18 @@ def _derived_mirror_required(entity_type: str) -> bool:
     fold from crashing if the record's arming module cannot be imported, which is
     a WRITE-path fault and must never take a write down.
 
-    ⛔ AND THIS GUARDS THE FOLD ONLY. A `:Point`'s vector is RECORD TRUTH (`#5004`)
-    and is never derived, so nothing here may touch it; the document/Event/Source
-    arms this issue does not retire are untouched too.
+    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS ONLY. A `:Point`'s vector is
+    RECORD TRUTH (`#5004`) and is never derived, so nothing here may touch it.
+
+    ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
+    why it is imported rather than re-spelled: `sdk::_update_entity`,
+    `sdk::_event_raw_write_door`, `sdk::_session_event_write`,
+    `sdk::_embedding_repair_attempt`, `sdk::_ingest_corpus`,
+    `session_indexer::main` and `hosted_backup::restore_graph` all write the same
+    derived `embedding` property, so each must ask the SAME predicate — the one
+    `record_vector.mirror_required` owns — and each has the same reason to survive an
+    unreadable gate rather than take its write down. A second spelling in each of
+    those modules would be a second predicate, and `#13610` forbids exactly that.
     """
     try:
         from tortoise.record_vector import mirror_required
@@ -5505,22 +5514,56 @@ class _EntityHandlers:
         #     which is the exact stall #13224/#13229 removed. Nothing in this
         #     PR's test set would red on that loss, because this PR replaced the
         #     code path, so no test on either side pins `bounded` on `st`.
-        if not ev.get("suppress_embedding") and st and st.strip():
-            # #5008: through the EMBED gate — an identifier-only text earns no vector.
+        # #13626: NOT AT ALL ONCE THE RECORD OWNS THE `document` VECTOR — unless the `source`
+        # half still wants one (#13854 below). This fold still writes the `:Source` ROW — the
+        # vector is omitted only when BOTH halves answer stop — because the `:Source` node is
+        # the document's identity and `set_embedding_clause`'s preserve-on-null leaves a stored
+        # vector alone. The conjunct sits in the TEST rather than around the block so the write-stop
+        # is the encode itself, the same shape `_upsert_subject` / `_upsert_object` use.
+        # ⛔ AND IT ASKS THE `:Source` HALF TOO (#13854 review). ONE `:Source` vector serves
+        # both halves of the node, and `LABEL_SERVED` splits those halves on `document_kind`
+        # — so a node this fold writes need not belong to the `document` population at all.
+        # `_update_entity`'s `:Source` arm and `hosted_backup.restore_graph` therefore retire
+        # the vector only when BOTH `document` and `source` answer stop; asking `document`
+        # alone here wrote NO vector when the `document` half was covered but the `source`
+        # half was not, i.e. the "vector in neither store" state (#11395) the conservative
+        # arm exists to forbid.
+        _text_ready = bool(not ev.get("suppress_embedding") and st and st.strip())
+        # ⛔ TWO ARMS, NOT ONE `or`, AND SIBLING `if`s, NOT `if`/`elif`. The suppression in each
+        # test is load-bearing, and the census (`…strip_graph_entity_vectors.py::_asks_the_gate`)
+        # is why these are two tests: it reads gate calls as `and` CONJUNCTS (an `or` test is
+        # "masked", so the fold would count as still emitting) and it SKIPS an `if` whose
+        # `orelse` STORES — which an `elif` is, so the `document` ask went uncredited (#13854
+        # review C1, measured False at `9550359714`). The 2nd arm runs only if the 1st did not
+        # STORE (the flag), so a document write still pays exactly ONE encode — an `embedding is
+        # None` guard would re-enter it on `#5008`'s refusal and meter the decline twice
+        # (#13854 review P3).
+        # ⛔ AND THE SEAM (#13447) IS SPELLED INLINE IN THIS FUNCTION, NOT THROUGH A MODULE HELPER.
+        # The TEXT is `st` (`_build_search_text(title, summary, topics)`), and it is ALSO the
+        # record's text: `#13412` LANDED in main and the seam's `DocumentCreated` rule CALLS
+        # `_upsert_document` itself (`derived_embedding._document_embedding_parts`), so the record
+        # column and this fold compose ONE string and the text-keyed memo serves the second leg at
+        # zero model calls. The CALL has to sit in THIS function's body: the `#5008` seam census
+        # (`test_dod_5090_probe`) and `tortoise.embed_writer_register`'s seam-CALL population
+        # attribute an encode to the writer that PERFORMS it, so a shared `_encode_document_mirror`
+        # helper made this fold read as a writer that embeds OUTSIDE the gate — the `#13826` CI
+        # reds in `test (b)`, `(c)` and `(e)` (`test_11641_runtime_vector_label`,
+        # `test_dod_5090_probe`, `test_embed_writer_register`).
+        # `#5008` (an identifier-only text earns no vector) and `#13224`'s `bounded=True` live inside
+        # `derived_embedding.encode` / its `encode_for_row` primitive, so each arm gets the same
+        # refusals by construction rather than by a second copy here.
+        _vector_written = False
+        if _text_ready and _derived_mirror_required("document"):
             try:
-                # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
-                # (`_build_search_text(title, summary, topics)`), and it is ALSO the
-                # record's text: `#13412` LANDED in main and the seam's
-                # `DocumentCreated` rule CALLS this same function
-                # (`derived_embedding._document_embedding_parts`), so the record column
-                # and this fold compose ONE string and the text-keyed memo serves this
-                # second leg at zero model calls — a document write pays ONE encode,
-                # like every other label. ⚠️ This comment said the opposite until
-                # review cycle 8 (P3): it was written while `#13412` was still unlanded,
-                # the re-cut made it false, and it then contradicted the seam module's
-                # own `DocumentCreated` paragraph ("the document pair dedupes for free").
                 from tortoise import derived_embedding
-                # #13224: DERIVED vector — see `_upsert_subject` for the scope.
+                embedding = derived_embedding.encode(
+                    st, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
+            _vector_written = True
+        if _text_ready and not _vector_written and _derived_mirror_required("source"):
+            try:
+                from tortoise import derived_embedding
                 embedding = derived_embedding.encode(
                     st, self.required_embedding_dim, bounded=True)
             except Exception:
@@ -5893,7 +5936,15 @@ class _EntityHandlers:
                 inner.get("eventKind", ""),
                 inner.get("object", ""),
             ]))
-            if event_content.strip():
+            # #13626: the DERIVED half of this fold's write-stop. The carried half
+            # (`inner["embedding"]`, the journal's replay carrier) is gated where it is
+            # actually stored — `_event_plain_merge`, which is declared as a writer of
+            # `:Event` in its own right — so one ask covers the payload and this conjunct
+            # covers the encode. `mirror_required("event")` answering False means the
+            # record proved it holds this label's vectors, so a second copy on the graph
+            # is rent and `e.embedding` stays as it was (`set_embedding_clause`'s
+            # preserve-on-null); the ROW is written either way.
+            if event_content.strip() and _derived_mirror_required("event"):
                 # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
                     # ⛔ THE SEAM (#13447) — see `_upsert_subject`. The text is
@@ -6427,6 +6478,19 @@ class _EntityHandlers:
         an in-repo producer that sets ``objectType`` today, so this is a residual
         closed, not a live defect fixed.
         """
+        # ── #13626: the WRITE-STOP for this fold's vector (#13610 option 2) ──
+        # The vector is a PARAMETER here (the caller encoded it, or the journal carried
+        # it), so the stop is not a skipped encode but a skipped STORE: `embedding` is
+        # what the two clauses below are handed, and on the stop verdict it is None.
+        # "Write none" is exactly what `set_embedding_clause`'s preserve-on-null CASE and
+        # `clear_embedding`'s null guard already do, so a stored vector is left untouched
+        # rather than deleted — this issue retires the WRITE, not the property.
+        # ⛔ The ROW is still written: every other property in `$props`, the edges and the
+        # document `:Source` below are untouched by this answer.
+        caller_vector = embedding
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = caller_vector
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
         # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
@@ -7526,9 +7590,27 @@ class _EntityHandlers:
         _allow = self._SOURCE_EXTRA_PROPS
         if ev.get("_stub_completion"):
             _allow = _allow | self._SOURCE_CAPTURE_REPLAY_PROPS
+        # ── #13626: the WRITE-STOP for the caller-supplied vector ──
+        # `embedding` is on `_SOURCE_EXTRA_PROPS` (declared beside `domain`/`summary`),
+        # so the passthrough below is a REAL store of a vector this fold never encodes
+        # — `create_source(url, props={"embedding": [...]})` lands it, which is why
+        # `:Source` could not open while this fold was ungated. The stop is a `pop` on a
+        # COPY of the event, so the vector is absent from the SET and the ROW (identity,
+        # version, `_searchText`, every other extra) is written exactly as before; the
+        # caller's own dict is left alone because the live door journals it. ⛔ BOTH labels
+        # are asked, not `source` alone (#13854 review): this is `_upsert_document`'s
+        # `:Source {url}` key space, so one counter's stop is evidence about half the node.
+        # That does not cross the census's union rule (`_fold_consults_gate`'s
+        # ⛔ COVERAGE IS A UNION ACROSS WRITERS): it requires each served type to be asked
+        # about by SOME writer, never a cross-product, and asking MORE can only under-strip
+        # (a graph copy the record no longer serves), never lose one the record keeps.
+        _extra = ev
+        if not _derived_mirror_required("document") and not _derived_mirror_required("source"):
+            _extra = dict(ev)
+            _extra.pop("embedding", None)
         _persisted = self._persist_extra_props(
             "MATCH (n:Source {url: $url})", {"url": key},
-            ev, self._SOURCE_HANDLED, allow_keys=_allow,
+            _extra, self._SOURCE_HANDLED, allow_keys=_allow,
         )
         _denied = {
             k for k in ev

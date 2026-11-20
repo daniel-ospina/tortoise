@@ -363,7 +363,7 @@ def test_live_journaled_point_round_trips(sup, tmp_path):
     already writes.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "HELLO")["id"]
+    pid = sdk._create_point("statement", "HELLO")["id"]
     before = _read_derived(sdk, pid)
     assert before["content_hash"] is not None
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)

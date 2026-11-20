@@ -60,7 +60,7 @@ def sdk():
 
 
 def _point(sdk: TortoiseSDK, content: str) -> str:
-    return sdk.create_point("statement", content, status="live")["id"]
+    return sdk._create_point("statement", content, status="live")["id"]
 
 
 def _node(sdk: TortoiseSDK, label: str, node_id: str) -> str:
@@ -130,7 +130,7 @@ def test_epistemic_label_queries_expands_once_per_label():
 def test_create_operator_admits_every_epistemic_target(sdk, label):
     src = _point(sdk, "strong source")
     tgt = _node(sdk, label, f"{label.lower()}-7902-tgt")
-    op = sdk.create_operator("IMPL", src, [tgt], direction="bidirectional")
+    op = sdk._create_operator("IMPL", src, [tgt], direction="bidirectional")
     assert op["id"]
     assert _edge_count(sdk, tgt, "INPUT", op["id"]) == 1
     # the typed edge is the operator -> endpoint arm
@@ -147,7 +147,7 @@ def test_create_operator_admits_non_point_source(sdk):
     """The SOURCE slot (idx=0) accepts a non-Point label too."""
     obj = _node(sdk, "Object", "obj-7902-src")
     tgt = _point(sdk, "plain target")
-    op = sdk.create_operator("IMPL", obj, [tgt])
+    op = sdk._create_operator("IMPL", obj, [tgt])
     assert op["id"]
     assert _edge_count(sdk, obj, "INPUT", op["id"]) == 1
 
@@ -156,14 +156,14 @@ def test_create_operator_part_whole_accepts_non_point(sdk):
     """Part/whole operators (hasPart edge type) widen with the same set."""
     sub = _node(sdk, "Subject", "sub-7902-part")
     obj = _node(sdk, "Object", "obj-7902-part")
-    op = sdk.create_operator("contains", sub, [obj])
+    op = sdk._create_operator("contains", sub, [obj])
     assert _edge_count(sdk, op["id"], "hasPart", obj) == 1
 
 
 def test_create_operator_point_path_unchanged(sdk):
     a = _point(sdk, "A")
     b = _point(sdk, "B")
-    op = sdk.create_operator("IMPL", a, [b])
+    op = sdk._create_operator("IMPL", a, [b])
     assert _edge_count(sdk, op["id"], "IMPL", b) == 1
     assert _edge_count(sdk, b, "INPUT", op["id"]) == 1
 
@@ -171,7 +171,7 @@ def test_create_operator_point_path_unchanged(sdk):
 def test_create_operator_still_rejects_missing_endpoint(sdk):
     a = _point(sdk, "A")
     with pytest.raises(ValueError, match="do not exist"):
-        sdk.create_operator("IMPL", a, ["ghost-7902"])
+        sdk._create_operator("IMPL", a, ["ghost-7902"])
 
 
 def test_create_operator_still_rejects_source_endpoint(sdk):
@@ -180,7 +180,7 @@ def test_create_operator_still_rejects_source_endpoint(sdk):
     src = sdk.register_source("https://pre.example/7902", "report")
     src_id = src.get("id") or src.get("url")
     with pytest.raises(ValueError, match="do not exist"):
-        sdk.create_operator("IMPL", a, [src_id])
+        sdk._create_operator("IMPL", a, [src_id])
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -190,7 +190,7 @@ def test_create_operator_still_rejects_source_endpoint(sdk):
 def test_create_direct_edge_subject_to_object(sdk):
     sub = _node(sdk, "Subject", "sub-7902-de")
     obj = _node(sdk, "Object", "obj-7902-de")
-    r = sdk.create_direct_edge("IMPL", sub, obj)
+    r = sdk._create_direct_edge("IMPL", sub, obj)
     assert r == {"direct_edge": "IMPL", "from": sub, "to": obj,
                  "created": True, "deduped": False}
     assert _edge_count(sdk, sub, "IMPL", obj) == 1
@@ -208,7 +208,7 @@ def test_create_direct_edge_admits_epistemic_label_pairs(sdk, src_label,
            else _node(sdk, src_label, f"{src_label.lower()}-7902-s"))
     tgt = (_point(sdk, "Q") if tgt_label == "Point"
            else _node(sdk, tgt_label, f"{tgt_label.lower()}-7902-t"))
-    r = sdk.create_direct_edge("IMPL", src, tgt)
+    r = sdk._create_direct_edge("IMPL", src, tgt)
     assert r["created"] is True
     # exactly one edge; the resolved label anchored the MERGE (no dup nodes)
     assert _edge_count(sdk, src, "IMPL", tgt) == 1
@@ -220,8 +220,8 @@ def test_create_direct_edge_non_point_idempotent(sdk):
     """The bare-MERGE dedup contract holds for the widened labels too."""
     sub = _node(sdk, "Subject", "sub-7902-idem")
     obj = _node(sdk, "Object", "obj-7902-idem")
-    assert sdk.create_direct_edge("IMPL", sub, obj)["created"] is True
-    r2 = sdk.create_direct_edge("IMPL", sub, obj)
+    assert sdk._create_direct_edge("IMPL", sub, obj)["created"] is True
+    r2 = sdk._create_direct_edge("IMPL", sub, obj)
     assert r2["created"] is False and r2["deduped"] is True
     assert _edge_count(sdk, sub, "IMPL", obj) == 1
 
@@ -229,7 +229,7 @@ def test_create_direct_edge_non_point_idempotent(sdk):
 def test_create_direct_edge_point_path_unchanged(sdk):
     a = _point(sdk, "A")
     b = _point(sdk, "B")
-    assert sdk.create_direct_edge("IMPL", a, b)["created"] is True
+    assert sdk._create_direct_edge("IMPL", a, b)["created"] is True
 
 
 def test_create_direct_edge_still_rejects_source_endpoint(sdk):
@@ -238,23 +238,23 @@ def test_create_direct_edge_still_rejects_source_endpoint(sdk):
     src = sdk.register_source("https://pre.example/7902b", "report")
     src_id = src.get("id") or src.get("url")
     with pytest.raises(ValueError, match="does not exist or is not an epistemic"):
-        sdk.create_direct_edge("IMPL", a, src_id)
+        sdk._create_direct_edge("IMPL", a, src_id)
 
 
 def test_create_direct_edge_still_rejects_operator_endpoint(sdk):
     a = _point(sdk, "A")
     b = _point(sdk, "B")
-    op = sdk.create_operator("IMPL", a, [b])["id"]
+    op = sdk._create_operator("IMPL", a, [b])["id"]
     with pytest.raises(ValueError, match="is an operator"):
-        sdk.create_direct_edge("IMPL", a, op)
+        sdk._create_direct_edge("IMPL", a, op)
 
 
 def test_create_direct_edge_still_rejects_terminal_endpoint(sdk):
     a = _point(sdk, "A")
     b = _point(sdk, "B")
-    sdk.supersede_point(a, b)
+    sdk._supersede_point(a, b)
     with pytest.raises(ValueError, match="terminal"):
-        sdk.create_direct_edge("IMPL", a, b)
+        sdk._create_direct_edge("IMPL", a, b)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -265,7 +265,7 @@ def test_batch3_direct_edge_between_non_point_labels_is_a_factor(sdk):
     """Batch 3 must surface a factor for a non-Point direct edge (#7902)."""
     sub = _node(sdk, "Subject", "sub-7902-b3")
     obj = _node(sdk, "Object", "obj-7902-b3")
-    sdk.create_direct_edge("IMPL", sub, obj, direction="bidirectional")
+    sdk._create_direct_edge("IMPL", sub, obj, direction="bidirectional")
     factors = sdk._get_ep()._affected_factors({sub})
     hits = [f for f in factors if f[0] == sub and f[2] == [sub, obj]]
     assert hits, f"Batch 3 dropped the non-Point direct edge: {factors!r}"
@@ -276,7 +276,7 @@ def test_batch3_point_only_control_unchanged(sdk):
     """Control: the Point direct edge still yields exactly one factor."""
     a = _point(sdk, "A")
     b = _point(sdk, "B")
-    sdk.create_direct_edge("IMPL", a, b)
+    sdk._create_direct_edge("IMPL", a, b)
     factors = sdk._get_ep()._affected_factors({a})
     assert [f for f in factors if f[0] == a and f[2] == [a, b]]
 
@@ -285,7 +285,7 @@ def test_load_cache_back_message_read_admits_non_point_source(sdk):
     """#7902: the back-message read's SOURCE side is widened (the #7853 gap)."""
     sub = _node(sdk, "Subject", "sub-7902-bm")
     obj = _node(sdk, "Object", "obj-7902-bm")
-    sdk.create_direct_edge("IMPL", sub, obj, direction="bidirectional")
+    sdk._create_direct_edge("IMPL", sub, obj, direction="bidirectional")
     ep = sdk._get_ep()
     ep._load_cache({sub, obj})
     assert (sub, obj, "IMPL") in ep._back_cache, (
@@ -319,7 +319,7 @@ def test_operator_non_point_input_is_ep_live(sdk):
     """
     src = _point(sdk, "source")
     sub = _node(sdk, "Subject", "sub-7902-oplive")
-    op = sdk.create_operator(
+    op = sdk._create_operator(
         "IMPL", src, [sub], direction="bidirectional")["id"]
 
     ep = sdk._get_ep()
@@ -339,7 +339,7 @@ def test_direct_edge_non_point_target_is_ep_live(sdk):
     """A Point→:Subject direct edge must run, not silently converge on 0 work."""
     p1 = _point(sdk, "P1")
     sub = _node(sdk, "Subject", "sub-7902-delive")
-    sdk.create_direct_edge("IMPL", p1, sub, direction="bidirectional")
+    sdk._create_direct_edge("IMPL", p1, sub, direction="bidirectional")
 
     ep = sdk._get_ep()
     assert sub in ep._affected_claims([p1]), (
@@ -371,7 +371,7 @@ def test_non_point_back_message_round_trips_and_invalidates(sdk):
     """Belief/message write-back must persist for a non-Point SOURCE endpoint."""
     p1 = _point(sdk, "P1")
     sub = _node(sdk, "Subject", "sub-7902-wb")
-    sdk.create_direct_edge("IMPL", p1, sub, direction="bidirectional")
+    sdk._create_direct_edge("IMPL", p1, sub, direction="bidirectional")
 
     ep = sdk._get_ep()
     ep.run([p1], max_hops=2)
@@ -472,7 +472,7 @@ def test_find_operator_exact_hit_admits_non_point_input(sdk):
     """
     src = _point(sdk, "src")
     sub = _node(sdk, "Subject", "sub-7902-find")
-    op = sdk.create_operator(
+    op = sdk._create_operator(
         "IMPL", src, [sub], direction="bidirectional")["id"]
 
     found = sdk._find_operator("IMPL", [src, sub], direction="bidirectional")
@@ -527,7 +527,7 @@ def test_reconcile_sees_an_operator_whose_inputs_are_non_point(sdk):
 
     sub = _node(sdk, "Subject", "sub-7902-reconcile")
     obj = _node(sdk, "Object", "obj-7902-reconcile")
-    op = sdk.create_operator(
+    op = sdk._create_operator(
         "IMPL", sub, [obj], direction="bidirectional")["id"]
     assert op, "the operator node must exist (non-vacuity)"
 
@@ -547,15 +547,15 @@ def test_list_batch_detail_agrees_with_list_batches_for_a_non_point_edge(sdk):
     summary counted — two surfaces disagreeing about one batch."""
     sub = _node(sdk, "Subject", "sub-7902-batch")
     obj = _node(sdk, "Object", "obj-7902-batch")
-    assert sdk.create_direct_edge(
+    assert sdk._create_direct_edge(
         "IMPL", sub, obj, batch_id="batch-7902-so")["created"] is True
 
-    detail = sdk.list_batch("batch-7902-so")
+    detail = sdk._list_batch("batch-7902-so")
     assert detail["counts"]["direct_edges"] == 1, (
         "list_batch's audit detail dropped the non-Point direct edge")
     assert [(e["from"], e["to"]) for e in detail["direct_edges"]] == [(sub, obj)]
 
-    summary = {b["batch_id"]: b for b in sdk.list_batches()}
+    summary = {b["batch_id"]: b for b in sdk._list_batches()}
     assert summary["batch-7902-so"]["direct_edges"] == 1
     assert (detail["counts"]["direct_edges"]
             == summary["batch-7902-so"]["direct_edges"])
@@ -597,7 +597,7 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
         s1 = TortoiseSDK(db)
         sub = _node(s1, "Subject", "sub-7902-pin")
         obj = _node(s1, "Object", "obj-7902-pin")
-        assert s1.create_direct_edge("IMPL", sub, obj)["created"] is True
+        assert s1._create_direct_edge("IMPL", sub, obj)["created"] is True
 
         assert _graph_dirty(s1) == [], (
             "the dirty marker reached the graph for a non-Point write — the "
@@ -608,7 +608,7 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
         # #7927: the IN-PROCESS half is now FIXED — the widened selector sees
         # the (Subject)-[:IMPL]->(Object) direct-edge factor, so the local dream
         # runs it instead of returning an empty affected set.
-        d = s1.dream(mode="local")
+        d = s1._dream(mode="local")
         assert sorted(d["affected_claims"]) == sorted([obj, sub]), (
             "the write-triggered local dream no longer sees the non-Point "
             "direct-edge factor — the #7927 selector widening regressed")
@@ -618,12 +618,12 @@ def test_pinned_gap__non_point_write_is_not_graph_persisted():
         s1.close()
         s2 = TortoiseSDK(db)
         assert s2._hydrate_dirty_roots() == set()
-        assert s2.compute_confidence()["iterations"] == 0
+        assert s2._compute_confidence()["iterations"] == 0
 
         # CONTROL: a :Point endpoint takes the pre-existing persisted path.
         pt = _point(s2, "ctrl-7902-pin")
         obj2 = _node(s2, "Object", "obj-7902-pin")
-        assert s2.create_direct_edge("IMPL", pt, obj2)["created"] is True
+        assert s2._create_direct_edge("IMPL", pt, obj2)["created"] is True
         assert _graph_dirty(s2) == [pt], "the :Point half must persist"
         s2.close()
     finally:
@@ -645,9 +645,9 @@ def test_mixed_label_window_closure_covers_affected(sdk):
     """
     p1 = _point(sdk, "p1-7902-mixed")
     p2 = _point(sdk, "p2-7902-mixed")
-    sdk.create_direct_edge("IMPL", p1, p2)
+    sdk._create_direct_edge("IMPL", p1, p2)
     sub = _node(sdk, "Subject", "sub-7902-mixed")
-    sdk.create_direct_edge("IMPL", p1, sub)
+    sdk._create_direct_edge("IMPL", p1, sub)
 
     # Pin the Point roots as the window (mirrors the #6597 harness): the
     # `create_direct_edge` writes marked the endpoints dirty, and `dream()`
@@ -665,7 +665,7 @@ def test_mixed_label_window_closure_covers_affected(sdk):
         f"affected ∖ closure = {sorted(affected - closure)!r} — the widened "
         "affected set trails the coverage denominator")
 
-    result = sdk.dream(mode="local", require_calibration=False, max_hops=2)
+    result = sdk._dream(mode="local", require_calibration=False, max_hops=2)
     assert 0.0 <= result["coverage"] <= 1.0, (
         f"coverage={result['coverage']} — affected ⊆ closure is broken")
 
@@ -679,7 +679,7 @@ def test_affected_claims_tolerates_unresolved_and_duplicate_seeds(sdk):
     """
     p1 = _point(sdk, "p1-7902-seeds")
     p2 = _point(sdk, "p2-7902-seeds")
-    sdk.create_direct_edge("IMPL", p1, p2)
+    sdk._create_direct_edge("IMPL", p1, p2)
 
     ep = sdk._get_ep()
     baseline = ep._affected_claims([p1], 2)
@@ -695,12 +695,12 @@ def test_full_coverage_excludes_unreachable_non_point_component(sdk):
     """
     p1 = _point(sdk, "p1-7902-fullA")
     p2 = _point(sdk, "p2-7902-fullA")
-    sdk.create_direct_edge("IMPL", p1, p2)
+    sdk._create_direct_edge("IMPL", p1, p2)
     sub = _node(sdk, "Subject", "sub-7902-fullA")
     obj = _node(sdk, "Object", "obj-7902-fullA")
-    sdk.create_direct_edge("IMPL", sub, obj)
+    sdk._create_direct_edge("IMPL", sub, obj)
 
-    result = sdk.dream(mode="full", require_calibration=False)
+    result = sdk._dream(mode="full", require_calibration=False)
     assert result["converged_all"] is True
     assert result["total_affected"] == 2
     assert result["coverage"] == 1.0, (
@@ -714,11 +714,11 @@ def test_full_coverage_includes_point_reachable_non_point_neighbour(sdk):
     """
     p1 = _point(sdk, "p1-7902-fullB")
     p2 = _point(sdk, "p2-7902-fullB")
-    sdk.create_direct_edge("IMPL", p1, p2)
+    sdk._create_direct_edge("IMPL", p1, p2)
     sub = _node(sdk, "Subject", "sub-7902-fullB")
-    sdk.create_direct_edge("IMPL", p1, sub)
+    sdk._create_direct_edge("IMPL", p1, sub)
 
-    result = sdk.dream(mode="full", require_calibration=False)
+    result = sdk._dream(mode="full", require_calibration=False)
     assert result["converged_all"] is True
     assert 0.0 <= result["coverage"] <= 1.0, (
         f"coverage={result['coverage']} — the full-mode denominator trails "
@@ -760,17 +760,17 @@ def test_mitigation_reaches_an_operator_whose_inputs_are_not_points(sdk):
     """
     sub = _node(sdk, "Subject", "sub-7505-mit")
     obj = _node(sdk, "Object", "obj-7505-mit")
-    op = sdk.create_operator("IMPL", sub, [obj])
+    op = sdk._create_operator("IMPL", sub, [obj])
     # Converged baseline first: the operator write's own marking must not be
     # what the mitigated pass consumes.
-    assert sdk.compute_confidence(require_calibration=False)
+    assert sdk._compute_confidence(require_calibration=False)
     before = _belief(sdk, obj)
     assert before and before != (None, None, None, None), (
         "the non-Point factor must have written a posterior first")
 
-    mid = sdk.mitigate_operator(op["id"], "weaker than it looks",
+    mid = sdk._mitigate_operator(op["id"], "weaker than it looks",
                                 strength=0.5)["id"]
-    sdk.compute_confidence(require_calibration=False)
+    sdk._compute_confidence(require_calibration=False)
     after = _belief(sdk, obj)
     assert after != before, (
         "a mitigation on an operator with non-:Point inputs must still reach "
@@ -778,4 +778,4 @@ def test_mitigation_reaches_an_operator_whose_inputs_are_not_points(sdk):
 
     # #7505: propagation must not come back as a permanent dirty root.
     assert mid not in sdk._dirty_roots
-    assert sdk.dream_health_check()["stale_backlog"] == 0
+    assert sdk._dream_health_check()["stale_backlog"] == 0

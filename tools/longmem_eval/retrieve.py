@@ -1445,7 +1445,7 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
         _sdk_kwargs["query_date"] = query_date
     merged: dict[str, dict] = {}
     for et in entity_types:
-        for h in sdk.tortoise_fts_query(
+        for h in sdk._tortoise_fts_query(
             query, entity_type=et, limit=limit,
             structural_kind=EXTRACTION_POINT_KIND,
             structural_hops=2,

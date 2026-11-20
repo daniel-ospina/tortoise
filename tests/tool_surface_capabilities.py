@@ -44,8 +44,12 @@ from tortoise.tool_registry import MAINTENANCE_TIER, WRITE_RISK_TIERS
 # `http_policy` left to check and the "has no tool binding" arm would (correctly) red.
 # The SDK method itself still exists — the SDK surface is trimmed by its own batch — so a
 # future MCP row that re-declares `backfill_v25` must re-add it here.
+# ⛔ #12901 (final batch) PRIVATISED `dream` to `_dream`: the public name left the
+# surface and the body stayed on the class, so the declared set follows the name the
+# code actually holds — an operation string that no longer resolves reds the liveness
+# arm (`declared_set_violations`), which is the whole point of keeping this key a KEY.
 HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
-    "dream": "CPU-heavy whole-graph EP (#329)",
+    "_dream": "CPU-heavy whole-graph EP (#329)",
 }
 
 # Operations that DO write on an internal self-heal / cache-refresh path but
@@ -58,8 +62,12 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 # below therefore require `risk == "maintenance"`: the declared set moves with
 # the code, so the posture cannot silently re-stale.
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
-    "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
-    "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
+    # #12901 (final batch): the two refresh methods themselves left the public surface
+    # (`_compute_confidence`, `_get_confidence`) — the ROW is about the OPERATION, and the
+    # operation is still reached by the same containers below, so the key follows the
+    # spelling the code holds rather than the one it used to advertise.
+    "_compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
+    "_get_confidence": "lazy `_dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
     # #11609 Phase 2 — the READ/QUERY containers. Each of these reaches a refresh that
     # is ALREADY declared above or below; the container does not add a new writer, it
     # aggregates reads that one of its arms performs. Named individually because the
@@ -279,13 +287,14 @@ DECLARED_BINDING_DIVERGENCES: dict[str, DeclaredBindingDivergence] = {
 # Operations a handler reaches that are reads with no registry binding (they
 # need no binding).  Enumerated so the binding-resolution guard is scoped.
 UNBOUND_READ_OPERATIONS: frozenset[str] = frozenset({
-    "recall_gaps", "recall_subgraph",
+    # #12901: both are private now (`tortoise_recall`'s modes reach them).
+    "_recall_gaps", "_recall_subgraph",
 })
 
 # Filesystem-api users on internal/derived paths — NOT caller-supplied walks,
 # so they are not "reaches a filesystem path" for the HTTP-exclusion guard.
 INTERNAL_PATH_READERS: frozenset[str] = frozenset({
-    "_probe_embedded_busy", "session_index_health",
+    "_probe_embedded_busy", "_session_index_health",
 })
 
 # The wrap sites that pass `abuse_weight` (R1 point-create metering).  Every
@@ -298,8 +307,11 @@ INTERNAL_PATH_READERS: frozenset[str] = frozenset({
 # assert a weight on a method that no longer has a wrap site, which is exactly the
 # `test_point_creating_wrap_sites_have_weights` red this re-key closes.
 WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
-    "create_point", "create_operator", "mitigate_operator", "write_question",
-    "record_decision", "diary_write", "ingest",
+    # #12901 (final batch) privatised these five; their `_quota_gated` wrap sites in
+    # `mcp_server.py` were re-pointed to the private spelling, so the declaration follows
+    # the ATTRIBUTE THE CODE CALLS — the same rule the `_checkpoint` row below states.
+    "_create_point", "_create_operator", "_mitigate_operator", "write_question",
+    "record_decision", "_diary_write", "_ingest",
     # #11609 lane C retires the PUBLIC `checkpoint` method; its still-served door
     # wraps the SDK's private seam, and the weight is unchanged (the `filed`
     # count), so the weight class follows the name the wrap site actually calls.
@@ -346,9 +358,12 @@ SDK_SEAM_ALIASES: dict[str, str] = {
 # against a declared map.  Staleness fails loudly (both directions + name
 # liveness).
 DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
-    "create_point": "tortoise_create_point",
-    "create_operator": "tortoise_create_operator",
-    "mitigate_operator": "tortoise_mitigate_operator",
+    # ⛔ #12901 (final batch) PRIVATISED the method column of this map; the LABEL column
+    # (the door) is untouched, because the doors still exist and still `_quota_gated` the
+    # same body — what moved is the name the wrap site calls.
+    "_create_point": "tortoise_create_point",
+    "_create_operator": "tortoise_create_operator",
+    "_mitigate_operator": "tortoise_mitigate_operator",
     # #4282 Phase 2: the four container names replace the five retired ones
     # (`file_decision`->`write_question`, `file_human_approval`->`record_decision`,
     # `supersede`->`supersede_knowledge`, `update_entity`/`update_point`->`update_knowledge`).
@@ -359,10 +374,10 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "record_decision": "tortoise_record_decision",
     "supersede_knowledge": "tortoise_supersede_knowledge",
     "update_knowledge": "tortoise_update_knowledge",
-    "invalidate_point": "tortoise_invalidate",
-    "retract_point": "tortoise_retract_point",
+    "_invalidate_point": "tortoise_invalidate",
+    "_retract_point": "tortoise_retract_point",
     "_checkpoint": "tortoise_checkpoint",  # retired method, seam-wrapping door (#11609)
-    "diary_write": "tortoise_diary_write",
+    "_diary_write": "tortoise_diary_write",
     "create_entity": "tortoise_create_entity",
     # ⛔ `update` LEFT this map in #11609 lane B (#12915 review F1): no MCP handler
     # quota-gates `sdk.update` any more. `tortoise_update` — the door the
@@ -373,11 +388,11 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # refuses every non-promote transition by a fixed sentence. Keeping the key
     # would red the inverse arm ("declared write methods with no wrap site") on a
     # method nothing writes through.
-    "annotate_operator": "tortoise_operator_action",
-    "create_subject": "tortoise_create_subject",
-    "create_object": "tortoise_create_object",
-    "create_event": "tortoise_create_event",
-    "create_document": "tortoise_create_document",
+    "_annotate_operator": "tortoise_operator_action",
+    "_create_subject": "tortoise_create_subject",
+    "_create_object": "tortoise_create_object",
+    "_create_event": "tortoise_create_event",
+    "_create_document": "tortoise_create_document",
     # #11609 lane C: `create_source` / `assess_source` are RETIRED (`register_source` /
     # `manage_source_trust` absorb them) and their doors wrap the private seams. The
     # key is the wrap site's name; the label is the retired-but-served door, which the
@@ -395,8 +410,8 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     # The entity write is still mapped, under the method its door actually wraps:
     # `update_knowledge` above.
 
-    "create_edge": "tortoise_create_edge",
-    "ingest": "tortoise_ingest",
+    "_create_edge": "tortoise_create_edge",
+    "_ingest": "tortoise_ingest",
     "_index_directory": "tortoise_index_files",  # retired method, seam-wrapping door
     # #11609 lane C's containers: each wraps its own SDK operation, so each is a
     # declared write surface of its own (the forward arm would otherwise report them

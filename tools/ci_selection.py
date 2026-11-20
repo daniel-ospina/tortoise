@@ -1715,6 +1715,36 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # pin is selected. Pinned by
              # tests/test_published_artifact_canary.py::test_a_tool_only_diff_selects_this_pin.
              "tools/published_artifact_canary.py",
+             # #4211 / #13919 review: the session-hierarchy re-measurement instrument.
+             # Same silent-drop class as the row above, and MEASURED before this entry:
+             # `--changed-files tools/measure_4211_session_hierarchy.py --event
+             # pull_request` -> `surfaces: []` (the path is dropped by
+             # `_keep_changed`), so the PR that adds the tool's own falsifiability pins
+             # ran them on nothing — the tool's 0/2 exit contract, its turn-key filters
+             # and its denominator accounting were all unguarded on exactly the diff
+             # that changed them. With the entry: `surfaces=['core']` and the suite is
+             # selected. Pinned by
+             # tests/test_measure_4211_session_hierarchy.py::
+             # test_a_tool_only_diff_selects_this_pin.
+             "tools/measure_4211_session_hierarchy.py",
+             # #4211 / #13919 review (round 7): the instrument's COMMITTED RECEIPT.
+             # Registering the tool and its suite left the ARTIFACT ungated, and MEASURED
+             # before this entry: `select(["docs/scoping/receipts/2026-11-19-4211-
+             # hierarchy-remeasure.json"], "pull_request", manifest)` -> `surfaces: []`,
+             # while the sibling receipt
+             # `2026-11-03-10538-window-arm-retention.json` selects `[`eval`]` — so a
+             # hand-edit of the numbers, or a re-emit by a changed instrument, selected
+             # NOTHING and shipped green. That is the #1349/#2938/#3616 silent-drop
+             # class on the artifact the #4211 "0 aboutObject in 60 of 173" verdict is
+             # ARGUED FROM, and it is what made the round-7 finding beside it (a
+             # zero-graph re-run replacing the receipt while exiting 0) undetectable.
+             # `core`, not `eval`: the pin that reads the receipt lives in
+             # tests/test_measure_4211_session_hierarchy.py, which is registered `core`
+             # in config/ci-surfaces.yml — an `eval` row here would select a surface in
+             # which that pin does not run. Pinned from the other side by
+             # tests/test_measure_4211_session_hierarchy.py::
+             # test_a_receipt_only_diff_selects_this_pin.
+             "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
@@ -1965,6 +1995,41 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_13629_entity_vector_retire.py::test_a_tools_only_diff_selects_this_pin.
              "tools/entity_vector_parity_census.py",
              "tools/strip_graph_entity_vectors.py",
+             # #13685: the BACKFILL that unblocks the retirement
+             # (`tools/entity_vector_backfill.py`) owns
+             # tests/test_13685_entity_vector_backfill.py (registered `core`, and a
+             # `slow_files` member because its acceptance leg mints a throwaway
+             # `pgvector/pgvector:pg16`). Same flat `tools/` swallow, and the stakes are
+             # the mirror image of the entry above: this tool is the one that FILLS, so a
+             # diff that dropped the `AND embedding IS NULL` guard, the exact-population
+             # digest, the two token refusals or the unmatched-node count would merge
+             # with every falsifier that catches those asleep — and the failure it would
+             # ship is a RECORD VECTOR OVERWRITTEN, which no later run can undo. Pinned by
+             # tests/test_13685_entity_vector_backfill.py::test_a_tools_only_diff_selects_this_pin
+             # and by
+             # tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row.
+             "tools/entity_vector_backfill.py",
+             # #13906: the dense-leg QUERY-parity harness
+             # (`tools/vector_parity_13906.py`) owns
+             # tests/test_vector_parity_13906.py (registered `core`). Same flat `tools/`
+             # swallow — a harness-only diff filters to `changed == []`, takes the
+             # docs-only early return and runs tier-1 smoke, where that file is not
+             # registered. The stakes are the instrument's own negative: the comparator
+             # is what is ALLOWED to say "the two dense legs agree", so a diff that
+             # widened the tie tolerance, dropped the distance comparison or made a
+             # poison undetectable would merge with every falsifier asleep — and the
+             # artifact it would produce is a green parity report. Pinned by
+             # tests/test_ci_selection.py::test_a_vector_parity_harness_only_diff_selects_its_pins,
+             # which asserts THE ARM ITSELF (`surfaces == ["core"]` plus the file in
+             # `test_files`). ⛔ Not by the comparator's own falsifiers: an earlier
+             # version of this comment cited
+             # `tests/test_vector_parity_13906.py::test_each_poison_makes_the_comparison_fail`
+             # and `::test_a_distance_change_with_identical_ids_is_a_divergence`, and
+             # neither calls `select()` — so deleting this entry left every one of them
+             # green while a tools-only diff collapsed to `surfaces: []` (measured,
+             # #13914 review round 5). The entry now cites only the pin that reads it.
+             "tools/vector_parity_13906.py",
+
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a
              # tool-only diff answers with `surfaces: []` — measured before this entry:

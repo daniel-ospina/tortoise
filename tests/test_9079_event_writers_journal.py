@@ -234,7 +234,7 @@ def test_ingest_corpus_journals_every_document_event(sdk_with_journal, tmp_path)
         "b.md": _doc("Beta"),
     })
 
-    result = sdk.ingest_corpus(str(docs))
+    result = sdk._ingest_corpus(str(docs))
 
     assert result["ingested"] == 2, result
     records = _event_records(sdk._journal_path_for_test)
@@ -255,7 +255,7 @@ def test_a_rebuild_reproduces_the_ingested_events(sdk_with_journal, tmp_path):
     """
     sdk = sdk_with_journal
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
-    assert sdk.ingest_corpus(str(docs))["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs))["ingested"] == 1
     live = _event_props(sdk._get_proj(), "a.md")
     assert live, "sanity: the Event exists live"
     assert live.get("file_hash"), "sanity: the live write carries file_hash"
@@ -280,11 +280,11 @@ def test_a_rebuilt_corpus_still_skips_a_byte_identical_reingest(
     """The end the file_hash exists for: `skipped`, not `updated`, after a rebuild."""
     sdk = sdk_with_journal
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
-    assert sdk.ingest_corpus(str(docs))["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs))["ingested"] == 1
     sdk._get_proj().rebuild_all(
         str(sdk._journal_path_for_test.parent), confirm_destructive=True)
 
-    second = sdk.ingest_corpus(str(docs))
+    second = sdk._ingest_corpus(str(docs))
 
     assert second["skipped"] == 1, (
         "byte-identical re-ingest after a rebuild no longer skips — the "
@@ -300,10 +300,10 @@ def test_reingest_byte_identical_stays_a_skip_and_appends_nothing(
     """
     sdk = sdk_with_journal
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
-    assert sdk.ingest_corpus(str(docs))["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs))["ingested"] == 1
     before = len(_event_records(sdk._journal_path_for_test))
 
-    second = sdk.ingest_corpus(str(docs))
+    second = sdk._ingest_corpus(str(docs))
 
     assert second["skipped"] == 1, second
     assert len(_event_records(sdk._journal_path_for_test)) == before, (
@@ -315,10 +315,10 @@ def test_a_changed_document_journals_the_update(sdk_with_journal, tmp_path):
     """The update arm is a write too, so it carries its own record."""
     sdk = sdk_with_journal
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
-    assert sdk.ingest_corpus(str(docs))["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs))["ingested"] == 1
 
     (docs / "a.md").write_text(_doc("Alpha revised"), encoding="utf-8")
-    second = sdk.ingest_corpus(str(docs))
+    second = sdk._ingest_corpus(str(docs))
 
     assert second["updated"] == 1, second
     assert len(_event_records(sdk._journal_path_for_test)) == 2, (
@@ -336,7 +336,7 @@ def test_ingest_corpus_agent_session_branch_journals(sdk_with_journal, tmp_path)
         "s1.md": "---\ntitle: Session One\nsessionId: s9122\n---\nuser: hi\nassistant: hello\n",
     })
 
-    result = sdk.ingest_corpus(str(docs), eventKind="AgentSession")
+    result = sdk._ingest_corpus(str(docs), eventKind="AgentSession")
 
     assert result["ingested"] == 1, result
     records = _event_records(sdk._journal_path_for_test)
@@ -365,7 +365,7 @@ def test_the_ingest_record_folds_back_to_an_event_not_a_source(
     """
     sdk = sdk_with_journal
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
-    assert sdk.ingest_corpus(str(docs))["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs))["ingested"] == 1
 
     sdk._get_proj().rebuild_all(
         str(sdk._journal_path_for_test.parent), confirm_destructive=True)
@@ -407,7 +407,7 @@ def test_ingest_corpus_writes_inside_a_live_write_scope(
         "sanity: the probe only refuses on a journal-backed projection")
     docs = _corpus(tmp_path / "corpus", {"a.md": _doc("Alpha")})
 
-    result = sdk.ingest_corpus(str(docs))
+    result = sdk._ingest_corpus(str(docs))
 
     assert result["ingested"] == 1, (
         f"the guard refused the sanctioned ingest write: {probe.mutating()}")
@@ -540,7 +540,7 @@ def test_the_session_update_record_replays_a_faithful_node(
     docs = _corpus(tmp_path / "corpus", {
         "s1.md": "---\ntitle: Session One\nsessionId: s9122u\n---\nuser: hi\nassistant: hello\n",
     })
-    assert sdk.ingest_corpus(str(docs), eventKind="AgentSession")["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs), eventKind="AgentSession")["ingested"] == 1
     event_id = "session_s9122u"
     live = _event_props(sdk._get_proj(), event_id)
     assert live.get("startedAt"), "sanity: the create arm stamps startedAt"
@@ -550,7 +550,7 @@ def test_the_session_update_record_replays_a_faithful_node(
     (docs / "s1.md").write_text(
         "---\ntitle: Session One\nsessionId: s9122u\n---\n"
         "user: hi\nassistant: hello again\n", encoding="utf-8")
-    assert sdk.ingest_corpus(str(docs), eventKind="AgentSession")["updated"] == 1
+    assert sdk._ingest_corpus(str(docs), eventKind="AgentSession")["updated"] == 1
 
     sdk._get_proj().rebuild_all(
         str(sdk._journal_path_for_test.parent), confirm_destructive=True)
@@ -588,7 +588,7 @@ def test_a_failed_append_does_not_write_the_cache(
 
     monkeypatch.setattr(sdk, "_emit_event", failing_append)
     try:
-        result = sdk.ingest_corpus(str(docs))
+        result = sdk._ingest_corpus(str(docs))
     finally:
         monkeypatch.setattr(sdk, "_emit_event", real)
 
@@ -634,7 +634,7 @@ def test_the_record_is_gated_for_kind_spellings_before_the_append(
     # A refusal must fail the ONE file, not take the batch down: `ingest_corpus`
     # is a sweep, and #9068's whole point is that the write is refused rather
     # than silently widening the pack approval set.
-    result = sdk.ingest_corpus(str(docs))
+    result = sdk._ingest_corpus(str(docs))
 
     assert seen, "the door appended without consulting the #5475 record gate"
     assert seen[0].get("document_kind") == "marketing:brief", (
@@ -671,7 +671,7 @@ def test_a_frontmatter_date_still_ingests(sdk_with_journal, tmp_path):
         ),
     })
 
-    result = sdk.ingest_corpus(str(docs))
+    result = sdk._ingest_corpus(str(docs))
 
     assert result["ingested"] == 1, (
         f"a bare frontmatter date broke the ingest: {result}")
@@ -695,13 +695,13 @@ def test_the_update_record_carries_the_stored_vector(
     docs = _corpus(tmp_path / "corpus", {"s1.md": body + "assistant: a\n"})
     vec = [0.01] * 8
     monkeypatch.setattr(sdk, "_session_embedding", lambda *a, **kw: list(vec))
-    assert sdk.ingest_corpus(str(docs), eventKind="AgentSession")["ingested"] == 1
+    assert sdk._ingest_corpus(str(docs), eventKind="AgentSession")["ingested"] == 1
 
     # The embedder is unavailable for the update, so the live clause preserves
     # the stored vector; the record must carry that same vector.
     monkeypatch.setattr(sdk, "_session_embedding", lambda *a, **kw: None)
     (docs / "s1.md").write_text(body + "assistant: b\n", encoding="utf-8")
-    assert sdk.ingest_corpus(str(docs), eventKind="AgentSession")["updated"] == 1
+    assert sdk._ingest_corpus(str(docs), eventKind="AgentSession")["updated"] == 1
 
     def _vec():
         rows = sdk._get_proj().g.query(

@@ -4,12 +4,21 @@
  * WHY THIS FILE EXISTS
  * --------------------
  * `/api/consent/start` is a route a PERSON navigates to, not an endpoint a program calls: the
- * connector sends a browser here and the browser renders whatever comes back. Every hard failure of
- * that route used to answer `json({error, reason})`, so a visitor whose consent attempt could not be
+ * connector sends a browser here and the browser renders whatever comes back. Every REFUSAL on that
+ * route used to answer `json({error, reason})`, so a visitor whose consent attempt could not be
  * carried saw `{"error":"unavailable","reason":"consent_store_unavailable"}` on a blank page — with
  * no sentence telling them what happened and no way forward. #10487's own title names the class
  * (*"both as raw JSON"*); #10884 covers the `503` store arms and #10865 arm B the `403` refusal, and
- * they are ONE root: **the failure states of the carriage were never given a user-facing face.**
+ * they are ONE root: **the refusal states of the carriage were never given a user-facing face.**
+ *
+ * ⛔ "REFUSAL", not "hard failure": `start.ts` still returns JSON from TWO places — the `400`
+ * caller error and the terminal `200` flow state — and both reach a browser. A summary that claimed
+ * otherwise would be FALSE, and it is the more dangerous kind of false: #10865's owner comment
+ * records the terminal `200` as a DIFFERENT CONTRACT, so a reader who believed the absolute would
+ * "finish" the job by converting an arm whose retirement is the OWNER'S DECISION (that comment
+ * offers it as an option and calls it "an owner-visible API decision, not a review fix" — it does
+ * not rule it out, and this comment must not say it does). The two survivors are counted and
+ * classified in `tests/test_oauth_consent_bff_routes.py`.
  *
  * WHAT THIS PAGE DELIBERATELY DOES
  * --------------------------------

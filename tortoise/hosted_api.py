@@ -98,6 +98,7 @@ from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
 )
 from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
     AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    attachment_target_ids,  # #12244: the merge collapse, for the about-anchor
     name_key_space_same_entity,  # #12120: the writer's key space, for node-returning reads
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
@@ -4659,7 +4660,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                result = sdk.dream(dirty_only=True, mode="local")
+                result = sdk._dream(dirty_only=True, mode="local")
                 # #8099: precompute the why-blocks this pass made true, so the
                 # push below READS them instead of assembling per event. Runs
                 # INSIDE the lock and INSIDE the pool item on purpose: it is a
@@ -8375,6 +8376,65 @@ async def liveness(response: Response):
             else round((now - previous) * 1000.0, 1)}
 
 
+# ── #13674: the embedder's declared state, as `/health` reports it ───────────
+# `EmbeddingModel.status()` exists so the LOAD BOUND is observable — the three
+# fields #13674 added (`load_timeout_s`, `load_elapsed_s`, `load_in_progress`,
+# plus `load_in_progress_s`) are what let an operator see a load 290 s into a
+# 300 s bound BEFORE it becomes a timeout. Until this block existed, every
+# caller of that dict in `tortoise/` was a test comment, so on the product the
+# one instrument for "is hybrid retrieval on, and if not, why" had no reader —
+# which is exactly the clause
+# `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §6 states for the record
+# door: "a door must not make a counter its instrument unless the caller can
+# read it back."  #13674's own indicator (1) — a production boot showing
+# `embedder warm-up OK` rather than `load_timeout` — was therefore checkable
+# only from `fly logs`, and indicator (3) (RSS bounded across a retry) not at
+# all.
+#
+# ⛔ IT DOES NOT FOLD INTO `status`, the same rule as `change_feed`,
+# `wait_bound_breaches` and `capture`: an embedder that is loading or on
+# cooldown means KEYWORD-ONLY READS, and #2952 already requires each such read
+# to DECLARE itself (`declared_retrieval_kind`). Folding it in would pin a
+# deployment degraded for the life of the process the moment the model failed to
+# load once (#10185), and would land a restart-loop's worth of 503s on the deploy
+# gate for a condition the product is designed to survive. `state` is the
+# operator's cue; the per-read declaration is the contract.
+#
+# `threads` rides along because #10296 made the intra-op pin observable for the
+# same reason ("why is this host slow" is read here instead of rediscovered).
+# `model` is the pinned identity (#1349), so a reader can tell WHICH embedder
+# reported ready.
+_EMBEDDER_HEALTH_KEYS = (
+    "model", "available", "state", "last_error", "failure_kind",
+    "cooldown_remaining_s", "threads", "load_timeout_s", "load_elapsed_s",
+    "load_in_progress", "load_in_progress_s",
+)
+
+
+def _embedder_health() -> dict:
+    """#13674: the embedder's load state, on the surface an operator curls.
+
+    Publishes `EmbeddingModel.status()` — the DECLARED availability plus the
+    load bound and how far into it the in-flight attempt is — so "the dense leg
+    is off in production" has a datum that survives the process, instead of a
+    log line somebody has to already be watching for.
+
+    Never raises, collects no I/O (#2850): `status()` reads process memory only
+    — it takes no embedder lock, so a 156.5 s cold import cannot delay this
+    handler. The DEGRADED arm publishes the SAME key set as the healthy one
+    (PLUS `error` — an extra key cannot `KeyError` a consumer, a missing one
+    can) and the rule `capture` / `refusals` state holds: an ad-hoc short dict
+    is how a dashboard gets a `KeyError` in exactly the path it is reading.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+
+        status = EmbeddingModel.status()
+    except Exception as exc:  # a health path must always answer
+        return {**dict.fromkeys(_EMBEDDER_HEALTH_KEYS), "error": str(exc)[:200]}
+    return {key: status.get(key) for key in _EMBEDDER_HEALTH_KEYS}
+
+
 @app.get("/health")
 async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
@@ -8492,6 +8552,24 @@ async def health():
     a saturated capture gate refuses `POST /v1/sessions` while every other route
     — including this one — is healthy, and restarting the process would neither
     drain the extractions holding the slots nor clear a burst of arrivals.
+
+    Embedder check (#13674): ``embedder`` publishes ``EmbeddingModel.status()`` —
+    ``available``, ``state`` (``ready``/``cooldown``/``unavailable``),
+    ``failure_kind``, the intra-op ``threads`` pin, the load bound
+    ``load_timeout_s`` and, for the attempt in flight, ``load_in_progress`` plus
+    ``load_in_progress_s`` — plus ``model``, ``last_error``,
+    ``cooldown_remaining_s`` and ``load_elapsed_s``. The authoritative full set is
+    ``_EMBEDDER_HEALTH_KEYS``, which the DEGRADED arm publishes exactly. It exists
+    because the dense leg being OFF —
+    keyword-only reads for every query, with every published surface saying
+    ``ok`` — was invisible except in a ``fly logs`` line nobody watched. It does
+    NOT fold into ``status``: a loading or cooling-down embedder means
+    keyword-only reads, which #2952 requires each read to DECLARE; folding it in
+    would pin a deployment degraded forever after one failed load (#10185) and
+    put a restart loop's worth of 503s on the deploy gate. ⛔ Its DEGRADED arm
+    (``_embedder_health``'s never-raise branch) returns the SAME key set with
+    every value ``null`` plus ``error`` — ``available: null`` therefore means
+    "this block could not be read", NOT "the model is unavailable".
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -8628,7 +8706,14 @@ async def health():
             # (see the docstring). Resolved through the SAME module the verifier
             # uses, so the reading cannot describe a key this process does not
             # actually sign with.
-            "consent_token_key": _consent_token_key_health()}
+            "consent_token_key": _consent_token_key_health(),
+            # #13674: the embedder's declared state. The load bound this P1
+            # raised (90 s -> 300 s), how far into it the in-flight attempt is,
+            # and whether the dense leg is available AT ALL — without this the
+            # "hybrid retrieval is OFF in production" claim could only be
+            # re-measured by a human with a shell on the box. Reported, never
+            # folded into `status`: see `_embedder_health`'s docstring.
+            "embedder": _embedder_health()}
 
 
 @app.get("/health/ready")
@@ -14039,7 +14124,7 @@ async def create_object(body: CreateObjectRequest, request: Request,
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
-        node = await asyncio.to_thread(sdk.create_object, body.name, **props)
+        node = await asyncio.to_thread(sdk._create_object, body.name, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -14097,7 +14182,7 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         # a stored kind to the default.
         _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
-            sdk.create_subject, body.name, **_kind)
+            sdk._create_subject, body.name, **_kind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -14157,7 +14242,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
             # not clear; `update_knowledge` does.
             if body.goalState is not None:
                 _author_props["goalState"] = body.goalState
-            out = sdk.create_point(
+            out = sdk._create_point(
                 content=body.content,
                 kind=body.kind,
                 tags=body.tags,
@@ -14912,13 +14997,13 @@ async def dream(
         # SDK's close.
         with _dream_lock(_dk):
             if mode is not None:
-                result = sdk.dream(mode=mode, budget=budget)
+                result = sdk._dream(mode=mode, budget=budget)
             elif full:
-                result = sdk.dream(full=True)
+                result = sdk._dream(full=True)
             else:
                 if queued_roots:
                     sdk._mark_dirty(queued_roots)
-                result = sdk.dream(dirty_only=True)
+                result = sdk._dream(dirty_only=True)
             # #8099 (review F2): EVERY belief-moving dream pass refreshes the
             # why-block cache, not only the write-triggered drain. Indicator 3's
             # "a point whose belief moved in a dream is pushed with the
@@ -14957,7 +15042,7 @@ async def dream_health(
     # `finally: sdk.close()`, cancelling the request would close the projection
     # on the LOOP while the worker was still inside the scan (CPython #87185 —
     # the same race `_run_dream_on_pool` was built to remove).
-    return await _run_with_close(_DREAM_EXECUTOR, sdk.dream_health_check, sdk)
+    return await _run_with_close(_DREAM_EXECUTOR, sdk._dream_health_check, sdk)
 
 
 @app.get("/v1/search")
@@ -15083,7 +15168,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             # stalls and became a 3.7–14.6 s answer. Same callable, same result;
             # only WHERE it runs changes.
             results = await _read_offload(
-                lambda: sdk.tortoise_fts_query(
+                lambda: sdk._tortoise_fts_query(
                     q, limit=limit, read_status_out=status_out,
                     _truncation_out=trunc_out),
                 op="search")
@@ -15185,7 +15270,7 @@ async def topic_summary(
         # thread so the event loop stays free. #10602: on the dedicated,
         # BOUNDED read lane (same as /v1/search), not the shared pool.
         result = await _read_offload(
-            lambda: sdk.topic_summarize(
+            lambda: sdk._topic_summarize(
                 topic,
                 max_seeds=max_seeds, max_hops=max_hops,
                 include_relationships=include_relationships,
@@ -20653,7 +20738,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_mint_failed = False
     if not session_existed or (retry_failed_capture and not store_only):
         try:
-            event = sdk.create_event(
+            event = sdk._create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
                 _server_id=_session_capture_event_id(session_id),
@@ -23234,7 +23319,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # writer remaps the identity onto `:Source`) — it is what marks this a
         # derivation link, so it takes the `sourceVersion` anchor. See
         # `edges.py::_DERIVATION_REFERENCES_LABELS`.
-        sdk.link_source_to_entity(url, doc_id, "Document")
+        sdk._link_source_to_entity(url, doc_id, "Document")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -23337,7 +23422,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # BEFORE this successor is minted, so a refusal leaves no orphan
             # for this point.
             _prevalidate_supersede_window(sdk, pr, now=now)
-            _written = sdk.create_point(
+            _written = sdk._create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -23488,7 +23573,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # supersede leg's note above (an explicit None would CLEAR it).
             if _mention_props:
                 point_props["mentions"] = _mention_props
-            _written = sdk.create_point(
+            _written = sdk._create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -23821,7 +23906,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # `resolve_entity_id_same_entity` would make an attribution edge
             # REFUSE where capture writes — two live same-name carriers — silently
             # losing an attachment on the hosted path only. Widening the spelling
-            # set picks no identity, so that objection does not apply.
+            # set picks no identity, so that objection does not apply. ⛔ #12244:
+            # "one entity, two rows" is a DIFFERENT question from "two carriers",
+            # and the collapse below answers only that one (see the note at the
+            # read).
             _space, _space_params = name_key_space_same_entity("o", str(name))
             if not _space:
                 continue
@@ -23833,12 +23921,96 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if _fold(str(name)) in subject_entity_names_folded:
                 _space = f"({_space}) AND o.name = $exact"
                 _space_params = {**_space_params, "exact": str(name).strip()}
-            proj.g.query(
-                f"MATCH (p:Point {{id:$pid}}), (o:Object) "
-                f"WHERE {_space} "
-                f"MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, **_space_params},
-            )
+            # ⛔ #12244: the MERGE-COLLAPSE half. The space above is the writer's
+            # SPELLING space, and `apply_entity_merge` is non-destructive — a
+            # merged pair is ONE entity with TWO live rows under one folded key
+            # (the retired carrier keeps its name and gains `resolved_from`; the
+            # survivor records the candidate's folded key in `aliases`). A single
+            # MERGE over that space therefore wrote the edge onto BOTH, including
+            # the node the writer would never resolve to. Read the holders, map
+            # them through `entity_identity.attachment_target_ids` (the hop has
+            # ONE definition), then attach per ENTITY.
+            #
+            # ⛔ The recorded dispositions still hold: attach-to-every-carrier is
+            # unchanged for every DISTINCT entity (the collapse dedupes only rows
+            # the merge's own pointer joins, so no identity is picked and a second
+            # live same-name carrier keeps its edge); the anchor stays
+            # STATUS-BLIND (a terminal-only holder is still linked —
+            # `attachment_target_ids` applies no live filter); and the id-less
+            # arm below is kept because the recorded shape of this site is ONE
+            # `Object` MERGE that attaches id-less rows too, and `link_entity`
+            # cannot address them (it MERGEs on `{id:…}`).
+            _holders = [(_r[0] if _r else None) for _r in proj.g.query(
+                f"MATCH (o:Object) WHERE {_space} RETURN o.id",
+                params=_space_params).result_set]
+            # ⛔ An ID-LESS row has no `id` at all; a row whose `id` is present
+            # but NOT a string is a different shape: `link_entity`/the id arm
+            # address ids as strings, so the collapse answers with the string
+            # form and an `o.id IN $ids` match finds nothing — measured: an
+            # `Object {id: 4242}` matched by the name space dropped its edge at
+            # this anchor while the pre-#12244 single MERGE wrote it. It is
+            # addressable by its OWN value, so it rides the same id-keyed MERGE
+            # with the raw value beside the string ones (a raw int matches its
+            # own node and the string form never does, so neither arm can pick
+            # up the other's row) — and `attachment_target_ids` answers ONLY for
+            # string holders, so no string spelling of the raw value is emitted
+            # either: that spelling would address a TWIN whose id is literally
+            # "4242", a row the writer's name space never matched (#13724
+            # review; `test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge`).
+            #
+            # ⚠️ RESIDUAL: `follow_resolved_from` stringifies its argument on
+            # entry (`entity_resolver.py:673` `current = str(node_id)`), so a
+            # holder whose `id` is NON-STRING can never have its `resolved_from`
+            # followed — `hopped` stays False, this arm re-attaches that row
+            # as-is, including a carrier a merge retired (#12244 survives for
+            # that shape), and because no hop happened the presence filter at
+            # `entity_identity.py:455-465` is not reached either, so nothing
+            # corrects it here. Left as the pre-fix attachment deliberately: the
+            # alternative (normalise the id before the hop) changes the shared
+            # hop every writer uses, which is not this lane's blast radius.
+            #
+            # `_idless` is deliberately NARROWER than "not a string", and the
+            # narrowing has NO observable effect — it is defence-in-depth, not a
+            # behaviour change: the id-less arm's predicate (`o.id IS NULL OR
+            # o.id = ''`) cannot match a non-string id, and every row it CAN
+            # match is already a `None`/`''` element of `_holders`. So the two
+            # spellings of this flag are equivalent and no test can pin the
+            # difference; it is written this way because "id-less" is what the
+            # flag means (a non-string id is covered by the raw arm above).
+            _idless = any(_h is None or _h == "" for _h in _holders)
+            _raw_addressable = [_h for _h in _holders
+                                if _h is not None and _h != ""
+                                and not isinstance(_h, str)]
+            try:
+                _targets = attachment_target_ids(proj.g, "Object", _holders)
+            except Exception as _col_exc:  # noqa: BLE001, RUF100
+                # Never sink the commit on a collapse that cannot be computed:
+                # fall back to the pre-#12244 attachment set and say so.
+                _targets = [_h for _h in _holders
+                            if isinstance(_h, str) and _h]
+                _logger.warning(
+                    "about-anchor collapse failed for %r: %s: %s — attached "
+                    "to every matched carrier",
+                    name, type(_col_exc).__name__, _col_exc)
+            _targets = [*_targets, *_raw_addressable]
+            if _targets:
+                proj.g.query(
+                    "MATCH (p:Point {id:$pid}), (o:Object) "
+                    "WHERE o.id IN $ids "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, "ids": _targets},
+                )
+            if _idless:
+                # An id-less name stub (minted by the capture wiring
+                # `MERGE (o:Object {name:$name})`) has no id to attach by, so it
+                # keeps main's name-based MERGE over the SAME widened space.
+                proj.g.query(
+                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                    f"WHERE {_space} "
+                    "AND (o.id IS NULL OR o.id = '') "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, **_space_params},
+                )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a
         # point this commit actually WROTE, and only against the id the write
@@ -27777,7 +27949,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
         # all-NULL key provision (create_onboarding_org's #1716 keyless
         # parity). The old default minted a tt_ key whose plaintext was
         # never returned — a dead credential counted against max_api_keys.
-        result = sdk.org_create(name, mint_key=False,
+        result = sdk._org_create(name, mint_key=False,
                                  owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
@@ -37814,7 +37986,7 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
     # `asyncio.to_thread` pattern, so the error mapping below is unchanged.
     sdk = await _data_sdk_offloaded(org)
     try:
-        return await asyncio.to_thread(sdk.session_context)
+        return await asyncio.to_thread(sdk._session_context)
     except Exception:
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
@@ -38045,7 +38217,7 @@ async def volunteer_context(
         # search + why-block assembly) — never on the event loop.
         result = await asyncio.wait_for(
             asyncio.to_thread(
-                sdk.volunteer_context,
+                sdk._volunteer_context,
                 window,
                 body.session_id, body.prior_context,
                 body.min_confidence, body.max_pointers, body.why,
@@ -38109,7 +38281,7 @@ async def issue_insight(title: str, body: str | None = None,
     sdk = await _data_sdk_offloaded(org)
     try:
         return await asyncio.to_thread(
-            sdk.issue_insight, title=title, body=body, repo=repo, limit=limit)
+            sdk._issue_insight, title=title, body=body, repo=repo, limit=limit)
     except Exception:
         logging.getLogger("tortoise.api").exception("issue_insight failed")
         raise HTTPException(status_code=500, detail="Insight unavailable")  # noqa: B904
@@ -40539,10 +40711,10 @@ class _OrgSeedSurface:
         subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
-        return self._sdk.create_subject(name, **props)
+        return self._sdk._create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
-        return self._sdk.create_edge(relation, from_id, to_id)
+        return self._sdk._create_edge(relation, from_id, to_id)
 
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
@@ -41147,7 +41319,7 @@ async def _create_onboarding_org_lane(org: dict, name: str,
         # #1716 keyless parity + #1748 owner Membership for the session
         # user (org_create now creates it — without it the keyless
         # sub-org is an unmintable orphan).
-        result = sdk.org_create(name, mint_key=False,
+        result = sdk._org_create(name, mint_key=False,
                                  owner_user_id=owner_user_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
@@ -48328,7 +48500,7 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
         # Registry (selfhost) lane — sdk is the registry SDK passed by the
         # route (never None in registry mode).
         try:
-            result = sdk.org_create(org_name, mint_key=False,
+            result = sdk._org_create(org_name, mint_key=False,
                                      owner_user_id=user_id,
                                      idempotency_key=org_id)
         except Exception as e:
@@ -48338,7 +48510,7 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
             _logger.warning(
                 "webhook: org name %r was taken; provisioning as %r (team %s)",
                 org_name, alt, org_id)
-            result = sdk.org_create(alt, mint_key=False,
+            result = sdk._org_create(alt, mint_key=False,
                                      owner_user_id=user_id,
                                      idempotency_key=org_id)
         return result["id"]
@@ -50712,7 +50884,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 196 tracked files (734 distinct
+# ABSOLUTE line number from 197 tracked files (734 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

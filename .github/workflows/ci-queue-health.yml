@@ -192,7 +192,7 @@ jobs:
     # that visible; re-measure rather than trusting this text:
     # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
     # `config.sh` a version pin with the flag off — pinned at
-    # `tests/test_ci_runner_x64_install.py:230`.
+    # `tests/test_ci_runner_x64_install.py:236`.
     # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
     # (github/docs, "Using self-hosted runners in a workflow"), so while the
     # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
@@ -221,12 +221,42 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ── THE NEVER-DISPATCHED PROOF STORE (#13825) ─────────────────────
+      # The tool proves a queued run was never dispatched by reading its job records;
+      # each proof costs one request and there are ~128 of them, so the proofs are
+      # PERSISTED and RE-OBSERVED on a TTL (`NEVER_DISPATCHED_REPROOF_SECONDS`, 2 h)
+      # rather than re-derived every pass.
+      #
+      # ⛔ THE KEY/RESTORE-KEYS PAIR IS LOAD-BEARING, IN BOTH DIRECTIONS. A unique key
+      # with NO `restore-keys` never restores anything (exact-match only), so the proof
+      # set would never accumulate and every pass would re-probe the same budget. A key
+      # that does not change per run never re-saves (a cache entry is immutable per
+      # key), so the store would freeze at its first snapshot.
+      # ⛔ AND A RESTORED SNAPSHOT MAY BE ARBITRARILY OLD, which is FINE and is bounded
+      # TOGETHER: the loader rejects the file on a version or `repo` mismatch, rejects a
+      # record whose `proved_at` is in the future or older than the TTL, and drops any
+      # record whose run has left the feed or moved its `updated_at` — so the worst a
+      # stale restore can do is prove FEWER runs, which counts them as waiting (the
+      # fail-closed direction), never more.
+      - name: Restore the never-dispatched proof store (#13825)
+        uses: actions/cache@v4
+        with:
+          path: .ci-queue-health
+          key: ci-queue-health-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            ci-queue-health-${{ github.repository }}-
+
       - name: Measure the queue, and unjam a trim-safe flood
         env:
           # `gh` reads the token from the ENVIRONMENT; Actions exposes it only as
           # a context (#3092 — a `gh` call with no env binding fails every time).
           GH_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          # The proof store restored above. Without it the tool still works — it
+          # probes within its own budget each pass and proves fewer runs, which
+          # counts MORE runs as waiting. That degradation is the safe direction and
+          # is why the store is an optimisation, not a correctness dependency.
+          CI_QUEUE_HEALTH_STATE: ${{ github.workspace }}/.ci-queue-health/never-dispatched.json
         run: |
           set +e
           if [ "${DRY_RUN}" = "true" ]; then
@@ -346,6 +376,19 @@ jobs:
             # `::error::` diagnostics in ci-timing.yml escape the same way, and
             # tests/test_ci_queue_health.py pins the class over EVERY annotation).
             echo "::warning::${state} — PR CI IS executing (or is only REPORTED executing on an unmeasured census — see the reason line), but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires \`pr_running > 0\`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
+          elif [ "$verdict" = "PR-NEVER-DISPATCHED" ]; then
+            # ⛔ NOT `OK` (#13825). Every PR-event run in the wait legs was PROVED never
+            # dispatched: GitHub created the run object and never created a job, so the
+            # run will wait for ever and no runner slot can serve it. `OK` is this tool's
+            # only healthy state and the string the fleet samples, so printing it here
+            # would present an unservable queue as health.
+            # ⛔ THE LEVER IS NAMED AS ABSENT ON PURPOSE. There is no action available:
+            # measured, `/cancel` on those runs answers "Cannot cancel a workflow run that
+            # is completed" while the same id reads `status=queued`, and the population
+            # leaves on GitHub's own retention (tortoise#12906). So this must not tell an
+            # operator to raise the budget, retry, or add capacity — none of those touches
+            # it — and it must not read as "PR CI is slow".
+            echo "::warning::${state} — every PR-event run waiting was PROVED never dispatched: GitHub created the run and never created a single job for it, so no runner slot can ever serve them and they will leave on GitHub's own retention rather than by draining. This is NOT capacity, NOT a retryable read, and NOT a flood — the live PR queue is empty. Tracked by tortoise#12906."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
             # ⛔ THE CAUSE IS READ FROM THE PAYLOAD'S OWN FLAG, NOT RE-DERIVED FROM COUNTS.
             # `PR-UNWITNESSED` has three causes on different dimensions and they take
@@ -414,5 +457,5 @@ jobs:
               echo "::warning::${state} — the PR wait was not witnessed (a feed was cut at the page cap — the queued or the in-progress one, which share one flag — or the pending/requested leg was cut at its page cap, or a WAITING PR-event run — queued, pending or requested — has no measurable current-attempt age), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED or PR-UNWITNESSED (five exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED, PR-BACKLOGGED, PR-UNWITNESSED or PR-NEVER-DISPATCHED (six exit-0 shapes, all but OK and cleared warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

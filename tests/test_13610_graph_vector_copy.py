@@ -32,6 +32,13 @@ WHAT THIS FILE PINS, and each item is a way the change could be defeated:
 5. **The wiring is pinned** (`test_every_searcher_construction_site_...`): an
    unwired caller silently gets double-storage for ever, which no test of the
    predicate would catch.
+6. **The NON-VACUITY marker** (`test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so`,
+   `#13798`): the gate is `record >= graph`, so `0 >= 0` verified an unseeded label
+   exactly like a backfilled one. `Coverage.trivial` marks the two-zero case, the
+   real-verification case is pinned NOT to carry it, and the unmeasurable arm is
+   pinned not to be swallowed by it. The marker is additive: every shipped consumer's
+   verdict is unchanged, which is pinned in
+   `test_a_trivial_verdict_is_still_a_verified_verdict_for_the_shipped_paths`.
 
 Run (embedded lane; the DB-free cases need no database, the two projection cases
 build their own by path)::
@@ -44,6 +51,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -109,6 +117,16 @@ class _Cursor:
     def execute(self, sql, params=None):
         self.statements.append((sql, tuple(params or ())))
 
+    def serve(self, rows: list[tuple]) -> None:
+        """Change what the kNN arm answers — for the read AFTER a cached verdict.
+
+        Deliberately NOT a second `_stub_record` call, which resets the coverage
+        cache: the case this exists for needs the SAME cached trivial verdict while
+        the record's ANSWER changes, which is the ordinary fresh-tenant lifecycle
+        (measure 0/0, then write, then read a non-empty cohort).
+        """
+        self._rows = rows
+
     def fetchall(self):
         return self._rows
 
@@ -119,12 +137,41 @@ class _Cursor:
         return None
 
 
+class _SplitCursor(_Cursor):
+    """Answers the coverage ``count(*)`` PER KIND — one `public.source`, two halves.
+
+    `record_vector.LABEL_SERVED` splits `:Source` on `document_kind` while the graph
+    denominator counts the WHOLE label, so the two halves verify independently and a
+    single ``count`` (what :class:`_Cursor` answers) cannot express that state. This
+    reads the kind predicate out of the statement it is handed and answers that
+    half's own numerator — the only way to drive the half-verified read arm without
+    faking the count by call order.
+    """
+
+    def __init__(self, *, documents: int, sources: int, rows: list[tuple] | None = None):
+        super().__init__(count=documents, rows=list(rows or []))
+        self._documents = documents
+        self._sources = sources
+        self._answer = documents
+
+    def execute(self, sql, params=None):
+        super().execute(sql, params)
+        if "document_kind IS NOT NULL" in sql:
+            self._answer = self._documents
+        elif "document_kind IS NULL" in sql:
+            self._answer = self._sources
+
+    def fetchone(self):
+        return (self._answer,)
+
+
 class _Conn:
     def close(self):
         return None
 
 
-def _stub_record(monkeypatch, *, count: int, rows: list[tuple]) -> _Cursor:
+def _stub_record(monkeypatch, *, count: int, rows: list[tuple],
+                 cursor: _Cursor | None = None) -> _Cursor:
     """Point the record doors at an in-memory cursor (the #13422 pattern).
 
     Both statements the leg issues go to ONE cursor because both doors are the
@@ -133,16 +180,26 @@ def _stub_record(monkeypatch, *, count: int, rows: list[tuple]) -> _Cursor:
     :meth:`_Cursor.fetchall`). The fold's own DB half is stubbed — the cage is
     `tests/test_13422_object_subject_dense_leg.py`'s subject, and what THIS file
     measures is which STORE answered.
+
+    ``cursor`` overrides the default :class:`_Cursor` for a case whose numerator is
+    not one number (:class:`_SplitCursor`, i.e. the two halves of one `:Source`
+    label). Everything else about the stub — the DSN, the journal flag, the fold's
+    DB half, the coverage cache — is set up the same way, so such a case cannot
+    drift from the rest of the file's harness.
     """
     import tortoise.record_projection as rp
     import tortoise.record_serve as rs
 
-    cur = _Cursor(count=count, rows=rows)
+    cur = cursor if cursor is not None else _Cursor(count=count, rows=rows)
     monkeypatch.setattr(rs, "open_record", lambda *a, **k: _Conn(), raising=True)
     monkeypatch.setattr(rp, "scope_connection", lambda c, org: cur, raising=True)
+    # `len(cur._rows)`, not `len(rows)`: the two are equal at setup, but a case that
+    # changes what the arm serves AFTER the stub is installed (`_Cursor.serve`) must
+    # not leave the fold counting the cohort the arm no longer returns — a fixture
+    # that disagrees with itself is a trap for the next assertion, not a guard.
     monkeypatch.setattr(
         record_vector, "_folded_terminal_keys",
-        lambda conn, cur_, scope, entity_type, excluded: ([], len(rows)),
+        lambda conn, cur_, scope, entity_type, excluded: ([], len(cur_._rows)),
         raising=True)
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
     monkeypatch.delenv("TORTOISE_RECORD_JOURNAL", raising=False)
@@ -480,6 +537,51 @@ def test_the_searcher_raises_the_no_fallback_answer_for_a_gated_label(monkeypatc
         _searcher(5)("object", [0.1] * 8, 10)
 
 
+def test_the_contract_is_the_LABELS_freeze_not_one_half_of_it(monkeypatch):
+    """⛔ ONE HALT OF `:Source` VERIFYING DOES NOT FREEZE `:Source` (#13854 review).
+
+    The no-fallback arm claims the graph copy has been FROZEN, and the freeze is
+    produced by the WRITERS — which stop for a LABEL. Every writer of `:Source`
+    (`_upsert_document`, `_upsert_source`, `restore_graph`, `_update_entity`) asks
+    BOTH halves and stores while EITHER answers KEEP, so `document` verifying while
+    `source` has not leaves the graph copy COMPLETE and still being fed. Reading the
+    contract off the current `entity_type` alone answered `contracted=True` there
+    and turned a record blip into `RecordVectorWithoutFallback` — the complete graph
+    answer refused on the default posture, which `#11395`/option 2 never licensed.
+
+    ⛔ NON-VACUOUS BOTH WAYS: the half-verified case must reach the NAMED fallback,
+    and the BOTH-verified case must still refuse one — the conjunct is a label rule,
+    not a blanket disable of the contract for `:Source`.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorDeclined("bound")
+
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+
+    # ── one half verified (10 >= 10 documents), the other not (0 < 10 sources) ──
+    _stub_record(monkeypatch, count=0, rows=[],
+                 cursor=_SplitCursor(documents=10, sources=0))
+    # The NAMED fallback, i.e. the graph may answer — `vector_search`'s decline is
+    # passed through rather than sealed.
+    with pytest.raises(record_vector.RecordVectorDeclined):
+        _searcher(10)("document", [0.1] * 8, 10)
+
+    # ── BOTH halves verified → the graph really is frozen → sealed ─────────────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=0, rows=[],
+                 cursor=_SplitCursor(documents=10, sources=10))
+    with pytest.raises(record_vector.RecordVectorWithoutFallback):
+        _searcher(10)("document", [0.1] * 8, 10)
+
+    # ── and a single-type label is untouched by the conjunct ──────────────────
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=10, rows=[])
+    with pytest.raises(record_vector.RecordVectorWithoutFallback):
+        _searcher(10)("object", [0.1] * 8, 10)
+
+
 # ── 4. the write gate: retained while unproven, removed when proven ───────
 
 
@@ -671,6 +773,389 @@ def test_a_verified_verdict_survives_its_ttl_but_an_unverified_one_does_not(
         f"the expired verdict was served instead of re-measured: counts={counts}")
 
 
+# ── 3b. the non-vacuity marker: `0 >= 0` is TRUE and is not EVIDENCE (#13798) ──
+
+
+def test_two_zeroes_verify_trivially_and_the_verdict_SAYS_so(monkeypatch):
+    """⛔ THE TRIVIAL PASS, MARKED — this is the whole of #13798's defect.
+
+    `coverage` decides `record_vectors >= graph_vectors`, and `0 >= 0` is true: a
+    label that holds nothing in EITHER store reported the SAME `verified=True` as a
+    fully backfilled one, so *"the record caught up"* was a finding the count never
+    established. `tools/claim_dense_leg_13732.py` met it first — an unseeded
+    population PASSES this gate and is then served by a leg whose trace does not name
+    the two-zero state: `empty_results` on the record for the two CONTRACTED labels
+    (`object`/`subject`), and for the other five — including `point`, the label this
+    case reads — the empty record answer falls through and the graph records
+    `scan_fallback`/`no_embeddings`/`degraded=True`. Neither token says the count
+    compared two zeroes, which is why the instrument could not tell the states apart.
+
+    ⛔ `verified` STAYS TRUE, deliberately: with nothing in either store the two
+    stores answer identically, so refusing would change deployment behaviour for a
+    harmless state. What changes is that the state is TELLABLE — the marker and the
+    reason both say the evidence was two zeroes.
+
+    ⛔ THIS CASE REDS IF THE MARKER IS DROPPED — `verdict.trivial is True` fails on
+    a `Coverage` without the field (and on one that always answers `False`), which
+    is the falsifier the issue asks for. Both entry forms of the graph count are
+    driven (supplied / supplier) so the marker cannot live on one branch only.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: 0, raising=True)
+
+    supplied = record_vector.coverage("point", scope, graph_vectors=0)
+    assert supplied.verified is True, supplied.as_dict()
+    assert supplied.trivial is True, (
+        "a verified verdict from two zeroes was reported as an ordinary "
+        f"verification — 'the record caught up' on no evidence: {supplied.as_dict()}")
+    assert (supplied.record_vectors, supplied.graph_vectors) == (0, 0), supplied
+    assert "TRIVIAL" in supplied.reason and "EMPTY" in supplied.reason, (
+        f"the reason does not state the vacuity, so a reader who sees only the "
+        f"prose is told nothing: {supplied.reason!r}")
+    # ⛔ AND IT DATES THE COUNT (#13812 review P2). This string outlives the
+    # instant it describes — a verified verdict is cached for the life of the
+    # process, and `Coverage.as_dict()` hands the same string to a caller — so a
+    # present-tense "the record HOLDS N / the graph SERVES M" is read later as a
+    # claim about the population NOW, while the read rendering it may return rows
+    # the count never saw. The renderer is the trace line the cases below drive;
+    # this pins the string where it is BUILT, so the DECLINE line and `as_dict()`
+    # cannot keep a present-tense count after the trace has been corrected.
+    assert not re.search(r"\b(holds|serves)\s+\d", supplied.reason), (
+        "the reason narrates its count in the PRESENT tense, so every later "
+        "reader of it (a cached verdict, the unverified DECLINE line, a caller's "
+        f"as_dict()) is told a stale number is the current one: {supplied.reason!r}")
+    assert supplied.as_dict()["trivial"] is True, (
+        "the marker is not on the serialised verdict, so an artifact that records "
+        "`as_dict()` cannot tell a trivial pass from a catch-up")
+
+    # The SUPPLIER form is a different branch (asked on a cache miss) and must
+    # answer identically — a marker wired to one entry point is a marker the other
+    # one silently skips.
+    record_vector.reset_coverage_cache()
+    via_supplier = record_vector.coverage(
+        "point", scope, graph_population=lambda label: 0)
+    assert via_supplier.verified is True and via_supplier.trivial is True, (
+        f"the supplier form lost the marker: {via_supplier.as_dict()}")
+
+
+def test_a_real_verification_never_carries_the_trivial_marker(monkeypatch):
+    """The other direction: a satisfied count with a NON-EMPTY population.
+
+    Without this the marker could be `verified and True` or a hard-coded `True` and
+    the case above would still pass — the marker would then be on every verdict and
+    tell an operator nothing. Both shapes of a real contract are driven (an equal
+    count and a surplus) plus the shortfall, which is neither.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    scope = record_vector._Scope(*_SCOPE)
+
+    for record_vectors, graph_vectors, expected in (
+            (3, 3, True), (5, 3, True), (1, 1, True), (2, 3, False),
+            # ⛔ record > 0 WITH AN EMPTY GRAPH — the ONE shape that distinguishes
+            # the marker's `record_vectors == 0` clause from a `graph_vectors == 0`
+            # one (#13798 review B). Both sides zero is not the only way to have a
+            # zero in the comparison, and a mutant written as
+            # `trivial = verified and graph_vectors == 0` would label this
+            # SUBSTANTIVE verification TRIVIAL — a record that holds vectors against
+            # a graph that serves none (a cleared or restored-empty graph), which is
+            # exactly the catch-up the marker exists to let you tell apart. It is
+            # also reachable, so it is a case and not a hypothetical.
+            (5, 0, True)):
+        record_vector.reset_coverage_cache()
+        monkeypatch.setattr(record_vector, "_record_vector_count",
+                            lambda *a, _n=record_vectors, **k: _n, raising=True)
+        verdict = record_vector.coverage("point", scope,
+                                         graph_vectors=graph_vectors)
+        assert verdict.verified is expected, verdict.as_dict()
+        assert verdict.trivial is False, (
+            f"record={record_vectors}/graph={graph_vectors} was marked TRIVIAL — "
+            f"a non-empty comparison is exactly the evidence the marker exists to "
+            f"distinguish: {verdict.as_dict()}")
+        assert "TRIVIAL" not in verdict.reason, verdict.reason
+
+
+def test_the_trivial_marker_does_not_swallow_the_unmeasurable_arm(monkeypatch):
+    """⛔ THE ARM THE MARKER MUST NOT REACH.
+
+    An unmeasurable side is `None`, never `0` — *"an absence is not a verdict"* —
+    and reading it as a zero would let the marker turn a FAILED MEASUREMENT into a
+    harmless trivial pass. The dangerous shape is the mixed one: the graph supplies
+    a real `0` while the RECORD could not be counted, which is one zero away from
+    the trivial condition and must still be UNVERIFIED.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    scope = record_vector._Scope(*_SCOPE)
+
+    # (a) the graph's count could not be measured at all.
+    record_vector.reset_coverage_cache()
+    verdict = record_vector.coverage("point", scope, graph_vectors=None)
+    assert verdict.verified is False and verdict.trivial is False, verdict.as_dict()
+    assert verdict.record_vectors is None and verdict.graph_vectors is None
+
+    # (b) the graph says 0 and the RECORD could not be counted — one zero short of
+    #     the trivial condition, and still not a pass.
+    record_vector.reset_coverage_cache()
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: None, raising=True)
+    verdict = record_vector.coverage("point", scope, graph_vectors=0)
+    assert verdict.verified is False, (
+        "an unmeasurable record count verified coverage — the graph copy would be "
+        f"retired on a FAILED read: {verdict.as_dict()}")
+    assert verdict.trivial is False, (
+        f"the trivial marker swallowed the unmeasurable arm: {verdict.as_dict()}")
+    assert "TRIVIAL" not in verdict.reason, verdict.reason
+    assert record_vector.coverage_verified("point", scope) is False
+
+    # (c) a supplier that RAISES is the same unmeasured side, not a zero.
+    record_vector.reset_coverage_cache()
+
+    def _boom(_label: str) -> int:
+        raise RuntimeError("graph handle gone")
+
+    verdict = record_vector.coverage("point", scope, graph_population=_boom)
+    assert verdict.verified is False and verdict.trivial is False, verdict.as_dict()
+
+
+def test_a_trivial_verdict_is_still_a_verified_verdict_for_the_shipped_paths(
+        monkeypatch):
+    """⛔ ADDITIVE, PINNED: the marker changes NO shipped consumer's verdict.
+
+    The two-zero state is a real state, and the mandate on #13798 is explicit that
+    refusing it would change deployment behaviour for a harmless one. So the arms a
+    trivial verdict reaches must behave EXACTLY as before the marker:
+
+    * the READ gate (`searcher`'s `if not verdict.verified`) proceeds — both stores
+      answer the same empty cohort;
+    * the WRITE gate (`coverage_verified` -> `mirror_required`) still answers "the
+      record owns it", which is why this state is not a refusal;
+    * the CACHE still holds it stickily, which is the documented one-way contract
+      (`Coverage`'s fourth residual: a trivially-verified label inherits the
+      gain-case residual, so an operator must not read `trivial` as a backfill
+      certificate).
+    """
+    from tortoise.record_writer import use_record_tenant
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    record_vector.reset_coverage_cache()
+    scope = record_vector._Scope(*_SCOPE)
+    counts: list[int] = []
+    monkeypatch.setattr(record_vector, "_record_vector_count",
+                        lambda *a, **k: counts.append(1) or 0, raising=True)
+
+    verdict = record_vector.coverage("object", scope, graph_vectors=0)
+    assert verdict.trivial is True and verdict.verified is True, verdict.as_dict()
+    assert record_vector.coverage_verified("object", scope) is True
+    with use_record_tenant(*_SCOPE):
+        assert record_vector.mirror_required("object") is False, (
+            "the trivial verdict was turned into a refusal at the write gate — with "
+            "nothing in either store the two stores answer identically, so this "
+            "would change deployment behaviour for a harmless state (#13798)")
+
+    # Sticky, exactly like any other verified verdict: a second read takes NO count.
+    assert record_vector.coverage("object", scope, graph_vectors=0).trivial is True
+    assert len(counts) == 1, (
+        "the trivial verdict was re-measured — the cache contract moved, and the "
+        f"cost model with it: counts={counts}")
+
+    # The marker is DEFAULTED, so a `Coverage` built without it (every call site in
+    # this tree, plus any out-of-tree reader) is an ordinary non-trivial verdict.
+    assert record_vector.Coverage(
+        label="object", verified=True, record_vectors=4, graph_vectors=4,
+        reason="").trivial is False
+
+
+def test_a_trivially_verified_read_SAYS_so_on_the_path_that_serves_it(
+        monkeypatch, caplog):
+    """⛔ THE MARKER REACHES A TRACE, not only the object (#13798 review C).
+
+    `trivial` on the verdict, `as_dict()["trivial"]` and the reason string are real
+    data — but every SHIPPED consumer branches on `verdict.verified` alone, and the
+    serve gate logged its `reason` only in the DECLINE branch, which a verified
+    verdict never reaches. So on the tree before this case, a label holding nothing
+    in either store served an EMPTY cohort as `mechanism=pgvector,
+    reason=empty_results` — the SAME token a backfilled label answering the same
+    read records, so nothing in any trace told the two apart. The sealed-empty arm
+    already recorded `empty_results`/`degraded=False` (`search_engine.py:4176-4178`),
+    so the indistinguishability was never a different token: one token covers both
+    states, and no line said WHICH. The state #13798 exists to make tellable was
+    tellable only to a reader who already had the object in hand.
+
+    ⛔ REDS if the marker is dropped (always-False `trivial` -> the line is never
+    emitted), i.e. the same mutant as the zero-zero case, measured on the
+    OBSERVABILITY surface rather than on the object. And it changes NO decision: the
+    read still proceeds and still answers, because with both sides empty the two
+    stores answer identically.
+
+    ⛔ "IT CHANGES NO DECISION" IS PINNED HERE, NOT ONLY ASSERTED IN PROSE. An
+    empty `rows` cannot carry that claim on its own: `run_vector_query` returns
+    ``[]`` from the SERVED path (`mechanism=pgvector`, `reason=empty_results`,
+    `degraded=False` — `search_engine.py:4176-4178`) AND from a DECLINE that has NO
+    fallback leg to announce (`search_engine.py:4153-4155`: `mechanism=pgvector`,
+    `reason=query_failed`, `degraded=True`, `return []` — the post-contract arm where
+    the graph is not a fallback and is never asked). A mutant that raises
+    `RecordVectorDeclined` *after* the marker's debug line therefore keeps
+    `rows == []` and both caplog assertions green — the half of #13798's mandate
+    that says the marker must not turn a serve into a refusal was asserted in prose
+    and pinned by nothing. The trace is the evidence that separates them, and this
+    file already reads it that way for the non-trivial case
+    (`test_a_contracted_empty_answer_is_the_answer`, `:445-449`).
+
+    ⛔ WHAT EACH ASSERTION ACTUALLY HOLDS — measured BOTH ways, because the
+    intuitive reading of this pin is wrong and whoever reproduces the mutation will
+    otherwise infer grip it does not have. Two decline shapes were injected after the
+    marker's debug line, each run once with the graph assertion suppressed and once
+    with the trace trio suppressed:
+
+      * `graph.queries == []` catches ONLY the ESCAPING decline — a raise that
+        leaves the leg, so the graph IS asked (`mechanism=scan_fallback`,
+        `degraded=True`, `reason=no_embeddings`). It stays GREEN over an in-leg
+        decline, which never asks the graph at all.
+      * the trace trio catches BOTH shapes: the escaped one above, and the in-leg one
+        (`mechanism=pgvector`, `degraded=True`, `reason=query_failed`).
+
+    So the trio is the load-bearing set, and `graph.queries == []` is still not
+    redundant with it: it pins a property the trace cannot report at all — that no
+    work was spent on the graph for a cohort known empty on both sides.
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    _stub_record(monkeypatch, count=0, rows=[])
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, graph, trace = _run(_searcher(0), entity_type="object")
+
+    assert rows == [], rows
+    assert graph.queries == [], (
+        "a trivially-verified read asked the graph — with both sides empty the two "
+        f"stores answer identically, so nothing may be spent on the graph: {graph.queries}")
+    assert trace[-1]["mechanism"] == "pgvector", trace
+    assert trace[-1]["degraded"] is False, (
+        "the trivial marker turned a SERVE into a DEGRADED/declined read — that is "
+        f"the one behaviour #13798 forbids changing: {trace}")
+    assert trace[-1]["reason"] == "empty_results", (
+        "the read did not take the record's healthy empty answer, so `rows == []` "
+        f"is not evidence that anything was served: {trace}")
+    assert "TRIVIALLY" in caplog.text, (
+        "a trivially-verified label served an empty cohort with nothing in the trace "
+        "saying why — `mechanism=pgvector, reason=empty_results` is then "
+        f"indistinguishable from a catch-up: {caplog.text!r}")
+    assert "BOTH SIDES ARE EMPTY" in caplog.text, (
+        f"the trace names the state but not its evidence: {caplog.text!r}")
+
+
+def test_a_CACHED_trivial_verdict_does_not_claim_this_read_is_empty(
+        monkeypatch, caplog):
+    """⛔ THE LINE MUST STATE A MEASUREMENT, NOT THIS READ (#13799 review, open P2).
+
+    `trivial` is a MEASUREMENT-TIME fact and a VERIFIED verdict is sticky for the
+    life of the process (`_cached_coverage`: the only expiry is
+    `and not verdict.verified`). A trivial verdict is verified, so the ordinary
+    fresh-tenant lifecycle reaches a state the earlier wording claimed was
+    impossible: the first gated read measures `0/0` -> `trivial=True` is cached ->
+    the tenant WRITES (the mirror stays off, `mirror_required` is already False) ->
+    a later read is served the cached verdict and **returns rows**.
+
+    A present-tense line — *"this read is empty because the POPULATION is empty"* —
+    is then FALSE on every one of those reads. That is the trace-that-lies class
+    this repo treats as a defect, and it is self-defeating for the line's own
+    purpose: it exists so a trace can tell a vacuous pass from a catch-up, and the
+    wording would relabel the catch-up.
+
+    ⛔ THIS CASE REDS ON THE PRE-FIX WORDING. Nothing else in the tree emits
+    "TRIVIALLY", so the capture below cannot be satisfied by a pre-existing line;
+    the assertion that bites is the measurement-time one, which the reverted message
+    fails while every other assertion here stays green (measured).
+
+    ⛔ AND REDS IF THE COUNT IS RENDERED IN THE PRESENT TENSE (`#13812` review P2
+    follow-up). Wording the wrapper "was verified … WHEN IT WAS TAKEN" while
+    interpolating a present-tense `verdict.reason` ("the record holds 0 vector(s)")
+    makes the sentence contradict itself on THIS read: the parenthetical says the
+    record holds nothing while `rows2` carries a row. Both halves are pinned below —
+    the line must carry the measurement-time phrasing, and must not carry a
+    present-tense count — so correcting one half of the sentence cannot pass.
+    """
+    import logging
+
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    # `cursor` and not a second `_stub_record`: the cache must SURVIVE into the
+    # second read, and `_stub_record` resets it as part of its setup.
+    cursor = _stub_record(monkeypatch, count=0, rows=[])
+
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows, _graph, _trace = _run(_searcher(0), entity_type="object")
+    assert rows == [], rows
+    assert "TRIVIALLY" in caplog.text, caplog.text
+
+    # ── the tenant writes; the SAME cached trivial verdict gates the next read ──
+    caplog.clear()
+    cursor.serve([("obj-written-later", 0.10, None)])
+    with caplog.at_level(logging.DEBUG, logger=record_vector.LOG_NAME):
+        rows2, _graph2, trace2 = _run(_searcher(0), entity_type="object")
+
+    assert [row[0] for row in rows2] == ["obj-written-later"], (
+        "the write that landed after the trivial verdict was not served — the "
+        f"cached verdict decides the GATE, never the rows: {rows2}")
+    # ⛔ AND THE SECOND READ WAS REALLY CACHED — not a silent re-measurement. The
+    # case is named CACHED, and without this the cache could stop retaining a trivial
+    # verdict and the case would still pass: it would re-measure `0/0` and emit the
+    # same line. The COUNT is the discriminator — one aggregate for TWO reads.
+    aggregates = [sql for sql, _p in cursor.statements if "count(" in sql.lower()]
+    assert len(aggregates) == 1, (
+        "the second read re-measured the coverage count instead of taking the "
+        f"sticky verdict from the cache: {len(aggregates)} aggregate(s) — {aggregates}")
+    # The record answered, healthily: this is the caught-up case, not a decline.
+    assert trace2[-1]["reason"] == "ok", trace2
+    # ⛔ `mechanism`, NOT `degraded`. `reason == "ok"` already implies
+    # `degraded is False` at every emit site in `search_engine.run_vector_query`
+    # (`:3045`, `:3180`, `:3633`, `:4229`, `:4444`, `:4551`, `:4644`, `:4904` all pass
+    # `degraded=False` literally) and the one re-labelling that flips it also rewrites
+    # `reason` (`:3935-3945`), so a `degraded is False` line here could never fail on
+    # its own — the dead-assertion shape. `mechanism` CAN differ at `reason="ok"`:
+    # the graph legs record `"ok"` with `MECHANISM_INDEX` (`:4445`, `:4552`) and with
+    # the scan mechanism (`:4645`), so this pins the thing the case is about — the
+    # cohort came from the RECORD, not from a graph leg that answered instead.
+    assert trace2[-1]["mechanism"] == "pgvector", trace2
+
+    # ⛔ The verdict is STILL reported (provenance is the line's job) ...
+    assert "TRIVIALLY" in caplog.text, (
+        "a CACHED trivial verdict served a cohort with no provenance in the trace — "
+        "the one state an operator cannot reconstruct from the rows: "
+        f"{caplog.text!r}")
+    # ... and it says the fact is a MEASUREMENT, and therefore does NOT claim a
+    # present-tense property of a read that just returned rows.
+    assert "MEASUREMENT" in caplog.text, (
+        "the line does not say the verdict was a MEASUREMENT-time fact, so it reads "
+        f"as a claim about this read: {caplog.text!r}")
+    # ⛔ AND THE PARENTHETICAL IS DATED TOO (`#13812` review P2 follow-up). The
+    # wrapper above can say "was verified … WHEN IT WAS TAKEN" while the
+    # `verdict.reason` it interpolates still narrates its count in the PRESENT tense
+    # — "the record holds 0 vector(s)" — which on this very read (a row is served)
+    # makes the sentence contradict itself. Pinning only the wrapper left that half
+    # correctable-by-omission, so both halves are asserted.
+    trivial_line = next(
+        (line for line in caplog.text.splitlines() if "TRIVIALLY" in line), "")
+    assert "the count measured" in trivial_line, (
+        "the parenthetical does not date the count it prints, so a cached verdict "
+        f"is rendered as a reading of THIS read: {trivial_line!r}")
+    assert not re.search(r"\b(holds|serves)\s+\d", trivial_line), (
+        "the parenthetical still states the stale count in the PRESENT tense — on "
+        "the very read this case returns a row for, an operator triaging from the "
+        f"log is told the record holds 0 vectors: {trivial_line!r}")
+    assert "this read is empty" not in caplog.text, (
+        "⛔ THE TRACE LIES: the verdict was taken when both stores were empty, but "
+        "this read returned rows, so a present-tense 'this read is empty' is false "
+        "and it mislabels the caught-up case the line exists to distinguish: "
+        f"{caplog.text!r}")
+
+
 # ── 4b. the cost model: the counts are taken on a MISS, and only then ─────
 
 
@@ -816,6 +1301,92 @@ def test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback(
     rows, graph, _trace = _run(_searcher(3), graph=_Graph([("obj-graph-only", 1.0 / 1.5)]))
     assert rows == [], "a contracted `object` read recovered its frozen cohort"
     assert graph.queries == [], "the graph was queried after `object`'s contract"
+
+
+def test_a_HALF_verified_Source_label_keeps_the_fallback(monkeypatch):
+    """⮔ THE CONTRACT IS PER **LABEL**, not per `entity_type` (`#13826` review, P2).
+
+    `:Source` carries ONE vector per node and every fold that writes it keeps that
+    vector when EITHER `document` OR `source` answers KEEP (`_upsert_document`'s two
+    arms, `_upsert_source`, `restore_graph`'s ``all(...)``). So the graph copy is
+    frozen only when EVERY type addressing the label has verified — which is also the
+    AND `label_write_gate` requires before a strip can run. With one half verified
+    and the other not, the copy is complete and still being FED: refusing it turns a
+    record blip into a silent availability regression on the DEFAULT posture, and it
+    inverts the cutover order (the fallback goes LAST).
+
+    This is the ORDINARY state, not a corner: the graph denominator is LABEL-wide
+    (`_label_vector_count`) while the record numerator applies the KIND predicate, so
+    the half that dominates the label verifies against the same denominator the other
+    half cannot.
+
+    Both halves are driven — the `document`-verified direction AND its mirror, which
+    the searcher-level arm does not cover — and the fully-verified case is kept as the
+    control: a fix that simply removed `document`/`source` from
+    `MIRROR_RETIRED_LABELS` would pass the first two arms and fail the third. The
+    assertions are made on `run_vector_query`'s OUTCOME (the named
+    `scan_fallback` and the row it returns), not on which exception was raised.
+    """
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    assert record_vector.LABEL_SERVED["document"][0] == \
+        record_vector.LABEL_SERVED["source"][0] == "source", (
+        "the two halves no longer share one served table — the label AND this file "
+        "pins is then measuring a population the product does not have")
+
+    def _boom(*_a, **_k):
+        raise record_vector.RecordVectorDeclined("the record skipped this read")
+
+    def _searcher_by_label(populations):
+        return record_vector.searcher(
+            carried=_SCOPE, timeout_ms=500,
+            graph_population=lambda entity_type: populations.get(entity_type, 0))
+
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+
+    # ── the `document` half verified (3 >= 3), the `source` half NOT (3 < 9) ──
+    _stub_record(monkeypatch, count=3, rows=[])
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 3, "source": 9}), entity_type="document",
+        graph=_Graph([("doc-graph-only", 1.0 / 1.5)]))
+    assert [row[0] for row in rows] == ["doc-graph-only"], (
+        "a half-verified `:Source` read refused the graph — the label was still "
+        "being written by its other half, so the fallback was whole: "
+        f"{rows} (trace={trace[-1] if trace else None})")
+    assert graph.queries, "the graph branch never ran for a still-fed label"
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+    assert trace[-1]["degraded"] is False, trace
+
+    # ── symmetric: the `source` half verified (3 >= 3), `document` NOT (3 < 9) ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 9, "source": 3}), entity_type="source",
+        graph=_Graph([("src-graph-only", 1.0 / 1.5)]))
+    assert [row[0] for row in rows] == ["src-graph-only"], (
+        f"the mirror-image half-verified read refused the graph: {rows}")
+    assert trace[-1]["mechanism"] == "scan_fallback", trace
+
+    # ── the CONTROL: both halves verified → the contract still holds ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=9, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(
+        _searcher_by_label({"document": 3, "source": 9}), entity_type="document",
+        graph=_Graph([("doc-graph-only", 1.0 / 1.5)]))
+    assert rows == [], (
+        "a fully-verified `:Source` read recovered its frozen cohort — the fix "
+        "must narrow the contract to a half-verified label, not remove it")
+    assert graph.queries == [], "the graph was queried after `:Source`'s contract"
+    assert trace[-1]["reason"] == "query_failed", trace
+
+    # ── a single-type label is unaffected by the label AND (no extra refusal) ──
+    record_vector.reset_coverage_cache()
+    _stub_record(monkeypatch, count=3, rows=[])
+    monkeypatch.setattr(record_vector, "vector_search", _boom, raising=True)
+    rows, graph, trace = _run(_searcher(3), graph=_Graph([("obj-graph-only", 1.0 / 1.5)]))
+    assert rows == [] and graph.queries == [], (
+        f"the single-type `object` contract was weakened by the label AND: {rows}")
 
 
 def test_the_no_fallback_arm_covers_exactly_the_labels_the_folds_stop_writing():
@@ -1304,9 +1875,11 @@ def test_the_numerator_applies_the_labels_kind_predicate():
     (`vector_search`: `if kind_filter: where.append(kind_filter)`), so a numerator
     taken over the whole table compares a KIND's served rows against the PARENT
     table's total: a record holding only plain points would verify `operator` on a
-    surplus of plain points, and the operator-scoped read would then be answered
-    from the record with zero rows of that kind, reported `mechanism=pgvector,
-    reason=ok`. `record ≥ graph` is the expected steady state once the record (truth)
+    surplus of plain points, and the operator-scoped read's record answer would hold
+    zero rows of that kind — which for a non-contracted label falls through to the
+    graph (`search_engine.py:4179`) — so nothing on the record leg reports the
+    shortfall. `record ≥ graph` is the expected
+    steady state once the record (truth)
     is ahead of the graph (cache), so the surplus is not exotic.
     """
     sql: list[str] = []

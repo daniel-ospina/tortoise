@@ -611,7 +611,7 @@ class TestFourNodeChain:
         assert any(ev.get("sessionId") == "s1" or ev.get("session_id") == "s1"
                    for ev in found), f"s1 not discoverable: {found}"
         # get_session by session_id
-        ev = sdk.get_session("s1")
+        ev = sdk._get_session("s1")
         assert ev is not None and ev.get("eventKind") == "AgentSession"
 
     def test_duplicate_entities_merge_and_gate_flag_written(self, client):
@@ -642,7 +642,7 @@ class TestFourNodeChain:
         twin survived four review rounds.
         """
         sdk = _team_sdk()
-        sdk.create_object("ProbeCommitZ", "capability")
+        sdk._create_object("ProbeCommitZ", "capability")
         r = _commit(client, _raw_payload(1, entities=[
             {"name": "Alpha", "kind": "Project",
              "passes_frequency_gate": True},
@@ -1323,7 +1323,7 @@ class TestRekeyedPointResolvedIds:
     def test_rekey_keeps_operator_contains_and_about_object(self, client, caplog):
         # The graph pre-exists holding the payload point's CONTENT under a
         # legacy (auto-minted ULID) id — the re-key source.
-        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "point 0")["id"]
         assert legacy_id and not legacy_id.startswith("pt_"), legacy_id
 
         p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
@@ -1388,7 +1388,7 @@ class TestRekeyedPointResolvedIds:
         # the successor CONTENT pre-exists under a legacy id → the new
         # ``pt_<sha>`` payload id re-keys onto it in §5
         new_id = point_content_id("gym at 5pm")
-        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "gym at 5pm")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
 
         r = _commit(client, _raw_payload(1, session_id="s2", points=[
@@ -1417,7 +1417,7 @@ class TestRekeyedPointResolvedIds:
         on the capture path, reproduced here). §7 hands the helper a
         map-aware resolver (the reverse map) so the payload content still
         resolves."""
-        legacy_id = _team_sdk().create_point("decision", "point 0")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "point 0")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
         p0 = f"pt_{'0' * 64}"   # payload id — re-keys onto legacy_id
         p1 = f"pt_{'1' * 64}"   # genuinely new
@@ -1465,7 +1465,7 @@ class TestRekeyedPointResolvedIds:
         ])).status_code == 200
         # the successor CONTENT pre-exists under a legacy id → the recomputed
         # ``supersede_id`` re-keys onto it in §5
-        legacy_id = _team_sdk().create_point("decision", "gym at 5pm")["id"]
+        legacy_id = _team_sdk()._create_point("decision", "gym at 5pm")["id"]
         assert not legacy_id.startswith("pt_"), legacy_id
         r = _commit(client, _raw_payload(1, session_id="s2", points=[
             {"id": old_id, "content": "gym at 5pm", "pointKind": "decision",
@@ -1593,14 +1593,14 @@ class TestRekeyedPointResolvedIds:
         # Pre-existing OBSERVATION holding the shared content under a legacy
         # id: record A's write dedup-hits it, so A resolves to the legacy node
         # (never to ``shared_id``).
-        legacy_observation = _team_sdk().create_point(
+        legacy_observation = _team_sdk()._create_point(
             "observation", shared)["id"]
         assert not legacy_observation.startswith("pt_"), legacy_observation
         # Pre-existing DECISION to supersede, seeded at its own
         # content-addressed id: the payload point below reuses that id with
         # changed content, so reconcile takes the supersede path.
         prior_old_id = point_content_id("old claim")
-        prior_decision = _team_sdk().create_point(
+        prior_decision = _team_sdk()._create_point(
             "decision", "old claim", id=prior_old_id)["id"]
         assert prior_decision == prior_old_id
 
@@ -1768,7 +1768,7 @@ class TestFailedWriteRetry4704:
         """Make the FIRST payload point write raise — i.e. fail the phase
         AFTER step 1 (the counters) landed, which is the whole window this
         bug needs. Every later call delegates to the real writer."""
-        real = TortoiseSDK.create_point
+        real = TortoiseSDK._create_point
         calls = {"n": 0}
 
         def _boom_once(self, *args, **kwargs):
@@ -1777,7 +1777,7 @@ class TestFailedWriteRetry4704:
                 raise RuntimeError("simulated transient graph error")
             return real(self, *args, **kwargs)
 
-        monkeypatch.setattr(TortoiseSDK, "create_point", _boom_once)
+        monkeypatch.setattr(TortoiseSDK, "_create_point", _boom_once)
         return calls
 
     def test_failed_write_retry_applies_the_counters_once(self, client,
@@ -5687,6 +5687,229 @@ def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
     assert _point_mentions(pid) is None, (
         "the merge leg STORED the record: #11811's declared behaviour changed "
         "— flip this row (and the comment on the leg) with it")
+
+
+class TestThe12244TheHostedAnchorCollapsesAMergedPair:
+    """#12244 — the hosted `aboutObject` anchor widened its SPELLING space
+    (#12203) but not its MERGE COLLAPSE.
+
+    The disposition recorded for this site (`TestThe12120HostedAboutObjectAnchor`'s
+    docstring, and `tests/test_entity_identity.py::_ALLOWED_KEYED`) is
+    ATTACH-TO-EVERY-CARRIER: the anchor picks no identity, so a resolver call
+    would refuse where capture writes. `apply_entity_merge` is NON-destructive,
+    so a merged pair is ONE entity with TWO live rows under one folded key — the
+    collapse answers THAT question and leaves the disposition alone.
+    """
+
+    def test_a_merged_variant_links_the_survivor_not_the_retired_carrier(
+            self, client):
+        """#12244: the anchor's SPELLING space was widened, its MERGE COLLAPSE was not.
+
+        `apply_entity_merge` is NON-destructive — a merged pair is ONE entity with
+        TWO live rows under one folded key (the retired carrier keeps its
+        `name`/`canonical_name` and gains `resolved_from`; the survivor records
+        the candidate's folded key in `aliases`). One `MERGE` over the widened
+        space therefore wrote the `aboutObject` edge onto BOTH, including the
+        carrier the merge retired, while the writer's own answer for that name is
+        the SURVIVOR only (`resolve_or_mint` hops the pointer).
+
+        The recorded dispositions survive the fix and are pinned beside it: every
+        DISTINCT carrier still takes its edge (the collapse dedupes per ENTITY
+        and picks no identity), and the id-less arm — this site's single-MERGE
+        shape — still attaches an id-less stub
+        (`TestThe12120HostedAboutObjectAnchor`'s siblings and the local twin in
+        `tests/test_12047_entity_resolution.py`).
+        """
+        from tortoise.entity_resolver import apply_entity_merge
+
+        _seed_objects(client, "s12244-h-1", ["Acme Holdings", "The Team"])
+        sdk = _team_sdk()
+        try:
+            ids = {str(r[1]): str(r[0]) for r in sdk._get_proj().g.query(
+                "MATCH (o:Object) WHERE o.name IN $names RETURN o.id, o.name",
+                params={"names": ["Acme Holdings", "The Team"]},
+            ).result_set}
+            assert set(ids) == {"Acme Holdings", "The Team"}, (
+                f"fixture drift: the seed wrote {ids}")
+            apply_entity_merge(sdk, ids["The Team"], ids["Acme Holdings"],
+                               method="exact", similarity=1.0)
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-2",
+            entities=[{"name": "team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["team"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        carrier_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:$cid}) "
+            "RETURN count(o)",
+            params={"cid": ids["The Team"]}).result_set[0][0]
+        assert carrier_edges == 0, (
+            "the hosted anchor attached to the carrier the merge retired — the "
+            "writer resolves that name onto the survivor")
+        survivor_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:$sid}) "
+            "RETURN count(o)",
+            params={"sid": ids["Acme Holdings"]}).result_set[0][0]
+        assert survivor_edges == 1, (
+            "expected ONE edge, on the survivor: "
+            f"{survivor_edges} (carrier got {carrier_edges})")
+
+    def test_a_LEGACY_non_string_id_keeps_its_edge(self, client):
+        """#12244: an `Object` whose `id` is not a STRING is addressable, not id-less.
+
+        The anchor now attaches through an ID-KEYED MERGE (`o.id IN $ids`) fed
+        by `attachment_target_ids`, which answers in the STRING spelling (the
+        hop, `entity_resolver.follow_resolved_from`, does `str(node_id)` at its
+        own entry). A legacy/imported row can carry a non-string `id`, and the
+        string form matches nothing: measured on the intermediate code, an
+        `Object {id: 4242}` matched by the name space lost its edge at this
+        anchor, where main's single name-keyed MERGE — which matches NODES, not
+        id spellings — wrote it. So the raw value rides beside the string ones.
+
+        ⛔ Only THIS site had that exposure: the local capture seam
+        (`sdk._extract_session_v2`) and `apply_merge_union` both filtered to
+        `isinstance(row[0], str)` before #12244 and attached nothing for a
+        non-string id, so restoring the edge here is parity with main, not a
+        new policy.
+        """
+        sdk = _team_sdk()
+        try:
+            sdk._get_proj().g.query(
+                "CREATE (o:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'active'})")
+            assert sdk._get_proj().g.query(
+                "MATCH (o:Object {id:4242}) RETURN o.id").result_set == [[4242]]
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-int",
+            entities=[{"name": "Legacy Int", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Int"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        edges = _team_sdk()._get_proj().g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.id = 4242 RETURN count(o)").result_set[0][0]
+        assert edges == 1, (
+            "a non-string `id` was treated as unaddressable and lost its "
+            f"`aboutObject` edge (edges={edges}); the string spelling of "
+            "4242 names no node")
+
+    def test_a_STRING_TWIN_of_a_legacy_id_does_not_take_the_edge(self, client):
+        """#12244: the raw arm restored the edge; it must not hand one to a TWIN.
+
+        The sibling above keeps a legacy `Object {id: 4242}` addressable by its
+        own value. That value is fed to the id-keyed MERGE *beside* the collapse's
+        answer, and the collapse answers in the STRING spelling (the hop does
+        `str(node_id)` at its entry). Left in, that string addresses a DIFFERENT
+        row — any node whose id is literally `"4242"` — which the writer's name
+        space never matched: the twin took an edge main never wrote, i.e. exactly
+        the over-attachment class this PR removes.
+
+        So the fix is that a non-string holder is not ANSWERED at all
+        (`entity_identity.attachment_target_ids`); this anchor's own raw arm is
+        what keeps the legacy row addressable. Measured pre-fix: `twin=1`.
+        """
+        sdk = _team_sdk()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'active'}) "
+                "CREATE (b:Object {id:'4242', name:'Unrelated Twin', "
+                "canonical_name:'unrelated twin', status:'active'})")
+            assert g.query(
+                "MATCH (o:Object) WHERE o.id = 4242 OR o.id = '4242' "
+                "RETURN count(o)").result_set == [[2]], "fixture drift"
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-twin",
+            entities=[{"name": "Legacy Int", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Int"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        twin_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {id:'4242'}) "
+            "RETURN count(o)").result_set[0][0]
+        assert twin_edges == 0, (
+            "the anchor attached to the STRING twin of a legacy non-string id — "
+            "a row the writer's name space never matched "
+            f"(twin_edges={twin_edges})")
+        int_edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.id = 4242 RETURN count(o)").result_set[0][0]
+        assert int_edges == 1, (
+            "the legacy row itself must keep its edge "
+            f"(int_edges={int_edges})")
+
+    def test_an_IDLESS_legacy_row_is_ADOPTED_before_the_anchor_runs(self, client):
+        """The id-less arm has no end-to-end row HERE, and this pins why.
+
+        #13724's review asked for a row per site that reddens when an id-less
+        attachment arm is deleted. At the two local sites that row exists (`see
+        test_12047_entity_resolution.py::…::test_an_IDLESS_stub_still_gets_its_edge`).
+        At THIS anchor it cannot exist, and the reason is a property of the
+        endpoint, not of the test: a reference reaches the anchor only because it
+        is DECLARED in the payload's `entities`, and the entity step runs first —
+        measured here: the raw id-less row seeded below is gone after the commit
+        and exactly one `Object` remains in that name space, carrying a minted
+        `id`. So no id-less HOLDER is in `_holders` when the anchor runs, the arm
+        cannot fire, and the collapsed/raw arms address the adopted row.
+
+        Both halves are asserted, because the second is the one a user can lose:
+        no id-less row survives into the anchor, AND the edge is not dropped.
+        Deleting the arm therefore reddens NOTHING at this site — stated here so
+        the next reader does not hunt a pin that cannot exist (#3442's intent is
+        "no SILENT guard", not "an unreachable row must be faked"). The arm is
+        kept as defence for a graph whose row the entity step does not adopt.
+        """
+        sdk = _team_sdk()
+        try:
+            g = sdk._get_proj().g
+            g.query("CREATE (o:Object {name:'Legacy Idless', "
+                    "canonical_name:'legacy idless', status:'active'})")
+            assert g.query(
+                "MATCH (o:Object) WHERE o.id IS NULL "
+                "AND o.name = 'Legacy Idless' RETURN count(o)"
+            ).result_set == [[1]], "fixture drift: the raw stub was not minted"
+        finally:
+            sdk.close()
+
+        raw = _raw_payload(
+            1, session_id="s12244-h-idless",
+            entities=[{"name": "Legacy Idless", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["Legacy Idless"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Object) WHERE o.name = 'Legacy Idless' "
+            "RETURN o.id, o.id IS NULL").result_set
+        assert rows and all(not r[1] for r in rows), (
+            "an id-less row survived into the about-anchor, so the id-less arm "
+            f"IS reachable here and needs its own end-to-end row: {rows}")
+        edges = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Legacy Idless' RETURN count(o)").result_set[0][0]
+        assert edges == 1, (
+            "the adopted row lost its `aboutObject` edge — the class #12244 "
+            f"removes (edges={edges}; rows={rows})")
 
 
 class TestThe12120HostedAboutObjectAnchor:

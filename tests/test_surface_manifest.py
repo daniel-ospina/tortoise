@@ -952,7 +952,12 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   own `_manifest()`/`_caller_lists()`), and the arm below is a `>=` — so 25 would have left
 #:   the very two-row allowance this history paragraph exists to forbid. The conflict between
 #:   the two sides' numbers was settled by that measurement, not by picking a side.
-COMPARABLE_CALLER_ROWS_FLOOR = 27
+#:   27 -> 7 on 2026-11-19 (#12901 FINAL batch): twenty of the two-sided rows were `sdk:` rows the
+#:   batch privatised, so they left the manifest with their methods. Re-derived on the merged
+#:   manifest the same way — `_caller_lists(_manifest())` reads **7** here, and the arm is `>=`,
+#:   so 27 would have left a twenty-row allowance: exactly the hole this floor forbids. A small
+#:   floor is honest; a floor carried from a surface that no longer exists is not.
+COMPARABLE_CALLER_ROWS_FLOOR = 7
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -2390,8 +2395,6 @@ def test_no_SDK_row_is_classed_unreachable_while_its_own_row_names_an_agent_path
     whose own text named a CLI verb. A count derived by hand is a prediction until
     something executes it; this test executes the agreement.
     """
-    from tortoise.sdk import TortoiseSDK
-
     doc = yaml.safe_load((ROOT / "config" / "surface-manifest.yml").read_text())
     sdk = [r for r in doc["rows"] if str(r["name"]).startswith("sdk:")]
     assert sdk, "no SDK rows found"
@@ -2416,8 +2419,19 @@ def test_no_SDK_row_is_classed_unreachable_while_its_own_row_names_an_agent_path
         for r in doc["rows"]
         if not str(r["name"]).startswith("sdk:") and r.get("sdk_method")
     }
+    # ⛔ THE DECLARED SPELLING AND THE ROW NAME ARE TWO VOCABULARIES SINCE #12901. The batch
+    # privatised 66 methods, so a tool row now declares `_query` where the `sdk:` row is
+    # `sdk:query` (two of them took `_name__svc` to avoid shadowing an existing helper). This
+    # arm must still ask the question it was written for — "is agent-reachability UNDER-derived,
+    # so that rows a tool really binds read as no-caller-found?" — so it normalises the declared
+    # spelling back to the surface name and compares against the rows that exist. Comparing raw
+    # would count private names against public rows and red on the vocabulary, not the defect.
+    def _surface_name(method: str) -> str:
+        return method.removesuffix("__svc").lstrip("_")
+
+    bound_rows = {_surface_name(m) for m in declared_bindings}
     assert by_class["agent-reachable"] >= len(
-        {m for m in declared_bindings if hasattr(TortoiseSDK, m)}
+        {m for m in bound_rows if f"sdk:{m}" in {str(r["name"]) for r in sdk}}
     ), (
         "agent-reachable fell below the declared-binding count; the CLI and tool-handler legs are "
         f"not being derived (got {by_class['agent-reachable']})"
@@ -2915,7 +2929,11 @@ def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     """
     recorded = {(rf["response"], rf["field"]) for rf in _manifest()["response_fields"]}
     # main's half — landed by #7852 W1, present only in main's copy of the block.
-    assert ("sdk:create_operator", "direction_basis") in recorded
+    # ⛔ The SDK twin of this row (`sdk:create_operator`) is GONE as of #12901's final batch:
+    # the endpoint it anchored left the public surface (`_create_operator`), so the record now
+    # rides the tool that still emits the key — the SAME #7852 W1 write path. The union-merge
+    # property this test protects is unchanged; only the carrier is, and the tool row is the one
+    # a reader can still act on.
     assert ("tortoise_create_operator", "direction_basis") in recorded
     # the branch's half — must not be dropped in the other direction.
     assert ("tortoise_create_entity", "advisories") in recorded
@@ -2923,8 +2941,8 @@ def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     # the collapsed view the render/check tools see must carry both sides into the doc.
     rendered = RENDERED.read_text(encoding="utf-8")
     for response, field in (
-        ("sdk:create_operator", "direction_basis"),
         ("tortoise_create_operator", "direction_basis"),
+        ("tortoise_create_entity", "advisories"),
     ):
         assert f"| `{response}` | `{field}` |" in rendered, (
             f"the union-merge survivor lost {response}/{field} from the rendered list"
@@ -3042,6 +3060,88 @@ def test_the_committed_manifest_header_is_exactly_what_cut_re_emits():
             lineterm="",
         )
     )
+
+
+#: The per-row PROVENANCE record, by the three facts a later lane cannot cheaply re-derive: that the
+#: block IS a record rather than a value, the measured `recorded/derived` pair behind the `#13075`
+#: staleness, and the `OVERRIDES:` departure from the generated-artifact practice. Pinned as
+#: fragments rather than as the whole block so rewrapping the prose is not a red, and so losing a
+#: FACT is one.
+_PROVENANCE_RECORD_MARKERS = (
+    "⛔ PROVENANCE OF THE PER-ROW CELLS",
+    "recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8",
+    "OVERRIDES: the generated-artifact practice",
+)
+
+#: The per-row block #13626's `cut` deleted — as the three lines that IDENTIFY it, verbatim from
+#: `73c26022db^:config/surface-manifest.yml`. Its title was `⛔ PROVENANCE, not a value: …`, NOT
+#: the record's current one, which is exactly why the below-header arm below is keyed on every
+#: marker rather than on the new title (#13626 review ISSUE 2): a lane that `git show`s this block
+#: back and pastes it below the first key carries no new title at all, and a title-keyed arm read
+#: that restore as green.
+_RESTORED_PER_ROW_BLOCK = (
+    "  # ⛔ PROVENANCE, not a value: `served_from` below is `main`'s cell, written by a re-cut — this\n"
+    "  # reach this row): rc=1, the identical `recorded 5864fd98a914f746 / derived 59f8f7e5957d81d8`\n"
+    "  # OVERRIDES: the generated-artifact practice — never hand-edit a generator's output: change the\n"
+)
+
+
+def test_the_provenance_record_lives_in_the_header_a_cut_re_emits():
+    """A `cut` re-emits `MANIFEST_HEADER` alone, so the record must live there (#13626 ISSUE 3).
+
+    The block this pins was a per-row comment above the `tortoise_query` row. `yaml.safe_dump`
+    carries no comments and `cut` re-emits only the header, so #13626's re-cut deleted all 53 of
+    its lines — including the file's copy of the generated-artifact `OVERRIDES:` departure, ONE
+    OF THE FOUR the merge base `0d5bb6506` carried (that cut left three) — and NOTHING reded,
+    because no gate parses a comment. ⛔ It was NOT "the file's only copy" (#13687 review, cycle
+    2): a correction that overstates the loss is the same defect as the loss, one review later,
+    so the count is stated and the record beside the rows says the same thing. The
+    header/committed equality test above cannot see that: it is green for any header, including a
+    header that has lost the record.
+
+    Mutation attribution (measured, #3442): deleting `_PROVENANCE_RECORD` from `MANIFEST_HEADER`
+    (and from the committed file) reds this test on the first marker; deleting only the
+    `OVERRIDES:` line of the record reds it on the third; restoring either is green. Editing the
+    generator's `served_from` and re-running `cut` keeps it green — the header is re-emitted, so
+    this arm is red for LOSS, never for a legitimate re-cut.
+    """
+    sm = _load_manifest_tool()
+    committed_doc = MANIFEST.read_text(encoding="utf-8")
+    committed_header = committed_doc.split("manifest_version:")[0]
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker in sm._PROVENANCE_RECORD, (
+            f"`_PROVENANCE_RECORD` in tools/surface_manifest.py no longer carries {marker!r} — "
+            "the record a re-cut re-emits lost a fact only it holds")
+        assert marker in sm.MANIFEST_HEADER, (
+            f"`MANIFEST_HEADER` no longer carries {marker!r}, so the next `cut` deletes it from "
+            "the artifact — a comment nothing reads cannot be missed, which is how #13626 lost it")
+        assert marker in committed_header, (
+            f"config/surface-manifest.yml's header no longer carries {marker!r} — the artifact a "
+            "lane actually reads is missing a recorded fact (and the header equality test above "
+            "should already have reded: the two copies disagree)")
+    # …and it must not ALSO sit in a per-row block below the first key: a re-cut deletes that
+    # copy, so a second one would be the drift this guard exists to stop. ⛔ KEYED ON EVERY MARKER,
+    # not on the record's new title (#13626 review ISSUE 2): the block #13626 deleted opened
+    # `⛔ PROVENANCE, not a value: …`, so the most likely regression — a lane restoring that block
+    # from git history, which this test's own docstring documents as the loss — carries NONE of
+    # the new wording, and a title-keyed arm stayed green on it. Two of the markers DO fire on it
+    # (asserted below), which is what makes this arm read LOSS rather than a change of wording.
+    below_header = committed_doc.split("manifest_version:", 1)[1]
+    for marker in _PROVENANCE_RECORD_MARKERS:
+        assert marker not in below_header, (
+            f"the provenance record is duplicated as a per-row comment below the header "
+            f"({marker!r} appears there); a re-cut deletes per-row comments, so the copy that "
+            "survives is the header's and the other is a drift waiting to happen — the same "
+            "#13626 loss this guard exists to stop, re-introduced by hand")
+    # …and this arm reads LOSS, so it must fire on the restore it names. The probe is the deleted
+    # block's own wording, and the two assertions are its non-vacuity proof: without them a later
+    # re-keying of this arm could go green on the regression again (which is precisely ISSUE 2).
+    assert _PROVENANCE_RECORD_MARKERS[0] not in _RESTORED_PER_ROW_BLOCK, (
+        "the probe carries the record's NEW title, so it does not reproduce the gap review "
+        "ISSUE 2 names — keep it to the wording the deleted block actually used")
+    assert any(m in _RESTORED_PER_ROW_BLOCK for m in _PROVENANCE_RECORD_MARKERS), (
+        "no marker fires on the restored per-row block, so the arm above would be green on the "
+        "exact regression it names")
 
 
 #: The fragment of the line that went stale under `#13052` (`4a5ffa0a14`, the seven-door
@@ -4407,6 +4507,100 @@ def test_a_shallow_clone_that_cannot_answer_is_UNPROVABLE_and_NEVER_SILENT(
     assert "NOT VERIFIED" in out and FABRICATED_SHA in out, out
 
 
+def test_a_git_call_that_never_answers_is_ABANDONED_on_the_clock(monkeypatch):
+    """The gate must never HANG a required check: a stuck `git` is bounded, not waited on.
+
+    Measured on the `cmux` cell 2026-11-19: this checkout's object store had grown to
+    27,394 packfiles, so `git cat-file -e <an absent sha>` walked every pack (115 s of CPU
+    and still running) AFTER the promisor remote refused it. `_git` had no bound, so
+    `surface-guard` did not refuse — it never answered, and only pytest's own 300 s
+    timeout ended the run. A bound turns "cannot answer" into the verdict this module
+    already has for it.
+    """
+    sm = _load_manifest_tool()
+    seen: list[float | None] = []
+
+    def fake_run(*_a, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd="git cat-file -e", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(sm.subprocess, "run", fake_run)
+    rc, out, err = sm._git("cat-file", "-e", f"{FABRICATED_SHA}^{{commit}}")
+    assert seen and seen[0] == sm._GIT_TIMEOUT_S, (
+        f"the git call was not bounded (timeout={seen}), so a wedged promisor lookup can block "
+        "the required `surface-guard` job with no upper limit")
+    assert rc == sm._GIT_TIMED_OUT_RC, (rc, out, err)
+    assert out == ""
+    assert "did not answer within" in err and str(sm._GIT_TIMEOUT_S) in err, err
+
+
+def test_an_ABANDONED_git_call_is_UNPROVABLE_and_never_a_fabrication(monkeypatch):
+    """A timed-out probe answered NOTHING, so it can neither prove nor disprove the object.
+
+    Non-vacuity: the stub sets `shallow="false"`, i.e. the arm that WOULD refuse
+    (`fabricated`) if the timeout were not handled first. Deleting the sentinel arm reds
+    this row with `fabricated`, which on a merely SLOW checkout is a false refusal of a
+    healthy record.
+    """
+    sm = _load_manifest_tool()
+    _stub_git(
+        monkeypatch, sm, rc=sm._GIT_TIMED_OUT_RC,
+        stderr="git cat-file -e … did not answer within 30s and was abandoned",
+        shallow="false")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned probe read as {verdict!r} ({why}): a bounded call must not be graded as "
+        "a proven absence")
+    assert "did not answer within" in why, why
+    # The lint's three-valued probe reads the SAME verdict function, so it must be None
+    # (red an unresolvable record, stay silent where the clone cannot answer).
+    assert sm.cut_commit_resolves(FABRICATED_SHA) is None, (
+        "the lint probe did not follow the verdict for an abandoned call")
+
+
+def test_a_TIMED_OUT_shallow_probe_is_UNPROVABLE_and_never_a_proven_absence(monkeypatch):
+    """The SECOND `_git` probe is bounded too, and its timeout is not an answer either.
+
+    `cut_commit_verdict` bounds two calls: `cat-file -e` (does this clone hold the object)
+    and `rev-parse --is-shallow-repository` (may a missing object be merely unfetched).
+    Handling the sentinel on the FIRST only leaves the mixed case — object absent, shallow
+    probe abandoned — falling through to `fabricated`: a PROVEN ABSENCE from a probe that
+    never ran, i.e. a false refusal of a healthy record on a merely slow checkout.
+
+    Non-vacuity: with the arm removed (or `_GIT_TIMED_OUT_RC` re-keyed) the same stub yields
+    `fabricated`; measured by monkeypatching the sentinel away below.
+    """
+    sm = _load_manifest_tool()
+    # Captured ONCE: the mutant below re-keys `_GIT_TIMED_OUT_RC`, and a stub that read it
+    # lazily would move with the mutant and prove nothing.
+    sentinel = sm._GIT_TIMED_OUT_RC
+
+    def fake_git(*args, **_kwargs):
+        if args[:2] == ("cat-file", "-e"):
+            return 128, "", "fatal: Not a valid object name"
+        if args[:2] == ("rev-parse", "--is-shallow-repository"):
+            return (
+                sentinel,
+                "",
+                f"git rev-parse --is-shallow-repository did not answer within "
+                f"{sm._GIT_TIMEOUT_S}s and was abandoned",
+            )
+        return 0, "", ""
+
+    monkeypatch.setattr(sm, "_git", fake_git)
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, (
+        f"an abandoned SHALLOW probe read as {verdict!r} ({why}) — the object probe answered "
+        "nothing, so this clone cannot say whether the object is merely unfetched")
+    assert "did not answer within" in why, why
+
+    # …and the arm is what makes it so: re-key the sentinel and the same stub is a refusal.
+    monkeypatch.setattr(sm, "_GIT_TIMED_OUT_RC", -1)
+    without_arm, _ = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert without_arm == sm.CUT_FABRICATED, (
+        "removing the sentinel arm did not change the verdict, so this test does not pin it")
+
+
 def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
     """No abbreviation, no upper case, no `HEAD`-ish symbolic name: `cut` writes a sha."""
     sm = _load_manifest_tool()
@@ -4698,7 +4892,7 @@ def test_check_anchor_sees_an_sdk_endpoint_row_not_just_tool_rows(tmp_path, monk
     sm = _load_manifest_tool()
     doc = _manifest()
     doc["response_fields"] = [
-        {"response": "volunteer_context", "field": "x", "emitted_when": "always"}
+        {"response": "get_entity", "field": "x", "emitted_when": "always"}
     ]
     monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "sdk-anchored.yml"))
     monkeypatch.setattr(sm, "build_doc", lambda *a, **k: copy.deepcopy(doc))
@@ -5376,7 +5570,12 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # that had no `def` were implemented. The LIVE count rises, which no earlier line in
     # this comment chain does — every other move was a removal. The off-surface 66 does not
     # move: an implemented approved name is not surplus (105 − 39 approved-and-live = 66).
-    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 105
+    # 105 -> 39 on 2026-11-19 (#12901 FINAL batch): the 66 off-surface methods were privatised
+    # in one batch, so the class now carries exactly the 39 approved METHOD rows (the 40th
+    # approved row is the `Tortoise(...)` entry point, a class and not a method). This is the
+    # pin moving the OTHER way for once — 39 is the target-side number, and both instruments
+    # (the live class and the manifest's derived `sdk_public_methods`) read it.
+    assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 39
 
 
 def test_the_sdk_count_the_sequencing_list_types_is_the_measured_one():

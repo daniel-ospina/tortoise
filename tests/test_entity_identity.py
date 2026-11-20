@@ -96,7 +96,7 @@ def _wire_impl(sdk, subject_name, content):
     eid = f"ev-{content}"
     proj.apply({"type": "EventRecorded", "id": eid, "eventId": eid,
                 "eventKind": "analysis", "subject": subject_name})
-    point = sdk.create_point("observation", content)
+    point = sdk._create_point("observation", content)
     proj.g.query(
         "MATCH (e:Event {eventId:$eid}), (p:Point {id:$pid}) "
         "CREATE (e)-[:IMPL]->(p)",
@@ -109,7 +109,7 @@ def _wire_impl(sdk, subject_name, content):
 class TestResolveEntityId:
     def test_single_live_name_resolves_to_its_id(self, sdk_factory):
         sdk = sdk_factory()
-        subj = sdk.create_subject("solo", "analyst")
+        subj = sdk._create_subject("solo", "analyst")
         g = sdk._get_proj().g
         assert resolve_entity_id(g, "Subject", "solo") == subj["id"]
         assert resolve_entity_id(g, "Subject", subj["id"]) == subj["id"]
@@ -128,7 +128,7 @@ class TestResolveEntityId:
         """Opt-in: the case-insensitive arm is OFF by default and ON only where
         asked (`provenance`'s historical contract)."""
         sdk = sdk_factory()
-        subj = sdk.create_subject("El Dato Team", "team")
+        subj = sdk._create_subject("El Dato Team", "team")
         g = sdk._get_proj().g
         assert resolve_entity_id(g, "Subject", "el dato team") is None
         assert resolve_entity_id(
@@ -334,8 +334,8 @@ class TestResolveEntityId:
         """`file_human_approval` now writes the resolved Subject ID into
         `authoredBy`; `provenance` must still find the author."""
         sdk = sdk_factory()
-        subj = sdk.create_subject("pi-agent", "agent")
-        p = sdk.create_point("statement", "A claim", authoredBy=subj["id"])
+        subj = sdk._create_subject("pi-agent", "agent")
+        p = sdk._create_point("statement", "A claim", authoredBy=subj["id"])
         # The chain is not an EP surface: the posterior gate is opted out, exactly as
         # `_check_confidence_provenance` (mcp_server) does the same for the live door.
         out = sdk.check_confidence(p["id"], include_provenance=True,
@@ -345,8 +345,8 @@ class TestResolveEntityId:
 
     def test_provenance_keeps_case_insensitive_name_match(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("El Dato Team", "team")
-        p = sdk.create_point("statement", "B claim",
+        sdk._create_subject("El Dato Team", "team")
+        p = sdk._create_point("statement", "B claim",
                              authoredBy="el dato team")
         out = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
@@ -358,7 +358,7 @@ class TestResolveEntityId:
         fold — `provenance` refuses instead of picking one authoredBy carrier."""
         sdk = sdk_factory()
         _create_subject_rows(sdk, "dup", ["sub-a", "sub-b"])
-        p = sdk.create_point("statement", "C claim", authoredBy="DUP")
+        p = sdk._create_point("statement", "C claim", authoredBy="DUP")
         with pytest.raises(AmbiguousEntityName):
             sdk.check_confidence(p["id"], include_provenance=True,
                 require_calibration=False)['provenance']
@@ -372,7 +372,7 @@ class TestResolveEntityId:
         sdk._get_proj().g.query(
             "CREATE (s:Subject {id:'sub-dead', name:'ghost-author', "
             "status:'retracted'})")
-        p = sdk.create_point("statement", "D claim",
+        p = sdk._create_point("statement", "D claim",
                              authoredBy="ghost-author")
         out = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
@@ -386,9 +386,9 @@ class TestResolveEntityId:
 class TestComputeReputation:
     def test_single_live_name_resolves(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("frank", "analyst")
+        sdk._create_subject("frank", "analyst")
         _wire_impl(sdk, "frank", "frank's claim")
-        rep = sdk.compute_reputation("frank")
+        rep = sdk._compute_reputation("frank")
         assert rep["total_events"] == 1
         assert rep["outcomes"][0]["content"] == "frank's claim"
 
@@ -396,7 +396,7 @@ class TestComputeReputation:
         sdk = sdk_factory()
         _create_subject_rows(sdk, "dup", ["sub-a", "sub-b"])
         with pytest.raises(AmbiguousEntityName):
-            sdk.compute_reputation("dup")
+            sdk._compute_reputation("dup")
 
 
 # ── get_owned_entities / get_org_structure ────────────────────────────────
@@ -405,17 +405,17 @@ class TestComputeReputation:
 class TestGovernanceReads:
     def test_owned_entities_single_live_name_resolves(self, sdk_factory):
         sdk = sdk_factory()
-        owner = sdk.create_subject("owner-x", "organization")
-        point = sdk.create_point("observation", "an owned thing")
+        owner = sdk._create_subject("owner-x", "organization")
+        point = sdk._create_point("observation", "an owned thing")
         sdk._get_proj().create_owned_by(point["id"], owner["id"])
-        owned = sdk.get_owned_entities("owner-x")
+        owned = sdk._get_owned_entities("owner-x")
         assert any(e.get("id") == point["id"] for e in owned)
 
     def test_owned_entities_two_live_same_name_refuses(self, sdk_factory):
         sdk = sdk_factory()
         _create_subject_rows(sdk, "owner-dup", ["sub-a", "sub-b"])
         with pytest.raises(AmbiguousEntityName):
-            sdk.get_owned_entities("owner-dup")
+            sdk._get_owned_entities("owner-dup")
 
 
 # ── file_human_approval ───────────────────────────────────────────────────
@@ -423,12 +423,12 @@ class TestGovernanceReads:
 
 class TestFileHumanApproval:
     def _claim(self, sdk):
-        return sdk.create_point("statement", "a live claim", status="live")
+        return sdk._create_point("statement", "a live claim", status="live")
 
     def test_single_live_name_resolves(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("approver-x", "analyst")
-        obj = sdk.create_object("artifact-x", "thing")
+        sdk._create_subject("approver-x", "analyst")
+        obj = sdk._create_object("artifact-x", "thing")
         result = sdk.record_decision(
             approver_id="approver-x", artifact_id="artifact-x",
             point_ids=[self._claim(sdk)["id"]])
@@ -450,8 +450,8 @@ class TestFileHumanApproval:
         # a document Source is keyed by url (id == url); its display value is
         # `title`, so an exact id is the only address.
         sdk = sdk_factory()
-        sdk.create_subject("approver-d", "analyst")
-        doc = sdk.create_document("artifact-doc", "artifact")
+        sdk._create_subject("approver-d", "analyst")
+        doc = sdk._create_document("artifact-doc", "artifact")
         result = sdk.record_decision(
             approver_id="approver-d", artifact_id=doc["id"],
             point_ids=[self._claim(sdk)["id"]])
@@ -472,7 +472,7 @@ class TestFileHumanApproval:
                      "subjectKind:'person', status:'live'})")
         proj.g.query("CREATE (n:Source {id:'src-1', url:'alice', "
                      "status:'live'})")
-        obj = sdk.create_object("artifact-w", "thing")
+        obj = sdk._create_object("artifact-w", "thing")
         with pytest.raises(AmbiguousEntityName):
             sdk.record_decision(
                 approver_id="alice", artifact_id=obj["id"],
@@ -486,7 +486,7 @@ class TestFileHumanApproval:
         proj = sdk._get_proj()
         proj.g.query("CREATE (s:Subject {id:'X', name:'n1', status:'live'})")
         proj.g.query("CREATE (s:Subject {id:'X', name:'n2', status:'live'})")
-        obj = sdk.create_object("artifact-q", "thing")
+        obj = sdk._create_object("artifact-q", "thing")
         with pytest.raises(AmbiguousEntityName):
             sdk.record_decision(
                 approver_id="n1", artifact_id=obj["id"],
@@ -495,7 +495,7 @@ class TestFileHumanApproval:
     def test_two_live_same_name_approver_refuses(self, sdk_factory):
         sdk = sdk_factory()
         _create_subject_rows(sdk, "approver-dup", ["sub-a", "sub-b"])
-        doc = sdk.create_document("artifact-y", "artifact")
+        doc = sdk._create_document("artifact-y", "artifact")
         with pytest.raises(AmbiguousEntityName):
             sdk.record_decision(
                 approver_id="approver-dup", artifact_id=doc["id"],
@@ -503,7 +503,7 @@ class TestFileHumanApproval:
 
     def test_two_live_same_name_artifact_refuses(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("approver-z", "analyst")
+        sdk._create_subject("approver-z", "analyst")
         _create_object_rows(sdk, "artifact-dup", ["obj-a", "obj-b"])
         with pytest.raises(AmbiguousEntityName):
             sdk.record_decision(
@@ -734,6 +734,73 @@ class TestThe12120NameKeySpaceHelper:
             assert ids == {"space-a", "space-b"}, ids
         finally:
             sdk.close()
+
+
+class TestThe12244ANonStringHolderIsNotAnswered:
+    """A NON-STRING holder id is not answered, so it cannot name a STRING TWIN.
+
+    ``_collapse_resolved_holders`` follows the merge pointer through
+    ``entity_resolver.follow_resolved_from``, which does ``str(node_id)`` at its
+    own entry — so a non-string ``id`` can never be followed (the string form
+    matches no row carrying the int) and the collapse answered it with
+    ``str(holder)`` anyway. That string is a *different* spelling: the writers
+    match on ``id``, so ``"4242"`` addresses any node whose id is literally the
+    string ``"4242"`` — a twin the writer's name space never matched. It took
+    the edge, which is the over-attachment class #12244 removes.
+
+    Pre-fix measurement (this test, before the filter): ``['4242']``.
+    """
+
+    def test_a_non_string_holder_id_answers_nothing(self, sdk_factory):
+        from tortoise.entity_identity import attachment_target_ids
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id: 4242, name:'Legacy Int', "
+                "canonical_name:'legacy int', status:'live'}) "
+                "CREATE (b:Object {id:'4242', name:'Unrelated Twin', "
+                "canonical_name:'unrelated twin', status:'live'})")
+            seeded = {str(r[0]) for r in g.query(
+                "MATCH (o:Object) WHERE o.id = 4242 OR o.id = '4242' "
+                "RETURN o.id").result_set}
+            assert seeded == {"4242"}, f"fixture drift: {seeded}"
+            assert attachment_target_ids(g, "Object", [4242]) == [], (
+                "a non-string holder id was answered with its STRING spelling, "
+                "which names a different row")
+        finally:
+            sdk.close()
+
+
+class TestThe12244AttachmentTargetLabelGuard:
+    """``attachment_target_ids`` validates its OWN label (agent-infra#3442).
+
+    The helper is PUBLIC and ``label`` lands in a Cypher label position inside
+    ``_collapse_resolved_holders``. Borrowing the hop's validation is not enough
+    once the hop is optional: an all-id-less holder set never calls it, so the
+    label would reach the id-less query unvalidated. Before this pin, deleting
+    the ``_require_identity_label(label)`` line at ``entity_identity.py:554``
+    left the whole suite green (every in-repo caller passes the literal
+    ``"Object"``), which is why the guard gets an assertion of its own.
+
+    Neither test touches a graph: validation is the helper's FIRST statement, so
+    ``None`` stands in for ``g`` and a non-empty holder list proves the guard
+    runs *before* any read rather than after one.
+    """
+
+    def test_an_injected_label_raises_before_any_read(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        with pytest.raises(RuntimeError, match="unsafe label"):
+            attachment_target_ids(None, "Object) DETACH DELETE o //", ["obj-1"])
+
+    def test_every_label_outside_the_identity_pair_raises(self):
+        from tortoise.entity_identity import attachment_target_ids
+
+        for bad in ("Point", "object", "Object ` MATCH (n) DETACH DELETE n `"):
+            with pytest.raises(RuntimeError, match="unsafe label"):
+                attachment_target_ids(None, bad, [])
 
 
 class TestNonFoldedRecord:
@@ -1390,7 +1457,7 @@ class TestThe12120BlankNameBlindSpot:
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
-            made = sdk.create_object("   ", "document")
+            made = sdk._create_object("   ", "document")
             assert made and made.get("name") == "   ", made
             # read back BY ID: the point of the test is that equality cannot.
             row = g.query("MATCH (o:Object {id:$id}) RETURN o.name, size(o.name)",

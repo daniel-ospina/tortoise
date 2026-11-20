@@ -7462,9 +7462,12 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     # (`_search_fn=self.tortoise_fts_query`) — the ONE real shape in this tree —
     # while three artifacts certified that no such shape existed. Pinned on the
     # real tree, because that is where the claim was false.
-    assert "tortoise_fts_query" in declared, (
+    # #12901 FINAL batch: the leg was PRIVATISED to `_tortoise_fts_query` (the census key
+    # `VECTOR_LEG_SDK_METHOD` moved with it), so a mention of the leg is a mention of that
+    # spelling. `volunteer_context` itself is `_volunteer_context`.
+    assert "_tortoise_fts_query" in declared, (
         f"a mention OF THE LEG is not declared: {declared}")
-    assert methods["recall_state"] == {"object", "point"}, methods
+    assert methods["_recall_state"] == {"object", "point"}, methods
     assert methods["_search_sessions"] == {"event"}, methods
     assert methods["_suggest_entry_points"] == {"point"}, (
         "a call that omits entity_type runs the SDK default, and it must be "
@@ -7485,10 +7488,10 @@ def _byref_sdk_source() -> str:
     """
     return (
         "class S:\n"
-        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "    def _tortoise_fts_query(self, q, entity_type='point'):\n"
         "        return q\n"
         "    def _review_pool(self, t):\n"
-        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "        return self._tortoise_fts_query('x', entity_type=t)\n"
         "    def passes_an_attribute(self):\n"
         "        return _safe(self._review_pool, 'object')\n"
         "    def passes_a_bare_name(self):\n"
@@ -7519,7 +7522,7 @@ def _byref_sdk_source() -> str:
         "        _safe(self._second_pool, 'event')\n"
         "        return self._review_pool('object')\n"
         "    def _second_pool(self, t):\n"
-        "        return self.tortoise_fts_query('y', entity_type=t)\n"
+        "        return self._tortoise_fts_query('y', entity_type=t)\n"
         "    def calls_it_normally(self):\n"
         "        return self._review_pool('object')\n"
         "    def calls_a_bare_name(self):\n"
@@ -7595,7 +7598,7 @@ def _byref_sdk_source() -> str:
         # closure edge, so only the TYPE SET can distinguish the walks.
         "    def calls_the_leg_directly_inside_a_nested_CLASS(self):\n"
         "        class K:\n"
-        "            hit = self.tortoise_fts_query('q', entity_type='object')\n"
+        "            hit = self._tortoise_fts_query('q', entity_type='object')\n"
         "        return K\n"
         # ── `#11397`: the OVER-report half — each of these BINDS the name in this scope, so a
         # later mention of it is not a reach of the method, and declaring one is a caveat on a
@@ -7965,10 +7968,10 @@ def test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure(
     (tmp_path / "tortoise").mkdir()
     (tmp_path / "tortoise" / "sdk.py").write_text(
         "class S:\n"
-        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "    def _tortoise_fts_query(self, q, entity_type='point'):\n"
         "        return q\n"
         "    def _pool(self, t):\n"
-        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "        return self._tortoise_fts_query('x', entity_type=t)\n"
         "    def passes_it(self):\n"
         "        return _safe(self._pool)\n",
         encoding="utf-8")
@@ -8019,10 +8022,10 @@ attributable.
     (tmp_path / "tortoise").mkdir()
     (tmp_path / "tortoise" / "sdk.py").write_text(
         "class S:\n"
-        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "    def _tortoise_fts_query(self, q, entity_type='point'):\n"
         "        return q\n"
         "    def _pool(self, t):\n"
-        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "        return self._tortoise_fts_query('x', entity_type=t)\n"
         "    def passes_it(self):\n"
         "        return _safe(self._pool)\n",
         encoding="utf-8")
@@ -11390,7 +11393,9 @@ def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
     """
     methods, error, _declared = probe._sdk_methods_on_vector_leg()
     assert error is None, error
-    assert methods["review_connections"] == {"point"}, methods
+    # #12901 FINAL batch: `review_connections` was PRIVATISED (`_review_connections`,
+    # body unchanged); the transitively-reached method is the same one.
+    assert methods["_review_connections"] == {"point"}, methods
     named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
     assert "tortoise_review_link_candidates" in named, sorted(named)
 

@@ -388,7 +388,7 @@ def test_SDK_a_cold_cache_falls_back_to_the_record_and_names_it(monkeypatch):
     served: dict = {}
     sdk = _sdk_class()(None)
 
-    props = sdk.get_point("p-1", served_out=served)
+    props = sdk._get_point("p-1", served_out=served)
 
     assert props.get("id") == "p-1", (
         f"the SDK door served the cold cache, not the record — got {props!r}")
@@ -404,7 +404,7 @@ def test_SDK_record_mode_refuses_instead_of_inventing_an_absence(monkeypatch):
     sdk = _sdk_class()(None)
 
     with pytest.raises(rs.RecordUnavailable):
-        sdk.get_point("p-1", served_out={})
+        sdk._get_point("p-1", served_out={})
 
 
 def test_SDK_says_not_hot_when_the_record_could_not_be_asked(monkeypatch):
@@ -413,7 +413,7 @@ def test_SDK_says_not_hot_when_the_record_could_not_be_asked(monkeypatch):
     served: dict = {}
     sdk = _sdk_class()(None)
 
-    props = sdk.get_point("p-1", served_out=served)
+    props = sdk._get_point("p-1", served_out=served)
 
     assert props.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT, (
         f"a cache-only empty answer came back as absence — got {props!r}")
@@ -428,7 +428,7 @@ def test_SDK_without_the_instrument_is_byte_identical(monkeypatch):
     monkeypatch.setattr(rs, "open_record", opened)
     sdk = _sdk_class()(None)
 
-    assert sdk.get_point("p-1") == {}
+    assert sdk._get_point("p-1") == {}
     assert opened.calls == [], (
         "the opt-in instrument was absent, yet the record was consulted — the "
         "internal accessor is called MID-WRITE and must stay cache-only")
@@ -441,7 +441,7 @@ def test_SDK_off_mode_marks_a_PARTIAL_cache_not_hot(monkeypatch):
     served: dict = {}
     sdk = _sdk_class()(None, coverage="partial", hot_keys=["other"])
 
-    props = sdk.get_point("p-1", served_out=served)
+    props = sdk._get_point("p-1", served_out=served)
 
     assert props.get(RESIDENCY_FIELD) == RESIDENCY_NOT_HOT
     assert served.get("residency") == RESIDENCY_NOT_HOT
@@ -452,7 +452,7 @@ def test_SDK_off_mode_with_a_COMPLETE_cache_is_byte_identical(monkeypatch):
     monkeypatch.setenv("TORTOISE_RESIDENCY", "1")
     sdk = _sdk_class()(None, coverage="complete")
 
-    assert sdk.get_point("p-1", served_out={}) == {}
+    assert sdk._get_point("p-1", served_out={}) == {}
 
 
 def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
@@ -470,7 +470,7 @@ def test_SDK_a_RECORD_answered_absence_is_never_marked_not_hot(monkeypatch):
     served: dict = {}
     sdk = _sdk_class()(None, coverage="partial", hot_keys=["other"])
 
-    props = sdk.get_point("p-1", served_out=served)
+    props = sdk._get_point("p-1", served_out=served)
 
     # ⛔ #12941 review P2-1: the CACHE HANDLE was never opened. `record` mode
     # exists to answer with the graph engine stopped, so an eager `_get_proj()`

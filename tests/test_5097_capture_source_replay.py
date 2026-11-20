@@ -342,7 +342,7 @@ def test_an_empty_transcript_capture_replays_the_stamp_live_set(tmp_path):
     try:
         url = f"session:{SESSION_ID}"
         # The M2 stub: `contentHash=''` and NO `updatedAt`.
-        sdk.create_point("statement", "hello", extractedFrom=url)
+        sdk._create_point("statement", "hello", extractedFrom=url)
         stub = _source_props(sdk._get_proj(), url)
         assert stub.get("contentHash") == "", (
             "precondition: the stub carries the empty hash")
@@ -501,7 +501,7 @@ def test_the_stub_completion_discriminator_is_not_caller_settable(tmp_path):
                               _stub_completion=True, **forged)
         # The fail-closed backstop every OTHER props surface passes through.
         with pytest.raises(ValueError, match="_stub_completion"):
-            sdk.create_point("statement", "a statement",
+            sdk._create_point("statement", "a statement",
                              _stub_completion=True)
         # …and the MCP boundary, the third surface the docstring above names:
         # the tool splats caller `props` into `create_source(**props)`, so the

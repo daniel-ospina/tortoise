@@ -110,7 +110,7 @@ def test_ingest_corpus_small_delta_overwrite_lands(tmp_path, monkeypatch):
     sdk = TortoiseSDK(str(tmp_path / "seam.db"))
     event_id = "session_seam4520"
     try:
-        first = sdk.ingest_corpus(
+        first = sdk._ingest_corpus(
             str(corpus), eventKind="AgentSession", extract_metadata=False)
         assert first.get("ingested", 0) == 1, first
         graph = sdk._get_proj().g
@@ -121,7 +121,7 @@ def test_ingest_corpus_small_delta_overwrite_lands(tmp_path, monkeypatch):
         # Change the file so its hash changes -> the UPDATE branch (an overwrite).
         session_file.write_text(
             "---\nsessionId: seam4520\ntitle: Seam session\n---\nBody two\n")
-        second = sdk.ingest_corpus(
+        second = sdk._ingest_corpus(
             str(corpus), eventKind="AgentSession", extract_metadata=False)
         assert second.get("updated", 0) == 1, second
 

@@ -1102,7 +1102,7 @@ def test_e2e13_special_char_filenames_round_trip(tmp_path):
         assert len(sdk.list_knowledge("source")) == 5
         # recall_subgraph seeded with the ENCODED url resolves the node
         seed = "corpus://my%20corpus%231/my%20notes.md"
-        sub = sdk.recall_subgraph(seed=seed, completeness="full")
+        sub = sdk._recall_subgraph(seed=seed, completeness="full")
         assert any(n.get("id") == seed and n.get("type") == "source"
                    for n in sub.get("nodes", []))
         assert _required_sweep(g) == 0

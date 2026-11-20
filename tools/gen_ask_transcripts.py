@@ -127,7 +127,7 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict], *,
     for seed in seeds:
         succ = seed.get("supersedes_into")
         if succ and succ in ids and seed.get("label") in ids:
-            sdk.supersede_point(ids[seed["label"]], ids[succ])
+            sdk._supersede_point(ids[seed["label"]], ids[succ])
             # #8067: ``supersede_point`` stamps BOTH end columns from the run
             # clock — ``expiredAt`` is always ``now``, and ``validTo`` falls back
             # to ``now`` whenever the successor's own start is unusable — and
@@ -195,7 +195,7 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
     # before #8487 can therefore differ from one regenerated now on a
     # PREFER-LATEST question; regenerate rather than "fixing" it with an opt-out
     # (that would stop mirroring the lane).
-    hits = sdk.tortoise_fts_query(question, limit=caps["limit"],
+    hits = sdk._tortoise_fts_query(question, limit=caps["limit"],
                                   pool_size=caps["pool_size"],
                                   include_terminal=True,
                                   # #8487 (review round 7, P2): the same instant
@@ -205,7 +205,7 @@ def _render_user_message(sdk: TortoiseSDK, question: str,
                                   # selection as of the question's date, not as
                                   # of the day it is regenerated.
                                   query_date=question_date)
-    annotated = sdk.annotate_ask_hits(hits)
+    annotated = sdk._annotate_ask_hits(hits)
     from tortoise.retrieval import ask_session_key, dedup_pool
     # The lane's OWN key. Using the default (``session_key_of``) would re-derive
     # a different bucket order than the lane it claims to reproduce, so the

@@ -751,9 +751,9 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        team = sdk.create_object("Team")
-        office = sdk.create_object("Office", objectKind="core:location")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        team = sdk._create_object("Team")
+        office = sdk._create_object("Office", objectKind="core:location")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         prior_id = pt["id"]
         # The :Session node is S6's to create; the fusion only writes the edge
         # INTO it, so the test mints it directly (the same scoping the other
@@ -849,8 +849,8 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        twin = sdk.create_object("Dana")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        twin = sdk._create_object("Dana")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
         record = {"point_id": pt["id"], "about_entities": ["Dana"]}
 
@@ -893,8 +893,8 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Dana")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Dana")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
 
         res = apply_merge_union(
@@ -942,7 +942,7 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         proj = sdk._get_proj()
         # the id-less stub shape hosted_api.py mints (`MERGE (o:Object {name})`)
         proj.g.query("MERGE (o:Object {name:'Stubbed'})")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_x"})
 
         ok = apply_merge_union(
@@ -1021,9 +1021,9 @@ class TestTheCapturePathExecutesTheFusion:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Team")
-        sdk.create_object("Office", objectKind="core:location")
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Team")
+        sdk._create_object("Office", objectKind="core:location")
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
 
         record = {"point_id": prior["id"], "content": PRIOR_CONTENT,
                   "about_entities": ["Office", "Team"],
@@ -1093,9 +1093,9 @@ class TestTheCapturePathExecutesTheFusion:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Dana")
-        sdk.create_object("Office", objectKind="core:location")
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Dana")
+        sdk._create_object("Office", objectKind="core:location")
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
 
         record = {"point_id": prior["id"], "content": PRIOR_CONTENT,
                   "about_entities": ["Dana", "Office"],
@@ -1144,7 +1144,7 @@ class TestTheCapturePathExecutesTheFusion:
         """
         import tortoise.extractor_v2 as ev2
 
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
         out = {"payload": {"entities": [], "points": [], "events": [],
                             "operators": [], "supersessions": [],
                             "chain_notes": [], "link_before_create": []},
@@ -1196,8 +1196,8 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
     def test_a_fold_colliding_union_name_links(self, sdk):
         from tortoise.near_dup_merge import apply_merge_union
 
-        team = sdk.create_object("Team")
-        pt = sdk.create_point("statement", "a claim about the team")
+        team = sdk._create_object("Team")
+        pt = sdk._create_point("statement", "a claim about the team")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_f3"})
 
@@ -1244,7 +1244,7 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
             "objectKind:'organization', status:'live', "
             "canonical_name:'acme'})")
         obj = {"id": "obj-r3-acme"}
-        pt = sdk.create_point("statement", "a claim about acme")
+        pt = sdk._create_point("statement", "a claim about acme")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3"})
 
@@ -1274,8 +1274,8 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
         """
         from tortoise.near_dup_merge import apply_merge_union
 
-        obj = sdk.create_object("the acme", "thing")
-        pt = sdk.create_point("statement", "a claim about acme")
+        obj = sdk._create_object("the acme", "thing")
+        pt = sdk._create_point("statement", "a claim about acme")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3b"})
 
@@ -1306,7 +1306,7 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
         """
         from tortoise.near_dup_merge import apply_merge_union
 
-        pt = sdk.create_point("statement", "a claim about nobody")
+        pt = sdk._create_point("statement", "a claim about nobody")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r13"})
         res = apply_merge_union(
@@ -1317,3 +1317,221 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
             "a name no Object holds in any spelling was reported as a "
             f"subject-channel skip: {res}")
         assert res["skipped_subject"] == [], res
+
+
+class TestThe12244TheAttachmentCollapsesAMergedPair:
+    """#12244 — the MERGE COLLAPSE half, at the merge-attachment site.
+
+    #12203 widened these sites to the writer's **spelling** space
+    (`entity_identity.name_key_space_same_entity`) but not to its **entity**
+    resolution. `apply_entity_merge` is NON-DESTRUCTIVE, so a merged pair is ONE
+    entity with TWO live rows under one folded key — the retired carrier keeps its
+    `name`/`canonical_name` and gains `resolved_from`, while the survivor records
+    the candidate's folded key in `aliases`. The widened space therefore matched
+    BOTH and this site attached to each, including the carrier the merge retired;
+    the writer's own answer for the same name is the SURVIVOR only.
+
+    ⛔ The recorded dispositions are pinned here in the OTHER direction too: the
+    fix must not become an identity pick. Two DISTINCT carriers still both get
+    their edge (attach-to-every-carrier), and an id-less stub is still covered —
+    it has no `id` to attach by, so its arm is name-based and unchanged.
+    """
+
+    @pytest.fixture
+    def sdk(self, tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        s = TortoiseSDK(str(tmp_path / "merge_collapse.db"))
+        yield s
+        s.close()
+
+    @staticmethod
+    def _edges(sdk, point_id):
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) "
+            "RETURN o.id ORDER BY o.id",
+            params={"pid": point_id}).result_set
+        return [r[0] for r in rows]
+
+    def _merged_pair(self, sdk):
+        """The measured pair: `"The Team"` merged INTO `"Acme Holdings"`."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        survivor = sdk._create_object("Acme Holdings")
+        carrier = sdk._create_object("The Team")
+        apply_entity_merge(sdk, carrier["id"], survivor["id"],
+                           method="exact", similarity=1.0)
+        return survivor, carrier
+
+    def test_a_record_naming_the_variant_links_the_SURVIVOR_only(self, sdk):
+        """THE measured case (lane graph, review round 15).
+
+        Before the collapse this reported `linked=2` and the Point carried edges
+        to BOTH the survivor and `obj-carrier`, while the writer's answer for the
+        same name is the survivor only. `linked` is documented as "what actually
+        landed", so the over-attachment was counted as work as well.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        pt = sdk._create_point("statement", "the team meets weekly")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_a"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_a", sdk=sdk)
+
+        assert res["unresolved"] == [], res["unresolved"]
+        assert res["linked"] == 1, (
+            "one entity took two attachment edges — `linked` counts what "
+            f"landed: {res}")
+        assert self._edges(sdk, pt["id"]) == [survivor["id"]], (
+            "the merge record attached to the carrier the merge retired "
+            f"instead of the survivor (carrier={carrier['id']})")
+
+    def test_two_DISTINCT_carriers_still_both_get_their_edge(self, sdk):
+        """The recorded attach-to-every-carrier disposition SURVIVES.
+
+        Two live Objects of one folded key that NO merge joins are two distinct
+        entities — the site picks no identity, so both keep their edge. A fix
+        that routed this through the resolver (or that collapsed by NAME rather
+        than by the merge pointer) would drop one of them here.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        g = sdk._get_proj().g
+        # Two spellings of one FOLDED key, both addressable the way the writer
+        # makes them addressable (the fold arm matches a stored `canonical_name`
+        # value — it never lowercases the stored spelling, #12242's neighbour).
+        g.query("CREATE (o:Object {id:'obj-12244-twin-a', name:'Twin', "
+                "canonical_name:'twin', objectKind:'other', status:'live'})")
+        g.query("CREATE (o:Object {id:'obj-12244-twin-b', name:'the twin', "
+                "canonical_name:'twin', objectKind:'other', status:'live'})")
+        pt = sdk._create_point("statement", "a claim about the twin")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_b"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["twin"]},
+            session_id="s_12244_b", sdk=sdk)
+
+        assert res["linked"] == 2, (
+            "two DISTINCT carriers of one folded key must both keep their "
+            f"edge — the collapse dedupes per ENTITY, it picks no identity: {res}")
+        assert self._edges(sdk, pt["id"]) == [
+            "obj-12244-twin-a", "obj-12244-twin-b"]
+
+    def test_an_idless_stub_beside_a_merged_pair_still_gets_its_edge(self, sdk):
+        """The id-less arm is load-bearing and is NOT collapsed away.
+
+        An id-less row carries no `resolved_from` evidence and no id to attach
+        by (`link_entity` MERGEs on `{id:…}`), so it stays a holder in its own
+        right and this site keeps coverage for it. The merged carrier in the
+        SAME space must still take no edge, which is what makes this a collapse
+        and not a wider attach.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        g = sdk._get_proj().g
+        g.query("CREATE (o:Object {name:'team', status:'live'})")
+        pt = sdk._create_point("statement", "the team meets weekly")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_c"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_c", sdk=sdk)
+
+        assert res["linked"] == 2, res
+        edges = self._edges(sdk, pt["id"])
+        # ⛔ Ordering is decided HERE, not by `ORDER BY o.id`: the id-less row's
+        # key is NULL, and a NULL's position under an ascending sort is the
+        # backend's to choose — an assertion that leans on it passes on one
+        # engine and inverts on another. `key=str` because `None` is not
+        # comparable with a str id, and the answer is a SET either way.
+        # ⛔ The comparison is EXHAUSTIVE on purpose: membership-style assertions
+        # (`x in edges`, `edges.count(None) == 1`) let an EXTRA `aboutObject`
+        # edge through, which is exactly the over-attachment class #12244 exists
+        # to remove. An exact set pins the whole answer, order-independently.
+        assert sorted(edges, key=str) == sorted([survivor["id"], None],
+                                               key=str), edges
+        # The carrier check is kept as well because its message NAMES the class
+        # that matters (the merged-away carrier took an edge), where the exact
+        # set would only report a mismatch.
+        assert carrier["id"] not in edges, (
+            "the merged-away carrier kept an edge "
+            f"(carrier={carrier['id']}): {edges}")
+
+    def test_a_TERMINAL_survivor_still_takes_the_edge(self, sdk):
+        """STATUS-BLIND, and it is the flag that buys it (#12244 review P2).
+
+        These sites link a terminal-only holder (`apply_merge_union`'s docstring:
+        "a terminal-only holder IS linked"). The collapse's live filter after a
+        hop is the CREATE path's — #12047 round 9, where a create MERGEd onto a
+        retired incarnation — so an attachment must take the hop WITHOUT it.
+        Measured: with the flag flipped, this same graph answers `[]` and the
+        whole attachment disappears, silently, which is why the disposition gets
+        a pin of its own rather than a sentence.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, _carrier = self._merged_pair(sdk)
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$sid}) SET o.status = 'superseded'",
+            params={"sid": survivor["id"]})
+        pt = sdk._create_point("statement", "the team meets weekly")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_d"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_d", sdk=sdk)
+
+        assert res["linked"] == 1, (
+            "a terminal SURVIVOR lost its attachment — the collapse's live "
+            f"filter is the create path's, not this site's: {res}")
+        assert self._edges(sdk, pt["id"]) == [survivor["id"]], res
+
+    def test_a_dangling_pointer_links_the_holder_that_STILL_EXISTS(self, sdk):
+        """#12244 review P1: a hop to a node that is GONE must not delete the edge.
+
+        `follow_resolved_from` returns the hop's target without proving it still
+        exists (`entity_resolver.follow_resolved_from` re-reads and, finding no
+        row, returns `current`), and the carrier keeps its `resolved_from` after
+        the survivor is deleted — `_delete_entity` does not sweep dependents. An
+        id-keyed attach against that id writes NOTHING: measured `linked=0` with
+        no edge, no `unresolved` entry and no warning, where the pre-#12244 code
+        wrote the edge to the carrier that is still there. `linked` is documented
+        as what actually LANDED, so a silent zero is the false-PASS shape this
+        module forbids — the attachment path falls back to the holder.
+
+        The CREATE path keeps the opposite answer (a create must never MERGE onto
+        a retired incarnation, #12047 round 9), which is why the fallback lives in
+        the `drop_retired_survivors=False` arm and not in the shared hop.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        survivor, carrier = self._merged_pair(sdk)
+        assert sdk._delete_entity__svc(survivor["id"]) is not False
+        g = sdk._get_proj().g
+        assert g.query("MATCH (o:Object {id:$sid}) RETURN o.id",
+                       params={"sid": survivor["id"]}).result_set == []
+        # The carrier still carries the pointer — that is the state under test.
+        assert g.query("MATCH (o:Object {id:$cid}) RETURN o.resolved_from",
+                       params={"cid": carrier["id"]}).result_set == [
+            [survivor["id"]]]
+        pt = sdk._create_point("statement", "the team meets weekly")
+        g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_e"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["team"]},
+            session_id="s_12244_e", sdk=sdk)
+
+        assert res["linked"] == 1, (
+            "a pointer to a DELETED survivor turned a landed attachment into a "
+            f"silent zero: {res}")
+        assert self._edges(sdk, pt["id"]) == [carrier["id"]], res

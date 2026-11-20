@@ -126,7 +126,7 @@ jobs:
     # that visible; re-measure rather than trusting this text:
     # `gh api repos/<owner>/<repo>/actions/runners`. The installer never hands
     # `config.sh` a version pin with the flag off — pinned at
-    # `tests/test_ci_runner_x64_install.py:230`.
+    # `tests/test_ci_runner_x64_install.py:236`.
     # ⛔ THE COST, STATED: GitHub's label matching is cumulative and unscoped
     # (github/docs, "Using self-hosted runners in a workflow"), so while the
     # mitigation is engaged this observer is POOL-ELIGIBLE — and a guard whose
@@ -156,6 +156,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # ── THE NEVER-DISPATCHED PROOF STORE (#13825 review round 4) ─────────
+      # `read_queue_health` hands this path to `read_health`, and this pass runs
+      # every 30 minutes — more often than the queue-health job that owns the
+      # store. Without it every window starts from an empty store and re-proves
+      # the SAME oldest-first prefix, so the population never accumulates: the
+      # reading keeps the frozen 14-day `oldest` and `queue_congested: true` this
+      # issue is about, and spends the probe budget every window for it.
+      #
+      # The SAME path and key PREFIX as `.github/workflows/ci-queue-health.yml`
+      # (the `run_id` suffix differs, so the keys never collide); `actions/cache`
+      # restores the NEWEST cache matching the prefix, so whichever job ran last
+      # seeds this one. A miss is the pre-#13825 reading — FEWER proofs, hence
+      # MORE runs counted as waiting, which is the safe direction.
+      - name: Restore the never-dispatched proof store (#13825)
+        uses: actions/cache@v4
+        with:
+          path: .ci-queue-health
+          key: ci-queue-health-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            ci-queue-health-${{ github.repository }}-
       - name: Repair PRs whose required checks never ran
         env:
           # `gh` reads the token from the ENVIRONMENT; Actions exposes it only as
@@ -165,6 +185,8 @@ jobs:
           # automatic token, whose events do NOT create workflow runs, so it
           # reports those PRs instead of pretending a close/reopen would work.
           GITHUB_ACTIONS: "true"
+          # The proof store restored above, read by `read_queue_health`.
+          CI_QUEUE_HEALTH_STATE: ${{ github.workspace }}/.ci-queue-health/never-dispatched.json
         run: |
           set +e
           python3 tools/ci_check_repair.py --apply --json | tee /tmp/ci-check-repair.json

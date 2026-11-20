@@ -1370,8 +1370,14 @@ def main() -> int:
                     "or declare its real source)"
                 )
         elif kind == "fly-only":
-            # A decision-backed exception, NOT a way to spell `unmanaged` — see
+            # A `fly-only:` exception, NOT a way to spell `unmanaged` — see
             # read_manifest: reaching here proves the ref named an issue number.
+            # ⛔ Not "decision-backed": this checker is SHAPE ONLY and hermetic —
+            # it never reads the issue the ref names, so it cannot know whether a
+            # ruling exists, and its summary line is what an operator reads on a
+            # GREEN run. The decision half is a REVIEWER's to check (the manifest's
+            # entry-point paragraph routes them there), so this layer must not
+            # assert it in its own words (#13814 review rounds 8, 11).
             # The exception is only true while the name really is a live,
             # deliberately unversioned Fly secret, so every half is checked:
             # a name that is gone (nothing to except), a name the deploy assigns
@@ -1382,7 +1388,7 @@ def main() -> int:
             if name not in fly_names:
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but "
-                    "exists neither on Fly nor in the deploy payload; a decision-backed "
+                    "exists neither on Fly nor in the deploy payload; a `fly-only:` "
                     "exception is for a REAL out-of-band Fly secret (remove the entry, "
                     "or declare its real source)"
                 )
@@ -1539,7 +1545,7 @@ def main() -> int:
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
         f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
-        f"{len(fly_only)} decision-backed fly-only, {len(ledger)} deliberately absent)"
+        f"{len(fly_only)} fly-only, {len(ledger)} deliberately absent)"
     )
     return 0
 
