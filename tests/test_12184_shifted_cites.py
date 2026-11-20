@@ -182,15 +182,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
     # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
-    # lines RE-MEASURED on this document rather than carried from the pre-merge edition — `main`'s
-    # merge `0656b056d7` shifted the last two by +2, and the P2 fix above (which sits BETWEEN them)
-    # added another +2 to the last one only — so the pre-merge `:182`/`:585` named lines that no
-    # longer hold:
-    #   :171  the header trio above — main's site, the one this row was created for;
-    #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11281`' on the MERGED
+    # document gives `:173` / `:186` / `:592`. They have moved twice since the pre-merge `:182`/`:585`
+    # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
+    # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
+    # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
+    # which is why this block states the MEASUREMENT and not a delta:
+    #   :173  the header trio above — main's site, the one this row was created for;
+    #   :186  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :590  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
     # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
     # for the document, and it drifts the same way.
@@ -808,8 +810,10 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
 
     That 0 is a set-membership fact, not an arithmetic one: a re-spelling adds no pair BECAUSE all five
     `(resolved path, line)` pairs are already in the population, from the §2.5 one-token sites. Delete
-    ONE of those sites and the corrected clause goes false with no other arm red, so the premise is
-    recovered from the document here rather than trusted to the prose.
+    ONE of those sites and this clause's promise goes false; no other arm checks THAT promise —
+    deleting the site reds other arms, but each for its own reason (the spelling denominator moves, and
+    the address's own pin loses its one occurrence), not for the pair-membership premise the clause
+    asserts. So the premise is recovered from the document here rather than trusted to the prose.
     """
     _spellings, pairs = _resolved_pairs((REPO / _AUDIT).read_text(encoding="utf-8"))
     five = [(_SDK, 31365), (_SDK, 31347), (_SDK, 24327), (_SDK, 24671), (_MCP, 11281)]
