@@ -347,6 +347,24 @@ def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
     armed cap can be walked past on that door — tracked on #13134. This line is
     also what reddens the day the door set is widened to close it, so the change
     is made deliberately rather than silently.
+
+    ⛔ #13829 CHANGED ASSERTION 2 — it did not delete it. ``graph_storage`` now
+    declares ``derived_layer`` (it measures the FalkorDB hot cache, which
+    ``STORAGE-ARCHITECTURE.md`` §2.0/§3 makes a derived, physically droppable
+    layer), so the gate has TWO arms on the SAME door and the SAME reading:
+
+    * ``truth_carried=False`` — the DEFAULT, and what assertion 1 still drives:
+      REFUSE. This is the arm every unproven door gets, and it is not weakened.
+    * ``truth_carried=True`` — the door has declared the write reaches the record
+      first, so assertion 2 now proves the OTHER arm here rather than only
+      proving a resource this dimension does not gate: the write is SERVED and
+      the cap becomes a named cache-fold decline for the chokepoint to consume.
+
+    Both arms are necessarily asserted on ``points``, because that is the only
+    door this dimension gates — the pre-#13829 shape could only show the
+    difference by leaving the dimension's own doors. Nothing this test asserted
+    stopped being true: assertion 1's refusal is verbatim, and assertion 2's
+    "a door this dimension does not gate still serves" is kept below, unchanged.
     """
     armed = _limits(max_graph_storage_mb=77)
     over_cap = {"graph_storage": _meter(10_000.0)}
@@ -356,9 +374,23 @@ def test_the_armed_cap_refuses_only_its_own_WRITE_doors():
         with pytest.raises(QuotaExceededError):
             enforce_allowances(armed, resource=door, meters=over_cap)
 
-    # 2. a resource this dimension does not gate still serves (see the caveat).
+    # 2. #13829: the SAME door and the SAME reading, on a door that has declared
+    #    its write truth-carried, is SERVED — the cap moves to the cache fold
+    #    instead of refusing the record's write. See
+    #    ``tests/test_13829_cache_cap_at_fold.py`` for the fold half.
+    from tortoise.allowance_gate import cache_fold_denial, clear_cache_fold_denial
+
+    for door in ("points", "documents"):
+        clear_cache_fold_denial()
+        enforce_allowances(armed, resource=door, meters=over_cap,
+                           truth_carried=True)
+        denial = cache_fold_denial()
+        assert denial is not None and denial.dimension == "graph_storage"
+
+    # 3. a resource this dimension does not gate still serves (see the caveat).
     for door in ("api_keys", "sessions"):
         enforce_allowances(armed, resource=door, meters=over_cap)
+        assert cache_fold_denial() is None
 
 
 # ── 3. the meter's honesty: UNMEASURED is a state, never a refusal, here ───

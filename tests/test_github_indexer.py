@@ -3281,6 +3281,20 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # by **+194** — a uniform shift is the consistency check on the four measurements,
     # never their input; a per-address search is what produced each number. The
     # `update_knowledge` row did NOT move and is unchanged.
+    #
+    # ⛔ RE-DERIVED ONCE MORE at `28ca66878d` (`#13833`), by the same method and NOT by
+    # the delta: `#13833`'s `sdk.py` change is net `+194` BELOW `update_knowledge`, so
+    # the three later rows moved and that one did not — a single offset applied to the
+    # whole block would have re-pinned `update_knowledge` to the wrong function and
+    # left it looking "carried". Each address was found by searching its own pinned
+    # FIRST-line text (and, for the arm, its own LAST-line text `continue`) at
+    # `28ca66878d`: `55547-55549` (the non-scalar refusal), `55699-55708` (the
+    # un-supersede arm) and `56148` (the per-label `SET n += $props`). `update_knowledge`
+    # re-measured UNCHANGED at `22629-22804`. The `+194` is the consistency check on a
+    # measurement, never its input.
+    #
+    # Both derivations agree on the numbers, which is why they landed as one row set:
+    # the merge of `#13833` into this branch kept a single tuple, never two.
     ("sdk.py", 55547, 55549): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55699, 55708): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

@@ -208,6 +208,16 @@ class LiveWrite:
     folded: bool = False
     refusal: str | None = None
     unprojected: int = 0
+    #: The DERIVED cache's over-cap verdict for this write, when there was one
+    #: (#13829). ``None`` for every write whose door published no denial, which
+    #: includes every un-gated lane (stdio/operator, unarmed, an unlimited tier)
+    #: and every door that has not declared its write truth-carried.
+    #:
+    #: ⚠️ It is NOT a failure and NOT a disagreement about the truth. The journal
+    #: line is committed and the record took it; the CACHE declined this one write
+    #: because the org's derived layer is at/over its hard stop. Reads for it fall
+    #: back to the record until a replay folds it — projection lag.
+    cache_fold: Any | None = None
 
     @property
     def applied(self) -> bool:
@@ -252,6 +262,10 @@ class LiveWrite:
             "refusal": self.refusal,
             "folded": self.folded,
             "unprojected": self.unprojected,
+            # ``None`` = the fold was not asked, or it applied. A dict = the
+            # cache declined and NAMES why (dimension + the figures compared).
+            "cache_fold": (None if self.cache_fold is None
+                           else self.cache_fold.as_dict()),
         }
 
 
@@ -375,6 +389,7 @@ def write(event: Mapping[str, Any], *,
 
     # ── 3. THE CACHE, last — derived never leads truth. ────────────────────
     folded = False
+    denial = None
     if fold and projection is not None:
         # ⚠️ OUTSIDE THE `try` ABOVE, DELIBERATELY (#13345 review, note). Same SHAPE
         # as the record seam's import, opposite RULE: a RECORD fault reports and
@@ -383,11 +398,46 @@ def write(event: Mapping[str, Any], *,
         # propagates, and swallowing ITS import failure would leave the caller
         # believing a fold it asked for happened. Do not "close" this arm by
         # catching it without first deciding what `folded` then means.
-        from .projection import _live_write_scope
+        #
+        # ⛔ THE CAP OF THE DERIVED STORE IS ASKED HERE, AT THE FOLD (#13829).
+        # The door no longer refuses an over-cap `graph_storage` for a write it
+        # has declared truth-carried; it publishes that verdict instead
+        # (`allowance_gate.cache_fold_denial`), and THIS is the leg that consumes
+        # it. The comparison therefore decides whether the CACHE takes the write —
+        # never whether the journal and the record do, which are already done by
+        # the time control reaches this line.
+        #
+        # What the tenant sees: the write SUCCEEDS (durable in the record), the
+        # cache stops growing, and reads for it are served from the record. That
+        # is projection lag — the prescribed degradation for a derived read model
+        # (`STORAGE-ARCHITECTURE.md` §2.0/§3 make the cache physically droppable,
+        # so it must not be able to refuse the record) — not a lost write.
+        #
+        # ⚠️ The import is guarded and the arm is FAIL-OPEN to the fold: if the
+        # gate cannot be imported at all, asking is impossible and the cache
+        # behaves exactly as it did before this change. The alternative —
+        # refusing the fold because the meter's module is missing — would turn a
+        # packaging fault into a silently frozen cache.
+        try:
+            from .allowance_gate import cache_fold_denial
+        except Exception:  # noqa: BLE001, RUF100 — an unimportable gate must not stop the fold
+            denial = None
+        else:
+            denial = cache_fold_denial()
+        if denial is not None:
+            LOGGER.warning(
+                "live_write: the DERIVED cache DECLINED this write (#13829) — "
+                "%s. The journal holds position %s and the record took the "
+                "write; the cache is at/over its cap, so it lags until a "
+                "replay folds this record. Reads are served from the record.",
+                getattr(denial, "detail", denial), seq)
+        else:
+            from .projection import _live_write_scope
 
-        with _live_write_scope(scope_label):
-            projection.apply(event)
-        folded = True
+            with _live_write_scope(scope_label):
+                projection.apply(event)
+            folded = True
 
     return LiveWrite(event=event, seq=seq, appended=True, record=outcome,
-                     folded=folded, refusal=refusal, unprojected=unprojected)
+                     folded=folded, refusal=refusal, unprojected=unprojected,
+                     cache_fold=denial)
