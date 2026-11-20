@@ -3888,9 +3888,14 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     `None` — a refusal — for a NEGATED class, for a RANGE (an unescaped `-` with members on both
     sides, so `^[\-+]$` is refused, and grep refuses it too: `Invalid range end`, rc 2), for an
     escaped `-` in that same between-members position, and for an INCOMPLETE ESCAPE (a `\` that
-    ends the content, which is why `^[-+\]$` is refused although grep runs it and counts `3`). An
-    escaped `\` is a MEMBER, which is why `^[\\+-]$` is refused as well: its set is `{+,-,\}`, not
-    `{+,-}` — the same refusal, from the set rather than from the escape state.
+    ends the content, which `_d5_class_members("[+\\]") is None` states directly — note that
+    `[+-\\]` is refused by the RANGE rule before the trailing `\` is even reached). An escaped `\`
+    is a MEMBER, which is why `^[\\+-]$` is refused as well: its set is `{+,-,\}`, not `{+,-}`.
+    ⛔ AND `^[-+\]$` IS REFUSED BY TWO STAGES, NOT ONE (#13995 review round 21, P2 — MEASURED on
+    GNU grep 3.11, which runs it and counts `3`): its class is never CLOSED, so
+    `_d5_split_top_level` answers `None` before the helper is called, and the helper would answer
+    `None` for the trailing `\` on its own. A pin on the expression therefore witnesses the
+    COMPOSITION, which is why the helper has its own row below.
     Those refusals are the safe direction, and the only guarantee offered is one-sided and
     measured: an ACCEPTED spelling counts `2` or `3` (3 when the bracket carries a literal `\`),
     never more — which is what makes the superset cost one impossible diff line. Three spellings are NOT among them, all measured: `^[\-+]$` (the
@@ -4409,6 +4414,19 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     assert not _d5_counts_the_blank_class("^[\\\\+-]$"), (
         "an escaped backslash is a MEMBER, so this bracket's set is `{+,-,\\}`, not `{+,-}`: "
         "refused, although grep runs it and counts 3 (measured)")
+    # …and the HELPER's own verdicts, because a pinned EXPRESSION witnesses the whole composition:
+    # `^[-+\]$` never reaches the helper (its class is unclosed, so the splitter refuses it first),
+    # so the trailing-backslash rule needs a row that calls the helper directly
+    # (#13995 review round 21, P2 — MEASURED: with `return None if escaped else members` changed to
+    # `return members`, every d5 test stayed GREEN because only the expression was pinned).
+    assert _d5_class_members("[+\\]") is None, (
+        "a bracket whose content ends in a backslash is an INCOMPLETE ESCAPE and the helper must "
+        "answer None on its own: `[+\\]` has no `-` for the RANGE rule to refuse, so dropping "
+        "`return None if escaped else members` is visible HERE and nowhere else — `^[-+\\]$` never "
+        "reaches the helper at all (the splitter refuses its unclosed class first), which is why "
+        "an expression-level pin cannot witness this rule (#13995 review round 21, P2)")
+    assert _d5_class_members("[+\\-]") == {"+", "-"}, (
+        "and the ordinary escaped-hyphen spelling is a plain set: `[+\\-]` is `{+,-}`")
 
     # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
     # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
@@ -4455,10 +4473,12 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
                        # guard rewritten as `1 < len(alternatives) < 4` every d5 test still passed
                        # and this one was graded as the class on a `grep -cE` count of 6).
                        "^\\+|-|\\+|-$",
-                       # ⛔ AND A RANGE, because the docstring's rule names it — but the WITNESS
-                       # for the range branch is the row above (`^[\-+]$`): `^[+-+-+]$` is also
-                       # caught by the plain-hyphen rule, so on its own it would not notice that
-                       # branch being deleted (#13995 review round 20, P3 — MEASURED).
+                       # ⛔ AND A RANGE, because the docstring's rule names it. WHICH branch each
+                       # row witnesses, measured one at a time on copies (#13995 review rounds
+                       # 20-21, P3): `^[+-+-+]$` is the witness for the PLAIN-HYPHEN rule (delete
+                       # that rule and it becomes the only newly-accepted row), while the escaped
+                       # `-` branch is witnessed by `^[\-+]$` above (delete it and `^[\-+]$` is
+                       # the only one newly accepted).
                        "^[+-+-+]$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
