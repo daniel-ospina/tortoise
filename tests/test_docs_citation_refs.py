@@ -3175,8 +3175,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # Live cost today: zero — the corpus refusal set is the same six lines at `180b95d07d`, at
     # the peer head and here. ⛔ NO COUNT IS TYPED FOR THE WITNESS TUPLE, ON PURPOSE: an earlier
     # draft said "61 of the 192", the figure did not reproduce under any reading of "that arm",
-    # and 192 was the PARENT head's tuple length — the same typed-figure rot this file polices
-    # about itself, caught by #13802 review round 28, P3.
+    # and the `192` was not this head's tuple length either way it is counted — the same
+    # typed-figure rot this file polices about itself, caught by #13802 review round 28, P3.
+    # ⛔ NO COUNT OF THIS HEAD'S TUPLE IS TYPED OR RE-DERIVED HERE. Any further correction to
+    # this note goes in the commit message, not in it: what the reader needs is the rule, and
+    # the provenance of its wording is not load-bearing.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
@@ -4066,10 +4069,16 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "At the head of origin/main you are about to merge there are no files in the `tortoise/` set.",
         # ⛔ AND THE INTERVENING RUN'S OWN BOUND (#13802 review, round 28, P2 — MEASURED: the
         # round-27 edit widened that run's TOKEN CLASS and left its BOUND at three, so the parity
-        # `:2927-2928` claims broke again at a four-token gap: `At the very top outer head of the
-        # branch you are about to merge …` was GREEN against its RED twin. All three runs — this
-        # one and both tail branches — are now the same eight, and this spelling pins the four.)
-        "At the very top outer head of the branch you are about to merge there are no files in the `tortoise/` set.",
+        # the tail's note claims broke again at a FOUR-token gap: `At the very top outer layer
+        # head of the branch you are about to merge …` was GREEN against its RED twin. All three
+        # runs — this one and both tail branches — are now the same eight.)
+        # ⛔ AND THE WITNESS IS THE FOUR-TOKEN SPELLING, NOT A THREE-TOKEN ONE (#13802 review,
+        # round 29, P2 — MEASURED VACUOUS as first pinned: `At the very top outer head …` carries
+        # THREE intervening tokens and stays RED with the bound reverted to three, so it could not
+        # see the regression it was added for — reverting dropped 0 of the tuple's witnesses. The
+        # spelling below carries FOUR, is GREEN at `67bed284f0` and RED here, so it is the one that
+        # reds on a revert.)
+        "At the very top outer layer head of the branch you are about to merge there are no files in the `tortoise/` set.",
         # ⛔ AND THE FAMILY-A FILLER'S TWO BLIND SPOTS (#13802 review, round 26, P2 — MEASURED
         # detector-read/ban-blind on 600 of 11,220 swept cells: a `/`-bearing token
         # (`origin/main`) and a run longer than six words both defeated the filler, while the
