@@ -109,6 +109,63 @@ def _enforce_quota_double(resource: str = "points", *,
     return None
 
 
+def _assert_door_shaped(installed, door) -> None:
+    """Assert `installed` matches the door's parameters, ALL FOUR of them.
+
+    ⛔ THE PIN IS TOTAL (#14037 review, cycle 2, P3 — MEASURED): a
+    `(name, kind, default)` triple compared with `==` left TWO drifts GREEN — an
+    annotation-only change (`resource: int = "points"` passed), and `False`↔`0`
+    because `False == 0`. So name/kind/ANNOTATION are compared by `==` (both modules
+    are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and each default
+    by IDENTITY, where `False is 0` is False.
+
+    ⚠️ `door` is captured BEFORE an arm's `setattr` and never re-read afterwards:
+    comparing `mcp._enforce_quota` against itself would pass for ANY object, which
+    would make this a tautology that reads exactly like a real assertion.
+    """
+    import inspect
+
+    installed_params = list(inspect.signature(installed).parameters.values())
+    door_params = list(inspect.signature(door).parameters.values())
+    assert [(p.name, p.kind, p.annotation) for p in installed_params] == [
+        (p.name, p.kind, p.annotation) for p in door_params], (
+        f"the `_enforce_quota` stand-in installed here ({installed!r}) has parameters "
+        "(name, kind, annotation) that no longer match the door's — a wider stand-in "
+        "(`**kw`) fails OPEN on a shape drift and a narrower one (a missing default) "
+        "reads a legal zero-arg door call as a TEST defect. Fix the stand-in, not "
+        "this assertion")
+    assert all(a.default is b.default for a, b in
+               zip(installed_params, door_params, strict=True)), (
+        f"the `_enforce_quota` stand-in installed here ({installed!r}) has a DEFAULT "
+        "that differs from the door's in identity — `False == 0` is True, so an "
+        "equality comparison would accept a flipped default. Fix the stand-in, not "
+        "this assertion")
+
+
+def _assert_door_arm(installed, door) -> None:
+    """Assert an arm installed the ONE pinned double, and that it matches the door.
+
+    ⛔ TWO ASSERTIONS, AND BOTH ARE LOAD-BEARING (#14003 review, cycle 5, P3 —
+    the F1 gap, MEASURED): reading only the module-level symbol left the defect
+    this pin exists to prevent able to return through the two places the double
+    exists to protect. Restoring main's pre-fix inline
+    `lambda resource="points", *, truth_carried=False: None` at either
+    `setattr` kept the whole file GREEN, because no assertion observed what an
+    arm actually installed.
+
+    A shape comparison alone would NOT have closed it: main's pre-fix lambda is
+    shaped exactly like the door, so it passes a shape check and is still a
+    SECOND copy of the door's shape that nothing keeps in sync — the arm must
+    install the pinned symbol by IDENTITY, and that symbol must match `door`.
+    """
+    assert installed is _enforce_quota_double, (
+        f"this arm installed {installed!r} instead of the pinned "
+        "`_enforce_quota_double` — a private stand-in is a second copy of the "
+        "door's shape that nothing keeps in sync (which is exactly how the "
+        "earlier `**kw` form went unnoticed). Install the pinned symbol, not a copy")
+    _assert_door_shaped(installed, door)
+
+
 def test_the_enforce_quota_double_is_the_door():
     """Name, kind, annotation AND default per parameter, read from the door itself.
 
@@ -116,10 +173,13 @@ def test_the_enforce_quota_double_is_the_door():
     double's two earlier shapes were both wrong and neither was observable — the
     `**kw` form fails OPEN (an unexpected keyword is swallowed, so a door drift
     surfaces only in production `TypeError`) and the missing-default form fails
-    CLOSED (a legal zero-arg `_enforce_quota()` would read as a TEST defect). The
-    durable claim the neighbouring `test_13829_cache_cap_at_fold.py`
-    `test_the_mcp_gate_defaults_to_the_protective_arm` already makes for
-    `_quota_gated` is exactly this one, one door down, so it is read here too.
+    CLOSED (a legal zero-arg `_enforce_quota()` would read as a TEST defect).
+
+    The neighbouring `test_13829_cache_cap_at_fold.py`
+    `test_the_mcp_gate_defaults_to_the_protective_arm` is *narrower* than this
+    one: it asserts ONE parameter's default on the real `_quota_gated`, not a
+    per-parameter comparison of a double. What the two share is the pattern —
+    read the door rather than trust a comment — not the strength of the claim.
 
     ⛔ AND THE PIN IS TOTAL, WHICH COST ONE MORE REVIEW ROUND (#14037 review, cycle
     2, P3 — MEASURED). A `(name, kind, default)` triple compared with `==` left TWO
@@ -127,23 +187,14 @@ def test_the_enforce_quota_double_is_the_door():
     `False`↔`0` because `False == 0`. So name/kind/ANNOTATION are compared by `==`
     (both modules are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and
     each default is compared by IDENTITY, where `False is 0` is False.
-    """
-    import inspect
 
+    This test pins the symbol's definition; each `TestRunnerWiring` arm
+    additionally pins what it INSTALLS, via `_assert_door_arm`.
+    """
     import tortoise.mcp_server as mcp
 
-    double = list(inspect.signature(_enforce_quota_double).parameters.values())
-    door = list(inspect.signature(mcp._enforce_quota).parameters.values())
-    assert [(p.name, p.kind, p.annotation) for p in double] == [
-        (p.name, p.kind, p.annotation) for p in door], (
-        "the `_enforce_quota` double's parameters (name, kind, annotation) no longer "
-        "match the door's — a wider double (`**kw`) fails OPEN on a shape drift and a "
-        "narrower one (a missing default) reads a legal zero-arg door call as a TEST "
-        "defect. Fix the double, not this assertion")
-    assert all(a.default is b.default for a, b in zip(double, door, strict=True)), (
-        "the `_enforce_quota` double's DEFAULT differs from the door's in identity — "
-        "`False == 0` is True, so an equality comparison would accept a flipped "
-        "default. Fix the double, not this assertion")
+    _assert_door_shaped(_enforce_quota_double, mcp._enforce_quota)
+
 
 
 @pytest.fixture(autouse=True)
@@ -1316,12 +1367,16 @@ class TestRunnerWiring:
         # before the reader below existed: reverting to that shape left the whole file
         # green, `58 passed` then — the file is 59 now).
         # `test_the_enforce_quota_double_is_the_door` compares name, kind,
-        # annotation AND default per parameter against the door itself, so read the
-        # shape from that assertion — and ⚠️ the two `mcp_server.py` addresses an
-        # earlier cut typed here are GONE on purpose: nothing reads a number in a
-        # comment, which is the rule #14025 applied to
+        # annotation AND default per parameter against the door itself — and
+        # `_assert_door_arm` below pins THAT THIS ARM installs the same pinned symbol,
+        # because main's pre-fix inline lambda had the right shape and still hid the
+        # drift this pin exists to catch (it reddened NOTHING). ⚠️ the two
+        # `mcp_server.py` addresses an earlier cut typed here are GONE on purpose:
+        # nothing reads a number in a comment, which is the rule #14025 applied to
         # `tests/test_7949_capstone_measure.py`.
+        door = mcp._enforce_quota          # the REAL door, before the patch
         monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
+        _assert_door_arm(mcp._enforce_quota, door)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
@@ -1359,7 +1414,9 @@ class TestRunnerWiring:
         import tortoise.mcp_auth as mcp_auth
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
+        door = mcp._enforce_quota          # the REAL door, before the patch
         monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
+        _assert_door_arm(mcp._enforce_quota, door)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default="org-M"))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
