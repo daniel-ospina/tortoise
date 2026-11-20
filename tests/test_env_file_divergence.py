@@ -97,10 +97,10 @@ def _isolated(monkeypatch, tmp_path):
     # run), so no store is ever opened. ⛔ ONE ROW IS NOT A `doctor` ROW — ITS PIN PINS IT, NOT THE FIXTURE:
     # `test_the_daemons_refusal_is_still_the_one_the_user_sees` builds an SDK, and
     # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`). Pinned, the absent
-    # `<db_path>.settings` returns first (`sdk.py:14194-14195`) — and THAT PIN, not naming
-    # `_isolated` (`autouse=True`, :53), is what makes the row hermetic. Unpinned it resolves to
-    # the REAL `~/.tortoise/tortoise.db` (measured), so that registry's CONTENTS choose the arm:
-    # pidfile missing/dead -> `:14201-14202`/`:14211-14212`; LIVE holder -> `:14216` (#13867 Root 1).
+    # `<db_path>.settings` returns first (`sdk.py:14194-14195`) — and it is THAT PIN, not naming
+    # `_isolated`, that makes the row hermetic (`autouse` just above: every row runs it regardless).
+    # Unpinned, the row resolves to the REAL `~/.tortoise/tortoise.db` (measured), so that registry's
+    # CONTENTS choose the arm: missing/dead pidfile -> `:14201-14202`/`:14211-14212`; LIVE -> `:14216`.
     import tortoise.config as _config
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / "canonical" / "tortoise.db"))
