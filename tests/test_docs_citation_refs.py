@@ -3280,12 +3280,13 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     """
     if text in ("-", "--"):
         return text, ""
+    # grep is the judge of the NAME (`-mc`, `-Dc`, `-Ac` are all rejected by it, measured), so the
+    # option's argument-taking-ness is never decided here — only `option.startswith("--")` below is
+    # asked, and only to mirror GNU grep's `=`/space-free value rules.
     if text.startswith("--"):
         match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
-        takes_an_argument = True  # long options may carry a value; grep is the judge of the name
     elif text.startswith("-"):
         match = re.fullmatch(r"(-[A-Za-z0-9]+)(.*)", text, re.S)
-        takes_an_argument = False
     else:
         return None
     if match is None:
@@ -3691,14 +3692,17 @@ def _d5_blank_count_expression() -> str:
     # reading it is told to look for a second command that does not exist.
     assert blank_prescriptions, (
         "this arm SEES no BLANK-line count command at this head "
-        f"(count commands read: {prescriptions!r}), so it executes nothing — and TWO different "
-        "stages can be the reason, so check both before editing anything: the `05-verify.md` row "
-        "may still PRESCRIBE one in a spelling the count reader cannot see (an unquoted "
-        "expression; a pattern supplied on `-e`/`-f`), or the reader DID read it and "
+        f"(count commands read: {prescriptions!r}), so it executes nothing — and THREE different "
+        "stages can be the reason, so check all three before editing anything: the `05-verify.md` "
+        "row may still PRESCRIBE one in a spelling the count reader cannot see (an unquoted "
+        "expression; a pattern supplied on `-e`/`-f`); or the reader DID read it and "
         "`_d5_counts_the_blank_class` rejected the spelling — measured on a row spelled "
         "`^[+\\-]$`, which counts the same class and is graded as this one now — which is a "
-        "class-test gap and not a reader gap. Naming only the reader was a false attribution "
-        "(#13962, #13995 review)")
+        "class-test gap and not a reader gap; or the row prescribes the COMPLEMENT "
+        "(`grep -vc '^[+-] […]'` — read, and refused BY DESIGN by `_inverts_the_match_set`, never "
+        "a gap in either of the other two). Naming only the reader was a false attribution, and "
+        "naming only two of the three is the same defect one round later "
+        "(#13962, #13995 reviews)")
     assert len(blank_prescriptions) == 1, (
         f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
         f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
@@ -4133,8 +4137,13 @@ def test_the_d5_count_reader_does_not_describe_itself_as_complete():
     """#13995 — the reader's prose may not promise more than its own residual list gives.
 
     ⛔ NON-VACUOUS BY CONSTRUCTION, which is why a prose finding gets a cell at all. Each needle
-    below is a substring of the PRE-FIX tree, so this test REDS on the code both review rounds
-    graded — it is not a test written beside a wording edit, it IS the wording edit asserted. The
+    below is a substring of the PRE-FIX SNIPPET recorded beside it in `_D5_RETIRED_OVERCLAIMS` —
+    six review rounds' wordings, so the snippet for a round-1 claim IS `origin/main`'s text while
+    the ones for rounds 5-6 are earlier states of this branch, NOT of `origin/main` (measured: four
+    of the six needles do not occur in `git show origin/main:tests/test_docs_citation_refs.py`, and
+    claiming they did is the same over-claim this cell exists to ban). The ban therefore REDS on
+    code a review round actually graded — it is not a test written beside a wording edit, it IS the
+    wording edit asserted. The
     checks run in the control direction first: every needle must still be found in the pre-fix
     snippet it was cut from (a typo'd needle is an inert ban, and an inert ban is the failure
     this file bans elsewhere in the document).
