@@ -24,6 +24,7 @@ import importlib.util
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1319,7 +1320,7 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
     ⛔ PRESENCE IS NOT PLACEMENT, and this pin learned that the hard way. A first
     draft collected the names handed to ANY `*.seed(...)` and intersected them
     with the perturbation's result — so it could not see the RECEIVER or the
-    ORDER, and both of the mutants below stayed 82/82 green:
+    ORDER, and three mutants stayed 82/82 green:
       B3  move the perturbation AFTER `store.seed(...)` (the arm re-reads the
           unpoisoned rows the moment the store is already seeded)
       B4  send the perturbation to `record.seed(...)` and seed the GRAPH with the
@@ -1333,6 +1334,16 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
     is GUARDED by `args.poison == "vector"`. This is the same
     rule the teardown pin states: "`run()` calls `reset()` SOMEWHERE" is not
     "the teardown runs".
+
+    ⛔ THE GUARD IS CHECKED BY EVALUATING IT, not by matching substrings. Reading
+    `"poison" in guard and "vector" in guard` cannot tell a condition from its
+    negation, so an INVERTED guard (`rows if args.poison == "vector" else
+    perturb_for_vector_poison(rows)` — the store poisoned on exactly the wrong
+    run) and a VACUOUS one (`... if args.poison == "vector" or True else rows`)
+    both stayed 82/82 green. The guard expression is now compiled and run under
+    each poison value against sentinel inputs: under `vector` it must yield the
+    PERTURBED rows and under anything else the UNPERTURBED ones. That is the
+    contract, so it is what is tested.
     """
     tree = ast.parse(MODULE_PATH.read_text())
     run = next(node for node in ast.walk(tree)
@@ -1366,17 +1377,50 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
     # the graph `store`, before `store.seed(...)`, with the oracle untouched —
     # every check above stays green while the store is poisoned on EVERY run and
     # the harness reports `diverged` for `--poison none`.
-    assert isinstance(carrier_node.value, ast.IfExp), (
-        f"`{carrier}` is assigned unconditionally (a "
-        f"{type(carrier_node.value).__name__}, not a conditional) — the store "
-        "poison must be guarded by `args.poison == \"vector\"`, or every "
-        "`--poison none` run reports `diverged`")
-    guard = ast.unparse(carrier_node.value.test)
-    assert "poison" in guard and "vector" in guard, (
-        f"the guard on `{carrier}` is `{guard}`, which does not test "
-        "`args.poison == \"vector\"` — an unguarded store poison makes every "
-        "`--poison none` run report `diverged`, i.e. the falsifier fires on the "
-        "unperturbed baseline it exists to compare against")
+    #
+    # Evaluated, not string-matched: `"poison" in guard and "vector" in guard`
+    # passes for an INVERTED guard and for a VACUOUS one. This compiles the
+    # guarding expression and runs it under each poison value with sentinels, so
+    # what is asserted is the contract — `vector` perturbs, everything else does
+    # not — rather than the shape of the source that implements it.
+    if not isinstance(carrier_node.value, ast.IfExp):
+        raise AssertionError(
+            f"`{carrier}` is assigned from a "
+            f"{type(carrier_node.value).__name__}, not from the single guarded "
+            "expression this pin evaluates. If the guard has been re-spelled as "
+            "a statement (`store_rows = rows` then `if args.poison == \"vector\": "
+            "store_rows = perturb_for_vector_poison(rows)`), that is a legitimate "
+            "shape and this pin must be EXTENDED to read it — do not delete the "
+            "assertion, because it is what proves the store is poisoned ONLY "
+            "under `--poison vector`. A store poisoned on every run makes each "
+            "`--poison none` run report `diverged` against an unperturbed "
+            "baseline, i.e. the falsifier fires on the data it exists to compare "
+            "against")
+
+    perturbed = object()
+    unperturbed = object()
+
+    def _seed_rows_for(poison: str | None):
+        """What `run()` binds the carrier to when `--poison` is `poison`."""
+        env = {
+            "args": types.SimpleNamespace(poison=poison),
+            "rows": unperturbed,
+            "perturb_for_vector_poison": lambda _rows: perturbed,
+        }
+        expr = ast.Expression(body=carrier_node.value)
+        ast.fix_missing_locations(expr)
+        return eval(compile(expr, "<seed-pin>", "eval"), {"__builtins__": {}}, env)
+
+    assert _seed_rows_for("vector") is perturbed, (
+        f"under `--poison vector`, `{carrier}` is bound to the UNPERTURBED rows — "
+        "the guard is inverted (or vacuous), so the poison is never applied on "
+        f"the one run that asks for it. Guard: `{ast.unparse(carrier_node.value)!r}`")
+    for other in ("none", None):
+        assert _seed_rows_for(other) is unperturbed, (
+            f"under `--poison {other!r}`, `{carrier}` is bound to PERTURBED rows "
+            "— the store is poisoned on a run that did not ask for it, so every "
+            f"`--poison none` run reports `diverged`. Guard: "
+            f"`{ast.unparse(carrier_node.value)!r}`")
 
     # every `.seed(<name>)` call in `run()`, by RECEIVER, with its position
     seeds: list[tuple[str, str | None, int]] = [
