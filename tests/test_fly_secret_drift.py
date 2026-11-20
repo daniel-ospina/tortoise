@@ -1938,9 +1938,14 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # a STALE violation is tolerated ONLY for the recorded open transition, only
     # with its shadow clause, and only as the BYPASSABLE exit 1 (an exit 2 can
     # never be bypassed, so it must not pass for any state). Every other kind of
-    # violation on the shipped artifacts is still a defect and still fails here,
-    # and the day the secret is unset the arm holds with no edit: the tolerated
-    # set simply comes back empty.
+    # violation on the shipped artifacts is still a defect and still fails here.
+    # ⛔ THE TOLERANCE HAS NO EXPIRY: nothing here can observe the live Fly app, so a
+    # production `secrets unset` changes nothing in this file. When #13923's step 3
+    # lands, DELETE this entry from `open_route_b` AND the
+    # `r.returncode != control.returncode` control TOGETHER — emptying the set alone
+    # makes the subject and the control the SAME fixture, so the control reds with a
+    # message that would push a maintainer to weaken the very check the false PASS
+    # was fixed with. Until then the suite models the open transition on purpose.
     assert "UNDECLARED" not in r.stdout, r.stdout
     stale = [line for line in r.stdout.splitlines() if "STALE DECLARATION" in line]
     foreign = [line for line in stale if not any(n in line for n in open_route_b)]
@@ -1982,7 +1987,10 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         f"{control.stdout}"
     )
     assert r.returncode != control.returncode, (
-        "the two fixtures must produce DIFFERENT verdicts, or every arm above is vacuous"
+        "the two fixtures must produce DIFFERENT verdicts, or every arm above is vacuous. "
+        "If `open_route_b` was just emptied because the transition landed, delete THIS "
+        "control with it — the subject and the control are the same fixture then, and a "
+        "weaker control is not the fix."
     )
     # #4126's seven recorded-debt names, pinned by KIND so a revert to
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
@@ -2164,7 +2172,8 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # route before the `[env]`-then-unset order is PERFORMED AND VERIFIED cannot claim
     # it unblocked deploys — the claim is now measured here instead of asserted in a
     # PR body over a fixture that omitted the live secret (#13941 owner direction
-    # check). The day the secret is unset this asserts 0 with no edit.
+    # check). The day this entry leaves `open_route_b` this asserts 0 — it does not
+    # happen by itself.
     assert r.returncode == (1 if stale else 0), r.stdout + r.stderr
 
 
@@ -2677,8 +2686,9 @@ def _region_marker(
 
     A bare `next(...)` raises `StopIteration` — a red with no diagnosis, which reads as
     a broken test rather than as "the region this guard slices is gone, re-pin the
-    marker". The runbook arm has always raised a named `AssertionError`; this mirrors
-    it for the manifest (measured, round 7).
+    marker". The runbook arm has always raised a named `AssertionError`, and it is this
+    helper's ONLY caller since #13926 / this change deleted the manifest's `#13674`
+    block — keep the failure NAMED here, or a re-pin reads as a broken test.
     """
     index = next((i for i in range(after, len(lines)) if marker in lines[i]), None)
     if index is None:

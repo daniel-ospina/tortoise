@@ -4450,8 +4450,9 @@ recorded on #13926, **not** an outage and **not** the ~5 h absence of #4568 (whi
 and the *shape* to avoid: a value missing from the MERGED `fly.toml`). Follow that block; the transition
 is tracked in #13923.
 
-Two red states an operator will meet while moving this name. **Both are the expected interval, not a
-regression**, and neither can be cleared by editing prose:
+Two red states an operator will meet while moving this name. **Both are expected states, not a
+regression** — the first is the interval the sanctioned transition passes through, the second is what a
+revert split across two changes looks like — and neither can be cleared by editing prose:
 
 | state | what the gate prints |
 |---|---|
@@ -4460,11 +4461,13 @@ regression**, and neither can be cleared by editing prose:
 
 The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second by
 restoring the declaration (an unset also clears it, and leaves a clean `fly-toml-env` state).
-⛔ **Only the FIRST is red.** Unsetting the secret while the `fly-toml-env` declaration stands is
-**GREEN on this name** — `fly.toml [env]` alone satisfies the declaration — so an unset that lands
-BEFORE `[env]` is on the machine is **not** caught here: its cost is behavioural (flag unset ⇒ warm-up
-ON ⇒ the ~196 s cold load, #13926's recorded correction) and the order is prescribed by the manifest's
-route-(b) block, **not enforced by a red**. Do not read a green run as permission to unset first.
+⛔ **The unset itself is not a third red — it is the one step that is GREEN.** Unsetting the secret while
+the `fly-toml-env` declaration stands produces **no violation for this name** (`fly.toml [env]` alone
+satisfies the declaration), so an unset that lands BEFORE `[env]` is on the machine is **not** caught
+here: its cost is behavioural (flag unset ⇒ warm-up ON ⇒ the ~196 s cold load, #13926's recorded
+correction) and the order is prescribed by the manifest's route-(b) block, **not enforced by a red**.
+Do not read a green run as permission to unset first. What is NOT green, and must never be merged as
+if it were, is DELETING the declaration while the secret lives — that is row 2 above, `UNDECLARED`.
 The quotes above are bound to the messages the gate **actually prints** by
 `tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
 violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
@@ -4475,16 +4478,21 @@ unparseable (`main`'s duplicate pair) every `deploy-hosted` run dies at exit **2
 bypass at all (`deploy-hosted.yml:743` gates RC=1 only) — so no release can carry `[env]` to the box
 and #13923's steps 2–4 cannot begin. Its own status comment states it: *"Steps 2-4 are
 blocked until the duplicate is removed."* Removing the duplicate is therefore the PRECONDITION of the transition,
-not a substitute for it: land the dedupe, dispatch the deploy with
-`skip-fly-secret-provenance`, then `flyctl secrets unset`, then re-measure. ⛔ What must not happen is
+not a substitute for it: follow the manifest's route-(b) block for the four steps (the deploy must be the
+`deploy-api` JOB's Deploy step, not the run, and step 4 requires BOTH `flyctl secrets list` and
+`printenv`), then re-measure. ⛔ What must not happen is
 anyone reading the exit-1 state as done — it is the bypassable class, not the green one. ⛔ **A green suite is not that
 verification:** the three states measure differently and only one is green — `main`'s duplicate pair
 is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
-`fly-only:#13674` with the `[env]` row removed is exit **0** (#13941's owner direction check, measured
+the REJECTED direction — `fly-only:#13674` with the `[env]` row removed, i.e. reverting #13926, which is
+an owner decision (#13923) and not a lane's — is exit **0** (#13941's direction check, measured
 2026-11-20; the live-value fixture matters — the same run is exit 0 if the secret list is seeded
-WITHOUT this name, which is the false green that check was written for). Those numbers are pinned by
-`tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`,
-which seeds this name as the live shadow, so this state cannot be reported as clean again.
+WITHOUT this name, which is the false green that check was written for). The exit-1 and exit-0 halves
+are pinned by `tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+(it seeds this name as the live shadow, so this state cannot be reported as clean again, and re-runs the
+same fixture with the shadow withheld for the exit-0 half); the exit-2 half is pinned by
+`::test_duplicate_declaration_is_exit_2`, on a fixture manifest — which is why the duplicate must never
+be re-created.
 
 ⛔ **The `fly-toml-env` declaration is NOT `fly-only:` and must not be rewritten as one.** `fly-only:`
 is RESERVED for a deliberate, PERMANENT out-of-band secret whose issue carries a recorded `OVERRIDES:`
