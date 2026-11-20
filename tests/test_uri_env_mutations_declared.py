@@ -548,6 +548,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # run embedded-green), and neither the probe's `finally` nor the fixture's
     # restore lets the lane leak into a later docker-lane test.
     "test_13722_projection_open_round_trips.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
+    # #13903: the reachable-reads module's live half. `test_13557_13558_reachable_reads.py`
+    # landed with an undeclared `sdk` fixture that re-points the lane at the store
+    # the module itself probed (`monkeypatch.setenv("TORTOISE_DB_URI", _uri())`),
+    # so `main` went red on this guard and thereby on the merge ref of every open
+    # PR — the same class the #12360 rows above record. DELIBERATE_URI is the
+    # point: the claims under test (commitments reached by asking, endings reached
+    # by asking) are reads over a REAL store, which no pure-function test can
+    # observe, and `_uri()` resolves the ambient lane URI first so the fixture can
+    # never silently drag a docker lane onto an embedded database. `monkeypatch`
+    # auto-restores at teardown, so nothing leaks into a later docker-lane test.
+    # The module's other three `TORTOISE_DB_URI` mentions are READS (its probe's
+    # candidate list and `_uri()`'s fallback), which are not mutations and are
+    # deliberately not declared — a row that matched them would silence a future
+    # mutation on those lines.
+    "test_13557_13558_reachable_reads.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
     # unanchored declaration for this file here, and this branch had already
     # landed a narrowed one at the tail of this dict under the same KEY — an
