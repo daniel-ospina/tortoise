@@ -1595,6 +1595,15 @@ The class headings say what to DO: `N edge(s) were DECLINED by the door —
     # #13985 review round 4.
     header = "marker(s) from an earlier run"
     assert header in err, err
+    # ⛔ AND ONCE. `err.index` reads only the FIRST occurrence, so a SECOND copy of
+    # the line printed below a class heading is invisible to both order
+    # assertions — the hazard survives a merge-conflict resolution that keeps the
+    # new block and re-adds the old one, and that mutant measured green (136
+    # passed) at #13985 review round 5. The two sibling rows in this file already
+    # pin `err.count(...) == 1` for the same reason.
+    assert err.count(carried_line) == 1, (
+        f"the earlier run's line is printed {err.count(carried_line)}x — a second "
+        "copy would sit under a class heading whose remedy says to delete it: " + err)
     assert err.index(header) < err.index(carried_line), (
         "an EARLIER run's line is printed OUTSIDE its own header's block, so it "
         "reads as a line THIS run produced: " + err)
