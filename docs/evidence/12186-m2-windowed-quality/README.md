@@ -346,11 +346,14 @@ matters most, because that path is active exactly when retrieval is already fail
 `DETACH DELETE n` and never invalidated the snapshot, so the egress executor could delete a node
 and leave it returnable for up to 60 s. Filed separately as **#13123** rather than fixed here —
 this lane measures and does not change the eviction path. **#13123 has since landed**: the delete
-path now calls `fallback_snapshot.invalidate_graph(graph_name)` the moment its statement is issued
-(stamp per graph, so a build already in flight cannot cache the pre-delete rows either), and the
-sweep reports the outcome as `degraded_snapshot_invalidated`. The bound that remains is
-PROCESS-LOCAL — an evictor in another process cannot reach a serving process's in-memory store,
-which is still bounded by the 60 s TTL.
+path now calls `fallback_snapshot.invalidate_graph(graph_name)` as soon as its statement RETURNS (and
+also when the statement raised, since its effect is then unverified) — and never before the delete,
+which is what stops a build that read the pre-delete rows from caching them (the stamp is per graph).
+The sweep reports the outcome as `degraded_snapshot_invalidated`. Two bounds remain, both stated
+rather than implied: it is PROCESS-LOCAL — an evictor in another process cannot reach a serving
+process's in-memory store, which is still bounded by the 60 s TTL — and a read already in flight
+(a `get` between the delete committing and the stamp move, or a reader that joined a pre-move build)
+is still served that flight's rows, bounded by one round trip or one build rather than by the TTL.
 
 ### 7. The lexical leg's own ceiling is low on claims, independent of the window
 

@@ -1334,3 +1334,144 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
     assert not [e for e in events if e[0] == "mint"], (
         f"`lane` created {events} after the journal write failed — no graph may exist "
         "without an ownership record (#11373 P1)")
+
+
+# --------------------------------------------------------------------------------------
+# #13123 — the degraded-fallback snapshot must not outlive the delete
+# --------------------------------------------------------------------------------------
+#
+# ⛔ WHY THESE ARE ORDER/GATE PINS AND NOT "the invalidator was called" PINS. Review
+# round 1 measured this: monkeypatching `_delete_nodes` to invalidate BEFORE the
+# statement, and unconditionally, left the whole suite green — the live tests and these.
+# Both halves are load-bearing and neither is observable from a single-threaded "was it
+# called" assertion:
+#
+#  * BEFORE → a build that reads rows while the node is still resident caches them, and
+#    the stamp (already moved) cannot refuse that put. The stale corpus is then served
+#    for the TTL. Only the ORDER closes it.
+#  * UNCONDITIONALLY → a delete statement that removed nothing (`count(n) = 0`, e.g. a
+#    peer evictor won the race) blanks a warm snapshot for no reason, which is a whole
+#    corpus refetch per sweep — the #10602 regression class, on the path that only runs
+#    under strain. Only the `removed` gate closes it.
+
+class _InvalidationLog:
+    """Records the invalidations the evictor performs, in order with the statements."""
+
+    def __init__(self, graph, *, raises: bool = False) -> None:
+        self.graph = graph
+        self.raises = raises
+        #: (graph_name, index into graph.statements AT THE TIME OF THE CALL)
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, graph_name: str) -> int:
+        self.calls.append((graph_name, len(self.graph.statements)))
+        if self.raises:
+            raise RuntimeError("snapshot store unavailable")
+        return 0
+
+
+def _patch_invalidation(monkeypatch, log):
+    import tortoise.fallback_snapshot as fb
+
+    monkeypatch.setattr(fb, "invalidate_graph", log)
+
+
+def test_the_snapshot_is_invalidated_AFTER_the_statement_not_before(monkeypatch):
+    graph = _FakeGraph(nodes=10)
+    log = _InvalidationLog(graph)
+    _patch_invalidation(monkeypatch, log)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=10),
+    )
+
+    assert report.verdict == "EVICTED", report.reason
+    assert report.metric()["degraded_snapshot_invalidated"] is True
+    assert log.calls, "the delete removed nodes and nothing invalidated the snapshot"
+    delete_at = next(
+        i for i, s in enumerate(graph.statements) if "DETACH DELETE" in s
+    )
+    for graph_name, seen_at in log.calls:
+        assert seen_at > delete_at, (
+            f"the snapshot was invalidated at statement index {seen_at}, before the "
+            f"delete at {delete_at} (graph {graph_name!r}) — a build that read the "
+            f"corpus while the node was still resident can then cache it, and the "
+            f"already-moved stamp cannot refuse that put, so the evicted node is "
+            f"served for the full snapshot TTL")
+
+
+def test_a_delete_that_removed_NOTHING_does_not_invalidate_a_warm_snapshot(monkeypatch):
+    """`count(n) = 0` means no staleness was introduced, so nothing may be dropped."""
+    graph = _FakeGraph(nodes=10, delete_removes=0)
+    log = _InvalidationLog(graph)
+    _patch_invalidation(monkeypatch, log)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=10, max_passes=1),
+    )
+
+    assert any("DETACH DELETE" in s for s in graph.statements), (
+        "this test needs the statement to have been ISSUED; it was not")
+    assert log.calls == [], (
+        f"a delete that removed 0 rows invalidated the snapshot ({log.calls}) — every "
+        f"peer-won race would then cost a full corpus rebuild on the tier that only "
+        f"runs when the store is already under strain")
+    assert report.metric()["degraded_snapshot_invalidated"] is None, (
+        "`None` is 'nothing removed, so nothing needed invalidating'")
+
+
+def test_a_RAISING_delete_still_invalidates_and_reports_what_it_did(monkeypatch):
+    """The statement was ISSUED, so its effect is unverified and the snapshot may lie.
+
+    ⛔ And the report must say WHICH happened. Review round 1: the raise path used to
+    discard the invalidator's return, so the field read `None` — documented as "nothing
+    was removed, so nothing needed invalidating" — about a statement whose effect the
+    same report calls UNVERIFIED. That is the one reading this field must never produce.
+    """
+    graph = _FakeGraph(nodes=10, fail_delete=True)
+    log = _InvalidationLog(graph)
+    _patch_invalidation(monkeypatch, log)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=10, max_passes=1),
+    )
+
+    assert report.verdict == "REFUSED"
+    assert report.delete_unverified is True
+    assert log.calls, (
+        "a delete statement that RAISED left the snapshot untouched — its effect is "
+        "unverified and may be partial, so the corpus may now name a removed node")
+    assert report.metric()["degraded_snapshot_invalidated"] is True, (
+        "the raise path discarded the invalidation's outcome, so the report cannot say "
+        "whether the snapshot was actually invalidated")
+
+
+def test_a_FAILED_invalidation_on_the_raise_path_is_reported_as_FALSE(monkeypatch):
+    """`False` must be distinguishable from `None`, on the abort exit too."""
+    graph = _FakeGraph(nodes=10, fail_delete=True)
+    log = _InvalidationLog(graph, raises=True)
+    _patch_invalidation(monkeypatch, log)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=10, max_passes=1),
+    )
+
+    assert report.verdict == "REFUSED"
+    assert report.metric()["degraded_snapshot_invalidated"] is False, (
+        "an invalidation that RAISED was reported as `None` — a monitor keyed on "
+        "`is False` then sees nothing on the one exit where the node may still be served")
+    assert "could NOT be invalidated" in report.reason, (
+        "the metric says the invalidation failed and the reason does not — the field's "
+        "own contract says the prose carries it, and the abort exit skipped it")

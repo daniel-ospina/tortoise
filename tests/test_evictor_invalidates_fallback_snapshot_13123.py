@@ -104,7 +104,11 @@ def lane():
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
+    # ⛔ BOTH module caches, not just the store: a flight left by an earlier test would
+    # make a reader join a build it did not lead, and `get_or_build`'s wait is unbounded
+    # by design. The store is cleared on the way out for the same reason.
     fs._store.clear()
+    fs._FLIGHTS.clear()
     sdk = TortoiseSDK(namespace=NAMESPACE, graph_name=graph_name)
     proj = sdk._get_proj()
     assert proj.g.name == graph_name, (
@@ -114,6 +118,7 @@ def lane():
         yield client, graph, graph_name, proj, sdk
     finally:
         fs._store.clear()
+        fs._FLIGHTS.clear()
         try:
             graph.query("MATCH (n) DETACH DELETE n")
             client.delete(graph_name)

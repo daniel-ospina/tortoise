@@ -3174,18 +3174,35 @@ def test_the_record_state_is_bound_to_whether_the_evictor_invalidates_the_snapsh
         "claim rather than editing this pin")
     delete_path = src[src.index("def _delete_nodes"):]
     delete_path = delete_path[:delete_path.find("\ndef ", 10) if "\ndef " in delete_path[10:] else len(delete_path)]
-    assert "_invalidate_degraded_snapshot" in delete_path, (
-        "`cache_evictor._delete_nodes` no longer invalidates the degraded snapshot — "
-        "an evicted node would be returnable for up to 60 s (#13123), and the record "
-        "now tells a reader the opposite")
+    # ⛔ CALL-SHAPED, not a bare token (review round 1, P2): `in delete_path` is
+    # satisfied by the name appearing in a comment, or by a call wrapped in `if False:`.
+    # ⚠️ The ORDER (invalidate AFTER the statement, never before) is deliberately NOT
+    # pinned here. It is a behaviour, and it is pinned behaviourally where it belongs —
+    # `test_cache_eviction_evictor_pins.py::test_the_snapshot_is_invalidated_AFTER_the_
+    # statement_not_before`, which records the statement/invalidation order on a fake
+    # graph. A textual "the call is below the statement" check would be satisfied by the
+    # helper DEFINITION sitting above it while every call sat below, i.e. a pin that
+    # passes on the very refactor it looks like it forbids.
+    assert "_invalidate_degraded_snapshot(" in delete_path, (
+        "`cache_evictor._delete_nodes` no longer CALLS the snapshot invalidation — an "
+        "evicted node would be returnable for up to 60 s (#13123), and the record now "
+        "tells a reader the opposite")
     readme = (ROOT / "docs" / "evidence" / "12186-m2-windowed-quality" /
               "README.md").read_text(encoding="utf-8")
     assert "never invalidates" not in readme, (
         "the record still says the evictor never invalidates `fallback_snapshot` — "
         "#13123 landed, so that callout is stale and a reader would take the shipped "
         "path for one that serves demoted nodes")
-    assert "#13123" in readme and "landed" in readme, (
-        "the record no longer states where the eviction-path invalidation lives")
+    # ⛔ PARAGRAPH-SCOPED, not two independent substring tests (review round 1, P2).
+    # `"#13123" in readme and "landed" in readme` was satisfied by the two words
+    # appearing anywhere — the record mentions #13123 in more than one place, so a
+    # reworded or partially-removed correction stayed green. The sentence that carries
+    # the correction must carry BOTH: which issue, and its state.
+    paragraphs = [p for p in readme.split("\n\n") if "#13123" in p]
+    assert any("landed" in p for p in paragraphs), (
+        "no paragraph that names #13123 states that it LANDED — the record's Finding 6 "
+        "correction (and the verdict paragraph that relies on it) must say the "
+        "eviction-path invalidation exists, in the same place it names the issue")
 
 
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):

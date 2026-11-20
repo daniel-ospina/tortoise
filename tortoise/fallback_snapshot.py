@@ -136,6 +136,15 @@ class FallbackSnapshotStore:
         #: from one also invalidates the other's snapshot. The direction is a lost cache
         #: hit (a rebuild), never a stale serve, and it is bounded by
         #: ``MAX_SNAPSHOT_ENTRIES`` entries.
+        #: ⚠️ LIFETIME, stated rather than left to be inferred (review round 1). This
+        #: dict grows MONOTONICALLY in the number of distinct graph names this process
+        #: has ever evicted from; it is NOT bounded by ``MAX_SNAPSHOT_ENTRIES``, and
+        #: ``clear()`` is the only thing that empties it — and ``clear()`` has no
+        #: production call site (see ``_key_generation``'s note above). Accepted on that
+        #: note's own reasoning, and for a strictly smaller cardinality: one entry per
+        #: graph-eviction event, ~tens of bytes, against snapshot bodies of up to 50k
+        #: rows. A long-lived process evicting for very many tenant graphs is the case
+        #: that would need a bound; do not read this as "negligible by construction".
         self._graph_generation: dict[str, int] = {}
 
     def generation(self, key: tuple) -> tuple[int, int, int]:
@@ -165,8 +174,13 @@ class FallbackSnapshotStore:
     def invalidate_graph(self, graph_name: str) -> int:
         """Drop every cached snapshot that NAMES ``graph_name``, and refuse its puts.
 
-        Returns how many cached entries were dropped (0 when the cache was cold) —
-        a number the caller reports rather than infers.
+        Returns how many cached entries were dropped — ``0`` when the cache was cold
+        **and** ``0`` when the name matches no entry (a name that disagrees with the
+        serving projection's ``snapshot_key()[0]``). So the number is a DIAGNOSTIC, not
+        a proof of reach: the guard itself is the stamp bump, which protects puts
+        regardless of how many entries existed. ``tortoise/cache_evictor.py`` reads it
+        only through ``_invalidate_degraded_snapshot``'s ``True`` — i.e. "the counter
+        moved", never "an entry was dropped".
 
         ⛔ THIS IS THE EVICTION PATH'S HALF OF #13123. ``tortoise/cache_evictor.py``
         issues ``DETACH DELETE`` and is not an SDK write surface, so it never reaches
@@ -176,18 +190,35 @@ class FallbackSnapshotStore:
         ``recall@10`` 0.1133 against ``resident_share`` 0.1100, i.e. more nodes
         retrievable than the graph held.
 
-        Cost, measured rather than claimed: one dict lookup to bump the graph stamp
-        (O(1), independent of node count, corpus size and how many nodes the pass
-        deleted) plus a scan of ``_store`` — bounded by ``MAX_SNAPSHOT_ENTRIES`` (8), a
-        constant that does not grow with the corpus. It is NOT a graph scan and NOT a
-        corpus walk: nothing here touches the store.
+        What it closes, exactly: the ENTRIES that exist, and the PUT of any build whose
+        captured stamp predates this call — so a corpus read before the delete is never
+        CACHED after it. ⚠️ It does not stop a reader that is already being served: a
+        ``get`` that lands in the window between the delete committing and this call, or
+        a reader that joined a build started before the stamp moved, still sees that
+        flight's rows. Both are bounded by one round trip / one build, not by the TTL —
+        the same best-effort posture the write path documents under COMMIT→INVALIDATE
+        WINDOW, one statement wide instead of one TTL wide.
 
-        ⚠️ The bound this does NOT cover, stated so it is not inferred: this store is
-        PROCESS-LOCAL. An evictor running in a different process — e.g.
-        ``tools/cache_evict.py`` driven by an operator against a hosted API — cannot
-        reach the serving process's snapshot, and that process is still bounded only by
-        the 60 s TTL. The sweeper that arms the window (#13103) must therefore run in
-        the process that serves degraded reads, or accept that bound.
+        Cost, measured rather than claimed. One dict entry write to bump the graph stamp
+        (O(1) in node count, corpus size and how many nodes the pass deleted) plus a
+        scan of ``_store``, bounded by ``MAX_SNAPSHOT_ENTRIES`` (8) — a constant that
+        does not grow with the corpus, and no graph or corpus work at all. Measured over
+        20,000 calls with the store FULL (8 entries of ``MAX_CORPUS_POINTS`` = 50,000
+        points each, i.e. the worst realistic case): **p50 1.37 us, p95 2.11 us**, max
+        144 us (a scheduling outlier). The measurement is the function called in a loop
+        with a full store, refilling each entry the call dropped — it is not committed
+        as a suite because it measures a constant, but it is reproducible in ten lines
+        against this docstring's description.
+
+        ⚠️ The bounds this does NOT cover, stated so they are not inferred:
+        * PROCESS-LOCAL. An evictor running in a different process — e.g.
+          ``tools/cache_evict.py`` driven by an operator against a hosted API — cannot
+          reach the serving process's snapshot, and that process is still bounded only by
+          the 60 s TTL. The sweeper that arms the window (#13103) must therefore run in
+          the process that serves degraded reads, or accept that bound.
+        * The stamp policy below is per-GRAPH by design (see
+          ``_graph_generation``'s note), so two embedded stores sharing a graph name
+          over-invalidate each other — a lost cache hit, never a stale serve.
         """
         if not isinstance(graph_name, str) or not graph_name:
             return 0

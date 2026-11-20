@@ -826,12 +826,20 @@ def run(args: argparse.Namespace) -> int:
         snapshot invalidation and returns before any EP work.
 
         ⚠️ This is a WINDOW requirement, not a test detail — §7's window may not
-        serve a node it has demoted, on ANY leg. Recorded in the evidence record, and
-        filed as its own issue **(#13123 — since LANDED)**: the shipped egress executor
-        (``tortoise/cache_evictor.py`` ``_delete_nodes``) issued the same bare
-        ``DETACH DELETE``, and now invalidates the snapshot itself on every delete
-        route, so this instrument's own call is belt-and-braces rather than the only
-        thing standing between a demoted node and the degraded tier.
+        serve a node it has demoted, on ANY leg. Recorded in the evidence record.
+
+        ⛔ **THIS CALL IS STILL REQUIRED — do not delete it because #13123 landed.**
+        #13123 fixed the SHIPPED executor (``tortoise/cache_evictor.py``
+        ``_delete_nodes`` now invalidates the snapshot itself on every delete route),
+        and that is a different code path from this instrument's: the arms here do not
+        call ``evict()`` at all — they demote by writing only the resident set into a
+        FRESH graph via ``proj._upsert_point_props``, a projection write that does not
+        reach ``SDK._mark_dirty`` either — and ``reset()`` issues its own raw
+        ``DETACH DELETE`` for teardown. So BOTH halves of this instrument's corpus
+        edits bypass the SDK hook, exactly as they did before #13123, and an arm that
+        reuses a graph without this call would read the ``recall@10`` 0.1133 vs
+        ``resident_share`` 0.1100 defect again. #13123 removed the executor's version of
+        this gap, not this one.
         """
         try:
             cur["sdk"]._mark_dirty([])

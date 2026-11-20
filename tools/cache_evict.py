@@ -390,20 +390,33 @@ def main(argv: list[str] | None = None) -> int:
 
     # ⛔ #13123: THE INVALIDATION THIS PASS DID IS PROCESS-LOCAL, and this verb is the
     # one that runs in a DIFFERENT process from the API it is sweeping for. The eviction
-    # path drops the degraded-fallback corpus snapshot itself (so a deleted node cannot
-    # be served back for the snapshot TTL), but that store is in-memory in the process
-    # that holds it — a sweep driven from here cannot reach a serving process's copy.
-    # Saying so is not fatalism: it is the one fact an operator scheduling this verb
-    # needs, because the alternative reading is "the eviction invalidated the cache".
+    # path drops the degraded-fallback corpus snapshot itself, but that store is
+    # in-memory in the process that holds it — a sweep driven from here cannot reach a
+    # serving process's copy. Saying so is not fatalism: it is the one fact an operator
+    # scheduling this verb needs, because the alternative reading is "the eviction
+    # invalidated the cache".
+    # ⛔ THE SENTENCE IS DERIVED FROM THE METRIC, NOT ASSERTED BESIDE IT (review round 1
+    # P2). The first version printed "the snapshot of THIS process was invalidated
+    # (degraded_snapshot_invalidated=False)" on a FAILED invalidation — prose asserting
+    # the opposite of its own parenthetical, on the one surface an operator reads, for
+    # the one condition the field exists to make visible.
     if report.deleted:
+        outcome = report.metric()["degraded_snapshot_invalidated"]
+        state = {
+            True: "the degraded snapshot of THIS process WAS invalidated",
+            False: ("the degraded snapshot of THIS process could NOT be invalidated — "
+                    "a node this run removed may still be served here until the "
+                    "snapshot TTL expires"),
+            None: ("the degraded snapshot of THIS process was NOT invalidated and the "
+                   "metric does not say whether it needed to be (the delete "
+                   "statement's effect is UNVERIFIED — see `delete_unverified`)"),
+        }[outcome]
         print(
-            f"#13123: {len(report.deleted)} node(s) were removed and the degraded "
-            f"snapshot of THIS process was invalidated "
-            f"(degraded_snapshot_invalidated="
-            f"{report.metric()['degraded_snapshot_invalidated']}). The snapshot store "
-            f"is PROCESS-LOCAL: a separate serving process still holds its own copy "
-            f"for up to the snapshot TTL. Run the sweeper in the process that serves "
-            f"degraded reads (#13103) if that bound is not acceptable.",
+            f"#13123: {len(report.deleted)} node(s) were removed; {state}. The "
+            f"snapshot store is PROCESS-LOCAL: a separate serving process still holds "
+            f"its own copy, bounded only by the snapshot TTL. Run the sweeper in the "
+            f"process that serves degraded reads (#13103) if that bound is not "
+            f"acceptable.",
             file=sys.stderr,
         )
 
