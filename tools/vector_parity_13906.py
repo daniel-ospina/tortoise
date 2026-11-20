@@ -63,7 +63,9 @@ Exit codes: ``0`` parity within policy · ``1`` a required comparison diverged �
 ``3`` a poisoned run measured everything and the poison moved NOTHING (HARNESS
 BLIND). ⛔ 3 rather than 1 on purpose: §6's repro recipe is one `echo exit=$?`
 per poison, and a blind harness that shares `1` with "diverged" reads as
-"poison confirmed" — the one bit the falsifier's proof rests on.
+"poison confirmed" — the one bit the falsifier's proof rests on. · ``4`` the
+#5128 interpreter guard refused (Python < 3.12), with the message on stderr —
+the one code left once 0/1/2/3 are spent; see the guard below `__future__`.
 """
 from __future__ import annotations
 
