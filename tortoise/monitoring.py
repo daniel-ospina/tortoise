@@ -5258,7 +5258,10 @@ def reset_probe_starter() -> None:
     reset_daemon_worker(PROBE_STARTER_NAME)
 
 
-def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
+def _start_probe_worker_off_caller(
+    worker: threading.Thread,
+    on_failure: Callable[[], None] | None = None,
+) -> bool:
     """Start ``worker`` WITHOUT making the CALLER wait for the new thread.
 
     ⛔ WHY THIS EXISTS (#10893, measured). CPython's ``Thread.start()`` ends
@@ -5288,6 +5291,14 @@ def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
     the very loop block this removes, in the one situation where the block is
     already unbounded. The caller reports "no probe running" instead, and the
     read fails closed / reports stale, which is the honest answer.
+
+    ``on_failure`` is invoked if the start FAILS ASYNCHRONOUSLY — i.e. the
+    starter accepted it and ``Thread.start()`` then raised on the starter
+    thread (``RuntimeError: can't start new thread`` under thread exhaustion,
+    plausible on exactly the loaded box this whole mechanism exists for).
+    Without it the caller has already returned ``True``, so nothing would ever
+    clear the state it set and the coordinator reports ``in_flight: true``
+    forever for a probe that never started (review round 2, P2 note 2).
     """
     try:
         starter = _probe_starter()
@@ -5296,21 +5307,33 @@ def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
                        exc_info=True)
         return False
     future = starter.submit(worker.start)
-
-    def _report(f) -> None:
-        if f.cancelled() or f.exception() is not None:
-            logger.warning(
-                "#10893: a probe worker could not be started (%r) — the probe "
-                "is reported as not running rather than blocking the caller",
-                f.exception())
-
-    future.add_done_callback(_report)
     # A refusal is synchronous (`_SingleSlotWorker.submit` returns an ALREADY
     # failed future when its backlog is full). Distinguish it from a start that
     # simply completed very fast: only the failed/cancelled future is a refusal.
-    if future.done() and (future.cancelled() or future.exception() is not None):
-        return False
-    return True
+    refused = future.done() and (
+        future.cancelled() or future.exception() is not None)
+
+    def _report(f) -> None:
+        # ⛔ The refused case is the CALLER's synchronous arm; never handle it
+        # here. `add_done_callback` runs INLINE, on the caller's own thread,
+        # whenever the future is already settled — so this callback must be
+        # safe to run while the caller holds ``HealthProbe._cv``. It is:
+        # ``threading.Condition()``'s default lock is an RLock, so
+        # ``on_failure``'s ``with self._cv`` re-enters rather than deadlocking.
+        if refused:
+            return
+        if f.cancelled() or f.exception() is not None:
+            # ⛔ `f.exception()` RAISES on a cancelled future, so it can never
+            # be called unguarded inside the log call.
+            logger.warning(
+                "#10893: a probe worker could not be started (%r) — the probe "
+                "is reported as not running rather than blocking the caller",
+                None if f.cancelled() else f.exception())
+            if on_failure is not None:
+                on_failure()
+
+    future.add_done_callback(_report)
+    return not refused
 
 
 class HealthProbe:
@@ -5462,10 +5485,34 @@ class HealthProbe:
         # `_start_probe_worker_off_caller`. `_starting` covers the window before
         # the new thread is scheduled, so single-flight stays exact.
         self._starting = True
-        if not _start_probe_worker_off_caller(worker):
+        if not _start_probe_worker_off_caller(
+                worker, lambda: self._start_failed(seq)):
             self._starting = False
             self._running = False
             self._worker = None
+
+    def _start_failed(self, seq: int) -> None:
+        """A handed-off start FAILED on the starter thread (#10893 review P2).
+
+        ``Thread.start()`` can raise there (``RuntimeError: can't start new
+        thread``), i.e. AFTER :func:`_start_probe_worker_off_caller` already
+        returned ``True``. Clearing the same triple the refusal arm clears is
+        what makes the reported state match the log line: otherwise
+        ``begin()`` reads "in flight" for a probe that never ran, burns
+        ``PROBE_MAX_SUPERSEDES`` on it, and never starts again until
+        ``reset()`` — whose only production caller is app startup.
+
+        ⛔ GENERATION-GUARDED: a superseded generation must not clear its
+        successor's state (the same rule ``_run`` follows when it clears
+        ``_starting``).
+        """
+        with self._cv:
+            if seq != self._seq:
+                return
+            self._starting = False
+            self._running = False
+            self._worker = None
+            self._cv.notify_all()
 
     def _run(self, seq: int) -> None:
         with self._cv:
@@ -5640,11 +5687,17 @@ class HealthProbe:
         """Pure in-memory view — the /health read path (#2850 item 2).
 
         Returns the last known probe result (or an honest "no result yet" /
-        "stale" verdict) WITHOUT waiting for anything: no I/O, no thread
-        hand-off, no lock held across a submit, no await. It returns in
-        microseconds and therefore CANNOT queue behind a stalled DB, a
-        saturated executor, or another caller — which is the whole point of
-        decoupling liveness from work.
+        "stale" verdict) WITHOUT waiting for anything: no I/O, no await, and no
+        wait for a thread. It returns in microseconds and therefore CANNOT
+        queue behind a stalled DB, a saturated executor, or another caller —
+        which is the whole point of decoupling liveness from work.
+
+        ⛔ The one write it CAN cause is a probe START, and since #10893 that is
+        a hand-off, not a thread start: ``begin()`` hands the worker's
+        ``Thread.start`` to the process-wide probe starter and returns, so the
+        only thing this call pays is a bounded ``submit()`` — made while
+        ``_cv`` is held, which a submit never blocks on. ``peek()`` (the
+        ``/healthz`` path) does not even do that.
 
         ``begin(if_stale=True)`` is still called, and that is deliberate: it
         is non-blocking (worst case it hands the ONE bounded single-flight probe

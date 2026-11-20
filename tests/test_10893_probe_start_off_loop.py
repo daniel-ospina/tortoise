@@ -42,7 +42,7 @@ and pin the three properties the fix must preserve:
   (`test_a_budgeted_read_...` — the #10893 regression test),
 * the coordinator's state machine is unchanged: the probe still runs, still
   single-flights while a start is pending, and still reports honestly when a
-  start is refused (`test_*`).
+  start is refused or FAILS on the starter thread (`test_*`).
 """
 from __future__ import annotations
 
@@ -114,6 +114,15 @@ def test_a_probe_start_does_not_starve_the_event_loop(monkeypatch):
     ``Thread.start()`` blocks the loop for the whole start cost, so the ticker
     records a single gap equal to ``SLOW_START_S``. After the fix the wait is
     paid on the starter worker and the loop never misses its 5 ms turn.
+
+    ⛔ THE THRESHOLD IS ``SLOW_START_S``, NOT HALF OF IT (review round 2, P2
+    note 5). The mutant this defends against produces a gap of ~0.40 s, so a
+    0.40 s bound still discriminates — while a half-cost bound (0.20 s) flakes
+    on a scheduling stall, and this PR's own measurement says stalls of ~0.5 s
+    are exactly the environment this test most wants to run in. This repo has a
+    history of load-sensitive flakes here (see
+    ``tests/test_probe_reset_inflight_4608.py``), and this file is selected by
+    the ``core`` surface in a required lane.
     """
     _slow_thread_start(monkeypatch)
     _fresh_starter()
@@ -139,7 +148,7 @@ def test_a_probe_start_does_not_starve_the_event_loop(monkeypatch):
         return max_gap
 
     max_gap = asyncio.run(scenario())
-    assert max_gap < SLOW_START_S / 2, (
+    assert max_gap < SLOW_START_S, (
         f"the event loop was blocked for {max_gap:.3f}s by a {SLOW_START_S:.2f}s "
         "Thread.start() — a probe start is being paid ON THE LOOP, which is "
         "exactly what inflates another request's `pre_handler` (#10893)")
@@ -248,7 +257,7 @@ def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
     import concurrent.futures
 
     class _RefusingStarter:
-        def submit(self, fn):  # noqa: D401 - mimics _SingleSlotWorker.submit
+        def submit(self, fn):
             future: concurrent.futures.Future = concurrent.futures.Future()
             future.set_exception(
                 monitoring._WorkerBacklogFull("starter backlog full"))
@@ -267,6 +276,55 @@ def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
     assert result["ok"] is False, "a probe that never ran must not report ok"
     assert probe.info()["in_flight"] is False, (
         "the coordinator still believes a probe it could not start is running")
+
+
+def test_a_start_that_fails_on_the_starter_does_not_strand_the_coordinator(monkeypatch):
+    """A start the STARTER could not perform must not read as "in flight" forever.
+
+    ``Thread.start()`` can raise on the starter thread — thread exhaustion
+    (``RuntimeError: can't start new thread``) is the plausible shape on the
+    loaded box #10893 is about — and that failure lands on the future AFTER
+    :func:`monitoring._start_probe_worker_off_caller` already returned ``True``.
+    Nothing on the caller's path can see it, so without the failure arm the
+    coordinator reports ``in_flight: true, starting: true`` for a probe that
+    never ran: ``begin()`` supersedes it up to ``PROBE_MAX_SUPERSEDES`` and
+    then never starts again until ``reset()`` (whose only production caller is
+    app startup) — while the log line claims the opposite.
+    """
+    import concurrent.futures
+
+    _fresh_starter()
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.3)
+    pending: list[concurrent.futures.Future] = []
+
+    class _DeferredStarter:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            pending.append(future)
+            return future
+
+    monkeypatch.setattr(monitoring, "_probe_starter", _DeferredStarter)
+
+    probe.begin()
+    assert probe.info()["in_flight"] is True, (
+        "the start was not handed off (that is the refusal arm, not this one)")
+    assert probe.info()["starting"] is True
+
+    # The starter thread now hits thread exhaustion.
+    pending[0].set_exception(RuntimeError("can't start new thread"))
+
+    info = probe.info()
+    assert info["in_flight"] is False, (
+        "a probe whose start RAISED is still reported in flight — begin() will "
+        "supersede it up to PROBE_MAX_SUPERSEDES and then never start again")
+    assert info["starting"] is False
+
+    # …and the coordinator is not permanently wedged: the next begin() retries.
+    probe.begin()
+    assert len(pending) == 2, (
+        f"{len(pending)} starts for 2 begin() calls — a failed start left the "
+        "coordinator unable to start again")
 
 
 def test_an_abandoned_generation_does_not_clear_the_successors_start_bit():
