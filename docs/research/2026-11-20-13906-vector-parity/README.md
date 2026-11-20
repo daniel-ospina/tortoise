@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (43 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (44 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -287,6 +287,8 @@ what round 7's own pin had failed to do. Two findings, both reproduced here firs
 |---|---|---|
 | **K1** `_assert_local_record_dsn` decided locality from `urlsplit(dsn).hostname` alone. libpq's URI form lets `host=`/`hostaddr=` in the **query string** OVERRIDE the authority, and `hostaddr` is the address actually dialled — so `postgresql://127.0.0.1/db?host=db.prod.example.com` read as LOCAL here while `psycopg2.connect()` reached a remote record, which `run()` then seeds (org, graph, node_identity, `point` rows) and `teardown()` deletes from by `org_id`. H1 closed the `hostname is None` half of this guard and left this half open: the destructive path R1 advertises was still reachable with a DSN that looks loopback | measured on libpq's own resolver (`PQconninfoParse`, via `ctypes`): `?host=db.prod.example.com` → `host='db.prod.example.com'` (the query wins over the `127.0.0.1` authority); `?hostaddr=203.0.113.9` → `hostaddr='203.0.113.9'`. The shipped guard returned normally on both — measured, not inferred. Controls behaved: `postgresql:///db?host=…` and `host=… dbname=…` are refused, a plain remote authority is refused, plain loopback passes | the decision is now `_record_dsn_hosts()` — EVERY host libpq would dial (query `hostaddr`, query `host`, the authority, comma-separated failover lists, and the whitespace conninfo keywords), each of which must be loopback; the authority is kept even when a query parameter overrides it, because over-blocking costs an `--allow-remote-writes` flag while under-blocking costs a tenant's rows. Pinned by `test_a_host_in_the_query_string_overrides_the_authority_and_is_refused`: 6 remote shapes refused (two of them the new `?host=`/`?hostaddr=` forms) with `--allow-remote-writes` still reaching a real remote run, 5 local shapes passing, 2 no-host shapes refused — plus an AST read so the decision cannot go back to an inlined authority read |
 | **K2** the pin count moved with this round's pin (41 → **43**, `41 def test_` + 2 from the one parametrised case) | `uv run python tools/test_lane.py run -- tests/test_vector_parity_13906.py -q` → `43 passed`; `--collect-only` → `43 tests collected` | the header above and §6 both state **43**, the tree's own count, so the J3 re-stale cannot repeat in this revision |
+| **K3** **R1 was claimed, not held.** `GraphStore.reset()` wrapped `GRAPH.DELETE` in `contextlib.suppress(Exception)` with the comment "a missing graph is the goal". True — and a fail-open, because a delete that failed for ANY OTHER reason was suppressed identically, so the run reported as normal and left the corpus graph plus its HNSW index behind. §5.1 B1's only evidence for "no graph left behind" was a human's out-of-band `GRAPH.LIST`, which is not a property the tool carries. Same suppression on `rebuild_with_ef`'s path, where a failed delete makes `seed()` add a SECOND corpus and the `efRuntime=200` diagnostic is computed over a doubled graph | read the code, then drove `reset()` with a fake transport: delete raises **and** the catalogue still lists the graph → the old body returned normally (no exception, no output); catalogue read fails → also silent | the delete is attempted, its error ignored, and the graph catalogue then READ: a surviving graph, or an unreadable catalogue, is a `CannotRun` naming which — so a run either proves it left nothing behind or refuses to report. Pinned by `test_a_graph_that_survives_teardown_is_loud_not_silent` (three states + an AST read of `run()`'s call site); restoring the suppression reds exactly that pin |
+| **K4** the pin count moved again with K3's pin (43 → **44**) | `pytest --collect-only -q tests/test_vector_parity_13906.py` → `44 tests collected`; `44 passed` | header and §6 state **44**, the tree's own count. ⛔ J3's own advice — the count is DERIVED, not written — is still unimplemented, which is why this cell has now been wrong three times |
 
 ### The two evidence errors this section exists to correct
 
@@ -334,7 +336,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **43 passed**.
+tests/test_vector_parity_13906.py -q` → **44 passed**.
 
 ## 7. What this artifact does NOT establish
 

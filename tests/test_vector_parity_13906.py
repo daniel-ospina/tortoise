@@ -1102,3 +1102,87 @@ def test_the_float64_oracle_agrees_with_a_float32_store(harness):
         assert diff["order"] != "diverged", (
             f"{name}: float32 rounding moved a row ACROSS a distance bucket — a "
             f"re-order, not the tie permutation the rung allows: {diff}")
+
+
+def _graph_store(harness, *, delete_error=None, catalogue=()):
+    """A `GraphStore` whose transport is a fake, so teardown is testable DB-free.
+
+    Built with `object.__new__` on purpose: `GraphStore.__init__` opens a real
+    FalkorDB connection, and the property under test is what `reset()` does with
+    a FAILING delete — which is exactly the state a live store cannot be asked
+    to produce on demand.
+    """
+    store = object.__new__(harness.GraphStore)
+    store.graph_name = "tortoise_parity_13906"
+
+    class _Graph:
+        def delete(self):
+            if delete_error is not None:
+                raise delete_error
+
+    class _Client:
+        def select_graph(self, _name):
+            return _Graph()
+
+        def list_graphs(self):
+            if isinstance(catalogue, Exception):
+                raise catalogue
+            return list(catalogue)
+
+    store.client = _Client()
+    store.g = _Graph()
+    return store
+
+
+def test_a_graph_that_survives_teardown_is_loud_not_silent(harness):
+    """⛔ R1 SAYS "TEARS THE TENANT DOWN"; A SWALLOWED DELETE VERIFIES NOTHING.
+
+    `reset()` wrapped `GRAPH.DELETE` in `contextlib.suppress(Exception)` with the
+    comment "a missing graph is the goal". The comment is true and the code was
+    still a fail-open: a delete that failed for ANY other reason — a transient
+    module error, a concurrent writer — was suppressed identically, so the run
+    reported as normal and left the corpus graph AND its HNSW index behind.
+    README §5.1 B1's only evidence for "no graph left behind" was a human's
+    out-of-band `GRAPH.LIST`, which is not a property the tool holds.
+
+    Three states, three answers. If the suppression comes back, the FIRST case
+    goes green (no exception) and this test reds — verified by restoring the
+    suppression and watching exactly this test fail.
+    """
+    # (1) the delete raised AND the graph is still there ⇒ refuse to proceed
+    store = _graph_store(
+        harness,
+        delete_error=RuntimeError("concurrent write during GRAPH.DELETE"),
+        catalogue=("tortoise_parity_13906", "someone_elses_graph"),
+    )
+    with pytest.raises(harness.CannotRun) as refused:
+        store.reset()
+    assert "SURVIVED" in str(refused.value), str(refused.value)
+    # …and the diagnosis keeps the delete's own error, so the next reader is not
+    # told "survived" by a tool that threw the reason away
+    assert "concurrent write during GRAPH.DELETE" in str(refused.value)
+
+    # (2) the delete raised because the graph was ABSENT (the common case, and
+    # the one the suppression was written for) ⇒ that IS the post-condition
+    store = _graph_store(
+        harness,
+        delete_error=RuntimeError("ERR Invalid graph operation on empty key"),
+        catalogue=("someone_elses_graph",),
+    )
+    store.reset()  # must not raise
+
+    # (3) the delete looked fine but absence cannot be PROVEN ⇒ cannot claim R1
+    store = _graph_store(harness, catalogue=RuntimeError("connection reset"))
+    with pytest.raises(harness.CannotRun) as refused:
+        store.reset()
+    assert "cannot verify" in str(refused.value), str(refused.value)
+
+    # The CALL SITE: `run()`'s teardown must go through `reset()` — a guard the
+    # teardown path does not call protects nothing.
+    tree = ast.parse(MODULE_PATH.read_text())
+    run_node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(run_node) if isinstance(c, ast.Call)}
+    assert "reset" in called, sorted(called)

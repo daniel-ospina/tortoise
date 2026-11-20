@@ -764,9 +764,44 @@ class GraphStore:
         self.g = self.client.select_graph(graph)
 
     def reset(self) -> None:
-        with contextlib.suppress(Exception):  # a missing graph is the goal
+        """Delete this run's graph, then PROVE it is gone (R1, not a claim).
+
+        ⛔ A SWALLOWED DELETE IS AN UNVERIFIED SAFETY CLAIM. `GRAPH.DELETE` on an
+        absent graph raises, and absence is the post-condition — so the failure
+        was suppressed and NOTHING observed whether the delete happened. A delete
+        that failed for any other reason (a transient module error, a concurrent
+        writer) was therefore invisible: the run reported as normal and left the
+        corpus graph AND its HNSW index behind, which is README §5.1 B1's residue
+        in its silent form — the defect B1 says was fixed, still unfalsifiable
+        because the only evidence it held was a human's out-of-band `GRAPH.LIST`.
+        The same suppression sits on `rebuild_with_ef`'s path, where a failed
+        delete makes `seed()` add a SECOND copy of the corpus and the
+        `efRuntime=200` diagnostic is then computed over a doubled graph.
+
+        So: attempt the delete, ignore its error (a missing graph is the goal),
+        then read the graph catalogue and refuse to continue if this graph is
+        still there. The record side already fails loudly (`teardown()` is not
+        suppressed); this is the same posture for the graph side.
+        """
+        delete_error: str | None = None
+        try:
             self.g.delete()
+        except Exception as e:  # noqa: BLE001, RUF100 — a missing graph raises, and absence is the goal
+            delete_error = f"{type(e).__name__}: {e}"
         self.g = self.client.select_graph(self.graph_name)
+        try:
+            remaining = {name.decode() if isinstance(name, bytes) else str(name)
+                         for name in self.client.list_graphs()}
+        except Exception as e:  # noqa: BLE001, RUF100 — cannot PROVE absence ⇒ cannot claim R1
+            raise CannotRun(
+                f"cannot verify that the graph {self.graph_name!r} was deleted "
+                f"({type(e).__name__}: {e}) — this run cannot claim it left no "
+                f"graph behind") from e
+        if self.graph_name in remaining:
+            raise CannotRun(
+                f"graph {self.graph_name!r} SURVIVED teardown — refusing to report "
+                f"a clean run over a graph this harness left behind"
+                + (f" (the delete raised {delete_error})" if delete_error else ""))
 
     def seed(self, rows: list[Row]) -> None:
         for row in rows:
