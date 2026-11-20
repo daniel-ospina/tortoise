@@ -16570,10 +16570,14 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
         # restatement that drops the number is out of scope, which is a different claim.
         ("45728", "a DIFFERENT call site"),
-        "measured at this head: `:45728` is a NAME in an import list "
-        "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
+        "measured rather than carried: the import-list hit is what "
+        "`grep -n 'subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,' "
+        "tortoise/sdk.py` prints (a NAME in an import list, not a call), and the "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
-        "prints (#13794 measurement, P2)",
+        "prints — ⛔ no line number is typed here, because the number this note "
+        "used to carry rotted to a docstring line while the import list stayed "
+        "where it was, which is the same correction the D5 cell now records "
+        "(#13794 measurement, P2; #13853 review, P2)",
     ),
     (
         # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
