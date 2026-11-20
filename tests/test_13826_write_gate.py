@@ -251,6 +251,19 @@ def test_the_source_fold_asks_the_gate(proj, monkeypatch):
                  "title") == "Dropped", "the ROW was not written on the stop arm"
     assert _node_exists(proj.g, "(n:Source {url:'https://example.com/src-drop'})")
 
+    # ⛔ THE MIXED ARMS (#13854 review): this fold MERGEs the same `:Source {url}` key space
+    # `_upsert_document` writes, so one counter's answer is evidence about half the node and
+    # a single STOP must not retire the caller's vector. Before this arm existed the fold
+    # asked `source` alone and BOTH mixed states dropped the vector silently.
+    for keep, tag in (("document", "src-mixed-d"), ("source", "src-mixed-s")):
+        _gate_map(monkeypatch, {keep})
+        url = f"https://example.com/{tag}"
+        proj._upsert_source({"url": url, "title": tag, "embedding": list(VEC)})
+        assert _prop(proj.g, f"(n:Source {{url:'{url}'}})", "embedding") is not None, (
+            f"the caller vector was retired although `{keep}` answered KEEP — one `:Source` "
+            "vector serves both halves of the node")
+        assert _prop(proj.g, f"(n:Source {{url:'{url}'}})", "title") == tag
+
 
 # ── 4. `sdk::_update_entity` — the caller-prop door, per label ──────────
 

@@ -7595,9 +7595,11 @@ class _EntityHandlers:
         # `:Source` could not open while this fold was ungated. The stop is a `pop` on a
         # COPY of the event, so the vector is absent from the SET and the ROW (identity,
         # version, `_searchText`, every other extra) is written exactly as before; the
-        # caller's own dict is left alone because the live door journals it.
+        # caller's own dict is left alone because the live door journals it. ⛔ BOTH labels
+        # are asked, not `source` alone (#13854 review): this is `_upsert_document`'s
+        # `:Source {url}` key space, so one counter's stop is evidence about half the node.
         _extra = ev
-        if not _derived_mirror_required("source"):
+        if not _derived_mirror_required("document") and not _derived_mirror_required("source"):
             _extra = dict(ev)
             _extra.pop("embedding", None)
         _persisted = self._persist_extra_props(
