@@ -98,6 +98,31 @@ class _ColumnBlindCP:
         return [_org_row()]
 
 
+class _FlakyCP(_ColumnBlindCP):
+    """A control plane whose FIRST orgs read fails for a reason that is NOT drift.
+
+    The shape of a connection reset / a 5xx / a timeout. The retry WOULD succeed —
+    that is the whole point: the second read is fine, so nothing but the
+    CLASSIFICATION of the first error decides whether the account is read as
+    un-suspended. It projects the row to the requested `select`, like the real
+    PostgREST does (a fake that returns the whole row masks this class).
+    """
+
+    def __init__(self, first_error: BaseException, **row):
+        super().__init__(missing="")
+        self.first_error = first_error
+        self.row = _org_row(**row)
+
+    def query(self, table: str, *, select: list[str] | None = None,
+              filters=None, **_kwargs):
+        self.calls.append(list(select or []))
+        if len(self.calls) == 1:
+            raise self.first_error
+        if select:
+            return [{k: v for k, v in self.row.items() if k in select}]
+        return [dict(self.row)]
+
+
 class _Reading:
     """The shape `allowance_gate.read_dimension` returns (a MeterReading)."""
 
@@ -611,6 +636,75 @@ class TestDriftAndStaleness:
         with pytest.raises(RuntimeError, match="storage_notice_pct"):
             cn.read_account(cp, ORG_ID)
         assert len(cp.calls) == 2, "one retry, then fail closed"
+
+    def test_a_missing_deletion_column_still_refuses_to_read_alive(self):
+        """The OTHER fail-closed column, pinned in the direction nobody pinned.
+
+        `deleted_at` must never join `_ACCOUNT_DRIFT_SOFT`: a drift ladder that
+        dropped it would read a soft-deleted org as alive and mail it copy saying
+        "nothing is lost or deleted" while its data is on its way out — the
+        finding two earlier reviewers raised. The ledger half was pinned above;
+        this is the mirror, so moving `deleted_at` into the degrade tuple (which
+        left the whole file green before, #14038 review P2) now reds.
+        """
+        cp = _ColumnBlindCP(missing="deleted_at")
+        with pytest.raises(RuntimeError, match="deleted_at"):
+            cn.read_account(cp, ORG_ID)
+        assert len(cp.calls) == 2, (
+            "one drift-soft retry, which still asks for deleted_at — the retry "
+            f"must never drop a fail-closed column; calls={cp.calls}")
+        assert "deleted_at" in cp.calls[1]
+
+    @pytest.mark.parametrize("first_error", [
+        # The shapes the real seam produces for a non-schema failure:
+        # `query_with_total` re-raises a transport error VERBATIM, and renders an
+        # HTTP failure as `… : HTTP <status>` (the body is discarded).
+        RuntimeError("Supabase control-plane query failed (organizations): "
+                     "Connection reset by peer"),
+        RuntimeError("Supabase control-plane query failed (organizations): "
+                     "HTTP 502"),
+        RuntimeError("Supabase control-plane query failed (organizations): "
+                     "timed out"),
+        TimeoutError("read timeout"),
+    ])
+    def test_a_transient_first_read_failure_is_not_read_as_schema_drift(
+            self, first_error):
+        """⛔ A timeout/5xx/reset is NOT "the schema is older than 0015".
+
+        #14038 review P1, measured: the pre-fix retry fired on ANY first failure
+        and the retry succeeded, so a suspended org read as un-suspended, was
+        mailed a capacity purchase and had its once-ever stamp burnt — the stamp
+        names a threshold, so the mistake is not retryable. The retry is licensed
+        only by a REJECTED PROJECTION (PGRST204 / 42703 / `does not exist` /
+        HTTP 400); everything else propagates to
+        `notice-mark-unavailable` and is retried on the next pass.
+        """
+        cp = _FlakyCP(first_error, suspended_at="2026-11-19T00:00:00Z")
+        with pytest.raises((RuntimeError, TimeoutError)):
+            cn.read_account(cp, ORG_ID)
+        assert len(cp.calls) == 1, (
+            "a transient failure must not trigger the drift-soft retry: that "
+            "retry SUCCEEDS here, and its success is what reads a suspended org "
+            f"as un-suspended; calls={cp.calls}")
+
+    def test_a_transient_read_failure_mails_nothing_and_burns_no_stamp(self):
+        """The consequence, not the mechanism: no mail, so no stamp.
+
+        The stamp is written only after a successful send, and it is once-EVER, so
+        the pass must not reach the sender at all when the account row could not
+        be read (#14038 review P1). Pre-fix this sent a 100 % notice to a
+        SUSPENDED account on a 502.
+        """
+        cp = _FlakyCP(
+            RuntimeError("Supabase control-plane query failed (organizations): "
+                         "HTTP 502"),
+            suspended_at="2026-11-19T00:00:00Z")
+        send = _Sender()
+        out = asyncio.run(cn.notify_account(
+            ORG_ID, cp=cp, send=send, limits=_limits(102),
+            reading=_Reading(120.0)))
+        assert out["status"] == "notice-mark-unavailable", out
+        assert send.calls == [], "a suspended org was mailed on a transient error"
 
     def test_a_fully_drifted_schema_raises_the_ORIGINAL_error(self):
         """When the retry fails too, the FIRST error is what the operator sees.
@@ -1229,32 +1323,6 @@ def test_the_additive_tier_registry_covers_every_additive_column():
     assert covered == set(sc._ORG_ADDITIVE_SELECT)
 
 
-def _enclosing_functions(path: pathlib.Path) -> dict[int, int]:
-    """Map every node's line to the line its ENCLOSING function starts at.
-
-    A per-call-site binding question ("is `_ORG_ADDITIVE_TIERS` imported where
-    this ladder is built?") cannot be answered module-wide: `hosted_api`
-    imports the same name in two different endpoint functions, so a module-wide
-    "bound" set stays green when ONE of the two imports is deleted. Round 4 of
-    this review measured exactly that hole in
-    `test_every_ladder_module_imports_the_tiers_it_names`.
-    """
-    tree = _parse(path)
-    owner: dict[int, int] = {}
-
-    def walk(node: ast.AST, current: int) -> None:
-        for child in ast.iter_child_nodes(node):
-            start = child.lineno if isinstance(
-                child, (ast.FunctionDef, ast.AsyncFunctionDef)) else current
-            for line in range(getattr(child, "lineno", 1),
-                              getattr(child, "end_lineno", getattr(child, "lineno", 1)) + 1):
-                owner.setdefault(line, start)
-            walk(child, start)
-
-    walk(tree, 0)
-    return owner
-
-
 def _call_sites() -> list[tuple[str, int, set[str], set[str]]]:
     """Every `_orgs_row_fail_soft(...)` call: (file, line, select tokens, tiers named).
 
@@ -1347,6 +1415,44 @@ def test_the_shared_ladder_covers_every_declared_tier():
         f"declared but not appended (or removed): {sorted(declared - set(members))}")
 
 
+#: The one ordered ladder every drift-soft call site passes.
+_LADDER_TUPLE = "_ORG_ADDITIVE_TIERS"
+
+
+def _ladder_tuple_binding_problems(tree: ast.Module,
+                                   label: str) -> tuple[list[str], int]:
+    """Every load of the shared ladder tuple — resolved, and counted.
+
+    Two questions, ONE resolver (#14038 review, P2). The CALL SITES that hand the
+    tuple to `_orgs_row_fail_soft` are counted here, so a row that found none
+    cannot read green; the BINDING question is delegated to
+    `_ladder_import_problems` — the same resolver the tier arms use — with
+    `names` fixed to the shared tuple.
+
+    ⛔ Delegating is the fix for a real false PASS. The previous revision answered
+    the binding question itself: it built `per_function` with `ast.walk(node)`
+    (which descends INTO nested `def` bodies) and collapsed every line onto its
+    OUTERMOST enclosing function. So an `ImportFrom` sitting only inside a helper
+    nested in the endpoint counted as bound for the endpoint, and the row stayed
+    green over a `NameError` on the drift path — measured by the reviewer, whose
+    mutant kept the alias at nesting depth 1 and nothing at function scope.
+    `_ladder_import_problems` maps a load to its OWN scope and inherits only
+    lexical ancestors, so the nested import binds the helper and nothing else.
+    """
+    sites = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_orgs_row_fail_soft"):
+            continue
+        names = {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+        if _LADDER_TUPLE in names:
+            sites += 1
+    problems, _checked = _ladder_import_problems(
+        tree, label, names=frozenset({_LADDER_TUPLE}))
+    return problems, sites
+
+
 def test_every_ladder_call_site_can_name_the_shared_tuple():
     """The shared ladder must be BOUND AT THE CALL SITE, not merely somewhere.
 
@@ -1359,53 +1465,19 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
     assumed (#14038 review cycle 2): the first revision built `module_bound` with
     `ast.walk(tree)`, which descends INTO function bodies, so a function-local
     import counted as module-level and the per-function arm could never fire. The
-    reviewer deleted `_ORG_ADDITIVE_TIERS` from `_session_user_org`'s import block
-    and every ladder guard stayed green over a real `NameError`. Module scope is
-    now taken from `_enclosing_functions` (a node whose enclosing function is 0 is
-    module level, so an import nested in `try:`/`if TYPE_CHECKING:` still counts),
-    and `_ladder_import_problems` is the general resolver this row is one case of.
+    second revision fixed the module arm and left the NESTED one: `ast.walk`
+    still credited an import inside a nested `def` to the feature above them. Both
+    arms are gone — the binding verdict is `_ladder_import_problems`', the same
+    resolver the tier rows use, so there is one narrowing rule in this file and a
+    row cannot be blind to a shape its sibling catches (#14038 review, P2).
     """
     problems: list[str] = []
     checked = 0
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        tree = _parse(path)
-        owners = _enclosing_functions(path)
-        module_bound = {alias.name
-                        for node in ast.walk(tree)
-                        if isinstance(node, ast.ImportFrom)
-                        for alias in node.names
-                        if owners.get(node.lineno, 0) == 0}
-        module_bound |= {t.id
-                         for node in tree.body
-                         if isinstance(node, (ast.Assign, ast.AnnAssign))
-                         for t in (node.targets if isinstance(node, ast.Assign)
-                                   else [node.target])
-                         if isinstance(t, ast.Name)}
-        per_function: dict[int, set[str]] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                per_function[node.lineno] = {
-                    alias.name
-                    for sub in ast.walk(node)
-                    if isinstance(sub, ast.ImportFrom)
-                    for alias in sub.names}
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "_orgs_row_fail_soft"):
-                continue
-            names = {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
-            if "_ORG_ADDITIVE_TIERS" not in names:
-                continue
-            checked += 1
-            fn_line = owners.get(node.lineno, 0)
-            bound = module_bound | per_function.get(fn_line, set())
-            if "_ORG_ADDITIVE_TIERS" not in bound:
-                problems.append(
-                    f"{path.relative_to(ROOT)}:{node.lineno} builds the ladder from "
-                    f"_ORG_ADDITIVE_TIERS but the enclosing function (line "
-                    f"{fn_line or 'module'}) never imports it — a NameError on the "
-                    "drift path, where nothing else works either")
+        found, sites = _ladder_tuple_binding_problems(
+            _parse(path), str(path.relative_to(ROOT)))
+        problems.extend(found)
+        checked += sites
     assert checked >= 4, f"only {checked} shared-ladder call sites found — the scan broke"
     assert problems == [], "\n".join(problems)
 
@@ -1452,17 +1524,23 @@ def _iter_own_scope(body: list[ast.stmt]):
         stack.extend(ast.iter_child_nodes(node))
 
 
-def _ladder_import_problems(tree: ast.Module,
-                            label: str) -> tuple[list[str], int]:
-    """Every tier Name load, resolved against ITS OWN scope's bindings.
+def _ladder_import_problems(tree: ast.Module, label: str, *,
+                            names: frozenset[str] | None = None
+                            ) -> tuple[list[str], int]:
+    """Every load of each watched NAME, resolved against ITS OWN scope bindings.
 
     The pre-fix guard built one ``bound`` set per MODULE, so a module that
     imported a tier in two functions stayed green when one of the two imports was
     deleted — the defect its docstring names ("a NameError on a schema-drift
     read") is per-CALL-SITE, and a module-wide set cannot see it (#14038 review,
     mutation-attribution rule 2/3).
+
+    ``names`` is what the caller watches; it defaults to the ADDITIVE TIER
+    constants, and the shared-ladder row passes the ladder TUPLE instead
+    (`_ladder_tuple_binding_problems`) so both rows resolve through this one
+    function. One narrowing rule, not two (#14038 review, P2).
     """
-    tiers = set(_additive_tiers())
+    tiers = set(names) if names is not None else set(_additive_tiers())
     problems: list[str] = []
     checked = 0
 
@@ -1523,6 +1601,14 @@ def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
     `NameError` on the schema-drift path. A guard nobody can prove can fail is a
     comment with a `def`, so this plants that exact shape in a throwaway module
     and requires the resolver to NAME the unbound use and only that one.
+
+    ⛔ AND IT PLANTS THE SHAPE THE ROW WAS STILL BLIND TO (#14038 review, P2):
+    the alias exists only inside a `def` nested in `outer`, at nesting depth 1,
+    with nothing at `outer`'s own scope. `ast.walk` credited that import to
+    `outer` and the row stayed green; the resolver binds it to the helper alone.
+    The previous version of this fixture planted `_ORG_ADDITIVE_0015_TIER`
+    while the measured mutation deleted `_ORG_ADDITIVE_TIERS` — a fixture can
+    only pin the shape it actually writes, so it writes the ladder tuple now.
     """
     fake = tmp_path / "fake_module.py"
     fake.write_text(
@@ -1530,21 +1616,28 @@ def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
         "\n"
         "\n"
         "def outer():\n"
+        "    def helper():\n"
+        "        from somewhere import _ORG_ADDITIVE_TIERS\n"
         "    return _orgs_row_fail_soft(select=1, additive_tiers=list(\n"
-        "        _ORG_ADDITIVE_0015_TIER))\n"
+        "        _ORG_ADDITIVE_TIERS))\n"
         "\n"
         "\n"
         "def sibling():\n"
-        "    from somewhere import _ORG_ADDITIVE_0015_TIER\n"
+        "    from somewhere import _ORG_ADDITIVE_TIERS\n"
         "    return _orgs_row_fail_soft(select=1, additive_tiers=list(\n"
-        "        _ORG_ADDITIVE_0015_TIER))\n")
-    problems, checked = _ladder_import_problems(_parse(fake), str(fake))
-    assert checked >= 2, f"only {checked} tier loads found — the fixture broke"
+        "        _ORG_ADDITIVE_TIERS))\n")
+    problems, sites = _ladder_tuple_binding_problems(_parse(fake), str(fake))
+    assert sites == 2, (
+        f"both call sites must be counted — a scanner that saw one proves "
+        f"nothing: {sites}")
     assert len(problems) == 1, (
-        "the sibling's import must leave the OTHER function's use unbound; "
-        f"got {problems}")
+        "the sibling's import must leave the OTHER function's use unbound, and "
+        f"a helper's import must not bind its parent; got {problems}")
     assert "outer" in problems[0], problems
     assert "sibling" not in problems[0], problems
+    assert "helper" not in problems[0], (
+        "the helper BINDS the name — it is `outer` that does not; the report "
+        f"must name the scope that fails: {problems}")
 
 
 def test_the_ladder_resolver_credits_an_enclosing_closure(tmp_path):
