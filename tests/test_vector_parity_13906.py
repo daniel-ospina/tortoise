@@ -335,6 +335,81 @@ def test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped(harness):
     assert "_assert_local_record_dsn" in called, sorted(called)
 
 
+def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harness):
+    """⛔ THE AUTHORITY IS NOT THE ANSWER — libpq dials the QUERY STRING.
+
+    H1 replaced `if host:` with a decided refusal, but it still decided from
+    `urlsplit(...).hostname` alone. libpq's URI form lets a `host=`/`hostaddr=` in
+    the QUERY STRING override the authority, and `hostaddr` is the address
+    actually dialled — so `postgresql://127.0.0.1/db?host=db.prod.example.com`
+    read as LOCAL here while `psycopg2.connect()` reached a remote record. The
+    same DSN then seeds an organization, a graph row, node identities and `point`
+    rows into that store, and `teardown()` deletes rows by `org_id`: a guard that
+    waves it through is a no-op on the destructive path R1 advertises.
+
+    Measured on libpq's own resolver (`PQconninfoParse`), which is why the
+    precedence below is the expected value and not a reading of the docs:
+
+        postgresql://127.0.0.1/db?host=db.prod.example.com -> host=db.prod.example.com
+        postgresql://127.0.0.1/db?hostaddr=203.0.113.9     -> hostaddr=203.0.113.9
+
+    ⛔ The mutant this pins: make `_assert_local_record_dsn` read
+    `urlsplit(dsn).hostname` again (the pre-fix body) and the `remote` loop below
+    goes green on every entry — the two `?host=`/`?hostaddr=` cases are the ones
+    no pre-existing test could see.
+    """
+    assert harness._record_dsn_hosts(
+        "postgresql://127.0.0.1/db?host=db.prod.example.com"
+    ) == ["db.prod.example.com", "127.0.0.1"]
+    assert harness._record_dsn_hosts(
+        "postgresql://127.0.0.1/db?hostaddr=203.0.113.9"
+    ) == ["203.0.113.9", "127.0.0.1"]
+
+    remote = (
+        # the two shapes this pin exists for: loopback AUTHORITY, remote DIAL
+        "postgresql://127.0.0.1:5432/tortoise_record?host=db.prod.example.com",
+        "postgresql://localhost/tortoise_record?hostaddr=203.0.113.9",
+        # a failover list — the remote member is a store this run may reach
+        "postgresql://127.0.0.1/tortoise_record?host=127.0.0.1,db.prod.example.com",
+        # …and H1's two spellings, now refused by the host's own name
+        "postgresql:///tortoise_record?host=db.prod.example.com",
+        "host=db.prod.example.com dbname=tortoise_record",
+        "hostaddr=203.0.113.9 dbname=tortoise_record",
+    )
+    for dsn in remote:
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        # …and the deliberate act still reaches a real remote run.
+        harness._assert_local_record_dsn(dsn, True)
+
+    local = (
+        "postgresql://127.0.0.1:5432/tortoise_record?host=127.0.0.1",
+        "postgresql://tortoise@localhost/tortoise_record?hostaddr=127.0.0.1&sslmode=disable",
+        "postgresql:///tortoise_record?host=localhost",
+        "postgresql://u:p@localhost/tortoise_record?host=[::1]",
+        "dbname=tortoise_record host=127.0.0.1",
+    )
+    for dsn in local:
+        harness._assert_local_record_dsn(dsn, False)
+
+    # A DSN naming NO host is not a local one — it is one this cannot PROVE.
+    for dsn in ("postgresql:///tortoise_record", "dbname=tortoise_record"):
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+
+    # The DECISION must remain the helper — an inlined authority read is exactly
+    # the shape that shipped the fail-open, so it cannot come back silently.
+    tree = ast.parse(MODULE_PATH.read_text())
+    guard = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef)
+                 and n.name == "_assert_local_record_dsn")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(guard) if isinstance(c, ast.Call)}
+    assert "_record_dsn_hosts" in called, sorted(called)
+
+
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
     """The misalignment the review caught: ids permuted, distances not.
 
