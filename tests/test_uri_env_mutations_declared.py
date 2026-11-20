@@ -316,12 +316,32 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # The arm pins the VALUE (`_uri()`), not just the variable name, so a FUTURE site
     # in this file with a different expression is NOT authorized and must be triaged
     # by hand (the #11083 hazard: an arm wider than the site it was written for
-    # authorizes sites nobody reviewed). Reformatting the call is likewise a re-triage,
-    # not a silent pass — `\s*` tolerates a wrapped line, but the `_uri()` literal must
-    # still be the argument.
+    # authorizes sites nobody reviewed). ⛔ It is anchored at BOTH ends over the whole
+    # stripped line, so it also cannot silence a commented-out or embedded mutation;
+    # reformatting the call is therefore a RE-TRIAGE by design, not a silent pass.
+    # The module's other three `TORTOISE_DB_URI` mentions are READS (its probe's
+    # candidate list and `_uri()`'s fallback), not mutations, and are deliberately not
+    # declared — a row that matched them would silence a future mutation on those lines.
+    #
+    # ⛔ ONE ROW, ONE FILE — and it is THIS one (#12631, measured 2026-11-20 at `main`
+    # `f2e5e3a98f`). THREE rows for this key had landed inside ~4 minutes, because each
+    # merge that hit the census red repaired it by ADDING a row: #13929 landed the
+    # first, #13926 the second, #13928's squash a third (dict: 147 rows / 145 unique
+    # keys, this one at 322 / 607 / 1663). Python keeps the LAST silently, so the file
+    # read as triple coverage while one row graded, and BOTH gates reddened — ruff
+    # `F601` x2 on `agent-infra-ci / lint`, plus
+    # `test_the_declaration_table_carries_no_duplicate_key` in a required `test` shard.
+    # The two shadowed copies were DELETED rather than left to shadow this one: a
+    # TAIL copy that was byte-identical to the arm below, and a BROAD copy
+    # (`setenv(\s*"TORTOISE_DB_URI"` with no value pinned) that #13928's squash landed
+    # — that one's `#13903` triage is the paragraphs above, so nothing was lost. The
+    # same class the #13158-vs-#13176 merge note records a round earlier: an auto-merge
+    # that keeps BOTH sides of a row pair is a duplicate key, and the last one wins
+    # SILENTLY. **A lane that reads "undeclared mutation" for this file must NOT add a
+    # row** — grep this dict for the key first, because a shadowed row is invisible to
+    # the red it is meant to clear.
     "test_13557_13558_reachable_reads.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*_uri\(\)\)',
-    ],
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
@@ -590,22 +610,19 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # run embedded-green), and neither the probe's `finally` nor the fixture's
     # restore lets the lane leak into a later docker-lane test.
     "test_13722_projection_open_round_trips.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
-    # #13903: the reachable-reads module's live half. `test_13557_13558_reachable_reads.py`
-    # landed with an undeclared `sdk` fixture that re-points the lane at the store
-    # the module itself probed (`monkeypatch.setenv("TORTOISE_DB_URI", _uri())`),
-    # so `main` went red on this guard and thereby on the merge ref of every open
-    # PR — the same class the #12360 rows above record. DELIBERATE_URI is the
-    # point: the claims under test (commitments reached by asking, endings reached
-    # by asking) are reads over a REAL store, which no pure-function test can
-    # observe, and `_uri()` resolves the ambient lane URI first so the fixture can
-    # never silently drag a docker lane onto an embedded database. `monkeypatch`
-    # auto-restores at teardown, so nothing leaks into a later docker-lane test.
-    # The module's other three `TORTOISE_DB_URI` mentions are READS (its probe's
-    # candidate list and `_uri()`'s fallback), which are not mutations and are
-    # deliberately not declared — a row that matched them would silence a future
-    # mutation on those lines.
-    "test_13557_13558_reachable_reads.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
-    # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
+    # ⛔ NEITHER THIS KEY NOR `test_13557_13558_reachable_reads.py` GETS A SECOND ROW
+    # HERE (#12631, measured 2026-11-20 at `main` `f2e5e3a98f`). Three rows for the
+    # latter had landed inside ~4 minutes — #13929's, #13926's and #13928's squash —
+    # because each merge that hit the census red repaired it by ADDING a row instead of
+    # checking whether one already existed. Python keeps the LAST silently, so the file
+    # read as triple coverage while one row graded, and both gates reddened (ruff `F601`
+    # x2 on `agent-infra-ci / lint`, plus
+    # `test_the_declaration_table_carries_no_duplicate_key` in a required `test` shard).
+    # Its ONE row now sits near the head of this dict, anchored, with the rationale.
+    # **A lane that reads "undeclared mutation" for a file must NOT add a row** — grep
+    # this dict for the key first: a shadowed row is invisible to the red it is meant to
+    # clear, so "add the row" is exactly how one missing declaration became three.
+    # `main`'s 5fae3f4f6f landed its OWN
     # unanchored declaration for this file here, and this branch had already
     # landed a narrowed one at the tail of this dict under the same KEY — an
     # auto-merge that keeps BOTH is a duplicate dict key, and the last one wins
@@ -1644,24 +1661,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\] = old$',
         r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", f"\{uri\}_\{uuid\.uuid4\(\)\.hex\[:10\]\}"\)$'],
-    # ── test_13557_13558_reachable_reads.py — DELIBERATE_URI, one SET site ───
-    # `1231060fd2` (#13833) landed this module with its one mutation site
-    # untriaged, so this register is RED on `main` for it — the same class as
-    # #12631/#13290 above (each PR green against its review base, the tip
-    # carrying both). The site is the `sdk` fixture:
-    #     monkeypatch.setenv("TORTOISE_DB_URI", _uri())
-    # and it PINS the lane the module's own availability probe already found:
-    # `_uri()` prefers the ambient value, then `_WORKING_URI` (the first seam the
-    # probe got an answer from), then the docker seam. Both reads under test are
-    # live Cypher over a real store, so an embedded fake would certify nothing —
-    # the mutation is the lane PIN, not a silent downgrade. `monkeypatch` is the
-    # fixture param, so pytest auto-restores it and the sibling restoration guard
-    # is satisfied without any save/restore pair.
-    # ⛔ Anchored to the whole stripped line, like every row above: a future
-    # setenv of a DIFFERENT expression in this file is a different site and
-    # must be triaged rather than riding along on this arm (#11083).
-    "test_13557_13558_reachable_reads.py": [
-        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
