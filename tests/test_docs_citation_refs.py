@@ -2270,26 +2270,43 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)"
-    # ⛔ AND A FRONTED TEMPORAL ADVERBIAL, WHICH IS THE CORPUS'S OWN HOUSE SPELLING (#13802
-    # review, round 22, P1 — MEASURED at `20f01e1075`). The clause anchor above was `^` or a
-    # sentence boundary, so moving the adverbial to the FRONT of the clause — the same words in
-    # the same order with one adverbial prepended — defeated the WHOLE family: measured GREEN in
-    # both arms (the sibling detector returned `[]` too, so there was no second layer):
-    #   `At this head there are no files in the `tortoise/` set.`            -> GREEN
-    #   `At this head, there are no entries in the `tortoise/` set.`        -> GREEN
-    #   `At this head there is NOTHING in the `tortoise/` set.`             -> GREEN
-    #   `At this head NOTHING is what `-- tortoise/` prints.`               -> GREEN
-    #   `At this head two paths are what the `tortoise/` set holds.`        -> GREEN
-    #   `At the head you merge there are no files in the `tortoise/` set.`  -> GREEN
-    # while every un-fronted twin above is refused. This is the same two-orders-one-refused
-    # asymmetry rounds 13, 16 and 21 closed three times before, so the fix belongs in the
-    # FAMILY PREFIX rather than in the newest branch. The class is a BOUNDED list of the
-    # spellings this corpus actually uses for the head you merge, all already in the ban's own
-    # vocabulary; a fronted adverbial OUTSIDE this list is the declared residual (stated, not
-    # matched — the same trade the other residuals carry).
-    r"(?:(?:at\s+this\s+head|at\s+the\s+head\s+you\s+merge|at\s+this\s+merge|"
-    r"at\s+the\s+merge\s+head|at\s+merge\s+time),?\s+)?"
+    r"|(?:^|[.;:!?]\s|\n)(?:[*_`]{0,3}(?:at|on|in)[*_`]{0,3}\s+"
+    r"[*_`]{0,3}(?:this|the|that)[*_`]{0,3}"
+    # ⛔ AND THE FRONTED ADVERBIAL IS A STRUCTURE, NOT A LIST OF SPELLINGS (#13802 review, round
+    # 23, P1 + P2 — MEASURED at `3b901efa84`). Round 22 closed the fronting hole with a bounded
+    # list (`at this head|at the head you merge|at this merge|…`) and that reproduced, on the
+    # element it had just added, the two defects this file has closed four times already:
+    #
+    # (a) NO FORMATTING TOLERANCE. Every other element in this ban absorbs `[*_`]{0,3}`, and the
+    #     contract at `:2047` is that formatting is NOT content. The fronted group sat BEFORE the
+    #     class, so it could never absorb emphasis, and the corpus's own house spelling walked:
+    #       `**At this head** there are no files in the `tortoise/` set.`   -> GREEN
+    #       `_At this head_ …`, `` `At this head` … ``, `At **this** head …`  -> GREEN
+    #       `At this head — there are no files in the `tortoise/` set.`     -> GREEN
+    #     The emphasised form is not invented: `**At this head**` occurs in `docs/` (3 files,
+    #     e.g. `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md:216`), and
+    #     the sibling detector reads none of them (`_typed_answers_to_tortoise_cmd -> []`), so
+    #     there was no second layer.
+    # (b) THE LIST'S STATED JUSTIFICATION WAS FALSE. "The spellings this corpus actually uses …
+    #     all already in the ban's own vocabulary" is refuted by the census: `on this head` 11x
+    #     (and `on` IS in the ban's vocabulary — `_TORTOISE_HEAD_BINDING_AT` carries `at|on|in`),
+    #     `at the head` 158x, `at this head` 331x. Thirteen of eighteen realistic fronted
+    #     spellings were still GREEN, `On this head …` among them.
+    # So the boundary is the STRUCTURE — a preposition the ban already treats as a head binder,
+    # a determiner, up to two intervening words, then `head`/`merge` (optionally `you merge`) —
+    # case-insensitively (the ban's own flag), with the emphasis class on every token and the
+    # em/en-dash bridge the dash family already carries. Enumerating spellings is what failed;
+    # this reads the shape the spellings share.
+    r"(?:\s+[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}){0,2}"
+    r"\s+[*_`]{0,3}(?:head|merge)(?![A-Za-z0-9])[*_`]{0,3}"
+    r"(?:\s+(?:head|you\s+merge)[*_`]{0,3})?"
+    r"\s*(?:[—–]\s*)?,?\s+)?"
+    # ⚠️ DECLARED OVER-BLOCK, MEASURED (round 23, P2): this prefix extends a PRE-EXISTING
+    # over-block into fronted prose — `At this head nothing in the `tortoise/` set is broken.`,
+    # `At this head none of the `tortoise/` files were touched.` and `At this head both files in
+    # `tortoise/` have docstrings.` are GREEN at `9024f2e5d0` and RED here, and their un-fronted
+    # twins were already RED. Corpus cost today: **zero** — the ban's hit set over all 855
+    # `docs/**/*.md` is 6 before and 6 after, set difference zero in both directions.
     r"(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
@@ -2654,6 +2671,30 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "At this head there is NOTHING in the `tortoise/` set.",
         "At this head NOTHING is what `-- tortoise/` prints.",
         "At the head you merge there are no files in the `tortoise/` set.",
+        # ⛔ AND THE SIXTH MEASURED FORM, WHICH ROUND 22 FIXED AND PINNED NOWHERE (#13802 round
+        # 23, P2: the comment above said "six of six" while the list held five — this form
+        # appeared only in that comment, so a later prefix edit could regress it silently).
+        "At this head two paths are what the `tortoise/` set holds.",
+        # ⛔ AND THE FORMATTING TOLERANCE ON THE ADVERBIAL ITSELF (#13802 round 23, P1 —
+        # MEASURED at `3b901efa84`: the fronted group sat BEFORE the `[*_`]{0,3}` class, so it
+        # could not absorb emphasis — the one form the corpus actually writes
+        # (`**At this head**` in 3 `docs/` files) walked GREEN, in this ban AND in the sibling
+        # detector. Formatting is not content: `:2047` is the contract.)
+        "**At this head** there are no files in the `tortoise/` set.",
+        "_At this head_ there are no files in the `tortoise/` set.",
+        "`At this head` there are no files in the `tortoise/` set.",
+        "At **this** head there are no files in the `tortoise/` set.",
+        "At this head — there are no files in the `tortoise/` set.",
+        # ⛔ AND THE PREPOSITION AND DETERMINERS THE BOUNDED LIST MISSED (#13802 round 23, P2 —
+        # MEASURED: `on this head` occurs 11x in `docs/` and `on` is ALREADY in the ban's own
+        # head-binding vocabulary; the round-22 list read 5 spellings and left 13 of 18
+        # realistic ones GREEN. The class is the STRUCTURE, so these need no new code — only
+        # the pin.)
+        "On this head there are no files in the `tortoise/` set.",
+        "At that head there are no files in the `tortoise/` set.",
+        "At the merge there are no files in the `tortoise/` set.",
+        "At this merge head there are no files in the `tortoise/` set.",
+        "In this head there are no files in the `tortoise/` set.",
         # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
         # MEASURED GREEN at this head while every verb-first twin above was refused: the
         # `no <noun>` branch existed only on the verb-then-answer side)
