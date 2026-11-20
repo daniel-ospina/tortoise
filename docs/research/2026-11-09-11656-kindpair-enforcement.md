@@ -46,7 +46,7 @@ that must be settled before a scope can converge.
 - `fromKind`/`toKind` are acted on in **four** places, and none of them is a general write gate.
   ⚠️ **Correction (revision 2):** this said "exactly one place". The four are —
   `domain_validators.py::_portfolio_mark_contract` (one pack's portfolio-shape rule); `sdk._resolve_traversal_path`
-  (`sdk.py::TortoiseSDK._resolve_traversal_path`, live in `sdk.py::TortoiseSDK.tortoise_fts_query`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
+  (`sdk.py::TortoiseSDK._resolve_traversal_path`, live in `sdk.py::TortoiseSDK._tortoise_fts_query`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
   job (but by bare suffix, first-match-wins, so unusable as a gate); and
   `value_extractor._relation_endpoint_refs` (`value_extractor.py::_relation_endpoint_refs`), the kind→kind adjacency wired to kind co-selection; and
   `pack_hierarchy._matching_row` (`pack_hierarchy.py::_matching_row`) + `_binding` (`pack_hierarchy.py::_binding`) — the pair→**WRITER** resolver (it joins a
@@ -96,8 +96,8 @@ visible **only as call arguments**, never as an edge.
 Consequences, both load-bearing:
 
 1. `create_operator` is the correct seam, and it is also the *cheap* seam: kinds are already in hand there
-   (the scope's §4 takes each call site to its kind source — none needs an extra round trip). The two seams were written anticipating this change and name it — `sdk.py::TortoiseSDK.create_operator` (*"the
-   kind-pair leg is an epic-level gap"*) and `sdk.py::TortoiseSDK.create_operator` (*"(3) endpoint kinds → `direction_basis
+   (the scope's §4 takes each call site to its kind source — none needs an extra round trip). The two seams were written anticipating this change and name it — `sdk.py::TortoiseSDK._create_operator` (*"the
+   kind-pair leg is an epic-level gap"*) and `sdk.py::TortoiseSDK._create_operator` (*"(3) endpoint kinds → `direction_basis
    'kind-pair'` — a SEPARATE scoped change, not implemented here"*).
 2. **A post-hoc census over stored edges cannot see a violation at all** without reconstructing
    `(source, target)` from the `INPUT idx 0` + `IMPL` pair. This is why the sixth capstone row (#11083)
@@ -113,17 +113,17 @@ three primitives covers it automatically; the point is that the third primitive 
 
 ### 2.4 The third door, and why revision 1 of the scope got it wrong (the P0)
 
-`create_direct_edge(op_type, source_id, target_id, *, …, label=…)` (`sdk.py::TortoiseSDK.create_direct_edge`) accepts a **`label`** — and
+`create_direct_edge(op_type, source_id, target_id, *, …, label=…)` (`sdk.py::TortoiseSDK._create_direct_edge`) accepts a **`label`** — and
 a label *is* a declared `relations[].predicate`. It validates **nothing** about declarations or kinds: its
 guards are `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists /
 not-an-operator / not-terminal, and the claim-class override. `undeclared_relation` fires only in
-`create_operator` (`sdk.py::TortoiseSDK.create_operator`).
+`create_operator` (`sdk.py::TortoiseSDK._create_operator`).
 
 Two callers reach it with a declared label:
 
 - `link_entities` (`sdk.py::TortoiseSDK.link_entities`): `if upper in ("IMPL","NAND") and operator is not True:` →
   `create_direct_edge(upper, from, to, …, label=label, …)`.
-- `ingest`'s plain-operator arm (`sdk.py::TortoiseSDK.ingest`).
+- `ingest`'s plain-operator arm (`sdk.py::TortoiseSDK._ingest`).
 
 **And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py::TortoiseSDK._point_mediated_route`) reifies only when a
 `:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is operator-mediated …
@@ -204,8 +204,8 @@ a corner case: its records come from **two** producers, and the predicate is in 
 - the **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py::TortoiseSDK._record_structural_edge`) journals `edge_type=rel`
   (the journal call in that same method), so `edge_type` **is** the predicate (`ownedBy`/`hasPart`/`dependsOn` — the fold's own
   *"#9553 class 4"* note in `_rebuild_all_replay`);
-- **`create_direct_edge`** writes `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK.create_direct_edge`) and carries the declared
-  predicate as an edge **property**, `attrs["label"] = label` (`sdk.py::TortoiseSDK.create_direct_edge`), restored by the fold through
+- **`create_direct_edge`** writes `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK._create_direct_edge`) and carries the declared
+  predicate as an edge **property**, `attrs["label"] = label` (`sdk.py::TortoiseSDK._create_direct_edge`), restored by the fold through
   `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`).
 
 So a rule that reads the predicate from `edge_type` alone sees `IMPL`/`NAND` for a direct-door record — a
@@ -420,7 +420,7 @@ replay one.
 
 | issue says | measured | effect |
 |---|---|---|
-| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py::TortoiseSDK.create_direct_edge`), `link_entities` passes one (the `IMPL`/`NAND` arm in `sdk.py::TortoiseSDK.link_entities`) and `ingest` reaches it too (`sdk.py::TortoiseSDK.ingest`), it validates nothing about declarations, and `_point_mediated_route` keeps `Object↔Object` on the direct shape while `Subject`/`Event` take the same path (`sdk.py::TortoiseSDK._point_mediated_route`, its docstring) — so **33 of the 35** declarations are reachable through it by the public routes (28 `Object↔Object`, 3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and the other 2 are Point-involved (`agent-ops:groundedIn`, `product-strategy:addresses` `useCase→feature`) — `ingest` reifies those 2 while `link_entities` and a raw `create_direct_edge` call both still write them direct, since the Point gate is `ingest`'s alone, as `sdk.py::TortoiseSDK.create_direct_edge`'s own docstring states). See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + **both** replay folds (`_create_edges` **and** `projection/__init__.py`'s pass-2b `DirectEdgeCreated` fold); `ingest` inherits all of them |
+| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py::TortoiseSDK._create_direct_edge`), `link_entities` passes one (the `IMPL`/`NAND` arm in `sdk.py::TortoiseSDK.link_entities`) and `ingest` reaches it too (`sdk.py::TortoiseSDK._ingest`), it validates nothing about declarations, and `_point_mediated_route` keeps `Object↔Object` on the direct shape while `Subject`/`Event` take the same path (`sdk.py::TortoiseSDK._point_mediated_route`, its docstring) — so **33 of the 35** declarations are reachable through it by the public routes (28 `Object↔Object`, 3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and the other 2 are Point-involved (`agent-ops:groundedIn`, `product-strategy:addresses` `useCase→feature`) — `ingest` reifies those 2 while `link_entities` and a raw `create_direct_edge` call both still write them direct, since the Point gate is `ingest`'s alone, as `sdk.py::TortoiseSDK._create_direct_edge`'s own docstring states). See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + **both** replay folds (`_create_edges` **and** `projection/__init__.py`'s pass-2b `DirectEdgeCreated` fold); `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; **both** folds (`_create_edges` and the pass-2b `DirectEdgeCreated` fold) must call it too — and the second must read the predicate from `ev["label"]` when present, else `ev["edge_type"]` (§3.3) — or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
 | depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** The epic plan §5.3a (carried by `#11685`) defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 35/35 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (**36** declared relations, **35** of them kind-bearing — `pm:onBoard` is `declarationOnly` and maps no pair — over **34** distinct `(fromKind, toKind)` pairs; `venture:asset→venture:program` is declared twice). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |

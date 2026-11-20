@@ -116,7 +116,16 @@ SWEEP_NAMES = 66
 #: A re-pin here is a DECLARATION of a known shape, not a new allowance: adding an
 #: SDK-holding receiver to the residue still requires the same deliberate re-pin with its
 #: own reason.
-SWEEP_RESIDUE = (11769, "3dc892001700a031")
+#:
+#: RE-PINNED (11769, 3dc892001700a031) → (11758, d2311d5af77fe5d5) by the same round, and again the
+#: intended direction: eleven side effects in `tests/test_tortoise_client.py` sat on the RETIRED
+#: PUBLIC spellings (`mock_sdk.return_value.query` / `.create_point` / `.summarize_structure`) while
+#: the client calls `_query` / `_create_point` / `_summarize_structure`, so eleven untyped-receiver
+#: rows that pinned nothing are gone. The ordinary-word rows are unchanged (`reg.query` 409,
+#: `graph.query` 267, `cp.query` 263, `sdk._get_registry().query` 263, `self.g.query` 202) and typed
+#: references to a public name are still 0. An SDK-holding receiver is still residue: adding one
+#: still requires this same deliberate step, with its own reason.
+SWEEP_RESIDUE = (11758, "d2311d5af77fe5d5")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

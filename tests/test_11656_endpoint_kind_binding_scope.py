@@ -1741,7 +1741,7 @@ class TestTheThirdDoorExists:
 
         linking = inspect.getsource(TortoiseSDK.link_entities)
         assert 'upper in ("IMPL", "NAND") and operator is not True' in linking
-        assert "label=label" in _call_window(linking, "self.create_direct_edge("), (
+        assert "label=label" in _call_window(linking, "self._create_direct_edge("), (
             "`link_entities` no longer passes the caller's `label` into `create_direct_edge` — the door would "
             "then be reachable with no declared predicate, and §1.1's 33-of-35 direct-shape count is void"
         )
@@ -1758,7 +1758,7 @@ class TestTheThirdDoorExists:
             "`_route == \"direct\"` at a statement boundary. A substring test here is satisfied by the "
             "`_request_route` decoy above it, which is why this anchor is newline-delimited"
         )
-        assert "label=label" in _call_window(ingest, "self.create_direct_edge("), (
+        assert "label=label" in _call_window(ingest, "self._create_direct_edge("), (
             "`ingest`'s direct route no longer passes `label` into `create_direct_edge` — the second public "
             "path to the door is gone and the delta §1.1 counts would have to be re-derived"
         )
@@ -2257,7 +2257,7 @@ class TestTheDocsAreDiscoverableAndResolve:
         )
         # The control: a citation that DOES resolve must stay clean, or the row above would pass on any input.
         assert _unresolved_python_citations(
-            "see `sdk.py::TortoiseSDK.create_direct_edge`", "synthetic"
+            "see `sdk.py::TortoiseSDK._create_direct_edge`", "synthetic"
         ) == []
         # …and the citation FORM itself, quoted as prose in both docs, is excused by NAME, not by shape.
         assert _unresolved_python_citations("cite as `path.py::symbol`", "synthetic") == []

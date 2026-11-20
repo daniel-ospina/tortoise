@@ -541,7 +541,7 @@ class TestAnnotateOperatorGuardsBeforeTheEmit:
 
         sdk = TortoiseSDK.__new__(TortoiseSDK)
         with mock.patch.object(
-            TortoiseSDK, "get_point", autospec=True,
+            TortoiseSDK, "_get_point", autospec=True,
             return_value={"is_operator": True},
         ), mock.patch.object(TortoiseSDK, "_emit_event", autospec=True) as emit:
             with pytest.raises(ValueError) as exc:
@@ -570,7 +570,7 @@ class TestNonFiniteDecimalNamesTheKeyBeforeTheRangeCheck:
 
         sdk = self._bare()
         with mock.patch.object(
-            TortoiseSDK, "get_point", autospec=True,
+            TortoiseSDK, "_get_point", autospec=True,
             return_value={"is_operator": True},
         ):
             with pytest.raises(ValueError) as exc:
@@ -606,7 +606,7 @@ class TestDirectWriterSitesAreGuardedRoundTwo:
         with mock.patch.object(
             TortoiseSDK, "_get_proj", autospec=True
         ) as proj, mock.patch.object(
-            TortoiseSDK, "get_point", autospec=True,
+            TortoiseSDK, "_get_point", autospec=True,
             return_value={"is_operator": True, "baseline_set": True},
         ):
             proj.return_value.g.query.return_value.result_set = []
