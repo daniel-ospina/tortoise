@@ -53,9 +53,11 @@ The map is **78 nodes / 101 edges** (4 subjects + 27 objects + 6 sources + 14 ev
   finding, because the corpus's counter-findings are worth keeping. The skill's rule (relevance lives on
   the operator, truth on the point) is why the counter-findings NAND the claim rather than the claim's
   target. ⛔ The MECHANISM is what is filed: `tortoise_create_operator` exposes no `label` parameter, so
-  a Layer-2 word travels as the write's `semantics` and is recorded as the operator's `direction_basis`
+  a Layer-2 word travels as the write's `semantics` and influences only the DIRECTION it resolves to
   (the gate warns when it contradicts the mechanism, and `file_map.py` now treats that warning as a
-  failure). The map's one `refutes` edge is therefore a `NAND`, not an `IMPL` — an `IMPL` wire carrying
+  failure). **The word itself is not readable back** — the surface stores no operator `label` — so
+  `--verify` checks the mechanism and the direction, never the Layer-2 term; a label-only correction
+  would require deleting the existing operator first, which this filer never does. The map's one `refutes` edge is therefore a `NAND`, not an `IMPL` — an `IMPL` wire carrying
   a `refutes` meaning RAISES the target where the judgement says it must lower it.
 - **Nothing is mitigated.** A mitigation is 0.10-0.50 and must be written one at a time; none of these
   edges needed dampening, and inventing one to look thorough would have dampened EP for no reason.

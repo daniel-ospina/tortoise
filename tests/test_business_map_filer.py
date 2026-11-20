@@ -22,6 +22,7 @@ import ast
 import importlib.util
 import json
 import re
+import urllib.error as urllib_error
 from pathlib import Path
 from typing import ClassVar
 
@@ -1384,6 +1385,12 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
     monkeypatch.setenv("FALKORDB_CLOUD_URI", "redis://example.invalid:6379/0")
 
     doc = json.loads(filer.MAP_PATH.read_text())
+    # ⛔ A PERMUTATION, not the declared order: asserting the shipped order is
+    # already there accepts the hard-coded transcription this test exists to
+    # exclude (measured: replacing the derived columns with the literal left the
+    # first version of this test GREEN). The tuple is mutated, so a query that
+    # does not follow it reds.
+    monkeypatch.setattr(filer, "IDENTITY_PROPS", ("content", "name", "url"))
     filer.verify(doc)   # the verdict is not what this pins — the QUERIES are
 
     node_q = next(q for q in queries
@@ -1460,3 +1467,103 @@ def test_the_verdict_refuses_DUPLICATED_operators(map_doc):
     doubled = [*op_rows, *[[f"{row[0]}~dup", *row[1:]] for row in op_rows]]
     assert filer.duplicate_operators(map_doc, doubled), "the duplicate was invisible"
     assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, doubled) == 1
+
+
+def test_an_ERROR_BODY_that_cannot_be_read_is_an_UNKNOWN_outcome(monkeypatch):
+    """The BODY READ inside `except HTTPError` is part of the classification.
+
+    That read is one frame below `call()`'s `except` tuple for transport errors,
+    and an exception raised inside a sibling `except` handler is not caught by it
+    — so an `IncompleteRead` there escaped to `write_once`'s refusal arm and
+    un-recorded a NON-IDEMPOTENT intent. Measured over a real socket (a 504 whose
+    declared Content-Length is never delivered): the marker was retired, and the
+    resume re-issued all 51 operators. A status line without a readable body is
+    an UNKNOWN outcome, never a refusal.
+
+    Mutant: drop the inner `try/except` around `exc.read()` — this raises
+    `IncompleteRead` and the intent would be un-recorded.
+    """
+    class _Unreadable(urllib_error.HTTPError):
+        def read(self, *_a, **_kw):
+            raise filer.http.client.IncompleteRead(b"partial")
+
+    mcp = _RealMcp("not-a-real-key")
+
+    def _post(_body):
+        raise _Unreadable("https://example.invalid", 504, "Gateway Timeout", {}, None)
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome):
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+
+
+def test_a_REFUSED_write_un_records_but_an_UNCLASSIFIED_one_does_not(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """`write_once` un-records ONLY on the explicit `Refusal` type.
+
+    The pre-fix arm was "any exception that is not `UnknownOutcome`", so an
+    UNCLASSIFIED exception (an error-body read that raised, a bug in this module)
+    counted as a refusal and the resume re-issued a non-idempotent write. A
+    wrongly-kept intent is recoverable — the report names the remedy and
+    `--verify` decides — while a wrongly-retired one duplicates a node the door
+    cannot dedup (#10849).
+
+    Mutant: `except Exception: unmark(marker)` — the second run re-issues the
+    operator and this reds.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _Boom(ValueError):
+        """Neither a Refusal nor an UnknownOutcome: an unclassified failure."""
+
+    class _UnclassifiedOnOperator(_StubMcp):
+        calls = 0
+
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                type(self).calls += 1
+                raise _Boom("this module has a bug")
+            return super().call(tool, args, **_kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _UnclassifiedOnOperator)
+
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first_op)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    on_disk = json.loads(state_path.read_text())
+    assert marker in on_disk["written"], (
+        "an UNCLASSIFIED exception retired the intent — the resume would re-issue "
+        "a non-idempotent write")
+    assert marker in on_disk["unconfirmed"], on_disk["unconfirmed"]
+
+
+def test_the_UNCONFIRMED_operator_report_names_its_remedy(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The operator arm says WHICH entries to remove, like the Event arm does.
+
+    "'--verify' decides what landed" with no route to act on that verdict leaves
+    the run at exit 1 forever: nothing removes an unconfirmed marker.
+
+    Mutant: the bare "`--verify` decides what landed" text — the remedy
+    assertions red.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    marker = filer.edge_marker(next(e for e in map_doc["edges"] if "op" in e))
+    st = json.loads(state_path.read_text())
+    st["unconfirmed"] = [marker]
+    state_path.write_text(json.dumps(st))
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert marker in err, err
+    assert "unconfirmed" in err and "written" in err, err

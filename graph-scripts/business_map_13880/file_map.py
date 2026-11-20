@@ -18,11 +18,17 @@ WHY THIS SHAPE
   re-checks them before it writes anything.
 * **Edges are the difference between filed and findable.** Support and
   contradiction are OPERATORS (`IMPL`/`NAND`). ⛔ This surface has no `label`
-  parameter: a Layer-2 `semantics` travels as the write's `semantics` argument
-  and is recorded as the operator's `direction_basis`, while the MECHANISM is
-  what is filed — so `validate()` refuses a mechanism that contradicts the
-  declared meaning (`IMPL` carrying `refutes` RAISES where it must LOWER) and a
-  returned `mechanism_mismatch` is a failure;
+  parameter: a Layer-2 `semantics` travels as the write's `semantics` argument,
+  while the MECHANISM is what is filed — so `validate()` refuses a mechanism
+  that contradicts the declared meaning (`IMPL` carrying `refutes` RAISES where
+  it must LOWER) and a returned `mechanism_mismatch` is a failure.
+  ⛔ AND THE WORD ITSELF IS NOT READABLE BACK, so `--verify` does not claim to
+  check it: the door stores no operator `label`, and all 51 operator edges
+  declare an explicit `direction`, so the meaning leaves no trace beyond the
+  direction it resolved to. A label-only correction therefore cannot be
+  re-filed in place — the existing operator must be deleted first, and this
+  filer never deletes. That is a stated limitation (measured, #13913 review
+  round 8), not a verified property;
   structural relations are plain typed edges (`memberOf`, `holdsRole`,
   `aboutObject`, `performs`, `produces`, …). A node with no edge is an orphan,
   so the filer reports any ref that ends up unconnected.
@@ -423,7 +429,30 @@ class Mcp:
                 })
             except urllib.error.HTTPError as exc:
                 code, payload = exc.code, None
-                body = exc.read().decode("utf-8", "replace")
+                # ⛔ THE BODY READ IS PART OF THE CLASSIFICATION. This read sits
+                # inside `except HTTPError`, so an exception raised HERE is not
+                # caught by the sibling `except` below — and it escaped all the
+                # way to `write_once`'s refusal arm, which un-recorded a
+                # NON-IDEMPOTENT intent the server may well have acted on.
+                # Measured over a real socket (a 504 whose declared
+                # Content-Length is never delivered): `call(retry_safe=False)`
+                # raised `http.client.IncompleteRead`, the marker was
+                # un-recorded, and the resume re-issued all 51 operators
+                # (#13913 review round 8). A status line without a readable body
+                # is an UNKNOWN outcome, never a refusal.
+                try:
+                    body = exc.read().decode("utf-8", "replace")
+                except (OSError, ValueError, http.client.HTTPException) as read_exc:
+                    if not retry_safe:
+                        raise UnknownOutcome(
+                            _unknown(tool, f"HTTP {code} body unreadable: "
+                                     f"{read_exc}")) from read_exc
+                    if attempt == 5:
+                        raise RuntimeError(
+                            f"{tool}: transport died reading the error body — "
+                            f"{read_exc}") from read_exc
+                    time.sleep(min(60, 5 * (attempt + 1)))
+                    continue
                 try:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
@@ -456,7 +485,7 @@ class Mcp:
                         raise UnknownOutcome(_unknown(tool, err))
                     time.sleep(min(120, float(retry_after) + 1))
                     continue
-                raise RuntimeError(f"{tool} refused: {err}")
+                raise Refusal(f"{tool} refused: {err}")
             # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS: a timeout may have been
             # read and acted on, and a rate limiter can sit INSIDE the door
             # (measured: a 429 un-recorded an operator intent and the resume wrote
@@ -483,7 +512,7 @@ class Mcp:
             # opposite case — the server accepted the call and the outcome is
             # genuinely unknown.
             if 400 <= code < 500:
-                raise RuntimeError(
+                raise Refusal(
                     f"{tool} refused: HTTP {code} — the write did not land "
                     f"({json.dumps(payload)[:200]})")
             if not payload:
@@ -520,7 +549,7 @@ class Mcp:
                     # whole window proving the window is closed.
                     time.sleep(min(60, 10 * (attempt + 1)))
                     continue
-                raise RuntimeError(f"{tool} FAILED: {msg[:400]}")
+                raise Refusal(f"{tool} FAILED: {msg[:400]}")
             return result
         raise UnknownOutcome(f"{tool}: gave up after 6 attempts")
 
@@ -535,6 +564,22 @@ class UnknownOutcome(RuntimeError):
     classes and the resume then made a second `create_operator` over the same
     endpoints — the #10849 EP double-count, printed as `all nodes and edges
     written` (#13913 review round 5).
+    """
+
+
+class Refusal(RuntimeError):
+    """The door ANSWERED NO — nothing was written, so the intent may be re-issued.
+
+    ⛔ THE INVERSE OF `UnknownOutcome`, AND THE DEFAULT IS THE OTHER WAY ROUND.
+    `write_once` used to un-record its intent on "any exception that is not
+    `UnknownOutcome`", so an UNCLASSIFIED exception (a body read that raised, a
+    bug in this module) counted as a refusal and the resume re-issued a
+    non-idempotent write the server may have acted on — measured: an
+    `IncompleteRead` inside the `HTTPError` handler re-issued all 51 operators
+    (#13913 review round 8). Only THIS type un-records; anything else leaves the
+    intent recorded, because a wrongly-kept intent is recoverable (the remedy is
+    printed and `--verify` decides) and a wrongly-retired one duplicates a node
+    the door cannot dedup.
     """
 
 
@@ -737,10 +782,17 @@ def write_map(doc: dict) -> int:
             # outcome rather than a completed write — without it the resume
             # skipped it silently and printed `all nodes and edges written`.
             raise
-        except Exception:
+        except Refusal:
             pending.discard(marker)
-            unmark(marker)      # a definite refusal: the write certainly did not land
+            unmark(marker)      # the door answered no: the write certainly did not land
             raise
+        # ⛔ NO GENERIC `except Exception` ARM, ON PURPOSE. An UNCLASSIFIED
+        # exception leaves the intent recorded: a wrongly-kept intent is
+        # recoverable (the report names the remedy and `--verify` decides), while
+        # a wrongly-retired one re-issues a non-idempotent write over endpoints
+        # the door cannot dedup (#10849) — measured on an `IncompleteRead` that
+        # escaped the classification and re-issued all 51 operators (#13913
+        # review round 8). Only a `Refusal` proves nothing was written.
         pending.discard(marker)
         st["unconfirmed"] = sorted(pending)
         save_state(st)
@@ -855,8 +907,11 @@ def write_map(doc: dict) -> int:
             if "op" in e and marker in pending:
                 # Same rule as an unresolved event: the operator may exist, and
                 # re-issuing it double-counts the claim's EP weight (#10849).
-                failures.append(f"{marker}: attempted, outcome UNCONFIRMED — NOT "
-                                "re-issued; --verify decides what landed")
+                failures.append(
+                    f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued. "
+                    "Run --verify: if the edge is present it landed — delete this "
+                    "marker from `unconfirmed` in state.json and KEEP it in "
+                    "`written`; if it is absent, delete it from BOTH and re-run.")
                 print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
