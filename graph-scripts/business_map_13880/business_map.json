@@ -441,8 +441,8 @@
     },
     {
       "ref": "pt:journal-is-not-knowledge",
-      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes of the largest legacy graph's 126,908 (the #13880 `GRAPH.MEMORY USAGE` measurement over Falkor, 2026-11-20 \u2014 cited, not re-derived here; the 2026-11-19 label census of the same graph records 72,488). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
-      "legacy": "label census of the four legacy graph exports (2026-11-19, 72,488 GraphEvent for the largest) and the 2026-11-20 Falkor byte measurement (76,610 of 126,908); issue #13880 source table and comments. The count is cited: neither surface is the one `--verify` reads, and no percentage is stated because the denominator was never counted on a surface anyone can re-measure."
+      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes of the largest legacy graph's 126,908 \u2014 60% of that graph, the share its own #13880 Falkor measurement of 2026-11-20 records (cited, not re-derived here; the 2026-11-19 label census of the same graph records 72,488). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
+      "legacy": "#13880 source table (label census of the four legacy graph exports, 2026-11-19: 72,488 GraphEvent for the largest graph) and the 2026-11-20 Falkor measurement (76,610 GraphEvent of that graph's 126,908 nodes, its GRAPH.MEMORY USAGE 123 MB, and the share it states: 60% of its nodes are the capture journal). Both counts are cited, not re-derived; no share is derived from mixing them, since they are a day apart on a graph still being written to."
     },
     {
       "ref": "pt:decision-is-event",
