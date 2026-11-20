@@ -17141,7 +17141,7 @@ _D5_PINNED_PAIRS: tuple[tuple[str, str, str, _D5Needle, _D5Needle], ...] = (
 
 #: The labels `_D5_PINNED_PAIRS` must still carry, one per entry. ⛔ THE SAME REASON
 #: `_D5_CURRENT_CLAIM_LABELS` EXISTS (#13879 review, cycle 2), and it cost one review round to
-#: learn it here too (#14003 review, round 2, P3 — MEASURED): the table's only reader walks
+#: learn it here too (#14003 review, round 2, P2 — MEASURED): the table's only reader walks
 #: whatever entries it FINDS, so DELETING an entry returns that pair to unread with NO red
 #: anywhere — and the pair-2 entry is the harder one to restore, so it is the one a lane under
 #: merge pressure drops. Compared as a SET (a drop and an undeclared addition both red) plus a
@@ -17153,10 +17153,10 @@ _D5_PINNED_PAIR_LABELS = frozenset({
 
 
 def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
-    """Two D5 pairs this PR re-derived had no reader at all (#13956 review).
+    """Two D5 pairs #13988 re-pointed had no reader at all (#13956 review).
 
-    ⛔ MEASURED, which is why this is an arm and not a comment: this PR re-pointed the
-    `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
+    ⛔ MEASURED, which is why this is an arm and not a comment: #13988 (`4326d7f146`)
+    re-pointed the `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
     docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
     value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
     and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 270 of
