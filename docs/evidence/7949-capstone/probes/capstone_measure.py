@@ -4215,7 +4215,7 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     for pack, block in (artifact.get("packs") or {}).items():
         if not isinstance(block, dict):
             continue
-        for surface in ("relations", "hierarchies"):
+        for surface in E6_SURFACES:
             for row in block.get(surface) or []:
                 if not isinstance(row, dict):
                     continue
@@ -4244,12 +4244,14 @@ def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
     """
     rows: list[tuple[str, str, dict]] = []
     for pack, block in (census.get("packs") or {}).items():
-        if not isinstance(block, dict):
-            continue
+        # ⛔ NO silent skip (#14049 review P3): an unexpected census shape used to be
+        # `continue`d here, so a malformed pack block or row UNDER-COUNTED `written` and
+        # `defects` with no named gap while `declared` still came from `population` — the
+        # probe's own "never silently drop a row" rule, one layer down. Malformed input is
+        # the census tool's defect and raises, which is how it gets seen.
         for surface in E6_SURFACES:
             for row in block.get(surface) or []:
-                if isinstance(row, dict):
-                    rows.append((pack, surface, row))
+                rows.append((pack, surface, row))
     return rows
 
 

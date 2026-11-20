@@ -333,7 +333,78 @@ def test_a_threshold_edited_in_the_record_moves_the_bar():
 def test_a_floor_edited_in_the_record_moves_the_floor():
     record = _prereg()
     record["denominator_floors"]["e1_objects"] = 7
-    assert measure.parse_bars(record)["floors"]["e1_objects"] == 7
+    # #11695 review F5: the SAME lever over E6's floor, which is the row's false-PASS
+    # guard (a below-floor population is REFUSED, never scored). It was parsed and never
+    # proven read, so `"e6_declared_rows": 30` as a literal stayed green — the record's
+    # value is 30 at this head. ⛔ RESTORED at #14049 review P2: the merge that brought the
+    # fixer lane in dropped these three lines, and a hardcoded `30` in `parse_bars` then
+    # left the whole file green (measured: 440 passed) while redding at the parent.
+    record["denominator_floors"]["e6_declared_rows"] = 12
+    floors = measure.parse_bars(record)["floors"]
+    assert floors["e1_objects"] == 7
+    assert floors["e6_declared_rows"] == 12, floors["e6_declared_rows"]
+
+
+def test_e6_consumes_the_floor_and_the_bar_it_parsed():
+    """⛔ PARSED is not READ — `e6_outcome` may hardcode both and satisfy every other arm.
+
+    `#14049` review P2, measured at the parent: `floor = bars["floors"]["e6_declared_rows"]`
+    → `30` and `limit = bars["E6"]["unbound_max"]` → `0` EACH left the whole file green
+    (440 passed), because the E6 bar/floor arms assert on `parse_bars` and every fixture
+    hands `BARS`, whose values equal the hardcodes. The value is proven READ here by moving
+    it and requiring the OUTCOME to move with it, on a population the frozen value would
+    score differently — the only shape a hardcode cannot pass.
+
+    Non-vacuity: a `floor = 30` literal returns PASS for the first case (it must REFUSE),
+    and a `limit = 0` literal returns FAIL for the third (it must PASS).
+    """
+    moved_floor = {**BARS, "floors": {**BARS["floors"], "e6_declared_rows": 60}}
+    assert measure.e6_outcome(declared=45, unbound=0, bars=moved_floor)["outcome"] == (
+        "REFUSED")
+    # …and the FROZEN floor scores the same population, so the refusal above is the read
+    # value's and not the population's.
+    assert measure.e6_outcome(declared=45, unbound=0, bars=BARS)["outcome"] == "PASS"
+    moved_bar = {**BARS, "E6": {"unbound_max": 1}}
+    assert measure.e6_outcome(declared=45, unbound=1, bars=moved_bar)["outcome"] == "PASS"
+    assert measure.e6_outcome(declared=45, unbound=1, bars=BARS)["outcome"] == "FAIL"
+
+
+def test_e6_surfaces_are_stated_once_and_read_by_every_scan():
+    """The surface tuple is ONE statement, read by both scans (#14049 review P3).
+
+    The durations row credits "the single-statement surface tuple" as a review arm, and
+    the fixer lane's message claimed a pin that no loop may restate it inline — but no test
+    referenced `E6_SURFACES`, and `_e6_write_cells` still spelled the pair out. Measured:
+    restating it inline in `_e6_census_rows` (behaviour-identical) reddened only a cite-count
+    assertion that happened to count tokens, not the property.
+
+    Non-vacuity: spelling the pair out at EITHER loop raises the literal's source count to 2
+    and reds the second assertion; changing the tuple reds the first.
+    """
+    assert measure.E6_SURFACES == ("relations", "hierarchies"), measure.E6_SURFACES
+    source = Path(measure.__file__).read_text(encoding="utf-8")
+    stated = source.count('("relations", "hierarchies")')
+    assert stated == 1, (
+        f"the surface pair is stated {stated} time(s) in the probe — it must be ONE "
+        f"statement (`E6_SURFACES`) that every scan reads, or the two scans can drift "
+        f"apart silently")
+    # ⛔ …and a malformed census is NOT silently dropped (#14049 review P3). The extracted
+    # reader `continue`d over a non-dict pack block AND over a non-dict row, so `declared`
+    # still came from `population` while `written` and `defects` were computed over the
+    # SURVIVORS — an under-count with no named gap, which is the probe's own "never silently
+    # drop a row" rule one layer down. Two arms, one per guard: a non-dict BLOCK raises HERE
+    # (the block's own `.get`, loud), and a non-mapping ROW is RETURNED un-filtered — its
+    # malformation surfaces downstream in `measure_e6`'s population sums, which sit OUTSIDE
+    # the `try/except` that wraps ONLY the registry load, so the run fails HARD (fail-closed,
+    # no E6 row at all) instead of shrinking the population; only a registry-load fault
+    # becomes a named `error`. The raise is checked type-agnostically on purpose:
+    # `AttributeError` here is incidental to `list.get`, and an explicit `TypeError`
+    # validation would preserve the property without reding this.
+    with pytest.raises((AttributeError, TypeError)):
+        measure._e6_census_rows({"packs": {"p": ["not a block"]}})
+    assert measure._e6_census_rows(
+        {"packs": {"p": {"relations": ["not a mapping row"]}}}) == [
+            ("p", "relations", "not a mapping row")]
 
 
 def test_a_threshold_that_cannot_be_parsed_refuses_rather_than_defaulting():
@@ -16262,11 +16333,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             encoding="utf-8", errors="replace").splitlines() if mention.search(line))
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
-    #: The probe's count moved 10 -> 19 with `#11695`'s E6 producer comments, which name the
+    #: The probe's count moved 10 -> 20 with `#11695`'s E6 producer comments, which name the
     #: `hierarchies[]` surface the metric spans, and the record's own §10.39 entry adds one
     #: more to `PRE-REGISTRATION.md` (23 -> 24); the note in the record is re-derived with them.
+    #: ⛔ #14049 review P3 then moved it 20 -> 19: `_e6_write_cells` read the surface pair from
+    #: `E6_SURFACES` instead of spelling `("relations", "hierarchies")` inline, which is one
+    #: fewer occurrence of the literal (and is what makes "stated once" true).
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 20}, (
+                        "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
