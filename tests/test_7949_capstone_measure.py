@@ -16856,20 +16856,23 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "docstring lines are the +18 HALF of the +84 (#13878 review, F2). Unattributed, the "
         "+18 gets credited to whatever commit is nearest — which is how it was credited to "
         "`#13845`.")
-    # ⛔ THIS GUARD READ THE WRONG ARTIFACT (#13878 review, cycle 4 — measured). It used to
-    # assert the phrase was absent from `text`, which is `d5[0]`: the ONE markdown line of
-    # `05-verify.md`'s D5 row. That line NEVER carried the phrase at any commit on this
-    # branch, so the assertion could not fire — a vacuous guard over the very defect it was
-    # written for. The wording that actually shipped lived in THIS FILE's own comment, and
-    # the form D5 carried credited the +18 to that same commit in a parenthetical. Both are
-    # now forbidden in the artifact that carried them.
+    # ⛔ THIS GUARD READ THE WRONG ARTIFACT, TWICE (#13878 review, cycles 4 and 5 — both
+    # measured). Cycle 4's cut asserted the phrase was absent from `text`, which is `d5[0]`:
+    # the ONE markdown line of `05-verify.md`'s D5 row. That line NEVER carried the phrase at
+    # any commit on this branch, so the assertion could not fire. Cycle 4 moved the read to
+    # this FILE's own prose but banned a DIFFERENT string — `#13845`'s +18 — which this file
+    # likewise never carried (`for c in <every commit here>; do git show $c:tests/… | grep -c
+    # … ; done` -> 0 for all), so re-inserting the wording this file ACTUALLY shipped left the
+    # row at `1 passed`. The ban is now on the artifact that carried the defect AND in the
+    # form it carried it: the positive attribution of the guard-insertion to that commit. The
+    # two retractions in this file quote the phrase only to REFUTE it, so they stay green.
     _own_prose = Path(__file__).read_text(encoding="utf-8")
-    assert "#13845" + "`'s +18" not in _own_prose, (
-        "this file's comment credited the +18 to `#13845`. No commit did that: the 18 lines "
-        "are `819a473cd4`'s `Embedder check (#13674)` docstring paragraph "
-        "(`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` -> `18 0`), "
-        "and `#13845` (`8bdd34c631`) touches three doc/test files and no `hosted_api.py` "
-        "(#13878 review, F2).")
+    assert not re.search(r"#13845`? inserted its D5 formatting guard", _own_prose), (
+        "this file's comment names `#13845` as the commit that inserted the guard. No commit "
+        "did that: the 18 lines are `819a473cd4`'s `Embedder check (#13674)` docstring "
+        "paragraph (`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` "
+        "-> `18 0`), and `#13845` (`8bdd34c631`) touches three doc/test files and no "
+        "`hosted_api.py` (#13878 review, F2).")
     assert not re.search(r"#13845`'s \+18", text), (
         "D5 credits the +18 to `#13845`. It is `819a473cd4`'s (`#13841`): a doc-only commit "
         "cannot move a line in `hosted_api.py` (#13878 review, F2).")
