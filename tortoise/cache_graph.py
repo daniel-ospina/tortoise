@@ -39,6 +39,17 @@ cache graph, used by ``record-reconcile``, ``record-restore`` and the write path
 with the ``org_<org>`` legacy name carried as a fact read from
 ``graphs.namespace`` rather than derived."*
 
+⛔ **THE WRITE PATH NAMED IN THAT QUOTE IS NOT WIRED HERE, and the quote must not
+be read as saying it is.** This module declares the mapping and the two VERBS
+consume it (``git grep declared_cache_graph``: ``tortoise/__main__.py``, plus
+this lane's evidence script — nothing on the write path). A write still names its
+graph from the credential that wrote, which is why the org-wide row of the table
+above is reachable in principle even after this change: the fix makes a reconcile
+READ the name a tenant is already filed under, so it can no longer GRADE the
+wrong coordinate — it does not move where a write LANDS. Wiring the write path is
+a separate change (a per-tenant fact on the hot path, i.e. a control-plane lookup
+per write) and is out of scope here.
+
 WHY A READ AND NOT A DERIVATION. ``org_<org>_<graph_id>`` is the REGISTRY/ACL
 spelling and is a correct guess for a graph created through ``_data_sdk`` — but
 it is a guess, and the one graph it is wrong about is graph 0, the org's default,

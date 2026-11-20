@@ -892,6 +892,7 @@ def _cmd_record_reconcile(args):
     # the registry spelling ASSUMED, labelled so.
     from tortoise.cache_graph import (
         SOURCE_DERIVED,
+        SOURCE_FLAG,
         declared_cache_graph,
         namespace_from_control_plane,
     )
@@ -907,7 +908,20 @@ def _cmd_record_reconcile(args):
         cache_graph=args.cache_graph,
         read_namespace=lambda _org, _gid: namespace_fact)
     cache_graph = declared.name
-    if namespace_fact and args.cache_graph and namespace_fact != declared.name:
+    # ⛔ THE WARNING IS ROUTED OFF THE RESOLVED SOURCE, NOT OFF `args.cache_graph`
+    # (#14068 review P3-3b). A whitespace-only `--cache-graph "   "` is TRUTHY,
+    # so keying on the raw flag both fired a disagreement warning about a name the
+    # operator never stated and SKIPPED the derived-arm note below — reporting a
+    # verdict on a coordinate it had not labelled as assumed. `declared.source` is
+    # the same fact with the blank case already folded (`declared_cache_graph`
+    # trims before it decides), so the arms can no longer disagree with it.
+    # ⛔ THE CONTROL-PLANE READ ABOVE IS NOT SKIPPED WHEN THE FLAG IS STATED, and
+    # that is deliberate (#14068 review P3-3a): the disagreement warning IS the
+    # read's purpose — a stated name is exactly the coordinate that can be wrong,
+    # and skipping the read would delete the only signal that says so. One
+    # control-plane lookup, on a verb that then scans a whole tenant's cache, is
+    # not the cost that matters here.
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
         # A stated name is a fact and is never overridden — but grading the
         # wrong coordinate produces a WRONG VERDICT, which is the thing this
         # verb exists to refuse. Say it, grade what was asked for.
@@ -916,7 +930,7 @@ def _cmd_record_reconcile(args):
               f"This run grades the name you stated; if the tenant's writes go "
               f"to {namespace_fact!r}, every key reports missing_in_cache and a "
               f"coherent cache exits 3 (#13337).", file=sys.stderr)
-    elif declared.source == SOURCE_DERIVED and not args.cache_graph:
+    elif declared.source == SOURCE_DERIVED:
         # ⛔ NOT SILENT. A derived name is the one this tree has always been
         # wrong about for graph 0, so a run that used it must say so — the
         # verdict is real, the COORDINATE is an assumption. Both conventions are
@@ -1478,6 +1492,7 @@ def _cmd_record_restore(args):
     # a tenant's coordinate.
     from tortoise.cache_graph import (
         SOURCE_DERIVED,
+        SOURCE_FLAG,
         declared_cache_graph,
         namespace_from_control_plane,
     )
@@ -1487,13 +1502,13 @@ def _cmd_record_restore(args):
         org_id=args.org, graph_id=args.graph,
         cache_graph=args.cache_graph,
         read_namespace=lambda _org, _gid: namespace_fact)
-    if namespace_fact and args.cache_graph and namespace_fact != declared.name:
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
         print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
               f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
               f"This run restores into the name you stated; if the tenant's "
               f"graph is {namespace_fact!r} that is a restore into a graph "
               f"nobody reads (#13337).", file=sys.stderr)
-    elif declared.source == SOURCE_DERIVED and not args.cache_graph:
+    elif declared.source == SOURCE_DERIVED:
         # ⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB (#9556).
         # `record-reconcile` may grade an assumed coordinate — it reports the
         # source, and a wrong verdict is recoverable by re-running. This verb
@@ -1514,6 +1529,17 @@ def _cmd_record_restore(args):
             file=sys.stderr)
         return EXIT_UNAVAILABLE
     args.cache_graph = declared.name
+    # ⛔ A DESTRUCTIVE VERB STATES ITS COORDINATE BEFORE IT TOUCHES IT (#14068
+    # review P2-1). The derived arm refuses above; the fact arms fall through —
+    # and before this line the FIRST thing such a run emitted was the
+    # post-restore outcome, so an operator learned WHICH graph had been wiped
+    # only after it was gone. `record-reconcile` states its coordinate in the
+    # verdict; this verb wipes, so it states it up front, with the source and the
+    # detail that produced it. Printed before `FalkorProjection.from_uri`, which
+    # CREATES the target, so the statement always precedes the first touch.
+    print(f"restore target: {declared.name!r} — {declared.source}"
+          f"{' (' + declared.detail + ')' if declared.detail else ''}",
+          file=sys.stderr)
     if args.limit is not None and args.limit < 1:
         print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
               f"cache and writes nothing, so it is refused before any write. "
