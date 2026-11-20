@@ -20787,7 +20787,44 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_mint_failed = False
     if not session_existed or (retry_failed_capture and not store_only):
         try:
-            event = sdk._create_event(
+            # ⛔ #10893 (SECOND cycle) — OFF THE EVENT LOOP, and this is the
+            # measured leg, not a precaution. `_create_event` is a SYNCHRONOUS
+            # SDK write (`graph_ops.counts_capture_ops` calls it that way on the
+            # SDK lane), and on the hosted deployment every SDK entity write
+            # ends in `live_write.write` -> `record_writer.write` ->
+            # `record_projection.replay`, i.e. a blocking Postgres round trip per
+            # statement, on whatever thread called it.
+            #
+            # It was called inline, so it ran on the single uvicorn worker's
+            # loop. MEASURED on production (`/health` -> `loop_blocks`, the
+            # loop thread's own stack, innermost LAST):
+            #
+            #   hosted_api.py:20741 in _capture_session_impl
+            #     -> sdk._create_event -> create_entity -> derived_embedding.wrapper
+            #     -> _emit_event -> live_write.write -> _write_record_projection
+            #     -> record_writer.write_live_record -> write_records -> write
+            #     -> record_projection.replay -> _apply_tenant_scope
+            #
+            # with `loop_age_s` 5.5 s and `capture.in_flight` pinned at 8/8, so
+            # the loop is blocked for ~5.5 s per capture and there is always one
+            # capture in flight. That IS `pre_handler`: a `/v1/search` whose own
+            # legs are inside budget still waits seconds for its first
+            # instruction, because the loop cannot schedule it. Attribution on a
+            # 2-turn local capture (every TortoiseSDK sync method instrumented):
+            # this call was 552 ms of the 640 ms of synchronous SDK work running
+            # on the loop — 86 % — and the next-largest leg was 26 ms.
+            #
+            # The two calls on either side of it in this handler
+            # (`_write_session_and_turns` above, `_materialize_session_source`
+            # below) were already off-loaded, so the mint was the member of this
+            # class that was missed, not a design choice. The submission rides
+            # the same `_CAPTURE_EXECUTOR` pool and the same `_run_off_loop`
+            # contract (contextvars copied per attempt, bounded daemon workers) —
+            # nothing about WHAT is written or in what order changes, only where
+            # it runs, so the #4014/#1727 byte-parity with `sdk.capture_session`
+            # is untouched.
+            event = await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._create_event,
                 f"session_{session_id}",
                 "sessionCaptured",
                 _server_id=_session_capture_event_id(session_id),
