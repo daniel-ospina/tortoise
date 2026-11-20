@@ -334,7 +334,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # The two shadowed copies were DELETED rather than left to shadow this one: a
     # TAIL copy that was byte-identical to the arm below, and a BROAD copy
     # (`setenv(\s*"TORTOISE_DB_URI"` with no value pinned) that #13928's squash landed
-    # — that one's `#13903` triage is the paragraphs above, so nothing was lost. The
+    # — that one's `#13903` triage IS the paragraphs above (same site, same pinned
+    # value: the setenv re-points the lane at the store the module's own probe already
+    # proved), so nothing was lost by deleting it. The
     # same class the #13158-vs-#13176 merge note records a round earlier: an auto-merge
     # that keeps BOTH sides of a row pair is a duplicate key, and the last one wins
     # SILENTLY. **A lane that reads "undeclared mutation" for this file must NOT add a
@@ -610,26 +612,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # run embedded-green), and neither the probe's `finally` nor the fixture's
     # restore lets the lane leak into a later docker-lane test.
     "test_13722_projection_open_round_trips.py": [r'os\.environ\["TORTOISE_DB_URI"]\s*=', r'os\.environ\.pop\(\s*"TORTOISE_DB_URI"'],
-    # ⛔ NEITHER THIS KEY NOR `test_13557_13558_reachable_reads.py` GETS A SECOND ROW
-    # HERE (#12631, measured 2026-11-20 at `main` `f2e5e3a98f`). Three rows for the
-    # latter had landed inside ~4 minutes — #13929's, #13926's and #13928's squash —
-    # because each merge that hit the census red repaired it by ADDING a row instead of
-    # checking whether one already existed. Python keeps the LAST silently, so the file
-    # read as triple coverage while one row graded, and both gates reddened (ruff `F601`
-    # x2 on `agent-infra-ci / lint`, plus
-    # `test_the_declaration_table_carries_no_duplicate_key` in a required `test` shard).
-    # Its ONE row now sits near the head of this dict, anchored, with the rationale.
-    # **A lane that reads "undeclared mutation" for a file must NOT add a row** — grep
-    # this dict for the key first: a shadowed row is invisible to the red it is meant to
-    # clear, so "add the row" is exactly how one missing declaration became three.
-    # `main`'s 5fae3f4f6f landed its OWN
-    # unanchored declaration for this file here, and this branch had already
-    # landed a narrowed one at the tail of this dict under the same KEY — an
-    # auto-merge that keeps BOTH is a duplicate dict key, and the last one wins
-    # SILENTLY, so the guard would have graded one row while the file showed two.
-    # The narrowed row is kept (it anchors every arm at both ends, so it cannot
-    # silence a commented-out mutation) and this copy is dropped rather than
-    # left to shadow it. One file, one row.
+    # ⛔ NO SECOND ROW FOR `test_13557_13558_reachable_reads.py` HERE (#12631, measured
+    # 2026-11-20 at `main` `f2e5e3a98f`). Three rows for that module had landed inside
+    # ~4 minutes — #13929's, #13926's and #13928's squash — because each merge that hit
+    # the census red repaired it by ADDING a row instead of checking whether one already
+    # existed. Python keeps the LAST silently, so the file read as triple coverage while
+    # one row graded, and both gates reddened (ruff `F601` x2 on `agent-infra-ci / lint`,
+    # plus `test_the_declaration_table_carries_no_duplicate_key` in a required `test`
+    # shard). Its ONE row now sits near the head of this dict, anchored, with the
+    # rationale. **A lane that reads "undeclared mutation" for a file must NOT add a row**
+    # — grep this dict for the key first: a shadowed row is invisible to the red it is
+    # meant to clear, so "add the row" is exactly how one missing declaration became
+    # three.
+    #
+    # ⛔ MERGE NOTE (#13158 vs #13176) — a DIFFERENT module, kept where it was recorded:
+    # `main`'s 5fae3f4f6f landed its OWN declaration for
+    # `test_13034_currency_rule_reads_position.py` (that row is in the #13158 region
+    # below, at `:1539`) while another branch had landed a narrowed one for the same
+    # KEY — an auto-merge that keeps BOTH sides of a row pair is a duplicate dict key,
+    # and the last one wins SILENTLY, so the guard would have graded one row while the
+    # file showed two. The narrowed row was kept and the other dropped rather than left
+    # to shadow it. One file, one row — the same rule #12631 had to re-apply above.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -3733,6 +3736,21 @@ def test_declaration_path_rejects_undeclared():
     assert not _is_declared(
         "test_10015_organisation_account.py",
         'monkeypatch.delenv("TORTOISE_DB_URI")')
+    # #12631: the `test_13557_13558_reachable_reads.py` row's arm is anchored at BOTH
+    # ends, and that narrowing is a CLAIM the row's own comment makes — so it is
+    # enforced here, not just written. Scoped to the SAME declared file, per the
+    # `test_unknown.py` lesson above. Two independent widenings red the negatives:
+    # dropping the `^…$` anchors makes the commented-out line "declared", and
+    # loosening the value to a bare variable name makes a different expression pass.
+    assert _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri())')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        '# monkeypatch.setenv("TORTOISE_DB_URI", _uri())')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", uri)')
 
 
 def test_restoration_exemption_boundary():
