@@ -505,7 +505,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
         # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pairs
-        # adds four addresses, three of them `main`-set drifters, so the numerator moves), and "±5"
+        # adds three addresses, TWO of them drifters (`cache_projection.py:2485` and `sdk.py:2917`;
+        # `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing), so the
+        # numerator moves 127 -> 129 while the denominator moves 222 -> 225), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
         # arithmetic — the offset-not-content failure, one level down.
