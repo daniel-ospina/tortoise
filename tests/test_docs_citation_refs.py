@@ -1806,13 +1806,19 @@ _TORTOISE_EMPTY_SPELLINGS = (
     "`-- tortoise/` returns NOTHING",
     "that command returns nothing for all three",
     "contributes no `tortoise/` path at all",
-    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW, and the
-    # reason is a live counterexample rather than taste: that exact string still occurs in
-    # the document exactly once, as a QUOTED RETRACTION (“‘this diff carries no `tortoise/`
-    # path’ — which the `--refresh` above made FALSE”). Retiring it would red the document
-    # for retracting a falsehood, i.e. the over-block this ledger already documents. The
-    # clause that ASSERTED it was rewritten to a structural statement (`#12943` landed on
-    # `main`, so it sits on both sides of the merge) that needs no reading of the set at all.
+    # ⛔ `"this diff carries no `tortoise/` path"` IS DELIBERATELY **NOT** A ROW — for the
+    # OVER-BLOCK, not for a live occurrence: a QUOTED RETRACTION of that claim has to stay
+    # legal, because retiring the string would red a document for retracting a falsehood.
+    # ⚠️ AND THE COUNTEREXAMPLE THIS NOTE USED TO CITE IS GONE — measured, not assumed (#13802
+    # review, cycle 7, P2): it said "that exact string still occurs in the document exactly
+    # once, as a QUOTED RETRACTION", and at this head `grep -rn 'this diff carries no
+    # `tortoise/` path' docs/` returns NOTHING, while `git grep` at `origin/main` returns ONE
+    # — because THIS diff rewrote that retraction sentence (the ban began refusing the
+    # spelling it quoted). The carve-out therefore rests on the CLASS and not on an
+    # instance, and the note says which, so the next reader does not measure a stale witness.
+    # The clause that ASSERTED the claim was rewritten to a structural statement (`#12943`
+    # landed on `main`, so it sits on both sides of the merge) that needs no reading of the
+    # set at all.
 )
 #: Both directions, because a ban that covers one of them is the defect these lists record.
 _TORTOISE_RETIRED_SPELLINGS = (
@@ -1935,8 +1941,21 @@ _TORTOISE_HEAD_BINDING = re.compile(
     r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)")
 
 
+#: ⛔ MARKDOWN EMPHASIS IS ABSORBED WHERE IT OCCURS — THE TEXT IS NOT STRIPPED (#13802 review,
+#: cycle 7, P1 — MEASURED). The detector can strip `[`*_]` because it normalises a SHORT answer
+#: head; the ban cannot, because its alternatives use `[^`]*` spans that the backticks DELIMIT —
+#: measured: stripping them made `contains `tortoise/identityhold.py`` swallow four paragraphs
+#: and produced four false positives in RECONCILE-A1-A2-A5.md (two of them `git grep … --
+#: tortoise/` counts about a DIFFERENT command). So the tolerance is a `[*_`]{0,3}` class,
+#: written INLINE at the two places the pattern needs it — around the VERB and before the
+#: ANSWER — and the delimiters stay where they are. There is deliberately no whole-text
+#: normaliser and no constant for that class: one of each was written, measured, and removed,
+#: and a constant that nothing references is a claim the code does not keep (this commit's
+#: VGATE advisory caught exactly that, in this file).
+
+
 class _HeadBoundBan:
-    """The direction ban, minus HISTORICAL mentions.
+    """The direction ban, minus HISTORICAL mentions, and minus FORMATTING.
 
     A sentence that NAMES the head it is about is not a head-bound claim about the head you
     merge: the document is allowed to say "`#10215`'s `8bc2fbed1` touches no `tortoise/`
@@ -1955,6 +1974,18 @@ class _HeadBoundBan:
     followed by an event verb — read on the clause, because a clause boundary is exactly what
     separates an unrelated citation from a claim about THIS head. A copula is not an event
     verb: that is what the round-12 counterexamples all turn on.
+
+    ⛔ AND IT TOLERATES MARKDOWN EMPHASIS, BECAUSE ITS SIBLING DOES (#13802 review, cycle 7,
+    P1 — MEASURED). `_typed_answers_to_tortoise_cmd` strips `[`*_]` and matches
+    case-insensitively, and this file PINS that as the contract ("FORMATTING IS NOT CONTENT …
+    not 'one spelling of it'"). This ban did neither, so `Prints two paths`,
+    `` `prints` the two comment-only modules ``, `**prints** the two COMMENT-ONLY modules`,
+    `` prints `two` paths ``, `prints _two_ paths`, `prints Empty`/`Blank`/`Zero`/`Single`/
+    `Both`/`Comment-Only` were each read by the detector and refused by no arm — two
+    injected into `05-verify.md` stayed GREEN. The pattern now absorbs emphasis around the
+    VERB and before the ANSWER and compiles case-insensitively; the text itself is NOT
+    stripped, because the `[^`]` spans rely on backticks as delimiters (the `[*_`]{0,3}`
+    classes in the pattern below are the whole of the tolerance).
     """
 
     __slots__ = ("_rx",)
@@ -1991,9 +2022,32 @@ class _HeadBoundBan:
 
 
 _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
+    # ⛔ FORMATTING IS NOT CONTENT, AND THIS LINE IS THE CONTRACT, NOT A CONVENIENCE (#13802
+    # review, cycle 7, P1 — MEASURED). The sibling detector normalises before it matches —
+    # `low = re.sub(r"[`*_]", "", low)` and `flags=re.IGNORECASE` — and this file PINS that
+    # as required, not incidental (`FORMATTING IS NOT CONTENT … the form matched
+    # case-insensitively … not 'one spelling of it'`). This ban did neither, so eleven
+    # spellings the detector read were refused by no arm in any checkout — measured
+    # `ban=None` against a non-empty detector verdict, every one of them: `Prints two
+    # paths` (capital P), `**prints** the two COMMENT-ONLY modules` and
+    # `` `prints` the two comment-only modules `` (emphasis/backtick-wrapped verb),
+    # `prints `two` paths` and `prints _two_ paths` (wrapped answer), `prints Empty`,
+    # `prints Blank`, `prints Zero`, `prints Single`, `prints Both`, `prints Comment-Only`
+    # (capitalised answer). Two of them injected into `05-verify.md` left the suite GREEN.
+    # So the pattern absorbs emphasis around the VERB and BEFORE THE ANSWER and is compiled
+    # case-insensitively (the `[*_`]{0,3}` inline classes); the text itself is NOT stripped —
+    # the two command
+    # anchors keep their LITERAL backticks, because making them `?` widened the anchor to any
+    # `-- tortoise/` and refused two true `git grep … -- tortoise/` sentences in RECONCILE.
     # ANCHOR — the command (long spelling or the `-- tortoise/` shorthand), the
     # `tortoise/` SET, or the DEICTIC reference that names no command at all.
     r"(?:(?:git diff --name-only origin/main\.\.\.HEAD -- tortoise/`"
+    # ⛔ THE BACKTICKS HERE ARE LITERAL, NOT OPTIONAL (#13802 review, cycle 7 — MEASURED):
+    # making them `?` widened the anchor to ANY `-- tortoise/`, and `git grep -n … --
+    # tortoise/` → **8** / `git grep apply_hierarchy_edges -- tortoise/` → **two** (both
+    # real sentences in RECONCILE-A1-A2-A5.md, about a DIFFERENT command) were then refused.
+    # This anchor is the `-- tortoise/` SHORTHAND FOR THAT DIFF, and the backticks are what
+    # identifies it as a command spelling rather than a flag on any `git` invocation.
     r"|`-- tortoise/`"
     # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
     # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
@@ -2020,7 +2074,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # head, returns NOTHING` were BOTH GREEN through this ban AND its sibling detector, in
     # the depth-1 configuration where the measured leg skips). Six tokens with optional
     # punctuation is still bounded: the POINTER and PAST-TENSE forms must reach no answer.
-    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*"
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
     # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
@@ -2031,7 +2085,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"(?:prints?|->|→|returns?|reports?|lists?|yields|carries|gives|shows?|names?|"
     r"comes? back|resolves? to|answers? with|"
     r"includes?|contains?|outputs?|has|holds?|answers?|resolves?|reveals?|reads?|touches?|"
-    r"is|are|was|were|remains?|stays?|[=:])\s*`?"
+    r"is|are|was|were|remains?|stays?|[=:])\s*[*_`]{0,3}"
     # ⛔ AND A PREPOSITION BETWEEN THE VERB AND THE ANSWER (`comes back WITH an empty
     # list`, `resolves to ZERO`), measured GREEN before this line (#13802 review, round 7)
     r"(?:(?:with|to|as|into|out|of)\s+)?"
@@ -2057,7 +2111,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
     # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
     # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
-    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?"
+    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_]{0,3}"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
@@ -2099,10 +2153,15 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `tortoise/`, so those answers walked through green here on the `set` and
     # deictic anchors, where this ban is the only layer.
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|both)"
-    r"(?=[\s.,;:!?)]|$)"
-    r"|`?tortoise/`?(?=[\s.,;:!?)]|$)"
-    r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)\s+"
-    r"(?:[\w-]+\s+)?(?:files?|paths?|modules?|edits?|entry|entries|diffs?|hits?|"
+    r"(?=[\s.,;:!?)*_`]|$)"
+    r"|`?tortoise/`?(?=[\s.,;:!?)*_`]|$)"
+    r"|(?:exactly\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|a|an|the)[*_`]{0,3}\s+"
+    # ⛔ THE WHITESPACE IS REQUIRED, AND THAT IS THE WHOLE GUARD AGAINST A SUBSTRING MATCH
+    # (#13802 review, cycle 7 — MEASURED): with `\s*` on either side of the adjective, the
+    # word `narrow` in `its `-- tortoise/` sibling is the NARROWER measurement` matched as
+    # `nar` + `row` and the bundle document was refused — a false positive that the required
+    # space makes impossible. Emphasis stays optional; the SEPARATOR does not.
+    r"(?:[\w-]+[*_`]{0,3}\s+)?(?:files?|paths?|modules?|edits?|entry|entries|diffs?|hits?|"
     r"records?|items?|rows?|lines?|changes?)"
     r"|(?:[a-z''-]+\s+){0,4}comment[^.]{0,40}?(?:only|text|edits?)"
     # ⛔ AND THE VERB-BEFORE-PATH PARAPHRASES that carry the answer as a NOUN PHRASE
@@ -2148,14 +2207,22 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # footnote limiting the ban's scope.
     r"|`?tortoise/`?\s+(?:is|are|was|were|remains?|stays?)\s+(?:NOT\s+|not\s+)?"
     r"(?:untouched|unchanged|unmodified|identical|byte-identical|the\s+same|no\s+code)"
-    # E) ⛔ AND THE ANSWER-FIRST ORDER (#13802 review, round 13, P2 — MEASURED GREEN in all
-    # three arms: `Nothing is in the `tortoise/` set at this head.`, `Empty is what
-    # `-- tortoise/` prints at this head.`). Every other alternative is verb-then-answer, so
-    # the same claim stated the other way round was read by nothing. This one requires the
-    # ANSWER to open a clause and `tortoise/` to follow inside the same sentence, so ordinary
-    # prose that merely begins with `Nothing` is untouched.
-    r"|(?:^|[.;:!?]\s|\n)(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?)"
-    r"\b[^.\n]{0,60}?tortoise/"))
+    # ⛔ AND ITS TOKENS STAY CASE-SENSITIVE, ALONE IN THIS PATTERN (#13802 review, cycle 7 —
+    # MEASURED): they are pinned case-BY-case on purpose, and the compile is now
+    # `re.IGNORECASE` for the verb/answer alphabet — with the flag reaching this group,
+    # `It does **not** discharge A1: it is **transport only** — nothing in `tortoise/`
+    # consumes \`result["relations"]\`` (ordinary prose about a directory, not a direction
+    # claim) matched and `RECONCILE-A1-A2-A5.md` was refused. The scoped `(?-i:…)` is what
+    # keeps one compile from widening an alternative that opted out of it.
+    r"|(?:^|[.;:!?]\s|\n)(?:(?-i:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero)|`?\[\]`?)"
+    r"\b[^.\n]{0,60}?tortoise/",
+    # ⛔ CASE-INSENSITIVE, for the same reason and by the same measurement as the emphasis
+    # tolerance above: the detector compiles with `re.IGNORECASE`, and this file's own
+    # witness list pins `Prints two paths` as a must-red spelling. Compiled WITHOUT it, the
+    # ban refused none of the eleven capitalised/emphasis-wrapped forms measured at cycle 7
+    # (`Prints two paths`, `prints Empty`/`Blank`/`Zero`/`Single`/`Both`/`Comment-Only`, …),
+    # two of which kept `05-verify.md` GREEN when injected.
+    re.IGNORECASE))
 
 
 def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_verb_class():
@@ -2312,6 +2379,22 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "the `tortoise/` set prints one",
         "the `tortoise/` set holds both",
         "`-- tortoise/` prints `tortoise/`",
+        # ⛔ AND THE ELEVEN CASE/EMPHASIS SPELLINGS THE DETECTOR READ AND THIS BAN DID NOT
+        # (#13802 review, cycle 7, P1 — every one MEASURED `ban=None` against a non-empty
+        # detector verdict, and two of them kept the suite GREEN when injected into
+        # `05-verify.md`). Formatting is not content: the detector strips `[`*_]` and
+        # matches case-insensitively, so each of these is the SAME claim as its plain form.
+        "`-- tortoise/` Prints two paths",
+        "`-- tortoise/` **prints** the two COMMENT-ONLY modules",
+        "`-- tortoise/` `prints` the two comment-only modules",
+        "the `tortoise/` set prints Empty",
+        "the `tortoise/` set prints Blank",
+        "the `tortoise/` set prints Zero",
+        "the `tortoise/` set prints Single",
+        "the `tortoise/` set prints Both",
+        "`-- tortoise/` prints `two` paths",
+        "`-- tortoise/` prints _two_ paths",
+        "`-- tortoise/` prints Comment-Only",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
