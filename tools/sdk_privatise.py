@@ -185,7 +185,19 @@ SWEEP_NAMES = 66
 #: None of the ten is a reference to a retired public name — `typed references still pointing at a
 #: public name: 0` on this tree. The pin moves UPWARD because the tree gained files: that is the
 #: direction which has to be declared deliberately rather than absorbed silently.
-SWEEP_RESIDUE = (11762, "c78653328fa17ea7")
+#: RE-CUT to the REBASED tree → (11794, "d26b6f638a612643"). The pin is an ABSOLUTE count of the
+#: tree, so it moves with the base as well as with this PR: the branch was rebased onto
+#: `origin/main` `ef1d6f7561`, which observes 11784 on its OWN tree against the same pin of 11752.
+#: ⛔ So the 32 rows between 11752 and that base's 11784 are the BASE's, not declared here, and this
+#: block does not enumerate them (they are `#13854`/`#13966`-era merges' business); the ten above
+#: are the only rows this PR owns. ⛔ And
+#: ⛔ **`--check` on that tree is RED regardless of this pin** — `typed references still pointing at
+#: a public name: 4`, all four on the typed SDK receiver `._ingest_corpus` in
+#: `tests/test_13826_write_gate.py:544,555,580,596` (a `#13854` file). A re-pin cannot make that
+#: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
+#: Measured here, so the next lane does not have to re-derive it:
+#:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
+SWEEP_RESIDUE = (11794, "d26b6f638a612643")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
