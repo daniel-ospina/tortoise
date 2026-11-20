@@ -4297,6 +4297,29 @@ jobs:
         run: |
           python3 tools/archive_surface.py verify-anchors
           python3 tools/archive_surface.py check --require-entries
+      # ── THE PRIVATISATION SWEEP'S VERIFIER MUST HAVE A CALLER (#13899 F3) ──────
+      # `tools/sdk_privatise.py --check` is the ONLY walk that can answer the review
+      # question the #12901 batch rests on — "how many typed references still point at a
+      # public name?" — and before this step NO workflow invoked it (measured:
+      # `git grep -n sdk_privatise origin/feat/12901-sdk-final-c` matched only the tool's
+      # own docstring). An arm nothing runs is not a guard, and a verifier whose "0" no
+      # gate reproduces is a claim rather than a measurement.
+      #
+      # It belongs HERE rather than in `ci.yml`'s stdlib tool list for one reason: it
+      # derives its rename map from `SWEEP_BASE`, a recorded commit, so the checkout must
+      # be able to RESOLVE an ancestor — which is exactly what `fetch-depth: 0` above
+      # buys (the #9075/#11057 shape: a gate that runs only where it cannot answer proves
+      # nothing). `import tortoise` comes from this job's own `pip install -e .`.
+      #
+      # Cost is measured, not estimated: 71 s on a dev box over the whole package
+      # (`time python3 tools/sdk_privatise.py --check`), inside this job's 10-minute bound.
+      # ⚠️ ACCEPTED RESIDUAL, the same one the two steps above name: this runs the
+      # CHECKOUT'S OWN verifier, so a PR that deflates the verifier in the same commit
+      # that leaves references un-swept grades itself. Pinning it to the base ref would
+      # be a DEADLOCK for the PR that fixes the verifier (the #5192 note below), which is
+      # also why this step stays a plain invocation rather than a pinned copy.
+      - name: The privatisation sweep's check reports no typed reference left
+        run: python3 tools/sdk_privatise.py --check
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the
