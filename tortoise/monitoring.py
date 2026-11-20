@@ -5470,8 +5470,14 @@ class HealthProbe:
     def _run(self, seq: int) -> None:
         with self._cv:
             # #10893: the deferred start has landed; `is_alive()` is authoritative
-            # from here on.
-            self._starting = False
+            # from here on. ⛔ ONLY for the CURRENT generation: a SUPERSEDED
+            # worker can begin after its successor was handed off (that is what
+            # superseding is for), and clearing the bit then would make `begin()`
+            # read `_starting=False` + `is_alive()=False` for the successor and
+            # start a THIRD probe — breaking the supersede cap. The successor
+            # owns the bit; this generation only clears its own.
+            if seq == self._seq:
+                self._starting = False
         try:
             result = self._probe_fn()
         except BaseException as exc:

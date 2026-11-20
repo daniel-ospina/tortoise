@@ -269,5 +269,31 @@ def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
         "the coordinator still believes a probe it could not start is running")
 
 
+def test_an_abandoned_generation_does_not_clear_the_successors_start_bit():
+    """A superseded worker begins AFTER its successor was handed off (#10893).
+
+    That is exactly what superseding a wedged probe DOES, so the older
+    generation's first act must not clear the ``_starting`` bit its successor
+    owns: ``begin()`` would then read ``_starting=False`` + ``is_alive()=False``
+    for the successor and start a THIRD probe per poll, defeating
+    ``PROBE_MAX_SUPERSEDES``.
+
+    Driven by calling ``_run`` for the STALE generation directly (synchronously,
+    no threads) so the assertion is about the invariant, not about scheduling.
+    """
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.2)
+    with probe._cv:
+        probe._running = True
+        probe._starting = True
+        probe._seq = 7              # the CURRENT generation owns the bit
+
+    probe._run(6)                   # the abandoned generation finally begins
+
+    assert probe.info()["starting"] is True, (
+        "the superseded generation cleared the CURRENT one's start bit — the "
+        "next begin() will start a third probe")
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
