@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import pathlib
 import re
 import threading
@@ -691,6 +692,25 @@ class TestSweepPass:
         assert send.calls == []
         assert cp.tables["organizations"][0]["storage_notice_pct"] is None
 
+    def test_a_suspended_org_is_neither_emailed_nor_stamped(self):
+        """#1853: a suspended org's calls 403 but its inbox is still open to us.
+
+        The notice offers to ADD CAPACITY; offering it to an account that cannot
+        use the capacity is noise at best, and the stamp is once-ever.
+        """
+        cp = _fake_cp(suspended_at="2026-11-19T00:00:00+00:00")
+        send = _Sender()
+        with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: _Reading(103.0)):
+            summary = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send,
+                enumerate_orgs=lambda: [_org_row(
+                    suspended_at="2026-11-19T00:00:00+00:00")]))
+        assert summary["statuses"].get("suspended-org") == 1
+        assert send.calls == []
+        assert cp.tables["organizations"][0]["storage_notice_pct"] is None
+
     def test_the_burst_guard_defers_and_the_frontier_still_moves(self):
         """A capped pass walks the WHOLE enumeration and stops SENDING — so the
         next pass starts with a smaller unstamped population.
@@ -1008,6 +1028,12 @@ def test_no_migration_after_the_tenancy_rename_writes_to_public_teams():
         f"{RENAME_MIGRATION} renamed to `organizations` — they cannot apply")
 
 
+@functools.cache
+def _parse(path: pathlib.Path) -> ast.Module:
+    """Parse each module ONCE — four guards in this file walk all of `tortoise/`."""
+    return ast.parse(path.read_text(), filename=str(path))
+
+
 def _additive_tiers() -> dict[str, list[str]]:
     """Every `_ORG_ADDITIVE_*_TIER` the ladder can drop, by name."""
     return {name: list(getattr(sc, name)) for name in dir(sc)
@@ -1029,6 +1055,32 @@ def test_the_additive_tier_registry_covers_every_additive_column():
     assert covered == set(sc._ORG_ADDITIVE_SELECT)
 
 
+def _enclosing_functions(path: pathlib.Path) -> dict[int, int]:
+    """Map every node's line to the line its ENCLOSING function starts at.
+
+    A per-call-site binding question ("is `_ORG_ADDITIVE_TIERS` imported where
+    this ladder is built?") cannot be answered module-wide: `hosted_api`
+    imports the same name in two different endpoint functions, so a module-wide
+    "bound" set stays green when ONE of the two imports is deleted. Round 4 of
+    this review measured exactly that hole in
+    `test_every_ladder_module_imports_the_tiers_it_names`.
+    """
+    tree = _parse(path)
+    owner: dict[int, int] = {}
+
+    def walk(node: ast.AST, current: int) -> None:
+        for child in ast.iter_child_nodes(node):
+            start = child.lineno if isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef)) else current
+            for line in range(getattr(child, "lineno", 1),
+                              getattr(child, "end_lineno", getattr(child, "lineno", 1)) + 1):
+                owner.setdefault(line, start)
+            walk(child, start)
+
+    walk(tree, 0)
+    return owner
+
+
 def _call_sites() -> list[tuple[str, int, set[str], set[str]]]:
     """Every `_orgs_row_fail_soft(...)` call: (file, line, select tokens, tiers named).
 
@@ -1038,7 +1090,7 @@ def _call_sites() -> list[tuple[str, int, set[str], set[str]]]:
     """
     sites = []
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = _parse(path)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name)
@@ -1121,6 +1173,59 @@ def test_the_shared_ladder_covers_every_declared_tier():
         f"declared but not appended (or removed): {sorted(declared - set(members))}")
 
 
+def test_every_ladder_call_site_can_name_the_shared_tuple():
+    """The shared ladder must be BOUND AT THE CALL SITE, not merely somewhere.
+
+    `hosted_api` builds two ladders in two different endpoint functions; an
+    `ImportFrom` anywhere in the module satisfies a module-wide check while the
+    OTHER endpoint raises `NameError` on a schema-drift read — the one path that
+    is already degraded. Resolved per enclosing function here.
+    """
+    problems: list[str] = []
+    checked = 0
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = _parse(path)
+        module_bound = {alias.name
+                        for node in ast.walk(tree)
+                        if isinstance(node, ast.ImportFrom)
+                        for alias in node.names}
+        # ...or DEFINED at module level (`supabase_control` owns the tuple).
+        module_bound |= {t.id
+                         for node in tree.body
+                         if isinstance(node, (ast.Assign, ast.AnnAssign))
+                         for t in (node.targets if isinstance(node, ast.Assign)
+                                   else [node.target])
+                         if isinstance(t, ast.Name)}
+        per_function: dict[int, set[str]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                per_function[node.lineno] = {
+                    alias.name
+                    for sub in ast.walk(node)
+                    if isinstance(sub, ast.ImportFrom)
+                    for alias in sub.names}
+        owners = _enclosing_functions(path)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "_orgs_row_fail_soft"):
+                continue
+            names = {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
+            if "_ORG_ADDITIVE_TIERS" not in names:
+                continue
+            checked += 1
+            fn_line = owners.get(node.lineno, 0)
+            bound = module_bound | per_function.get(fn_line, set())
+            if "_ORG_ADDITIVE_TIERS" not in bound:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno} builds the ladder from "
+                    f"_ORG_ADDITIVE_TIERS but the enclosing function (line "
+                    f"{fn_line or 'module'}) never imports it — a NameError on the "
+                    "drift path, where nothing else works either")
+    assert checked >= 4, f"only {checked} shared-ladder call sites found — the scan broke"
+    assert problems == [], "\n".join(problems)
+
+
 def test_every_ladder_module_imports_the_tiers_it_names():
     """A tier named but not imported is a NameError on a schema-drift read.
 
@@ -1132,7 +1237,7 @@ def test_every_ladder_module_imports_the_tiers_it_names():
     tiers = set(_additive_tiers())
     problems: list[str] = []
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = _parse(path)
         bound = {alias.name
                  for node in ast.walk(tree)
                  if isinstance(node, ast.ImportFrom)

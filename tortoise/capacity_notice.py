@@ -54,7 +54,7 @@ arithmetic (#13998 requirement 5):
   `graph_storage.VECTOR_INDEX_EXCLUDED`), so this notice errs LATE, never early.
 
 EXACTLY ONE SEND PER THRESHOLD PER ACCOUNT, EVER. The durable ledger is
-`teams.storage_notice_pct`, an integer HIGH-WATER MARK of the highest threshold
+`organizations.storage_notice_pct`, an integer HIGH-WATER MARK of the highest threshold
 ever notified, stamped only after the provider accepts. A high-water mark rather
 than one column per threshold, because two independent markers let the emails
 land OUT OF ORDER (a 100 % notice, then a stale 80 % pass emailing "at 80 %"
@@ -526,7 +526,8 @@ def claim_notice(cp, org_id: str, threshold: int,
 #: searchable", and the stamp is once-ever, so mailing an account inside its
 #: deletion grace window would both state something false and burn the one notice
 #: it can ever get (#14038 review, P2 — found independently by two reviewers).
-_ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at")
+_ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
+                   "suspended_at")
 
 
 @dataclass(frozen=True)
@@ -538,6 +539,7 @@ class Account:
     name: str | None
     notice_pct: int | None
     deleted: bool = False
+    suspended: bool = False
 
 
 def read_account(cp, org_id: str) -> Account | None:
@@ -556,7 +558,8 @@ def read_account(cp, org_id: str) -> Account | None:
         mark = None
     return Account(org_id=org_id, email=row.get("email"),
                     name=row.get("name"), notice_pct=mark,
-                    deleted=bool(row.get("deleted_at")))
+                    deleted=bool(row.get("deleted_at")),
+                    suspended=bool(row.get("suspended_at")))
 
 
 async def notify_account(org_id: str, *, cp=None, account: Account | None = None,
@@ -614,6 +617,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # workspace whose data is on its way out — and the copy would tell it
         # "nothing is lost or deleted" while it is (see `_ACCOUNT_SELECT`).
         return {"status": "deleted-org", "org_id": org_id}
+    if account.suspended:
+        # #1853: a suspended org's calls 403 but its inbox is still open to us.
+        # The notice offers a capacity purchase; offering it to an account that
+        # cannot use the capacity is noise at best, and the stamp is once-ever.
+        return {"status": "suspended-org", "org_id": org_id}
     if not account.email:
         # A registry/agent-minted org carries no address; the copy greets a
         # PERSON, so there is nobody to greet.
