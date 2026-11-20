@@ -16733,8 +16733,12 @@ _D5_TRIPLE_RE = re.compile(
 #:     measure.py | grep -cF`), so it evaluated IDENTICALLY pre-fix and post-fix — vacuous, in
 #:     the commit whose subject was the vacuous guard (cycle 5's finding).
 #: So the requirement is structural: a backticked issue ref IMMEDIATELY followed by the
-#: mis-description (`:6593`'s "NOT a \"D5 formatting guard\"" and `:16846`'s "as \"its D5
-#: formatting guard\"" name the class without asserting it, and stay green). And a refutation
+#: mis-description (the "NOT a \"D5 formatting guard\"" retraction and the one recording what
+#: the prose used to credit name the class without asserting it, and stay green). Both are
+#: cited by PHRASE and not by line: a self-cite here re-stales on every insert above it —
+#: which is exactly what this commit did to the number it replaced: `:16846` landed on the
+#: unrelated line `f"at {hits}"` inside the very commit removing a re-staled self-cite).
+#: And a refutation
 #: on the same line is exempt (`_D5_MISATTRIBUTION_REFUTES`): #13750's own doctrine is that a
 #: guard which reds on TRUE content is a false RED, and the next lane deletes the guard instead
 #: of the defect.
