@@ -532,6 +532,12 @@ def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
 
 RECORD_DSN_NO_HOST = "<host not resolvable — cannot PROVE it is local>"
 
+#: A DSN naming a libpq SERVICE delegates the dialled host to `pg_service.conf`,
+#: which this harness cannot read before connecting — so it is as unknowable as an
+#: absent host and is refused the same way.
+RECORD_DSN_SERVICE = ("<service — the dialled host is whatever pg_service.conf "
+                      "says, so it cannot be PROVEN local>")
+
 
 def _split_host_list(value: str) -> list[str]:
     """libpq accepts a COMMA-SEPARATED host list in one `host=`/`hostaddr=` value.
@@ -550,7 +556,7 @@ def _split_host_list(value: str) -> list[str]:
 
 
 def _conninfo_hosts(dsn: str) -> list[str]:
-    """The `host`/`hostaddr` keywords of libpq's whitespace conninfo form."""
+    """The `host`/`hostaddr`/`service` keywords of libpq's conninfo form."""
     hosts: list[str] = []
     try:
         tokens = shlex.split(dsn)
@@ -560,6 +566,10 @@ def _conninfo_hosts(dsn: str) -> list[str]:
         key, sep, value = token.partition("=")
         if sep and key in ("host", "hostaddr"):
             hosts.extend(_split_host_list(value))
+        elif sep and key == "service" and value:
+            # The host comes from pg_service.conf, which this harness cannot read
+            # before connecting — unknowable, so never loopback (`RECORD_DSN_SERVICE`).
+            hosts.append(RECORD_DSN_SERVICE)
     return hosts
 
 
@@ -585,11 +595,31 @@ def _record_dsn_hosts(dsn: str) -> list[str]:
 
     Returns ``[]`` when the DSN names no host at all — the caller refuses that
     (``RECORD_DSN_NO_HOST``), it does not treat it as local.
+
+    ⛔ AND A ``service`` NAMES A HOST WE CANNOT SEE. ``host``/``hostaddr`` are not
+    the only ways libpq learns the address: ``parseServiceInfo`` fills every
+    option the conninfo left UNSET from ``pg_service.conf``, so ``service=prod``
+    on a loopback DSN dials whatever that entry's ``hostaddr`` is — and
+    ``PGSERVICE`` in the environment does the same for a DSN that never mentions
+    it. Measured with libpq itself (``psql`` names the host it tried, service file
+    with ``hostaddr=203.0.113.9``):
+
+        postgresql://127.0.0.1:1/db?service=prod                 -> dials 203.0.113.9
+        postgresql://127.0.0.1:1/db?host=127.0.0.1&service=prod   -> dials 203.0.113.9
+        postgresql://127.0.0.1:1/db  (PGSERVICE=prod in env)      -> dials 203.0.113.9
+
+    while this function returned ``['127.0.0.1']`` and the guard PASSED — the
+    same fail-open class as K1 on the same destructive path, and internally
+    inconsistent with the conninfo spelling (which was refused only because it
+    named no host). A ``service`` is therefore reported as ``RECORD_DSN_SERVICE``,
+    which no loopback predicate accepts.
     """
     hosts: list[str] = []
     if "://" in dsn:
         parts = urlsplit(dsn)
         query = parse_qs(parts.query)
+        if query.get("service") or os.environ.get("PGSERVICE"):
+            return [RECORD_DSN_SERVICE]
         # `hostaddr` first: it is the address libpq dials, so naming it first in
         # the refusal names the store the run would actually hit.
         for key in ("hostaddr", "host"):
@@ -598,6 +628,8 @@ def _record_dsn_hosts(dsn: str) -> list[str]:
         if parts.hostname:
             hosts.append(parts.hostname)
     else:
+        if os.environ.get("PGSERVICE"):
+            return [RECORD_DSN_SERVICE]
         hosts.extend(_conninfo_hosts(dsn))
     return hosts
 
