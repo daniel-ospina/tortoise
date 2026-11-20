@@ -1073,8 +1073,26 @@ def _modules_with_a_body(paths, read) -> set[str]:
     return out
 
 
+def _path_carries_a_module_body(root: Path, path: str | None) -> bool:
+    """Does the module file at `path` carry a BODY? (`path=None` means the module is not here)
+
+    A set of dotted names is a set of PATHS, and arm 1b exists because a path is not a body —
+    the file can survive with its statements gone. So any diagnostic that says "this tree still
+    carries it" must ask the FILE, not the set: the set answered `True` for a module whose body
+    had been truncated to nothing, and the waiver line then told an operator that nothing was
+    removed about the removal the same run had just demanded a record for (review P2 of PR
+    #14039). Unreadable counts as CONTENT — the same fail-closed answer `_modules_with_a_body`
+    gives, so the diagnostic and the arm can never disagree.
+    """
+    if path is None:
+        return False
+    text = _file_text(root, path)
+    return text is None or _init_carries_a_body(text)
+
+
 def _file_text(root: Path, path: str) -> str | None:
     """The working tree's copy of a repo-relative file, or None when it cannot be read."""
+
     try:
         return (root / path).read_text(encoding="utf-8")
     except OSError:
@@ -1450,10 +1468,28 @@ def shrink_violations(
                     "so nothing was removed for it to waive"
                 )
             elif symbol in base_modules:
-                why = (
-                    f"{base_label} carries `{symbol}` ({kind}) and this tree still carries it, "
-                    "so nothing was removed for it to waive"
-                )
+                # ⛔ ASK THE HEAD SIDE, and ask it about the BODY (review P2 of PR #14039). Set
+                # membership is a PATH set, so it was `True` in BOTH shapes that DID remove a
+                # module: arm 1's (the file left — `base_modules - head_modules` reaches here
+                # only when the removal is already recorded, since an unrecorded one is reported
+                # by arm 1 and would have CONSUMED the waiver) and arm 1b's (the file stayed and
+                # its body left, so the name is still in `head_modules`). In both, the old
+                # wording — "this tree still carries it, so nothing was removed" — pointed the
+                # operator at a removal that never happened while the run had just demanded a
+                # record for the one that did. Undoing an over-statement with an under-statement
+                # is not the fix either: the two answers are distinct facts and each states its
+                # own, which is this loop's stated rule.
+                if _path_carries_a_module_body(root, head_paths_by_module.get(symbol)):
+                    why = (
+                        f"{base_label} carries `{symbol}` ({kind}) and this tree still carries "
+                        "it, so nothing was removed for it to waive"
+                    )
+                else:
+                    why = (
+                        f"{base_label} carries `{symbol}` ({kind}) and this tree does not — "
+                        "the removal IS recorded by the `module` entry you also passed, so the "
+                        "waiver waives nothing"
+                    )
             elif symbol in head_modules:
                 why = (
                     f"{base_label} carries no `{symbol}` ({kind}) and this tree does — that is "

@@ -2030,6 +2030,61 @@ def test_a_waiver_for_a_LIVE_module_the_base_never_recorded_says_so(
     assert "does not record" not in waived[0], waived[0]
 
 
+def test_a_MODULE_waiver_for_a_RECORDED_deletion_does_not_claim_the_tree_still_carries_it(
+    tree: Path,
+) -> None:
+    """Review P2 of PR #14039: the SAME falsity, one branch over, on the removal path.
+
+    The reviewer's trace, performed: `tortoise/gone.py` had a body at the base, is deleted here,
+    and the deletion carries its `module` row — so arm 1 stays silent (it does NOT mark the
+    waiver used, because the record is what silenced it) and the waiver falls through as UNUSED.
+    The old `elif symbol in base_modules:` answered from the BASE alone and printed "this tree
+    still carries it, so nothing was removed for it to waive" over a module the same run had
+    just required a record for. Discriminating: that exact sentence, in the same run that
+    reports the record the operator passed to satisfy it.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    _archive_module(tree, "tortoise.gone")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" not in waived[0], waived[0]
+    assert "nothing was removed" not in waived[0], waived[0]
+    assert "this tree does not" in waived[0], waived[0]
+    assert "IS recorded" in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_for_a_RECORDED_body_removal_does_not_claim_the_tree_still_carries_it(
+    tree: Path,
+) -> None:
+    """The second shape the PATH set cannot see: the file survives, its body does not (arm 1b).
+
+    A fix that asked only `symbol in head_modules` would still print "this tree still carries
+    it" here, because arm 1b exists precisely because the NAME stays in that set while the code
+    is gone — so the diagnostic has to ask the FILE. Discriminating: the membership-only
+    wording reds this row, and the pre-fix wording reds both.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    (tree / "tortoise" / "gone.py").write_text("", encoding="utf-8")
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, "tortoise/gone.py")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" not in waived[0], waived[0]
+    assert "this tree does not" in waived[0], waived[0]
+    assert "IS recorded" in waived[0], waived[0]
+
+
 # ── 12. the module→package split: arm 1's remedy must clear arm 2 (review C-F2) ─────
 
 def _head_sha(root: Path) -> str:
