@@ -73,7 +73,7 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 
 # Per-run volatile props excluded from the isomorphism comparison (the
 # plan's "modulo batch_id" — extended to the other per-run-derived props:
-# ids (per-call ULIDs), timestamps (assigned at write — ``sdk.py::TortoiseSDK.create_point``
+# ids (per-call ULIDs), timestamps (assigned at write — ``sdk.py::TortoiseSDK._create_point``
 # stamps ``createdAt``/``updatedAt``, ``sdk.py::TortoiseSDK.register_source`` stamps
 # ``ingestedAt``), and source defaults). Deliberately NARROW: semantic payload
 # props (title / contentHash / externalId / version on Source nodes, content
