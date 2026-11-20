@@ -1585,6 +1585,19 @@ The class headings say what to DO: `N edge(s) were DECLINED by the door —
     # being absent.
     assert carried_line in err, err
     assert "edge(s) were DECLINED" in err, err
+    # ⛔ BOTH HALVES OF THE ORDER, because they fail differently. This assertion
+    # pins the line ABOVE the class headings (the mislabel); the next one pins it
+    # BELOW its own header. Hoisting the loop out of `if markers_carried:` — one
+    # indent — satisfies the first and breaks the second: the line then prints
+    # right after this run's own `!!` block, detached from the header that says it
+    # is an EARLIER run's, so it reads as one more line THIS run produced. That
+    # mutant was measured green (136 passed) until the header anchor existed, at
+    # #13985 review round 4.
+    header = "marker(s) from an earlier run"
+    assert header in err, err
+    assert err.index(header) < err.index(carried_line), (
+        "an EARLIER run's line is printed OUTSIDE its own header's block, so it "
+        "reads as a line THIS run produced: " + err)
     assert err.index(carried_line) < err.index("edge(s) were DECLINED"), (
         "an EARLIER run's line is printed under this run's DECLINED heading, so "
         "the heading's remedy (\"delete the line, nothing was written\") reads as "
