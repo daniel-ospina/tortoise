@@ -1670,3 +1670,68 @@ def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
         "the job running the shrink arm must check out full history, or the merge base is "
         "absent by construction and the gate cannot answer"
     )
+
+
+# ── 11. review rounds 2-3: content, not paths (#12402, #12291) ────────────────
+
+def test_an_init_py_WITH_A_BODY_is_a_removal_even_when_the_package_still_imports(
+    tree: Path,
+) -> None:
+    """Round 3 F2: `tortoise/__init__.py` is 406 lines of the public API.
+
+    The dotted name still resolves through a surviving sibling, so a PATH-set comparison
+    cancels the deletion — measured: the pre-fix arm graded `git rm tortoise/__init__.py`
+    green on a tree that kept `tortoise/sdk.py`, with no `module` entry required. A module
+    body is content; only scaffolding may cancel.
+    """
+    (tree / "tortoise" / "core.py").write_text("X = 1\n", encoding="utf-8")
+    (tree / "tortoise" / "__init__.py").write_text(
+        "from tortoise.core import X\n\n__all__ = ['X']\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise")
+    _commit_drop(tree, "tortoise/__init__.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise: MODULE REMOVED" in p for p in problems), (
+        "the package name still resolves through `core.py`, but its __init__ BODY left the "
+        f"product and no other arm can see that: {problems}"
+    )
+
+
+def test_a_docstring_only_init_py_is_scaffolding_and_still_cancels(tree: Path) -> None:
+    """The other direction: prose carries no API, so deleting it removes nothing."""
+    (tree / "tortoise" / "pkg2").mkdir()
+    (tree / "tortoise" / "pkg2" / "__init__.py").write_text(
+        '"""Package marker."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "pkg2" / "sub.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/pkg2")
+    _commit_drop(tree, "tortoise/pkg2/__init__.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_waiver_must_name_a_real_kind(tree: Path) -> None:
+    """The `kind not in KINDS` half of the parser was unpinned (round 3 note)."""
+    with pytest.raises(arch.ArchiveRefused, match="not `<kind>:<symbol>`"):
+        arch.shrink_violations(tree, base_ref="HEAD", allowed=["widget:tortoise.gone"])
+
+
+def test_a_waiver_for_a_row_that_never_LEFT_says_so_without_claiming_the_base_lacks_it(
+    tree: Path,
+) -> None:
+    """Round 3 F1's sibling: the verdict was right, the stated fact was false.
+
+    The base records the row AND this tree still carries it, so "does not record `x` at all"
+    would send the operator looking for a removal that never happened.
+    """
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" in waived[0], waived[0]
+    assert "does not record" not in waived[0], waived[0]

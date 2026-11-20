@@ -3163,14 +3163,20 @@ def shrink_problems(
         problems, _accounting = removal_report(prior, derived, records, allowed=list(allowed))
         out = [str(p) for p in problems]
         # ⛔ A WAIVER THAT WAIVES NOTHING IS A FALSE RECORD, and `removal_report` cannot report
-        # it here: it only grades a waiver against a removal it met, so a waiver naming a
-        # symbol the BASE never carried falls through silently. That is the one shape a false
-        # record takes on a tree with nothing to remove — and it is worse than no record,
-        # because it reads as a departure somebody checked. (`archive_surface.shrink_violations`
-        # carries the same arm for its own waivers; `removal_report`'s redundant/ambiguous arms
-        # cover the rest.)
+        # every shape of it: it only grades a waiver against a removal it met, so a waiver
+        # naming a symbol that never left the surface falls through silently — worse than no
+        # record, because it reads as a departure somebody checked. (`removal_report`'s
+        # redundant/ambiguous arms cover the waivers that DO meet a removal.)
+    # ONE code path for all three shapes, decided by what the waiver actually WAIVED: the
+    # archive arm tracks a `used` set and reports the rest, and this arm recomputing from the
+    # base instead was a fail-open — a waiver naming a symbol the base carries and this tree
+    # still carries matched neither hand-written branch and was accepted silently (review
+    # round 3, F1: `--allow-surface-shrink tool:<a live tool>` on a no-op tree exited 0).
+    removed = prior - derived
     prior_symbols = {symbol for symbol, _cls in prior}
     for entry in list(allowed):
+        if any(waiver_matches(entry, symbol, cls) for symbol, cls in removed):
+            continue  # it waives a removal that happened, and `removal_report` graded it
         cls, symbol = parse_waiver(entry)
         if symbol not in prior_symbols:
             out.append(
@@ -3182,6 +3188,13 @@ def shrink_problems(
                 f"`--allow-surface-shrink {entry}` waives nothing on the {cls!r} surface: "
                 f"{symbol!r} is a {sorted(c for s, c in prior if s == symbol)!r} symbol in the "
                 "base ref's baseline"
+            )
+        else:
+            out.append(
+                f"`--allow-surface-shrink {entry}` waives nothing: the base ref's baseline "
+                f"records {symbol!r} and this tree still carries it, so nothing was removed "
+                "for it to waive. Drop the flag (a waiver that records nothing is worse "
+                "than no waiver, because it reads as a departure that was checked)"
             )
     return out
 

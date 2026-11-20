@@ -7996,3 +7996,41 @@ def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
         "the job running the shrink arm must check out full history, or the merge base is "
         "absent by construction and the gate cannot answer"
     )
+
+
+def test_a_waiver_for_a_row_that_never_LEFT_is_reported(monkeypatch):
+    """Round 3 F1 (fail-open): the waiver arm only reported two of the three shapes.
+
+    A waiver naming a symbol the BASE carries and this tree still carries matched neither
+    branch, so `check --base-ref` exited 0 with `--allow-surface-shrink tool:<a live tool>
+    --allow-surface-shrink-reason ...` on a tree where nothing shrank — the exact "reads as a
+    departure somebody checked" state the docstring calls worse than no record.
+    """
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    live = doc["rows"][0]
+    symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+    assert symbol, live
+
+    problems = sm.shrink_problems(doc, doc, allowed=[f"tool:{symbol}"])
+
+    assert any("waives nothing" in p and symbol in p for p in problems), (
+        f"nothing left the surface, so `tool:{symbol}` waives nothing: {problems}"
+    )
+    assert any("still carries it" in p for p in problems), (
+        f"the stated reason must not claim the base never carried it: {problems}"
+    )
+
+
+def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
+    """Non-vacuity for the consumption check: the class-mismatch shape must not be lost."""
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    live = doc["rows"][0]
+    symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+
+    problems = sm.shrink_problems(doc, doc, allowed=[f"sdk:{symbol}"])
+
+    assert any("waives nothing" in p for p in problems), problems

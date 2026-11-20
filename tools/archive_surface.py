@@ -999,20 +999,60 @@ def module_name(path: str) -> str:
     return ".".join(parts)
 
 
-def _dotted_modules(paths) -> set[str]:
-    """The dotted names a set of package paths carries, INCLUDING package ancestors.
+def _init_carries_a_body(text: str) -> bool:
+    """Does this `__init__.py` carry anything of its OWN? (review F2, round 3)
 
-    A directory that holds only submodules is still an importable (namespace) package, so
-    deleting its `__init__.py` while `pkg/sub.py` survives removes nothing a caller could
-    import. Adding every ancestor name on BOTH sides is what makes that case cancel out
-    instead of reding a `__init__` cleanup as a module removal.
+    A module body is CONTENT. `tortoise/__init__.py` is 406 lines of the product's public API,
+    so deleting it while `tortoise/sdk.py` survives removes everything a caller reaches through
+    `import tortoise` — while the dotted name still resolves, because the directory still holds
+    importable siblings. A comparison over PATHS therefore cancels that deletion, which is why
+    "the package still imports" is the wrong question to ask of `__init__.py`.
+
+    Only an `__init__.py` with no statements of its own — empty, whitespace, or a docstring
+    alone — is pure scaffolding, where deleting it while siblings survive removes nothing. Any
+    statement (an import, a re-export, `__all__`, an assignment, a function) is content.
+    Unparseable text is treated as content: fail CLOSED toward the violation.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return True
+    body = list(tree.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]  # a docstring alone is prose about scaffolding, not content
+    return bool(body)
+
+
+def _modules_with_a_body(paths, read) -> set[str]:
+    """The dotted names whose OWN module file carries a body on this side.
+
+    Deliberately NOT `_dotted_modules`' ancestor expansion: adding every ancestor on both sides
+    is what made a 406-line `__init__.py` body disappear (review F2). A name is carried HERE if
+    this side holds a file for it, and a scaffolding-only `__init__.py` carries nothing at all,
+    so it cancels the way a namespace-package cleanup should. `read` returns `None` when the
+    side cannot answer, and an unreadable `__init__.py` is counted as content (fail closed).
     """
     out: set[str] = set()
     for path in paths:
-        parts = module_name(path).split(".")
-        for depth in range(1, len(parts) + 1):
-            out.add(".".join(parts[:depth]))
+        if path.endswith("/__init__.py"):
+            text = read(path)
+            if text is not None and not _init_carries_a_body(text):
+                continue
+        out.add(module_name(path))
     return out
+
+
+def _file_text(root: Path, path: str) -> str | None:
+    """The working tree's copy of a repo-relative file, or None when it cannot be read."""
+    try:
+        return (root / path).read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _package_paths_at(root: Path, sha: str) -> list[str]:
@@ -1153,7 +1193,13 @@ def shrink_violations(
     # ── arm 1: a MODULE that disappeared from the package tree (#12402) ──────────
     head_paths = _package_modules(root)
     base_paths = _package_paths_at(root, sha)
-    gone_modules = _dotted_modules(base_paths) - _dotted_modules(head_paths)
+    # CONTENT decides, not the path set: an `__init__.py` with a body at the base is a module
+    # that left even though its package still resolves through a surviving sibling (review F2 —
+    # `tortoise/__init__.py` is 406 lines of the public API, and the ancestor expansion that
+    # used to cancel it graded that deletion green).
+    base_modules = _modules_with_a_body(base_paths, lambda path: _git_blob(root, sha, path))
+    head_modules = _modules_with_a_body(head_paths, lambda path: _file_text(root, path))
+    gone_modules = base_modules - head_modules
     for module in sorted(gone_modules):
         key = (MODULE, module)
         if key in working:
@@ -1221,9 +1267,18 @@ def shrink_violations(
     # false record that makes a later reader believe a departure was checked (#12237's rule).
     for key in sorted(set(waivers) - used):
         kind, symbol = key
+        if key in base_entries:
+            # The base DOES record it and it is still here: the stated fact must not claim
+            # otherwise (review round 3 — "does not record `symbol` at all" was false on this
+            # path, and misdirects the operator to look for a removal that never happened).
+            why = (
+                f"{base_label} records `{symbol}` ({kind}) and this tree still carries it, so "
+                "nothing was removed for it to waive"
+            )
+        else:
+            why = f"{base_label} does not record `{symbol}` ({kind}) at all"
         out.append(
-            f"--allow-archive-shrink {waivers[key]!r} waives nothing: {base_label} does not "
-            f"record `{symbol}` ({kind}) at all, so there is no removal to waive. Drop the "
+            f"--allow-archive-shrink {waivers[key]!r} waives nothing: {why}. Drop the "
             "flag (an override that replaces a real record is the state this arm exists to "
             "make visible)"
         )
