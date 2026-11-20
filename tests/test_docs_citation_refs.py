@@ -581,10 +581,14 @@ _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
 #: witness, and the four unit kinds below are what may sit there instead (each with a unique
 #: first character, which is what makes the run linear).
 _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
-_GAP = (r"(?:[^\w<&[\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP + r"|" + _OPEN_BRACKET
-        + r"|" + _SOFT + r")*")
-_GAP_FULL = _GAP
-_GAP_ABBREV = _GAP
+#: ⛔ ONE GAP, ONE UNIT LIST, AND THE UNITS ARE WHAT THE MATCHER WALKS (#13921 review, F5).
+#: `_GAP_UNIT` is the single alternation every separator character goes through; `_GAP` is its
+#: `*`-closure and is kept as the STATEMENT of the separator for readers. The matcher no longer
+#: relies on a greedy `_GAP*` to skip the separator — it walks `_GAP_UNIT` itself, so the
+#: separated position list is the thing that decides where a verb may start (see the scan below).
+_GAP_UNIT = (r"(?:[^\w<&[\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP + r"|"
+             + _OPEN_BRACKET + r"|" + _SOFT + r")")
+_GAP = _GAP_UNIT + r"*"
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -668,26 +672,50 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # at all; the live document states those as PAST TENSE with their head named, which is
     # a convention kept by reading, not by an assertion (the label exemption that tried to
     # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
-    # ⛔ RETRY AT THE NEXT VERB, AND RESPECT THE GAP (#13900 verification, MEASURED). With a gap
-    # that admitted prose, a separator containing a listed verb (`… — the row that IS measured
-    # above — prints TWO paths`) latched that `is`, failed the answer-head test, and the whole
-    # occurrence was DROPPED — the LIVE document stayed `592 passed` over a FALSE claim; a URL in
-    # the gap did the same through its `protocol:`. A verb candidate whose preceding text is not a
-    # FULL gap match is not this occurrence's verb, so the scan continues to the next one.
-    _cmd_pat = re.compile(
-        r"`?" + re.escape(cmd)
-        + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV), re.IGNORECASE)
-    _gap_full = re.compile(_GAP, re.IGNORECASE)
+    # ⛔ THE VERB IS SOUGHT INSIDE THE GAP, AND ONLY AT A UNIT BOUNDARY (#13921 review,
+    # F2/F3/P1-1/F4, MEASURED). Three facts force this shape:
+    #
+    #  * The gap is `_GAP_UNIT*` with nothing trailing it, so a greedy `_GAP*` consumes to the
+    #    FURTHEST position any unit can reach — a position at which, by construction, no unit can
+    #    start. Scanning verbs from there meant the retry never retried: a separator carrying a
+    #    listed verb (`… — the row that IS measured above — prints TWO paths`) or a URL's
+    #    `protocol:` was still dropped, and the four answer FORMS that are themselves separator
+    #    characters (`=`, `:`, `->`, `→`) became UNREACHABLE — a coverage regression against
+    #    `origin/main` (#13921 review, F3).
+    #  * So the scan starts at the END OF THE COMMAND, and the separator is the TEST: a verb
+    #    candidate counts only when everything between the command and it is a whole number of
+    #    gap units. That is a strict superset of the old candidate set — the old single position
+    #    is still one of the boundaries — and it re-grades `=` / `:` / `->` / `→` as the answer
+    #    forms the docstring lists.
+    #  * ⛔ A SLICE FULL-MATCH IS NOT ENOUGH TO SAY "UNIT BOUNDARY" (#13921 review, F4): a unit's
+    #    LOOKAHEAD cannot see past the slice it is handed, so `[is]` would let `[` match the
+    #    UNTERMINATED-bracket unit on the prefix `" ["` and grade the `is` INSIDE the bracket (and
+    #    a tag's quoted `title="a: b"` would do the same through its `:`). So the boundaries are
+    #    ENUMERATED from the document itself, walking `_GAP_UNIT` with `match` — which is exactly
+    #    the parse the greedy closure took, since each alternative requires a character and they
+    #    are tried in order — and a candidate that is not one of those positions is not this
+    #    occurrence's verb. That enumeration is also what replaces the blank-line `break` this
+    #    function used to carry: `_SOFT` refuses to cross one and the single-character unit
+    #    excludes `\n`, so a blank line simply ends the boundary list (pinned by a witness).
+    _cmd_pat = re.compile(r"`?(?P<cmd>" + re.escape(cmd) + r")", re.IGNORECASE)
+    _unit_pat = re.compile(_GAP_UNIT, re.IGNORECASE)
     _verb_pat = re.compile(
         r"(?:(?:still|now|actually|also)\s+)?"
         r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
         r"names|includes|contains|has|->|→|is|=|:)", re.IGNORECASE)
     for _cm in _cmd_pat.finditer(doc):
-      for match in _verb_pat.finditer(doc, _cm.end(), min(len(doc), _cm.end() + 200)):
-        if not _gap_full.fullmatch(doc[_cm.end():match.start()]):
+      _after_cmd = _cm.end("cmd")
+      _bounds = {_after_cmd}
+      _pos = _after_cmd
+      while True:
+          _unit = _unit_pat.match(doc, _pos)
+          if _unit is None:
+              break
+          _pos = _unit.end()
+          _bounds.add(_pos)
+      for match in _verb_pat.finditer(doc, _after_cmd, min(len(doc), _pos + 200)):
+        if match.start() not in _bounds:
             continue
-        if re.search(r"\n[^\S\n]*\n", doc[_cm.end():match.start()]):
-            break
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
         # cycle 3, P1). The short form a caller may pass is a SUBSTRING of every longer
         # `git diff … -- <pathspec>` invocation, so the tail of a sentence the writer fixed
@@ -1687,6 +1715,64 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         f"`{_full_subject}` R&D prints TWO paths", _full_subject) == [], (
         "a WORD between the command and the verb is now detected — that contradicts the "
         "declared limit at `_GAP`, so the declaration must change with it")
+    # ⛔ THE TWO SENTENCES THIS PR IS TITLED AFTER ARE **NOT** GRADED, AND THAT IS THE DECLARED
+    # LIMIT — PINNED, because the claim that they WERE graded is the sentence that had to be
+    # withdrawn (#13921 review, F2/P1-1, MEASURED). Each carries a WORD between the command and
+    # the verb (`the row that is measured above`, `see`) — exactly the form the unit list refuses —
+    # so no retry can reach them: what the retry fixes is a listed verb sitting INSIDE the
+    # separator (`is`, a URL's `:`), not a word. Both returned `[]` at `4d3e031710` and both still
+    # do. Non-vacuity: widening the single-character unit to admit `\w` reds both this and the
+    # `R&D` row above.
+    for _unreached in (
+        f"`{_full_subject}` \u2014 the row that is measured above\n  \u2014 prints TWO paths at this head.",
+        f"`{_full_subject}` \u2014 see https://example.com/13795 \u2014 prints TWO paths",
+    ):
+        assert _typed_answers_to_tortoise_cmd(_unreached, _full_subject) == [], (
+            "a WORD between the command and the verb is now graded — if this ever passes, the "
+            "DECLARATION in the `_GAP_UNIT` block must change with it, and #13921's body must "
+            "stop describing a prose-crossing gap as the closed half of this repair (#13921 "
+            "review, F2)")
+    # ⛔ THE ANSWER FORMS THAT ARE THEMSELVES SEPARATOR CHARACTERS ARE REACHABLE AGAIN
+    # (#13921 review, F3, MEASURED). `=`, `:`, `->` and `→` are each matched by a
+    # SINGLE-CHARACTER unit, so when the scan started at the END of the maximal separator they
+    # had already been consumed and all four returned `[]` — while this function's docstring
+    # still listed all four as answer forms and `origin/main` graded all four. A shape the
+    # previous rule graded going silent is a fail-open regression, which is why this is a
+    # REGRESSION pin and not a widening: each row is `[]` at `4d3e031710` (that head's own
+    # function, same input) and one emptiness answer here.
+    for _form in ("=", ":", "->", "\u2192"):
+        _seen_form = _typed_answers_to_tortoise_cmd(
+            f"`-- tortoise/` {_form} empty at this head", "-- tortoise/")
+        assert _seen_form and _seen_form[0][0].startswith(_form) and _seen_form[0][1] is True, (
+            f"the arm SKIPPED the answer form {_form!r} — it is a separator character too, so a "
+            "verb scan anchored at the END of the maximal separator can never see it; four forms "
+            "`origin/main` graded returned `[]` at `4d3e031710` (#13921 review, F3)")
+    # ⛔ AN UNTERMINATED `[` IS ONE UNIT, AND ONLY THIS WITNESS CAN SAY SO (#13921 review, F4,
+    # MEASURED): `_OPEN_BRACKET` had NO assertion — deleting it from the unit list reddened
+    # NOTHING in this file — so the unit that keeps `origin/main`'s admission of a bare `[` was
+    # unfalsifiable, and an unguarded fix is one that reads as coverage and is not. The row reds
+    # the moment the unit goes, because `[` is excluded from the single-character class.
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_full_subject}` [ prints TWO paths", _full_subject), (
+        "an UNTERMINATED `[` ended the separator — `_OPEN_BRACKET` is the unit that admits it, "
+        "and `[` is a character `origin/main`'s gap already had (#13921 review, F4)")
+    # ⛔ AND THE RETRY EARNS ITS OWN WITNESS, WHICH ONLY A VERB *INSIDE* A UNIT CAN GIVE
+    # (#13921 review, F2/F4, MEASURED). Reducing the scan to its FIRST candidate reddened nothing
+    # in this file, because under the old anchor the first candidate was already the occurrence's
+    # verb. Now that the scan starts at the command, a verb sitting INSIDE a unit (`[is]`, a tag's
+    # quoted `title="a: b"`) comes first and its separator IS a full gap match — it is only not a
+    # UNIT BOUNDARY — so the scan must continue past it. Each row must grade the OUTER verb.
+    # Non-vacuity: a slice full-match instead of the boundary list grades the inner verb here
+    # (measured: `[is]` then yields `('is ] prints TWO paths', False)`).
+    for _inner, _row in (("[is]", "`-- tortoise/` [is] prints TWO paths"),
+                         ('<span title="a: b">',
+                          '`-- tortoise/`<span title="a: b">prints TWO paths')):
+        _seen_inner = _typed_answers_to_tortoise_cmd(_row, "-- tortoise/")
+        assert _seen_inner and _seen_inner[0][0].strip() == "prints TWO paths", (
+            f"the arm took a verb INSIDE the unit {_inner}: expected the outer `prints`, got "
+            f"{_seen_inner!r} — a separator full-match cannot tell a unit boundary from a "
+            "position inside a unit, because a unit's lookahead cannot see past the slice it is "
+            "given (#13921 review, F4)")
     # ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT TOO, AND EACH UNIT KIND GETS ITS OWN WITNESS
     # (#13900 review, verification round, P2, MEASURED). The comment beside `_TAG` / `_BRACKET`
     # says "three holes, each reproduced on the LIVE document" — and before this block NOTHING
