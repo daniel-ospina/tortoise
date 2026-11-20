@@ -3289,10 +3289,15 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # `sdk.py` rows was located by searching its own pinned text in the tree that was
     # about to be committed (`grep -n` the first-line text, and for the arm its own
     # last-line text `continue`; the per-label write was again found by its ONE
-    # occurrence, never by the bare `SET n += $props`). All four moved by **+194** — a
-    # uniform shift is the consistency check on the four measurements, never their
-    # input; a per-address search is what produced each number. The `update_knowledge`
-    # row did NOT move and is unchanged.
+    # occurrence, never by the bare `SET n += $props`). The three rows BELOW
+    # `update_knowledge` moved by **+194** — a uniform shift is the consistency check on
+    # those three measurements, never their input, and it is exactly why the fourth row
+    # (`update_knowledge`, which `#13833` did not move) was NOT given the offset; a
+    # per-address search is what produced each number. The `update_knowledge` row did NOT
+    # move and is unchanged. ⛔ This sentence used to read "All four moved by +194" and
+    # then "the `update_knowledge` row did NOT move", which cannot both hold — the same
+    # lesson the `#13833` note above states, mis-transcribed in the sentence that draws
+    # it (#13899 re-cut review, P2).
     #
     # ⛔ RE-DERIVED AT THE RE-CUT that merged `origin/main` `290912f303` (`#13829`,
     # `#13835`, `#13867`…) INTO this branch, again by the same method and NOT by the
