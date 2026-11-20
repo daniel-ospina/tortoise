@@ -3567,6 +3567,82 @@ def _css_declarations(css: str, selector: str) -> str | None:
     return rules[-1] if rules else None
 
 
+def _css_blanked(css: str) -> str:
+    """`css` with every `/* … */` comment replaced by spaces, SAME length.
+
+    Same length on purpose: an index found in the blanked text is a valid index
+    into the real sheet, so a reader can brace-count structure here and still
+    describe the sheet. Comments matter to every structural reader below — a
+    comment that QUOTES a rule (this page's own notes write `@media (max-width:
+    760px)` and `--prose-measure: min(660px, 74ch)` in prose) is matched as a
+    rule by any `@media…{` or `--x:` scan: measured, the quoted `@media swallowed
+    the hero's base rule into a phantom media span and the quoted `ch` measure
+    read as a declaration (#14020 review P1/P2.4).
+    """
+    return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), css, flags=re.S)
+
+
+def _media_block_spans(css: str) -> list[tuple[int, int]]:
+    """Every `@media (…) { … }` block as a `(start, end)` character span.
+
+    `_max_width_media_blocks` answers "what does each narrow block say"; this
+    answers "is THIS rule inside one", which is the question the hero rows need
+    (#14020 review P2.4): a viewport override is a legitimate re-centring, so
+    only the last BASE rule may be read as the desktop alignment.
+    """
+    blanked = _css_blanked(css)
+    spans: list[tuple[int, int]] = []
+    for m in re.finditer(r"@media[^{]*\{", blanked):
+        inner = _brace_block(blanked, m.end() - 1)
+        spans.append((m.start(), m.end() + len(inner) + 1))
+    return spans
+
+
+def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
+    """Every `selector { … }` body in document order, `(body, inside_media)`.
+
+    Bodies come from the COMMENT-BLANKED sheet (see `_css_blanked`), so a
+    `text-align`/`max-width` named in a comment cannot satisfy an assertion.
+
+    `_css_rules` cannot say whether a body sits inside an `@media` block, and
+    that is exactly the difference between the desktop rule and a narrow-
+    viewport override. `_css_declarations` takes `[-1]`, which is the LAST rule
+    — on `#beat-hero .doc-copy` that is `@media (max-width: 760px)`'s centred
+    override, so a later BASE `text-align: center` appended after it would leave
+    a `[-1]`-based assertion green while the desktop column is centred (#14020
+    review P2.4, measured).
+    """
+    blanked = _css_blanked(css)
+    media = _media_block_spans(css)
+    return [(_brace_block(blanked, m.end() - 1),
+             any(start <= m.start() < end for start, end in media))
+            for m in re.finditer(re.escape(selector) + r"\s*\{", blanked)]
+
+
+def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
+    """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
+
+    `_css_rules` matches the exact selector TEXT, so it cannot see a rule that
+    shares its prelude with other selectors — which is the shape the shared
+    prose measure uses (`#beat-intro p, #beat-compute > p, .outcomes { … }`) and
+    therefore the shape any `.outcomes` override can hide in: `.outcomes
+    { max-width: 660px }` as its own rule is a DIFFERENT string from the shared
+    prelude, and appending it leaves a prelude-exact reader green (#14020
+    review P2.3). Split on commas and read the list. Comments are blanked first
+    (`_css_blanked`), so a commented-out rule is not a declaration.
+    """
+    blanked = _css_blanked(css)
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        parts = {p.strip() for p in prelude.split(",")}
+        if selector in parts:
+            out.append((prelude, _brace_block(blanked, m.end() - 1)))
+    return out
+
+
 def _max_width_media_blocks(html: str) -> list[tuple[int, str]]:
     """Every `@media (max-width: Npx) { ... }` block as `(N, body)`."""
     return [(int(m.group(1)), _brace_block(html, m.end() - 1))
@@ -8478,6 +8554,22 @@ class TestStylesheetChannelIsRead:
         assert _stylesheet_imports("@import url(a.css);") == ["a.css"]
         assert _stylesheet_imports("@import url( 'a.css' ) screen;") == ["a.css"]
 
+    def test_two_imports_on_one_line_are_BOTH_read(self):
+        """The per-match `next(g for g in groups if g)` correction, pinned.
+
+        Every row above passes a SINGLE `@import`, where the old flattened form
+        (`[next(g for groups in found for g in groups if g) for groups in
+        found]`) and the current one are identical — so the correction was
+        unpinned and a revert would be invisible (#14020 review P2.2). On two
+        matches the old form returns `['a.css', 'a.css']`: the SECOND sheet is
+        silently dropped from the price-channel walk that reads these imports,
+        leaving the file green. Measured: revert + this test only.
+        """
+        assert _stylesheet_imports(
+            '@import "a.css"; @import url("b.css");') == ["a.css", "b.css"]
+        assert _stylesheet_imports(
+            '@import "a.css";\n@import url(b.css);') == ["a.css", "b.css"]
+
     def test_a_commented_out_import_is_not_read(self):
         assert _stylesheet_imports('/* @import "a.css"; */') == []
 
@@ -8968,8 +9060,9 @@ class TestPricingSourceIsShared:
 
         So the render is bound to the SOURCE here, not to its twin: the page's
         `fmtPrice` must hand `window.tortoiseFmtPrice` the shared discount, and
-        the numbers it therefore prints are checked against the formatter the
-        source actually defines (`_js_fmt_price`, which EXECUTES it).
+        the pair it therefore prints is held to the Python mirror of the same
+        shared source (`_fmt_price`), never to truthiness — see the loop's own
+        comment (#14020 review P2.1).
         """
         pricing = _extract_pricing_object()
         disc = pricing["display"]["annual_discount_pct"]
@@ -8990,14 +9083,25 @@ class TestPricingSourceIsShared:
                 "quotes different money to every JS visitor while both pages "
                 "stay identical to each other, so no twin comparison can see it "
                 "(#13696 review cycle 2, P1)")
-            # …and the numbers that call produces are the shared source's own.
+            # …and the numbers that call produces are the shared source's own:
+            # the pair EXECUTED from the page's call is held to the Python
+            # mirror of the same source. ⛔ It used to be `assert big and total`,
+            # a TAUTOLOGY: every tier in every mode returns a non-empty pair
+            # (`_js_fmt_price(0, …)` -> (`$0`, `Free forever`)), so the loop could
+            # only fail on EMPTY output and never on DIFFERENT MONEY, while its
+            # docstring claimed the numbers were checked. Measured at #14020
+            # review P2.1: the loop survived any price change in either formatter.
             for tier in ("free", "solo", "pro", "team"):
                 price = pricing["tiers"][tier]["price"]
                 for mode in ("annual", "monthly"):
                     big, total = _js_fmt_price(price, mode, disc)
-                    assert big and total, (
-                        f"the shared formatter produced no pair for {tier} in "
-                        f"{mode} mode (#13696): {big!r}, {total!r}")
+                    mirrored = _fmt_price(price, mode, disc)
+                    assert (big, total) == mirrored, (
+                        f"the shared formatter EXECUTED from {name}'s call and "
+                        f"the Python mirror disagree for {tier} at ${price} "
+                        f"({mode} mode): source={(big, total)!r} "
+                        f"mirror={mirrored!r} — one of them now quotes different "
+                        "money than the other (#14020 review P2.1)")
 
     def test_both_pages_init_to_the_same_billing_mode(self):
         """The render is compared; the statement that SEEDS it was not.
@@ -10136,6 +10240,63 @@ class TestProductTeamsCopy:
             "carry `class=\"lead\"` so the opening line reads as the section's "
             "title rather than as body copy (#13696 item 2)")
 
+    def test_the_lead_resolves_the_shared_measure_in_the_prose_font(self):
+        """The lead's first line may not be WIDER than the prose under it.
+
+        #14020 review P1, measured: `--prose-measure: min(660px, 74ch)` was
+        declared on `#beat-intro` and consumed by `.lead`. A custom property is
+        substituted as a TOKEN STREAM, so its `ch` resolves at the CONSUMER —
+        `.lead`, whose `font-size` was the serif clamp (1.3–1.9rem) — where 74ch
+        is ~710–780px, so `min()` picked the flat 660px while the paragraphs
+        below computed 605.625px (13.6px mono). 54px wider, ~27px left of the
+        prose, every box flex-centred: owner item 3's defect one element up.
+        Headless Chrome at 768x900: `.lead` 660px @ 20.8px vs `p` 605.625px.
+
+        Three things keep it resolved in the PROSE font, and each is asserted
+        separately so a revert names itself: the `<p class="lead">` declares no
+        font-size (the serif lives on its inner `<span>`), it declares no
+        max-width (it INHERITS the shared measure rather than restating it), and
+        no custom property carries a `ch` measure — that is the trap itself.
+        """
+        css = _product_teams_html()
+
+        lead_rules = _css_rules_with_scope(css, "#beat-intro .lead")
+        assert lead_rules, "`#beat-intro .lead` declares no rule"
+        for body, inside_media in lead_rules:
+            where = "inside an @media block" if inside_media else "at top level"
+            assert "font-size" not in body, (
+                "`#beat-intro .lead` declares a `font-size` "
+                f"({where}): {body.strip()!r}. `max-width: min(660px, 74ch)` on "
+                "this <p> resolves `74ch` against THAT size — the serif clamp "
+                "makes it ~710–780px, so `min()` picks the flat 660px while the "
+                "prose below is 605.6px: the intro's first line 54px wider and "
+                "~27px left of it (#14020 review P1). Keep the serif on the "
+                "inner <span>.")
+            assert "max-width" not in body, (
+                "`#beat-intro .lead` declares its own `max-width` "
+                f"({where}): {body.strip()!r}. The lead must INHERIT the shared "
+                "`min(660px, 74ch)` from `#beat-intro p` — a second declaration "
+                "is a second measure, and a `var(--…)` one resolves its `ch` "
+                "at this <p> anyway (#14020 review P1)")
+
+        span_rules = _css_rules(css, "#beat-intro .lead > span")
+        assert span_rules, (
+            "`#beat-intro .lead > span` declares no rule — the lead's serif has "
+            "to live on an inner element, or it lands back on the element whose "
+            "font-size resolves `74ch` (#14020 review P1)")
+        assert any("font-family: var(--serif)" in b for b in span_rules), (
+            "the lead's inner <span> does not take the serif; owner item 2 has "
+            "the opening line read as the section's title, not as body copy")
+
+        ch_property = re.search(r"--[\w-]+\s*:[^;{}]*\bch\b", _css_blanked(css))
+        assert ch_property is None, (
+            f"a custom property carries a `ch` measure: {ch_property.group(0)!r}. "
+            "`ch` in a custom property resolves against whatever element "
+            "CONSUMES the var(), not the one that declares it, so this reads as "
+            "a shared measure and is not one — measured #14020 review P1: "
+            "declared on `#beat-intro`, picked up as the flat 660px at `.lead`. "
+            "Declare the measure on the rule that applies it.")
+
     def test_the_outcomes_grid_is_never_wider_than_the_prose_above_it(self):
         """#13696 item 3: ONE measure, and no flat override in the narrow block.
 
@@ -10166,6 +10327,29 @@ class TestProductTeamsCopy:
                     "width in the band and makes the grid wider than the prose "
                     "it sits under — owner item 3, #13696. Delete the override "
                     "and let the grid inherit the shared measure.")
+        # ⛔ THE MEDIA-ONLY SWEEP ABOVE IS NOT THE INVARIANT, and reading only
+        # `@media (max-width: Npx)` bodies left the BASE block unread: appending
+        # `.outcomes { max-width: 660px; }` at top level restored item 3's
+        # 54.1px overhang at 760px with every assertion above GREEN (#14020
+        # review P2.3, measured). The invariant is the EFFECTIVE measure, so
+        # read every rule whose selector LIST contains `.outcomes` — base and
+        # media alike — and allow exactly one declaration: the shared measure.
+        with_measure = [
+            (prelude, body) for prelude, body in _css_rule_preludes(css, ".outcomes")
+            if "max-width" in body]
+        assert len(with_measure) == 1, (
+            "`.outcomes` gets its measure from "
+            f"{len(with_measure)} rules: "
+            f"{[p for p, _ in with_measure]!r}. Exactly ONE may declare it — a "
+            "second override (base OR media) is owner item 3 again: the grid "
+            "is wider than the prose above it whenever that rule applies "
+            "(#13696, #14020 review P2.3)")
+        prelude, body = with_measure[0]
+        assert "min(660px, 74ch)" in body, (
+            f"the `.outcomes` measure is declared on `{prelude}` as "
+            f"{body.strip()!r}; the grid's ONLY max-width must be the shared "
+            "`min(660px, 74ch)` — a flat value is the 54.1px overhang at 760px "
+            "(#13696)")
 
     def test_the_hero_copy_column_shares_one_left_edge(self):
         """#13696 item 1: `.beat p` centring may not leak into the hero.
@@ -10176,23 +10360,36 @@ class TestProductTeamsCopy:
         it (measured at 1440x900: h1/CTA x=220, links x=291), in three axes.
         """
         css = _product_teams_html()
-        # The BASE rule, not the last: `@media (max-width: 760px)` deliberately
-        # re-centres the stacked hero (`.doc-copy`/`.hero-sub` -> centre), which
-        # is correct on one column. What must never regress is the desktop base.
-        copy_rules = _css_rules(css, "#beat-hero .doc-copy")
-        assert copy_rules, "`#beat-hero .doc-copy` declares no rule"
-        assert "text-align: left" in copy_rules[0], (
-            f"the base `#beat-hero .doc-copy` rule reads {copy_rules[0].strip()!r}; "
-            "it must declare `text-align: left`, or `.beat p`'s centring leaks "
-            "into `.hero-sub` and `.hero-links` — the 71px-off-axis defect of "
-            "#13696 item 1")
-        for selector in ("#beat-hero .hero-sub", "#beat-hero .hero-links"):
-            bodies = _css_rules(css, selector)
-            assert bodies, f"{selector} declares no rule"
-            assert any("text-align: left" in b for b in bodies), (
-                f"{selector} does not pin `text-align: left` in any rule; it is "
-                "a <p>, so it inherits `.beat p`'s centred alignment "
-                "(#13696 item 1)")
+        # The last BASE rule, not the first and not the media blocks:
+        # `@media (max-width: 760px)` deliberately re-centres the stacked hero
+        # (`.doc-copy`/`.hero-sub` -> centre), which is correct on one column.
+        # What must never regress is the EFFECTIVE DESKTOP alignment — so
+        # `copy_rules[0]` (the first rule) is the wrong reader: appending a
+        # later `text-align: center` at top level leaves it green while the
+        # cascade is centred, which IS the 71px-off-axis defect (#14020 review
+        # P2.4, measured).
+        for selector, why in (
+            ("#beat-hero .doc-copy",
+             "it must declare `text-align: left`, or `.beat p`'s centring leaks "
+             "into `.hero-sub` and `.hero-links` — the 71px-off-axis defect of "
+             "#13696 item 1"),
+            ("#beat-hero .hero-sub",
+             "it is a <p>, so it inherits `.beat p`'s centred alignment "
+             "(#13696 item 1)"),
+            ("#beat-hero .hero-links",
+             "it is a <p>, so it inherits `.beat p`'s centred alignment "
+             "(#13696 item 1)"),
+        ):
+            scoped = _css_rules_with_scope(css, selector)
+            assert scoped, f"{selector} declares no rule"
+            base = [body for body, inside_media in scoped if not inside_media]
+            assert base, (
+                f"{selector} declares no BASE rule — every one of its "
+                f"{len(scoped)} rule(s) sits inside an `@media` block")
+            assert "text-align: left" in base[-1], (
+                f"the last base `{selector}` rule reads {base[-1].strip()!r}; "
+                f"{why}. A later top-level rule wins the cascade even when an "
+                "earlier one says `left` (#14020 review P2.4)")
         links = " ".join(_css_rules(css, "#beat-hero .hero-links"))
         assert "display: flex" in links, (
             "`.hero-links` is not a flex row on the copy column's left edge — "

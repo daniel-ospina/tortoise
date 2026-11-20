@@ -411,16 +411,21 @@
        was REMOVED on the owner's instruction (#13696 item 2) — it also
        outdented 32.8px past the text at 390px wide and sat 660px wide over a
        358.8px column. */
-    /* `ch` resolves against the element's OWN font-size, so the shared measure
-       is declared here — on `#beat-intro`, whose font-size is the body mono —
-       and consumed below. A `min(660px, 74ch)` written directly on `.lead`
-       would resolve `74ch` against the serif clamp (1.3–1.9rem), where 74ch is
-       ~782px at Georgia's ~0.51em digit advance: `min()` would then pick the
-       flat 660px while the paragraphs beneath it are 605.9px at 768, leaving
-       the intro's first line ~54px wider than the prose and — every box being
-       flex-centred — starting ~27px left of it. That is owner item 3's defect,
-       one element up. */
-    #beat-intro { --prose-measure: min(660px, 74ch); }
+    /* ⛔ `ch` resolves against the font-size of the element that CONSUMES the
+       length — and a custom property does NOT move that point. `--prose-measure:
+       min(660px, 74ch)` declared on `#beat-intro` (or on any ancestor) is
+       substituted into `.lead` as a TOKEN STREAM, so its `ch` still resolves
+       against `.lead`'s own font: with the serif clamp on `.lead` that is
+       ~710–780px, `min()` picks the flat 660px, and the intro's first line is
+       54px wider than — and, every box being flex-centred, ~27px left of — the
+       605.6px prose beneath it. That IS owner item 3's defect, one element up.
+       (Measured at 768×900 in headless Chrome: `.lead` 660px at 20.8px, the
+       paragraph 605.625px at 13.6px. #14020 review P1.)
+
+       So the measure is declared ONCE, on the paragraphs, and the serif that
+       would break it lives on an inner <span> instead of on `.lead` — see the
+       `.lead` rule below. One measure, one place, no custom property to
+       substitute. */
     #beat-intro p, #beat-compute > p, .outcomes {
       max-width: min(660px, 74ch);
     }
@@ -439,17 +444,19 @@
 
     /* The intro's first line is a LEAD, not body copy: it opens the section and
        reads as its title. It stays a <p> (the copy pins read the intro as three
-       paragraphs) but takes the serif at a heading-adjacent size. */
+       paragraphs) and it takes the shared prose measure from the rule above by
+       INHERITANCE — the <p class="lead"> is not restating it.
+
+       ⛔ The serif lives on an INNER <span>, and that is load-bearing rather
+       than cosmetic. `max-width: min(660px, 74ch)` is resolved against THIS
+       <p>'s font-size; put the serif clamp (1.3–1.9rem) on the <p> and `74ch`
+       becomes ~710–780px, so `min()` picks the flat 660px while the body
+       paragraphs beneath it compute 605.6px — the intro's first line 54px wide
+       of the prose and ~27px left of it (measured, #14020 review P1). Keeping
+       the <p> on the body mono font-size is what makes the shared measure
+       resolve to the SAME number for the lead and for the prose below it.
+       Markup: `<p class="lead"><span>…</span></p>`. */
     #beat-intro .lead {
-      font-family: var(--serif);
-      font-size: clamp(1.3rem, 2.6vw, 1.9rem);
-      font-weight: 400;
-      line-height: 1.35;
-      letter-spacing: -0.005em;
-      color: var(--text);
-      /* The lead's OWN measure, resolved against the body font-size (see
-         `--prose-measure` above) rather than this element's serif size. */
-      max-width: var(--prose-measure);
       /* 36px below the lead against 20px between body paragraphs. Declared as
          `margin-bottom` and left to collapse against the next paragraph's
          `margin-top: 1.25rem` — which is `max(2.25rem, 1.25rem)`, so the 36px
@@ -458,6 +465,14 @@
       /* Same orphan rule as the hero subtitle: at ~768px this breaks into
          611.8 / 129.4 ("dependencies." alone) without it. */
       text-wrap: balance;
+    }
+    #beat-intro .lead > span {
+      font-family: var(--serif);
+      font-size: clamp(1.3rem, 2.6vw, 1.9rem);
+      font-weight: 400;
+      line-height: 1.35;
+      letter-spacing: -0.005em;
+      color: var(--text);
     }
 
     /* ── The ↑/↓ contrast grid — investors.html's `.outcomes` COMPONENT ──
@@ -727,7 +742,7 @@
 
     <!-- ══ 2. Intro ══════════════════════════════════════════════════════ -->
     <section id="beat-intro" class="beat workflow">
-      <p class="lead">Free up time from repetitive explaining, supervision, and managing dependencies.</p>
+      <p class="lead"><span>Free up time from repetitive explaining, supervision, and managing dependencies.</span></p>
       <p>When agents (and people) understand goal cascades, root causes, trade-offs, and dependencies, they autonomously and reliably advance your business.</p>
       <p>Tortoise builds a logical model of your business, product, and code. It connects goals, insights and analytics, decisions, and execution so you, your team, and agents have the whole context, current and logical.</p>
     </section>
