@@ -22,6 +22,7 @@ The three review findings they cover:
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import tempfile
@@ -2909,7 +2910,7 @@ def _revision_shape(node, prefix=""):
 # The committed receipt's revision shape, verbatim. A new disclosure block is a deliberate
 # edit to this table, never a silent addition to the artifact.
 _PINNED_REVISION_SHAPE = {
-    "<root>": ["action", "denominator_not_retroactively_verifiable", "round_10_review", "round_11_key_and_ledger_correction", "round_14_review", "round_7_census_and_gate", "round_7_note_correction", "second_review_round", "third_review_round", "values_a_rerun_on_this_population_would_change", "why"],
+    "<root>": ["action", "denominator_not_retroactively_verifiable", "round_10_review", "round_11_key_and_ledger_correction", "round_14_review", "round_20_review", "round_7_census_and_gate", "round_7_note_correction", "second_review_round", "third_review_round", "values_a_rerun_on_this_population_would_change", "why"],
     "values_a_rerun_on_this_population_would_change": ["sessions_with_gt1_contains_turn", "sessions_with_gt1_entity_linked_turn", "writer.turns_per_session_contains_max_avg"],
     "second_review_round": ["action", "not_in_this_receipt", "provenance_defects_fixed", "why"],
     "second_review_round.not_in_this_receipt": ["every_graph_has_fewer_turns_than_contains", "object_kinds", "pair_count_guard", "per_graph_omitted", "session_created_at_range"],
@@ -2924,6 +2925,8 @@ _PINNED_REVISION_SHAPE = {
     "round_14_review": ["keyed_query_changes", "not_in_this_receipt", "why"],
     "round_14_review.not_in_this_receipt": ["instrument.argv is NOT a reproduction command", "instrument.arms_requested / instrument.arms_not_requested", "queries text for the keys the turn-filter and multiplicity fixes touched"],
     "round_14_review.keyed_query_changes": ["per_session_queries.session_aboutObject_edges", "queries.contains_distinct_pairs", "queries.objects_reaching_gt1_event", "queries.objects_with_gt1_turn", "queries.sessions_with_gt1_aboutObject_edge", "queries.sessions_with_gt1_contains_turn", "queries.sessions_with_gt1_entity_linked_turn", "queries.turns_per_session_contains_max_avg"],
+    "round_20_review": ["fix", "not_in_this_receipt", "why"],
+    "round_20_review.not_in_this_receipt": ["the SDK method name the writer arm calls", "tools/sdk_privatise.py's typed-reference count"],
 }
 
 
@@ -2994,6 +2997,10 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
             "instrument.arms_requested / instrument.arms_not_requested",
             "queries text for the keys the turn-filter and multiplicity fixes touched",
         },
+        "round_20_review": {
+            "the SDK method name the writer arm calls",
+            "tools/sdk_privatise.py's typed-reference count",
+        },
     }
     # ⛔ THE WHOLE SHAPE IS PINNED, and the ROUND SET is DERIVED from it (#13919 round 18,
     # P3-1). Round 17 derived the round set from "top-level dicts that already carry a
@@ -3026,3 +3033,85 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
             f"the recorded one — missing {sorted(want - got)}, unexpected "
             f"{sorted(got - want)}. A disclosure row deleted in silence re-opens the "
             "class this pin exists for.")
+
+
+# ── the writer arm must call names the REAL SDK still answers to ───────────
+#: Every `sdk.<name>(…)` the ``measure_writer`` arm makes, pinned as a SET so a
+#: silent REMOVAL is caught too. `_create_object` mints the WorkItem Object the link
+#: pass resolves, `_capture_session` is the one live capture implementation, and
+#: `_get_proj`/`close` are the graph handle and the teardown.
+_WRITER_ARM_SDK_SEAMS = {"_get_proj", "_create_object", "_capture_session", "close"}
+
+
+def _tortoisesdk_body_names() -> set[str]:
+    """Names the REAL ``class TortoiseSDK`` body defines, read as SOURCE, not imported.
+
+    The import is deliberately avoided: this module's contract is that nothing here opens
+    a DB, a socket or a model, and `tortoise.sdk` refuses to import on a box that carries
+    an ambient hosted-mode ``TORTOISE_API_KEY`` (measured — "could not import the surface
+    declaration"). `class TortoiseSDK:` takes no bases (`tortoise/sdk.py:14023`), so its
+    own body IS its attribute surface; a method inherited from a base would have to widen
+    this pin, which reds loudly rather than silently.
+
+    A RETIRED name (#4282) is not in the body — that is exactly what makes this pin able
+    to fail: the SDK's retirement shim answers `create_object` with an AttributeError
+    pointing at `create_entity`, so "it is mentioned in sdk.py" is not liveness.
+    """
+    tree = ast.parse((_REPO / "tortoise" / "sdk.py").read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK":
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names.add(item.name)
+                elif isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if isinstance(target, ast.Name):
+                            names.add(target.id)
+    assert names, "read no `class TortoiseSDK` body — the pin would be vacuous"
+    return names
+
+
+def _writer_arm_sdk_attributes() -> set[str]:
+    """The `sdk.<name>` attribute NAMES referenced inside ``measure_writer``."""
+    fn = next(
+        node for node in ast.walk(ast.parse(_TOOL.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef) and node.name == "measure_writer")
+    return {
+        node.attr for node in ast.walk(fn)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == "sdk"
+    }
+
+
+def test_r20_the_writer_arm_calls_only_sdk_names_the_real_class_still_defines():
+    """The writer arm called a RETIRED name, and ten fakes hid it.
+
+    ``measure_writer`` minted its fixture Object with ``sdk.create_object(…)``.
+    ``create_object`` was privatised to ``_create_object`` by the #12901 sweep
+    (``tools/sdk_privatise.py`` maps the name 1:1), so at this head the REAL class
+    answers it with ``AttributeError: TortoiseSDK.create_object was retired (#4282)``
+    — the writer arm could not run at all, on the branch whose artifact a reader
+    re-runs with ``--arms …writer``.
+
+    NOTHING CAUGHT IT: every writer-arm test monkeypatches a `_FakeSDK` that defined
+    ``create_object`` itself, so the fakes reproduced the dead name and the suite
+    stayed at 100 passed. That is the false-PASS shape this pin exists for — a fake
+    may shape a RETURN VALUE, but the name it is asked for has to be one the real
+    class still has, and only the real class can say which those are.
+
+    Fails on the pre-fix tool (``create_object`` is not in the class body) and on a
+    silent REMOVAL of any seam (the set is pinned in both directions).
+    """
+    observed = _writer_arm_sdk_attributes()
+    absent = observed - _tortoisesdk_body_names()
+    assert not absent, (
+        f"the writer arm calls {sorted(absent)}, which `class TortoiseSDK` no longer "
+        "defines — the SDK answers with its #4282 retirement shim, so this arm cannot "
+        "run. Rename the call site to the live spelling (the privatisation sweep's "
+        "`tools/sdk_privatise.py --check` names the typed references too).")
+    assert observed == _WRITER_ARM_SDK_SEAMS, (
+        "the writer arm's SDK seams changed. A name it calls that the class does not "
+        "define raises AttributeError at run time and no fake can see it; a name "
+        f"removed changes what the arm writes. new={sorted(observed - _WRITER_ARM_SDK_SEAMS)} "
+        f"gone={sorted(_WRITER_ARM_SDK_SEAMS - observed)}")
