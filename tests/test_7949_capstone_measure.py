@@ -16669,9 +16669,11 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: that clause ever had a reader. What IS new coverage here: the `dedup_reviewed IS NULL`
 #: clause below, the `_D5_TRIPLE_RE` three-anchor sentence (a number swapped onto ANOTHER
 #: anchor's slot, which no per-line row can see), the #13845 quota guard (a number ON D5's
-#: line belonging to a clause about another file), the I7 `nodes_used`/`max_nodes` pair and
-#: the `sdk.py` import's other hit — the last two from #13879. No count is stated here: this
-#: list grows, and a count in a comment is the head-bound figure the rows below forbid.
+#: line belonging to a clause about another file), the I7 `nodes_used`/`max_nodes` pair
+#: (#13879) and the `sdk.py` import's other hit (#13879). Provenance is attached to each
+#: item rather than to a POSITION — "the last two" would silently re-attribute the next
+#: entry appended here. No count is stated either: this list grows, and a count in a
+#: comment is the head-bound figure the rows below forbid.
 _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     (
         "the file's ONLY `dedup_reviewed IS NULL`",
