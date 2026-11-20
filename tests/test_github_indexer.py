@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6348`, `excluded = _terminal_object_statuses()` at `:6014` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:55699-55708`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:55894-55903`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:55699-55708`) — so each poll minted another `-reopened`
+    `sdk.py:55894-55903`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6348`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:55547-55549`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:55742-55744`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3283,12 +3283,27 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # un-supersede arm) and `56148` (the per-label `SET n += $props`). `update_knowledge`
     # re-measured UNCHANGED at `22629-22804`. The `+194` is the consistency check on a
     # measurement, never its input.
-    ("sdk.py", 55547, 55549): (
+    #
+    # ⛔ RE-DERIVED at `bd020ff45b` (#13937 — frozen `main` red, measured on a bare
+    # `main` checkout with no PR diff applied), by the same method and NOT by the
+    # delta: `sdk.py` moved under every row, `+150` above `update_knowledge` and `+195`
+    # below it, so this is TWO regions and a single offset would have re-pinned the
+    # wrong function. Each address was found by searching its own pinned FIRST-line
+    # text (and, for the arm, its own LAST-line text `continue`) at the tree that
+    # carries this row: `55742-55744` (the non-scalar refusal), `55894-55903` (the
+    # un-supersede arm), `56343` (the per-label `SET n += $props`, which occurs once
+    # while bare `SET n += $props` occurs 40×) and `22779-22954` (`update_knowledge`,
+    # its end again located as the function's own last line `return
+    # self._update_entity_any(id, **props)`, whose other occurrence is a different
+    # door's). `if (_np_dead == [_SUPERSEDED_STATUS]` occurs TWICE, so that row is
+    # located by its `continue` terminator and not by its start text. The `+150` /
+    # `+195` pair is the consistency check on a measurement, never its input.
+    ("sdk.py", 55742, 55744): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 55699, 55708): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22629, 22804): (
+    ("sdk.py", 55894, 55903): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22779, 22954): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 56148, 56148): (
+    ("sdk.py", 56343, 56343): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
