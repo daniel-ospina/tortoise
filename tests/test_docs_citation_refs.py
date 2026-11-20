@@ -3232,17 +3232,12 @@ _ARG_TAKING_LONG_FLAGS = frozenset({
     "--group-separator", "--include", "--label", "--max-count", "--regexp",
 })
 
-#: Every long option `grep --help` documents PLUS one of the TWO undocumented aliases grep still
-#: ACCEPTS (`--unix-byte-offsets`; the other, `--fixed-regexp`, is deliberately excluded above),
-#: for ONE purpose: whether a prefix is AMBIGUOUS.
-#: `_resolved_long_option` may only resolve a prefix that names a single option in this whole set,
-#: because that is the rule `getopt_long` applies — `--re` names `--regexp` in the arity set but is
-#: refused by grep as ambiguous against `--recursive` (measured), and certifying it graded a
-#: command grep will not run (#13995, MEASURED). Pinned against `grep --help` by
-#: `test_the_d5_count_reader_knows_every_long_option_grep_documents`, so a grep that adds one
-#: reds there rather than quietly making a new prefix ambiguous.
+#: GNU grep's ONE undocumented alias that this reader ACCEPTS, declared on its own so that the
+#: block below stays a description of the UNION rather than of this one-element allowance —
+#: `_comment_block_above` scopes a prose guard to the comment run above its anchor, so a description
+#: sitting between a constant and its set would be read as that constant's (#14027 review, P3).
 #:
-#: ⛔ THE UNDOCUMENTED ALIAS IS HERE BECAUSE GREP RUNS IT, AND LEAVING IT OUT LOST A REAL COUNT
+#: ⛔ IT IS HERE BECAUSE GREP RUNS IT, AND LEAVING IT OUT LOST A REAL COUNT
 #: (#14027 review round 2, P2 — MEASURED). `grep --help` never mentions `--unix-byte-offsets`, but
 #: grep accepts it — and every prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u`
 #: (`warning: --unix-byte-offsets (-u) is obsolete`), and `grep -c --unix-byte-offsets '^[+-]$'`
@@ -3253,6 +3248,15 @@ _ARG_TAKING_LONG_FLAGS = frozenset({
 #: --fixed-` is ACCEPTED), and it retargets the match semantics rather than the arity.
 _D5_UNDOCUMENTED_LONG_OPTIONS = frozenset({"--unix-byte-offsets"})
 
+#: Every long option `grep --help` documents PLUS `_D5_UNDOCUMENTED_LONG_OPTIONS`, for ONE
+#: purpose: whether a prefix is AMBIGUOUS.
+#: `_resolved_long_option` may only resolve a prefix that names a single option in this whole set,
+#: because that is the rule `getopt_long` applies — `--re` names `--regexp` in the arity set but is
+#: refused by grep as ambiguous against `--recursive` (measured), and certifying it graded a
+#: command grep will not run (#13995, MEASURED). Pinned against `grep --help` by
+#: `test_the_d5_count_reader_knows_every_long_option_grep_documents`, so a grep that adds one
+#: reds there rather than quietly making a new prefix ambiguous — and that cell asserts the union
+#: equals `grep --help` ∪ the declared allowance, so an allowance member the universe lost reds by name.
 _D5_ALL_LONG_OPTIONS = frozenset({
     "--after-context", "--basic-regexp", "--before-context", "--binary", "--binary-files",
     "--byte-offset",
@@ -3801,12 +3805,15 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: `_long_option_is_accepted` declines every alias spelling (`--fixed-regexp`, `--fixed-r`,
 #: `--fixed-re`), so a member here would be UNREACHABLE: this line used to carry one and nothing
 #: witnessed it — dropping it left the suite green, which is the inert-table-member defect
-#: (agent-infra#3442). The residual is that those spellings are UNREAD; it is pinned in
+#: (agent-infra#3442). The residual is that those spellings are UNREAD, and ALL THREE are pinned:
+#: `--fixed-regexp` and `--fixed-r` in
 #: `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX`'s
-#: `alias_spelling` loop, and NOWHERE ELSE — this paragraph used to name the long-spelling cell
-#: as a second witness, and that cell asserts nothing about an alias (measured: `--fixed-regexp`
-#: occurs there only inside grep's own ambiguity message), which is the `_D5_RETIRED_OVERCLAIMS`
-#: defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints `0` on the blank-class probe, so declining
+#: `alias_spelling` loop, and `--fixed-regexp` again as a control in
+#: `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS` — this paragraph used to
+#: call the long-spelling cell a witness, and that cell asserts nothing about an alias (measured:
+#: `--fixed-regexp` occurs there only inside grep's own ambiguity message), which is the
+#: `_D5_RETIRED_OVERCLAIMS` defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints `0` on
+#: the blank-class probe, so declining
 #: the alias can never grade a non-class as this class.
 #: ⛔ THE NEIGHBOURS THAT ARE **NOT** HERE, measured on the same probe: `-i`, `-w`, `-x`, `-E`, `-G`
 #: and `-P` all print `2`, so they leave this class intact; `--null` is `-Z` (a NUL after the FILE
@@ -5276,10 +5283,17 @@ def test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REG
             "and state the residual, or teach the acceptance oracle the spelling "
             "(#13995 final-head review, P2)")
     # …and the residual that DEAD MEMBER left behind, pinned so it is a stated shape rather than
-    # an implied claim of closure: grep ACCEPTS `--fixed-regexp` / `--fixed-r` (measured: both
-    # print `0`, i.e. `-F` semantics, so neither counts this class) and this reader DECLINES them,
-    # because the alias is undocumented in `grep --help`. Fail-closed, and pinned as such.
-    for alias_spelling in ("grep -c --fixed-regexp '^[+-]$'", "grep -c --fixed-r '^[+-]$'"):
+    # an implied claim of closure: grep ACCEPTS `--fixed-regexp` / `--fixed-r` / `--fixed-re`
+    # (measured: all three print `0`, i.e. `-F` semantics, so none counts this class) and this
+    # reader DECLINES them, because the alias is undocumented in `grep --help`. Fail-closed, and
+    # pinned as such — ALL THREE, because the paragraph that describes this residual NAMES three and
+    # a row set of two left `--fixed-re` unpinned while the prose implied it was covered (#14027
+    # review, P3 — MEASURED: `_d5_count_prescriptions` answers `[]` for all three).
+    for alias_spelling in ("grep -c --fixed-regexp '^[+-]$'", "grep -c --fixed-r '^[+-]$'",
+                           "grep -c --fixed-re '^[+-]$'"):
+        # ⛔ `--fixed-re` is NOT decoration: it is the longest prefix that is still an alias and
+        # still unambiguous against `--fixed-strings` alone, so deleting it leaves the paragraph's
+        # three-name claim with two witnesses again.
         assert _d5_count_prescriptions(f"a prescription: `{alias_spelling}`\n") == [], (
             f"{alias_spelling!r} is now READ — grep accepts it as `-F` and it prints `0` on the "
             "blank-class probe, so if the reader sees it, `_retargets_the_matched_text` must "
