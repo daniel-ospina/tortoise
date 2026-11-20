@@ -180,16 +180,25 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
     # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3):
     #   :171  the header trio above — main's site, the one this row was created for;
-    #   :182  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
-    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
+    #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as bare siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :585  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    #   :591  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
     # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
     # addresses for one reader). The count is kept at the measured number rather than deleting a
     # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
     # exists for.
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
+    # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
+    # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
+    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
+    # the fragment the header paragraph quotes for it.
+    (_AUDIT, "`:31365`", _SDK, 31365, 'MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})'),
+    (_AUDIT, "`:31347`", _SDK, 31347, '"MATCH (t:Tag) "'),
+    (_AUDIT, "`:24327`", _SDK, 24327, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
+    (_AUDIT, "`:24671`", _SDK, 24671, 'MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t'),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -357,6 +366,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
+    # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
+    # the §2.5 spellings are the one-token keys `sdk.py:31365` etc. and are a different key.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31365`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31347`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24327`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24671`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -986,7 +1001,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
     # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
     # line are the neighbours that already carry their own bare-token row.
-    assert len(_PINS) == 64
+    assert len(_PINS) == 68
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:

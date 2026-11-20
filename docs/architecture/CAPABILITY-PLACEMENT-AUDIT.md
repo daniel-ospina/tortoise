@@ -176,16 +176,22 @@ absent from this list, so the rule above was sending a reader to the pin, where 
 `sdk.py:22081` (the capture writer) with its read-back `:22204`, and `hosted_api.py:23046` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22858`; and §2.5's `:Tag`
 paragraph, whose **five** reader addresses the `#13879` review re-derived from that row's own quoted
-fragments and which were the last group stated in a paragraph but left OUT of this list —
-`sdk.py` `:31365` (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})`), `sdk.py` `:31347` (the tag list with
-counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `sdk.py` `:24327` (the
-`WHERE t.name IN $names` filter), `mcp_server.py` `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`)
-and `sdk.py` `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). They are
-spelled here as BARE siblings, not as one-token `path.py:NNNN` pairs, for the reason the row beside
-them already gives: each address is quoted once, in §2.5, so re-spelling it here as a pair would move
-the drift denominator the figures above are computed from. For the four `sdk.py` addresses there is a
-pin to red as well — `_REDEFINED_13854` pins each of them by content at exactly one occurrence (the
-`mcp_server.py` sibling has no row in that pin). Each was opened at this head, and ⛔ **none of them
+fragments — the group this list carried only as the number it then gave for the `mcp_server.py`
+member — `sdk.py`: `:31365`
+(`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})`), `:31347` (the tag list with
+counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24327` (the
+`WHERE t.name IN $names` filter) and `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the
+orphan GC), and `mcp_server.py`: `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`). The four
+`sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
+does, and NOT as new `path.py:NNNN` pairs (in either spelling the header counts): §2.5 already spells
+each of the five as a ONE-TOKEN pair, so a second spelling adds no pair at all — the unique
+`(resolved path, start line)` pairs the denominator counts stay 223, and the drift ratio cannot move
+either way. What a pair spelling does add is FIVE as-written spellings and five collisions (the `328` and
+`105` in the counts above), and in the two-code-span form five to the population the header reports
+separately as three pairs (`227` / `130`). A bare sibling adds to neither. The pin agrees:
+`_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
+§2.5 token, so a second one-token spelling would red it. Each was
+opened at this head, and ⛔ **none of them
 opens at the pin**: at `ccb49741b2ec` all five of those numbers
 read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31365p;31347p;24327p;24671p'`,
 and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
