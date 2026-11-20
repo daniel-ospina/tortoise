@@ -2796,7 +2796,9 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: false property RE-WORDED. Measured on the merged document: replacing "whose first non-space
 #: character **after that marker** is `#`" with "whose first non-space character is `#`"
 #: matched no row and left the suite green (466 passed). `_FALSE_FILTER_PROPERTY_RE` grades the
-#: SHAPE instead, so the property cannot come back in different words.
+#: SHAPE in the spellings the pattern below covers. It does NOT close the class: the declared
+#: escapes at the pattern are real, and the sentence that used to sit here ("the property cannot
+#: come back in different words") was itself the over-claim round 19 reded.
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
     "drops exactly the lines whose first non-space character is `#`",
@@ -2819,11 +2821,11 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: defect: a permissive heuristic over prose is a FALSE PASS by this file's own policy, and no
 #: bounded regex closes a semantic class. So the mechanisms are three, and each is named:
 #:   · THIS shape ban — the property in the vocabulary this document actually uses;
-#:   · THE ROW LEDGER below — every spelling a review MEASURED, banned verbatim and pinned whole;
+#:   · THE ROW LEDGER above — every spelling a review MEASURED, banned verbatim and pinned whole;
 #:   · REVIEW — new prose is judged, not grepped.
 #: Add a measured spelling as a ROW. Never widen this arm's claim to "the property cannot come
-#: back in different words": it cannot, and saying it can is the over-claim #13853 round 17/18/19
-#: each reded in turn.
+#: back in different words": a bounded token test does not close a semantic class, and saying it
+#: does is the over-claim #13853 round 17/18/19/20 each reded in turn.
 #:
 #: ⛔ THE FALSE-RED DIRECTION IS ACCEPTED AND STATED: a TRUE sentence that does not use the word
 #: `marker` ("after the `+`/`-` prefix") reds; reword it to name the marker. A false PASS on prose
@@ -2839,7 +2841,11 @@ _FILTER_PIPELINE_RE = re.compile(r"grep -E '([^']+)' \\?\| grep -vE '([^']+)'")
 
 
 def _false_filter_property_restatements(doc: str) -> list[str]:
-    """Every re-wording of the false property still spelled in `doc` (#13853 review round 17)."""
+    """Every restatement of the false property that THIS ARM'S PATTERN matches, still in `doc`.
+
+    ⛔ Not "every re-wording" — the pattern is a bounded token test and the declared escapes at the
+    pattern are restatements it does not match (#13853 review round 19/20).
+    """
     return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(doc)]
 
 
@@ -2950,6 +2956,19 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         assert _false_filter_property_restatements(escape) == [], (
             f"the arm now catches {escape!r} — good, but then the DECLARED-ESCAPE list above "
             "is stale and must say so (#13853 review round 19)")
+    # ⛔ AND THE WINDOW IS A CONTROL TOO, not just a number in the pattern: round 20 measured that
+    # narrowing `{0,400}` back to `{0,200}` left every other control green, so the 200-char escape
+    # round 19 fixed could have been re-opened silently. This probe puts ~210 chars between the
+    # noun and the copula; it must still be caught.
+    wide_gap = "… whose first non-space character" + " and more words here" * 12 + " is `#` …"
+    assert 200 < wide_gap.index(" is `#`") < 400, (
+        f"the wide-gap probe stopped separating the 400-char window from the 200-char one "
+        f"({wide_gap.index(' is `#`')} chars) — it would no longer catch a narrowing "
+        "(#13853 review round 20, P2)")
+    assert len(_false_filter_property_restatements(wide_gap)) == 1, (
+        "the shape ban's 400-character window is not in effect: a false property stated with a "
+        "~210-character gap between the noun and the copula passes, which is the escape round 19 "
+        "fixed and round 20 measured as unpinned (#13853 review round 20, P2)")
     # ...and the QUALIFIER keeps an honest sentence legal, which is the other half round 18
     # measured as a false red: naming the marker in any wording exempts the sentence.
     for exempt in ("… whose first non-space character **after that marker** is `#` …",
