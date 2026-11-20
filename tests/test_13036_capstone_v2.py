@@ -765,6 +765,46 @@ class TestSearchReturnsSeededClaim:
         assert isinstance(out, list) and out, out
         assert s["claim"] in _ids(out), out
 
+    def test_query_text_arm_returns_the_seeded_claim(self, seeded):
+        """`text=` routes through ``tortoise_fts_query`` — a DIFFERENT accessor
+        from the structural arm (``sdk.paginated_query``) the case above drives,
+        so the two are different queries behind one name and neither proves the
+        other. Undriven until the r5 review, which had the structural case as
+        the only `tortoise_query` arm in the file."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_query", {"text": "capstone"})
+        assert status == 200
+        assert isinstance(out, list) and out, out
+        assert s["claim"] in _ids(out), out
+
+    @pytest.mark.parametrize("argument,value", [
+        ("min_confidence", 0.5),
+        ("order_by", "confidence"),
+    ])
+    def test_query_REFUSES_a_structural_arm_argument_it_cannot_apply(
+            self, seeded, argument, value):
+        """#12500: ``paginated_query`` — the accessor both structural arms read
+        through — takes neither a confidence floor nor an ordering, so the arm
+        REFUSES them instead of dropping them. Before #12500 the value was
+        accepted and discarded and the UNFILTERED population was served as if
+        it had applied: a wrong answer that looked like a right one.
+
+        Asserting the refusal NAMES the knob and the arm that can apply it is
+        what distinguishes this from the dropped-value behaviour — a payload
+        carrying `results` means the argument was silently ignored."""
+        door, _s, _ = seeded
+        status, out = door.call("tortoise_query",
+                                {"kind": "statement", argument: value})
+        assert status == 200
+        assert isinstance(out, dict), out
+        error = str(out.get("error") or "")
+        assert argument in error, out
+        assert "structural arm" in error, out
+        assert "text=" in error, (
+            f"the refusal must name the arm that CAN apply it: {out}")
+        assert "results" not in out, (
+            f"the refused argument was dropped and the read served anyway: {out}")
+
     def test_suggest_entry_points_returns_the_seeded_claim(self, seeded):
         door, s, _ = seeded
         status, out = door.call("tortoise_suggest_entry_points",
@@ -910,6 +950,59 @@ class TestWritesAreReadableBack:
         assert out.get("id") == s["claim2"], out
         assert out.get("corrected_by") == new_id, out
 
+    def test_supersede_object_arm_reports_the_family_supersede(self, seeded):
+        """`old_id` dispatches on the OLD node's label (`mcp_server.py:6111`):
+        a Point gets the CORRECTS arm, an Object/Subject gets the FAMILY arm,
+        whose payload is a different one
+        (``{superseded, id, label, superseded_by, superseded_at}``). The Point
+        case above never touches it, so the family arm was unasserted.
+
+        The successor is created over the wire, and the write is read back —
+        the payload alone would pass on a supersede that reported the
+        transition without applying it."""
+        door, s, _ = seeded
+        made = door.call("tortoise_create_entity",
+                         {"type": "object", "name": "Widget v2"})[1]
+        successor = (made.get("node") or made)["id"]
+        status, out = door.call("tortoise_supersede_knowledge",
+                                {"old_id": s["object"], "new_id": successor})
+        assert status == 200
+        assert out.get("superseded") is True, out
+        assert out.get("id") == s["object"], out
+        assert out.get("label") == "Object", out
+        assert out.get("superseded_by") == "Widget v2", out
+        assert out.get("superseded_at"), out
+        assert "invalidated" not in out, (
+            f"the POINT arm answered an Object supersede: {out}")
+        status, got = door.call("tortoise_get_entity",
+                                {"id": s["object"], "type": "entity"})
+        assert got.get("status") == "superseded", got
+        assert got.get("supersededBy") == "Widget v2", got
+
+    def test_supersede_dry_run_previews_the_family_arm_and_writes_nothing(
+            self, seeded):
+        """`dry_run=True` previews the SAME arm: it must name which arm it would
+        run and change nothing. A preview that answered generically (or that
+        applied the write) would pass a status-only check and fail a person
+        reading it before deciding."""
+        door, s, _ = seeded
+        made = door.call("tortoise_create_entity",
+                         {"type": "object", "name": "Gadget v2"})[1]
+        successor = (made.get("node") or made)["id"]
+        status, out = door.call("tortoise_supersede_knowledge",
+                                {"old_id": s["object"], "new_id": successor,
+                                 "dry_run": True})
+        assert status == 200
+        assert out.get("dry_run") is True, out
+        assert out.get("found") is True, out
+        assert "family supersede" in str(out.get("would") or ""), out
+        assert (out.get("target") or {}).get("superseded_by") == "Gadget v2", out
+        assert "No changes were made" in str(out.get("note") or ""), out
+        status, got = door.call("tortoise_get_entity",
+                                {"id": s["object"], "type": "entity"})
+        assert got.get("status") != "superseded", (
+            f"a dry-run supersede mutated the node: {got}")
+
     def test_delete_dry_run_previews_the_seeded_node(self, seeded):
         """`dry_run` must not delete — the payload names what WOULD go, and a
         confirmation token proves the preview was computed against the node."""
@@ -925,6 +1018,68 @@ class TestWritesAreReadableBack:
         status, got = door.call("tortoise_get_entity",
                                 {"id": s["claim"], "type": "point"})
         assert got.get("id") == s["claim"], got
+
+    def test_delete_confirm_arm_deletes_the_node_and_the_read_agrees(self, seeded):
+        """The CONFIRMED half of the one destructive write on the surface — the
+        only arm this file drove was `dry_run`, the one that changes nothing
+        (``mcp_server.py:7037-7041``). Two behaviours V2 owns live only there:
+        `_deletion.verify` must accept the token the PREVIEW issued, and
+        `deleted` is computed from ``bool(result)``, so a falsy-but-correct
+        delete reports ``deleted: False`` — the destructive write claiming it
+        changed nothing while the row is gone.
+
+        A throwaway node, so the seed every other arm reads stays intact."""
+        door, _s, _ = seeded
+        made = door.call("tortoise_create_entity",
+                         {"type": "point", "name": "Doomed capstone claim."})[1]
+        doomed = (made.get("node") or made)["id"]
+        status, preview = door.call("tortoise_delete",
+                                    {"id": doomed, "dry_run": True})
+        assert status == 200
+        assert preview.get("found") is True, preview
+        token = preview.get("confirmation")
+        assert token, preview
+        status, out = door.call("tortoise_delete",
+                                {"id": doomed, "confirmation": token})
+        assert status == 200
+        assert out.get("deleted") is True, out
+        assert out.get("id") == doomed, out
+        status, got = door.call("tortoise_get_entity",
+                                {"id": doomed, "type": "point"})
+        assert not (isinstance(got, dict) and got.get("id") == doomed), (
+            f"the node the delete reported as deleted is still readable: {got}")
+
+    def test_delete_refuses_a_token_issued_for_a_DIFFERENT_node(self, seeded):
+        """``deletion.py:159`` binds the token to ONE target — the module's own
+        contract is "it never falls through to a delete". Driven end to end
+        because that binding is the whole point of the two-call protocol
+        (#9660): a token minted for one claim must not destroy another."""
+        door, s, _ = seeded
+        _status, preview = door.call("tortoise_delete",
+                                     {"id": s["claim"], "dry_run": True})
+        token = preview["confirmation"]
+        status, out = door.call("tortoise_delete",
+                                {"id": s["claim2"], "confirmation": token})
+        assert status == 200
+        assert "different item" in str(out.get("_text") or out), out
+        status, still = door.call("tortoise_get_entity",
+                                  {"id": s["claim2"], "type": "point"})
+        assert still.get("id") == s["claim2"], still
+
+    def test_delete_refuses_a_bogus_token_and_destroys_nothing(self, seeded):
+        """A malformed token is a REFUSAL, not a delete — asserted on the node,
+        not on the error text alone: a handler that raised after deleting would
+        pass a message-only check."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_delete",
+                                {"id": s["claim"],
+                                 "confirmation": "not-a-token"})
+        assert status == 200
+        assert "not a deletion confirmation token" in str(
+            out.get("_text") or out), out
+        status, still = door.call("tortoise_get_entity",
+                                  {"id": s["claim"], "type": "point"})
+        assert still.get("id") == s["claim"], still
 
     def test_diary_write_arm_round_trips_through_diary_read(self, seeded):
         """The 6th `create_entity` arm (`type='diary'`) — the absorbed
@@ -1414,6 +1569,77 @@ class TestConfidenceArms:
         assert isinstance(posterior, dict), posterior
         assert 0.0 <= float(posterior["mean"]) <= 1.0, posterior
         assert float(posterior["variance"]) >= 0.0, posterior
+
+    def test_recall_arm_answers_the_seeded_claim_in_state_mode(self, seeded):
+        """`recall=True` is the arm the retired ``tortoise_recall`` door retires
+        INTO — the container names it in its own dispatch set
+        (``mcp_server.py:8220``) and dispatches it at ``:8358``. It was the ONE
+        documented arm this file drove nothing for, so the tool still read as
+        covered while all four recall intents (``state | gaps | subgraph |
+        custom``) carried no payload assertion anywhere.
+
+        It is reachable over the tenant door: ``tortoise_recall`` carries no
+        ``_transport_mode`` guard and no ``_http_excluded_error()``, so this is
+        a measured gap in the row, not an environmental one.
+
+        Anchored on the seeded CLAIM and on the `mode` the arm ECHOES, so a
+        dispatch that fell through to the calibration view (or clamped to
+        ``gaps``) cannot pass by returning a well-formed payload of another
+        arm."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_check_confidence",
+                                {"recall": True, "mode": "state",
+                                 "query": "capstone"})
+        assert status == 200
+        assert isinstance(out, dict), out
+        assert out.get("mode") == "state", out
+        rows = out.get("results")
+        assert isinstance(rows, list) and rows, out
+        by_id = {r.get("id"): r for r in rows if isinstance(r, dict)}
+        assert s["claim"] in by_id, (
+            "the state read must serve the seeded claim it matched by name — "
+            f"got ids {sorted(str(k) for k in by_id)}")
+        assert "capstone V2 lane" in (by_id[s["claim"]].get("content") or ""), \
+            by_id[s["claim"]]
+
+    def test_recall_arm_answers_the_subgraph_mode_shape(self, seeded):
+        """``mode="subgraph"`` returns ``{nodes, edges, stats}`` — a DIFFERENT
+        shape from the state/gaps/custom family, which is what makes it the
+        mode that proves the arm CARRIES the caller's ``mode=`` instead of
+        serving the default. The walk is anchored on the seeded IMPL: the
+        source claim is the seed and the operator's target must be reachable."""
+        door, s, _ = seeded
+        status, out = door.call("tortoise_check_confidence",
+                                {"recall": True, "mode": "subgraph",
+                                 "seed": s["claim"]})
+        assert status == 200
+        assert isinstance(out, dict), out
+        assert out.get("mode") == "subgraph", out
+        assert "results" not in out, (
+            f"the subgraph mode answered the state shape: {out}")
+        node_ids = {n.get("id") for n in out.get("nodes") or []
+                    if isinstance(n, dict)}
+        assert s["claim"] in node_ids, out
+        assert s["claim2"] in node_ids, (
+            "the walk must reach the operator's target through the seeded "
+            f"IMPL: {out}")
+        assert out.get("edges"), out
+        assert isinstance(out.get("stats"), dict), out
+
+    def test_recall_arm_refuses_an_unknown_mode_naming_the_served_set(self, seeded):
+        """The arm's own mode contract: an unknown mode is REFUSED and the
+        refusal names the four it serves. An arm that answered the default for
+        any mode string would pass a refusal-free check and hide a caller's
+        typo."""
+        door, _s, _ = seeded
+        status, out = door.call("tortoise_check_confidence",
+                                {"recall": True, "mode": "bogus"})
+        assert status == 200
+        assert isinstance(out, dict), out
+        assert out.get("mode") == "bogus", out
+        error = str(out.get("error") or "")
+        assert "not recognized" in error, out
+        assert "state|gaps|subgraph|custom" in error, out
 
     def test_calibrate_arm_answers_the_calibration_view(self, seeded):
         door, s, _ = seeded
