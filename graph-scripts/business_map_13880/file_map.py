@@ -323,7 +323,22 @@ class Mcp:
                 continue
             if not payload:
                 raise RuntimeError(f"{tool}: empty response (HTTP {code})")
-            return payload.get("result", payload)
+            result = payload.get("result", payload)
+            # ⛔ A TOOL THAT FAILED IS NOT A SUCCESSFUL CALL. MCP reports a
+            # handler failure as `result.isError: true` with the reason in
+            # `content[]` — the JSON-RPC envelope is still a `result`, so
+            # reading `payload["error"]` alone reports a refused write as done.
+            # That is the false-PASS this filer exists downstream of: the first
+            # run of this map against a degraded API "wrote" all 78 nodes by
+            # falling back to each item's own name as its id, and only the
+            # Falkor read-back (`--verify`: 0 nodes) showed nothing existed.
+            if result.get("isError"):
+                msg = _text(result) or "no reason given"
+                if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 5:
+                    time.sleep(min(120, 10 * (attempt + 1)))
+                    continue
+                raise RuntimeError(f"{tool} FAILED: {msg[:400]}")
+            return result
         raise RuntimeError(f"{tool}: gave up after 6 attempts")
 
 
@@ -396,13 +411,28 @@ def write_map(doc: dict) -> int:
             st["written"].append(marker)
         save_state(st)
 
+    def _resolve(self, item_ref: str, name: str, res: dict, what: str) -> str:
+        """The id the write returned — or a refusal, never a plausible stand-in.
+
+        A name is not an id: binding an edge endpoint to a name writes an edge
+        between nodes that do not exist (or none at all), which reads as filed
+        and is not. So a missing id stops the run and says which item.
+        """
+        got = _id_of(res)
+        if not got:
+            raise RuntimeError(
+                f"{what} {item_ref!r} ({name[:40]!r}) returned no id — "
+                f"response: {json.dumps(_json_of(res))[:300]}"
+            )
+        return got
+
     # 1. Subjects — the actors.
     for s in doc["subjects"]:
         if already(f"subject:{s['ref']}") and s["ref"] in ids:
             continue
         res = mcp.call("tortoise_create_subject",
                        {"name": s["name"], "subjectKind": s["subjectKind"]})
-        ids[s["ref"]] = _id_of(res) or s["name"]
+        ids[s["ref"]] = _resolve(s["ref"], s["name"], res, "subject")
         mark(f"subject:{s['ref']}")
         print(f"  subject  {s['name']:<34} -> {ids[s['ref']]}")
 
@@ -416,7 +446,7 @@ def write_map(doc: dict) -> int:
         if o.get("goalState"):
             args["goalState"] = o["goalState"]
         res = mcp.call("tortoise_create_object", args)
-        ids[o["ref"]] = _id_of(res) or o["name"]
+        ids[o["ref"]] = _resolve(o["ref"], o["name"], res, "object")
         mark(f"object:{o['ref']}")
         print(f"  object   {o['name'][:44]:<44} -> {ids[o['ref']]}")
 
@@ -428,7 +458,7 @@ def write_map(doc: dict) -> int:
         if s.get("documentKind"):
             args["documentKind"] = s["documentKind"]
         res = mcp.call("tortoise_create_source", args)
-        ids[s["ref"]] = _id_of(res) or s["url"]
+        ids[s["ref"]] = _resolve(s["ref"], s["url"], res, "source")
         mark(f"source:{s['ref']}")
         print(f"  source   {s['url'][:60]:<60} -> {ids[s['ref']]}")
 
@@ -440,7 +470,7 @@ def write_map(doc: dict) -> int:
         if e.get("startedAt"):
             args["startedAt"] = e["startedAt"]
         res = mcp.call("tortoise_create_event", args)
-        ids[e["ref"]] = _id_of(res) or e["content"][:40]
+        ids[e["ref"]] = _resolve(e["ref"], e["content"], res, "event")
         mark(f"event:{e['ref']}")
         print(f"  event    {e['ref']:<34} -> {ids[e['ref']]}")
 
@@ -453,7 +483,7 @@ def write_map(doc: dict) -> int:
         if src:
             args["source_url"] = doc_by_ref(doc, src)["url"]
         res = mcp.call("tortoise_create_point", args)
-        ids[p["ref"]] = _id_of(res) or p["content"][:40]
+        ids[p["ref"]] = _resolve(p["ref"], p["content"], res, "point")
         mark(f"point:{p['ref']}")
         print(f"  point    {p['ref']:<34} -> {ids[p['ref']]}")
 
