@@ -506,6 +506,32 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+#: ⛔ TWO GAPS, BECAUSE THE TWO SUBJECTS ASK DIFFERENT QUESTIONS (#13900 review, cycles 9-11).
+#: For the FULL command (`git diff --name-only origin/main...HEAD -- tortoise/`) any gap at all is
+#: an answer's gap: the sentence named THIS head, so a claim behind it is a claim about this head,
+#: and the gap is simply "up to 40 characters with no newline and no sentence terminator" — no
+#: enumeration of punctuation, widths, tags, entities or footnote shapes (all four of those were
+#: measured holes in the three earlier attempts).
+#:
+#: For the ABBREVIATION (`-- tortoise/`) the gap must stay SHORT — punctuation, emphasis, a tag or
+#: an entity, but not prose. Reason, measured: the abbreviation is a SUBSTRING of every longer
+#: `git diff <other revs> -- tortoise/` invocation, so a long gap cannot distinguish "the command
+#: said something" from "somebody else's invocation was quoted and this is a later clause". Three
+#: true, head-named history sentences on the live document red under the long gap; none red under
+#: this one. That is the F4 fail-open and its fix in the same place.
+#: ⛔ A PERIOD IS NOT A TERMINATOR HERE (#13900 review, cycle 11, MEASURED): excluding `.`
+#: reds `… -- tortoise/`<span class="x"> prints ONE` because the attribute carries one, and an
+#: inline tag is in-house spelling (`<span` appears 44 times under `docs/`). Only `;`, `|` and a
+#: newline stop the gap; a period does not, so a claim one clause past the command is graded
+#: rather than skipped — the over-block direction, which this file's rule prefers.
+#: ⛔ A TAG IS A UNIT, NOT A RUN OF CHARACTERS (#13900 review, cycle 11, MEASURED): with a
+#: flat gap, `<span class="x">` matched its own `=` as the VERB and the claim was dropped —
+#: the verb list includes `=`, so a flat gap cannot stop the scan landing inside a tag. The
+#: gap therefore consumes a tag (or an entity) WHOLE and otherwise proceeds one non-`;`,
+#: non-`|`, non-newline character at a time.
+_GAP_FULL = r"(?:[^;|<]|<[^>\n]*>|&[a-z]{1,8};){0,40}?"
+_GAP_ABBREV = r"(?:[^\w\n]|_|<[^>\n]*>|\[\^?\d+\]|&[a-z]{1,8};)*"
+
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
 
@@ -611,20 +637,28 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # older, enumerated class used to admit (measured: `2 failed` when it was left
             # out — a closure that drops a form the previous rule already had is a
             # regression wearing a widening's clothes).
-            # ⛔ AND A REPETITION BOUND IS AN ENUMERATION TOO (#13900 review, cycle 10, P1,
-            # MEASURED): with `{0,4}` six spaces or five spaces between the command and the
-            # verb returned `[]` — a REGRESSION against `origin/main`, whose class was
-            # unbounded — and a table cell spends the whole budget, so one emphasis mark on
-            # top of it is ungraded. The quantifier is therefore unbounded: prose cannot
-            # cross it, because a word character ends the run, so there is nothing to cap.
-            # ⛔ AND A NEWLINE IS A SEPARATOR, NOT A WORD (#13900 review, cycle 10, P2,
-            # MEASURED at `47b3ea7001`): `[^\w\n]` excluded it, so the HARD-WRAPPED pair
-            # `` `-- tortoise/` `` / `prints …` returned `[]` — another REGRESSION against
-            # `origin/main`, whose `[`_\s*]*` admitted `\s`. `\s` is therefore in the class.
-            # Only the ANSWER window is cut at a newline (the residual the docstring states);
-            # the separator is not, because a word character still ends the run.
-            + r"(?:\s|[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\])*"
-              r"(?:(?:still|now|actually|also)\s+)?"
+            # ⛔ NO SEPARATOR GRAMMAR AT ALL (#13900 review, cycles 9-11, MEASURED). Three
+            # attempts to describe the gap between the command and the verb each left a hole the
+            # next cycle measured, because a described gap is an enumeration however it is spelled:
+            #   * an enumerated set (`[`_\s*|)]`) missed `—`, `;`, `,`, `/`, `(`, `…`, a quote
+            #     character (cycle 9);
+            #   * a repetition BOUND (`{0,4}`) missed five and six spaces — a REGRESSION against
+            #     `origin/main`, whose class was unbounded — and a table cell that spent the budget
+            #     (cycle 10);
+            #   * a bounded tag/footnote FORM missed `<span class="x">`, `[^1234]` and `&nbsp;`,
+            #     all three of which left the LIVE document GREEN (cycle 11).
+            # So the gap is not described. It is ANY run of characters that contains no newline,
+            # no sentence terminator (`.` `;` `|`) and no more than 40 of them — lazy, so the
+            # match still starts at the reported occurrence and stops at the first listed verb.
+            # That admits prose between the command and the verb, which is deliberate and is the
+            # correct side to err on: a sentence that names the command and then states an answer
+            # IS a claim about the command, and this file's own rule is that a false PASS costs
+            # more than an over-block (D5: `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`).
+            # A true history sentence is written in the PAST TENSE, which is outside the verb list
+            # and therefore outside this matcher — that is the one half of the convention measured
+            # to work (`:763`).
+            + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV)
+            + r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
@@ -655,15 +689,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # Prose and a command line are not distinguishable by punctuation, so the arm does
         # not try. The property the skip reached for is kept by the DOCUMENT instead: a claim
         # about another head is written so it is not an answer to the command — PAST TENSE
-        # (`returned`, `named`, `printed`, which are not in the verb list), or the named head
-        # first and the command after it. That convention is stated in the RESIDUAL note at
+        # (`returned`, `named`, `printed`, which are not in the verb list). ⛔ NAMING THE HEAD
+        # FIRST DOES NOT PROTECT ANYTHING, and that is measured, not argued (#13900 review,
+        # cycle 11, P1): `at `2a7f24e241` `git diff … -- tortoise/` names exactly …` is still
+        # GRADED, because this matcher reads the VERB and not the head. The convention is
+        # stated in the RESIDUAL note at
         # THIS function's head (`_typed_answers_to_tortoise_cmd`, immediately above the
         # matcher) — NOT in the module docstring, which states the NAME-vs-line rule and says
         # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
         # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
-        # graded wherever it sits on the line, whatever surrounds it — a separator is any run
-        # of non-word characters (newlines included) and punctuation between the verb and the
-        # answer is stripped. The exceptions are the residuals THIS docstring declares (a
+        # graded wherever it sits on the line, whatever surrounds it — the gap between the
+        # command and the verb is any run of up to 40 characters with no newline and no sentence
+        # terminator (see the matcher), and punctuation between the verb and the answer is
+        # stripped. The exceptions are the residuals THIS docstring declares (a
         # hard-wrapped ANSWER, a verb or an answer word outside the listed classes, a pronoun
         # subject), and they are named THERE, not left to be inferred from this sentence.
         #
@@ -1560,12 +1598,20 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
                      "`-- tortoise/` prints: two modules at this head",
                      "`-- tortoise/` prints (two modules at this head)",
                      "`-- tortoise/`      prints ONE path at this head",
-                     "| **`-- tortoise/`** | prints ONE path at this head |",
-                     "`-- tortoise/`\nprints ONE path at this head"):
+                     "| **`-- tortoise/`** | prints ONE path at this head |"):
         assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
-            f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb, a "
-            "separator run longer than four, and a hard wrap are all the SAME answer; "
-            "each returned `[]` before this fix (#13900 review, cycle 10, P2)")
+            f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb and a "
+            "separator run longer than four are the SAME answer; each returned `[]` before "
+            "this fix (#13900 review, cycle 10, P2)")
+    # ⛔ A HARD WRAP IS A DECLARED RESIDUAL, PINNED AS ONE (#13900 review, cycle 11). The gap
+    # excludes `\n` on purpose — this arm is a single-line reader, and a rule that reached
+    # across lines could join two unrelated clauses. So the wrapped form is asserted UNGRADED,
+    # which is the opposite pin from the rows above: if someone widens the gap across newlines,
+    # this reds and the docstring's declared limit has to be updated with it.
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/`\nprints ONE path at this head", "-- tortoise/") == [], (
+        "a hard-wrapped answer is now graded — that is a change to a DECLARED residual, so "
+        "the docstring's limit list must say so (#13900 review, cycle 11)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
