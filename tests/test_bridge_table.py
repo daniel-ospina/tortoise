@@ -2652,17 +2652,22 @@ def _disable_the_round_3_guards(monkeypatch) -> None:
 def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """Shape 1 — a wrap whose continuation is ITSELF a row RE-REGISTERED as row 21.
+    """Shape 1 — a wrap whose continuation is ITSELF a row RE-REGISTERED as the same row.
 
-    `…annotate_operator, |` ⏎ `| 21 | `adjust_relationship` | mitigate_operator |` ⏎ `| 22 | …`
+    `…assess_source, get_source_reliability, |` ⏎ `| 14 | `manage_source_trust` | assess_source,
+    get_source_reliability |` ⏎ `| 15 | …` — the shape is what this pins, not the row number:
+    #12901's final batch moved the fixture off row 21, and the rule it exercises is unchanged.
 
     Both lines are legal table rows and both are legal table syntax, so the body test had
     nothing to say: the row loop matched the continuation, and `menu[name] = {…}` is an
     unconditional assign keyed by NAME, so the one-member remainder silently REPLACED the
     complete row. Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
-    `row_errors == []`, `tortoise_annotate_operator` rendered "*(no approved row names it)*"
+    `row_errors == []`, the truncated row's own tool rendered "*(no approved row names it)*"
     / **refuted**, and the section count moved 5/7/0 → 4/7/1. Nothing bounded duplicates —
     the count guard checks only for MISSING row numbers (#8930 review, round 3, P1).
+    ⛔ The MEASURED example above was taken on row 21 (`tortoise_annotate_operator`); the
+    fixture is row 14 since #12901's final batch, because row 21's third member was
+    privatised and a truncation there no longer changes the artifact (#13899 review, P2).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2799,9 +2804,10 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
 ) -> None:
     """Shape 3 — the same NAME on a different number, which no number bound can see.
 
-    `menu` is keyed by name, so this is the overwrite from the other side: row 21's cell is
-    replaced by the new row's and `annotate_operator` / `mitigate_operator` lose their
-    approved home. Renumbering hides it from the missing-number check too, so before the fix
+    `menu` is keyed by name, so this is the overwrite from the other side: the tracked row's
+    cell is replaced by the new row's and its later members lose their approved home. (Row 21
+    before #12901's final batch; row 14 since — its third member, `set_source_tier`, is what
+    the asserts below can no longer find. The rule is the same either way.) Renumbering hides it from the missing-number check too, so before the fix
     the ONLY thing that fired was the anonymous row count ("only 22 approved rows parsed") —
     a diagnostic that names no row and states no cause, on a document that is otherwise
     shaped perfectly (#8930 review, round 3, P1).
@@ -2834,7 +2840,7 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     assert "approved row 24 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
-    # ---- MUTATION: no guard fires at all; the row 21 cell is simply GONE, and the only
+    # ---- MUTATION: no guard fires at all; the row 14 cell is simply GONE, and the only
     # diagnostic left is the anonymous row count — the failure this guard replaces.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
@@ -3134,7 +3140,6 @@ def _restore_the_round_4_predicate(monkeypatch) -> None:
 # absorbs.
 _ROW_14 = "| 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |"
 _ROW_14_MEMBERS = "assess_source, get_source_reliability, set_source_tier |"
-_ROW_14_NO = 14
 _ROW_14_DEST = "manage_source_trust"
 
 
@@ -3501,7 +3506,7 @@ def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) ->
     assert row_errors == [], f"the prose in the gap tripped a guard: {row_errors}"
     assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    # Row 21 is untouched here, and its third member is still read — the prose block did not
+    # Row 14 is untouched here, and its third member is still read — the prose block did not
     # cost the parse a row, which is what a false positive would look like from a distance.
     assert "set_source_tier" in menu[_ROW_14_DEST]["members"]
 
@@ -3604,7 +3609,7 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
         "the real doc must raise no approved-menu error at all"
     )
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    # Row 21 is complete in the real doc, so the guard must see its third member.
+    # Row 14 is complete in the real doc, so the guard must see its third member.
     assert "set_source_tier" in menu[_ROW_14_DEST]["members"]
     # ...and the entry point the gate runs agrees.
     monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
@@ -3786,7 +3791,7 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
 
     # Two plausible owner edits, and BOTH are needed to reproduce it: re-column the header
-    # (so the body pass never arms) and wrap row 21 leaving `|` at the end of line 1 (so
+    # (so the body pass never arms) and wrap ROW 14 leaving `|` at the end of line 1 (so
     # the row still reads as complete and only the body test could see the remainder).
     mutated = real.replace("| # | Tool | Absorbs |", "| # | Tool | Absorbs | Notes |")
     assert mutated != real, "the approved header is not in the doc — this test is stale"
