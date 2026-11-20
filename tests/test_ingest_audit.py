@@ -302,7 +302,6 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
 def test_audit_tool_registry_surface():
     """A13 SC5 surface: the mirror tools are registered, read-only, and
     HTTP-accessible (a read surface)."""
-    from tortoise.sdk import TortoiseSDK
     from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, RETIRED_USE_INSTEAD, TOOL_REGISTRY
     # ⛔ The property is about the MIRROR, not about which list the name sits in
     # (#11609 door-retirement wave retired `tortoise_list_batch` FORWARD into
@@ -323,10 +322,12 @@ def test_audit_tool_registry_surface():
         entry = by_name.get(name)
         assert entry is not None, f"{name} missing from the served registry"
         assert entry.sdk_method == method
-        # The literal above is the pin; this is the property behind it. `TortoiseSDK.__getattr__`
-        # raises the retirement hint for a public name, so `hasattr` is False exactly when the
-        # mirror points at a door the SDK no longer serves — a rename reds here, naming the
-        # declaration, instead of only reporting a bare string mismatch.
+        # The literal above is the pin; this is the property behind it. #13899 removed the public
+        # spelling from the CLASS body — the retirement hint lives on the instance hook
+        # `TortoiseSDK.__getattr__`, which class-level `hasattr` never reaches — so this arm is
+        # True exactly when the class declares the door, and False for any name it no longer
+        # serves (including one that never existed). A rename reds here, naming the declaration,
+        # instead of only reporting a bare string mismatch.
         assert hasattr(TortoiseSDK, method), (
             f"{name} declares sdk_method {method!r}, which does not resolve on TortoiseSDK")
         assert entry.annotations.readOnlyHint is True
