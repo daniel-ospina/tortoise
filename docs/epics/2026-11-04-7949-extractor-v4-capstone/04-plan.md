@@ -510,7 +510,7 @@ vocabulary. **The A-rows are additive.**
 |---|---|---|
 | **G0** — the record is readable, on the **A-lane** | `prereg` appears **zero times** in `hosted_api.py`; the chain lives only in `capstone_run.py` | **OWED — new** · owner **C2** · refusal under I6 |
 | **G1** — posted-payload hash equals the row's pin, on the **A-lane** | the check does not exist: `payload_sha256` occurs only as an export/import envelope key, and `docs/evidence/7949-capstone/a-corpus/` does not exist | **OWED — new** · owner **C2**; the record-side map is C1's (seam split: C1 = map + CI pin, C2 = run-side hash + refusal) |
-| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:18205` the condition / `:18216` the raise, via `quota_refusal_payload`) | `BLOCKED — capture refused 402`; never a zero, never a pass |
+| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:18205` the condition / `:18216` the raise, via `quota_refusal_payload` — ⛔ **both read at `a577d0e25c`, the head this row's cite set was taken at** (#13802 review, round 7, P2: the pair was typed with no head, which this bundle's own D5 rule forbids; at THIS head 18205 is a blank line)) | `BLOCKED — capture refused 402`; never a zero, never a pass |
 | registration → verdict gate | a new id the enum refuses | derive the enum (4.4) + a CI pin |
 | corpus pin | a row scored against another row's corpus | per-row `corpus_id`; refuse on mismatch |
 | `create_edge` (the A1 writer's boundary) | it **cannot** carry an anchor (`#5213` option 3) | documented, not fixed; E3's metric is `#9736`'s |
@@ -714,9 +714,9 @@ receipt, not on the status code:**
 a **fresh** `session_id`" — which **discards the door's own convergence machinery and mints a second session's
 points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
 lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it at `a577d0e25c`, the head this
-section's numbers are stamps of — at this head they are `:20170`/`:20198`; blocked for `m2`);
+section's numbers are stamps of — at this head they are `:20255`/`:20283`; blocked for `m2`);
 a **replay** fires only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"`
-(`hosted_api.py:18717` at `a577d0e25c` — the `"mode": "replayed"` receipt — `:20767` here); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
+(`hosted_api.py:18717` at `a577d0e25c` — the `"mode": "replayed"` receipt — `:20852` here); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
 retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, and the correction to it was RIGHT when
 written: the range did hold `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` at `a577d0e25c`
 (`:17212`/`:17216`). The NUMBER then rotted — at `5843fdf234` (the pre-de-conflict head, and already at `d05688df59`, the

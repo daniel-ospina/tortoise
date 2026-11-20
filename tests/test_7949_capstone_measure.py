@@ -1364,13 +1364,39 @@ def test_the_durations_map_carries_one_row_per_file():
     pin that reads one line of a file that carries two cannot claim the file is
     clean (the manifest's own 51st pin names this class).
     """
-    manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
-    rows = [line for line in manifest.splitlines()
-            if line.strip().startswith("test_7949_capstone_measure.py:")]
-    assert len(rows) == 1, (
-        f"the durations map carries {len(rows)} rows for this file — a duplicate "
-        "key is a claim YAML keeps only the last of:" + "".join(
-            f"\n  {row[:90]}" for row in rows))
+    # ⛔ SCOPED TO THE WHOLE MANIFEST, NOT TO THIS FILE (#13802 review, round 11, P2).
+    # The guard used to count this ONE filename, and the class recurred FIVE times inside
+    # the PR that added it — every recurrence in `test_docs_citation_refs.py`, a file this
+    # guard never looked at, so `merge=union` re-added the twin on each rebase and the
+    # suite stayed green over a manifest whose duplicate key silently discards a row. A
+    # guard scoped to the one file that has never been the offender is the inert-enforcer
+    # shape this PR keeps naming, so the reader is now the loader that actually merges:
+    # a duplicate key is detected wherever it sits.
+    import yaml
+
+    _dupes: list[tuple[str, int]] = []
+
+    class _DupKeyLoader(yaml.SafeLoader):
+        pass
+
+    def _mapping(loader: yaml.SafeLoader, node, deep: bool = False):
+        _seen: set[str] = set()
+        for _k, _v in node.value:
+            _key = loader.construct_object(_k, deep=deep)
+            if _key in _seen:
+                _dupes.append((_key, _k.start_mark.line + 1))
+            _seen.add(_key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+    _DupKeyLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
+    yaml.load((_REPO / "config" / "ci-surfaces.yml").read_text(),
+              Loader=_DupKeyLoader)
+    assert not _dupes, (
+        "the manifest carries a DUPLICATE mapping key — YAML keeps only the LAST value, so "
+        "one row (usually a stale `merge=union` twin) is silently discarded, and the two "
+        "readers of this file disagree: " + "".join(
+            f"\n  {key!r} repeated at line {line}" for key, line in _dupes))
 
 
 def _build_gate_repo() -> Path:
@@ -6400,7 +6426,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("20354", "quota_refusal_payload(QuotaExceededError("),
         ), "hosted_api"),
         # ⛔ THE LINE THAT *QUOTES* :82's NUMBER (#12462 review). `03-test-design.md:236`
-        # re-states `hosted_api.py:19589` (`19558` when this note was written, the same guard read at an older head), so it is
+        # re-states `hosted_api.py:20329` now, and its own `hosted_api.py:19589` (`19558` before that) is that SAME guard at an older head — so it is
         # a second statement of one hit — and the paragraph it sits in INSTRUCTS the next
         # merger to re-point line 82, which is exactly how 236 comes to assert the old
         # number while 82 moves. Unpinned until the review reverted it green. Only the
@@ -6779,7 +6805,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 262 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 269 cite-shaped `:N` tokens at this head
+    # (the `~50` these
     # comments used to say was an order of magnitude low — #13900 review, finding 5): a row
     # cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -6859,7 +6886,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
     # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.
@@ -16459,7 +16486,11 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 262 cite-shaped tokens on, and it is ONE line.
+    """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
+    ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
+    the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
+    `6991e2f0ad` moving the line off `262` reds instead of leaving four comments behind (a
+    mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
 
     ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
     this file is line-scoped, so this row can be broken structurally — 6 cells against a
@@ -16658,7 +16689,8 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 262 cite-shaped tokens, so any
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 269 cite-shaped tokens at
+#: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
 #: rows bind the ANCHOR PROSE to the tree instead of the number to the line, so a
@@ -16686,7 +16718,8 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 262 cite-shaped `:N` tokens (measured at this head with
+    # carries 269 cite-shaped `:N` tokens at this head (re-measured after `6991e2f0ad` moved
+    # the line off the `262` this comment carried, which was true at `f16ef087d1`; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was an order of magnitude low, which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
@@ -16724,7 +16757,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
-    number that shared a line with 262 others (the `~50` this sentence used to say
+    number that shared a line with 262 others at `f16ef087d1` (the `~50` this sentence used to say
     was an order of magnitude low: #13900 review, cycle 11).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
@@ -16739,19 +16772,40 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     text = d5[0]
     # ⛔ THE ROW'S OWN COUNT IS NOW TYPED (#13900 review, P2-1). The row states how
     # many `:N` tokens share its line, and until this assert NOTHING read that figure — which is
-    # why `~50` survived four sibling corrections and disagreed with the `262` this file already
-    # states elsewhere. It is re-MEASURED here rather than typed as a constant, so the row cannot
+    # why `~50` survived four sibling corrections and disagreed with the `262` this file stated
+    # at `f16ef087d1`; the row itself is re-MEASURED here rather than typed as a constant, so it
+    # cannot
     # drift from the line it describes: the sentence is the claim, the line is its subject.
     _stated_count = re.search(r"carrying (\d+) numbers", text)
     assert _stated_count is not None, (
         "the D5 row no longer states how many `:N` tokens carry its line — that figure was "
-        "refuted once at `~50` while the line carried 262, so a row that stops stating it "
+        "refuted once at `~50` while the line carried 262 at `f16ef087d1`, so a row that stops stating it "
         "cannot be checked at all (#13900 review, P2-1)")
     _measured_count = len(re.findall(r":\d{2,}", text))
     assert int(_stated_count.group(1)) == _measured_count, (
         f"the D5 row says its line carries {_stated_count.group(1)} `:N` tokens, but the line "
         f"carries {_measured_count} — the same sentence family stated two different figures, "
         "which is the failure the D5 row exists to prevent (#13900 review, P2-1)")
+    # ⛔ AND THE FIGURES THIS FILE STATES IN ITS OWN COMMENTS GET A READER TOO (#13802 review,
+    # round 27, P2 — MEASURED: four comments sentence-initialised the same count and NOTHING read
+    # them, so a mutated figure (`269` -> `263` in the docstring) left this arm GREEN — a typed
+    # number in the file whose thesis is "a typed number rots", with the fix's own sentence
+    # asserting "the arm below RE-MEASURES it" while no such arm existed. The derivation is the
+    # same one the row is graded by: the number is read OUT of this file and compared with the
+    # live line, so the four `<n> cite-shaped` sentences cannot drift from the row they describe.
+    # Any NEW `<n> cite-shaped` sentence is graded too, which is why the number is bound to the
+    # PHRASE. ⛔ AND THE SENTENCES ARE NAMED BY THEIR PHRASE, NOT BY `file:line` — an earlier
+    # draft cited the four line numbers and the same commit's own insertions staled two of them
+    # (#13802 review, round 28, P3), which is this file's recurring defect committed in the act
+    # of fixing it.
+    _typed_comment_counts = {
+        int(n) for line in Path(__file__).read_text(encoding="utf-8").splitlines()
+        for n in re.findall(r"(\d+)\s+cite-shaped", line)}
+    assert _typed_comment_counts == {_measured_count}, (
+        f"this file states {sorted(_typed_comment_counts)} as the D5 line's `:N` count in its "
+        f"own comments, but the line carries {_measured_count} — re-derive the sentence, do not "
+        "re-type it: an unread figure is exactly the rot the D5 row exists to prevent "
+        "(#13802 review, round 27, P2)")
     sources = {key: path.read_text(encoding="utf-8").splitlines()
                for key, path in _EPIC_CITE_SOURCES.items()}
 
@@ -16822,11 +16876,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
             "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
-            "`:15262-15339` -> `:15328-15405`), which the document CARRIES at this head — "
+            "`:15262-15339` -> `:15346-15423`), which the document CARRIES at this head — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15328-15405`"):
+    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15346-15423`"):
         assert _pair in text, (
             f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
             "this head. Both ends are pinned here because the range's TARGET was once "
