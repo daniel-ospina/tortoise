@@ -262,6 +262,7 @@ __all__ = [
     "carry_resolved_allowances",
     "clear_cache_fold_denial",
     "enforce_allowances",
+    "read_dimension",
     "reset_signal_state_for_tests",
     "unarmed_served_counts",
 ]
@@ -2002,6 +2003,51 @@ def enforce_allowances(
         if _published:
             _CACHE_FOLD_DENIED.set(None)
         raise
+
+
+def read_dimension(dimension: str, org_id: str) -> MeterReading | None:
+    """ONE declared dimension's metered reading for ``org_id`` — READ-ONLY.
+
+    The gate's own instrument, exposed for a consumer that must agree with the
+    gate WITHOUT gating anything: the capacity notices (#13998) report
+    "{n}% of the capacity included in your plan", and a second meter there would
+    be a second answer to one question — the disagreement that notice exists to
+    make impossible.
+
+    ⛔ NOT A GATING API. It never refuses, never raises for a meter failure, and
+    never signals: a caller that must not guess gets ``None`` and says so. It
+    also cannot be used to bypass a cap — enforcement stays in
+    :func:`enforce_allowances` and reads the meters through its own path.
+
+    ``None`` means NO USABLE READING, and it deliberately folds three states that
+    a *gating* decision must keep apart (``ABSENT`` — nobody has measured this
+    window yet / a meter fault / a dimension with no meter). A consumer that
+    needs the distinction asks the meter itself; one that must not guess does not
+    need it, because all three mean "do not state a figure".
+
+    Raises ``KeyError`` for an undeclared dimension name — the same loud failure
+    ``_dimension`` gives at import, so a typo cannot silently read nothing.
+    """
+    declared = {dim.dimension: dim for dim in DIMENSIONS}
+    dim = declared[dimension]
+    meter = dim.meter
+    if meter is None:
+        return None
+    try:
+        reading = meter(org_id)
+    except MeterUnavailable as e:
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s has no usable "
+            "reading (%s)", org_id, dim.dimension, e)
+        return None
+    except Exception:
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s meter raised",
+            org_id, dim.dimension, exc_info=True)
+        return None
+    if reading is None or reading is ABSENT:
+        return None
+    return reading
 
 
 def _enforce_each_dimension(

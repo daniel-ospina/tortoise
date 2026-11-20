@@ -2837,6 +2837,12 @@ _LIVENESS_TASK_ATTRS = (
     # sweep task would either stop every retry or double-deliver — and neither
     # shows up anywhere except as "the subscriber never got the event".
     "_webhook_sweep_task",
+    # #13998: the scheduled capacity-notice pass. Process-lifetime and periodic
+    # like the rest, and its LOSS is silent by construction: the notices have no
+    # write-triggered path (a threshold is crossed between writes), so an
+    # orphaned or never-started sweep means no notice is ever sent and nothing
+    # else in the system notices.
+    "_capacity_notice_task",
 )
 
 
@@ -3548,6 +3554,29 @@ async def _lifespan(app):
                 "webhook retry sweep not started — a failed delivery whose "
                 "backoff elapses while its tenant is idle will NOT be retried "
                 "until that tenant's next dream cycle: %s", exc, exc_info=True)
+
+        # ── #13998: the scheduled capacity-notice pass (80 %/100 % of the fast
+        # search window). Its OWN try, for the reason stated above: a bad
+        # interval here must disable only these notices. Armed as a background
+        # task, never awaited before the bind (#2953).
+        try:
+            from tortoise import capacity_notice as _capacity_notice
+
+            _notice_interval = _capacity_notice.sweep_interval_s()
+            # INFO, not DEBUG: the knob and the cadence are the only way an
+            # operator can tell "sweeping, nothing due" from "never armed" —
+            # the pass is otherwise invisible when it has nothing to send.
+            _logger.info(
+                "capacity notice sweep armed: interval=%ss enabled=%s limit=%s",
+                _notice_interval, _capacity_notice.notices_enabled(),
+                _capacity_notice.sweep_limit())
+            app.state._capacity_notice_task = \
+                asyncio.get_event_loop().create_task(
+                    _capacity_notice_sweep_loop(_notice_interval))
+        except Exception as exc:
+            _logger.error(
+                "capacity notice sweep not started — no 80 %/100 % working-set "
+                "notice will be sent by this process: %s", exc, exc_info=True)
 
         # ── #2850: the DB probe refresher — keeps /health's ``db`` field
         # honest without the request path doing any I/O at all.
@@ -4540,6 +4569,52 @@ async def _webhook_retry_sweep_loop(interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
         await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
+
+
+# ── #13998: the scheduled capacity-notice pass ──────────────────────────────
+async def _capacity_notice_sweep_pass() -> dict:
+    """ONE pass: evaluate every account's gauge, send at most one notice each.
+
+    The decision logic (threshold, copy, ledger, send) lives in
+    ``tortoise/capacity_notice.py`` so it is unit-testable without a server; this
+    wrapper contributes only the two facts that are the SERVER's: the kill switch
+    and the hosted/registry mode.
+
+    ⛔ REGISTRY/SELFHOST MODE: ``organizations`` does not exist there, so the
+    pass does nothing rather than reading a control plane that is not configured
+    (the onboarding endpoint's own guard, same reason).
+    """
+    import logging
+
+    from tortoise import capacity_notice as _capacity_notice
+    from tortoise.supabase_control import is_supabase_enabled
+
+    _log = logging.getLogger("tortoise.api")
+    if not _capacity_notice.notices_enabled():
+        return {"enabled": False}
+    if not is_supabase_enabled():
+        return {"enabled": True, "skipped": "registry-mode"}
+    summary = await _capacity_notice.sweep_pass(
+        limit=_capacity_notice.sweep_limit())
+    if summary.get("error"):
+        _log.warning("capacity notice sweep: %s — no notices this pass",
+                     summary["error"])
+    return summary
+
+
+async def _capacity_notice_sweep_loop(interval: float) -> None:
+    """#13998: the periodic runner — sleeps FIRST, for #2953's reason.
+
+    A threshold is crossed BETWEEN writes, so there is no request to hang the
+    notice on: without this loop the copy exists and no customer ever receives
+    it. ``interval`` is a parameter (not a captured closure) so a test can drive
+    the loop, and each pass goes through ``_guarded_step`` (#5381) so a raising
+    pass cannot end the ``while True`` — the failure mode that would silently
+    stop notifying for the process's lifetime.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        await _guarded_step("capacity notice sweep", _capacity_notice_sweep_pass)
 
 
 def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
