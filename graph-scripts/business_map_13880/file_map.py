@@ -754,9 +754,15 @@ def write_map(doc: dict) -> int:
     def already(marker: str) -> bool:
         return marker in st["written"]
 
+    #: Markers THIS run confirmed. A prior failure clears only against one of
+    #: these — see the `failed` ledger at the end of this function.
+    done: list[str] = []
+
     def mark(marker: str) -> None:
         if marker not in st["written"]:
             st["written"].append(marker)
+        if marker not in done:
+            done.append(marker)
         save_state(st)
 
     def unmark(marker: str) -> None:
@@ -963,9 +969,24 @@ def write_map(doc: dict) -> int:
             failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
                             f"{e['from']}->{e['to']}: {exc}")
             print(f"  !! {failures[-1]}", file=sys.stderr)
-    st["failed"] = failures
+    # ⛔ A RESUME MUST NOT ERASE A DIAGNOSIS IT DID NOT RE-OBSERVE. `failed` was
+    # overwritten unconditionally, so a run that resolved nothing but also failed
+    # nothing exited 0 with `failed: []` — measured on a mechanism INVERSION
+    # (`mechanism_mismatch`), which `--verify` cannot see by this module's own
+    # declared limitation: run 1 failed loudly, run 2 (a resume) printed `all
+    # nodes and edges written` and erased the only record that the graph stores an
+    # operator meaning the opposite of the judgement (#13913 review round 10).
+    # A failure is cleared only when THIS run re-wrote its marker successfully.
+    carried = [f for f in (st.get("failed") or [])
+               if not any(f.startswith(marker) for marker in done)]
+    st["failed"] = sorted({*carried, *failures})
     st["unconfirmed"] = sorted(pending)
     save_state(st)
+    if carried:
+        print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
+              "(their markers were not re-written this run) — see state.json", file=sys.stderr)
+        for line in carried[:10]:
+            print(f"  ! {line}", file=sys.stderr)
     if ambiguous:
         print(f"\n{len(ambiguous)} item(s) were recorded but returned no id — an "
               "UNKNOWN outcome, NOT re-written (a second write would duplicate a "
@@ -976,7 +997,7 @@ def write_map(doc: dict) -> int:
     if failures:
         print(f"\n{len(failures)} edge(s) not written — recorded in state.json", file=sys.stderr)
         return 1
-    if ambiguous:
+    if ambiguous or carried:
         return 1
     print("\nall nodes and edges written")
     return 0
@@ -1351,7 +1372,8 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
         where.setdefault(key, []).append((e["op"], e["from"], e["to"]))
 
     holders: dict[frozenset, set[object]] = {}
-    for nid, (_kind, _dir, slots) in grouped.items():
+    for nid, node in grouped.items():
+        slots = node[2]      # (mechanism, direction, slots) — the census is blind to the first two
         sources = slots.get(0, set())
         targets = slots.get(1, set())
         for source in sources:
