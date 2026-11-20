@@ -3070,7 +3070,16 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
 #: sentences, so this is a regression a pin would have caught and no arm did.
 _D5_HEAD_BOUND_VERDICTS = (
     "does NOT hold for this head",
-    "the FIRST of them prints a path",
+    # ⛔ THE HEAD QUALIFIER IS PART OF THIS ROW (#13948 review, P2). The spelling the re-cut
+    # merge restored was `at this head the FIRST of them prints a path`; carrying it WITHOUT
+    # `at this head` widened the ban past what was measured, so it also refused the shape this
+    # document deliberately REQUIRES — a verdict stamped with the head it is true of, e.g.
+    # "At `2584a86ec1` the FIRST of them prints a path." (measured: that sentence was refused,
+    # with a message calling it a verdict "about the head being merged", which would be false of
+    # it). A row is a MEASURED SPELLING, never a widened one — the convention the ledger above
+    # this cell states. RESIDUAL, declared: a present-tense restatement that drops `at this head`
+    # altogether can now slip, which is the same bounded-token residual every row here carries.
+    "at this head the FIRST of them prints a path",
 )
 
 
@@ -3112,7 +3121,7 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
     # leave the ban inert while the injection loop below still passes.
     assert _D5_HEAD_BOUND_VERDICTS == (
         "does NOT hold for this head",
-        "the FIRST of them prints a path",
+        "at this head the FIRST of them prints a path",
     ), (
         "the per-head-verdict ledger changed. These are the exact sentences #13853's re-cut "
         "merge restored and the tree refuted; retiring a NEW spelling means adding it, never "
