@@ -31,9 +31,23 @@ USAGE
 `--dry-run` needs no credentials and no network. `--verify` needs
 `FALKORDB_CLOUD_URI` (and the optional `redis` package). `--write` needs
 `TORTOISE_MCP_API_KEY` in the environment (on the lane box: `set -a; .
-/home/cmux/businessmap.env; set +a`). It is resumable: ids are
-persisted to `state.json` after every write and re-resolved by name on retry, so
-re-running after a transport death converges instead of duplicating.
+/home/cmux/businessmap.env; set +a`).
+
+RESUME, STATED HONESTLY. Resumption is `state.json`: after every write the id
+the door returned is persisted, and a re-run skips the markers already there.
+There is NO name lookup — so a kill in the window between a successful call and
+the `save_state()` that persists its id loses that id, and the re-run creates a
+**duplicate** node (points except the one: they pass `dedup=True`). The earlier
+version of this paragraph claimed ids are "re-resolved by name on retry"; they
+never were, and a resume contract that does not exist is the same false PASS the
+read-back exists to prevent.
+
+⛔ SO A STALE `state.json` IS REFUSED, NOT TRUSTED. A state file is *claimed*
+proof of filing, and the run that produced the bug this map's body documents —
+where every item was marked written with its own **name** as its id — would
+otherwise print "all nodes and edges written" and exit 0 over an empty graph on
+the next run. `write_map` refuses a state whose id for a declared ref IS that
+item's identity, and says which file to delete.
 
 ⛔ It never deletes, supersedes or mitigates anything. Mitigations are
 0.10-0.50 and must be written one at a time; this map needs none.
@@ -473,6 +487,24 @@ def write_map(doc: dict) -> int:
     ids: dict[str, str] = st["ids"]
     failures: list[str] = []
 
+    # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
+    # taken on trust. The pre-fix run recorded every item's own name/url/content
+    # as its "id" (that is what the false PASS looked like on disk); a resume
+    # over that file finds every marker present, prints "all nodes and edges
+    # written" and exits 0 with nothing filed. So the resume state has to be
+    # checked before it is believed — this is the read-back's discipline applied
+    # to the only input it cannot see.
+    named = [(ref, got) for ref, got in ids.items()
+             if _is_identity_of(doc, ref, got)]
+    if named:
+        ref, got = named[0]
+        print(f"state.json is not a filing record: {len(named)} id(s) are the "
+              f"item's OWN identity, not an id the door returned "
+              f"(e.g. {ref!r} -> {got[:60]!r}). Delete {STATE_PATH} and re-run "
+              f"--write; resuming over it would report success over an empty "
+              f"graph.", file=sys.stderr)
+        return 2
+
     def already(marker: str) -> bool:
         return marker in st["written"]
 
@@ -675,22 +707,83 @@ def _row_identities(row: list) -> set[tuple[str, str]]:
             if value}
 
 
+def declared_identity(item: dict) -> tuple[str, str]:
+    """The (property, value) that identifies ONE declared item.
+
+    The per-item twin of `map_identities`, so an edge ENDPOINT can be named the
+    same way its node is: an Event is keyed on the `name` its door writes, a
+    Source on its `url`, a Point on its `content`.
+    """
+    # ⛔ `eventKind` FIRST: an Event also carries a `content` prop, so a
+    # content-first test keys the event on prose the read-back cannot match
+    # (the Event door writes `name`). Measured while writing this: 27 of the
+    # map's edges touched an Event and every one of them read back as absent.
+    if "eventKind" in item:
+        return ("name", event_name(item))
+    if "url" in item:
+        return ("url", item["url"])
+    if "content" in item:
+        return ("content", item["content"])
+    return ("name", item["name"])
+
+
+def _is_identity_of(doc: dict, ref: str, value: str) -> bool:
+    """Is `value` this ref's own identity — i.e. a name masquerading as an id?"""
+    try:
+        item = doc_by_ref(doc, ref)
+    except KeyError:
+        return False
+    return declared_identity(item)[1] == value
+
+
+def declared_edges(doc: dict) -> set[tuple[tuple[str, str], tuple[str, str], str]]:
+    """Every edge the map DECLARES: (from identity, to identity, relation).
+
+    The relation is the operator's mechanism (`IMPL`/`NAND`/`coherence`) or the
+    structural relation name. It is part of the KEY on purpose — see
+    `presence()`.
+    """
+    return {(declared_identity(doc_by_ref(doc, e["from"])),
+             declared_identity(doc_by_ref(doc, e["to"])),
+             e.get("op") or e["relation"])
+            for e in doc["edges"]}
+
+
 def presence(doc: dict, node_rows: list, edge_rows: list) -> tuple[list, int]:
-    """Which declared identities the graph holds, and how many declared edges
-    join two of them.
+    """Which declared identities the graph holds, and how many DECLARED edges
+    are actually there — across all three dimensions of an edge.
 
     Pure, so the verdict can be exercised without a database: `verify()` is the
     only thing that needs Falkor, and its arithmetic is the part that was wrong.
+
+    ⛔ AN EDGE IS PRESENT ONLY WHEN IT IS THE DECLARED EDGE. The first version of
+    this arm credited any edge whose endpoint matched ANY identity in `present`,
+    and `present` is seeded from every node the graph returns — so a graph with
+    the map's 78 nodes plus 30 unrelated ones, whose 101 edges joined ONLY the
+    unrelated nodes, printed `edges: 101/101 declared edges join two present
+    nodes` and exited 0 with not one declared edge filed. Any-identity matching
+    is not a weaker check than identity matching; it is a check that cannot
+    fail while unrelated edges exist.
+
+    ⛔ AND THE RELATION IS PART OF THE KEY. `NAND` vs `IMPL` is the one
+    distinction whose inversion changes what the graph MEANS (it NANDs — raises —
+    the target), so a census that cannot see the mechanism certifies exactly the
+    defect this map exists to prevent. 101 edges among the right nodes with the
+    wrong relations is not a filed map.
     """
     present: set[tuple[str, str]] = set()
     for row in node_rows:
         present |= _row_identities(row)
     missing = [(prop, value) for prop, value in map_identities(doc)
                if (prop, value) not in present]
-    joined = 0
+
+    got: set[tuple[tuple[str, str], tuple[str, str], str]] = set()
     for row in edge_rows:
-        if _row_identities(row[:3]) & present and _row_identities(row[3:]) & present:
-            joined += 1
+        rel = row[6] if len(row) > 6 and row[6] else ""
+        for a in _row_identities(row[:3]):
+            for b in _row_identities(row[3:6]):
+                got.add((a, b, rel))
+    joined = len(declared_edges(doc) & got)
     return missing, joined
 
 
@@ -708,10 +801,10 @@ def verdict(doc: dict, node_rows: list, edge_rows: list) -> int:
             print(f"  - {prop}: {value[:70]!r}", file=sys.stderr)
         if len(missing) > 20:
             print(f"  … and {len(missing) - 20} more", file=sys.stderr)
-    if joined < expected_edges:
+    if joined != expected_edges:
         print(f"EDGES SHORT — {expected_edges - joined} declared edge(s) are absent "
               "(an unjoined map is filed but not findable)", file=sys.stderr)
-    return 0 if not missing and joined >= expected_edges else 1
+    return 0 if not missing and joined == expected_edges else 1
 
 
 def verify(doc: dict) -> int:
@@ -756,7 +849,7 @@ def verify(doc: dict) -> int:
                   "coalesce(n.content,'')")
     edge_rows = q("MATCH (a)-[e]->(b) RETURN coalesce(a.name,''), coalesce(a.url,''), "
                   "coalesce(a.content,''), coalesce(b.name,''), coalesce(b.url,''), "
-                  "coalesce(b.content,'')")
+                  "coalesce(b.content,''), coalesce(e.op_type, type(e), '') ")
     return verdict(doc, node_rows, edge_rows)
 
 
