@@ -2373,6 +2373,63 @@ def test_a_4xx_carrying_retry_after_is_still_a_REFUSAL(monkeypatch):
             f"{sleeps}")
 
 
+def test_a_4xx_with_a_NON_OBJECT_body_is_still_a_REFUSAL(monkeypatch):
+    """The STATUS decides landed-ness, not the shape of the body.
+
+    The non-object guard (`payload is not None and not isinstance(payload, dict)`)
+    exists so no arm below calls `payload.get` on a list or a string. It stood
+    ABOVE the status arm, so it OVERRULED it: a 4xx whose body parsed as valid
+    JSON but not an object — `400` with `[]`, `401` with `[]`, `403` with
+    `"nope"`, `422` with `[1, 2]`, the default page a proxy or WAF emits — was
+    classified `UnknownOutcome`, `write_once` KEPT the intent, and no later run
+    could clear it: the hand-edited-`state.json` recovery the `4xx` arm's own
+    comment describes. A 4xx was rejected BEFORE the handler ran, so nothing
+    landed whatever the body looks like (#13950 verification of the rebased head,
+    measured).
+
+    Non-vacuity, MEASURED: with the guard's status split reverted to the single
+    `raise UnknownOutcome(...)` this reds on the first value — `UnknownOutcome` is
+    a `RuntimeError` sibling of `Refusal`, not a subclass. The second half is the
+    control that the split did not WIDEN the refusal: 5xx/408/429 keep UNKNOWN,
+    because those may have been acted on.
+    """
+    for code, body in ((400, []), (401, []), (403, "nope"), (422, [1, 2])):
+        posts: list[int] = []
+        sleeps: list[float] = []
+        monkeypatch.setattr(filer.time, "sleep",
+                            lambda s, _s=sleeps: _s.append(s))
+
+        def _post(_body, _code=code, _body_value=body, _posts=posts):
+            _posts.append(1)
+            return _code, _body_value, {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.Refusal) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "refused" in str(excinfo.value).lower(), excinfo.value
+        assert len(posts) == 1, (
+            f"a {code} was re-issued {len(posts)} times over a {type(body).__name__} body")
+        assert sleeps == [], f"a {code} must not back off at all: {sleeps}"
+
+    # The control: the same body shapes on a status that MAY have been acted on
+    # stay UNKNOWN, so the intent is kept — the split must not refuse these.
+    for code in (500, 503, 408, 429):
+        posts2: list[int] = []
+
+        def _post_unknown(_body, _code=code, _posts=posts2):
+            _posts.append(1)
+            return _code, [], {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post_unknown)
+        with pytest.raises(filer.UnknownOutcome) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "UNCONFIRMED" in str(excinfo.value), excinfo.value
+        assert len(posts2) == 1, (
+            f"a non-idempotent write on a real {code} was POSTed {len(posts2)} times")
+
+
 def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     """A junk `retry_after` must not escape `call()` as an unclassified raise.
 

@@ -569,7 +569,29 @@ class Mcp:
             # error page can be valid JSON (`[]`, `"Bad Gateway"`, `502`), and
             # `payload.get` then raised `AttributeError` — again outside every
             # classification, again retiring the intent (#13913 review round 8).
+            # ⛔ AND THE STATUS STILL DECIDES LANDED-NESS, NOT THE BODY'S SHAPE
+            # (#13950 verification of the rebased head — MEASURED, and it was
+            # FALSE where this guard stood ABOVE the status arm): a 4xx whose body
+            # is valid JSON but not an object (`400` with `[]`, `401` with `[]`,
+            # `403` with `"nope"`, `422` with `[1, 2]` — the default page a proxy
+            # or WAF emits) was classified UNKNOWN, so `write_once` KEPT the intent
+            # and no later run could clear it: exactly the hand-edited-`state.json`
+            # recovery the `4xx` arm below exists to prevent. The request was
+            # rejected BEFORE the handler ran, so nothing landed whatever the body
+            # looks like. This guard exists only so that no arm below calls
+            # `payload.get` on a non-object; it must not OVERRULE the status. The
+            # class that stays UNKNOWN is every OTHER status — 5xx/408/429 (the
+            # request may have been acted on, as the status arm below states), and
+            # a 2xx/3xx (the server ACCEPTED the call: the outcome is genuinely
+            # unknown, which is what
+            # `test_a_body_that_PARSES_to_a_non_object_is_unknown` pins at `200`).
+            # The `not in (408, 429)` is load-bearing: both ARE 4xx codes and both
+            # take the UNKNOWN arm above.
             if payload is not None and not isinstance(payload, dict):
+                if 400 <= code < 500 and code not in (408, 429):
+                    raise Refusal(
+                        f"{tool} refused: HTTP {code} — the write did not land "
+                        f"(body is not a JSON-RPC object: {type(payload).__name__})")
                 raise UnknownOutcome(
                     f"{tool}: HTTP {code} body is not a JSON-RPC object "
                     f"({type(payload).__name__}) — the write is UNCONFIRMED")
