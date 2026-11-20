@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (44 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (45 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -290,6 +290,17 @@ what round 7's own pin had failed to do. Two findings, both reproduced here firs
 | **K3** **R1 was claimed, not held.** `GraphStore.reset()` wrapped `GRAPH.DELETE` in `contextlib.suppress(Exception)` with the comment "a missing graph is the goal". True — and a fail-open, because a delete that failed for ANY OTHER reason was suppressed identically, so the run reported as normal and left the corpus graph plus its HNSW index behind. §5.1 B1's only evidence for "no graph left behind" was a human's out-of-band `GRAPH.LIST`, which is not a property the tool carries. Same suppression on `rebuild_with_ef`'s path, where a failed delete makes `seed()` add a SECOND corpus and the `efRuntime=200` diagnostic is computed over a doubled graph | read the code, then drove `reset()` with a fake transport: delete raises **and** the catalogue still lists the graph → the old body returned normally (no exception, no output); catalogue read fails → also silent | the delete is attempted, its error ignored, and the graph catalogue then READ: a surviving graph, or an unreadable catalogue, is a `CannotRun` naming which — so a run either proves it left nothing behind or refuses to report. Pinned by `test_a_graph_that_survives_teardown_is_loud_not_silent` (three states + an AST read of `run()`'s call site); restoring the suppression reds exactly that pin |
 | **K4** the pin count moved again with K3's pin (43 → **44**) | `pytest --collect-only -q tests/test_vector_parity_13906.py` → `44 tests collected`; `44 passed` | header and §6 state **44**, the tree's own count. ⛔ J3's own advice — the count is DERIVED, not written — is still unimplemented, which is why this cell has now been wrong three times |
 
+### Round 9: the guard read the string libpq parses, but not the FILE libpq reads
+
+The attestation review at `14c311fb` re-earned nothing on the gated comparison (all
+five artifacts still replay bit-identically, `compare`/`_verdict` untouched since the
+clean verdict at `5546af21`) and found one more hole in the record-DSN guard — on
+the same destructive path, one indirection further out.
+
+| finding | verified how | fix |
+|---|---|---|
+| **L1** `_record_dsn_hosts` enumerated the two host-bearing keys libpq knows (`host`, `hostaddr`) and returned them. libpq has a THIRD way to learn the dialled address: `parseServiceInfo` fills every option the conninfo left UNSET from `pg_service.conf`, so a **loopback** DSN with `service=prod` dials that entry's `hostaddr` — and `PGSERVICE` in the environment does the same to a DSN that never mentions it. The guard PASSED all three, and inconsistent with itself: the conninfo spelling `service=prod …` was refused, but only because it named no host | measured with libpq itself — `psql` names the host it tries, service file carrying `hostaddr=203.0.113.9`: `?service=prod` → **203.0.113.9**, `?host=127.0.0.1&service=prod` → **203.0.113.9**, `PGSERVICE=prod` + plain loopback → **203.0.113.9**; the control without a service dialled 127.0.0.1 | a `service` in either spelling, or `PGSERVICE` in the environment, is reported as `RECORD_DSN_SERVICE` — a sentinel no loopback predicate accepts — so it is refused unless `--allow-remote-writes`, exactly like a host that cannot be resolved. Pinned by `test_a_service_dsn_cannot_prove_it_is_local` (4 DSN spellings + the env form + the control that the same DSNs are local again without it) and by three new entries in the `remote` tuple; mutants: ignore the URI `service` → **2 red**, ignore `PGSERVICE` → **1 red**, ignore the conninfo keyword → **1 red** |
+
 ### The two evidence errors this section exists to correct
 
 Both were in the **previous revision of this document**, and both are the
@@ -336,7 +347,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **44 passed**.
+tests/test_vector_parity_13906.py -q` → **45 passed**.
 
 ## 7. What this artifact does NOT establish
 

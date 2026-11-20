@@ -375,6 +375,17 @@ def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harne
         "postgresql:///tortoise_record?host=db.prod.example.com",
         "host=db.prod.example.com dbname=tortoise_record",
         "hostaddr=203.0.113.9 dbname=tortoise_record",
+        # AND A `service` IS A HOST THIS CANNOT SEE. `pg_service.conf` fills
+        # every UNSET option, `hostaddr` included, so a loopback DSN with
+        # `service=` dials whatever that entry says - measured with libpq itself
+        # (`psql` names the host it tried, service file `hostaddr=203.0.113.9`):
+        #   ?service=prod  /  ?host=127.0.0.1&service=prod  -> dials 203.0.113.9
+        # ...and `PGSERVICE` in the environment does it to a DSN that never
+        # mentions it. All three PASSED the guard before this pin (review
+        # round 10), the same fail-open class as K1 on the same destructive path.
+        "postgresql://127.0.0.1:5432/tortoise_record?service=prod",
+        "postgresql://127.0.0.1:5432/tortoise_record?host=127.0.0.1&service=prod",
+        "service=prod dbname=tortoise_record",
     )
     for dsn in remote:
         with pytest.raises(harness.CannotRun) as refused:
@@ -408,6 +419,57 @@ def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harne
                else getattr(c.func, "id", ""))
               for c in ast.walk(guard) if isinstance(c, ast.Call)}
     assert "_record_dsn_hosts" in called, sorted(called)
+
+
+def test_a_service_dsn_cannot_prove_it_is_local(harness, monkeypatch):
+    """A `service=` HANDS THE DIAL TO A FILE THIS HARNESS CANNOT READ.
+
+    Found in review round 10, after the K1 fix had been described as closing the
+    guard: `host`/`hostaddr` are not the only sources of the dialled address.
+    `parseServiceInfo` fills every option the conninfo left UNSET from
+    `pg_service.conf`, so a LOOPBACK DSN with `service=prod` dials that entry's
+    `hostaddr`. Measured with libpq itself (a service file carrying
+    `hostaddr=203.0.113.9`, `psql` naming the host it tried):
+
+        postgresql://127.0.0.1:1/db?service=prod                -> 203.0.113.9
+        postgresql://127.0.0.1:1/db?host=127.0.0.1&service=prod -> 203.0.113.9
+        PGSERVICE=prod  + a plain loopback DSN                  -> 203.0.113.9
+
+    while `_record_dsn_hosts` returned the loopback host and the guard PASSED. It
+    was also inconsistent with itself: the conninfo spelling `service=prod ...`
+    was refused, but only because it named no host.
+    """
+    monkeypatch.delenv("PGSERVICE", raising=False)
+    service_dsns = (
+        "postgresql://127.0.0.1:5432/tortoise_record?service=prod",
+        "postgresql://127.0.0.1:5432/tortoise_record?host=127.0.0.1&service=prod",
+        "service=prod dbname=tortoise_record",
+        "service=prod host=127.0.0.1 dbname=tortoise_record",
+    )
+    for dsn in service_dsns:
+        assert harness.RECORD_DSN_SERVICE in harness._record_dsn_hosts(dsn), dsn
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        # ...and a deliberate remote run still works.
+        harness._assert_local_record_dsn(dsn, True)
+
+    # AND `PGSERVICE` DOES IT TO A DSN THAT NEVER MENTIONS A SERVICE - libpq
+    # expands it from the ENVIRONMENT, so the DSN alone is not the question.
+    monkeypatch.setenv("PGSERVICE", "prod")
+    for dsn in ("postgresql://127.0.0.1:5432/tortoise_record",
+                "host=127.0.0.1 dbname=tortoise_record"):
+        assert harness.RECORD_DSN_SERVICE in harness._record_dsn_hosts(dsn), dsn
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+        harness._assert_local_record_dsn(dsn, True)
+
+    # ...and WITHOUT it the same DSNs are local again - so the refusal is about
+    # the service, not a blanket block on loopback DSNs.
+    monkeypatch.delenv("PGSERVICE")
+    for dsn in ("postgresql://127.0.0.1:5432/tortoise_record",
+                "host=127.0.0.1 dbname=tortoise_record"):
+        harness._assert_local_record_dsn(dsn, False)
 
 
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
