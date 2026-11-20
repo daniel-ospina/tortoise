@@ -197,6 +197,75 @@ def test_write_map_refuses_a_state_whose_ids_are_item_identities(tmp_path, monke
     assert _RecordingMcp.instances[-1].calls == []
 
 
+def test_write_map_refuses_index_keyed_edge_markers(tmp_path, monkeypatch, map_doc):
+    """An index is not an identity: markers keyed by POSITION cannot be resumed
+    after the map is edited.
+
+    Measured on the pre-fix spelling (`f"edge:{i}"`): insert one newly-judged
+    edge at `edges[0]` and the resume makes exactly ONE call — re-issuing the old
+    LAST edge as the new `edge:101` — never writes the inserted edge, and exits 0
+    printing `all nodes and edges written`.
+
+    Mutant: `marker = f"edge:{i}"` and no stale-marker guard — this run returns 0
+    and writes the wrong edge.
+    """
+    stale = {"ids": {}, "written": [], "failed": []}
+    for section in ("subjects", "objects", "sources", "events", "points"):
+        for item in map_doc[section]:
+            stale["ids"][item["ref"]] = f"id:{item['ref']}"
+            stale["written"].append(f"{section[:-1]}:{item['ref']}")
+    stale["written"] += [f"edge:{i}" for i in range(len(map_doc["edges"]))]
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(stale))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+
+    assert filer.write_map(map_doc) == 2
+    assert _RecordingMcp.instances[-1].calls == []
+
+
+def test_write_map_resumes_after_an_edge_is_added(tmp_path, monkeypatch, map_doc, capsys):
+    """The reason the markers are identity-keyed: an ADDED edge is written, and
+    the edges already filed are not re-issued.
+
+    Mutant: index-keyed markers — the second run makes one call for the old last
+    edge (skipping the inserted one entirely).
+    """
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    edited = json.loads(json.dumps(map_doc))
+    edited["edges"].insert(0, {"from": edited["points"][0]["ref"],
+                              "to": edited["objects"][0]["ref"],
+                              "relation": "references"})
+
+    before = len(_RecordingMcp.instances)
+    assert filer.write_map(edited) == 0
+    calls = _RecordingMcp.instances[before].calls
+    assert len(calls) == 1, calls
+    assert calls[0][0] == "tortoise_create_edge", calls
+    assert calls[0][1]["source_id"].startswith("tortoise_create_point:"), calls
+    capsys.readouterr()
+
+
+def test_a_duplicated_edge_is_refused_by_validate(map_doc):
+    """The same edge judged twice is two judgements of one fact — and ONE written
+    edge certifies both, so the duplicate is invisible to the read-back.
+
+    Mutant: drop the edge-duplicate arm from `validate()`.
+    """
+    duped = json.loads(json.dumps(map_doc))
+    duped["edges"].append(json.loads(json.dumps(duped["edges"][0])))
+    errs = filer.validate(duped)
+    assert any("judged twice" in e for e in errs), errs
+
+
 def test_write_map_resumes_a_state_whose_ids_are_real(tmp_path, monkeypatch, map_doc, capsys):
     """Non-vacuity: a state file of REAL ids still resumes (skips) as before."""
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
@@ -595,7 +664,7 @@ def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
                     written = json.loads(state_path.read_text())["written"]
                     # THIS edge's marker — structural edges earlier in the list
                     # have their own markers, so a prefix test would pass either way.
-                    seen["op"] = f"edge:{first_op}" in written
+                    seen["op"] = filer.edge_marker(map_doc["edges"][first_op]) in written
                 self._n += 1
                 return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
                     "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})

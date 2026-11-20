@@ -273,6 +273,16 @@ def validate(doc: dict) -> list[str]:
         if count > 1:
             errs.append(f"{count} items share the identity {prop}={value[:60]!r} — "
                         "the read-back cannot tell them apart")
+    # the same rule for EDGES. `--verify` matches each declared edge against the
+    # graph independently, so the same edge judged twice is certified by ONE
+    # written edge — two judgements, one fact, and the duplicate is invisible.
+    edge_seen: dict[str, int] = {}
+    for e in doc["edges"]:
+        edge_seen[edge_marker(e)] = edge_seen.get(edge_marker(e), 0) + 1
+    for marker, count in sorted(edge_seen.items()):
+        if count > 1:
+            errs.append(f"{count} edges are the same edge ({marker!r}) — judged "
+                        "twice; one written edge would certify both")
     return errs
 
 
@@ -528,6 +538,19 @@ def write_map(doc: dict) -> int:
               f"graph.", file=sys.stderr)
         return 2
 
+    declared_markers = {edge_marker(e) for e in doc["edges"]}
+    orphan_markers = sorted(m for m in st["written"]
+                            if m.startswith("edge:") and m not in declared_markers)
+    if orphan_markers:
+        print(f"state.json names {len(orphan_markers)} edge marker(s) this map does "
+              f"not declare (e.g. {orphan_markers[0]!r}) — an edge was added, "
+              f"removed or re-typed since it was written, or the markers are the "
+              f"INDEX-keyed spelling an older version wrote. Resuming would skip "
+              f"the edited edges and re-issue the rest. Remove those 'edge:*' "
+              f"entries from {STATE_PATH} (KEEP the ids) and re-run.",
+              file=sys.stderr)
+        return 2
+
     def already(marker: str) -> bool:
         return marker in st["written"]
 
@@ -650,8 +673,8 @@ def write_map(doc: dict) -> int:
     #    structural relations are plain typed edges.
     #    Spellings are the surface's own: `source_id`/`target_ids` on the
     #    operator door, `source_id`/`target_id`/`predicate` on the edge door.
-    for i, e in enumerate(doc["edges"]):
-        marker = f"edge:{i}"
+    for e in doc["edges"]:
+        marker = edge_marker(e)
         if already(marker):
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
@@ -742,6 +765,24 @@ def declared_identity(item: dict) -> tuple[str, str]:
     if "name" in item:
         return ("name", item["name"])
     return ("content", item["content"])
+
+
+def edge_marker(edge: dict) -> str:
+    """The STABLE marker this edge is remembered by — never its list index.
+
+    ⛔ An index is not an identity. `f"edge:{i}"` meant that inserting one
+    newly-judged edge shifted every later marker, so a resume skipped the new
+    edge, re-issued a NON-IDEMPOTENT operator over endpoints it had already
+    joined (the double-count this filer's own docstring cites), and still
+    printed `all nodes and edges written` and exited 0. Measured: insert one
+    edge at `edges[0]` and run 2 made exactly ONE call — the old last edge,
+    rewritten as `edge:101` — and never wrote the inserted one.
+
+    Keyed on what the edge IS, an edit can only add or remove a marker, and
+    `write_map` refuses a marker the map no longer declares instead of resuming
+    onto it.
+    """
+    return f"edge:{edge['from']}->{edge['to']}:{edge.get('op') or edge['relation']}"
 
 
 def identity_by_ref(doc: dict) -> dict[str, tuple[str, str]]:
