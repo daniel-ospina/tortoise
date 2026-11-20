@@ -551,3 +551,56 @@ def test_a_refused_writer_run_is_exit_2_not_a_completed_capture(monkeypatch, tmp
     receipt = json.loads(out.read_text())
     assert "refusing to WRITE" in receipt["unmeasurable"]["arms"]["writer"]
     assert "counts" not in receipt["arms"]["writer"]
+
+
+# ── round 3: an arm that was NOT REQUESTED is not an arm that SKIPPED ─────
+#
+# Making `writer` opt-in left a hole the round-2 findings did not reach: the documented
+# one-line re-run passes no `--arms`, so it now produces a receipt with NO writer arm
+# and nothing in the artifact saying whether that arm was skipped, refused, or never
+# asked for. That is the same class as R2/N5 — a shrunken population published as a
+# complete one — one level up, in the arm set itself.
+
+def _fake_arms(monkeypatch):
+    ran: list[str] = []
+    for name in ("measure_store", "measure_live", "measure_instrument",
+                 "measure_corpus", "measure_writer"):
+        monkeypatch.setattr(mod, name, lambda *a, _n=name, **k: (
+            ran.append(_n) or {"skipped": "faked"}))
+    return ran
+
+
+def test_the_receipt_says_which_arms_it_never_asked_for(monkeypatch, tmp_path):
+    ran = _fake_arms(monkeypatch)
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "corpus", "--out", str(out)]) == 0
+    inst = json.loads(out.read_text())["instrument"]
+    assert inst["arms_requested"] == ["corpus"]
+    assert inst["arms_not_requested"] == ["store", "live", "instrument", "writer"], (
+        "an arm absent from `arms` is indistinguishable from one that measured nothing; "
+        "the artifact must say it was never requested")
+    assert ran == ["measure_corpus"]
+
+
+def test_a_bare_run_records_that_the_write_arm_was_not_requested(monkeypatch, tmp_path):
+    _fake_arms(monkeypatch)
+    out = tmp_path / "r.json"
+    assert mod.main(["--out", str(out)]) == 0
+    inst = json.loads(out.read_text())["instrument"]
+    assert inst["arms_requested"] == mod.DEFAULT_ARMS.split(",")
+    assert "writer" in inst["arms_not_requested"], (
+        "the default set is read-only, so the artifact must name the arm it did not run")
+
+
+def test_a_typo_in_arms_is_refused_not_measured_as_nothing(monkeypatch, tmp_path):
+    """`--arms crocodile` used to match no `if "<arm>" in arms` and exit 0 with an
+    EMPTY receipt — an empty population published as a measurement."""
+    ran = _fake_arms(monkeypatch)
+    out = tmp_path / "r.json"
+    try:
+        rc = mod.main(["--arms", "crocodile", "--out", str(out)])
+    except SystemExit as exc:            # argparse's refusal path
+        rc = exc.code
+    assert rc != 0, "a typo in --arms was accepted as a measurement"
+    assert not out.exists()
+    assert ran == []

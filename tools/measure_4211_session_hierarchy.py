@@ -43,7 +43,18 @@ Usage
     uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"     # never a bare pytest
     TORTOISE_DB_URI="docker://:@127.0.0.1:${TORTOISE_TEST_DOCKER_PORT}/m4211_hierarchy" \\
       uv run python tools/measure_4211_session_hierarchy.py \\
+        --arms store,writer,live,instrument,corpus \\
         --out docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json
+
+⚠️ Name ``--arms store,writer,live,instrument,corpus`` to reproduce the committed
+receipt: the DEFAULT set is the READ-ONLY one (``writer`` MUTATES the graph
+``TORTOISE_DB_URI`` names, and that variable is the product's connection string, not a
+test-only one), so a bare run is a SHRUNKEN measurement — it records
+``instrument.arms_not_requested`` rather than leaving the absence unexplained. The write
+arm additionally REFUSES — rather than acting — when the target graph name does not look
+ephemeral (``m4211``/``test``/``tmp``/``lane``/``scratch``/``e2e``/``ci_``);
+``--allow-non-ephemeral-writes`` overrides that deliberately and is recorded in argv and
+in ``arms.writer.non_ephemeral_write_override``.
 
 Exit codes: 0 = MEASURED (whatever the numbers are), 2 = could not measure — the reason is
 in the receipt's TOP-LEVEL ``unmeasurable`` block, which is written whenever ANY arm could
@@ -86,6 +97,13 @@ DEFAULT_SESSIONS_DIR = "~/.tortoise/session-events"
 #: opt-in: a bare `python tools/measure_4211_session_hierarchy.py` must not be able to
 #: write into whatever graph ``TORTOISE_DB_URI`` happens to name (#4211 review N8).
 DEFAULT_ARMS = "store,live,instrument,corpus"
+
+#: Every arm the tool knows — the read-only default set plus the opt-in write arm.
+#: ⛔ Used to REFUSE a typo and to record what was NOT requested: an absent arm is not a
+#: skipped arm, and the default set is read-only, so a receipt produced without
+#: ``--arms store,writer,live,instrument,corpus`` is a SHRUNKEN measurement that must
+#: say so in the artifact (the same discipline `graphs_without_turn_store` applies).
+KNOWN_ARMS = (*DEFAULT_ARMS.split(","), "writer")
 
 #: Graph names the writer arm may write into without an explicit override.
 EPHEMERAL_GRAPH_MARKERS = ("m4211", "test", "tmp", "lane", "scratch", "e2e", "ci_")
@@ -925,6 +943,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    unknown = [a for a in arms if a not in KNOWN_ARMS]
+    if unknown or not arms:
+        # A typo used to fall through every `if "<arm>" in arms` and produce an EMPTY
+        # receipt reported as a MEASUREMENT (exit 0) — the same empty-population
+        # fail-open `_is_empty` and `every_graph_has_fewer_turns_than_contains` refuse.
+        ap.error(f"no measurable arm: {args.arms!r} — "
+                 f"unknown {unknown}; choose from {','.join(KNOWN_ARMS)}")
+    not_requested = [a for a in KNOWN_ARMS if a not in arms]
     receipt: dict = {
         "issue": 4211,
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -934,11 +960,19 @@ def main(argv: list[str] | None = None) -> int:
             "sha256": _sha256(_TOOL_PATH),
             "measured_through": _module_digests(),
             "argv": sys.argv[1:],
+            # ⛔ What RAN versus what was never ASKED FOR. The default set is read-only
+            # (`writer` is opt-in), so the documented one-line re-run used to produce a
+            # receipt with no writer arm and nothing in the artifact saying why — an
+            # absent arm is indistinguishable from a skipped one without this.
+            "arms_requested": arms,
+            "arms_not_requested": not_requested,
             "note": "code_head is the tree this run STARTED from; it may predate the "
                     "commit that carries this file, so the sha256 is what a re-run keys "
                     "on. measured_through pins the product modules the numbers come "
                     "THROUGH (the writer/corpus arms call into them), so an SDK move "
-                    "is distinguishable from a graph move",
+                    "is distinguishable from a graph move. arms_not_requested is NOT a "
+                    "missing measurement: reproducing the committed receipt requires "
+                    "--arms store,writer,live,instrument,corpus",
         },
         "purpose": "does a session-hierarchy structure exist for the #4211 "
                    "candidate-expansion arm to walk?",
