@@ -56,9 +56,15 @@ found outside it) and they open at **`ae54df166d`**, the `main` this revision wa
 lines DID move under it (`#13290` re-derived the `search_engine.py` group), so the head is named here rather
 than inferred, and every entry below was re-opened AT IT. **The rule a reader applies is mechanical, and it
 is exact for the addresses IN the `main` group of that enumeration: an address in it opens at `main` `ae54df166d`.**
-⚠️ **The enumeration has since grown entries that name a DIFFERENT head — this revision's own group (§2.1's EP
-and §2.7's watermark addresses, written at THIS head), the `#13124` eight and §2.5's five — and each of those
-says so where it is listed, which is the whole of its head: read the entry, not this sentence, for them.** ⛔ **There
+⚠️ **The enumeration has since grown entries that name a DIFFERENT head, and the scope of this sentence is the
+`main` group only.** Outside it are: this revision's own group (which carries, besides §2.1's EP and §2.7's
+watermark addresses, the whole-node pair, the §2.5 `:Tag` family and the `session_source_prose_migration`
+reader row), the `#13124` eight, §2.5's five, the `projection/__init__.py` fulltext declaration block, the
+`mcp_server.py` entity-type pair, row 13's four writer addresses, and the sixteen the `#13083` follow-up
+re-derived — every one of those was opened at the head its own sentence names (THIS head, or the integration
+head that sentence names), and NOT at `ae54df166d`. ⏐ **So read the entry, never this sentence, for them;
+and an entry that names no head at all is a GAP in the enumeration, not a licence to read `ae54df166d`
+into it.** ⛔ **There
 is no rule for an address OUTSIDE it — open the line, never infer its head.** Such an address was *written*
 at the pin `ccb49741b2ec`, and that is where
 the census read it; it is not a promise that the line still carries what the row quotes. `#13083` found
@@ -175,7 +181,9 @@ that nothing else is at `main`** — and a range entry spans every line it cover
 `record_serve.py:468` (`READ_POINT_BY_ID`); `sdk.py:37697`/`:37720` (the whole-node pair, still 23 apart);
 `audit.py:817`; `mcp_server.py:5184`/`:8206`/`:11281`; `goal_judgement.py:1128`; and §2.1's own table, which carries
 two of this class as well — `sdk.py:24440` and `search_engine.py:6891`, both open at this revision and neither
-open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at `main` but
+open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
+`main` `ae54df166d`, where `hosted_api.py`'s `:23046` is `for ev in (payload.events or []):` and the commit
+door's `MERGE (s:Source {url:$did})` is the integration head's line) but
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
 (`:22919`) is unrelated code:
 `sdk.py:22081` (the capture writer) with its read-back `:22204`, and `hosted_api.py:23046` (the commit
