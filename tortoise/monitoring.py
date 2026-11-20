@@ -5329,8 +5329,12 @@ def _start_probe_worker_off_caller(worker: threading.Thread):
     Returns the ``Future`` of the handed-off start (the caller keeps it so a
     LATER failure can be observed — a start that is accepted and then raises in
     the starter is not a refusal and must not wedge the coordinator), or
-    ``None`` when the starter refused it (its bounded backlog is full, i.e. the
-    starter itself is wedged).
+    ``None`` when the hand-off itself could not be MADE — ``_probe_starter()``
+    raised while building the pool, or ``submit`` raised (e.g. ``RuntimeError:
+    can't start new thread`` under ``RLIMIT_NPROC``). ``None`` is NOT a backlog
+    refusal: a refusal returns an already-failed future carrying
+    `_WorkerBacklogFull`, which the coordinator reconciles with its own message
+    so the operator is sent to the right recovery (starter vs. box).
 
     ⛔ A refusal NEVER falls back to an inline ``start()``: that would restore
     the very loop block this removes, in the one situation where the block is
@@ -5353,14 +5357,28 @@ def _start_probe_worker_off_caller(worker: threading.Thread):
         return None
 
     def _report(f) -> None:
-        if f.cancelled() or f.exception() is not None:
+        # ⛔ THE CANCELLED CASE MUST BE TESTED BEFORE THE EXCEPTION IS READ.
+        # `Future.exception()` RAISES `concurrent.futures.CancelledError` for a
+        # cancelled future (CPython `_base.py`:
+        # `if self._state in [CANCELLED, CANCELLED_AND_NOTIFIED]: raise
+        # CancelledError()`), so `f.cancelled() or f.exception() is not None`
+        # short-circuits INTO a raise when cancelled: `_invoke_callbacks`
+        # swallows it and logs a spurious "exception calling callback", and
+        # this INFO line is never written. Same guard as
+        # `_log_abandoned_outcome` (`if future.cancelled(): return` before
+        # reading the exception) — it runs on a done-callback path and must not
+        # raise either.
+        if f.cancelled():
+            logger.info("#10893: a probe worker start was cancelled")
+            return
+        exc = f.exception()
+        if exc is not None:
             # INFO, not WARNING: `snapshot()` calls `begin()` on EVERY
             # unauthenticated `/health` read, so a warning here is a log
             # amplifier exactly while the box is in trouble. The operator-visible
             # signal is the coordinator's `start_error`, which is published by
             # `info()` and by the read that could not be served.
-            logger.info("#10893: a probe worker could not be started: %r",
-                        f.exception())
+            logger.info("#10893: a probe worker could not be started: %r", exc)
 
     future.add_done_callback(_report)
     return future
@@ -5540,25 +5558,42 @@ class HealthProbe:
         if not future.done():
             return
         self._start_attempt = None
+        # ✅ The start landed and `_run` takes over — read the exception ONLY
+        # for a future that is not cancelled, because `Future.exception()`
+        # RAISES `concurrent.futures.CancelledError` for a cancelled one
+        # (CPython `_base.py`: `if self._state in [CANCELLED,
+        # CANCELLED_AND_NOTIFIED]: raise CancelledError()`).
         if not future.cancelled() and future.exception() is None:
-            return                      # the start landed; `_run` takes over
-        exc = future.exception()
+            return
+        # ⛔ AND CLEAR THE STATE BEFORE CLASSIFYING, never after reading an
+        # exception that can raise. The pre-fix order read `future.exception()`
+        # first, so for a cancelled attempt `_running`/`_starting`/`_worker`
+        # kept describing a probe that will never run — for a whole
+        # `_stale_after` window, since `_start_attempt` was already dropped and
+        # only `begin()`'s stale-supersede arm could get out of it — and the
+        # `CancelledError` escaped EVERY caller of this method, including
+        # `_view_locked()`: i.e. out of the unauthenticated `GET /health` read
+        # path (`snapshot()`) and `peek()`. The documented "cancelled" cause
+        # could never be produced either.
         self._starting = False
         self._running = False
         self._worker = None
         if future.cancelled():
             self._start_error = "probe could not be started: cancelled"
-        elif isinstance(exc, _WorkerBacklogFull):
-            # A refusal and a start failure are different operator actions: the
-            # backlog is full when the STARTER is wedged (recover it), while
-            # "can't start new thread" is the box out of threads (recover the
-            # box). Say which.
-            self._start_error = (
-                "probe could not be started: the starter refused the request "
-                "(its bounded backlog is full — the starter is wedged)")
         else:
-            self._start_error = (
-                f"probe could not be started: {type(exc).__name__}: {exc}")
+            exc = future.exception()
+            if isinstance(exc, _WorkerBacklogFull):
+                # A refusal and a start failure are different operator actions:
+                # the backlog is full when the STARTER is wedged (recover it),
+                # while "can't start new thread" is the box out of threads
+                # (recover the box). Say which.
+                self._start_error = (
+                    "probe could not be started: the starter refused the "
+                    "request (its bounded backlog is full — the starter is "
+                    "wedged)")
+            else:
+                self._start_error = (
+                    f"probe could not be started: {type(exc).__name__}: {exc}")
         self._cv.notify_all()
 
     def _start_locked(self) -> None:
@@ -5581,9 +5616,19 @@ class HealthProbe:
             self._starting = False
             self._running = False
             self._worker = None
+            # ⛔ NOT a backlog refusal. `_start_probe_worker_off_caller` returns
+            # ``None`` ONLY from its ``except Exception`` around
+            # ``_probe_starter()``/``submit`` — the hand-off itself could not be
+            # made (pool construction or a submit raise, e.g. ``RuntimeError:
+            # can't start new thread`` under RLIMIT_NPROC). A backlog refusal
+            # returns an ALREADY-FAILED future carrying `_WorkerBacklogFull`,
+            # reconciled with its own message in `_reconcile_start_locked`. A
+            # refusal and a hand-off failure are different operator actions
+            # (recover the starter vs. recover the box), so say which.
             self._start_error = (
-                "probe could not be started: the starter refused the request "
-                "(its bounded backlog is full — the starter is wedged)")
+                "probe could not be started: the start could not be handed "
+                "off (the starter pool could not be built or its submit "
+                "raised — see the log)")
             return
         self._start_attempt = (seq, future)
 

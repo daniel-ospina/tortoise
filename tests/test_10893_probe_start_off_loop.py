@@ -232,11 +232,24 @@ def test_reads_inside_the_start_window_still_coalesce(monkeypatch):
     handed to the starter but has not run yet. If the coordinator trusted
     ``is_alive()`` alone, a second read in that window would start a SECOND
     probe — the accumulation #2850 item 2 exists to prevent.
+
+    ⛔ THE DISCRIMINATOR IS **HAND-OFFS**, NOT ``probe_fn`` CALLS (review round
+    4, F1). ``calls["n"] == 1`` alone is GREEN under the gate mutant: dropping
+    ``self._starting or`` from ``begin()``'s gate makes all six reads supersede
+    one another (``_seq`` 1..6), and ``_run``'s generation guard then discards
+    generations 1–5 BEFORE ``probe_fn`` — so the count stays 1 whether
+    single-flight held or six starts were thrown away. A row must vary under the
+    mutation of the behaviour it names, or it is dead weight that reads as
+    coverage. Counting hand-offs makes the mutant red by 6; the ``probe_fn``
+    count is kept because it proves the probe still RAN, which is a different
+    invariant (already separately pinned by
+    ``test_an_abandoned_generation_does_not_clear_the_successors_start_bit``).
     """
     _slow_thread_start(monkeypatch, seconds=0.30)
     _fresh_starter()
 
     calls = {"n": 0}
+    handoffs = {"n": 0}
 
     def probe_fn():
         calls["n"] += 1
@@ -245,14 +258,116 @@ def test_reads_inside_the_start_window_still_coalesce(monkeypatch):
 
     probe = monitoring.HealthProbe(probe_fn, timeout=5.0)
 
+    # The seam the behaviour actually lives in: `_start_locked` hands every
+    # start to this module-level function (resolved at call time), so counting
+    # its invocations counts the STARTS the coordinator issued.
+    real_handoff = monitoring._start_probe_worker_off_caller
+
+    def counting_handoff(worker, _real=real_handoff):
+        handoffs["n"] += 1
+        return _real(worker)
+
+    monkeypatch.setattr(monitoring, "_start_probe_worker_off_caller",
+                        counting_handoff)
+
     async def scenario():
         return await asyncio.gather(*[probe.run() for _ in range(6)])
 
     results = asyncio.run(scenario())
+    assert handoffs["n"] == 1, (
+        f"{handoffs['n']} probe STARTS were handed off for 6 reads inside the "
+        "start window — single-flight broke, which is the accumulation #2850 "
+        "item 2 forbids (five of the workers are then discarded by `_run`'s "
+        "generation guard, so a `probe_fn` count cannot see this)")
     assert calls["n"] == 1, (
         f"{calls['n']} probes ran for 6 reads — the start window broke "
         "single-flight")
     assert all(r["ok"] is True for r in results)
+
+
+def test_a_cancelled_start_is_reconciled_without_raising(monkeypatch):
+    """A CANCELLED handed-off start must clear the state, not raise (#10893).
+
+    ``Future.exception()`` raises ``concurrent.futures.CancelledError`` for a
+    cancelled future, so the pre-fix order — read the exception, THEN clear
+    ``_running``/``_starting``/``_worker`` — escaped this read path (it is
+    reached from ``_view_locked()``, i.e. the unauthenticated ``GET /health``
+    read ``snapshot()``/``peek()``) and left the coordinator describing a probe
+    that will never run. Its ``"cancelled"`` cause string was unreachable.
+
+    No in-tree caller cancels a start today (measured: nothing calls
+    ``.cancel()`` on a start future), so this drives the arm through the starter
+    seam the way a future caller — a pool shutdown, a supervisor reaping the
+    hand-off — would.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    pending: list[concurrent.futures.Future] = []
+
+    class _PendingStarter:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            pending.append(future)
+            return future
+
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=1.0)
+    monkeypatch.setattr(monitoring, "_probe_starter", _PendingStarter)
+
+    async def scenario() -> dict:
+        async def cancel_the_start():
+            await asyncio.sleep(0.05)
+            pending[0].cancel()
+
+        cancelling = asyncio.create_task(cancel_the_start())
+        result = await probe.run()      # pre-fix: CancelledError escapes here
+        await cancelling
+        return result
+
+    result = asyncio.run(scenario())
+    assert result["ok"] is False
+    assert "cancelled" in (result.get("error") or ""), (
+        f"a cancelled start is not declared as cancelled: "
+        f"{result.get('error')!r}")
+    info = probe.info()
+    assert info["in_flight"] is False, (
+        "a cancelled start left the probe 'in flight' forever")
+    assert info["starting"] is False
+
+
+def test_a_hand_off_failure_is_not_reported_as_a_backlog_refusal(monkeypatch):
+    """``None`` from the hand-off is a START we could not MAKE, not a refusal.
+
+    ``_start_probe_worker_off_caller`` returns ``None`` only from its
+    ``except Exception`` around ``_probe_starter()``/``submit`` — pool
+    construction or the submit itself raised (``RuntimeError: can't start new
+    thread`` under ``RLIMIT_NPROC``, the resource-exhaustion regime this change
+    exists for). A backlog refusal returns an ALREADY-FAILED future carrying
+    ``_WorkerBacklogFull`` and is reconciled with its own message, so reporting
+    ``None`` as "the starter's bounded backlog is full" sends the operator to
+    recover the wrong thing (review round 4, P3-a).
+    """
+    _fresh_starter()
+
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.3)
+
+    def broken_starter():
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(monitoring, "_probe_starter", broken_starter)
+
+    result = asyncio.run(probe.run())
+    error = result.get("error") or ""
+    assert result["ok"] is False, "a probe that never ran must not report ok"
+    assert "handed off" in error, (
+        f"the hand-off failure is not named: {error!r}")
+    assert "backlog" not in error, (
+        f"a hand-off failure was reported as a starter backlog refusal — the "
+        f"wrong operator action: {error!r}")
+    assert probe.info()["in_flight"] is False
 
 
 def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
