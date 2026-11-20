@@ -529,8 +529,15 @@ def test_the_real_docs_tree_is_not_empty():
 #: the verb list includes `=`, so a flat gap cannot stop the scan landing inside a tag. The
 #: gap therefore consumes a tag (or an entity) WHOLE and otherwise proceeds one non-`;`,
 #: non-`|`, non-newline character at a time.
-_GAP_FULL = r"(?:[^;|<]|<[^>\n]*>|&[a-z]{1,8};){0,40}?"
-_GAP_ABBREV = r"(?:[^\w\n]|_|<[^>\n]*>|\[\^?\d+\]|&[a-z]{1,8};)*"
+#: ⛔ A SOFT BREAK IS NOT A PARAGRAPH BREAK (#13900, and `7557a52cf5`'s measurement, kept):
+#: a single newline is a CommonMark SOFT BREAK, so a claim hard-wrapped after the command is
+#: still one claim and is graded; a BLANK line delimits the paragraph and IS the boundary.
+#: Alternatives are DISJOINT — `[^;|<\n]` cannot start a tag or an entity, and the newline
+#: enters only through its own branch — so the run stays linear (measured: 8/16/28/40 spaces
+#: 0.000s; the ambiguous form `7557a52cf5` replaced took 15.8 s at 24).
+_GAP_FULL = r"(?:[^;|<\n]|<[^>\n]*>|&[a-z]{1,8};|\n(?![^\S\n]*\n)){0,40}?"
+_GAP_ABBREV = (r"(?:[^\w\n]|_|<[^>\n]*>|\[\^?\d+\]|&[a-z]{1,8};"
+                r"|\n(?![^\S\n]*\n))*")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -1603,15 +1610,27 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb and a "
             "separator run longer than four are the SAME answer; each returned `[]` before "
             "this fix (#13900 review, cycle 10, P2)")
-    # ⛔ A HARD WRAP IS A DECLARED RESIDUAL, PINNED AS ONE (#13900 review, cycle 11). The gap
-    # excludes `\n` on purpose — this arm is a single-line reader, and a rule that reached
-    # across lines could join two unrelated clauses. So the wrapped form is asserted UNGRADED,
-    # which is the opposite pin from the rows above: if someone widens the gap across newlines,
-    # this reds and the docstring's declared limit has to be updated with it.
+    # ⛔ A SOFT BREAK IS GRADED, A PARAGRAPH BREAK IS THE BOUNDARY (kept from `7557a52cf5`,
+    # whose measurement this replaces the earlier "hard wrap is a residual" pin with a measured
+    # one). A single newline is a CommonMark SOFT BREAK — the claim continues — so the wrapped
+    # form must be read. A BLANK line ends the paragraph, and crossing it is how a rule joins
+    # two unrelated clauses, so that form must NOT be read.
     assert _typed_answers_to_tortoise_cmd(
-        "`-- tortoise/`\nprints ONE path at this head", "-- tortoise/") == [], (
-        "a hard-wrapped answer is now graded — that is a change to a DECLARED residual, so "
-        "the docstring's limit list must say so (#13900 review, cycle 11)")
+        "`-- tortoise/`\nprints ONE path at this head", "-- tortoise/"), (
+        "a hard-wrapped answer (one SOFT break) is not graded — it is one claim on two lines")
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/`\n\nprints ONE path at this head", "-- tortoise/") == [], (
+        "the gap crossed a BLANK line — a paragraph break is the boundary, and crossing it "
+        "joins two unrelated clauses (over-block side)")
+    # …and the run stays LINEAR when no verb follows, which is what `7557a52cf5` measured as
+    # exponential in the earlier ambiguous form. Bounded here so a regression reds instead of
+    # hanging: 28 spaces is the size that took 15.8 s there.
+    import time as _time
+    _t0 = _time.monotonic()
+    _typed_answers_to_tortoise_cmd("`-- tortoise/`" + " " * 28 + "no verb here", "-- tortoise/")
+    assert _time.monotonic() - _t0 < 2.0, (
+        "the separator's alternatives are ambiguous again — 28 spaces after the subject took "
+        "longer than 2 s, and at `d38f9152af` 24 spaces alone took 15.8 s (measured)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
