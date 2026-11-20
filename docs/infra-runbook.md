@@ -4495,8 +4495,9 @@ verification:** the three states measure differently and only one is green — `
 is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
 the REJECTED direction — `fly-only:#13674` with the `[env]` row removed, i.e. reverting #13926, which is
 an owner decision (#13923) and not a lane's — is exit **0**, but only while the secret is LIVE: withhold
-it and `fly-only:` reds (`exists neither on Fly nor in the deploy payload`), because that token requires
-a real out-of-band secret (#13941's direction check, measured 2026-11-20). ⛔ The false green is the
+it and `fly-only:` reds with a STALE declaration (its message is the `fly-only:`-specific one — no test
+binds that wording, so it is deliberately not quoted here), because that token requires a real
+out-of-band secret (#13941's direction check, measured 2026-11-20). ⛔ The false green is the
 other way round: THIS route-(b) state reads exit **0** for this name if the secret list is seeded
 WITHOUT it, which is exactly what a fixture that models the transition away does.
 The route-(b) PAIR — exit 1 with the shadow, exit 0 with it withheld — is pinned by

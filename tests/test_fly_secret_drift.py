@@ -2009,12 +2009,12 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         present=_declared_gh_names(REAL_MANIFEST),
         extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
     )
+    # `returncode == 0` is the WHOLE control predicate: the gate prints a violation line only
+    # inside the branch that returns 1, so a separate "no STALE in stdout" assert could never
+    # fire (it lived here until review round 9 — the same dead-assert class this file deletes
+    # elsewhere). If a future gate ever prints without counting, add the belt WITH a comment
+    # saying that is what it is.
     assert control.returncode == 0, control.stdout + control.stderr
-    assert "STALE DECLARATION" not in control.stdout, (
-        "with the transition's shadow withheld the shipped artifacts must be CLEAN; if they are "
-        f"not, the tolerated-STALE arm above is excusing a violation that is not the transition:\n"
-        f"{control.stdout}"
-    )
     assert r.returncode != control.returncode, (
         "the two fixtures must produce DIFFERENT verdicts, or every arm above is vacuous. "
         "If `open_route_b` was just emptied because the transition landed, delete THIS "
