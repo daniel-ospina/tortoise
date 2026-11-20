@@ -542,10 +542,17 @@ def test_the_real_docs_tree_is_not_empty():
 #:      The single-character unit excludes `&`, which is reached ONLY through `_AMP`, whose two
 #:      branches a negative lookahead keeps mutually exclusive, so `&` has one parse.
 #:      ⛔ THE BARE BRANCH IS NOT DECORATION (#13900 review, cycles 9-13, MEASURED): the first
-#:      form of this unit dropped it, and ``... -- tortoise/` R&D prints TWO paths`` then
-#:      returned `[]` — a claim left GREEN. `&` is a character `origin/main`'s gap already
-#:      admitted, and a closure that drops a form the previous rule had is a regression wearing
-#:      a widening's clothes.
+#:      form of this unit dropped it and a claim went GREEN. ⛔ THE LIVE WITNESS IS THE BARE-`&`
+#:      ROW IN `test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree` —
+#:      ``... ` & prints TWO paths``, MEASURED at #13921: `[('prints TWO paths', False)]` with
+#:      the branch and `[]` without it, so deleting the branch REDS there. ⛔ NOT the `R&D` row:
+#:      that one carries a WORD (`R`, `D`) between the command and the verb, which is this gap's
+#:      DECLARED out-of-scope form (see the `_GAP_UNIT` block), so it returns `[]` whether or
+#:      not the branch exists and CANNOT red for it — naming it as this branch's witness points
+#:      a future fixer at a row that can never fail (#13921 review, P2, MEASURED; corrected
+#:      here, same over-stated-attribution class as `_BRACKET` and the `[is]` row). `&` is a
+#:      character `origin/main`'s gap already admitted, and a closure that drops a form the
+#:      previous rule had is a regression wearing a widening's clothes.
 #:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no `]` (bare or ESCAPED)
 #:      reachable from it;
 #:   6. an UNTERMINATED tag — `_OPEN_TAG` below, a `<` that `_TAG` cannot parse. That INCLUDES a
