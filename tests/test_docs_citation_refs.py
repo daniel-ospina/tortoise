@@ -3700,9 +3700,11 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
 
     ⛔ A BOUNDED EQUIVALENCE, NOT A REGEX-EQUIVALENCE DECISION (#13995 review, P2 — MEASURED).
     The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`; measured, it carried
-    exactly `^[+-]$` and `^[-+]$`, so the plain group `^(\+|-)$` — the same class, measured `2` on
-    the 4-line probe — was read as an expression of some OTHER class. (The `^[+\-]$` this sentence
-    used to pair with it is NOT an equivalent: measured `3` on the 6-line probe — `+`, `-`, a lone
+    the `[...]` spellings (`^[+-]$`, `^[-+]$`, and any other bracket class whose members are just
+    `+`/`-` — `^[++-]$` is matched too) and rejected the plain group `^(\+|-)$`, which is the same
+    class (measured `2` on the 4-line probe) — so that spelling was read as an expression of some
+    OTHER class. (The `^[+\-]$` this sentence used to pair with it is NOT an equivalent:
+    measured `3` on the 6-line probe — `+`, `-`, a lone
     `\`, blank, `++`, `--`, the probe every count below uses — it is a SUPERSET, and that list
     rejected it too, which is why it appears in the rejection bullets below and not here; pairing
     the two made a TRUE statement about `^(\+|-)$` carry a FALSE one about `^[+\-]$` (#14026 P2.)
