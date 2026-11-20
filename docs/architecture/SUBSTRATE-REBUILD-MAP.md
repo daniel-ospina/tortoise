@@ -254,8 +254,9 @@ whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
 `_DOC_RETIRED_KEYS` (`projection/entities.py:2343`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
-returns that one line; the sentence used to name `2313` (then `2297`, which `#13971`'s review round
-moved +16 when it corrected the capture path's own docstring above, and before that
+returns that one line; the sentence has followed the symbol through `2297` → `2313` →
+`2343` as `#13971`'s review round corrected the capture path's own docstring above and then
+added the restore-door residual there, and before that
 `2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 

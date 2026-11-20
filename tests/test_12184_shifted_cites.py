@@ -65,7 +65,7 @@ _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
 _HB = "tortoise/hosted_backup.py"
-#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2684` for
+#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2683` for
 #: `_index_has_is_operator()`, and that row is in this branch's diff.
 _PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
 

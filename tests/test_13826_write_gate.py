@@ -617,13 +617,11 @@ def test_the_embedding_repair_asks_the_gate(sdk, monkeypatch):
 def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
     """The frozen legacy branch is a declared `:Event` writer, so it asks too.
 
-    ⛔ THE PIN NAMED A RETIRED DOOR. `TortoiseSDK.ingest_corpus` was retired by `#4282`
-    (the public name does not resolve — owner ruling `#3836` (c)), so this test raised
-    `AttributeError` on its first line and asserted NOTHING about the gate for however
-    long that had been true. The writer it is about still exists under its own name —
-    `_ingest_corpus`, which is also the key `tortoise.embed_writer_register` declares —
-    so the pin drives that spelling. A test that cannot reach its subject is a red gate,
-    not a passing one.
+    The public spelling `TortoiseSDK.ingest_corpus` was retired by `#4282` (owner ruling
+    `#3836` (c)), and this branch's base already carries the private spelling; the pin is
+    stated here because the writer that asks is `_ingest_corpus`, which is also the key
+    `tortoise.embed_writer_register` declares. A test that cannot reach its subject is a
+    red gate, not a passing one.
     """
     _stub_session_metadata(monkeypatch)
     calls = _count_session_embedding(monkeypatch)

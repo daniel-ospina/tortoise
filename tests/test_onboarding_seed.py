@@ -337,3 +337,76 @@ class TestSeedOnboardingAnchors:
         with pytest.raises(ValueError):
             seed_onboarding_anchors(
                 _make_sdk(), org_name="", person_name="Alex", org_id="t1")
+
+
+# ── the surface contract the seed depends on (#13971 review) ──────────
+
+
+def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
+    """⛔ THE `#13899` REGRESSION WAS A RENAMED DOOR, AND ONLY A DOUBLE CAUGHT IT.
+
+    `seed_onboarding_anchors` is handed a duck-typed SURFACE, not the SDK
+    (`hosted_api._OrgSeedSurface` for the org-hosted lane, `onboarding.selfhost._SdkSeedSurface`
+    for the self-hosted one). Both publish `query` / `create_subject` / `create_edge` and
+    delegate to the SDK's PRIVATE `_create_subject` / `_create_edge` underneath — so a seed
+    that calls the private spelling raises `AttributeError` on every run, while a test whose
+    double was renamed in lockstep stays green. That is exactly how it shipped.
+
+    This pins the CONTRACT instead of the wording: every `surface.<name>` the module calls
+    must exist on BOTH real surfaces. Renaming a door on either side reds here.
+    """
+    import inspect
+    import re
+
+    from tortoise import hosted_api
+    from tortoise.onboarding import selfhost
+    from tortoise.onboarding import seed as seed_module
+
+    used = set(re.findall(r"\bsurface\.(\w+)",
+                          inspect.getsource(seed_module)))
+    assert {"create_subject", "create_edge"} <= used, (
+        f"the seed no longer calls the doors this pin exists for: {sorted(used)}")
+
+    for surface_cls in (hosted_api._OrgSeedSurface, selfhost._SdkSeedSurface):
+        missing = sorted(name for name in used if not hasattr(surface_cls, name))
+        assert not missing, (
+            f"{surface_cls.__name__} does not publish {missing}, which "
+            f"`tortoise/onboarding/seed.py` calls as `surface.{missing[0]}(…)` — a seed "
+            "against this lane would raise AttributeError, and a double renamed in "
+            "lockstep would keep the suite green")
+
+
+def test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk():
+    """The org-hosted surface is the one no end-to-end pin reaches; bind it here.
+
+    It must forward `create_subject` to the SDK's own door with the caller's props intact
+    (and no fabricated kind — `#9572`), so the seed's write path is the SDK's write path.
+    """
+    from tortoise.hosted_api import _OrgSeedSurface
+
+    seen = []
+
+    class _Sdk:
+        def _get_proj(self):
+            return None  # this test drives the write doors, not the read
+
+        def _create_subject(self, name, **props):
+            seen.append(("subject", name, dict(props)))
+            return {"id": f"sub-{name}", **props}
+
+        def _create_edge(self, relation, from_id, to_id):
+            seen.append(("edge", relation, from_id, to_id))
+            return {"relation": relation}
+
+    surface = _OrgSeedSurface(_Sdk())
+    created = surface.create_subject("Acme", subjectKind="organization",
+                                     entityType="Organization")
+    assert created["id"] == "sub-Acme"
+    assert seen[-1][0] == "subject"
+    assert seen[-1][2]["subjectKind"] == "organization"
+    assert seen[-1][2]["entityType"] == "Organization", (
+        "the surface dropped a caller prop on its way to the SDK door")
+    surface.create_edge("WORKS_AT", "sub-Acme", "sub-Alex")
+    assert seen[-1] == ("edge", "WORKS_AT", "sub-Acme", "sub-Alex")
+    # and it never advertises the SDK's private spelling, which is what the seed must not call
+    assert not hasattr(_OrgSeedSurface, "_create_subject")

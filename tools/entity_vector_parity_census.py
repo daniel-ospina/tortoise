@@ -177,8 +177,12 @@ CensusError = census_mod.CensusError
 #: record's coverage for it was unproven and the label was still being mirrored by
 #: ungated writers*. The MEASUREMENT half is gone: the record's dense leg is armed since
 #: `#13685` and holds ~37,099 point vectors against 37,158 in the graph (measured
-#: 2026-11-19 — a 59-vector shortfall, so coverage still answers KEEP and nothing pops, and
-#: this census is the authority on when that flips), the in-graph `:Point` HNSW index is
+#: 2026-11-19 — a 59-vector shortfall, so coverage still answers KEEP and nothing pops; the
+#: census is the authority on when the `point` half closes, and `operator`'s half does NOT
+#: close from a count at all: its graph denominator is the whole `:Point` label while its
+#: record numerator is the operator subset, so the comparison is unreachable until the
+#: denominator is kind-aware — see `record_vector`'s `coverage` and the stripper's header),
+#: the in-graph `:Point` HNSW index is
 #: RETIRED (`#13330`) so nothing reads the property, and `#13971` gates the two writers that
 #: place a genuinely redundant copy (the SDK update door and the DR restore) on the same
 #: measured predicate the entity labels use — so `#5004`'s "a Point vector is RECORD
