@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 15000,
+  "exit_code": null,
+  "heartbeat_at": 1795132907,
+  "host": "cmux",
+  "issue": 13906,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13906-1795132907-p817428-0316b8eb",
+  "lease_until": 1795147907,
+  "pid": 817428,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795132907,
+  "state": "RUNNING",
+  "tag": "13906",
+  "worktree": "/home/cmux/tortoise/.worktrees/13906-vector-move"
+}
