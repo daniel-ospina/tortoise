@@ -981,17 +981,18 @@ def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
     silently read an EMPTY graph: every record key became ``missing_in_cache``
     and a coherent cache exited ``3``.
 
-    ⚠️ **THE REFUSAL STAYS FOR THE DERIVED ARM — #13337's recorded decision,
-    verbatim:** *"The shipped refusal in `tortoise/__main__.py` (`--cache-graph`
-    has no derived default, with the reason spelled out) is correct and must
-    stay: guessing would make an empty graph read as `divergent`, i.e. a wrong
-    verdict instead of no verdict."* What #13337 adds is a FACT arm — with a
-    readable ``graphs.namespace`` the flag is optional and nothing is assumed
-    (pinned in ``test_13337_cache_graph_declaration.py``). This case is the arm
-    the decision was written about (nothing answers), so it still refuses; what
-    is new is that the refusal is ACTIONABLE — it names the spelling it would
-    have assumed and both conventions, so the one decision it needs is in front
-    of the operator instead of made blind by the verb.
+    ⚠️ **SUPERSEDED IN PART BY #13337, and this pin follows the successor rule
+    rather than the old one.** The refusal that used to answer this case existed
+    because DERIVING was the only alternative to guessing — and a derivation is
+    wrong about exactly one graph, an org's default at ``org_<org_id>``. A fact
+    exists now (``public.graphs.namespace``), so the flag is optional WHERE A
+    FACT ANSWERS. What must never come back is the SILENT derivation this test
+    was written against — and, per #13337's own ruling, a GRADED one either: on
+    this shape (no control plane) the verb still refuses, now naming the spelling
+    it would have used. So the assertion is unchanged in substance — both
+    conventions are named, the run says the coordinate would be assumed, and the
+    exit code is still no-verdict — while the message is the actionable one and
+    not the old blanket flag refusal.
     """
     from tortoise import __main__ as cli
 
@@ -1004,12 +1005,14 @@ def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
                    "--org", "acme", "--graph", "g1"])
     err = capsys.readouterr().err
 
-    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "org_<org_id>" in err and "org_<org_id>_<graph_id>" in err, err
-    assert "DERIVED" in err and "org_acme_g1" in err, err
+    assert "DERIVED" in err, err
+    assert "org_acme_g1" in err, err
+    assert "--cache-graph is required" not in err, (
+        "the flag is optional now (#13337); the refusal that remains is for a "
+        f"coordinate nothing can answer, and here one was derived: {err}")
+    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "UNKNOWN, not zero" in err, err
-    assert "reachable control plane" in err, (
-        f"the refusal must name the way OUT of it, not only the reason: {err}")
 
 
 def test_the_verb_bounds_BOTH_stores(monkeypatch, cache_graph):

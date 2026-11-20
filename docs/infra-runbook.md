@@ -4117,7 +4117,10 @@ whole reason this path exists.
 #        regenerate;
 #      • neither present (an image) → the image lost its package data; ship it.
 #
-# 2. Restore. --cache-graph is REQUIRED and has no default (see below).
+# 2. Restore. --cache-graph is OPTIONAL when the control plane can answer: the
+#    name is READ from public.graphs.namespace for this tenant, never derived.
+#    With NO readable fact the verb REFUSES (exit 2) — an assumed name is not
+#    enough for a verb that WIPES (see below).
 python -m tortoise record-restore \
     --db "docker://<user>:<pw>@<falkordb-host>:<port>" \
     --org <org_id> --graph <graph_id> \
@@ -4166,12 +4169,20 @@ record is unreachable".
    off the graph after the write, so a projection that wiped and materialised
    nothing reports `0` (and the printed `N node(s)` on a healthy run is the
    number of nodes actually in the cache, not the size of the record slice).
-3. **`--cache-graph` cannot be guessed.** The cache graph's name is not the
+3. **`--cache-graph` is never GUESSED — it is read, or the run refuses.** The
+   cache graph's name is not the
    record's `graph_id` scope column: this tree names it `org_<org_id>` (the org
    SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
-   namespace). A wrong guess does **not** fail — FalkorDB opens an EMPTY graph —
+   namespace). Without the flag the verb asks the control plane for
+   `public.graphs.namespace` (the same read `hosted_api._assert_graph_owned`
+   makes); with no readable fact it REFUSES with exit `2` and names the spelling
+   it would have used. A wrong guess does **not** fail — FalkorDB opens an EMPTY
+   graph —
    so the run would report a restore into a graph nobody reads while the real
-   graph stayed destroyed. The result prints the target's **pre-wipe count of
+   graph stayed destroyed. The resolved coordinate and its source are printed
+   **before** anything is opened or deleted ("note: restoring into cache graph
+   'org_x' (control_plane)"), and the result prints the target's **pre-wipe
+   count of
    RESTORABLE nodes** (the labels the record can put back) for the same reason:
    `target held 0 node(s) before the wipe` beside `wrote 412` is either a
    correct restore into a freshly-minted graph or a restore into the wrong one,
