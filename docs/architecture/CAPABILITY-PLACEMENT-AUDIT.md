@@ -182,10 +182,11 @@ counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `sdk.py
 `WHERE t.name IN $names` filter), `mcp_server.py` `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`)
 and `sdk.py` `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). They are
 spelled here as BARE siblings, not as one-token `path.py:NNNN` pairs, for the reason the row beside
-them already gives: each address is quoted once, in §2.5, where `_REDEFINED_13854` pins it by content at
-exactly one occurrence, so re-spelling it here as a pair would either double-count it in the drift
-figures above or red that pin. Each was opened at this head, and ⛔ **none of them opens at the pin, nor
-did the pin-numbered values the row carried before them**: at `ccb49741b2ec` all ten of those numbers
+them already gives: each address is quoted once, in §2.5, so re-spelling it here as a pair would move
+the drift denominator the figures above are computed from. For the four `sdk.py` addresses there is a
+pin to red as well — `_REDEFINED_13854` pins each of them by content at exactly one occurrence (the
+`mcp_server.py` sibling has no row in that pin). Each was opened at this head, and ⛔ **none of them
+opens at the pin**: at `ccb49741b2ec` all five of those numbers
 read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31365p;31347p;24327p;24671p'`,
 and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
 reader sent to the pin would have found a different line at every one of them — which is why they are
@@ -580,9 +581,9 @@ read resolves the node **through the edge** — `sdk.py:31365`
 `sdk.py:24327` (`MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) WHERE t.name IN $names`) /
 `mcp_server.py:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
 `sdk.py:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
-addresses re-derived in this pass (#13879 review, P2: they were pin-head values from `ccb49741b2`,
-and the third of them had meanwhile drifted onto the address this document set now names as the
-**meta fold**, so two documents were giving one number two meanings). A traversal needs its
+addresses opened at this head and re-checked in this pass (#13879 review, P2): the four `sdk.py`
+addresses stand as they were, and only the `mcp_server.py` one was stale, at `:11280` → `:11281`,
+where the statement itself opens. A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
 
