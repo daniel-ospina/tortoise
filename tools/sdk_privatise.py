@@ -270,7 +270,28 @@ SWEEP_NAMES = 66
 #: comment-only: its contribution is the provenance and the non-delegability finding above, not a
 #: new number. `--check` on the merged tree exits 0 with typed references `0`. Re-derive with
 #: `--repin` on your own tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
+#:
+#: RE-CUT → (11829, "0a549dd352726b5c") by `#13971` (this PR), and the +7 is ENTIRELY this PR's,
+#: measured against the base it merged rather than inferred from the difference — the pin above is
+#: `main`'s own number and `main` still observes it, so every row below is owned here:
+#:   * `origin/main` `0656b056d7` (the merge this branch took) on its OWN tree prints
+#:     `--report --base 28ca66878d` → **11822**, i.e. exactly the (11822, "05e0ff542dfb8e62") pin, so
+#:     the base contributes NOTHING to the move;
+#:   * THIS branch's merged tree prints **11829** on the same instrument, and the row delta is two
+#:     shapes only, each MEASURED on both trees: `proj.g.query` 3637 → 3642 (+5) and
+#:     `g.query` 1490 → 1492 (+2). 5 + 2 = 7 = 11829 − 11822.
+#: Where the 7 sit, counted per file on both trees: `tests/test_10000_turns_record_only.py`
+#: `proj.g.query` 26 → 28 (+2, the two `rows = proj.g.query(` reads in the review round's P1 pins
+#: `test_the_graph_store_lane_keeps_the_turn_VECTOR` and
+#: `test_a_refused_record_write_falls_back_to_the_graph_WITH_its_vector`), and
+#: `tests/test_13826_write_gate.py` `proj.g.query` 8 → 11 (+3, the `REMOVE n.embedding` resets and the
+#: `DETACH DELETE` between gate arms) and `g.query` 23 → 25 (+2, the same resets on its own graph
+#: fixture). ⛔ Every one is an ordinary-word receiver on a FalkorDB `Graph` or the test's
+#: `FalkorProjection` double (`proj.g`) — the API those stand in for IS `Graph.query`, so
+#: re-pointing them at a private spelling would break the double's fidelity, which is exactly the
+#: `super().query` / `declared_markers.update` precedent declared above. No SDK-holding receiver is
+#: added, and no new shape appears: the typed-reference count is `0` on this tree, measured.
+SWEEP_RESIDUE = (11829, "0a549dd352726b5c")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
