@@ -7930,6 +7930,17 @@ def test_the_gate_reds_through_cmd_check_and_not_only_through_the_helper(
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "baseline")
 
+    # The scratch repo must also be able to PROVE the record's `cut_at_commit`: property 14
+    # runs BEFORE the shrink arm and refuses a tree whose provenance names no commit in THIS
+    # clone (`git said: Not a valid object name`), so without this the test measures the
+    # provenance arm and never reaches the waiver. Citing the scratch repo's own first commit
+    # — on its default branch by construction — isolates the arm under test.
+    doc["cut_at_commit"] = _git(repo, "rev-parse", "HEAD")
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "commit", "-qam", "record provenance on the default branch")
+
     monkeypatch.setattr(sm, "ROOT", repo)
     rc, out = _check(
         sm, doc, tmp_path, base_ref="HEAD", allow_surface_shrink=["tool:tortoise_never_existed"]
