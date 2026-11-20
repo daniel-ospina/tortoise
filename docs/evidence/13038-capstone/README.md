@@ -273,3 +273,29 @@ caller guesses its name — and no lifecycle slice moves it). Both boards, both 
 the exact commands are in [`13302/`](13302/README.md); this bundle's own four files are untouched,
 because the baseline above is the FIRST scoreboard and a later run must not overwrite the record of
 what it measured.
+
+**Measured 2026-11-20 — the re-measurement at `main`, with its limits
+([`11824-close/`](11824-close/README.md)).** Two runs bracketing this strand's implementation work:
+`9e9fc232` (2026-11-18) and `28ca66878d` on `main` (2026-11-20), scored `3 right · 3 wrong` →
+`6 right · 0 wrong`. Read them through the bundle README, which states the bounds; three
+reconciliations so the tree does not read as a 6 → 3 → 6 regression:
+
+* **The before arm was scored with `--judge file`**, against `verdicts-baseline.json` — whose
+  `_provenance` names a **different packet at a different product** (`446bd09a`). Its tally is
+  therefore that verdict file's score set applied to this run's payloads: a **comparison
+  reference**, not a judgement of `9e9fc232`. The fresh-judged 3/6 at `bf3a7b8e77bf` in the table
+  above is the measurement; the bundle README also names the two baseline clauses its own payloads
+  refute.
+* **The `13302/` pair's two runs are `5 right · 1 wrong` and `6 right · 0 wrong` at the SAME
+  commit** (`353c225703af`) — the step between them is Q1, the row this bundle records as
+  JUDGE-VARIABLE. Consequence, carried forward rather than quietly dropped: Q1 is `wrong` above and
+  `right` in `11824-close/`, so **Q1's movement is not attributed to any slice in either bundle**.
+* **A 6/6 board was already committed before `11824-close/`** — `13302/scoreboard-after-run2.md`.
+  Its product is a **#13302 branch head `main` does not contain** (`9e9fc232…353c225703af` diverged:
+  ahead 1, behind 36), so it is not a prior state of `main` and the newer board is not a
+  re-measurement of a 5/1 `main`.
+
+What the newer bundle adds on top of `13302/`: an after arm that is **`main`** rather than a PR
+branch, a before arm whose **payload** is committed alongside the reused verdicts so a disputed row
+can be re-read, verbatim-artefact digests, and an attribution table restricted to slices verified
+absent from the before product.

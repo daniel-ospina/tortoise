@@ -24,17 +24,6 @@
 - **evidence it cited / signals:** search: read_status='degraded'; search: read_status='degraded'; search: read_status='degraded'; found: q4_pricing (1a1ef8a850f-c688f9cd5567); DEGRADED-READ: the product reported the read degraded (legs: fallback, fts, vector) — rows may be the whole corpus ranked, not a match set
 - **verdict reason:** The answer serves Q4 pricing ($39/seat, superseding Q3) and the unmet Q4 uptime goal, correctly excluding the replaced Q3 price and the retired onboarding flow, but it omits the current 12 December launch plan — a third live commitment the narrative says exists — so the commitment set is incomplete.
 - **cause:** The plan node is unreachable from the commitment query: the object search 'current commitments' returned 0 rows and the point search surfaced only pricing/uptime, with the valid_time leg reporting state_read_incomplete and the vector leg d…
-  - ⚠️ **This `cause` is inherited baseline prose, and one clause of it is not
-    this run's payload.** The verdict file is a fresh reader's output from a
-    DIFFERENT run at product `446bd09a` (see README's first disclosure). Its
-    `valid_time`/`state_read_incomplete` clause names a leg Q1 never emitted:
-    Q1's three calls run `vector`/`fts`/`structural`/`fallback` only, no
-    `valid_time` appears in Q1 at all, and `state_read_incomplete` occurs nowhere
-    else in this bundle. The run's sole `valid_time` read is Q3's
-    `include_terminal` — not degraded, reason `no-prefer-latest-intent`. What Q1's
-    own payload supports is the row above: the object search returned 0 rows and
-    the point search reports `read_status=degraded` on legs
-    `fallback`/`fts`/`vector`.
 - **what a wrong answer means:** If the replaced Q3 pricing decision or the retired onboarding flow appears, the product serves retired things as current — the trust failure this model exists to remove.
 
 ### Q2 — Did we ever plan a launch event, and did it happen? → **right**
