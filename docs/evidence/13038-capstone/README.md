@@ -286,7 +286,7 @@ reconciliations so the tree does not read as a 6 → 3 → 6 regression:
   `capstone13038_20261117t184234z`) whose header names a **different product** (`446bd09a`). Its
   tally is therefore that verdict file's score set applied to this run's payloads: a **comparison
   reference**, not a judgement of `9e9fc232`. The fresh-judged 3/6 at `bf3a7b8e77bf` in the
-  [`13302/`](13302/README.md) table is the measurement; the bundle README also names the four
+  [`13302/`](13302/README.md) table is the measurement; the bundle README also names the five
   baseline clauses its own payloads refute.
 * **The `13302/` pair's two runs are `5 right · 1 wrong` and `6 right · 0 wrong` at the SAME
   commit** (`353c225703af`) — the step between them is Q1, the row this bundle records as

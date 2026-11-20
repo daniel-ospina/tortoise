@@ -116,8 +116,9 @@ on every one of its runs. And 4 of the 13 searches reported no legs at all
 (`retrieval: keyword_only`, `legs: []`): Q1 `current commitments`, Q5 `ended`,
 Q6 `has anything we relied on been withdrawn` and Q6 `ended` — which is why the
 posture reads `searches: 13` while the `vector` / `fts` / `structural` legs report
-9 runs each and `valid_time` reports 5 — it runs only on the `include_terminal`
-reads. Q1's two object searches took different paths inside this one run:
+9 runs each and `valid_time` reports 5 — it ran on 5 of the 13 searches, 3 of
+which set `include_terminal: false`, so its count is not the `include_terminal`
+count. Q1's two object searches took different paths inside this one run:
 `current commitments` `keyword_only` with no legs, `onboarding flow` `hybrid`
 with three.
 
