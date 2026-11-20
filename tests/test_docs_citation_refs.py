@@ -2869,8 +2869,16 @@ def _false_filter_descriptions(doc: str) -> list[str]:
     A substring test, deliberately: this arm grades the document's TEXT and never the tree,
     so it needs no merge base and cannot be skipped in a shallow checkout (the failure mode
     that made the measurement-keyed cut of (c-i) assert nothing — #13807 review, F1).
+
+    ⛔ CASE-INSENSITIVE, deliberately (#13948 review round 27, P2 — MEASURED). As a raw
+    substring test, capitalising the first character of a ledger row — the natural spelling for
+    a SENTENCE of prose, and a one-token edit — escaped it: all five rows went undetected and
+    three also escaped the shape arm beside it, so the whole cell reported GREEN over a
+    RE-INSERTED false description. It is the same false-PASS class this PR closed in
+    `_d5_head_bound_verdicts`, one function away; the case axis has its own control below.
     """
-    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling in doc]
+    lowered = doc.lower()
+    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling.lower() in lowered]
 
 
 def _document_filter_patterns(doc: str) -> list[tuple[str, str]]:
@@ -3036,6 +3044,16 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             f"the ban's own row {spelling!r} is not detected when injected, so editing it "
             "(even by one character) turns this arm inert — the bypass #13807 review "
             "finding 5 recorded for the membership ledger")
+    # ⛔ AND THE CASE AXIS HAS ITS OWN CONTROL (#13948 review round 27, P2 — MEASURED): every
+    # probe above is lowercase, so reverting the detector to a raw `in` left the cell GREEN
+    # while a sentence-initial cap on any ledger row escaped it — the same treatment the
+    # `_D5_HEAD_BOUND_VERDICTS` sibling got in round 26.
+    for spelling in _FILTER_FALSE_DESCRIPTIONS:
+        cased = spelling[0].upper() + spelling[1:]
+        assert _false_filter_descriptions(cased) == [spelling], (
+            f"the ledger ban misses the capitalised form of its own row ({cased!r}), so a "
+            "sentence-initial restatement of the false description passes it "
+            "(#13948 review round 27)")
 
     # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
     # with the patterns the DOCUMENT states, so a document that states a different filter is
