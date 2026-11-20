@@ -6591,10 +6591,10 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `/health` payload's `_consent_token_key_health()` line, re-emitted with a trailing comma
         # further down), so the span moves by a uniform +66; then `main`'s `819a473cd4`
         # (`#13674` close `#13819`'s last review round, `#13841`) inserted 18 lines above `org_info`
-        # (that block OPENS at `:8556`, its first inserted line — `:8552` is the hunk's opening
-        # CONTEXT line and was already there, so naming it would point at a line this commit did
-        # not add), so the span moves by a further uniform
-        # +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
+        # (that block OPENS at `:8556`, the first line it added TEXT on — `:8555` is the blank
+        # separator it also added, and `:8552` is the hunk's opening CONTEXT line, already
+        # there, so naming `:8552` would point at a line this commit did not add), so the span
+        # moves by a further uniform +18 and is `:15346-15423` at THIS head — the START is the `grep -n 'point_count = await
         # asyncio.to_thread(' tortoise/hosted_api.py` line (`:15346`, measured), and the END is
         # the blank line before `return OrgInfoResponse(` (`:15423`, with the call at `:15424`).
         # The three offsets (+29 `nodes_used` -> `:15375`, +39 `max_nodes` -> `:15385`, +77 END)
@@ -16745,11 +16745,11 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
 #: The labels `_D5_CURRENT_CLAIMS` must still carry, one per entry. Compared as a SET, never
 #: as a count: a count in a comment about a list that grows is the head-bound figure this
 #: file forbids, while a set reds on BOTH a dropped entry and a duplicated label.
-#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader is
-#: the loop in `test_the_D5_row_is_still_one_table_row`, so it walks whatever entries it
-#: FINDS and a SHORTER tuple is silently green. Deleting the I7 `nodes_used` entry left
-#: `len(_D5_CURRENT_CLAIMS)` at 4 and `pytest -k D5 -q` at `3 passed`, no red — so the
-#: loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
+#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader UNTIL
+#: this census was the loop in `test_the_D5_current_head_anchors_are_the_lines_they_name`, so it
+#: walks whatever entries it FINDS and a SHORTER tuple is silently green. Deleting the I7
+#: `nodes_used` entry left `len(_D5_CURRENT_CLAIMS)` at 4 and `pytest -k D5 -q` at `3 passed`,
+#: no red — so the loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
 #: nothing, and the one direction a reviewer or fixer under pressure can take — convert a
 #: graded present-tense number back to an ungraded one — had no gate at all.
 _D5_CURRENT_CLAIM_LABELS = frozenset({
