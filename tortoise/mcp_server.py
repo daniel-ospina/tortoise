@@ -3663,7 +3663,7 @@ def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
     return carry_resolved_allowances(limits)
 
 
-def _enforce_quota(resource: str = "points", *, truth_carried: bool = False) -> None:
+def _enforce_quota(resource: str = "points", *, truth_carried: bool = True) -> None:
     """#329: fail-closed org quota pre-write for MCP write tools.
 
     HTTP mode: limits come from the middleware-resolved ContextVar (same
