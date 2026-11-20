@@ -2291,7 +2291,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     #     all already in the ban's own vocabulary" is refuted by the census: `on this head` 11x
     #     (and `on` IS in the ban's vocabulary — `_TORTOISE_HEAD_BINDING_AT` carries `at|on|in`),
     #     `at the head` 158x, `at this head` 331x. Thirteen of eighteen realistic fronted
-    #     spellings were still GREEN, `On this head …` among them.
+    #     spellings were still GREEN, `On this head …` among them (re-measured here, 13/18).
+    # ⚠️ AND THE STRUCTURE'S OWN RESIDUAL IS MEASURED, NOT ASSERTED (round 23): of the same
+    # eighteen spellings, THREE remain GREEN at this head — `at merge time`, `as of this head`
+    # and `at the head of this merge` — because none of them has the shape the class reads
+    # (preposition + determiner + … + `head`/`merge`). They are the declared residual this
+    # class pays for in exchange for reading thirteen of eighteen instead of five. ⛔ AND THE
+    # RESIDUAL COSTS NOTHING LIVE, MEASURED RATHER THAN ASSUMED: `at merge time` DOES occur in
+    # `docs/` (10 lines) but only as ordinary prose about merges (`file at merge time`,
+    # `conflicting at merge time`, `as it is at merge time`) — none of those lines is a
+    # direction claim, and the corpus scan below finds 0 new refusals and 0 lost ones; the other
+    # two spellings do not occur at all. A residual is priced by live victims, not by word counts.
     # So the boundary is the STRUCTURE — a preposition the ban already treats as a head binder,
     # a determiner, up to two intervening words, then `head`/`merge` (optionally `you merge`) —
     # case-insensitively (the ban's own flag), with the emphasis class on every token and the
