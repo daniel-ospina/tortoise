@@ -540,27 +540,6 @@ NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
     ),
 }
 
-#: The FalkorDB graph handle, recorded separately because its receiver is NOT an
-#: ``ast.Name`` in most call sites: the handle is reached as an ATTRIBUTE
-#: (``proj.g.query(...)``, ``FalkorProjection.g``), and a Name-only exemption
-#: therefore missed it. Measured on `main` at a296e6741e: the census reported FIVE
-#: offenders, all of them ``.g.query(...)`` on a graph client
-#: (``tortoise/why.py:1363``, ``tortoise/why_snapshot.py:151``/``:563``,
-#: ``tortoise/__main__.py:1926``/``:13229``) and ZERO SDK call sites — a false red
-#: that made the whole file unusable as evidence for #13036's V4 row.
-#:
-#: ⛔ `g` can never name a `TortoiseSDK`: the class carries no `g` member and its
-#: `__getattr__` RAISES on an unknown attribute (the retirement hint path), so a
-#: receiver spelled `g` cannot resolve to the SDK at all. The exemption stays
-#: PATH-scoped, so it cannot widen into a global blind spot.
-GRAPH_HANDLE_RECEIVERS: dict[tuple[str, str], str] = {
-    ("tortoise/why.py", "g"): "`g` is the FalkorDB graph handle (see below)",
-    ("tortoise/why_snapshot.py", "g"):
-        "`proj.g` is `FalkorProjection.g`, the FalkorDB graph client",
-    ("tortoise/__main__.py", "g"):
-        "`proj.g`/`g` is `FalkorProjection.g`, the FalkorDB graph client",
-}
-
 #: Retired names that COLLIDE with an ordinary method name on the objects this
 #: code base holds (the Cypher client). `query` is the whole class today: it is a
 #: retired ``TortoiseSDK`` name AND the universal ``<graph>.query(cypher)`` method, so
@@ -570,11 +549,23 @@ GRAPH_HANDLE_RECEIVERS: dict[tuple[str, str], str] = {
 #: `analyze.py` … and zero SDK call sites, which is the same failure the CALL-only
 #: narrowing fixed once (`status`/`provenance`) recurring on a different name.
 #:
-#: For an ambiguous name the receiver must LOOK like the SDK (`sdk`, `_sdk`,
-#: `self.sdk`, `self._sdk`). The residual is recorded rather than hidden: a
-#: ``TortoiseSDK`` bound to some other variable name calling ``.query()`` is missed
-#: by this census — and `TortoiseSDK.__getattr__` still RAISES for it at runtime,
-#: which is the pin the census exists to back up, not a substitute for it.
+#: For an ambiguous name the receiver must LOOK like the SDK (`sdk`, `_sdk`). The
+#: residual is recorded rather than hidden: a ``TortoiseSDK`` bound to some other
+#: variable name calling ``.query()`` is missed by this census — and
+#: `TortoiseSDK.__getattr__` still RAISES for it at runtime, which is the pin the
+#: census exists to back up, not a substitute for it.
+#:
+#: This branch is ALSO what exempts the FalkorDB graph handle, and that is measured,
+#: not assumed (#13036 review F3a): the 16 ``.g.query(...)`` sites in the package
+#: (`tortoise/__main__.py` ×10, `why.py` ×5, `why_snapshot.py` ×3) call `query`, which
+#: is ambiguous, so they are exempted HERE — a separate `GRAPH_HANDLE_RECEIVERS` table
+#: keyed on `(path, receiver)` changed no outcome (0 offenders with it, 0 without) and
+#: its recorded justification was wrong on both counts (it said FIVE offenders where
+#: there are 16, and named `tortoise/__main__.py`'s `g` as `FalkorProjection.g` when
+#: there `g` is a loop variable over `groups`). Dead weight that misdescribes the
+#: mechanism is worse than absent: the next reader believes the guard is covered.
+#: ``test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver`` pins BOTH
+#: directions of this branch so removing the receiver test cannot pass silently.
 AMBIGUOUS_RETIRED_NAMES: frozenset[str] = frozenset(
     {"query", "list_graphs", "link_source_to_entity"})
 SDK_RECEIVER_NAMES: frozenset[str] = frozenset({"sdk", "_sdk"})
@@ -627,10 +618,6 @@ def _attribute_names(tree: ast.AST,
         if rel_path is not None and isinstance(receiver, ast.Name) \
                 and (rel_path, receiver.id, node.func.attr) in NON_SDK_RECEIVERS:
             continue
-        if rel_path is not None:
-            name = _receiver_name(receiver)
-            if name is not None and (rel_path, name) in GRAPH_HANDLE_RECEIVERS:
-                continue
         if node.func.attr in AMBIGUOUS_RETIRED_NAMES:
             name = _receiver_name(receiver)
             if name not in SDK_RECEIVER_NAMES:
@@ -683,6 +670,50 @@ def test_the_census_still_catches_an_sdk_call_site():
     bare = object.__new__(TortoiseSDK)
     with pytest.raises(AttributeError):
         getattr(bare, name)
+
+
+@pytest.mark.parametrize("name", sorted(AMBIGUOUS_RETIRED_NAMES))
+def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
+    """The ambiguous branch's CATCH direction is a pin, not a claim (#13036 review F3b).
+
+    `query`/`list_graphs`/`link_source_to_entity` are the retired names that also name
+    the Cypher client's own methods, so the branch exempts every non-SDK receiver. That
+    branch carries **1558 of 1558** live hits repo-wide (1542 `query`, 11 `list_graphs`,
+    5 `link_source_to_entity`) — so a mutant that forgot the receiver test
+    (`if node.func.attr in AMBIGUOUS_RETIRED_NAMES: continue`) would forgive EVERY ONE
+    of them and leave the whole file green: the only catch-direction pin that existed
+    seeded `sorted(RETIRED_SDK_METHODS)[0]` = a NON-ambiguous name, so nothing measured
+    this.
+
+    Both directions are asserted here, plus the graph-handle shape the census must keep
+    exempting through this branch (the branch that used to be labelled with a separate
+    `GRAPH_HANDLE_RECEIVERS` table).
+    """
+    for receiver in sorted(SDK_RECEIVER_NAMES):
+        assert _attribute_names(
+            ast.parse(f"def f({receiver}):\n    return {receiver}.{name}(1)\n")) \
+            == [(2, name)], (
+                f"`{receiver}.{name}()` is an SDK call site of a retired name and MUST be "
+                "caught — dropping the receiver test would forgive it silently")
+    # a non-SDK receiver is exempt — that is the point of the branch, not a hole
+    for receiver in ("row", "graph", "self"):
+        assert _attribute_names(
+            ast.parse(f"def f({receiver}):\n    return {receiver}.{name}(1)\n")) == [], (
+                f"`{receiver}.{name}()` on a non-SDK receiver must stay exempt, or the "
+                "census floods with the Cypher client's own methods (0 measured SDK hits)")
+    # ... and the ATTRIBUTE spelling of an SDK receiver is caught too: `_receiver_name`
+    # reads the terminal name of `self.sdk`, which is the shape the package actually uses.
+    assert _attribute_names(
+        ast.parse(f"def f(self):\n    return self.sdk.{name}(1)\n")) == [(2, name)], (
+            "`self.sdk.<retired>()` is an SDK call site — the terminal receiver name is "
+            "what the branch tests, so this shape must not be exempted with `self`")
+    # the graph-handle shape: `g` / `proj.g` are the 16 measured `.g.query(...)` sites
+    for source in (f"def f(g):\n    return g.{name}(1)\n",
+                   f"def f(proj):\n    return proj.g.{name}(1)\n"):
+        assert _attribute_names(ast.parse(source)) == [], (
+            "a graph-handle receiver must stay exempt THROUGH THE AMBIGUOUS BRANCH — "
+            "the path-scoped `GRAPH_HANDLE_RECEIVERS` table that exempted it separately "
+            "changed no outcome and was removed (#13036 review F3a)")
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():

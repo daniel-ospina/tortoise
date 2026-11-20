@@ -53,8 +53,16 @@ as itself — never as a pass, and never as a generic "skipped":
 
 EXIT CODES
 ==========
-0 — every approved row answered (MISSING / FAIL / refused rows do NOT exit 0)
-1 — at least one approved row did not answer, or a row is UNMEASURED
+0 — no row FAILED, is MISSING, or is UNMEASURED. A REFUSED or ARM GAP row is a
+    DOCUMENTED refusal that was measured, so it is reported in the "documented refusal"
+    block and does NOT change the exit code — this is the code's actual behaviour, and
+    the README states the same thing. (An earlier revision of this block claimed
+    "refused rows do NOT exit 0" while `main()` returned `1 if problems else 0` with
+    REFUSED/ARM GAP in `partial`. A published contract its own code violates is worse
+    than no contract: a later lane reads the docstring instead of the code.)
+1 — at least one approved row did not answer (FAIL / MISSING / UNMEASURED), or the
+    approved surface could not be READ and the probe refused to measure it (the SDK
+    declaration or the MCP approval record disagreeing with this file's transcription)
 2 — usage error
 
 Usage:
@@ -93,13 +101,21 @@ os.environ.pop("TORTOISE_DB_URI", None)
 # The approved surface — READ from the two documents that own it
 # ══════════════════════════════════════════════════════════════════════════
 
-#: The 27 approved MCP tools, transcribed from `docs/product/beta-sdk-surface.md`
-#: rows 3-27 + row 40 + the two amendments (`graph_set_recording`, the 24th approved
-#: tool per the 2026-09-21 owner ruling; `manage_sources`, #3540) — the composition
-#: `docs/product/canonical-mcp-tools.md` records at 27 (amended 2026-10-17).
-#: `test_the_approved_list_is_the_documented_set` in
-#: `tests/test_13036_capstone_v2.py` binds this transcription to the document, so a
-#: hand-typed list here cannot drift from the approval record.
+#: The 27 approved MCP tools, transcribed from the two documents that own them —
+#: `docs/product/beta-sdk-surface.md`'s **MCP twin** column (rows 3-27, row 30's
+#: `graph_set_recording`, row 40's `check_connection`) plus the #3540 amendment's
+#: `manage_sources`, which `docs/product/canonical-mcp-tools.md` records at 27
+#: (amended 2026-10-17). Rows are presented here in probe order; the BINDING is the
+#: set, and it is enforced at run time below.
+#:
+#: ⛔ THIS TRANSCRIPTION IS GUARDED AT RUN TIME, NOT BY A TEST NAME THAT SOUNDS RIGHT.
+#: `main()` re-reads the approval documents through `tools.mcp_surface_approval.py`
+#: and REFUSES when the two disagree — the same pattern the SDK half uses against
+#: `tortoise/__all__.py`. An earlier revision claimed a test
+#: (`test_the_approved_list_is_the_documented_set`) bound this tuple; no such test ever
+#: existed (`git grep` found the docstring and nothing else), so the denominator of
+#: "22/27 answered" was a hand-typed copy of the document with nothing reading the
+#: document — the #4185 defect one level down (#13036 review F1).
 APPROVED_TOOLS: tuple[str, ...] = (
     "search_knowledge", "list_knowledge", "check_confidence", "get_entity",
     "get_historical_knowledge", "explore_connections", "graph_overview",
@@ -392,6 +408,10 @@ def _tool_request(approved: str, door: str, s: dict):
     Returns `(arguments, check)` where `check(payload) -> (ok, note)` asserts the
     SEEDED content out of the answer — not the status code (#2952, #10084). A check that
     only said "it returned a dict" would pass on an empty answer.
+
+    `check` is `None` for the `http_policy=False` rows: the tenant door never reaches
+    their handler, so there is no answer to read content out of — and a check standing in
+    for the refusal would be a CONSTANT pretending to be a measurement.
     """
     def has(key: str, eql=None):
         def _check(p):
@@ -464,20 +484,17 @@ def _tool_request(approved: str, door: str, s: dict):
             lambda p: (isinstance(p, dict) and (p.get("id") or (p.get("source") or {}).get("id")),
                        f"no source id: {_shape_of(p)}"),
         ),
-        "index_sources_from_directory": (
-            {"directory": "/tmp"},
-            lambda p: (False, "refused by the tenant door (http_policy=False) — measured, "
-                              "not a failure of the tool"),
-        ),
+        # ── the three `http_policy=False` rows ────────────────────────────────
+        # No check: their verdict comes from the TRANSPORT ("did the door refuse with
+        # -32004?"), never from the payload's content — `probe_tools` decides them. A
+        # constant `False` here used to stand in for that measurement, so the row read
+        # REFUSED whatever the door answered (#13036 review F2).
+        "index_sources_from_directory": ({"directory": "/tmp"}, None),
         "mine_knowledge_from_session": (
             {"items": [{"content": "A mined probe statement."}]},
             has("filed"),
         ),
-        "mine_knowledge_from_directory": (
-            {"directory": "/tmp"},
-            lambda p: (False, "refused by the tenant door (http_policy=False) — measured, "
-                              "not a failure of the tool"),
-        ),
+        "mine_knowledge_from_directory": ({"directory": "/tmp"}, None),
         "manage_source_trust": (
             {"url": s["source_url"], "tier": "high"},
             lambda p: (isinstance(p, dict) and not p.get("error"),
@@ -511,11 +528,7 @@ def _tool_request(approved: str, door: str, s: dict):
             lambda p: (isinstance(p, dict) and p.get("mitigation_strength") == 0.25,
                        f"no mitigation receipt: {_shape_of(p)}"),
         ),
-        "refresh_confidence": (
-            {},
-            lambda p: (False, "refused by the tenant door (http_policy=False) — measured, "
-                              "not a failure of the tool"),
-        ),
+        "refresh_confidence": ({}, None),
         "approve_merge": (
             {"candidate_id": s["claim"]},
             lambda p: (isinstance(p, dict) and bool(p.get("merged") or p.get("candidate_id")),
@@ -565,6 +578,21 @@ def _tool_request(approved: str, door: str, s: dict):
 # The probe
 # ══════════════════════════════════════════════════════════════════════════
 
+def _door_refusal(payload) -> tuple[bool, str]:
+    """Did the TRANSPORT refuse this call with `-32004` (`http_policy=False`)?
+
+    The code, not the prose: `probe_retired` already reads `code == -32004` before it
+    calls a row by-design, and an `http_policy=False` row must be held to the same
+    standard. Its note QUOTES the `-32004`, so a row whose verdict ignored the code
+    would print evidence that contradicts its own status (#13036 review F2).
+    """
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict) and err.get("code") == -32004:
+            return True, str(err.get("message") or "")
+    return False, ""
+
+
 def probe_tools(door: _Door, s: dict) -> list[Row]:
     rows: list[Row] = []
     for approved in APPROVED_TOOLS:
@@ -581,16 +609,30 @@ def probe_tools(door: _Door, s: dict) -> list[Row]:
                             shape="transport-exception",
                             note=f"{type(exc).__name__}: {exc}"))
             continue
-        ok, note = check(payload)
-        if ok:
-            note = ""
+        ok, note = (False, "")
+        if check is not None:
+            ok, note = check(payload)
+            if ok:
+                note = ""
         if status != 200:
             status_word = FAIL
             note = f"HTTP {status}: {str(note or payload)[:300]}"
-        elif approved in HTTP_EXCLUDED and not ok:
-            # the refusal IS the documented answer for an http_policy=False tool
-            status_word = REFUSED
-            note = f"{HTTP_EXCLUDED[approved]} — door said: {str(payload)[:200]}"
+        elif approved in HTTP_EXCLUDED:
+            # ⛔ THE REFUSAL MUST BE READ OUT OF THE ANSWER. `http_policy=False` in the
+            # registry is the DECLARATION; the row is evidence only if the tenant door
+            # actually returned the transport's `-32004`. A constant `ok=False` here made
+            # the row read REFUSED even when the door served the tool — the vacuous-check
+            # class this file calls out two screens up (#13036 review F2).
+            refused, _ = _door_refusal(payload)
+            if refused:
+                status_word = REFUSED
+                note = f"{HTTP_EXCLUDED[approved]} — door said: {str(payload)[:200]}"
+            else:
+                status_word = FAIL
+                note = (f"the registry declares http_policy=False for `{approved}`, but the "
+                        f"tenant door did NOT refuse it with -32004 — it answered "
+                        f"{_shape_of(payload)}: {str(payload)[:200]}. The exclusion is no "
+                        "longer in force, so this row is not a measured refusal.")
         elif ok:
             status_word = PASS
         elif _error_of(payload):
@@ -631,9 +673,15 @@ def probe_tools(door: _Door, s: dict) -> list[Row]:
 def _measure(fn) -> tuple[str, float, str, str]:
     """Call one method once; -> (status, latency_ms, shape, note).
 
-    An exception from the product's own method is a FAIL — a method that cannot run
-    for a caller is exactly what this row exists to find. A method that returns a
-    documented REFUSAL payload is a real answer and stays PASS; the note carries it.
+    An exception from the product's own method is a FAIL — a method that cannot run for
+    a caller is exactly what this row exists to find.
+
+    ⛔ A RETURNED `{"error": …}` IS NOT AN ANSWER (#13036 review F4). The MCP half gives
+    an error payload its own status (`REFUSED`); this half used to record it as PASS
+    with the message in the note, so "N answered" could not separate answered from
+    errored — and the first method to start erroring would RAISE the "answered" figure.
+    Today no SDK row returns an error (every PASS in `probe-tables.md` is a real
+    payload), which is exactly why the distinction has to exist before one does.
     """
     started = time.perf_counter()
     try:
@@ -642,11 +690,12 @@ def _measure(fn) -> tuple[str, float, str, str]:
         ms = (time.perf_counter() - started) * 1000.0
         return FAIL, ms, "exception", f"{type(exc).__name__}: {str(exc)[:300]}"
     ms = (time.perf_counter() - started) * 1000.0
-    note = ""
-    if isinstance(out, dict):
+    if isinstance(out, dict) and out.get("error"):
         err = out.get("error")
-        note = str(err.get("message") if isinstance(err, dict) else (err or ""))[:200]
-    return PASS, ms, _shape_of(out), note
+        message = str(err.get("message") if isinstance(err, dict) else err)[:200]
+        return (REFUSED, ms, _shape_of(out),
+                f"the method RETURNED an error instead of answering: {message}")
+    return PASS, ms, _shape_of(out), ""
 
 
 def _probe_sdk_methods(sdk, s: dict, tmpdir: str) -> list[Row]:
@@ -781,7 +830,7 @@ def _probe_sdk_methods(sdk, s: dict, tmpdir: str) -> list[Row]:
             # that cannot answer says so). Recorded as ARM GAP — the SUCCESS arm is what
             # stays unmeasured, and this row does not claim it.
             status_word, ms, shape, note = _measure(fn)
-            if status_word == FAIL and "candidate" in note:
+            if status_word in (FAIL, REFUSED) and "candidate" in note:
                 status_word = ARM_GAP
                 note = ("ARM GAP — the success arm needs a dedup/temporal candidate; the "
                         f"product refuses this one by name: {note}")
@@ -814,8 +863,28 @@ def main(argv: list[str] | None = None) -> int:
 
     reg, sdk, s = _seed(db)
 
-    # the declaration is re-read, and a disagreement is a REFUSAL, never a quiet pass
+    # the declarations are re-read, and a disagreement is a REFUSAL, never a quiet pass —
+    # BOTH halves. The SDK names come from `tortoise/__all__.py`; the MCP names come from
+    # the two approval documents, through the same reader the pinning test uses
+    # (#13036 review F1: the MCP half was a hand-typed tuple nothing read).
+    from tools.mcp_surface_approval import ApprovalUnreadable, load_approved_tools
     from tools.sdk_surface_declaration import load_declaration
+
+    try:
+        approved_documented = load_approved_tools()
+    except ApprovalUnreadable as exc:
+        print("REFUSED — the approval documents' MCP names could not be read:")
+        print(f"  {exc}")
+        return 1
+    if set(approved_documented) != set(APPROVED_TOOLS):
+        print("REFUSED — the approval documents and this probe's transcription disagree:")
+        print(f"  only in the approval documents: "
+              f"{sorted(set(approved_documented) - set(APPROVED_TOOLS))}")
+        print(f"  only in this probe:             "
+              f"{sorted(set(APPROVED_TOOLS) - set(approved_documented))}")
+        print("  (the SET is the binding; this file presents its rows in probe order)")
+        return 1
+
     declared = tuple(load_declaration()["__all__"])
     if declared != APPROVED_SDK:
         print("REFUSED — the SDK declaration and this probe's transcription disagree:")

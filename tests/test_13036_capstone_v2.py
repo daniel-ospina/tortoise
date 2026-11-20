@@ -2363,3 +2363,204 @@ class TestRelationshipsAndRemainingReads:
         assert status == 200
         assert isinstance(out, dict) and "error" in out, out
         assert "no-such-candidate" in str(out["error"]), out
+
+
+# ── the instrument's own denominator and refusals are MEASURED ──────────────
+# #13036 review F1/F2/F4. `tools/surface_capstone_probe.py` is what produces the two
+# headline numbers ("22/27 tools answered", "27/40 SDK methods answered"), so three
+# things about it cannot be assertions in its own prose:
+#   F1 — the 27-name DENOMINATOR (it was a hand-typed tuple, and the docstring claimed a
+#        test bound it that did not exist — `git grep` found the name in the docstring
+#        and nowhere else);
+#   F2 — the three `http_policy=False` rows (a constant `False` decided them, so the row
+#        read REFUSED whatever the door answered);
+#   F4 — an SDK method that RETURNS `{"error": …}` (recorded as PASS, so "answered"
+#        could not be separated from "errored").
+# Each case below FAILS on the pre-fix code. The probe is imported lazily: it is written
+# to run standalone and mutates `os.environ` at import, which this session must not keep.
+
+
+def _probe_module():
+    """The capstone probe module, imported with `os.environ` restored afterwards.
+
+    `tools/surface_capstone_probe.py` defaults `TORTOISE_SECRET_PEPPER` and POPS
+    `TORTOISE_DB_URI` at module import — correct for a standalone evidence generator
+    that must never write to a shared graph, and wrong to hand to every test that runs
+    after this one in the same process. The environment is therefore saved and restored
+    around the FIRST import; `sys.modules` caches the module, so it can happen only once.
+    """
+    saved = dict(os.environ)
+    try:
+        from tools import surface_capstone_probe as probe
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    return probe
+
+
+class _StubDoor:
+    """A tenant door that answers every call with ONE payload — no graph, no transport.
+
+    Only the DOOR-facing verdict logic is under test here (the probe's own instrument is
+    exercised by running it), so the responses are whatever the case needs and the seed
+    is a dict of ids.
+    """
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls: list[str] = []
+
+    def call(self, name, arguments=None):
+        self.calls.append(name)
+        return 200, self.payload, 0.0
+
+
+#: Only the ids `_tool_request` reads out of the probe's seed (no graph is opened).
+_PROBE_SEED: dict = {
+    "org": "org-1", "api_key": "key-1",
+    "claim": "claim-1", "claim2": "claim-2", "calibrated": "calibrated-1",
+    "subject": "subject-1", "object": "object-1", "operator": "operator-1",
+    "source_url": "https://example.test/probe", "batch": "batch-1",
+    "topic": "probe-topic", "topic_object": "topic-object-1",
+    "topic_decision": "decision-1", "session": "session-1",
+}
+
+
+def test_the_approved_mcp_list_is_READ_from_the_documents_that_own_it():
+    """F1: the denominator of "N/27" is READ from the approval record, not typed.
+
+    `tools/mcp_surface_approval.py` parses the beta surface's **MCP twin** column and the
+    canonical doc's #3540 amendment, then checks the names against the count BOTH docs
+    state. Each assertion below is a separate DIMENSION of that parse, so a silent short
+    read cannot pass as "27 names".
+    """
+    from tools.mcp_surface_approval import load_approved_tools, mcp_target_count
+
+    names = load_approved_tools()
+    count = mcp_target_count()
+    assert len(names) == count, (
+        f"the two approval documents state an MCP target of {count} but yield "
+        f"{len(names)} name(s): {list(names)} — every 'answered N/27' figure would be "
+        "measured against a denominator the documents do not state")
+    assert len(names) == len(set(names)), f"a duplicated approved name: {list(names)}"
+    assert "manage_sources" in names, (
+        "the #3540 amendment's added tool is missing — the reader must take it from "
+        "`canonical-mcp-tools.md`, not from the beta table (it is not on that table)")
+    assert "graph_set_recording" in names, (
+        "beta row 30's twin is `graph_set_recording (recording only)` and the trailing "
+        "parenthetical must be dropped, not read as part of the name")
+    assert "check_connection" in names, (
+        "beta row 40 is inside the document's PLATFORM block and still carries an MCP twin")
+    assert "write_knowledge_batch" not in names, (
+        "beta row 13 is builder-only and has NO MCP twin — a reader that took every row "
+        "name would inflate the denominator")
+    assert "Tortoise" not in names and "close" not in names, (
+        "the constructor and `close` have no MCP twin")
+    assert "get_organisation_account" not in names, (
+        "rows 28-39 are the tenancy block: SDK/REST only, NOT on the MCP (row 30 excepted)")
+
+
+def test_the_approval_reader_REFUSES_a_document_that_moved_without_it(tmp_path):
+    """F1's non-vacuity: the reader refuses instead of measuring a drifted denominator."""
+    from tools.mcp_surface_approval import (
+        BETA_DOC,
+        CANONICAL_DOC,
+        ApprovalUnreadable,
+        load_approved_tools,
+    )
+
+    beta_text = BETA_DOC.read_text(encoding="utf-8")
+    canonical_text = CANONICAL_DOC.read_text(encoding="utf-8")
+
+    def _docs(tag, beta=None, canonical=None):
+        b = tmp_path / f"{tag}-beta.md"
+        c = tmp_path / f"{tag}-canonical.md"
+        b.write_text(beta if beta is not None else beta_text, encoding="utf-8")
+        c.write_text(canonical if canonical is not None else canonical_text, encoding="utf-8")
+        return b, c
+
+    # (a) a NAME added to the surface without the stated count moving
+    b, c = _docs("extra-row", beta=beta_text
+                 + "\n| 41 | `brand_new` | does a thing | `brand_new` | agent |\n")
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "yield" in str(exc.value), exc.value
+
+    # (b) the two documents disagree about the count
+    b, c = _docs("count-moved",
+                 beta=beta_text.replace("**MCP: 27 tools**", "**MCP: 28 tools**"))
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "disagree" in str(exc.value), exc.value
+
+    # (c) an unapproved record is not a target
+    b, c = _docs("unapproved", canonical=canonical_text.replace(
+        "approval_status: approved", "approval_status: pending"))
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "approval_status" in str(exc.value), exc.value
+
+
+def test_an_http_excluded_row_is_only_REFUSED_when_the_door_actually_refused():
+    """F2: the three `http_policy=False` rows are decided by the CODE, not a constant.
+
+    Pre-fix, each of the three carried `lambda p: (False, "refused by the tenant door")`
+    and the verdict was `elif approved in HTTP_EXCLUDED and not ok` — so `ok is False`
+    always, and the row read REFUSED even if the door had served the tool and returned
+    the seeded content. Mutant: set `refresh_confidence`'s registry row to
+    `http_policy=True` and let it answer; before this pin nothing reddened.
+    """
+    probe = _probe_module()
+    excluded = sorted(probe.HTTP_EXCLUDED)
+    assert excluded, "no http_policy=False rows declared — this pin would measure nothing"
+
+    # (1) the door SERVED the tool → the row must not claim a measured refusal
+    served = {r.approved: r for r in probe.probe_tools(_StubDoor({"mean": 0.5}),
+                                                       _PROBE_SEED)}
+    for name in excluded:
+        assert served[name].status == probe.FAIL, (
+            f"`{name}` was recorded {served[name].status} although the tenant door "
+            f"ANSWERED — the exclusion is no longer in force, so this row is not a "
+            f"measured refusal: {served[name].note}")
+        assert "did NOT refuse" in served[name].note, served[name].note
+
+    # (2) the door refused with the transport's own -32004 → REFUSED, quoting that code
+    refused = {r.approved: r for r in probe.probe_tools(
+        _StubDoor({"jsonrpc": "2.0",
+                   "error": {"code": -32004, "message": "not available over HTTP"}}),
+        _PROBE_SEED)}
+    for name in excluded:
+        assert refused[name].status == probe.REFUSED, (
+            f"`{name}`: the door returned -32004 and the row read "
+            f"{refused[name].status} — the refusal IS this row's documented answer")
+        assert "not available over HTTP" in refused[name].note, refused[name].note
+
+    # (3) the code is what decides: another error code is NOT the exclusion refusal
+    other = {r.approved: r for r in probe.probe_tools(
+        _StubDoor({"jsonrpc": "2.0",
+                   "error": {"code": -32602, "message": "invalid params"}}), _PROBE_SEED)}
+    for name in excluded:
+        assert other[name].status == probe.FAIL, (
+            f"`{name}`: -32602 is not `http_policy=False` doing its job and must not be "
+            f"recorded as the exclusion refusal ({other[name].status})")
+
+
+def test_an_sdk_method_that_RETURNS_an_error_is_not_an_answer():
+    """F4: `_measure` must separate "answered" from "returned an error"."""
+    probe = _probe_module()
+
+    status, _ms, shape, note = probe._measure(lambda: {"error": {"message": "boom"}})
+    assert status == probe.REFUSED, (
+        f"a returned error payload was recorded as {status} — 'N answered' would rise "
+        f"as methods start failing: {note}")
+    assert shape == "dict{error}" and "boom" in note, (shape, note)
+
+    status, _ms, _shape, note = probe._measure(lambda: {"mean": 0.5})
+    assert status == probe.PASS and note == "", (status, note)
+
+    def _raises():
+        raise ValueError("cannot run")
+
+    status, _ms, shape, note = probe._measure(_raises)
+    assert status == probe.FAIL, (status, note)
+    assert shape == "exception" and "ValueError" in note, (shape, note)
