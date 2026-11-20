@@ -59,8 +59,8 @@ def _raw_op(src: str, dst: str, op_type: str = "IMPL") -> dict:
 def test_apply_payload_operators_twice_writes_one_operator(tmp_path):
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
     ops = [_raw_op(a, b)]
 
     first = apply_payload_operators(proj, sdk, ops)
@@ -80,8 +80,8 @@ def test_apply_payload_operators_idempotent_across_many_repeats(tmp_path):
     1 -> 1 -> 1, never 1 -> 2 -> 3."""
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
     ops = [_raw_op(a, b)]
 
     counts = []
@@ -96,9 +96,9 @@ def test_apply_payload_operators_idempotent_across_many_repeats(tmp_path):
 def test_control_distinct_src_dst_still_written(tmp_path):
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
-    c = sdk.create_point("statement", "claim c")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
+    c = sdk._create_point("statement", "claim c")["id"]
 
     apply_payload_operators(proj, sdk, [_raw_op(a, b)])
     apply_payload_operators(proj, sdk, [_raw_op(a, c)])   # different dst
@@ -122,10 +122,10 @@ def test_control_distinct_op_type_still_written(tmp_path):
     """
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
-    c = sdk.create_point("statement", "claim c")["id"]
-    d = sdk.create_point("statement", "claim d")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
+    c = sdk._create_point("statement", "claim c")["id"]
+    d = sdk._create_point("statement", "claim d")["id"]
 
     apply_payload_operators(proj, sdk, [_raw_op(a, b, "IMPL")])
     apply_payload_operators(proj, sdk, [_raw_op(c, d, "NAND")])
@@ -170,8 +170,8 @@ def test_part_whole_ops_collapse_on_repeat_and_stay_distinct_by_op_type(tmp_path
     """
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "whole a")["id"]
-    b = sdk.create_point("statement", "part b")["id"]
+    a = sdk._create_point("statement", "whole a")["id"]
+    b = sdk._create_point("statement", "part b")["id"]
 
     def count(op_type):
         return proj.g.query(
@@ -205,8 +205,8 @@ def test_direction_is_not_part_of_the_key_first_write_wins(tmp_path):
     """
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
 
     apply_payload_operators(
         proj, sdk, [dict(_raw_op(a, b), direction="bidirectional")])
@@ -227,9 +227,9 @@ def test_repeat_pass_keeps_mitigation_attached_once(tmp_path):
     ``mitigate_operator`` must update — never duplicate — the dampener."""
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "claim a")["id"]
-    b = sdk.create_point("statement", "claim b")["id"]
-    z = sdk.create_point("statement", "reason z")["id"]
+    a = sdk._create_point("statement", "claim a")["id"]
+    b = sdk._create_point("statement", "claim b")["id"]
+    z = sdk._create_point("statement", "reason z")["id"]
     ops = [
         _raw_op(a, b, "IMPL"),
         {"src": z, "dst": a, "op_type": "MITIGATES", "strength": 0.4,
@@ -297,7 +297,7 @@ def test_rekeyed_recapture_does_not_duplicate_operator(tmp_path, monkeypatch):
     other = "backpressure must be added before the next release"
     # a non-payload (legacy ULID) id holding the payload point's content, so the
     # capture commit's content-hash resolver re-keys the payload id onto it
-    sdk.create_point("statement", prior)
+    sdk._create_point("statement", prior)
     legacy_id = sdk._get_proj().g.query(
         "MATCH (p:Point {content:$c}) RETURN p.id",
         params={"c": prior}).result_set[0][0]

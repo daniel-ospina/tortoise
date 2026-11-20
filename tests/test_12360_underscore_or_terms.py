@@ -180,7 +180,7 @@ class TestBothSurfacesPassTheRawQuery:
         seen: list[dict] = []
 
         class _FakeSDK:
-            def tortoise_fts_query(self, query, **kw):
+            def _tortoise_fts_query(self, query, **kw):
                 seen.append({"query": query, **kw})
                 return []
 

@@ -86,7 +86,7 @@ def _rank_pair(sdk, query: str) -> list[dict]:
     """The REAL search seam: graph-order rerank with the query threaded
     (flag-on boosts via the env; flag-off runs byte-identical to the
     pre-W4-b ranker).  Window is the whole statement pool."""
-    return sdk.tortoise_fts_query(
+    return sdk._tortoise_fts_query(
         query,
         kind="statement",
         order_by="graph",

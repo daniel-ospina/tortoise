@@ -751,9 +751,9 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        team = sdk.create_object("Team")
-        office = sdk.create_object("Office", objectKind="core:location")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        team = sdk._create_object("Team")
+        office = sdk._create_object("Office", objectKind="core:location")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         prior_id = pt["id"]
         # The :Session node is S6's to create; the fusion only writes the edge
         # INTO it, so the test mints it directly (the same scoping the other
@@ -849,8 +849,8 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        twin = sdk.create_object("Dana")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        twin = sdk._create_object("Dana")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
         record = {"point_id": pt["id"], "about_entities": ["Dana"]}
 
@@ -893,8 +893,8 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Dana")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Dana")
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_sub"})
 
         res = apply_merge_union(
@@ -942,7 +942,7 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         proj = sdk._get_proj()
         # the id-less stub shape hosted_api.py mints (`MERGE (o:Object {name})`)
         proj.g.query("MERGE (o:Object {name:'Stubbed'})")
-        pt = sdk.create_point("statement", PRIOR_CONTENT)
+        pt = sdk._create_point("statement", PRIOR_CONTENT)
         proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": "s_x"})
 
         ok = apply_merge_union(
@@ -1021,9 +1021,9 @@ class TestTheCapturePathExecutesTheFusion:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Team")
-        sdk.create_object("Office", objectKind="core:location")
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Team")
+        sdk._create_object("Office", objectKind="core:location")
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
 
         record = {"point_id": prior["id"], "content": PRIOR_CONTENT,
                   "about_entities": ["Office", "Team"],
@@ -1093,9 +1093,9 @@ class TestTheCapturePathExecutesTheFusion:
         # §5 SUBJECT kinds — the object door now routes them to a `:Subject`
         # (the kind decides the layer). The kind was incidental to what these
         # tests assert, so it is left unsupplied (the fold's `other` default).
-        sdk.create_object("Dana")
-        sdk.create_object("Office", objectKind="core:location")
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        sdk._create_object("Dana")
+        sdk._create_object("Office", objectKind="core:location")
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
 
         record = {"point_id": prior["id"], "content": PRIOR_CONTENT,
                   "about_entities": ["Dana", "Office"],
@@ -1144,7 +1144,7 @@ class TestTheCapturePathExecutesTheFusion:
         """
         import tortoise.extractor_v2 as ev2
 
-        prior = sdk.create_point("statement", PRIOR_CONTENT)
+        prior = sdk._create_point("statement", PRIOR_CONTENT)
         out = {"payload": {"entities": [], "points": [], "events": [],
                             "operators": [], "supersessions": [],
                             "chain_notes": [], "link_before_create": []},
@@ -1196,8 +1196,8 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
     def test_a_fold_colliding_union_name_links(self, sdk):
         from tortoise.near_dup_merge import apply_merge_union
 
-        team = sdk.create_object("Team")
-        pt = sdk.create_point("statement", "a claim about the team")
+        team = sdk._create_object("Team")
+        pt = sdk._create_point("statement", "a claim about the team")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_f3"})
 
@@ -1244,7 +1244,7 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
             "objectKind:'organization', status:'live', "
             "canonical_name:'acme'})")
         obj = {"id": "obj-r3-acme"}
-        pt = sdk.create_point("statement", "a claim about acme")
+        pt = sdk._create_point("statement", "a claim about acme")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3"})
 
@@ -1274,8 +1274,8 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
         """
         from tortoise.near_dup_merge import apply_merge_union
 
-        obj = sdk.create_object("the acme", "thing")
-        pt = sdk.create_point("statement", "a claim about acme")
+        obj = sdk._create_object("the acme", "thing")
+        pt = sdk._create_point("statement", "a claim about acme")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3b"})
 
@@ -1306,7 +1306,7 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
         """
         from tortoise.near_dup_merge import apply_merge_union
 
-        pt = sdk.create_point("statement", "a claim about nobody")
+        pt = sdk._create_point("statement", "a claim about nobody")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r13"})
         res = apply_merge_union(
@@ -1356,8 +1356,8 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         """The measured pair: `"The Team"` merged INTO `"Acme Holdings"`."""
         from tortoise.entity_resolver import apply_entity_merge
 
-        survivor = sdk.create_object("Acme Holdings")
-        carrier = sdk.create_object("The Team")
+        survivor = sdk._create_object("Acme Holdings")
+        carrier = sdk._create_object("The Team")
         apply_entity_merge(sdk, carrier["id"], survivor["id"],
                            method="exact", similarity=1.0)
         return survivor, carrier
@@ -1373,7 +1373,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         from tortoise.near_dup_merge import apply_merge_union
 
         survivor, carrier = self._merged_pair(sdk)
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_a"})
 
@@ -1408,7 +1408,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
                 "canonical_name:'twin', objectKind:'other', status:'live'})")
         g.query("CREATE (o:Object {id:'obj-12244-twin-b', name:'the twin', "
                 "canonical_name:'twin', objectKind:'other', status:'live'})")
-        pt = sdk.create_point("statement", "a claim about the twin")
+        pt = sdk._create_point("statement", "a claim about the twin")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_b"})
 
         res = apply_merge_union(
@@ -1436,7 +1436,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         survivor, carrier = self._merged_pair(sdk)
         g = sdk._get_proj().g
         g.query("CREATE (o:Object {name:'team', status:'live'})")
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_c"})
 
         res = apply_merge_union(
@@ -1481,7 +1481,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:$sid}) SET o.status = 'superseded'",
             params={"sid": survivor["id"]})
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         sdk._get_proj().g.query(
             "CREATE (s:Session {id:$sid})", params={"sid": "s_12244_d"})
 
@@ -1515,7 +1515,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         from tortoise.near_dup_merge import apply_merge_union
 
         survivor, carrier = self._merged_pair(sdk)
-        assert sdk.delete_entity(survivor["id"]) is not False
+        assert sdk._delete_entity__svc(survivor["id"]) is not False
         g = sdk._get_proj().g
         assert g.query("MATCH (o:Object {id:$sid}) RETURN o.id",
                        params={"sid": survivor["id"]}).result_set == []
@@ -1523,7 +1523,7 @@ class TestThe12244TheAttachmentCollapsesAMergedPair:
         assert g.query("MATCH (o:Object {id:$cid}) RETURN o.resolved_from",
                        params={"cid": carrier["id"]}).result_set == [
             [survivor["id"]]]
-        pt = sdk.create_point("statement", "the team meets weekly")
+        pt = sdk._create_point("statement", "the team meets weekly")
         g.query("CREATE (s:Session {id:$sid})", params={"sid": "s_12244_e"})
 
         res = apply_merge_union(

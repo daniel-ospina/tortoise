@@ -161,7 +161,8 @@ def test_the_fixture_is_at_the_size_the_issue_measured(scale_graph):
 
 def test_the_operator_cap_fires_at_scale_and_the_result_says_so(scale_graph):
     """#6211 A at scale: a capped pass is distinguishable in the RESULT."""
-    result = scale_graph.compute_confidence(anchors=[_HUB], max_hops=2, require_calibration=False)
+    # #12901 FINAL batch: `compute_confidence` was PRIVATISED (`_compute_confidence`).
+    result = scale_graph._compute_confidence(anchors=[_HUB], max_hops=2, require_calibration=False)
     assert result["truncated"] is True, (
         f"a capped pass over a {SCALE_CLAIMS}-claim graph must say so; "
         f"result keys: {sorted(result)}"
@@ -213,7 +214,7 @@ def test_the_uncapped_selection_reports_complete_at_scale(scale_graph):
     "capped" on the SAME graph, which a diagnostic keyed on graph size could
     not do.
     """
-    result = scale_graph.compute_confidence(
+    result = scale_graph._compute_confidence(
         anchors=[_BACKGROUND[0]], max_hops=1, require_calibration=False
     )
     assert result["truncated"] is False

@@ -67,10 +67,10 @@ class _FakeSDK:
         self.operator_calls: list[dict] = []
         _FakeSDK.instances.append(self)
 
-    def create_point(self, kind, content, dedup=True, **kwargs):
+    def _create_point(self, kind, content, dedup=True, **kwargs):
         return {"id": f"pt:{content}"}
 
-    def create_operator(self, op_type, source_id, target_ids, label=None, **kwargs):
+    def _create_operator(self, op_type, source_id, target_ids, label=None, **kwargs):
         self.operator_calls.append(
             {
                 "op_type": op_type,
@@ -82,10 +82,10 @@ class _FakeSDK:
         )
         return {"id": f"op:{len(self.operator_calls)}"}
 
-    def mitigate_operator(self, op_id, reason, strength):
+    def _mitigate_operator(self, op_id, reason, strength):
         return {"id": "mit:1"}
 
-    def compute_confidence(self, factors=None):
+    def _compute_confidence(self, factors=None):
         return {"iterations": 0, "converged": True, "confidences": {}}
 
 
@@ -257,9 +257,9 @@ def test_explicit_none_guard_stays_reachable():
     sdk._db_uri = uri
     sdk._proj = None  # force re-init against the isolated test graph
     try:
-        a = sdk.create_point("statement", "a", status="live")
-        b = sdk.create_point("statement", "b", status="live")
-        op = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
+        a = sdk._create_point("statement", "a", status="live")
+        b = sdk._create_point("statement", "b", status="live")
+        op = sdk._create_operator("NAND", a["id"], [b["id"]], direction=None)
         proj = sdk._get_proj()
         stored = proj.g.query(
             "MATCH (o:Point {id:$id}) RETURN o.direction",

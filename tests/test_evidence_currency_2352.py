@@ -63,7 +63,7 @@ def _scan(sdk):
     Full-scan form (``query=None``) so every fixture claim is returned
     deterministically — the same shape ``test_source_currency_5581.py`` uses.
     """
-    return sdk.tortoise_fts_query(query=None, kind="statement", limit=50)
+    return sdk._tortoise_fts_query(query=None, kind="statement", limit=50)
 
 
 def _hit(rows, point_id):
@@ -75,7 +75,7 @@ def _hit(rows, point_id):
 
 def _decay(sdk, url):
     """The decay component of the source's derived reliability (§10 half)."""
-    rel = sdk.get_source_reliability(url)
+    rel = sdk._get_source_reliability(url)
     assert rel["components"].get("tier") == "T1", rel
     return rel["components"]["decay"]
 
@@ -111,11 +111,11 @@ def _build(sdk):
     sdk.register_source(DEAD_URL, "T1", contentHash="D1")
     sdk.register_source(AGED_URL, "T1", contentHash="A1", sourceDate=AGED_DATE)
     points = {
-        "live": sdk.create_point("statement", "currency fixture live claim",
+        "live": sdk._create_point("statement", "currency fixture live claim",
                                  extractedFrom=LIVE_URL)["id"],
-        "stale": sdk.create_point("statement", "currency fixture stale claim",
+        "stale": sdk._create_point("statement", "currency fixture stale claim",
                                   extractedFrom=DEAD_URL)["id"],
-        "decayed": sdk.create_point("statement", "currency fixture aged claim",
+        "decayed": sdk._create_point("statement", "currency fixture aged claim",
                                     extractedFrom=AGED_URL)["id"],
     }
     # The source MOVES ON after the claim was read from it. §4.6: "a re-fetched

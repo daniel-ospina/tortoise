@@ -741,7 +741,7 @@ def test_dream_default_branch_marks_queued_roots_off_loop(client, monkeypatch):
     def _stub_dream(self, *args, **kwargs):
         return {"ok": True, "stubbed": True}
 
-    monkeypatch.setattr(TortoiseSDK, "dream", _stub_dream)
+    monkeypatch.setattr(TortoiseSDK, "_dream", _stub_dream)
 
     key = ha_mod._dream_key(TEST_ORG_ID, None)
     ha_mod._DREAM_QUEUES.pop(key, None)

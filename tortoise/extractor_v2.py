@@ -2905,7 +2905,7 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3, *,
     # idempotency branch is reachable through it — hiding terminal Objects
     # here would silently drop that prior set. The POINT leg keeps the
     # default (terminal Points stay out of capture priors, as before).
-    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit,
+    rows = sdk._tortoise_fts_query(query, entity_type=entity_type, limit=limit,
                                   include_terminal=entity_type in ("object", "subject"),
                                   # #7983: a link-before-create PRIOR, never a
                                   # surfaced result — recording it would count

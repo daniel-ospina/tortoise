@@ -12,7 +12,7 @@ avoid (delete the door, keep the name, no capability behind either). So this fil
 measures the three things a parameter presence cannot:
 
   1. **The arm DISPATCHES** — measured by substitution at the SDK method each retired
-     door called (`compute_confidence` / `recall_state`), the same seam
+     door called (`_compute_confidence` / `_recall_state`), the same seam
      `test_11609_write_containers.py` uses at `_create_entity`. The container answers,
      not a copy of it.
   2. **The answer is the SAME** as the retired door's — the arm's payload is compared
@@ -22,6 +22,11 @@ measures the three things a parameter presence cannot:
   3. **The retired NAME still answers** through the #3883 warning shim, with the
      retirement marker and the pointer in `_meta` — the half that makes a retirement a
      consolidation rather than a removal.
+
+Every substitution below names the `def` the CLASS actually holds: #12901's FINAL batch
+privatised these off-surface methods (`_name`), so a monkeypatch of the retired public
+spelling raises `AttributeError` instead of substituting anything. Prose in this file keeps
+the historical public names — they are what the retired MCP doors were called.
 
 ⛔ AND THE ONE THING THE ABSORBED DOOR'S CALLERS WOULD LOSE SILENTLY: `limit=`.
 `check_confidence`'s `topic` arm defaults it to 50 and `recall_state` defaults it to
@@ -72,7 +77,7 @@ def door(monkeypatch):
     #236) — every case here measures DISPATCH, not auth, so name the mode.
 
     Returns a callable that installs a recording SDK as the org SDK and hands back
-    its call log, so a door test reads `door("compute_confidence", payload)[0]`.
+    its call log, so a door test reads `door("_compute_confidence", payload)[0]`.
     """
     token = ms._transport_mode.set("stdio")
     monkeypatch.setattr(ms, "_is_dev_mode", lambda: True)
@@ -92,7 +97,7 @@ class TestTheRecomputeArm:
 
     def test_it_reaches_compute_confidence_with_the_arguments_the_door_took(
             self, monkeypatch):
-        sdk, calls = _sdk_stub(monkeypatch, "compute_confidence", {"confidences": {}})
+        sdk, calls = _sdk_stub(monkeypatch, "_compute_confidence", {"confidences": {}})
         sdk.check_confidence(
             recompute=True, factors=[{"id": "f1"}], evidence={"e": 1},
             anchors=["p1"], max_hops=2, rel_filter="IMPL", direction="outgoing",
@@ -108,7 +113,7 @@ class TestTheRecomputeArm:
 
     def test_it_returns_the_arm_s_answer_unwrapped(self, monkeypatch):
         payload = {"iterations": 3, "converged": True, "confidences": {"p1": 0.7}}
-        sdk, _ = _sdk_stub(monkeypatch, "compute_confidence", payload)
+        sdk, _ = _sdk_stub(monkeypatch, "_compute_confidence", payload)
         assert sdk.check_confidence(recompute=True) is payload, (
             "the recompute arm wrapped its answer — a migrating caller parsing the "
             "retired door's payload would then read a nesting that is not there")
@@ -116,7 +121,7 @@ class TestTheRecomputeArm:
     def test_the_no_argument_form_is_still_the_dirty_subgraph_pass(self, monkeypatch):
         """`tortoise_compute_confidence()` with no arguments is the LOCAL EP path —
         the arm must forward that shape, not invent factors (#395 delta C)."""
-        sdk, calls = _sdk_stub(monkeypatch, "compute_confidence", {})
+        sdk, calls = _sdk_stub(monkeypatch, "_compute_confidence", {})
         sdk.check_confidence(recompute=True)
         args, kwargs = calls[0]
         assert args == (None, None), args
@@ -127,7 +132,7 @@ class TestTheRecallArm:
     """`recall=True` — the arm `tortoise_recall` retires into."""
 
     def test_it_reaches_recall_state(self, monkeypatch):
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [{"id": "p1"}])
+        sdk, calls = _sdk_stub(monkeypatch, "_recall_state", [{"id": "p1"}])
         assert sdk.check_confidence(recall=True, query="what is true") == [{"id": "p1"}]
         args, kwargs = calls[0]
         assert args == ("what is true",), args
@@ -141,12 +146,12 @@ class TestTheRecallArm:
         """⛔ THE SILENT-WIDENING GUARD. `recall_state` bounds at 10; `check_confidence`'s
         `topic` arm bounds at 50. One shared default would have answered a migrating
         `tortoise_recall(query=...)` with five times the rows and no error."""
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
+        sdk, calls = _sdk_stub(monkeypatch, "_recall_state", [])
         sdk.check_confidence(recall=True, query="q", limit=supplied)
         assert calls[0][1]["limit"] == expected, calls[0][1]
 
     def test_the_topic_arm_keeps_its_own_fifty(self, monkeypatch):
-        sdk, calls = _sdk_stub(monkeypatch, "belief_timeline", [])
+        sdk, calls = _sdk_stub(monkeypatch, "_belief_timeline", [])
         sdk.check_confidence(topic="t")
         assert calls[0][1]["limit"] == 50, (
             "the topic arm's historical limit moved when the recall arm's arrived")
@@ -161,7 +166,7 @@ class TestTheRecallArm:
         door read a second dict."""
         from tortoise.sdk import RECALL_STATE_PRESET
 
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
+        sdk, calls = _sdk_stub(monkeypatch, "_recall_state", [])
         sdk.check_confidence(recall=True, query="q")
         assert calls[0][1]["relevance_exp"] == RECALL_STATE_PRESET["relevance_exp"]
         assert calls[0][1]["confidence_exp"] == RECALL_STATE_PRESET["confidence_exp"]
@@ -173,7 +178,7 @@ class TestTheRecallArm:
         """`gaps`/`subgraph` are graph-structure reads, not confidence reads: they are
         reachable on the SDK as their own methods, so the refusal NAMES them rather
         than silently answering the state arm."""
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
+        sdk, calls = _sdk_stub(monkeypatch, "_recall_state", [])
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(recall=True, mode="gaps", query="q")
         assert "recall_gaps" in str(exc.value), str(exc.value)
@@ -218,11 +223,11 @@ class TestOneArmPerCall:
         The refusal above guards the NEW arms only: a caller relying on the historical
         precedence keeps its exact behaviour, which is why that pair is not in the
         refusal table."""
-        sdk, calls = _sdk_stub(monkeypatch, "get_confidence", {"mean": 0.5})
+        sdk, calls = _sdk_stub(monkeypatch, "_get_confidence", {"mean": 0.5})
         assert sdk.check_confidence("c1", topic="ignored") == {"mean": 0.5}
         assert calls[0][0] == ("c1",), calls
 
-        sdk2, calls2 = _sdk_stub(monkeypatch, "session_context", {"session": "s"})
+        sdk2, calls2 = _sdk_stub(monkeypatch, "_session_context", {"session": "s"})
         assert sdk2.check_confidence(session=True, calibrate=True) == {"session": "s"}
         assert len(calls2) == 1, calls2
 
@@ -255,7 +260,7 @@ class TestTheArmArgumentsNameTheirArm:
     ])
     def test_the_sdk_refuses_an_arm_argument_without_the_arm(
             self, kwargs, arm, arg, monkeypatch):
-        sdk, calls = _sdk_stub(monkeypatch, "calibrate_summary", {"calibration": 1})
+        sdk, calls = _sdk_stub(monkeypatch, "_calibrate_summary", {"calibration": 1})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
@@ -275,7 +280,7 @@ class TestTheArmArgumentsNameTheirArm:
     ])
     def test_the_door_refuses_an_arm_argument_without_the_arm(
             self, kwargs, arm, arg, door):
-        calls = door("calibrate_summary", {"calibration": 1})
+        calls = door("_calibrate_summary", {"calibration": 1})
         out = ms.tortoise_check_confidence(**kwargs)
         assert out["code"] == ms.ERR_INVALID, out
         assert arg in out["error"], out
@@ -285,7 +290,7 @@ class TestTheArmArgumentsNameTheirArm:
     def test_a_call_naming_arguments_from_BOTH_arms_names_both_in_one_refusal(
             self, door):
         """One round trip, not two: the refusal lists both sets."""
-        calls = door("calibrate_summary", {"calibration": 1})
+        calls = door("_calibrate_summary", {"calibration": 1})
         out = ms.tortoise_check_confidence(query="q", factors=[])
         assert out["code"] == ms.ERR_INVALID, out
         assert "recompute arm: " in out["error"], out
@@ -312,8 +317,8 @@ class TestTheArmArgumentsNameTheirArm:
         # serve-then-raise looks like, so an empty call log is the half of this
         # test that says the refusal preceded dispatch (RUF059 flagged the
         # dropped assertion, it was not dead weight — #13593).
-        sdk, calls = _sdk_stub(monkeypatch, "recall_state", [])
-        _, calls2 = _sdk_stub(monkeypatch, "compute_confidence", {})
+        sdk, calls = _sdk_stub(monkeypatch, "_recall_state", [])
+        _, calls2 = _sdk_stub(monkeypatch, "_compute_confidence", {})
         with pytest.raises(ValueError) as exc:
             sdk.check_confidence(**kwargs)
         assert arg in str(exc.value), str(exc.value)
@@ -339,10 +344,10 @@ class TestTheArmArgumentsNameTheirArm:
     def test_a_shared_parameter_names_no_arm(self, monkeypatch):
         """`limit` and `require_calibration` belong to a LEGACY arm too, so supplying
         them must NOT be read as naming one (the `topic` arm's 50 depends on it)."""
-        sdk, calls = _sdk_stub(monkeypatch, "belief_timeline", [])
+        sdk, calls = _sdk_stub(monkeypatch, "_belief_timeline", [])
         sdk.check_confidence(topic="t", limit=7, require_calibration=False)
         assert calls[0][1]["limit"] == 7, calls
-        sdk2, calls2 = _sdk_stub(monkeypatch, "calibrate_summary", {})
+        sdk2, calls2 = _sdk_stub(monkeypatch, "_calibrate_summary", {})
         sdk2.check_confidence(limit=7)
         assert len(calls2) == 1, calls2
 
@@ -388,8 +393,8 @@ class TestTheAbsorbedDoorStillAnswers:
         assert "check_confidence(" in marker["message"]
 
     @pytest.mark.parametrize("name, method, payload", [
-        ("tortoise_compute_confidence", "compute_confidence", {"confidences": {}}),
-        ("tortoise_recall", "recall_state", [{"id": "p1"}]),
+        ("tortoise_compute_confidence", "_compute_confidence", {"confidences": {}}),
+        ("tortoise_recall", "_recall_state", [{"id": "p1"}]),
     ])
     def test_the_retired_name_runs_its_handler(self, name, method, payload, door):
         """Substituted at the SDK method the handler dispatches to: the shim must CALL
@@ -435,8 +440,8 @@ class TestTheDoorAndTheDoorItReplacedAgree:
     def test_every_recall_intent_answers_identically(self, mode, monkeypatch, door):
         payload = ({"nodes": [], "edges": [], "stats": {"n": 0}}
                    if mode == "subgraph" else [{"id": "p1"}])
-        stub_name = {"gaps": "recall_gaps", "subgraph": "recall_subgraph"}.get(
-            mode, "recall_state")
+        stub_name = {"gaps": "_recall_gaps", "subgraph": "_recall_subgraph"}.get(
+            mode, "_recall_state")
         door(stub_name, payload)
 
         kwargs = dict(mode=mode, query="q", limit=5,
@@ -455,7 +460,7 @@ class TestTheDoorAndTheDoorItReplacedAgree:
 
     def test_the_recompute_arm_answers_identically(self, door):
         payload = {"iterations": 2, "converged": True, "confidences": {"p1": 0.4}}
-        door("compute_confidence", payload)
+        door("_compute_confidence", payload)
         assert (ms.tortoise_check_confidence(recompute=True, anchors=["p1"])
                 == ms.tortoise_compute_confidence(anchors=["p1"]) == payload)
 
@@ -464,7 +469,7 @@ class TestTheDoorAndTheDoorItReplacedAgree:
         """`tortoise_compute_confidence` requires calibration by DEFAULT (#344) —
         `require_calibration=None` at the container means NOT SUPPLIED, so it must
         resolve to that door's `True`, never to the SDK read's `None`."""
-        calls = door("compute_confidence", {})
+        calls = door("_compute_confidence", {})
         ms.tortoise_check_confidence(recompute=True)
         assert calls[0][1]["require_calibration"] is True, calls[0][1]
 
@@ -551,8 +556,14 @@ class TestTheSignaturesCarryBothArms:
         removed = sorted(declared - public)
         assert not removed, (
             f"the SDK surface lost {removed} while the declaration still names it")
-        for needed in ("compute_confidence", "recall_state", "recall_gaps",
-                       "recall_subgraph", "check_confidence"):
-            assert needed in public, (
-                f"{needed} is not on the SDK surface — the arm names a route that is "
-                "not there")
+        # The four absorbed routes are PRIVATE `def`s since #12901, so "the route is
+        # there" is now a question about the class, not about the public surface —
+        # `check_confidence` is the one the arms hang ON, and it must stay public.
+        for needed in ("_compute_confidence", "_recall_state", "_recall_gaps",
+                       "_recall_subgraph"):
+            assert hasattr(TortoiseSDK, needed), (
+                f"{needed} is missing from TortoiseSDK — the arm names a route that "
+                "is not there")
+        assert "check_confidence" in public, (
+            "check_confidence is not on the SDK surface — the arm names a route that "
+            "is not there")

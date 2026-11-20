@@ -135,7 +135,7 @@ def test_mitigate_resolves_operator_memory_and_clamps(tmp_path) -> None:
         claim = next(m for m in mems if m.kind == "claim")
         other = next(m for m in mems if m.id != claim.id)
         # Build a real operator (the object a mitigation would modulate).
-        op = store._arm._sdk(store._scenario).create_operator(
+        op = store._arm._sdk(store._scenario)._create_operator(
             "IMPL", claim.id, [other.id])
         oid = op.get("id")
         assert oid

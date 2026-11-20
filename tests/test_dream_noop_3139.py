@@ -56,7 +56,7 @@ def _claim(sdk: TortoiseSDK, content: str) -> str:
     # #992: EP tests model live claims — status="live" is explicit for intent;
     # create_point's implicit status is live since #1088 (it was draft from
     # #943).
-    return sdk.create_point("statement", content, dedup=False,
+    return sdk._create_point("statement", content, dedup=False,
                             status="live")["id"]
 
 
@@ -65,8 +65,8 @@ def _factored_graph(sdk: TortoiseSDK) -> tuple[str, str, str]:
     a = _claim(sdk, "conclusion A")
     b = _claim(sdk, "premise B")
     c = _claim(sdk, "premise C")
-    sdk.create_operator("IMPL", b, [a])
-    sdk.create_operator("IMPL", c, [a])
+    sdk._create_operator("IMPL", b, [a])
+    sdk._create_operator("IMPL", c, [a])
     return a, b, c
 
 
@@ -127,7 +127,7 @@ class TestCorruptBooleanIndexStillPropagates:
             "RETURN count(n)"
         ).result_set[0][0] == 3
 
-        result = sdk.dream(mode="full", require_calibration=False)
+        result = sdk._dream(mode="full", require_calibration=False)
 
         assert result["converged_all"] is True
         assert result["total_affected"] > 0, (
@@ -150,7 +150,7 @@ class TestCorruptBooleanIndexStillPropagates:
         proj = sdk._get_proj()
         _corrupt_boolean_index(monkeypatch, sdk)
 
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
 
         assert result["converged"] is True
         assert result["budget_used"] > 0
@@ -169,11 +169,11 @@ class TestCorruptBooleanIndexStillPropagates:
         ``_last_affected``, so a confidence-only assertion would not catch it)."""
         a = _claim(sdk, "direct A")
         b = _claim(sdk, "direct B")
-        sdk.create_direct_edge("IMPL", a, b)  # bidirectional by default
+        sdk._create_direct_edge("IMPL", a, b)  # bidirectional by default
         proj = sdk._get_proj()
         _corrupt_boolean_index(monkeypatch, sdk)
 
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
 
         assert result["converged"] is True
         assert result["iterations"] >= 1, (
@@ -190,11 +190,11 @@ class TestCorruptBooleanIndexStillPropagates:
         predicate's index-independent spelling under corruption)."""
         a = _claim(sdk, "source A")
         b = _claim(sdk, "target B")
-        sdk.create_direct_edge("IMPL", a, b)  # bidirectional
+        sdk._create_direct_edge("IMPL", a, b)  # bidirectional
         _corrupt_boolean_index(monkeypatch, sdk)
         sdk._dirty_roots.clear()
         sdk._dirty_roots.add(a)  # source only
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
         assert result["iterations"] >= 1
         # Pins the `_window_closure` direct-edge predicate: with the closure
         # expanding to B, coverage is 2/2 = 1.0; without it the denominator
@@ -209,11 +209,11 @@ class TestCorruptBooleanIndexStillPropagates:
         case is the no-op test above)."""
         a = _claim(sdk, "source A")
         b = _claim(sdk, "target B")
-        sdk.create_direct_edge("IMPL", a, b)  # bidirectional
+        sdk._create_direct_edge("IMPL", a, b)  # bidirectional
         _corrupt_boolean_index(monkeypatch, sdk)
         sdk._dirty_roots.clear()
         sdk._dirty_roots.add(b)  # target only
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
         assert result["iterations"] >= 1
         assert 0.0 <= result["coverage"] <= 1.0
 
@@ -223,7 +223,7 @@ class TestCorruptBooleanIndexStillPropagates:
         model (a starved selector here would raise DreamNoOpError)."""
         _factored_graph(sdk)
         _corrupt_boolean_index(monkeypatch, sdk)
-        result = sdk.dream(mode="stale-first", require_calibration=False)
+        result = sdk._dream(mode="stale-first", require_calibration=False)
         assert result["converged"] is True
         assert result["budget_used"] > 0
 
@@ -234,12 +234,12 @@ class TestCorruptBooleanIndexStillPropagates:
         proj = sdk._get_proj()
         _corrupt_boolean_index(monkeypatch, sdk)
 
-        sdk.dream(mode="full", require_calibration=False)
+        sdk._dream(mode="full", require_calibration=False)
 
         assert proj.g.query(
             "MATCH (n:Point) WHERE n.ep_dirty = true RETURN count(n)"
         ).result_set[0][0] == 0
-        health = sdk.dream_health_check()
+        health = sdk._dream_health_check()
         assert health["stale_backlog"] == 0
         assert health["last_pass_output"] > 0
         assert health["alarm_verdict"] is False
@@ -261,7 +261,7 @@ class TestSilentNoOpFailsLoudly:
         _factored_graph(sdk)
         self._starve_selector(monkeypatch)
         with pytest.raises(DreamNoOpError) as excinfo:
-            sdk.dream(mode="local", require_calibration=False)
+            sdk._dream(mode="local", require_calibration=False)
         assert excinfo.value.mode == "local"
         assert excinfo.value.eligible_factors > 0
         assert sdk._dirty_roots, (
@@ -275,7 +275,7 @@ class TestSilentNoOpFailsLoudly:
         _factored_graph(sdk)
         self._starve_selector(monkeypatch)
         with pytest.raises(DreamNoOpError) as excinfo:
-            sdk.dream(mode="full", require_calibration=False)
+            sdk._dream(mode="full", require_calibration=False)
         assert excinfo.value.mode == "full"
         assert excinfo.value.eligible_factors > 0
 
@@ -289,14 +289,14 @@ class TestSilentNoOpFailsLoudly:
 
         a = _claim(sdk, "target A")
         b = _claim(sdk, "source B")
-        sdk.create_operator("IMPL", b, [a])
+        sdk._create_operator("IMPL", b, [a])
         # Window = {A} only (B's dirty root removed); hydrate is a no-op
         # because the in-memory set is non-empty.
         sdk._dirty_roots.clear()
         sdk._dirty_roots.add(a)
         self._starve_selector(monkeypatch)
         with pytest.raises(DreamNoOpError) as excinfo:
-            sdk.dream(mode="local", require_calibration=False)
+            sdk._dream(mode="local", require_calibration=False)
         assert excinfo.value.eligible_factors > 0
 
 
@@ -305,24 +305,24 @@ class TestLegitimateNoOpIsDistinguishable:
     and reports WHY it did nothing (no exception)."""
 
     def test_empty_graph_full_records_reason(self, sdk):
-        result = sdk.dream(mode="full", require_calibration=False)
+        result = sdk._dream(mode="full", require_calibration=False)
         assert result["converged_all"] is True
         assert result["total_affected"] == 0
-        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_ep_factors"
 
     def test_operatorless_claims_noop(self, sdk):
         _claim(sdk, "isolated one")
         _claim(sdk, "isolated two")
-        result = sdk.dream(mode="full", require_calibration=False)
+        result = sdk._dream(mode="full", require_calibration=False)
         assert result["converged_all"] is True
         assert result["total_affected"] == 0
-        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_ep_factors"
 
     def test_local_without_dirty_roots_records_reason(self, sdk):
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
         assert result["converged"] is True
         assert result["iterations"] == 0
-        assert sdk.dream_health_check()["no_op_reason"] == "no_dirty_roots"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_dirty_roots"
 
     def test_draft_operator_is_not_an_eligible_factor(self, sdk):
         """An EP-inert operator (draft/terminal, #780/#2422) with two LIVE
@@ -333,11 +333,11 @@ class TestLegitimateNoOpIsDistinguishable:
         b = _claim(sdk, "premise B")
         # promote_source=False → the operator is created draft while the
         # already-live endpoints stay live.
-        sdk.create_operator("IMPL", b, [a], promote_source=False)
-        result = sdk.dream(mode="full", require_calibration=False)
+        sdk._create_operator("IMPL", b, [a], promote_source=False)
+        result = sdk._dream(mode="full", require_calibration=False)
         assert result["converged_all"] is True
         assert result["total_affected"] == 0
-        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_ep_factors"
 
     def test_unidirectional_direct_edge_target_is_not_a_factor(self, sdk):
         """A pass over only the TARGET of a unidirectional direct IMPL edge
@@ -346,16 +346,16 @@ class TestLegitimateNoOpIsDistinguishable:
         lazy read path (get_confidence → dream) must not raise either."""
         src = _claim(sdk, "source claim")
         tgt = _claim(sdk, "target claim")
-        sdk.create_direct_edge("IMPL", src, tgt, direction="unidirectional")
+        sdk._create_direct_edge("IMPL", src, tgt, direction="unidirectional")
         # Converge once, then re-dirty ONLY the target (the direction-sensitive
         # case the direction-blind probe got wrong).
-        sdk.dream(mode="local", require_calibration=False)
+        sdk._dream(mode="local", require_calibration=False)
         sdk._mark_dirty([tgt])
-        result = sdk.dream(mode="local", require_calibration=False)
+        result = sdk._dream(mode="local", require_calibration=False)
         assert result["converged"] is True
-        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_ep_factors"
         # The read path lazily dreams the dirty root — it must not raise.
-        sdk.get_confidence(tgt, require_calibration=False)
+        sdk._get_confidence(tgt, require_calibration=False)
 
     def test_no_direction_direct_edge_is_not_a_factor(self, sdk):
         """#7852: a `-` direct edge ("the connection exists and no confidence
@@ -365,12 +365,12 @@ class TestLegitimateNoOpIsDistinguishable:
         window-INDEPENDENT eligibility is exactly `direction <> '-'`."""
         a = _claim(sdk, "claim a")
         b = _claim(sdk, "claim b")
-        sdk.create_direct_edge("IMPL", a, b, direction="-")
+        sdk._create_direct_edge("IMPL", a, b, direction="-")
         assert sdk._count_ep_factors(None) == 0
-        result = sdk.dream(mode="full", require_calibration=False)
+        result = sdk._dream(mode="full", require_calibration=False)
         assert result["converged_all"] is True
         assert result["total_affected"] == 0
-        assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
+        assert sdk._dream_health_check()["no_op_reason"] == "no_ep_factors"
 
     def test_backward_only_direct_edge_is_still_a_factor(self, sdk):
         """#7852: the graph-wide probe keeps counting an edge that flows AT ALL —
@@ -378,7 +378,7 @@ class TestLegitimateNoOpIsDistinguishable:
         it stays a factor (only `-` is excluded)."""
         a = _claim(sdk, "claim a")
         b = _claim(sdk, "claim b")
-        sdk.create_direct_edge("IMPL", a, b, direction="<-")
+        sdk._create_direct_edge("IMPL", a, b, direction="<-")
         assert sdk._count_ep_factors(None) == 1
 
 
@@ -403,7 +403,7 @@ class TestHealthAlarmIsHonest:
         """(a) A never-passed graph with a live backlog: the old alarm excused
         it via ``last_pass_at is not None``, reporting 'ok'."""
         _factored_graph(sdk)
-        health = sdk.dream_health_check()
+        health = sdk._dream_health_check()
         assert health["stale_backlog"] > 0
         assert health["last_pass_at"] is None
         assert health["coverage_pct"] == 0.0
@@ -423,7 +423,7 @@ class TestHealthAlarmIsHonest:
         drift out of the state this alarm is actually reached in.
         """
         a, b, c = _factored_graph(sdk)
-        sdk.dream(mode="local", require_calibration=False)
+        sdk._dream(mode="local", require_calibration=False)
         sdk._mark_dirty([a])
         return a, b, c
 
@@ -454,7 +454,7 @@ class TestHealthAlarmIsHonest:
         sdk._read_stamp_pair = lambda: (
             None, RuntimeError("graph read failed"))
 
-        health = sdk.dream_health_check()
+        health = sdk._dream_health_check()
 
         assert health["stale_backlog"] > 0, health
         assert health["last_pass_output"] > 0, health
@@ -478,7 +478,7 @@ class TestHealthAlarmIsHonest:
         self._backlog_with_output(sdk)
         sdk._read_stamp_pair = lambda: ((3, 0), None)
 
-        health = sdk.dream_health_check()
+        health = sdk._dream_health_check()
 
         assert health["alarm_verdict"] is True, health
         assert health["alarm_reason"] == "zero_coverage_with_backlog", health
@@ -503,9 +503,9 @@ class TestHealthAlarmIsHonest:
         _claim(sdk, "operator-less claim stamped by the doomed pass")
         self._starve_selector(monkeypatch)
         with pytest.raises(DreamNoOpError):
-            sdk.dream(mode="stale-first", require_calibration=False)
+            sdk._dream(mode="stale-first", require_calibration=False)
 
-        health = sdk.dream_health_check()
+        health = sdk._dream_health_check()
         assert health["no_op_reason"] == "silent_no_op"
         assert health["last_pass_output"] > 0, (
             "fixture is no longer discriminating: a stamping no-op must show "
@@ -532,7 +532,7 @@ class TestHealthAlarmIsHonest:
         cid = _claim(sdk, "operator-less claim the starved pass must not clear")
         self._starve_selector(monkeypatch)
         with pytest.raises(DreamNoOpError):
-            sdk.dream(mode="stale-first", require_calibration=False)
+            sdk._dream(mode="stale-first", require_calibration=False)
 
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN coalesce(n.ep_dirty, false)",
@@ -542,7 +542,7 @@ class TestHealthAlarmIsHonest:
             "the starved pass cleared the durable backlog — a fresh SDK would "
             "then report alarm_verdict False / 'ok' (#3139 reintroduced)"
         )
-        assert sdk.dream_health_check()["stale_backlog"] > 0
+        assert sdk._dream_health_check()["stale_backlog"] > 0
 
     def test_legitimate_no_op_does_not_alarm(self, sdk):
         """The alarm must not contradict the guard's own classification.
@@ -552,8 +552,8 @@ class TestHealthAlarmIsHonest:
         otherwise fire on it because the backlog is deliberately retained.
         """
         _factored_graph(sdk)
-        sdk.dream(mode="local", budget=0, require_calibration=False)
-        health = sdk.dream_health_check()
+        sdk._dream(mode="local", budget=0, require_calibration=False)
+        health = sdk._dream_health_check()
         assert health["no_op_reason"] == "budget_zero"
         assert health["stale_backlog"] > 0
         assert health["alarm_verdict"] is False, health
@@ -563,8 +563,8 @@ class TestHealthAlarmIsHonest:
         """Regression guard against over-firing: a converged graph with no
         backlog is fine."""
         _factored_graph(sdk)
-        sdk.dream(mode="local", require_calibration=False)
-        health = sdk.dream_health_check()
+        sdk._dream(mode="local", require_calibration=False)
+        health = sdk._dream_health_check()
         assert health["stale_backlog"] == 0
         assert health["alarm_verdict"] is False, health
         assert health["alarm_reason"] == "ok"
@@ -574,14 +574,14 @@ class TestHealthAlarmIsHonest:
         claims' — that divergence IS the silent no-op — and a no-op pass must
         not inherit the previous pass's count."""
         _factored_graph(sdk)
-        sdk.dream(mode="local", require_calibration=False)
-        healthy = sdk.dream_health_check()
+        sdk._dream(mode="local", require_calibration=False)
+        healthy = sdk._dream_health_check()
         assert (healthy["last_belief_write_count"] or 0) > 0, healthy
 
         # A legitimate no-op wrote no beliefs: a stale count would misdescribe
         # the LAST pass, the same quiet lie in a smaller place.
-        sdk.dream(mode="local", budget=0, require_calibration=False)
-        assert sdk.dream_health_check()["last_belief_write_count"] == 0, (
+        sdk._dream(mode="local", budget=0, require_calibration=False)
+        assert sdk._dream_health_check()["last_belief_write_count"] == 0, (
             "the no-op inherited the previous pass's belief-write count"
         )
 
@@ -598,12 +598,12 @@ class TestOperatorlessBacklogClears:
 
     def test_full_pass_clears_an_operatorless_backlog(self, sdk):
         _claim(sdk, "operator-less claim with no edges at all")
-        assert sdk.dream_health_check()["stale_backlog"] == 1
+        assert sdk._dream_health_check()["stale_backlog"] == 1
 
-        result = sdk.dream(mode="full", require_calibration=False)
+        result = sdk._dream(mode="full", require_calibration=False)
         assert result["converged_all"] is True
 
-        assert sdk.dream_health_check()["stale_backlog"] == 0, (
+        assert sdk._dream_health_check()["stale_backlog"] == 0, (
             "an operator-less claim must leave the backlog after being "
             "trivially stamped"
         )

@@ -459,7 +459,7 @@ def sdk(tmp_path):
 
 
 def _points(sdk, n=2):
-    return [sdk.create_point("statement", f"claim {i}")["id"] for i in range(n)]
+    return [sdk._create_point("statement", f"claim {i}")["id"] for i in range(n)]
 
 
 def _contents(sdk, *ids):
@@ -483,9 +483,9 @@ def test_refuses_a_second_mechanism_on_one_pair(sdk, first, second):
     """EVERY ordered combination, not just IMPL-vs-NAND: the closure is about
     the SET, so a third mechanism must inherit it for free."""
     a, b = _points(sdk)
-    sdk.create_operator(first, a, [b])
+    sdk._create_operator(first, a, [b])
     with pytest.raises(ValueError) as exc:
-        sdk.create_operator(second, a, [b])
+        sdk._create_operator(second, a, [b])
     message = str(exc.value)
     # It must NAME BOTH, or the caller cannot act on it. ⛔ Pin the PHRASED
     # prefix, not bare membership: the message's remediation clause lists all
@@ -501,8 +501,8 @@ def test_the_same_mechanism_twice_is_not_two_mechanisms(sdk):
     mechanism — the closure must not refuse it (the ingest path re-issues
     operators by design)."""
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b])
-    sdk.create_operator("IMPL", a, [b])
+    sdk._create_operator("IMPL", a, [b])
+    sdk._create_operator("IMPL", a, [b])
 
 
 def test_direction_is_not_the_flag(sdk):
@@ -510,9 +510,9 @@ def test_direction_is_not_the_flag(sdk):
     opposite-facing wires over one pair are still one pair with two mechanisms
     (#12067's "direction as the only flag")."""
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b], direction="->")
+    sdk._create_operator("IMPL", a, [b], direction="->")
     with pytest.raises(ValueError):
-        sdk.create_operator("NAND", b, [a], direction="->")
+        sdk._create_operator("NAND", b, [a], direction="->")
 
 
 def test_a_part_whole_opcode_is_not_a_second_mechanism(sdk):
@@ -520,8 +520,8 @@ def test_a_part_whole_opcode_is_not_a_second_mechanism(sdk):
     map to `hasPart` storage), so pairing one with a NAND is not two mechanisms
     and must stay writable."""
     a, b = _points(sdk)
-    sdk.create_operator("NAND", a, [b])
-    sdk.create_operator("composedOf", a, [b])
+    sdk._create_operator("NAND", a, [b])
+    sdk._create_operator("composedOf", a, [b])
 
 
 def test_a_deleted_operator_frees_the_pair(sdk):
@@ -537,21 +537,21 @@ def test_a_deleted_operator_frees_the_pair(sdk):
     test pins the REACHABLE behaviour so the refusal's own remedy text is true.
     """
     a, b = _points(sdk)
-    first = sdk.create_operator("IMPL", a, [b])
-    sdk.delete_point(first["id"])
-    sdk.create_operator("NAND", a, [b])
+    first = sdk._create_operator("IMPL", a, [b])
+    sdk._delete_point(first["id"])
+    sdk._create_operator("NAND", a, [b])
 
 
 def test_nary_pairwise_overlap_is_refused(sdk):
     """The pair is the unit, not the operator: a 3-input coherence that already
     covers {a,b} must refuse an IMPL over {a,b}."""
     a, b, c = _points(sdk, 3)
-    sdk.create_operator("coherence", a, [b, c])
+    sdk._create_operator("coherence", a, [b, c])
     with pytest.raises(ValueError):
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
     # ... but a pair with no overlap is free.
     d, e = _points(sdk)
-    sdk.create_operator("IMPL", d, [e])
+    sdk._create_operator("IMPL", d, [e])
 
 
 def test_a_direct_edge_is_the_other_arm_of_the_same_invariant(sdk):
@@ -563,9 +563,9 @@ def test_a_direct_edge_is_the_other_arm_of_the_same_invariant(sdk):
     bare `:IMPL`, and it is the least general of the reasons — ONTOLOGY states
     the slot geometry correctly, so the mechanism of harm is what this names.)"""
     a, b = _points(sdk)
-    sdk.create_direct_edge("IMPL", a, b)
+    sdk._create_direct_edge("IMPL", a, b)
     with pytest.raises(ValueError):
-        sdk.create_operator("NAND", a, [b])
+        sdk._create_operator("NAND", a, [b])
 
 
 def test_the_direct_edge_door_refuses_TOO(sdk):
@@ -587,9 +587,9 @@ def test_the_direct_edge_door_refuses_TOO(sdk):
     (`test_a_non_point_endpoint_is_still_checked`).
     """
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b])
+    sdk._create_operator("IMPL", a, [b])
     with pytest.raises(ValueError) as exc:
-        sdk.create_direct_edge("NAND", a, b)
+        sdk._create_direct_edge("NAND", a, b)
     assert "already carries" in str(exc.value), str(exc.value)
 
     # ... the reverse order, and through the third mechanism (a coherence
@@ -597,15 +597,15 @@ def test_the_direct_edge_door_refuses_TOO(sdk):
     # two-mechanism pair — the pre-fix probe compared it against its own
     # storage type and let it through).
     c, d = _points(sdk)
-    sdk.create_direct_edge("IMPL", c, d)
+    sdk._create_direct_edge("IMPL", c, d)
     with pytest.raises(ValueError):
-        sdk.create_operator("coherence", c, [d])
+        sdk._create_operator("coherence", c, [d])
 
     # A pair carrying ONE mechanism stays writable through the same door — the
     # guard must not become a blanket refusal (the #8175 false-block class).
     e, f = _points(sdk)
-    sdk.create_operator("IMPL", e, [f])
-    sdk.create_direct_edge("IMPL", e, f)
+    sdk._create_operator("IMPL", e, [f])
+    sdk._create_direct_edge("IMPL", e, f)
 
 
 def test_a_non_point_endpoint_is_still_checked(sdk):
@@ -617,11 +617,11 @@ def test_a_non_point_endpoint_is_still_checked(sdk):
     written. Asserted on a Subject endpoint because that is the shape the #7902
     tests mint.
     """
-    a = sdk.create_point("statement", "claim")["id"]
-    subj = sdk.create_subject("Entity", "some entity")["id"]
-    sdk.create_operator("NAND", a, [subj])
+    a = sdk._create_point("statement", "claim")["id"]
+    subj = sdk._create_subject("Entity", "some entity")["id"]
+    sdk._create_operator("NAND", a, [subj])
     with pytest.raises(ValueError):
-        sdk.create_operator("IMPL", a, [subj])
+        sdk._create_operator("IMPL", a, [subj])
 
 
 def test_a_DRAFT_operator_is_part_of_the_population(sdk):
@@ -635,9 +635,9 @@ def test_a_DRAFT_operator_is_part_of_the_population(sdk):
     before the fix: both writes were accepted.
     """
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b], promote_source=False)
+    sdk._create_operator("IMPL", a, [b], promote_source=False)
     with pytest.raises(ValueError):
-        sdk.create_operator("coherence", a, [b], promote_source=False)
+        sdk._create_operator("coherence", a, [b], promote_source=False)
     # ... and the promotion really does keep both live, which is why the refusal
     # has to happen at the WRITE, not at the promotion.
     sdk._promote_incident_operators(sdk._get_proj(), a, "2026-01-01T00:00:00Z")
@@ -653,14 +653,14 @@ def test_coherence_has_its_OWN_direction_default(sdk):
     necessity. `->` is the reading the mechanism means — the FIRST input is the
     condition, the second the dependent."""
     a, b = _points(sdk)
-    op = sdk.create_operator("coherence", a, [b])
+    op = sdk._create_operator("coherence", a, [b])
     stored = sdk._get_proj().g.query(
         "MATCH (o:Point {id:$id}) RETURN o.direction",
         params={"id": op["id"]}).result_set
     assert stored and stored[0][0] == "->", stored
     # IMPL keeps the mutual default it has always had.
     c, d = _points(sdk)
-    op2 = sdk.create_operator("IMPL", c, [d])
+    op2 = sdk._create_operator("IMPL", c, [d])
     stored2 = sdk._get_proj().g.query(
         "MATCH (o:Point {id:$id}) RETURN o.direction",
         params={"id": op2["id"]}).result_set
@@ -672,11 +672,11 @@ def test_the_derived_over_asserted_guard_covers_the_third_mechanism(sdk):
     asserted write was refused for support and accepted for coherence (#12067
     review round 2, P1) — and with the asymmetric potential's slot swap, the
     downgraded direction then pushed the DERIVED claim into the ASSERTED one."""
-    src = sdk.create_point("statement", "src", claim_class="derived")["id"]
-    tgt = sdk.create_point("statement", "tgt", claim_class="asserted")["id"]
+    src = sdk._create_point("statement", "src", claim_class="derived")["id"]
+    tgt = sdk._create_point("statement", "tgt", claim_class="asserted")["id"]
     for mechanism in ("IMPL", "NAND", "coherence"):
         with pytest.raises(ValueError, match="DERIVED"):
-            sdk.create_operator(mechanism, src, [tgt])
+            sdk._create_operator(mechanism, src, [tgt])
 
 
 def test_an_ingest_retry_dedups_a_coherence_operator(sdk):
@@ -684,11 +684,11 @@ def test_an_ingest_retry_dedups_a_coherence_operator(sdk):
     while `create_operator` stores coherence on `:IMPL` — so a retried ingest
     minted a SECOND operator over the same pair, double-pricing the factor
     (#12067 review round 2, P1; the same class as the `commit_ops` probe)."""
-    a = sdk.create_point("statement", "a")["id"]
-    b = sdk.create_point("statement", "b")["id"]
+    a = sdk._create_point("statement", "a")["id"]
+    b = sdk._create_point("statement", "b")["id"]
     payload = {"connections": [{"operator": "coherence", "from": a, "to": b}]}
-    first = sdk.ingest(payload)
-    second = sdk.ingest(payload)
+    first = sdk._ingest(payload)
+    second = sdk._ingest(payload)
     assert first["created"]["connections"] == 1, first
     assert second["created"]["connections"] == 0, second
     ops = sdk._get_proj().g.query(
@@ -711,13 +711,13 @@ def test_ingest_reports_the_conflict_as_a_VIOLATION_not_a_mid_bundle_abort(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b])
+    sdk._create_operator("IMPL", a, [b])
     payload = {
         "points": [{"content": "a brand new claim, queued behind the conflict"}],
         "connections": [{"operator": "coherence", "from": a, "to": b}],
     }
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest(payload)
+        sdk._ingest(payload)
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND mechanism" in (v.get("message") or "") for v in violations), (
         violations)
@@ -743,7 +743,7 @@ def test_an_INTRA_BUNDLE_conflict_is_a_VIOLATION(sdk):
 
     a, b = _points(sdk)
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({"connections": [
+        sdk._ingest({"connections": [
             {"operator": "IMPL", "from": a, "to": b},
             {"operator": "coherence", "from": a, "to": b},
         ]})
@@ -778,10 +778,10 @@ def test_a_REF_endpoint_resolves_to_its_LANDING_node(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b])
+    sdk._create_operator("IMPL", a, [b])
     ca, cb = _contents(sdk, a, b)
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({
+        sdk._ingest({
             "points": [{"content": ca, "ref": "rA"},
                        {"content": cb, "ref": "rB"}],
             "connections": [{"operator": "coherence", "from": "rA", "to": "rB"}],
@@ -805,9 +805,9 @@ def test_an_NARY_PRICED_pair_is_judged_at_Phase_1(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
-    sdk.create_operator("IMPL", c, [a])
+    sdk._create_operator("IMPL", c, [a])
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({"connections": [
+        sdk._ingest({"connections": [
             {"operator": "coherence", "from": a, "to": [b, c]}]})
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND mechanism" in (v.get("message") or "")
@@ -831,9 +831,9 @@ def test_two_REFS_that_fold_onto_one_minted_node_are_ONE_pair(sdk):
     """
     from tortoise.exceptions import BundleValidationError
 
-    z = sdk.create_point("statement", "shared target")["id"]
+    z = sdk._create_point("statement", "shared target")["id"]
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({
+        sdk._ingest({
             "points": [{"content": "same claim, twice", "ref": "r1"},
                        {"content": "same claim, twice", "ref": "r2"}],
             "connections": [
@@ -865,13 +865,13 @@ def test_a_bare_edge_on_a_TARGET_SUBPAIR_is_NOT_a_conflict(sdk):
     The PRICED sub-pair is still refused, by both doors, in the next test.
     """
     a, b, c = _points(sdk, 3)
-    sdk.create_direct_edge("NAND", b, c)
-    op = sdk.create_operator("coherence", a, [b, c])
+    sdk._create_direct_edge("NAND", b, c)
+    op = sdk._create_operator("coherence", a, [b, c])
     assert op["id"], op
     # ... and the mirror through `ingest` accepts the same state.
     d, e, f = _points(sdk, 3)
-    sdk.create_direct_edge("NAND", e, f)
-    out = sdk.ingest({"connections": [
+    sdk._create_direct_edge("NAND", e, f)
+    out = sdk._ingest({"connections": [
         {"operator": "coherence", "from": d, "to": [e, f]}]})
     assert not (getattr(out, "violations", None) or []), out
 
@@ -887,12 +887,12 @@ def test_a_bare_edge_on_a_PRICED_SUBPAIR_is_refused_by_BOTH_doors(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
-    sdk.create_direct_edge("NAND", a, b)
+    sdk._create_direct_edge("NAND", a, b)
     with pytest.raises(ValueError) as exc:
-        sdk.create_operator("coherence", a, [b, c])
+        sdk._create_operator("coherence", a, [b, c])
     assert "NAND" in str(exc.value), str(exc.value)
     with pytest.raises(BundleValidationError) as exc2:
-        sdk.ingest({"connections": [
+        sdk._ingest({"connections": [
             {"operator": "coherence", "from": a, "to": [b, c]}]})
     violations = getattr(exc2.value, "violations", []) or []
     assert any("direct edge" in (v.get("message") or "") for v in violations), violations
@@ -908,9 +908,9 @@ def test_a_bare_edge_conflict_names_the_EDGE_not_an_operator(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b = _points(sdk)
-    sdk.create_direct_edge("NAND", a, b)
+    sdk._create_direct_edge("NAND", a, b)
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({"connections": [
+        sdk._ingest({"connections": [
             {"operator": "IMPL", "from": a, "to": b}]})
     msgs = [v.get("message") or "" for v in
             (getattr(exc.value, "violations", []) or [])]
@@ -928,9 +928,9 @@ def test_a_key_hit_DISCARDS_the_content_so_it_cannot_bridge(sdk):
     collapsed onto ONE group and `ingest` refused a bundle the writer handles —
     two nodes (K/alpha, beta), two mechanisms, no conflict at all.
     """
-    z1 = sdk.create_point("statement", "target one")["id"]
-    z2 = sdk.create_point("statement", "target two")["id"]
-    res = sdk.ingest({
+    z1 = sdk._create_point("statement", "target one")["id"]
+    z2 = sdk._create_point("statement", "target two")["id"]
+    res = sdk._ingest({
         "points": [
             {"key": "K", "content": "alpha", "ref": "r1"},
             {"key": "K", "content": "beta", "ref": "r2"},
@@ -958,10 +958,10 @@ def test_an_absorbed_coherence_leg_lands_on_the_STORAGE_edge(sdk):
     was INERT (#12067 review round 3, P1 — the same class as the two replay maps).
     """
     a, b = _points(sdk)
-    c = sdk.create_point("statement", "third input")["id"]
-    sdk.create_operator("coherence", a, [b])
+    c = sdk._create_point("statement", "third input")["id"]
+    sdk._create_operator("coherence", a, [b])
     # The absorb arm: same operator, widened input set.
-    sdk.ingest({"connections": [
+    sdk._ingest({"connections": [
         {"operator": "coherence", "from": a, "to": [b, c]}]})
     rels = sdk._get_proj().g.query(
         "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
@@ -1002,12 +1002,12 @@ def test_coherence_reaches_the_run_loop_and_lowers_its_dependent(sdk):
     a control dependent whose condition is PRESENT. Two claims, one run, one
     difference — the only shape that cannot be satisfied by an inert mechanism
     (an unreached factor leaves both at their baselines and the gap is 0)."""
-    cond_absent = sdk.create_point("statement", "condition absent")["id"]
-    cond_present = sdk.create_point("statement", "condition present")["id"]
-    dep_a = sdk.create_point("statement", "dependent, condition absent")["id"]
-    dep_p = sdk.create_point("statement", "dependent, condition present")["id"]
-    sdk.create_operator("coherence", cond_absent, [dep_a])
-    sdk.create_operator("coherence", cond_present, [dep_p])
+    cond_absent = sdk._create_point("statement", "condition absent")["id"]
+    cond_present = sdk._create_point("statement", "condition present")["id"]
+    dep_a = sdk._create_point("statement", "dependent, condition absent")["id"]
+    dep_p = sdk._create_point("statement", "dependent, condition present")["id"]
+    sdk._create_operator("coherence", cond_absent, [dep_a])
+    sdk._create_operator("coherence", cond_present, [dep_p])
     _evidence(sdk, cond_absent, 0.5, 9.5)     # 0.05 — absent
     _evidence(sdk, cond_present, 10.0, 1.0)   # 0.909 — present
     _evidence(sdk, dep_a, 10.0, 1.0)          # both dependents equally held
@@ -1023,12 +1023,12 @@ def test_support_and_attack_move_a_neutral_claim_the_same_WAY_they_should(sdk):
     """End-to-end direction check for the two pre-existing mechanisms: a
     supported neutral claim settles HIGHER than an attacked one. Pinned at the
     level of the RUN so a dispatch that swapped the potentials is caught."""
-    sup_src = sdk.create_point("statement", "supporting evidence")["id"]
-    atk_src = sdk.create_point("statement", "counter-evidence")["id"]
-    sup_tgt = sdk.create_point("statement", "supported claim")["id"]
-    atk_tgt = sdk.create_point("statement", "attacked claim")["id"]
-    sdk.create_operator("IMPL", sup_src, [sup_tgt])
-    sdk.create_operator("NAND", atk_src, [atk_tgt])
+    sup_src = sdk._create_point("statement", "supporting evidence")["id"]
+    atk_src = sdk._create_point("statement", "counter-evidence")["id"]
+    sup_tgt = sdk._create_point("statement", "supported claim")["id"]
+    atk_tgt = sdk._create_point("statement", "attacked claim")["id"]
+    sdk._create_operator("IMPL", sup_src, [sup_tgt])
+    sdk._create_operator("NAND", atk_src, [atk_tgt])
     for pid in (sup_src, atk_src):
         _evidence(sdk, pid, 10.0, 1.0)   # equally strong on both sides
     for pid in (sup_tgt, atk_tgt):
@@ -1051,12 +1051,12 @@ def test_coherence_is_not_support_in_the_RISING_direction(sdk):
     a claim touched by no factor is outside the run's affected set and carries no
     written confidence at all, so a control would assert on an absent key.
     """
-    src_sup = sdk.create_point("statement", "evidential source")["id"]
-    src_coh = sdk.create_point("statement", "present precondition")["id"]
-    t_sup = sdk.create_point("statement", "low claim, supported")["id"]
-    t_coh = sdk.create_point("statement", "low claim, coerced")["id"]
-    sdk.create_operator("IMPL", src_sup, [t_sup])
-    sdk.create_operator("coherence", src_coh, [t_coh])
+    src_sup = sdk._create_point("statement", "evidential source")["id"]
+    src_coh = sdk._create_point("statement", "present precondition")["id"]
+    t_sup = sdk._create_point("statement", "low claim, supported")["id"]
+    t_coh = sdk._create_point("statement", "low claim, coerced")["id"]
+    sdk._create_operator("IMPL", src_sup, [t_sup])
+    sdk._create_operator("coherence", src_coh, [t_coh])
     for pid in (src_sup, src_coh):
         _evidence(sdk, pid, 10.0, 1.0)
     baseline = 0.2
@@ -1176,7 +1176,7 @@ def test_ingest_refuses_two_mechanisms_from_the_SAME_bundle(sdk):
         ],
     }
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest(payload)
+        sdk._ingest(payload)
     violations = getattr(exc.value, "violations", []) or []
     assert any(("TWO mechanisms" in (v.get("message") or "") or "SECOND mechanism" in (v.get("message") or ""))
                for v in violations), violations
@@ -1191,7 +1191,7 @@ def test_ingest_refuses_two_mechanisms_from_the_SAME_bundle(sdk):
 
     # ... and the SAME bundle re-stating ONE mechanism is not a conflict: the
     # ingest path re-issues operators by design (the closure must not refuse it).
-    ok = sdk.ingest({"connections": [
+    ok = sdk._ingest({"connections": [
         {"operator": "IMPL", "from": a, "to": b},
         {"operator": "IMPL", "from": a, "to": b},
     ]})
@@ -1214,7 +1214,7 @@ def test_the_mechanism_mismatch_message_names_the_THIRD_mechanism(sdk):
     acting on it would rewrite a correct coherence wire into a NAND one.
     """
     a, b = _points(sdk)
-    warned = sdk.create_operator("coherence", a, [b], semantics="refutes")
+    warned = sdk._create_operator("coherence", a, [b], semantics="refutes")
     msgs = [w for w in (warned.get("warnings") or [])
             if w.get("code") == "mechanism_mismatch"]
     assert msgs, warned.get("warnings")
@@ -1267,7 +1267,7 @@ def test_the_disclosure_does_not_invent_a_meaning_the_PACK_leg_never_supplied(sd
     picks its preamble the same way.
     """
     a, b = _points(sdk)
-    warned = sdk.create_operator("coherence", a, [b], label="competesWith")
+    warned = sdk._create_operator("coherence", a, [b], label="competesWith")
     msgs = [w for w in (warned.get("warnings") or [])
             if w.get("code") == "mechanism_mismatch"]
     assert msgs, warned.get("warnings")
@@ -1344,8 +1344,8 @@ def test_a_mechanism_on_a_TARGET_SUBPAIR_is_NOT_priced(sdk):
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
-    sdk.create_operator("NAND", b, [c])
-    out = sdk.ingest({
+    sdk._create_operator("NAND", b, [c])
+    out = sdk._ingest({
         "points": [{"content": "queued ahead of an UNPRICED target sub-pair"}],
         "connections": [{"operator": "IMPL", "from": a, "to": [b, c]}],
     })
@@ -1357,9 +1357,9 @@ def test_a_mechanism_on_a_TARGET_SUBPAIR_is_NOT_priced(sdk):
 
     # The PRICED pair still blocks the bundle in Phase 1, before any write.
     d, e, f = _points(sdk, 3)
-    sdk.create_operator("NAND", d, [e])
+    sdk._create_operator("NAND", d, [e])
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest({
+        sdk._ingest({
             "points": [{"content": "queued ahead of a PRICED sub-pair conflict"}],
             "connections": [{"operator": "IMPL", "from": d, "to": [e, f]}],
         })
@@ -1388,26 +1388,26 @@ def test_only_PRICED_pairs_count_measured_six_ways(sdk):
     """
     # ACCEPT: a one-way NAND star `c→[a, b]` does not price `(a, b)`.
     c, a, b = _points(sdk, 3)
-    sdk.create_operator("NAND", c, [a, b], direction="unidirectional")
-    assert sdk.create_operator("IMPL", a, [b])["id"]
+    sdk._create_operator("NAND", c, [a, b], direction="unidirectional")
+    assert sdk._create_operator("IMPL", a, [b])["id"]
 
     # ACCEPT: two fully DISJOINT stars.
     p, q, r, s = _points(sdk, 4)
-    sdk.create_operator("NAND", p, [q], direction="unidirectional")
-    assert sdk.create_operator("IMPL", r, [s])["id"]
+    sdk._create_operator("NAND", p, [q], direction="unidirectional")
+    assert sdk._create_operator("IMPL", r, [s])["id"]
 
     # REFUSE: a MUTUAL nand prices the clique, so `(a, b)` is covered.
     c2, a2, b2 = _points(sdk, 3)
-    sdk.create_operator("NAND", c2, [a2, b2], direction="<->")
+    sdk._create_operator("NAND", c2, [a2, b2], direction="<->")
     with pytest.raises(ValueError) as exc:
-        sdk.create_operator("IMPL", a2, [b2])
+        sdk._create_operator("IMPL", a2, [b2])
     assert "NAND" in str(exc.value), str(exc.value)
 
     # REFUSE: a one-way coherence star prices `(condition, dependent)`.
     cond, dep, other = _points(sdk, 3)
-    sdk.create_operator("coherence", cond, [dep, other])
+    sdk._create_operator("coherence", cond, [dep, other])
     with pytest.raises(ValueError) as exc2:
-        sdk.create_operator("IMPL", cond, [dep])
+        sdk._create_operator("IMPL", cond, [dep])
     assert "coherence" in str(exc2.value), str(exc2.value)
 
     # REFUSE: the plain two-input mirror, ONE order here. The reverse of THIS
@@ -1418,16 +1418,16 @@ def test_only_PRICED_pairs_count_measured_six_ways(sdk):
     # file must not claim to cover both orders in one case: that is how a count
     # came to be wrong here before.
     x, y = _points(sdk)
-    sdk.create_operator("IMPL", x, [y])
+    sdk._create_operator("IMPL", x, [y])
     with pytest.raises(ValueError) as exc3:
-        sdk.create_operator("NAND", x, [y])
+        sdk._create_operator("NAND", x, [y])
     assert "IMPL" in str(exc3.value), str(exc3.value)
 
     # REFUSE: a bare `NAND` edge over a pair a coherence operator prices.
     cond2, dep2 = _points(sdk)
-    sdk.create_operator("coherence", cond2, [dep2])
+    sdk._create_operator("coherence", cond2, [dep2])
     with pytest.raises(ValueError) as exc4:
-        sdk.create_direct_edge("NAND", cond2, dep2)
+        sdk._create_direct_edge("NAND", cond2, dep2)
     assert "coherence" in str(exc4.value), str(exc4.value)
 
 
@@ -1494,8 +1494,8 @@ def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
         OperatorTarget(src="a", dst="b", op_type="NAND")
 
     # ... and end-to-end through the commit layer, which is where it was lost.
-    a = sdk.create_point("statement", "mit condition")["id"]
-    b = sdk.create_point("statement", "mit dependent")["id"]
+    a = sdk._create_point("statement", "mit condition")["id"]
+    b = sdk._create_point("statement", "mit dependent")["id"]
     out = apply_payload_operators(sdk._get_proj(), sdk, [
         {"src": a, "dst": b, "op_type": "coherence", "direction": "->"},
         {"src": a, "dst": b, "op_type": "MITIGATES",
@@ -1517,8 +1517,8 @@ def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
     # on exactly the pair the declaration was about: a mitigation that says
     # "support" damping a necessity. Written as an EARLIER call's bridge, because
     # a same-call operator is in `target_op_ids` and never reaches the probe.
-    c = sdk.create_point("statement", "impostor mitigation")["id"]
-    d = sdk.create_point("statement", "impostor target")["id"]
+    c = sdk._create_point("statement", "impostor mitigation")["id"]
+    d = sdk._create_point("statement", "impostor target")["id"]
     apply_payload_operators(sdk._get_proj(), sdk, [
         {"src": c, "dst": d, "op_type": "coherence", "direction": "->"},
     ])
@@ -1548,13 +1548,13 @@ def test_the_PROMOTION_door_reports_a_refused_temporal_NAND(sdk):
     The pair here carries a plain `IMPL` (not the `alreadyDecided` cross-guard
     shape, which legitimately skips), so the closure is what refuses the NAND.
     """
-    prior = sdk.create_point("decision", "we decided to use port 16379",
+    prior = sdk._create_point("decision", "we decided to use port 16379",
                              status="live")["id"]
-    cid = sdk.create_point("decision", "we decided to revert port 16379",
+    cid = sdk._create_point("decision", "we decided to revert port 16379",
                            status="draft")["id"]
     # The IMPL is written WITHOUT promoting its source, so the candidate stays a
     # draft and `promote_point` still accepts it.
-    sdk.create_operator("IMPL", cid, [prior], promote_source=False)
+    sdk._create_operator("IMPL", cid, [prior], promote_source=False)
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) "
         # A MERGE verdict (not a replacement): the promotion wires a temporal
@@ -1564,7 +1564,7 @@ def test_the_PROMOTION_door_reports_a_refused_temporal_NAND(sdk):
         "n.temporal_target_ids = [$prior]",
         params={"id": cid, "prior": prior})
 
-    res = sdk.promote_point(cid)
+    res = sdk._promote_point(cid)
     assert res["promoted"] is True, res
     assert "temporal_wired" not in res, res
     assert res.get("temporal_nand_refused_count") == 1, res
@@ -1671,7 +1671,7 @@ def test_a_MIXED_contradiction_does_not_invent_a_meaning(sdk):
     the mixed case.
     """
     a, b = _points(sdk)
-    out = sdk.create_operator(
+    out = sdk._create_operator(
         "coherence", a, [b], label="competesWith", semantics="supports")
     msgs = [w for w in (out.get("warnings") or [])
             if w.get("code") == "mechanism_mismatch"]
@@ -1761,7 +1761,7 @@ def test_the_disclosure_is_TRUE_for_the_NEUTRAL_direction(sdk):
     `-` — so the arm is now gated on the resolved direction.
     """
     a, b = _points(sdk)
-    out = sdk.create_operator(
+    out = sdk._create_operator(
         "coherence", a, [b], label="competesWith", semantics="related")
     msgs = [w for w in (out.get("warnings") or [])
             if w.get("code") == "mechanism_mismatch"]
@@ -1772,7 +1772,7 @@ def test_the_disclosure_is_TRUE_for_the_NEUTRAL_direction(sdk):
 
     # …and a PROPAGATING direction still gets the necessity sentence.
     c, d = _points(sdk)
-    out2 = sdk.create_operator(
+    out2 = sdk._create_operator(
         "coherence", c, [d], label="competesWith", semantics="produces")
     text2 = next(w["message"] for w in (out2.get("warnings") or [])
                  if w.get("code") == "mechanism_mismatch")
@@ -1790,7 +1790,7 @@ def test_the_IMPL_contrast_names_no_SIDE(sdk):
     """
     a, b = _points(sdk)
     # `supports` declares IMPL, which is the branch whose contrast named a side
-    out = sdk.create_operator("coherence", a, [b], semantics="supports")
+    out = sdk._create_operator("coherence", a, [b], semantics="supports")
     text = next(w["message"] for w in (out.get("warnings") or [])
                 if w.get("code") == "mechanism_mismatch")
     assert "toward the source" not in text.lower(), text
@@ -1812,7 +1812,7 @@ def test_phase1_and_the_DOOR_agree_on_a_REAL_write(sdk):
                   "bidirectional"):
         for semantics in (None, "produces", "related"):
             a, b = _points(sdk)
-            out = sdk.create_operator("coherence", a, [b], direction=token,
+            out = sdk._create_operator("coherence", a, [b], direction=token,
                                       semantics=semantics)
             pid = out["id"]
             row = sdk._get_proj().g.query(

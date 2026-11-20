@@ -60,21 +60,21 @@ class _StubSDK:
                        for i in range(point_population)]
         self.n_tag_points = n_tag_points
 
-    def query(self, kind=None, **kwargs):
+    def _query(self, kind=None, **kwargs):
         self.calls.append(("query", kind, kwargs))
         return self.points
 
-    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+    def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
         total = len(self.points)
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag, *, _record_reads=True):
+    def _query_points_by_tag(self, tag, *, _record_reads=True):
         self.calls.append(("query_points_by_tag", tag, _record_reads))
         return [{"id": f"tag{i}"} for i in range(self.n_tag_points)]
 
-    def tortoise_fts_query(self, query=None, kind=None, **kwargs):
+    def _tortoise_fts_query(self, query=None, kind=None, **kwargs):
         self.calls.append(("tortoise_fts_query", query, kind, kwargs))
         return [{"id": "op0", "is_operator": True}]
 

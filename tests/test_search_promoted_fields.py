@@ -26,7 +26,7 @@ def sdk(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "search.db"), namespace=TEST_GRAPH)
     yield sdk
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -34,15 +34,15 @@ def sdk(tmp_path):
 
 
 def _scan(sdk, kind="statement", limit=50, include_terminal=False):
-    return sdk.tortoise_fts_query(query=None, kind=kind, entity_type="point",
+    return sdk._tortoise_fts_query(query=None, kind=kind, entity_type="point",
                                   limit=limit, include_terminal=include_terminal)
 
 
 def test_full_scan_decorated_bounded(sdk):
     """Full-scan results carry bounded relationships (legacy keys, no content) + status."""
-    a = sdk.create_point("statement", "alpha claim target")
-    peers = [sdk.create_point("statement", f"peer {i} claim") for i in range(3)]
-    sdk.create_operator("IMPL", a["id"], [p["id"] for p in peers])
+    a = sdk._create_point("statement", "alpha claim target")
+    peers = [sdk._create_point("statement", f"peer {i} claim") for i in range(3)]
+    sdk._create_operator("IMPL", a["id"], [p["id"] for p in peers])
 
     results = _scan(sdk)
     hit = next(r for r in results if r["id"] == a["id"])
@@ -59,10 +59,10 @@ def test_full_scan_decorated_bounded(sdk):
 
 def test_full_scan_promoted_superseded_and_subject(sdk):
     """Promoted fields: superseded_by (CORRECTS) + subject (own aboutSubject)."""
-    old = sdk.create_point("statement", "obsolete claim")
-    new = sdk.create_point("statement", "replacement claim")
-    sdk.supersede_point(old["id"], new["id"])
-    subj = sdk.create_subject("Epistemic Team", subjectKind="team")
+    old = sdk._create_point("statement", "obsolete claim")
+    new = sdk._create_point("statement", "replacement claim")
+    sdk._supersede_point(old["id"], new["id"])
+    subj = sdk._create_subject("Epistemic Team", subjectKind="team")
     sdk._get_proj().create_about_edge(new["id"], subj["id"], "aboutSubject")
 
     results = _scan(sdk, include_terminal=True)
@@ -79,8 +79,8 @@ def test_full_scan_promoted_superseded_and_subject(sdk):
 
 def test_retrieval_ranking_unchanged(sdk, monkeypatch):
     """Guardrail D1: decoration never reorders — identical result-id sequence."""
-    pts = [sdk.create_point("statement", f"claim {i}") for i in range(5)]
-    sdk.create_operator("IMPL", pts[0]["id"], [p["id"] for p in pts[1:]])
+    pts = [sdk._create_point("statement", f"claim {i}") for i in range(5)]
+    sdk._create_operator("IMPL", pts[0]["id"], [p["id"] for p in pts[1:]])
 
     baseline = _scan(sdk)
     baseline_ids = [r["id"] for r in baseline]
@@ -94,7 +94,7 @@ def test_retrieval_ranking_unchanged(sdk, monkeypatch):
 
 
 def test_relationships_empty_when_no_operators(sdk):
-    p = sdk.create_point("statement", "lonely claim")
+    p = sdk._create_point("statement", "lonely claim")
     results = _scan(sdk)
     hit = next(r for r in results if r["id"] == p["id"])
     assert hit["relationships"] == []
@@ -115,7 +115,7 @@ def test_failed_decoration_is_labelled_on_the_wire(sdk, monkeypatch):
     """
     import tortoise.search_engine as se
 
-    p = sdk.create_point("statement", "claim whose decoration read failed")
+    p = sdk._create_point("statement", "claim whose decoration read failed")
 
     def failing(graph, point_ids, **kw):
         rels = se.RelationshipDecoration({pid: [] for pid in point_ids})
@@ -141,7 +141,7 @@ def test_failed_decoration_does_not_break_retrieval(sdk, monkeypatch):
     """
     import tortoise.search_engine as se
 
-    pts = [sdk.create_point("statement", f"claim {i}") for i in range(5)]
+    pts = [sdk._create_point("statement", f"claim {i}") for i in range(5)]
     healthy = [r["id"] for r in _scan(sdk)]
 
     def failing(graph, point_ids, **kw):
@@ -162,9 +162,9 @@ def test_failed_decoration_does_not_break_retrieval(sdk, monkeypatch):
 
 def test_expand_relationships_full_content(sdk):
     """The expand side returns the FULL unbounded payload incl. related_content."""
-    a = sdk.create_point("statement", "alpha claim")
-    b = sdk.create_point("statement", "beta claim with unique content payload")
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    a = sdk._create_point("statement", "alpha claim")
+    b = sdk._create_point("statement", "beta claim with unique content payload")
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
 
     expanded = sdk.explore_connections(a["id"], include_content=True)
     assert len(expanded) == 1
@@ -188,9 +188,9 @@ def test_expand_mcp_tool(sdk, monkeypatch):
     monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: sdk)
     token = _transport_mode.set("stdio")
     try:
-        a = sdk.create_point("statement", "alpha claim")
-        b = sdk.create_point("statement", "beta claim with unique content payload")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        a = sdk._create_point("statement", "alpha claim")
+        b = sdk._create_point("statement", "beta claim with unique content payload")
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         out = tortoise_expand_relationships(a["id"])
         assert isinstance(out, list), out
         assert any("related_content" in e and "beta claim" in e["related_content"] for e in out)
@@ -217,9 +217,9 @@ def test_expand_tool_registered(sdk):
 def test_promoted_window_fields_and_default_live_lock(sdk):
     """T4: superseded hit (include_terminal) carries valid_from/valid_to/
     expired_at + status; DEFAULT search excludes it (D5 regression lock)."""
-    old = sdk.create_point("statement", "gym at 6pm", validFrom="2026-06-10")
-    new = sdk.create_point("statement", "gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    old = sdk._create_point("statement", "gym at 6pm", validFrom="2026-06-10")
+    new = sdk._create_point("statement", "gym at 5pm", validFrom="2026-06-14")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
     # default retrieval: superseded old excluded (live preference unchanged)
     default_ids = [r["id"] for r in _scan(sdk)]
@@ -243,7 +243,7 @@ def test_promoted_window_fields_and_default_live_lock(sdk):
 def test_undated_hits_have_no_window_keys(sdk):
     """Undated points: to_dict emits NO valid_* keys (additive-only, #1353
     D8 rule — byte-identical output for legacy graphs)."""
-    p = sdk.create_point("statement", "timeless belief")
+    p = sdk._create_point("statement", "timeless belief")
     results = _scan(sdk)
     hit = next(r for r in results if r["id"] == p["id"])
     assert "valid_from" not in hit
@@ -256,9 +256,9 @@ def test_marker_strings_via_full_scan_decoration(sdk):
     [valid …] marker renders from SearchResult-promoted state."""
     from tools.longmem_eval.retrieve import _validity_marker
 
-    old = sdk.create_point("statement", "gym at 6pm", validFrom="2026-06-10")
-    new = sdk.create_point("statement", "gym at 5pm", validFrom="2026-06-14")
-    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+    old = sdk._create_point("statement", "gym at 6pm", validFrom="2026-06-10")
+    new = sdk._create_point("statement", "gym at 5pm", validFrom="2026-06-14")
+    sdk._supersede_point(old["id"], new["id"], valid_from="2026-06-14")
 
     results = _scan(sdk, include_terminal=True)
     old_hit = next(r for r in results if r["id"] == old["id"])
@@ -283,9 +283,9 @@ def test_marker_distinguishes_still_open_from_ended_unknown(sdk):
     """
     from tools.longmem_eval.retrieve import _validity_marker
 
-    still = sdk.create_point("statement", "still true",
+    still = sdk._create_point("statement", "still true",
                              validFrom="2026-06-14")
-    ended = sdk.create_point("statement", "ended, un-datable",
+    ended = sdk._create_point("statement", "ended, un-datable",
                              validFrom="2026-06-14",
                              validToPrecision="unknown")
 
@@ -309,7 +309,7 @@ def test_eval_annotation_forwards_the_end_state_for_the_marker(sdk):
     ``render_context`` cannot render the distinction on that surface."""
     from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
 
-    ended = sdk.create_point("statement", "ended, un-datable",
+    ended = sdk._create_point("statement", "ended, un-datable",
                              validFrom="2026-06-14",
                              validToPrecision="unknown")
     hits = _scan(sdk, include_terminal=True)
@@ -339,7 +339,7 @@ def test_eval_annotation_keeps_an_absent_end_absent(sdk):
     from tools.longmem_eval.retrieve import _annotate_hits, _validity_marker
     from tortoise.time_aware import is_stale_entry
 
-    timeless = sdk.create_point("statement", "i live in lisbon")
+    timeless = sdk._create_point("statement", "i live in lisbon")
     hits = _scan(sdk)
     # non-vacuous premise: the search payload carries NO window key for an
     # undated point (pinned by test_undated_hits_have_no_window_keys).
@@ -383,7 +383,7 @@ def test_eval_annotation_of_a_legacy_undatable_end_still_reads_ended(sdk):
     from tools.longmem_eval.retrieve import _annotate_hits
     from tortoise.time_aware import is_stale_entry
 
-    ended = sdk.create_point("statement", "ended, un-datable",
+    ended = sdk._create_point("statement", "ended, un-datable",
                              validFrom="2026-06-14",
                              validToPrecision="unknown")
     entry = next(e for e in _annotate_hits(_scan(sdk), {}, [])
@@ -405,7 +405,7 @@ def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypa
     With ``TORTOISE_SEARCH_PROVENANCE`` set, every other key/value is unchanged
     and exactly the ``provenance`` block is added.
     """
-    p = sdk.create_point(
+    p = sdk._create_point(
         "statement",
         "beta ships in October",
         extractedFrom="https://example.com/beta-plan",
@@ -432,7 +432,7 @@ def test_provenance_flag_on_still_carries_capture_time_for_unlinked_points(sdk, 
     whatever provenance the point actually has, and a point is always created
     with a ``createdAt``.
     """
-    p = sdk.create_point("statement", "orphan claim with no source")
+    p = sdk._create_point("statement", "orphan claim with no source")
     monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
     assert "provenance" in hit
@@ -454,16 +454,16 @@ def test_provenance_flag_is_point_only(sdk, monkeypatch):
     on an empty result set.
     """
     monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
-    p = sdk.create_point("statement", "beta ships in October",
+    p = sdk._create_point("statement", "beta ships in October",
                          extractedFrom="https://example.com/beta-plan")
-    doc = sdk.create_document("Beta plan", "memo", content="beta memo body")
+    doc = sdk._create_document("Beta plan", "memo", content="beta memo body")
 
-    point_hits = sdk.tortoise_fts_query(query=None, kind="statement",
+    point_hits = sdk._tortoise_fts_query(query=None, kind="statement",
                                         entity_type="point", limit=10)
     point_hit = next(r for r in point_hits if r["id"] == p["id"])
     assert "provenance" in point_hit, "the point leg must be enriched (non-vacuous)"
 
-    doc_hits = sdk.tortoise_fts_query(query=None, kind="memo",
+    doc_hits = sdk._tortoise_fts_query(query=None, kind="memo",
                                       entity_type="document", limit=10)
     doc_hit = next(r for r in doc_hits if r["id"] == doc["id"])
     assert "provenance" not in doc_hit, (

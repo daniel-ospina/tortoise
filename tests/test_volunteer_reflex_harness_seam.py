@@ -151,10 +151,10 @@ def test_reflex_fires_on_measured_graph_mirroring_kta_gold():
     sdk = _fresh_sdk()
     proj = sdk._get_proj()
     # Mirror kta01's fact: Alice/WidgetCo pricing as a MEASURED statement.
-    claim = sdk.create_point(
+    claim = sdk._create_point(
         "statement", "Alice flagged the Widget Co pricing as too aggressive")
-    ev = sdk.create_point("evidence", "widgetco supporting record")
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", "widgetco supporting record")
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     for pid, a, b in ((claim["id"], 12.0, 1.0), (ev["id"], 12.0, 1.0)):
         mean = round(a / (a + b), 4)
         proj.g.query(
@@ -179,7 +179,7 @@ def test_reflex_silent_below_notability_opener():
     """Below-notability openers never fire even with a measured graph —
     the reflex stays silent on graph-free/greeting turns (indicator 4)."""
     sdk = _fresh_sdk()
-    claim = sdk.create_point("statement", "Ember onboarding ships next week")
+    claim = sdk._create_point("statement", "Ember onboarding ships next week")
     proj = sdk._get_proj()
     for pid, a, b in ((claim["id"], 12.0, 1.0),):
         mean = round(a / (a + b), 4)

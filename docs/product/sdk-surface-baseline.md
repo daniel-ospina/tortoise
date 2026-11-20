@@ -14,10 +14,10 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 105 |
+| live public methods on `TortoiseSDK` | 39 |
 | approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 40 |
 | approved but not implemented yet | 0 |
-| live and NOT approved (migration backlog) | 66 |
+| live and NOT approved (migration backlog) | 0 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
@@ -39,69 +39,4 @@ Phase 2 implements them.
 Public on `TortoiseSDK` today, absent from the approved 40. Phase 2 removes them;
 the count above is the honest measure of the gap.
 
-- `annotate_ask_hits`
-- `annotate_operator`
-- `audit`
-- `belief_timeline`
-- `calibrate_summary`
-- `check_structure`
-- `compute_confidence`
-- `compute_reputation`
-- `create_derivation`
-- `create_direct_edge`
-- `create_document`
-- `create_edge`
-- `create_event`
-- `create_object`
-- `create_operator`
-- `create_point`
-- `create_subject`
-- `delete`
-- `delete_entity`
-- `delete_point`
-- `delete_point_wrapped`
-- `diary_write`
-- `dream`
-- `dream_health_check`
-- `dream_health_state`
-- `get_confidence`
-- `get_cross_lens_candidates`
-- `get_events`
-- `get_owned_entities`
-- `get_point`
-- `get_session`
-- `get_source_reliability`
-- `ingest`
-- `ingest_corpus`
-- `invalidate_point`
-- `issue_insight`
-- `link_source_to_entity`
-- `list_batch`
-- `list_batches`
-- `list_graphs`
-- `mitigate_operator`
-- `org_create`
-- `paginated_query`
-- `promote_point`
-- `query`
-- `query_points_by_tag`
-- `recall_gaps`
-- `recall_state`
-- `recall_subgraph`
-- `reconcile_sessions`
-- `resolve_id`
-- `retract_point`
-- `review_connections`
-- `session_context`
-- `session_index_health`
-- `set_point_baseline`
-- `stale_points`
-- `summarize_structure`
-- `supersede_point`
-- `test_guard`
-- `topic_summarize`
-- `tortoise_fts_query`
-- `ulid`
-- `update`
-- `update_point`
-- `volunteer_context`
+- (none)

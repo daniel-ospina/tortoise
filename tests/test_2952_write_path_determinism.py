@@ -121,7 +121,7 @@ def _new_namespace():
 def _ingest(sdk):
     """Write the corpus through the product write path."""
     for fact in FACTS:
-        sdk.create_point(kind="evidence", content=fact, dedup=True,
+        sdk._create_point(kind="evidence", content=fact, dedup=True,
                          credibility="medium", source_harness="battery-parity",
                          source_session="regression-2952")
 
@@ -149,7 +149,7 @@ def _rankings(sdk, questions, k=20):
     """
     return [
         [(r["id"], r["recall_ranking"]["relevance_norm"],
-          r["recall_ranking"]["final_score"]) for r in sdk.recall_state(
+          r["recall_ranking"]["final_score"]) for r in sdk._recall_state(
               query=q, kind=None, limit=k, object_centric=False)]
         for q in questions
     ]
@@ -187,7 +187,7 @@ def test_create_point_is_one_graph_write_per_point(tmp_path, monkeypatch,
 
     monkeypatch.setattr(_GuardedGraph, "query", spy)
     try:
-        sdk.create_point(kind="evidence", content=FACTS[0], credibility="medium",
+        sdk._create_point(kind="evidence", content=FACTS[0], credibility="medium",
                          source_harness="battery-parity",
                          source_session="regression-2952")
     finally:
@@ -240,7 +240,7 @@ def test_create_point_sourced_with_inherited_at_is_one_graph_write(
 
     monkeypatch.setattr(_GuardedGraph, "query", spy)
     try:
-        point = sdk.create_point(
+        point = sdk._create_point(
             kind="evidence", content=FACTS[0], credibility="medium",
             source_harness="battery-parity",
             source_session="regression-2952",
@@ -301,7 +301,7 @@ def test_born_terminal_point_is_not_a_dirty_root(tmp_path, force_sparse_tfidf):
         namespace = _new_namespace()
         sdk = _open(tmp_path, namespace)
         try:
-            point = sdk.create_point(
+            point = sdk._create_point(
                 kind="statement",
                 content=f"born {status} — #2422 regression",
                 status=status)
@@ -439,7 +439,7 @@ def test_create_point_retries_an_aborted_create_once_and_writes_one_point(
 
     monkeypatch.setattr(_GuardedGraph, "query", _abort_the_create_once)
     try:
-        point = sdk.create_point(
+        point = sdk._create_point(
             kind="evidence", content=FACTS[0], credibility="medium",
             source_harness="battery-parity",
             source_session="regression-2952")

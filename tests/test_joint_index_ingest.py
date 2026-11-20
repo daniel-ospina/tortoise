@@ -98,7 +98,7 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
                   {"u": url}) == 1
 
     # ingest a bundle whose source item REUSES the url
-    res = sdk.ingest({
+    res = sdk._ingest({
         "points": [
             {"ref": "p1", "kind": "statement",
              "content": "Claim about the session."}],
@@ -147,7 +147,7 @@ def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
     this test asserted before the ruling."""
     c = _corpus(tmp_path)
     # ingest a bundle with points + a plain IMPL connection (reified)
-    res = sdk.ingest({  # noqa: F841
+    res = sdk._ingest({  # noqa: F841
         "points": [
             {"ref": "p1", "kind": "statement", "content": "A implies B."},
             {"ref": "p2", "kind": "statement", "content": "B."},
@@ -182,7 +182,7 @@ def test_joint_stub_source_exception_class(tmp_path, sdk):
     index_directory over a matching corpus COMPLETES the stub (the
     conditional merge writes the real hash when it differs)."""
     c = _corpus(tmp_path)
-    res = sdk.ingest({
+    res = sdk._ingest({
         "points": [
             {"ref": "p1", "kind": "statement", "content": "Claim."}],
         "entities": [],
@@ -213,7 +213,7 @@ def test_joint_stub_source_exception_class(tmp_path, sdk):
     # file matches the stub's url completes it — use a corpus url instead:
     # create a stub at a corpus:// url, then the sweep completes it
     corpus_url = f"corpus://{c.name}/s1.md"
-    sdk.ingest({
+    sdk._ingest({
         "points": [{"ref": "p1", "kind": "statement", "content": "C."}],
         "entities": [], "sources": [],
         "connections": [],

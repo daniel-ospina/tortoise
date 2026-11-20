@@ -288,7 +288,7 @@ class TestThePayloadWalk:
 
 class TestTheWriteDoor:
     def test_a_point_stores_a_valid_percentage(self, percent_sdk):
-        created = percent_sdk.create_point("statement", "target is 12%",
+        created = percent_sdk._create_point("statement", "target is 12%",
                                    **percent_props(1_200, verbatim="12%"))
         node = percent_sdk.get_entity(created["id"])
         assert node[BASIS_POINTS] == 1_200
@@ -303,14 +303,14 @@ class TestTheWriteDoor:
     @pytest.mark.parametrize("value", [20_000, -1, 12.5, True])
     def test_a_malformed_percentage_cannot_be_created(self, percent_sdk, value):
         with pytest.raises(ValueError, match="write boundary"):
-            percent_sdk.create_point("statement", "target is 120%",
+            percent_sdk._create_point("statement", "target is 120%",
                              basisPoints=value)
 
     def test_a_malformed_percentage_cannot_be_updated_in(self, percent_sdk):
-        created = percent_sdk.create_point("statement", "target is 12%",
+        created = percent_sdk._create_point("statement", "target is 12%",
                                    **percent_props(1_200))
         with pytest.raises(ValueError, match="write boundary"):
-            percent_sdk.update_point(created["id"], basisPoints=20_000)
+            percent_sdk._update_point(created["id"], basisPoints=20_000)
         assert percent_sdk.get_entity(created["id"])[BASIS_POINTS] == 1_200
 
     def test_deleting_the_value_is_not_a_refusal(self):
@@ -370,22 +370,22 @@ class TestSharedSourceEvidence:
 
     def test_a_percent_cannot_overwrite_a_money_values_evidence(
             self, percent_sdk):
-        created = percent_sdk.create_point(
+        created = percent_sdk._create_point(
             "statement", "the tranche released EUR 800 committed",
             **money_props(80_000, "EUR", minor_unit_exponent=2,
                           verbatim="EUR 800"))
         with pytest.raises(ValueError, match="overwrite the source text"):
-            percent_sdk.update_point(
+            percent_sdk._update_point(
                 created["id"], **percent_props(1_200, verbatim="12%"))
         # …and the money value's evidence is INTACT, which is the point.
         assert percent_sdk.get_entity(created["id"])["verbatim"] == "EUR 800"
 
     def test_a_money_cannot_overwrite_a_percents_evidence(self, percent_sdk):
-        created = percent_sdk.create_point(
+        created = percent_sdk._create_point(
             "statement", "the target is 12%",
             **percent_props(1_200, verbatim="12%"))
         with pytest.raises(ValueError, match="overwrite the source text"):
-            percent_sdk.update_point(
+            percent_sdk._update_point(
                 created["id"],
                 **money_props(80_000, "EUR", minor_unit_exponent=2,
                               verbatim="EUR 800"))
@@ -397,11 +397,11 @@ class TestSharedSourceEvidence:
         overwrites nothing, and a node holding a budget AND a target percentage
         is a readable, legitimate state. A blanket "one shape per carrier" rule
         would refuse it — over-blocking for a defect that is not there."""
-        created = percent_sdk.create_point(
+        created = percent_sdk._create_point(
             "statement", "the tranche released EUR 800 committed",
             **money_props(80_000, "EUR", minor_unit_exponent=2,
                           verbatim="EUR 800"))
-        percent_sdk.update_point(created["id"], **percent_props(1_200))
+        percent_sdk._update_point(created["id"], **percent_props(1_200))
         node = percent_sdk.get_entity(created["id"])
         assert node[BASIS_POINTS] == 1_200
         assert node["verbatim"] == "EUR 800", (
@@ -418,8 +418,8 @@ class TestSharedSourceEvidence:
                 door="EventAPI.PointAdded")
 
     def test_a_carrier_with_no_value_evidence_is_unaffected(self, percent_sdk):
-        created = percent_sdk.create_point("statement", "a plain claim")
-        percent_sdk.update_point(created["id"],
+        created = percent_sdk._create_point("statement", "a plain claim")
+        percent_sdk._update_point(created["id"],
                                  **percent_props(1_200, verbatim="12%"))
         assert percent_sdk.get_entity(created["id"])["verbatim"] == "12%"
 

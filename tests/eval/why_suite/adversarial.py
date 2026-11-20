@@ -438,8 +438,8 @@ def _plant_wide_decision(sdk, proj, topic: str) -> dict[str, str]:
         option = seeding._create_point(
             sdk, "option", PLANT_ROLES["wide_decision"][role].format(topic=topic)
         )
-        op = sdk.create_operator("IMPL", decision, [option])
-        sdk.mitigate_operator(op["id"], mitigations[role])
+        op = sdk._create_operator("IMPL", decision, [option])
+        sdk._mitigate_operator(op["id"], mitigations[role])
         seeding._set_posterior(proj, option, *posteriors[role])
         roles[role] = option
     counter = seeding._create_point(
@@ -525,8 +525,8 @@ def _plant_precedence(sdk, proj, topic: str) -> dict[str, str]:
         option = seeding._create_point(
             sdk, "option", PLANT_ROLES["precedence"][role].format(topic=topic)
         )
-        op = sdk.create_operator("IMPL", decision, [option])
-        sdk.mitigate_operator(op["id"], mitigations[role])
+        op = sdk._create_operator("IMPL", decision, [option])
+        sdk._mitigate_operator(op["id"], mitigations[role])
         seeding._set_posterior(proj, option, *posteriors[role])
         roles[role] = option
     counter = seeding._create_point(

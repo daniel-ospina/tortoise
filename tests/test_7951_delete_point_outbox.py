@@ -211,8 +211,8 @@ def test_the_cache_delete_lands_before_the_destruction_record(env, monkeypatch):
 
     monkeypatch.setattr(type(proj.g), "query", spy_query)
 
-    pid = sdk.create_point("observation", "delete me, in order")["id"]
-    assert sdk.delete_point(pid) is True
+    pid = sdk._create_point("observation", "delete me, in order")["id"]
+    assert sdk._delete_point(pid) is True
 
     assert order.count("journal") == 1, (
         f"exactly one EntityMutated delete record per hard delete: {order!r}")
@@ -256,7 +256,7 @@ def test_a_failed_cache_write_appends_no_destruction_record(env, monkeypatch):
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "refused, so nothing is recorded")["id"]
+    pid = sdk._create_point("observation", "refused, so nothing is recorded")["id"]
 
     real_query = type(proj.g).query
 
@@ -269,7 +269,7 @@ def test_a_failed_cache_write_appends_no_destruction_record(env, monkeypatch):
     monkeypatch.setattr(type(proj.g), "query", failing_delete)
 
     with pytest.raises(DirectCacheWriteRefused):
-        sdk.delete_point(pid)
+        sdk._delete_point(pid)
 
     monkeypatch.setattr(type(proj.g), "query", real_query)
 
@@ -309,7 +309,7 @@ def test_a_landed_destroy_whose_record_failed_is_reported(env, monkeypatch):
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "destroyed, record refused")["id"]
+    pid = sdk._create_point("observation", "destroyed, record refused")["id"]
 
     log = sdk._get_event_log()
     assert log is not None, "the fixture must wire a journal for this arm"
@@ -321,7 +321,7 @@ def test_a_landed_destroy_whose_record_failed_is_reported(env, monkeypatch):
     monkeypatch.setattr(log, "append", _boom)
 
     with pytest.raises(WriteNotLandedError) as ei:
-        sdk.delete_point(pid)
+        sdk._delete_point(pid)
 
     assert ei.value.operation == "delete_point", (
         "the refusal must name the door that raised it (#7209)")
@@ -375,7 +375,7 @@ def test_a_lost_reply_over_an_applied_destroy_is_still_recorded(env,
     """
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "applied, reply lost")["id"]
+    pid = sdk._create_point("observation", "applied, reply lost")["id"]
 
     real_query = type(proj.g).query
 
@@ -387,7 +387,7 @@ def test_a_lost_reply_over_an_applied_destroy_is_still_recorded(env,
 
     monkeypatch.setattr(type(proj.g), "query", land_then_lose)
     try:
-        assert sdk.delete_point(pid) is True, (
+        assert sdk._delete_point(pid) is True, (
             "the destroy DID land (the read-back proves it), so the call is a "
             "completed delete, not a failure")
     finally:
@@ -423,7 +423,7 @@ def test_the_landed_destroy_arm_does_not_claim_the_statement_succeeded(env,
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "applied, reply lost, no record")["id"]
+    pid = sdk._create_point("observation", "applied, reply lost, no record")["id"]
     log = sdk._get_event_log()
     assert log is not None, "the fixture must wire a journal for this arm"
 
@@ -442,7 +442,7 @@ def test_the_landed_destroy_arm_does_not_claim_the_statement_succeeded(env,
     monkeypatch.setattr(log, "append", _boom)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
 
@@ -480,7 +480,7 @@ def test_an_unreadable_after_state_writes_no_record_and_claims_nothing(
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "state unreadable")["id"]
+    pid = sdk._create_point("observation", "state unreadable")["id"]
 
     real_query = type(proj.g).query
 
@@ -497,7 +497,7 @@ def test_an_unreadable_after_state_writes_no_record_and_claims_nothing(
     monkeypatch.setattr(type(proj.g), "query", everything_fails)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
 
@@ -584,7 +584,7 @@ def test_a_deleted_graph_key_is_never_read_as_a_landed_destroy(env, monkeypatch)
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "graph deleted mid-delete")["id"]
+    pid = sdk._create_point("observation", "graph deleted mid-delete")["id"]
 
     real_query = type(proj.g).query
     real_exec = type(proj.g).execute_command
@@ -611,7 +611,7 @@ def test_a_deleted_graph_key_is_never_read_as_a_landed_destroy(env, monkeypatch)
     monkeypatch.setattr(type(proj.g), "execute_command", key_is_gone)
     try:
         with pytest.raises(redis_exc.ResponseError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
@@ -657,7 +657,7 @@ def test_a_transport_failure_pays_the_presence_probe_too(env, monkeypatch):
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "transport failure mid-delete")["id"]
+    pid = sdk._create_point("observation", "transport failure mid-delete")["id"]
 
     real_query = type(proj.g).query
     real_exec = type(proj.g).execute_command
@@ -684,7 +684,7 @@ def test_a_transport_failure_pays_the_presence_probe_too(env, monkeypatch):
     monkeypatch.setattr(type(proj.g), "execute_command", key_is_gone)
     try:
         with pytest.raises(ConnectionError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
@@ -743,7 +743,7 @@ def test_a_state_independent_refusal_is_never_read_as_a_landed_destroy(
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "write slot contention")["id"]
+    pid = sdk._create_point("observation", "write slot contention")["id"]
 
     real_query = type(proj.g).query
     real_exec = type(proj.g).execute_command
@@ -771,7 +771,7 @@ def test_a_state_independent_refusal_is_never_read_as_a_landed_destroy(
     monkeypatch.setattr(type(proj.g), "execute_command", count_exists)
     try:
         with pytest.raises(redis_exc.ResponseError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
         monkeypatch.setattr(type(proj.g), "execute_command", real_exec)
@@ -819,7 +819,7 @@ def test_an_empty_read_back_claims_nothing(env, monkeypatch):
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "empty read-back")["id"]
+    pid = sdk._create_point("observation", "empty read-back")["id"]
 
     real_query = type(proj.g).query
     readbacks: list[str] = []
@@ -838,7 +838,7 @@ def test_an_empty_read_back_claims_nothing(env, monkeypatch):
     monkeypatch.setattr(type(proj.g), "query", fail_then_read_empty)
     try:
         with pytest.raises(WriteNotLandedError) as ei:
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
     finally:
         monkeypatch.setattr(type(proj.g), "query", real_query)
 
@@ -868,7 +868,7 @@ def test_a_missing_point_journals_nothing(env):
     sdk, events = env
     pid = "p_does_not_exist_7951"
 
-    assert sdk.delete_point(pid) is False
+    assert sdk._delete_point(pid) is False
     assert _mutations(events, pid) == [], (
         "a no-op delete journalled a destruction — a replay would then delete "
         "a node this call never touched")
@@ -886,8 +886,8 @@ def test_the_delete_record_keeps_its_declared_shape(env):
     `record` default) — the shape assertion is what holds the replay contract.
     """
     sdk, events = env
-    pid = sdk.create_point("observation", "one honest record")["id"]
-    sdk.delete_point(pid)
+    pid = sdk._create_point("observation", "one honest record")["id"]
+    sdk._delete_point(pid)
 
     recs = _mutations(events, pid)
     assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")]
@@ -913,8 +913,8 @@ def test_the_graph_event_row_is_still_written_after_the_delete(env):
     """
     sdk, _events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "subscribers still see this")["id"]
-    sdk.delete_point(pid)
+    pid = sdk._create_point("observation", "subscribers still see this")["id"]
+    sdk._delete_point(pid)
 
     polled = sdk.poll_events(after=None)["events"]
     assert any(e["type"] == "PointRetracted"
@@ -944,8 +944,8 @@ def test_a_journal_less_sdk_still_deletes(tmp_path):
 
     sdk = TortoiseSDK(str(tmp_path / "no-journal.db"))
     try:
-        pid = sdk.create_point("observation", "deleted with no journal")["id"]
-        assert sdk.delete_point(pid) is True, (
+        pid = sdk._create_point("observation", "deleted with no journal")["id"]
+        assert sdk._delete_point(pid) is True, (
             "a journal-less SDK must delete, not refuse — there is no record "
             "to fail to commit")
         assert _live(sdk._get_proj(), pid) is False
@@ -977,7 +977,7 @@ def test_an_append_that_lands_then_raises_is_reported_as_unconfirmed(
 
     sdk, events = env
     proj = sdk._get_proj()
-    pid = sdk.create_point("observation", "append lands then raises")["id"]
+    pid = sdk._create_point("observation", "append lands then raises")["id"]
 
     log = sdk._get_event_log()
     assert log is not None
@@ -990,7 +990,7 @@ def test_an_append_that_lands_then_raises_is_reported_as_unconfirmed(
     monkeypatch.setattr(log, "append", _land_then_raise)
 
     with pytest.raises(WriteNotLandedError) as ei:
-        sdk.delete_point(pid)
+        sdk._delete_point(pid)
 
     assert ei.value.record_committed is False, (
         "the door cannot confirm the append, so it must not claim the record "
@@ -1049,8 +1049,8 @@ def test_the_evidence_probe_rebinds_the_guarded_handle_per_instance(tmp_path):
         _orig, restore = probe._patch_query(
             ga, lambda real: probe._record_deletes(real, seen))
         try:
-            doomed = a.create_point("observation", "deleted under the spy")["id"]
-            a.delete_point(doomed)
+            doomed = a._create_point("observation", "deleted under the spy")["id"]
+            a._delete_point(doomed)
         finally:
             restore()
 
@@ -1066,7 +1066,7 @@ def test_the_evidence_probe_rebinds_the_guarded_handle_per_instance(tmp_path):
         # Behavioural half: SDK #2's write must land in SDK #2's graph. Read
         # through the UNDERLYING handle, so a misrouted class attribute cannot
         # mask the misroute by misrouting the read the same way.
-        pid_b = b.create_point("observation", "belongs to graph b")["id"]
+        pid_b = b._create_point("observation", "belongs to graph b")["id"]
         assert _count_on_raw_handle(gb, pid_b) == 1, (
             "SDK #2's Point did not land in its own graph — the patched class "
             "attribute is still redirecting it")

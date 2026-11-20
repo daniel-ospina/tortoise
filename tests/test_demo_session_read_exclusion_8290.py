@@ -265,7 +265,10 @@ def test_sdk_read_uses_the_shared_predicate():
     positional: the guard must appear before the Event query.
     """
     src = _src("tortoise/sdk.py")
-    start = src.index("def get_session(")
+    # #12901 FINAL batch: `get_session` was PRIVATISED to `_get_session` (body
+    # unchanged, public spelling a tombstone) — the ENTRY the positional pin reads
+    # is the same entry.
+    start = src.index("def _get_session(")
     body = src[start:src.index("def _read_captured_session(", start)]
     assert "from tortoise.session_schema import is_demo_session_id" in body, (
         "the SDK read must import the ONE predicate")
@@ -474,7 +477,7 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
             "MATCH (s:Session) RETURN s.id").result_set
         assert written == [], written
         # ...and the read mirror agrees the namespace is not readable either
-        assert client.get_session(reserved) is None
+        assert client._get_session(reserved) is None
     finally:
         client.close()
 

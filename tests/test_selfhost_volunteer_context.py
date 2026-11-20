@@ -37,9 +37,9 @@ def _client_for_env(monkeypatch, tmp_path, **env):
 
 def _seed(sdk, content: str, counter: str | None = None) -> str:
     proj = sdk._get_proj()
-    ev = sdk.create_point("evidence", f"{content} [supporting record]")
-    claim = sdk.create_point("statement", content)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{content} [supporting record]")
+    claim = sdk._create_point("statement", content)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     for pid, a, b in ((claim["id"], 2.0, 0.7), (ev["id"], 12.0, 1.0)):
         mean = round(a / (a + b), 4)
         proj.g.query(
@@ -47,8 +47,8 @@ def _seed(sdk, content: str, counter: str | None = None) -> str:
             "n.posterior_alpha=$a, n.posterior_beta=$b",
             params={"id": pid, "a": a, "b": b, "c": mean})
     if counter:
-        c = sdk.create_point("statement", counter)
-        sdk.create_operator("NAND", c["id"], [claim["id"]])
+        c = sdk._create_point("statement", counter)
+        sdk._create_operator("NAND", c["id"], [claim["id"]])
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9, "
             "n.posterior_alpha=10.0, n.posterior_beta=1.0",
@@ -136,12 +136,12 @@ def test_selfhost_fail_open_never_503(monkeypatch, tmp_path):
 
     tc = _client_for_env(monkeypatch, tmp_path)
     _seed_via_app(tmp_path, "Orion migration plan is on track")
-    orig = TortoiseSDK.volunteer_context
+    orig = TortoiseSDK._volunteer_context
 
     def _boom(self, window, *a, **k):
         raise RuntimeError("simulated failure")
 
-    TortoiseSDK.volunteer_context = _boom
+    TortoiseSDK._volunteer_context = _boom
     try:
         with tc:
             r = tc.post("/v1/context", json={
@@ -150,4 +150,4 @@ def test_selfhost_fail_open_never_503(monkeypatch, tmp_path):
             assert r.status_code == 200, r.text
             assert r.json()["degraded_reason"] == "assembly_error"
     finally:
-        TortoiseSDK.volunteer_context = orig
+        TortoiseSDK._volunteer_context = orig

@@ -269,7 +269,7 @@ class TortoiseCrMemory:
         """
         written = 0
         for text in texts:
-            created = self._sdk.create_point(
+            created = self._sdk._create_point(
                 kind=_FACT_KIND, content=text, dedup=True,
                 credibility=_FACT_CREDIBILITY,
                 source_harness="battery-parity", source_session=self._session)
@@ -285,7 +285,7 @@ class TortoiseCrMemory:
                       leg_trace: list[dict] | None = None):
         """The ONE read call shape this lane uses (single source, so the
         capability probe and ``recall`` can never drift apart)."""
-        return self._sdk.recall_state(
+        return self._sdk._recall_state(
             query=question, kind=None, limit=k, object_centric=False,
             leg_trace=leg_trace)
 

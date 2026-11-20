@@ -105,7 +105,7 @@ def _measure_pools(sdk, query: str, *, limit: int, pools, repeats: int) -> dict:
         # off the returned id set, and the read path's valid-time selection is a
         # separate pool mover that reorders before the ``limit`` cut — leaving it
         # on would make the pool-size diff conflate two effects.
-        sdk.tortoise_fts_query(query, limit=limit, pool_size=pool,
+        sdk._tortoise_fts_query(query, limit=limit, pool_size=pool,
                                include_terminal=True, leg_trace=trace,
                                keep_numeric=True, search_keys_prf=True,
                                _valid_time_rerank=False,
@@ -113,7 +113,7 @@ def _measure_pools(sdk, query: str, *, limit: int, pools, repeats: int) -> dict:
         lat: list[float] = []
         for _ in range(repeats):
             t0 = time.perf_counter()
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 query, limit=limit, pool_size=pool, include_terminal=True,
                 keep_numeric=True, search_keys_prf=True,
                 _valid_time_rerank=False, _rerank_candidates=False)

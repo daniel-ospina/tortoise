@@ -19,7 +19,7 @@ def test_known_kind_accepted():
     """Known kind values work without warnings."""
     sdk = TortoiseSDK(":memory:")
     try:
-        point = sdk.create_point("statement", "A test statement")
+        point = sdk._create_point("statement", "A test statement")
         assert point["pointKind"] == "statement"
         assert point["content"] == "A test statement"
     finally:
@@ -35,7 +35,7 @@ def test_unrecognized_kind_warns_not_errors():
         logger.setLevel(logging.WARNING)
         
         with _log_capture(logger) as records:
-            point = sdk.create_point("customResearchFinding", "A custom kind point")
+            point = sdk._create_point("customResearchFinding", "A custom kind point")
         
         assert point["pointKind"] == "customResearchFinding"
         assert point["content"] == "A custom kind point"
@@ -58,7 +58,7 @@ def test_register_kind_suppresses_warning():
         logger.setLevel(logging.WARNING)
         
         with _log_capture(logger) as records:
-            point = sdk.create_point("auditFinding", "An audit finding")
+            point = sdk._create_point("auditFinding", "An audit finding")
         
         assert point["pointKind"] == "auditFinding"
         warnings = [r for r in records if r.levelno == logging.WARNING]

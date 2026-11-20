@@ -70,7 +70,7 @@ class _FakeSDK:
         digest = hashlib.sha256(f"{label}:{name}".encode()).hexdigest()[:26]
         return f"{label[:3].lower()}-{digest}"
 
-    def create_subject(self, name, subjectKind="other", **props):
+    def _create_subject(self, name, subjectKind="other", **props):
         node = self.subjects.get(name)
         if node is None:
             node = {"id": self._id_for("Subject", name), "name": name,
@@ -86,7 +86,7 @@ class _FakeSDK:
             node[k] = v
         return dict(node)
 
-    def create_edge(self, relation, from_id, to_id):
+    def _create_edge(self, relation, from_id, to_id):
         edge = (relation, from_id, to_id)
         created = edge not in self.edges
         if created:

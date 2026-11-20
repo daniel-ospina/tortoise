@@ -93,7 +93,7 @@ def _make_claim(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict
     the intent; create_point's implicit status is live since #1088 (it was
     draft from #943, where the #780 draft filter strips draft inputs from
     operators, making them degenerate)."""
-    return sdk.create_point(kind, content, dedup=False, status="live")
+    return sdk._create_point(kind, content, dedup=False, status="live")
 
 
 def _set_last_dreamed_at(sdk: TortoiseSDK, point_id: str, iso: str) -> None:
@@ -185,7 +185,7 @@ def _build_corpus(sdk: TortoiseSDK) -> tuple[dict[str, str], dict[str, str]]:
     for i in range(1, 21):
         pid = _make_claim(sdk, f"premise {i}")["id"]
         alpha, beta = _CORPUS_TIERS[i % 3]
-        sdk.set_point_baseline(pid, alpha, beta)
+        sdk._set_point_baseline(pid, alpha, beta)
         claims[f"p{i}"] = pid
 
     # 25 tree claims.
@@ -196,14 +196,14 @@ def _build_corpus(sdk: TortoiseSDK) -> tuple[dict[str, str], dict[str, str]]:
     assert len(_CORPUS_IMPL_EDGES) == 25
     for idx, (src, tgt) in enumerate(_CORPUS_IMPL_EDGES, start=1):
         src_id = claims[src]
-        op = sdk.create_operator("IMPL", src_id, [claims[tgt]],
+        op = sdk._create_operator("IMPL", src_id, [claims[tgt]],
                                  direction="bidirectional")
         operators[f"impl_{idx}"] = op["id"]
 
     # 10 NAND contradiction pairs (bidirectional mutual contradiction).
     assert len(_CORPUS_NAND_PAIRS) == 10
     for idx, (a, b) in enumerate(_CORPUS_NAND_PAIRS, start=1):
-        op = sdk.create_operator("NAND", claims[a], [claims[b]],
+        op = sdk._create_operator("NAND", claims[a], [claims[b]],
                                  direction="bidirectional")
         operators[f"nand_{idx}"] = op["id"]
 
@@ -282,12 +282,12 @@ def f2_staleness_regions() -> F2Staleness:
             _make_claim(sdk, f"{name} claim 3")["id"],
         ]
         # support chain c1 → c2 → c3 (2 operators per region).
-        op1 = sdk.create_operator("IMPL", claim_ids[0], [claim_ids[1]],
+        op1 = sdk._create_operator("IMPL", claim_ids[0], [claim_ids[1]],
                                   direction="bidirectional")["id"]
-        op2 = sdk.create_operator("IMPL", claim_ids[1], [claim_ids[2]],
+        op2 = sdk._create_operator("IMPL", claim_ids[1], [claim_ids[2]],
                                   direction="bidirectional")["id"]
         # evidence baseline on the chain root (calibrated).
-        sdk.set_point_baseline(claim_ids[0], 10.0, 1.0)
+        sdk._set_point_baseline(claim_ids[0], 10.0, 1.0)
         if stamp is not None:
             for pid in claim_ids:
                 _set_last_dreamed_at(sdk, pid, stamp)
@@ -350,8 +350,8 @@ def f3_nonconvergent() -> F3NonConvergent:
 
     a = _make_claim(sdk, "A: strongly true claim")["id"]
     b = _make_claim(sdk, "B: neutral claim")["id"]
-    sdk.set_point_baseline(a, 10.0, 1.0)
-    sdk.set_point_baseline(b, 1.0, 1.0)
+    sdk._set_point_baseline(a, 10.0, 1.0)
+    sdk._set_point_baseline(b, 1.0, 1.0)
 
     # ⛔ #12067 closes the mechanism set: ONE mechanism per pair. The NAND attack
     # lands on (a, b); the two opposing IMPLs come from two OTHER strongly-true
@@ -359,12 +359,12 @@ def f3_nonconvergent() -> F3NonConvergent:
     # in, bidirectional both ways) without a second mechanism on one pair.
     c = _make_claim(sdk, "C: strongly true claim")["id"]
     d = _make_claim(sdk, "D: strongly true claim")["id"]
-    sdk.set_point_baseline(c, 10.0, 1.0)
-    sdk.set_point_baseline(d, 10.0, 1.0)
-    nand = sdk.create_operator("NAND", a, [b], direction="bidirectional")["id"]
+    sdk._set_point_baseline(c, 10.0, 1.0)
+    sdk._set_point_baseline(d, 10.0, 1.0)
+    nand = sdk._create_operator("NAND", a, [b], direction="bidirectional")["id"]
     impls = [
-        sdk.create_operator("IMPL", c, [b], direction="bidirectional")["id"],
-        sdk.create_operator("IMPL", d, [b], direction="bidirectional")["id"],
+        sdk._create_operator("IMPL", c, [b], direction="bidirectional")["id"],
+        sdk._create_operator("IMPL", d, [b], direction="bidirectional")["id"],
     ]
     return F3NonConvergent(
         sdk=sdk, db_path=db_path,
@@ -429,9 +429,9 @@ def _build_f4_graph(sdk: TortoiseSDK) -> tuple[dict[str, str], list[str]]:
     for key in ["r1", "r2", "r3", "r4", "r5", "s1", "s2", "s3", "t1", "t2"]:
         ids[key] = _make_claim(sdk, f"f4 claim {key}")["id"]
     for key, (alpha, beta) in _F4_BASELINES.items():
-        sdk.set_point_baseline(ids[key], alpha, beta)
+        sdk._set_point_baseline(ids[key], alpha, beta)
     for src, tgt in _F4_IMPL_EDGES:
-        op = sdk.create_operator("IMPL", ids[src], [ids[tgt]],
+        op = sdk._create_operator("IMPL", ids[src], [ids[tgt]],
                                  direction="bidirectional")
         operator_ids.append(op["id"])
     return ids, operator_ids
@@ -515,16 +515,16 @@ def capture_f4_oracle(sdk: TortoiseSDK, ids: dict[str, str],
     state = random.getstate()
     try:
         random.seed(seed)
-        targeted = sdk.compute_confidence(factors=operator_ids,
+        targeted = sdk._compute_confidence(factors=operator_ids,
                                           require_calibration=False)
         random.seed(seed)
-        stabilized = sdk.dream(dirty_only=True, warm_start=False,
+        stabilized = sdk._dream(dirty_only=True, warm_start=False,
                                require_calibration=False)
         # Read INSIDE the saved region: the reads are pure today, and if one
         # ever again triggers a lazy dream it must do so under the pinned seed
         # rather than under whatever RNG state the caller happens to be in —
         # that is how the failure this delta fixes stayed order-dependent.
-        captured = {key: sdk.get_confidence(pid, require_calibration=False)["mean"]
+        captured = {key: sdk._get_confidence(pid, require_calibration=False)["mean"]
                     for key, pid in ids.items()}
     finally:
         random.setstate(state)
@@ -694,7 +694,7 @@ def _build_diagnostics_graph(sdk: TortoiseSDK) -> None:
         src = source_ids.pop(0)
         op_targets = target_ids[tidx:tidx + arity - 1]
         tidx += arity - 1
-        sdk.create_operator(op_type, src, op_targets, direction="bidirectional")
+        sdk._create_operator(op_type, src, op_targets, direction="bidirectional")
 
 
 def compute_diagnostics_stats(sdk: TortoiseSDK) -> dict:

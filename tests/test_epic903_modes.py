@@ -28,7 +28,7 @@ class TestPrecedenceMatrix:
         f = f1_corpus()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(full=True, mode="local")
+            r = f.sdk._dream(full=True, mode="local")
             assert r["mode"] == "local"
             assert set(r.keys()) == LOCAL_KEYS, sorted(r.keys())
         finally:
@@ -39,7 +39,7 @@ class TestPrecedenceMatrix:
         f = f1_corpus()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(full=True)
+            r = f.sdk._dream(full=True)
             assert r["mode"] == "full"
             assert set(r.keys()) == FULL_KEYS
         finally:
@@ -49,7 +49,7 @@ class TestPrecedenceMatrix:
         f = f1_corpus()
         try:
             with pytest.raises(ValueError):
-                f.sdk.dream(mode="quantum")
+                f.sdk._dream(mode="quantum")
         finally:
             f.sdk.close()
 
@@ -58,7 +58,7 @@ class TestPrecedenceMatrix:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first")
+            r = f.sdk._dream(mode="stale-first")
             assert r["mode"] == "stale-first"
             assert set(r.keys()) == STALE_KEYS
         finally:
@@ -70,7 +70,7 @@ class TestPrecedenceMatrix:
         try:
             f.sdk._mark_dirty([f.isolated_claim])
             random.seed(FIXED_SEED)
-            r = f.sdk.dream()  # mode=None, full=False
+            r = f.sdk._dream()  # mode=None, full=False
             assert r["mode"] == "local"
             assert set(r.keys()) == LOCAL_KEYS
         finally:
@@ -93,7 +93,7 @@ class TestAutoSelection:
             f.sdk._get_proj().g.query(
                 "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
             random.seed(FIXED_SEED)
-            r = f.sdk.dream()
+            r = f.sdk._dream()
             assert r["mode"] == "full"
             assert set(r.keys()) == FULL_KEYS
         finally:
@@ -106,17 +106,17 @@ class TestAutoSelection:
         sdk, _ = fresh_sdk(prefix="tortoise_epic903_auto_")
         try:
             from tortoise.sdk import _ep_require_calibration_default  # noqa
-            claims = [sdk.create_point("statement", f"c{i}", dedup=False,
+            claims = [sdk._create_point("statement", f"c{i}", dedup=False,
                                        status="live") for i in range(52)]
             for i in range(51):
-                sdk.create_operator("IMPL", claims[i]["id"],
+                sdk._create_operator("IMPL", claims[i]["id"],
                                     [claims[i + 1]["id"]])
             sdk._dirty_roots.clear()  # P2-review: create_point marks dirty —
             # the ≥50-operator threshold branch must be exercised WITHOUT
             # dirty roots (otherwise the dirty-roots→local rule, not the
             # threshold, is what passes the test)
             random.seed(FIXED_SEED)
-            r = sdk.dream()
+            r = sdk._dream()
             assert r["mode"] == "local"
         finally:
             sdk.close()
@@ -128,7 +128,7 @@ class TestAutoSelection:
             for mode, keys in (("local", LOCAL_KEYS),
                                ("stale-first", STALE_KEYS),
                                ("full", FULL_KEYS)):
-                r = f.sdk.dream(mode=mode, budget=0)
+                r = f.sdk._dream(mode=mode, budget=0)
                 assert r["mode"] == mode
                 assert set(r.keys()) == keys
                 assert r["budget_used"] == 0
@@ -145,7 +145,7 @@ class TestPerModeReturnShapes:
         try:
             f.sdk._mark_dirty([f.regions[0].claims[0]])
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert set(r.keys()) == LOCAL_KEYS
             assert 0.0 <= r["coverage"] <= 1.0
             assert r["converged"] in (True, False)
@@ -156,7 +156,7 @@ class TestPerModeReturnShapes:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=2)
+            r = f.sdk._dream(mode="stale-first", budget=2)
             assert set(r.keys()) == STALE_KEYS
             # budget_used is the SDK-side mapping of the scheduler's
             # operators_deduped (I6→I1) — the key-set assert pins the shape.
@@ -168,7 +168,7 @@ class TestPerModeReturnShapes:
         f = f1_corpus()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="full")
+            r = f.sdk._dream(mode="full")
             assert set(r.keys()) == FULL_KEYS
             assert r["scanned_count"] >= 0
             assert r["total_affected"] >= 0
@@ -180,10 +180,10 @@ class TestPerModeReturnShapes:
         no stamps (owner: 903-C6; stamping/scan covered by 903-C2)."""
         sdk, _ = fresh_sdk(prefix="tortoise_epic903_zeroop_")
         try:
-            sdk.create_point("statement", "lonely", dedup=False,
+            sdk._create_point("statement", "lonely", dedup=False,
                              status="live")
             random.seed(FIXED_SEED)
-            r = sdk.dream(mode="full")
+            r = sdk._dream(mode="full")
             assert r["mode"] == "full"
             assert r["total_affected"] == 0  # no EP ran — no operators
             assert r["converged_all"] is True
@@ -202,7 +202,7 @@ class TestBudgetBoundaries:
         try:
             from tortoise.exceptions import BudgetExceededError
             with pytest.raises(BudgetExceededError):
-                f.sdk.dream(mode="full", budget=1)
+                f.sdk._dream(mode="full", budget=1)
         finally:
             f.sdk.close()
 
@@ -211,7 +211,7 @@ class TestBudgetBoundaries:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=1)
+            r = f.sdk._dream(mode="stale-first", budget=1)
             assert r["budget_used"] <= 1
         finally:
             f.sdk.close()
@@ -220,7 +220,7 @@ class TestBudgetBoundaries:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first")
+            r = f.sdk._dream(mode="stale-first")
             assert r["budget_used"] <= 200  # default selector cap
         finally:
             f.sdk.close()
@@ -242,7 +242,7 @@ class TestWritePathStructural:
             for _ in range(3):
                 f.sdk._mark_dirty([f.regions[0].claims[0]])
                 assert f.sdk._dirty_roots, "write must mark dirty roots"
-                r = f.sdk.dream()
+                r = f.sdk._dream()
                 assert r["mode"] == "local"
         finally:
             f.sdk.close()

@@ -455,9 +455,9 @@ class TestStateSupersedeShape:
         # pipeline stages — not lifecycle words, so a create names a lifecycle
         # word. This test's subject is SUPERSESSION (the engine's state-version
         # fold), not the vocabulary, and supersession is unchanged.
-        sdk.create_object("Tranche T2 — pending", objectKind="venture:tranche",
+        sdk._create_object("Tranche T2 — pending", objectKind="venture:tranche",
                           status="live")
-        sdk.create_object("Tranche T2 — released", objectKind="venture:tranche",
+        sdk._create_object("Tranche T2 — released", objectKind="venture:tranche",
                           status="live")
 
         warns: list[str] = []
@@ -474,12 +474,12 @@ class TestStateSupersedeShape:
         assert _object_state(sdk, "Tranche T2 — released") == ["live", None]
 
         # The CURRENT-STATE read carries only the latest claim.
-        live = sdk.recall_state(kind="venture:tranche", object_centric=True,
+        live = sdk._recall_state(kind="venture:tranche", object_centric=True,
                                 limit=10)
         assert "Tranche T2 — released" in _object_names(live)
         assert "Tranche T2 — pending" not in _object_names(live)
         # …and history is still reachable explicitly.
-        hist = sdk.recall_state(kind="venture:tranche", object_centric=True,
+        hist = sdk._recall_state(kind="venture:tranche", object_centric=True,
                                 limit=10, include_superseded=True)
         assert "Tranche T2 — pending" in _object_names(hist)
 
@@ -489,9 +489,9 @@ class TestStateSupersedeShape:
         a superseded state current again."""
         # #11824 S0: `unmet`/`met` are the condition kind's STAGES; the create
         # names a lifecycle word (the subject here is the resurrection guard).
-        sdk.create_object("Condition C1", objectKind="venture:condition",
+        sdk._create_object("Condition C1", objectKind="venture:condition",
                           status="live")
-        sdk.create_object("Condition C2", objectKind="venture:condition",
+        sdk._create_object("Condition C2", objectKind="venture:condition",
                           status="live")
         apply_supersessions(
             sdk._get_proj(), sdk,
@@ -511,9 +511,9 @@ class TestStateSupersedeShape:
         so the graph never holds two competing current answers. The pack declares
         NO pointKind by design — a claim about a venture Object is a core
         `statement` — so this pins the claim layer, not a pack kind."""
-        old = sdk.create_point("statement", "Tranche T2 is still pending")
-        new = sdk.create_point("statement", "Tranche T2 was released")
-        sdk.supersede_point(old["id"], new["id"])
+        old = sdk._create_point("statement", "Tranche T2 is still pending")
+        new = sdk._create_point("statement", "Tranche T2 was released")
+        sdk._supersede_point(old["id"], new["id"])
 
         state = fetch_point_epistemic_state(sdk._get_proj().g, [old["id"], new["id"]])
         assert state[old["id"]]["status"] == "superseded"

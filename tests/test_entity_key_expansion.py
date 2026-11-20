@@ -137,20 +137,20 @@ def seeded_sdk(monkeypatch):
         proj = sdk._get_proj()
         sdk.create_entity("object", ENTITY_ANCHOR, objectKind="core:other",
                           is_episodic=True)
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "the road bike repairs cost 120 dollars at the shop",
             id=SEED_ID, session_id=SEED_SESSION,
             search_keys="road bike repairs bill paid 120 dollars",
             status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "on saturday morning the weather was sunny so i went for a "
             "long walk instead",
             id=JOIN_ID, session_id=JOIN_SESSION,
             search_keys=JOIN_KEYS, status="draft")
         for i in range(12):
-            sdk.create_point(
+            sdk._create_point(
                 "statement",
                 f"{DISTRACTOR_TOPIC} number {i}",
                 id=f"p2518dist{i}", session_id=f"dist2518{i}",
@@ -176,7 +176,7 @@ def test_expansion_still_resolves_a_terminal_object_anchor(seeded_sdk):
     proj = seeded_sdk._get_proj()
     proj.g.query("MATCH (o:Object {name:$n}) SET o.status='superseded'",
                  params={"n": ENTITY_ANCHOR})
-    on_ids = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+    on_ids = [h["id"] for h in seeded_sdk._tortoise_fts_query(
         QUESTION, limit=20, pool_size=60, entity_key_expansion=True)]
     assert JOIN_ID in on_ids, (
         "a terminal Object anchor must still resolve so the key expansion "
@@ -188,14 +188,14 @@ def test_expansion_surfaces_same_entity_point_from_other_session(seeded_sdk):
     shares no query token); the entity/fact-augmented key expansion surfaces
     it into top-k via the sparse OR leg. The join is the shared
     ``aboutObject`` anchor + the point's OWN E3 keys."""
-    off = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+    off = [h["id"] for h in seeded_sdk._tortoise_fts_query(
         QUESTION, limit=20, pool_size=60, entity_key_expansion=False)]
     assert SEED_ID in off, "session A seed must match the plain query"
     assert JOIN_ID not in off, (
         "session B point must be MISSED by plain top-k (zero content-token "
         "overlap — the partial-evidence miss class #2513 targets)")
 
-    on = seeded_sdk.tortoise_fts_query(
+    on = seeded_sdk._tortoise_fts_query(
         QUESTION, limit=20, pool_size=60, entity_key_expansion=True)
     on_ids = [h["id"] for h in on]
     assert JOIN_ID in on_ids, (
@@ -221,7 +221,7 @@ def test_expansion_keeps_seed_and_reaches_top_window(seeded_sdk):
     """The expansion is ADDITIVE: the pass-1 seed (the strongest original
     match) is never displaced, and the joined cross-session point lands
     inside the top-k reader window (not merely appended at the tail)."""
-    on = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+    on = [h["id"] for h in seeded_sdk._tortoise_fts_query(
         QUESTION, limit=5, pool_size=60, entity_key_expansion=True)]
     assert SEED_ID in on[:5], "expansion must not displace the pass-1 seed"
     assert JOIN_ID in on[:5], (
@@ -238,11 +238,11 @@ def test_expansion_disabled_is_default_byte_identical(seeded_sdk):
     import inspect
 
     from tortoise.sdk import TortoiseSDK as _SDK
-    sig = inspect.signature(_SDK.tortoise_fts_query)
+    sig = inspect.signature(_SDK._tortoise_fts_query)
     assert sig.parameters["entity_key_expansion"].default is False
-    default_ids = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+    default_ids = [h["id"] for h in seeded_sdk._tortoise_fts_query(
         QUESTION, limit=20, pool_size=60)]
-    off_ids = [h["id"] for h in seeded_sdk.tortoise_fts_query(
+    off_ids = [h["id"] for h in seeded_sdk._tortoise_fts_query(
         QUESTION, limit=20, pool_size=60, entity_key_expansion=False)]
     assert default_ids == off_ids
     assert JOIN_ID not in default_ids, "default behavior must not expand"
@@ -309,7 +309,7 @@ def test_expansion_never_runs_on_non_point_entity_type(seeded_sdk, monkeypatch):
                         "_entity_key_expansion_pass", _boom)
     # No events exist in the fixture; the point is the gate fires before any
     # pass logic — same call shape as the temporal (et="event") arm.
-    out = seeded_sdk.tortoise_fts_query(
+    out = seeded_sdk._tortoise_fts_query(
         QUESTION, limit=5, pool_size=60, entity_key_expansion=True,
         entity_type="event")
     assert calls == []
@@ -474,15 +474,15 @@ def dense_seeded_sdk(_dense_encoder, monkeypatch):
     try:
         sdk.create_entity("object", ENTITY_ANCHOR, objectKind="core:other",
                           is_episodic=True)
-        sdk.create_point(
+        sdk._create_point(
             "statement", DENSE_SEED_CONTENT,
             id=DENSE_SEED_ID, session_id=DENSE_SEED_SESSION,
             search_keys=DENSE_SEED_KEYS, status="draft")
-        sdk.create_point(
+        sdk._create_point(
             "statement", DENSE_JOIN_CONTENT,
             id=DENSE_JOIN_ID, session_id=DENSE_JOIN_SESSION, status="draft")
         for i in range(12):
-            sdk.create_point(
+            sdk._create_point(
                 "statement", f"{DISTRACTOR_TOPIC} number {i}",
                 id=f"p2518densedist{i}", session_id=f"densedist2518{i}",
                 status="draft")
@@ -499,7 +499,7 @@ def dense_seeded_sdk(_dense_encoder, monkeypatch):
 def _dense_read(sdk, *, trace=None):
     """One read at the fixture's narrow window (the starved-pool shape)."""
     return [
-        h["id"] for h in sdk.tortoise_fts_query(
+        h["id"] for h in sdk._tortoise_fts_query(
             QUESTION, limit=5, pool_size=_DENSE_POOL,
             entity_key_expansion=True, leg_trace=trace)
     ]
@@ -851,13 +851,13 @@ def test_dense_expansion_cannot_launder_a_hollow_scope_into_hybrid(
             else _semantic_vec(content))))
     sdk = dense_seeded_sdk
     for i in range(3):
-        sdk.create_point("decision", f"unembedded decision number {i}",
+        sdk._create_point("decision", f"unembedded decision number {i}",
                          id=f"p2518hollow{i}", session_id=f"hollow2518{i}",
                          status="draft")
 
     def _declaration() -> dict | None:
         trace: list[dict] = []
-        sdk.tortoise_fts_query(
+        sdk._tortoise_fts_query(
             QUESTION, limit=5, pool_size=_DENSE_POOL, kind="decision",
             entity_key_expansion=True, leg_trace=trace)
         return declared_degraded_read(trace), trace

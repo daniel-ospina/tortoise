@@ -3353,8 +3353,8 @@ def _sdk_boolean_levers() -> tuple[str, ...]:
     tree = ast.parse((ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8"))
     defs = [n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "tortoise_fts_query"]
-    assert len(defs) == 1, ("tortoise/sdk.py", "tortoise_fts_query", len(defs))
+            and n.name == "_tortoise_fts_query"]
+    assert len(defs) == 1, ("tortoise/sdk.py", "_tortoise_fts_query", len(defs))
     kwonly = defs[0].args.kwonlyargs
     defaults = defs[0].args.kw_defaults
     assert len(kwonly) == len(defaults), (len(kwonly), len(defaults))
@@ -3422,7 +3422,7 @@ def _call_keywords(path: Path, func: str) -> tuple[dict[str, ast.expr], tuple[st
     assert len(owners) == 1, (path, func, "expected exactly one definition")
     calls = [n for n in ast.walk(owners[0])
              if isinstance(n, ast.Call)
-             and getattr(n.func, "attr", None) == "tortoise_fts_query"]
+             and getattr(n.func, "attr", None) == "_tortoise_fts_query"]
     assert len(calls) == 1, (path, func, f"expected one call, found {len(calls)}")
     named = {kw.arg: kw.value for kw in calls[0].keywords if kw.arg is not None}
     splats = tuple(ast.unparse(kw.value)

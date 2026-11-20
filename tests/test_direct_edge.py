@@ -24,15 +24,15 @@ def sdk():
 
 
 def _two_points(sdk):
-    pa = sdk.create_point("statement", "A implies B")["id"]
-    pb = sdk.create_point("statement", "B")["id"]
+    pa = sdk._create_point("statement", "A implies B")["id"]
+    pb = sdk._create_point("statement", "B")["id"]
     return pa, pb
 
 
 class TestCreateDirectEdge:
     def test_creates_direct_edge_no_operator(self, sdk):
         pa, pb = _two_points(sdk)
-        r = sdk.create_direct_edge("IMPL", pa, pb)
+        r = sdk._create_direct_edge("IMPL", pa, pb)
         assert r == {"direct_edge": "IMPL", "from": pa, "to": pb,
                      "created": True, "deduped": False}
         # exactly ONE edge, no operator node
@@ -47,8 +47,8 @@ class TestCreateDirectEdge:
 
     def test_idempotent_reingest_single_edge(self, sdk):
         pa, pb = _two_points(sdk)
-        sdk.create_direct_edge("IMPL", pa, pb)
-        r2 = sdk.create_direct_edge("IMPL", pa, pb)
+        sdk._create_direct_edge("IMPL", pa, pb)
+        r2 = sdk._create_direct_edge("IMPL", pa, pb)
         assert r2["created"] is False and r2["deduped"] is True
         proj = sdk._get_proj()
         n = proj.g.query(
@@ -58,8 +58,8 @@ class TestCreateDirectEdge:
 
     def test_last_writer_wins_attribute_change(self, sdk):
         pa, pb = _two_points(sdk)
-        sdk.create_direct_edge("IMPL", pa, pb, label="first")
-        sdk.create_direct_edge("IMPL", pa, pb, label="second")
+        sdk._create_direct_edge("IMPL", pa, pb, label="first")
+        sdk._create_direct_edge("IMPL", pa, pb, label="second")
         proj = sdk._get_proj()
         lab = proj.g.query(
             "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) RETURN r.label",
@@ -72,9 +72,9 @@ class TestCreateDirectEdge:
 
     def test_direction_defaults_per_op_type(self, sdk):
         pa, pb = _two_points(sdk)
-        sdk.create_direct_edge("IMPL", pa, pb)          # absent -> bidirectional
+        sdk._create_direct_edge("IMPL", pa, pb)          # absent -> bidirectional
         pc, pd = _two_points(sdk)
-        sdk.create_direct_edge("NAND", pc, pd)          # absent -> unidirectional (CYCLE-25)
+        sdk._create_direct_edge("NAND", pc, pd)          # absent -> unidirectional (CYCLE-25)
         proj = sdk._get_proj()
         d1 = proj.g.query(
             "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) RETURN r.direction",
@@ -87,7 +87,7 @@ class TestCreateDirectEdge:
 
     def test_explicit_direction_preserved(self, sdk):
         pa, pb = _two_points(sdk)
-        sdk.create_direct_edge("IMPL", pa, pb, direction="unidirectional")
+        sdk._create_direct_edge("IMPL", pa, pb, direction="unidirectional")
         proj = sdk._get_proj()
         d = proj.g.query(
             "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) RETURN r.direction",
@@ -96,33 +96,33 @@ class TestCreateDirectEdge:
 
     def test_terminal_endpoint_rejected(self, sdk):
         pa, pb = _two_points(sdk)
-        sdk.supersede_point(pa, pb)  # pa now superseded
+        sdk._supersede_point(pa, pb)  # pa now superseded
         with pytest.raises(ValueError, match="terminal"):
-            sdk.create_direct_edge("IMPL", pa, pb)
+            sdk._create_direct_edge("IMPL", pa, pb)
         # and the other direction
         with pytest.raises(ValueError, match="terminal"):
-            sdk.create_direct_edge("IMPL", pb, pa)
+            sdk._create_direct_edge("IMPL", pb, pa)
 
     def test_operator_endpoint_rejected(self, sdk):
         pa, pb = _two_points(sdk)
-        op = sdk.create_operator("IMPL", pa, [pb])["id"]
+        op = sdk._create_operator("IMPL", pa, [pb])["id"]
         with pytest.raises(ValueError, match="operator"):
-            sdk.create_direct_edge("IMPL", pa, op)
+            sdk._create_direct_edge("IMPL", pa, op)
 
     def test_missing_endpoint_rejected(self, sdk):
         pa, _ = _two_points(sdk)
         with pytest.raises(ValueError, match="does not exist"):
-            sdk.create_direct_edge("IMPL", pa, "ghost-123")
+            sdk._create_direct_edge("IMPL", pa, "ghost-123")
 
     def test_self_edge_rejected(self, sdk):
         pa, _ = _two_points(sdk)
         with pytest.raises(ValueError, match="must differ"):
-            sdk.create_direct_edge("IMPL", pa, pa)
+            sdk._create_direct_edge("IMPL", pa, pa)
 
     def test_invalid_op_type_rejected(self, sdk):
         pa, pb = _two_points(sdk)
         with pytest.raises(ValueError, match="IMPL or NAND"):
-            sdk.create_direct_edge("hasPart", pa, pb)
+            sdk._create_direct_edge("hasPart", pa, pb)
 
     def test_promotion_only_on_created(self, sdk):
         pa, pb = _two_points(sdk)
@@ -132,16 +132,16 @@ class TestCreateDirectEdge:
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.status = NULL", params={"id": pa})
         # auto parity: created -> source live
-        sdk.create_direct_edge("IMPL", pa, pb, promote_source=True)
-        assert sdk.get_point(pa)["status"] == "live"
+        sdk._create_direct_edge("IMPL", pa, pb, promote_source=True)
+        assert sdk._get_point(pa)["status"] == "live"
         # dedup hit: NO re-promotion (and no downgrade)
-        sdk.create_direct_edge("IMPL", pa, pb, promote_source=True)
-        assert sdk.get_point(pa)["status"] == "live"
+        sdk._create_direct_edge("IMPL", pa, pb, promote_source=True)
+        assert sdk._get_point(pa)["status"] == "live"
         # promote_source=False: no status write
-        pc = sdk.create_point("statement", "A implies B", status="draft")["id"]
-        pd = sdk.create_point("statement", "B", status="draft")["id"]
-        sdk.create_direct_edge("IMPL", pc, pd, promote_source=False)
-        assert sdk.get_point(pc)["status"] == "draft"
+        pc = sdk._create_point("statement", "A implies B", status="draft")["id"]
+        pd = sdk._create_point("statement", "B", status="draft")["id"]
+        sdk._create_direct_edge("IMPL", pc, pd, promote_source=False)
+        assert sdk._get_point(pc)["status"] == "draft"
 
     def test_descriptor_emitted_on_every_write(self, sdk, tmp_path):
         # REVIEW-FIX P1 (cycle-26): the descriptor is emitted on EVERY write
@@ -153,8 +153,8 @@ class TestCreateDirectEdge:
         db = os.path.join(tempfile.mkdtemp(prefix="s8_"), "test.db")
         s2 = TortoiseSDK(db, event_log_path=log_path)
         pa, pb = _two_points(s2)
-        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v1")
-        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v2")  # dedup hit
+        s2._create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v1")
+        s2._create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v2")  # dedup hit
         lines = [json.loads(l) for l in open(log_path)  # noqa: E741, SIM115
                  if "DirectEdgeCreated" in l]
         assert len(lines) == 2, "every write emits a descriptor"
@@ -169,12 +169,12 @@ class TestCreateDirectEdge:
 class TestSupersedeDirectEdges:
     def test_repoint_both_directions_preserves_attrs(self, sdk):
         pa, pb = _two_points(sdk)
-        pc = sdk.create_point("statement", "C")["id"]
+        pc = sdk._create_point("statement", "C")["id"]
         # direct edges: pa->pb and pc->pa
-        sdk.create_direct_edge("IMPL", pa, pb, label="L", confidence=0.8,
+        sdk._create_direct_edge("IMPL", pa, pb, label="L", confidence=0.8,
                                batch_id="b1")
-        sdk.create_direct_edge("NAND", pc, pa, direction="unidirectional")
-        sdk.supersede_point(pa, pc)  # repoint pa's edges to pc
+        sdk._create_direct_edge("NAND", pc, pa, direction="unidirectional")
+        sdk._supersede_point(pa, pc)  # repoint pa's edges to pc
         proj = sdk._get_proj()
         # zero direct edges incident to the superseded pa
         n = proj.g.query(
@@ -204,9 +204,9 @@ class TestSupersedeDirectEdges:
         db = os.path.join(tempfile.mkdtemp(prefix="s8_"), "test.db")
         s2 = TortoiseSDK(db, event_log_path=log_path)
         pa, pb = _two_points(s2)
-        pc = s2.create_point("statement", "C")["id"]
-        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1")
-        s2.supersede_point(pa, pc)
+        pc = s2._create_point("statement", "C")["id"]
+        s2._create_direct_edge("IMPL", pa, pb, batch_id="b1")
+        s2._supersede_point(pa, pc)
         lines = [json.loads(l) for l in open(log_path)  # noqa: E741, SIM115
                  if "DirectEdgeRepoint" in l]
         assert len(lines) == 1
@@ -221,8 +221,8 @@ class TestSupersedeOutPassTopology:
         # REVIEW-FIX P1 (cycle-26): (old)->(successor) out-edge must be
         # DELETED (repointing would create a self-edge), never repointed.
         pa, pb = _two_points(sdk)
-        sdk.create_direct_edge("IMPL", pa, pb)  # pa->pb where pb is the successor
-        sdk.supersede_point(pa, pb)
+        sdk._create_direct_edge("IMPL", pa, pb)  # pa->pb where pb is the successor
+        sdk._supersede_point(pa, pb)
         proj = sdk._get_proj()
         self_edges = proj.g.query(
             "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id = b.id RETURN count(r)"

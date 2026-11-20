@@ -701,7 +701,7 @@ def traced(armed, tmp_path_factory):
         # a journal they have nothing to do with (measured: 24 schema statements
         # + `MERGE (m:EpMeta)` before the capture's first append).
         with use_record_tenant(*tenant):
-            sdk.create_point("observation", "warm-up: schema + ep-epoch, not observed")
+            sdk._create_point("observation", "warm-up: schema + ep-epoch, not observed")
         _instrument(mp, entries)
         session_id = f"capstone-order-{tag}"
         with use_record_tenant(*tenant):
@@ -1744,7 +1744,7 @@ def org(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     sdk = TortoiseSDK(str(tmp_path / "quota.db"), namespace="registry")
-    sdk.org_create(name="capstone")
+    sdk._org_create(name="capstone")
     rows = sdk._get_registry().query("MATCH (t:Team) RETURN t.id LIMIT 1").result_set
     assert rows, "no org provisioned"
     yield sdk, rows[0][0]
@@ -1777,7 +1777,7 @@ def test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible(org):
     )
 
     sdk, org_id = org
-    sdk.create_point("statement", "one point the org already owns")
+    sdk._create_point("statement", "one point the org already owns")
     used = count_org_usage(org_id, "points", sdk=sdk)
     limits = resolve_org_limits(org_id)
 
@@ -1791,7 +1791,7 @@ def test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible(org):
 
     under = dict(limits, max_points=used + 1)  # below the cap ⇒ the write goes
     enforce_org_limit(under, "points", sdk=sdk)
-    sdk.create_point("statement", "the write the gate admitted")
+    sdk._create_point("statement", "the write the gate admitted")
     assert count_org_usage(org_id, "points", sdk=sdk) > used
 
 

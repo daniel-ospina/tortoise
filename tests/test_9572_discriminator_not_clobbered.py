@@ -49,7 +49,7 @@ def sdk(tmp_path):
     sdk._test_journal_path = str(events / "events.jsonl")
     yield sdk
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
     except Exception:
@@ -62,8 +62,8 @@ def _graph(sdk):
 
 
 def test_subject_bare_recreate_keeps_supplied_kind(sdk):
-    sdk.create_subject("Probe Subject Z", "team", description="orig")
-    node = sdk.create_subject("Probe Subject Z")
+    sdk._create_subject("Probe Subject Z", "team", description="orig")
+    node = sdk._create_subject("Probe Subject Z")
     assert node["subjectKind"] == "team", (
         "a call that supplies no subjectKind rewrote the stored discriminator")
     assert node["description"] == "orig"
@@ -71,26 +71,26 @@ def test_subject_bare_recreate_keeps_supplied_kind(sdk):
 
 def test_subject_explicit_kind_still_updates(sdk):
     """The discriminator must stay mutable when a caller DOES supply one."""
-    sdk.create_subject("Probe Subject Y", "team")
-    node = sdk.create_subject("Probe Subject Y", "organization")
+    sdk._create_subject("Probe Subject Y", "team")
+    node = sdk._create_subject("Probe Subject Y", "organization")
     assert node["subjectKind"] == "organization"
 
 
 def test_subject_first_create_still_defaults_to_other(sdk):
     """No caller-supplied kind on a FIRST create still means 'other'."""
-    node = sdk.create_subject("Probe Subject X")
+    node = sdk._create_subject("Probe Subject X")
     assert node["subjectKind"] == "other"
 
 
 def test_object_bare_recreate_keeps_supplied_kind(sdk):
-    sdk.create_object("Probe Object Z", "capability", description="orig")
-    node = sdk.create_object("Probe Object Z", description="CHANGED")
+    sdk._create_object("Probe Object Z", "capability", description="orig")
+    node = sdk._create_object("Probe Object Z", description="CHANGED")
     assert node["objectKind"] == "capability"
     assert node["description"] == "CHANGED"
 
 
 def test_object_first_create_still_defaults_to_other(sdk):
-    node = sdk.create_object("Probe Object X")
+    node = sdk._create_object("Probe Object X")
     assert node["objectKind"] == "other"
 
 
@@ -115,7 +115,7 @@ def test_bare_create_journal_carries_no_fabricated_kind(sdk, tmp_path):
     key, and a bare create replayed over an empty graph then reaches the same
     state the live fold reaches (`ON CREATE` supplies `'other'`).
     """
-    sdk.create_subject("Probe Journal Z")
+    sdk._create_subject("Probe Journal Z")
     journal = EventLog(str(tmp_path / "events" / "events.jsonl")).read_all()
     payloads = [e for e in journal if e.get("type") == "SubjectAdded"]
     assert len(payloads) == 1, "expected exactly one SubjectAdded record"
@@ -147,8 +147,8 @@ def test_caller_supplied_props_still_apply_on_recreate(sdk):
     MATCH — that is the identity-upsert contract these doors have always had,
     and it is what the `destructive` risk tier (#4122 axis) is derived from.
     """
-    sdk.create_object("Probe Props Z", "capability", meta="a")
-    node = sdk.create_object("Probe Props Z", meta="b")
+    sdk._create_object("Probe Props Z", "capability", meta="a")
+    node = sdk._create_object("Probe Props Z", meta="b")
     assert node["meta"] == "b"
 
 
@@ -237,8 +237,8 @@ def test_ingest_mention_does_not_reset_a_stored_kind(sdk):
     from tortoise.extractor import LLMExtractor
     from tortoise.log import EventLog
 
-    sdk.create_subject("Probe Mention Z", "team")
-    sdk.create_object("Probe Mention Obj Z", "capability")
+    sdk._create_subject("Probe Mention Z", "team")
+    sdk._create_object("Probe Mention Obj Z", "capability")
     api = EventAPI(EventLog(sdk._test_journal_path),
                    initiated_by="extractor", agent_id="test",
                    projection=sdk._get_proj())
@@ -267,8 +267,8 @@ def test_snake_case_kind_prop_is_honoured(sdk):
     object_kind="capability")` was silently rewritten to `"other"`. With the
     fabricated default gone, the caller's snake-case kind reaches the fold.
     """
-    assert sdk.create_object("Snake Obj Z", object_kind="capability")["objectKind"] == "capability"
-    assert sdk.create_subject("Snake Subj Z", subject_kind="team")["subjectKind"] == "team"
+    assert sdk._create_object("Snake Obj Z", object_kind="capability")["objectKind"] == "capability"
+    assert sdk._create_subject("Snake Subj Z", subject_kind="team")["subjectKind"] == "team"
 
 
 # ── the two lanes the second review round found still fabricating ───────────
@@ -286,7 +286,7 @@ def test_conversation_mining_does_not_reset_a_stored_kind(sdk):
     from tortoise.log import EventLog
     from tortoise.mining import ConversationMiner
 
-    sdk.create_object("Probe Mined Obj Z", "capability")
+    sdk._create_object("Probe Mined Obj Z", "capability")
     api = EventAPI(EventLog(sdk._test_journal_path), initiated_by="extractor",
                    agent_id="test", projection=sdk._get_proj())
     miner = ConversationMiner(
@@ -340,8 +340,8 @@ def test_uses_stub_does_not_reset_a_stored_kind(sdk):
     event that merely `uses` an existing `capability` Object reset it. The
     structured `{name, kind}` form still writes.
     """
-    sdk.create_object("Probe Uses Z", "capability")
-    sdk.create_event("Probe Uses Event Z", "meeting", uses=["Probe Uses Z"])
+    sdk._create_object("Probe Uses Z", "capability")
+    sdk._create_event("Probe Uses Event Z", "meeting", uses=["Probe Uses Z"])
     row = _graph(sdk).query(
         "MATCH (o:Object {name:'Probe Uses Z'}) RETURN o.objectKind").result_set
     assert row and row[0][0] == "capability", row
@@ -436,7 +436,7 @@ def test_issue_linking_does_not_retype_a_stored_object(sdk):
     public `index_sessions()` reachability was measured separately by the
     reviewer that found it — this pins the mechanism, not the caller.
     """
-    sdk.create_object("Tortoise 9572 issue carrier", "capability")
+    sdk._create_object("Tortoise 9572 issue carrier", "capability")
     g = _graph(sdk)
     rows = g.query(
         "MATCH (o:Object) WHERE o.name = $n RETURN o.id AS id, o.objectKind AS k",
@@ -459,7 +459,7 @@ def test_issue_linking_does_not_retype_a_stored_object(sdk):
     assert after[0][2] == 9572, after
 
     # A connector-written kind survives a re-index too (the measured case).
-    sdk.create_object("Connector 9572 carrier", "pm:issue")
+    sdk._create_object("Connector 9572 carrier", "pm:issue")
     cid = g.query("MATCH (o:Object {name:'Connector 9572 carrier'}) "
                   "RETURN o.id").result_set[0][0]
     sdk._connect_issue_objects("evt-9572-c", {"issues": [{
@@ -519,25 +519,25 @@ def test_named_kind_treats_blank_as_absent_but_keeps_a_named_value():
 
 def test_sdk_subject_door_does_not_write_a_blank_kind(sdk):
     """`create_subject(name, "")` must not reset a stored kind, nor store ``""``."""
-    sdk.create_subject("Probe Blank Subject Z", "team")
-    node = sdk.create_subject("Probe Blank Subject Z", "")
+    sdk._create_subject("Probe Blank Subject Z", "team")
+    node = sdk._create_subject("Probe Blank Subject Z", "")
     assert node["subjectKind"] == "team", (
         f"a blank subjectKind reset the stored discriminator to "
         f"{node['subjectKind']!r}")
     assert node["subjectKind"] != "", "the door stored a blank discriminator"
 
     # a blank FIRST create still gets the fold's ON CREATE default
-    fresh = sdk.create_subject("Probe Blank Subject Y", "  ")
+    fresh = sdk._create_subject("Probe Blank Subject Y", "  ")
     assert fresh["subjectKind"] == "other", fresh.get("subjectKind")
 
 
 def test_sdk_object_door_does_not_write_a_blank_kind(sdk):
-    sdk.create_object("Probe Blank Object Z", "capability")
-    node = sdk.create_object("Probe Blank Object Z", "")
+    sdk._create_object("Probe Blank Object Z", "capability")
+    node = sdk._create_object("Probe Blank Object Z", "")
     assert node["objectKind"] == "capability", (
         f"a blank objectKind reset the stored discriminator to "
         f"{node['objectKind']!r}")
-    fresh = sdk.create_object("Probe Blank Object Y", "   ")
+    fresh = sdk._create_object("Probe Blank Object Y", "   ")
     assert fresh["objectKind"] == "other", fresh.get("objectKind")
 
 
@@ -595,7 +595,7 @@ def test_seed_surfaces_do_not_write_a_blank_kind(sdk):
 
 def test_blank_kind_journals_no_kind_at_all(sdk, tmp_path):
     """live == replay for the blank spelling too: no key, not a blank key."""
-    sdk.create_subject("Probe Blank Journal Z", "")
+    sdk._create_subject("Probe Blank Journal Z", "")
     journal = EventLog(str(tmp_path / "events" / "events.jsonl")).read_all()
     payloads = [e for e in journal if e.get("type") == "SubjectAdded"]
     assert len(payloads) == 1, payloads

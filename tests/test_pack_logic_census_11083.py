@@ -659,13 +659,13 @@ def test_h10b_the_cleanup_deletes_in_reverse_mint_order(monkeypatch):
             issued.append(node_id)
             return {"node": {"id": node_id}}
 
-        def create_operator(self, mechanism, src, targets, label=None,
+        def _create_operator(self, mechanism, src, targets, label=None,
                             semantics=None, direction=None):
             op_id = f"op-{len(issued)}"
             issued.append(op_id)
             return {"id": op_id}
 
-        def delete_entity(self, node_id):
+        def _delete_entity__svc(self, node_id):
             deleted.append(node_id)
             return True
 

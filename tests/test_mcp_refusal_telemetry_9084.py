@@ -898,7 +898,7 @@ async def test_a_successful_write_carrying_a_user_error_prop_stays_ok(
     ``error`` cannot be mistaken for a refusal.
     """
     class _WriteSDK:
-        def create_point(self, *a, **kw):
+        def _create_point(self, *a, **kw):
             return {"id": "pt_1", "error": "a user prop",
                     "pointKind": "statement"}
 
