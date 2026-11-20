@@ -1168,6 +1168,49 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
             "exactly the false PASS this check exists to stop")
 
 
+def test_the_cutover_rule_is_ARMED_inside_check(wiring_mod, monkeypatch):
+    """⛔ THE ARMING, NOT JUST THE RULE (`#3442` rule 3 — carried from review
+    cycle 2/4 as P2 and still unpinned at this head).
+
+    Every leg above drives a rule FUNCTION directly, which is why none of them
+    can see the one line that makes the rule run in production:
+
+        position_problems = (… + live_call_sites_forward_the_journal_skip())
+
+    Delete it and this whole file stays green — measured, not argued: the seven
+    gate legs pass, and so do `test_9078`'s eleven `position`/`D3`/`wiring`
+    legs — while `record_wiring_check.py` still exits 0 and still prints
+    `WIRED` (the capstone's subprocess leg asserts exactly that output). So the
+    cutover gate — the guard that holds every door to forwarding the decision —
+    could be disarmed in production with 100% of the suite green, which is the
+    `#12894` false-PASS class this PR exists to close, and the same defect this
+    repo fixed once before (`test_7949_capstone_verdict_check.py`: "deleting the
+    schema test from `check()` left the whole suite green").
+
+    Behavioural, DB-free: one rule is monkeypatched to report one problem, and
+    `check()` must turn it into NOT WIRED. The unpatched run is the control —
+    a `check()` that refused everything unconditionally would pass the mutant
+    assertion alone.
+    """
+    # The control: on this tree the gate is WIRED. If it is ever not, that is a
+    # real red here rather than a leg that silently proves nothing.
+    code, report = wiring_mod.check()
+    assert (code, report["verdict"]) == (0, "WIRED"), (
+        "the wiring gate is not WIRED on the real tree, so the mutant arm below "
+        f"would prove nothing: verdict={report.get('verdict')!r} "
+        f"code={code} position_problems={report.get('position_problems')!r}")
+
+    monkeypatch.setattr(wiring_mod, "live_call_sites_forward_the_journal_skip",
+                        lambda: ["a door dropped journal_skipped="])
+    code, report = wiring_mod.check()
+    assert code == 1 and report["verdict"] == "NOT WIRED", (
+        "`check()` no longer includes live_call_sites_forward_the_journal_skip "
+        "— the gate that holds every door to forwarding the cutover decision is "
+        "UNENFORCED in production, and the whole suite is green without it "
+        f"(verdict={report.get('verdict')!r} code={code} "
+        f"position_problems={report.get('position_problems')!r})")
+
+
 # ── 5. the live legs: the issue's ACCEPTANCE, on a real Postgres ──────────
 
 #: The DSN gate. A skip here is visible on the `test-record-postgres` job, whose

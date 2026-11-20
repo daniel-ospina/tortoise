@@ -101,10 +101,13 @@ continuously), scaled down to a deterministic count.
 
 Run: `TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 uv run pytest
 tests/test_14002_record_only_journal.py -q` →
-**30 tests** (25 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
-reports **25 passed, 5 skipped** — measured at this head, and the split the `core`
-matrix leg sees; `--collect-only -q` prints `28 tests collected`, which is the
-number to diff if this counts claim ever stops reproducing.
+**35 tests** (30 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
+reports **30 passed, 5 skipped** — measured at this head, and the split the `core`
+matrix leg sees; `--collect-only -q` prints `35 tests collected`, which is the
+number to diff if this counts claim ever stops reproducing. ⚠️ It has drifted
+twice already (`28` → `34` → `35`: every fix round that ADDS a leg moves it), so
+re-derive it with those two commands rather than trusting the figure — the same
+rule §6 states for the mutant population.
 
 **Red-first, the same window with the fix disabled** (`journal_skipped = False`
 in the chokepoint — the pre-#14002 tree, everything else identical):
@@ -281,18 +284,23 @@ TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 \
   uv run pytest tests/test_14002_record_only_journal.py -q
 ```
 
-**TEN mutants across TWO legs**: FIVE on the chokepoint
+**ELEVEN mutants across THREE legs**: FIVE on the chokepoint
 (`test_the_wiring_gate_reds_when_the_cutover_skip_is_deleted`, one parametrized
 case per `_MUTATIONS` key — the decision replaced by a constant, the append moved
 out of the guard, the helper answering a constant, the helper CALLING the record
-and ignoring the answer, and the decision not forwarded to the seam) and FIVE door
+and ignoring the answer, and the decision not forwarded to the seam), FIVE door
 shapes
 (`test_a_door_that_drops_the_flag_is_refused_by_the_gate` — dropped, constant
-`False`, constant `True`, `None`, and a locally bound constant forwarded by name).
+`False`, constant `True`, `None`, and a locally bound constant forwarded by name),
+and ONE ARMING mutant (`test_the_cutover_rule_is_ARMED_inside_check` — the
+`+ live_call_sites_forward_the_journal_skip()` term deleted from `check()`'s
+`position_problems` expression, which disarmed the whole gate with every other leg
+green; review cycle 2/4's carried P2, closed here).
 Every one leaves the tree compiling and every other claim of the gate green: the
 shape this repo has already shipped once (#12894's door refused every write while
 the gate printed `WIRED`). ⚠️ Stated ONCE here and cited elsewhere — three
 artifacts quoting three populations was itself a finding (review cycle 4), and the
 first unification still said NINE while the code held TEN (five `_MUTATIONS` keys
-plus five door shapes, re-counted at `4cf3e8ce0c` rather than carried from prose).
-A reader diffing this figure should re-count the two populations, not trust it.
+plus five door shapes, re-counted at `4cf3e8ce0c` rather than carried from prose);
+the ARMING mutant is the eleventh, added because the rule was pinned by nothing.
+A reader diffing this figure should re-count the three populations, not trust it.
