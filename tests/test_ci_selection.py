@@ -10447,6 +10447,19 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
     # row and nothing reds.
     "test_vector_parity_13906.py",
+    # #13123 — the eviction path's OWN end-to-end suite (`evict()` → the cache the
+    # degraded read path actually consults, `FallbackSnapshotStore.get_or_build`), a
+    # file this fold ADDED and registered on `core` + `uri_requiring:` + `durations:`.
+    # Listed here because the ENTRY-RULE pin above iterates this EXPLICIT tuple: a file
+    # nobody names is INVISIBLE to it, so dropping the `durations:` row is silent
+    # (measured at this PR's head before this entry: `grep -c
+    # test_evictor_invalidates_fallback_snapshot_13123 tests/test_ci_selection.py` → 0,
+    # i.e. the registration had no reddening assertion behind it — the inert-guard shape
+    # #13110's round-5 review records and the five sibling `new in #…` rows guard).
+    # ⛔ The `uri_requiring:` half is NOT guarded by this set: its enforcer is
+    # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
+    # which re-derives the set from a real URI-less collection.
+    "test_evictor_invalidates_fallback_snapshot_13123.py",
 )
 
 
@@ -10461,6 +10474,36 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_the_eviction_suite_is_in_the_entry_rule_set_13123():
+    """#13123 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
+
+    The pin above is silent for a file nobody listed — that is the defect the #14067
+    review measured on this PR's own head (`grep -c` for the filename in this module
+    was 0), and a `durations:` row is not enough on its own: the row can be dropped
+    again and nothing reds while the file is absent from the tuple. So the membership
+    itself is pinned, in both directions, from the LIVE map — the same shape as
+    `test_the_entry_rule_bites_on_the_two_rows_this_fold_registered` above.
+
+    Red on the pre-fix tree: the file is registered in `config/ci-surfaces.yml` and
+    carries a `durations:` row, but is not in this set, so the first assertion fails.
+    """
+    from tools.ci_selection import load_manifest
+    name = "test_evictor_invalidates_fallback_snapshot_13123.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#13123 registers {name} in a fast surface, but it is not in "
+        "ROWED_BY_THIS_FOLD — the ENTRY-RULE pin cannot see it, so dropping its "
+        "`durations:` row would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#13123 put {name} in a fast surface but shipped no `durations:` row, so it "
+        "packs at the flat default")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
 
 
 def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():

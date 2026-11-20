@@ -9137,13 +9137,26 @@ surfaces:
   # drift, redding `manifest-integrity` — measured on PR #14067 at `05802ec1912`:
   # `❌ manifest drift: ['test_evictor_invalidates_fallback_snapshot_13123.py']`,
   # exit 1.
-  # ⚠️ The registration is THREE entries, not one. This suite module-skips at import
-  # (`allow_module_level=True`) unless `TORTOISE_DB_URI` is set and docker is
-  # reachable, exactly as `test_cache_eviction_evictor.py` beside it does — so it is
-  # also declared in `uri_requiring:` below (the #6884 collect-nothing leg) and given
-  # a `durations:` weight. A surface-only registration passes `--integrity` and then
-  # reds the NEXT check the map composes (`leg_coverage_issues` / the push-leg
-  # packer), which is why the three are added together rather than incrementally.
+  # ⚠️ The registration is THREE entries, not one, and each is enforced by a
+  # DIFFERENT check — none of them by `--integrity`, whose drift list names only a file
+  # no surface owns. ⛔ `leg_coverage_issues` is NOT one of the three: it is push-leg
+  # membership (shards vs slow/carve-out/on-demand, `tools/ci_selection.py:6382`) and it
+  # never reads `uri_requiring` or `durations` — an earlier revision of this note said it
+  # did and the #14067 review measured that false, which is why the enforcers are named
+  # one by one here:
+  #   * the `core` row above → `--integrity`'s drift list (a file NO surface owns);
+  #   * `uri_requiring:` below → the suite module-skips at import
+  #     (`allow_module_level=True`) unless `TORTOISE_DB_URI` is set and docker is
+  #     reachable, exactly as `test_cache_eviction_evictor.py` beside it does, so
+  #     `tests/test_uri_requiring_selection.py`
+  #     `::test_declared_list_matches_the_observation` re-derives the set by running
+  #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
+  #   * the `durations:` row → the ENTRY RULE pin
+  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
+  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
+  #     0.90 RATIO with headroom and is silent over one missing row.
+  # The three are added together because a lane that adds one and stops is red in a leg
+  # it is not looking at — not because any one check reds the others.
   - test_evictor_invalidates_fallback_snapshot_13123.py
   # #11047 REPLACES a #11052 file that had already been MERGED — not a branch that superseded one.
   # `#11052` merged as `bc5a26436e`, an ancestor of this PR's merge base (`30c961a43f`), so `main`
@@ -15013,8 +15026,12 @@ durations:
   # #13123: a PR-ADDED row takes DEFAULT_FAST_WEIGHT (2.0) — the map's own rule, so this
   # is NOT a hand-picked wall clock. The local reading is context only, not the weight:
   # the file is a live suite on the private lane container, and a figure copied next to a
-  # shard-layout input re-stales against the run it came from. A later junit sweep
-  # (`tools/ci_timing.py --refresh-durations`) re-cuts it.
+  # shard-layout input re-stales against the run it came from. The row must EXIST, not
+  # merely default ("a default is not a reading"), and the file is named in
+  # `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD` so that ENTRY-RULE pin can SEE it —
+  # without that name this row could be dropped and nothing would red, which is the state
+  # the #14067 review measured. A later junit sweep (`tools/ci_timing.py
+  # --refresh-durations`) re-cuts the value.
   test_evictor_invalidates_fallback_snapshot_13123.py: 2.0
   test_ci_cancel_guard.py: 17.0  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 28.5
   test_ci_runner_label_coverage.py: 2.4
