@@ -1282,3 +1282,111 @@ def test_the_section_labels_are_the_projection_s_LABELS():
         assert pattern.search(src), (
             f"{section} -> {label!r} is not a label the projection writes")
     assert len(set(filer.SECTION_LABELS.values())) == 5
+
+
+def test_a_CORRECTED_edge_spelling_is_not_silently_skipped(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A correction to what an edge SAYS re-files it — it is not skipped.
+
+    Keyed on the endpoints and mechanism alone, flipping an operator's
+    `direction` (`->` → `<->`) or its `label` (`addresses` →
+    `mutuallySupportive`) left the marker unchanged, so the resume made zero
+    calls and printed `all nodes and edges written` with exit 0 over a graph
+    still holding the OLD direction and the OLD semantics (measured).
+    `validate()` cannot help: both spellings are legal.
+
+    Mutant: `edge_marker` back to `edge:{from}->{to}:{mechanism}` — run 2 exits 0
+    with no calls, which is the silent skip this refuses.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    # A DECLARED flip: for IMPL the door treats `None`/`bidirectional`/`<->` as
+    # a non-declaration, so `->` vs `<-` is the pair whose resolution differs.
+    base = next(e for e in map_doc["edges"] if "op" in e)
+    flipped = dict(base, direction="<-" if base.get("direction") != "<-" else "->")
+    relabelled = dict(base, label=("mutuallySupportive"
+                                   if base.get("label") != "mutuallySupportive"
+                                   else "supports"))
+    assert filer.edge_marker(flipped) != filer.edge_marker(base)
+    assert filer.edge_marker(relabelled) != filer.edge_marker(base)
+    # ...and the two judgements are still ONE edge for the duplicate arm.
+    assert filer.edge_key(flipped) == filer.edge_key(base)
+
+    edited = dict(map_doc, edges=[flipped if e is base else e for e in map_doc["edges"]])
+    assert filer.write_map(edited) == 2, "a corrected edge must be refused, not skipped"
+    out = capsys.readouterr().err
+    assert "not declare" in out and "edge:" in out, out
+    assert _RecordingMcp.instances[-1].calls == [], (
+        "the refused run WROTE through the door instead of stopping at the guard")
+
+
+def test_the_direction_VOCABULARY_is_the_SHIPPED_one(map_doc):
+    """`DIRECTIONS` is READ from `tortoise.live`, not transcribed.
+
+    `DIRECTION_ALIASES` was pinned already; `DIRECTIONS` was not, and it had
+    drifted: `live.ACCEPTED_DIRECTION_VALUES - DIRECTIONS` was
+    `{'bidirectional', 'unidirectional'}`, so `validate()` refused a
+    door-legal `direction: unidirectional` — a validator refusing a
+    surface-legal edge, the same class as the `STRUCTURAL_RELS` lag.
+
+    Mutant: the four-literal transcription — the containment assertion reds.
+    """
+    from tortoise import live
+
+    assert set(live.ACCEPTED_DIRECTION_VALUES) <= filer.DIRECTIONS
+
+    op = next(e for e in map_doc["edges"] if "op" in e)
+    declared = dict(op, direction="unidirectional", label="addresses")
+    doc = dict(map_doc, edges=[declared if e is op else e for e in map_doc["edges"]])
+    assert not [err for err in filer.validate(doc) if "direction" in err], (
+        "validate() refused a direction the door accepts")
+
+
+def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch):
+    """`verify()`'s Cypher columns follow `IDENTITY_PROPS`, so the two cannot
+    drift apart.
+
+    `_row_identities` zips `IDENTITY_PROPS` against `row[1:4]`; if the `RETURN`
+    listed the columns in another order, every identity would be read from the
+    wrong column and all 78 nodes would report missing against a live graph —
+    while every test still passed, because the tests build rows through
+    `_row_of`, which indexes the same tuple (measured: re-ordering it reddened
+    nothing).
+
+    Mutant: hard-code the three `coalesce(...)` columns — the derived-order
+    assertion reds.
+    """
+    import sys
+    import types
+
+    queries: list[str] = []
+
+    class _Graph:
+        def execute_command(self, _cmd, _graph, cypher):
+            queries.append(cypher)
+            return [0, []]
+
+    fake = types.SimpleNamespace(from_url=lambda _uri: _Graph())
+    monkeypatch.setitem(sys.modules, "redis", fake)
+    monkeypatch.setenv("FALKORDB_CLOUD_URI", "redis://example.invalid:6379/0")
+
+    doc = json.loads(filer.MAP_PATH.read_text())
+    filer.verify(doc)   # the verdict is not what this pins — the QUERIES are
+
+    node_q = next(q for q in queries
+                  if q.startswith("MATCH (n) RETURN labels(n)[0], coalesce("))
+    expected = ", ".join(f"coalesce(n.{p},'')" for p in filer.IDENTITY_PROPS)
+    assert expected in node_q, node_q
+    edge_q = next(q for q in queries if q.startswith("MATCH (a)-[e]->(b)"))
+    for prop in filer.IDENTITY_PROPS:
+        assert f"coalesce(a.{prop},'')" in edge_q, edge_q
+        assert f"coalesce(b.{prop},'')" in edge_q, edge_q
+    op_q = next(q for q in queries if "o.is_operator = true" in q)
+    for prop in filer.IDENTITY_PROPS:
+        assert f"coalesce(x.{prop},'')" in op_q, op_q

@@ -115,7 +115,20 @@ OP_TYPES = {"IMPL", "NAND", "coherence"}
 SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
              "mutuallyExclusive", "hasPart", "causes", "produces", "dependsOn",
              "transacts", "related", "ownedBy", "managedBy"}
-DIRECTIONS = {"->", "<-", "<->", "-"}
+#: ⛔ READ THE DIRECTION VOCABULARY FROM THE SHIPPED SOURCE, never transcribe
+#: it. `validate()` refuses a direction this set does not hold, so a drifted
+#: transcription is a validator that refuses a surface-LEGAL edge — the same
+#: class as `STRUCTURAL_RELS` lagging `_VALID_EDGE_PREDICATES` (#13913 review).
+#: Measured before this pin: `live.ACCEPTED_DIRECTION_VALUES - DIRECTIONS` was
+#: `{'bidirectional', 'unidirectional'}`, so a door-legal
+#: `direction: unidirectional` was refused. The fallback is the transcription,
+#: taken only on a box with no checkout (`--dry-run`'s standalone promise).
+try:
+    from tortoise.live import ACCEPTED_DIRECTION_VALUES as _SHIPPED_DIRECTIONS
+
+    DIRECTIONS = set(_SHIPPED_DIRECTIONS) | {"->", "<-", "<->", "-"}
+except Exception:  # standalone box: the literal set, never a silent pass
+    DIRECTIONS = {"->", "<-", "<->", "-"}
 #: Fallback for `pack_registry.SEMANTICS_MECHANISMS` — used only on a bare box
 #: with no checkout. The shipped mapping governs when the repo is importable.
 SEMANTICS_MECHANISMS_FALLBACK = {
@@ -314,9 +327,12 @@ def validate(doc: dict) -> list[str]:
     # the same rule for EDGES. `--verify` matches each declared edge against the
     # graph independently, so the same edge judged twice is certified by ONE
     # written edge — two judgements, one fact, and the duplicate is invisible.
+    #    ⛔ Keyed on `edge_key`, NOT `edge_marker`: the marker also carries the
+    #    direction and the label (so a CORRECTION re-files), while two judgements
+    #    that differ only in spelling are still the same endpoints judged twice.
     edge_seen: dict[str, int] = {}
     for e in doc["edges"]:
-        edge_seen[edge_marker(e)] = edge_seen.get(edge_marker(e), 0) + 1
+        edge_seen[edge_key(e)] = edge_seen.get(edge_key(e), 0) + 1
     for marker, count in sorted(edge_seen.items()):
         if count > 1:
             errs.append(f"{count} edges are the same edge ({marker!r}) — judged "
@@ -973,6 +989,15 @@ def declared_identity(item: dict) -> tuple[str, str]:
     return ("content", item["content"])
 
 
+def edge_key(edge: dict) -> str:
+    """The edge's ENDPOINTS and mechanism — what it is, before its spelling.
+
+    The duplicate-judgement key in `validate()`: two declarations of the same
+    endpoints and mechanism are one fact, however differently they are spelled.
+    """
+    return f"{edge['from']}->{edge['to']}:{edge.get('op') or edge['relation']}"
+
+
 def edge_marker(edge: dict) -> str:
     """The STABLE marker this edge is remembered by — never its list index.
 
@@ -987,8 +1012,21 @@ def edge_marker(edge: dict) -> str:
     Keyed on what the edge IS, an edit can only add or remove a marker, and
     `write_map` refuses a marker the map no longer declares instead of resuming
     onto it.
+
+    ⛔ AND THE MECHANISM-DEFINING FIELDS ARE PART OF WHAT IT IS. Keyed on the
+    endpoints and mechanism ALONE, a correction that changes what the edge SAYS
+    — its `direction` (`->` → `<->`) or its `label` (`addresses` →
+    `mutuallySupportive`) — left the marker unchanged, so a resume skipped the
+    edge, made no call, and printed `all nodes and edges written` and exit 0
+    over a graph still holding the OLD direction and the OLD semantics
+    (measured). `validate()` cannot catch that: both spellings are legal. With
+    both fields in the marker the edit ORPHANS the old marker, and the resume
+    refuses it by name instead of reporting a filing it never made.
     """
-    return f"edge:{edge['from']}->{edge['to']}:{edge.get('op') or edge['relation']}"
+    if "op" in edge:
+        return (f"edge:{edge_key(edge)}:{edge.get('label') or '-'}:"
+                f"{direction_of(edge)}")
+    return f"edge:{edge_key(edge)}"
 
 
 def identity_by_ref(doc: dict) -> dict[str, tuple[str, str, str]]:
@@ -1242,29 +1280,30 @@ def verify(doc: dict) -> int:
     # The LABEL rides every row: a property value alone cannot say what KIND of
     # node carries it, so an Object named like a declared Event certified the
     # missing Event (#13913 review round 5).
-    node_rows = q("MATCH (n) RETURN labels(n)[0], coalesce(n.name,''), "
-                  "coalesce(n.url,''), coalesce(n.content,'')")
+    node_cols = ", ".join(f"coalesce(n.{p},'')" for p in IDENTITY_PROPS)
+    node_rows = q(f"MATCH (n) RETURN labels(n)[0], {node_cols}")
     # ⛔ NULL-SAFE, not `NOT (a.is_operator = true OR …)`: a Subject/Object/
     # Source/Event carries NO `is_operator` property, so that predicate evaluates
     # to `null` for every one of this map's 50 structural edges (their sources are
     # never Points), and `WHERE null` drops the row — `--verify` then reported all
     # 50 absent on a correctly filed map. This is the repo's own form
     # (`sdk.py`: `(x.is_operator IS NULL OR x.is_operator = false)`).
+    a_cols = ", ".join(f"coalesce(a.{p},'')" for p in IDENTITY_PROPS)
+    b_cols = ", ".join(f"coalesce(b.{p},'')" for p in IDENTITY_PROPS)
     edge_rows = q("MATCH (a)-[e]->(b) "
                   f"WHERE {NON_OPERATOR_PREDICATE} "
-                  "RETURN type(e), labels(a)[0], coalesce(a.name,''), "
-                  "coalesce(a.url,''), coalesce(a.content,''), labels(b)[0], "
-                  "coalesce(b.name,''), coalesce(b.url,''), coalesce(b.content,'')")
+                  "RETURN type(e), labels(a)[0], "
+                  f"{a_cols}, labels(b)[0], {b_cols}")
     # An operator is a NODE: its typed edges reach its endpoints, so the declared
     # operator is matched by (mechanism, both endpoints) grouped per operator id
     # — never by a direct `(from)-[:IMPL]->(to)` edge, which the writer does not
     # create (`projection/edges.py`: `MERGE (o)-[:IMPL]->(s)`).
+    x_cols = ", ".join(f"coalesce(x.{p},'')" for p in IDENTITY_PROPS)
     op_rows = q("MATCH (o)-[e]->(x) "
                 "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
                 "RETURN coalesce(o.id, o.nodeKey, toString(id(o))), "
                 "coalesce(o.op_type, e.op_type, ''), coalesce(e.idx, -1), "
-                "coalesce(o.direction,''), labels(x)[0], "
-                "coalesce(x.name,''), coalesce(x.url,''), coalesce(x.content,'')")
+                f"coalesce(o.direction,''), labels(x)[0], {x_cols}")
     return verdict(doc, node_rows, edge_rows, op_rows)
 
 
