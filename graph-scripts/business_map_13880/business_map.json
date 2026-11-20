@@ -441,7 +441,7 @@
     },
     {
       "ref": "pt:journal-is-not-knowledge",
-      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes of the largest legacy graph's 126,908 nodes (60% of them — the census in JUDGEMENT.md §2, measured 2026-11-19). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
+      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes of the largest legacy graph's 126,908 nodes (60% of them — the census in JUDGEMENT.md §3, measured 2026-11-19). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
       "legacy": "label census of the four legacy graphs; issue #13880 source table"
     },
     {
