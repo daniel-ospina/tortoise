@@ -590,7 +590,13 @@ read resolves the node **through the edge** — `sdk.py:31365`
 `sdk.py:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
 addresses opened at this head and re-checked in this pass (#13879 review, P2): the four `sdk.py`
 addresses stand as they were, and only the `mcp_server.py` one was stale, at `:11280` → `:11281`,
-where the statement itself opens. A traversal needs its
+where the statement itself opens. ⚠️ **The correction did not arrive on `main` from this pass.** This pass
+re-derived the address itself (commit `143b1fea07`, 12:26Z) on parent `1f7ae03e`, where this document
+still carried the stale address and not the corrected one; **#13992** (`8747965ad5`) put the same
+address on `main` at 16:14Z, 63 minutes before this pass merged, sweeping a second site — the header
+trio — that this pass's one-line edit did not. A later merge brought `main`'s copy in, so the address
+value here is `main`'s and only the wider quote in the line above is this pass's. A later reader should
+treat the address as done and not re-attribute the correction to this pass. A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
 
