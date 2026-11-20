@@ -78,15 +78,22 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     `record_vectors >= graph_vectors` over a LABEL, so blanking on it wrote those turns'
     vectors to NEITHER store. The two writers that place a genuinely redundant copy
     (`tortoise.sdk::_update_entity`, `tortoise.hosted_backup::restore_graph`) DO ask, and
-    do stop. When the
-    coverage predicate is present it names
-    each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
-    it names the requirement rather than the writers. That is the
-    true state of a two-pronged retirement, and it is a satisfiable one: as each
-    writer's `stores` entry loses the label, the gate opens for it. Testing that the gate
-    CAN open (rather than only that it refuses) is
+    do stop. When the coverage verdict answers STOP it names each un-cleared writer; while
+    it answers KEEP, or cannot be read, it returns before that walk and names the counts
+    (or, with the predicate symbol absent, the requirement). That is the
+    true state of a two-pronged retirement, and the WRITER prong is a satisfiable one: as
+    each writer's `stores` entry loses the label, that arm opens for it. ⛔ THE COVERAGE
+    PRONG IS NOT, for this label: `operator`'s graph denominator is the whole `:Point`
+    label while its record numerator is the operator subset, so `record_vectors >=
+    graph_vectors` is UNREACHABLE while any plain point carries an embedding
+    (`tortoise/record_vector.py`, pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`).
+    `:Point`'s cut-over is therefore an OPERATOR act — or a later, kind-aware denominator —
+    not a backfill that will eventually measure true. Testing that the writer arm CAN open
+    (rather than only that it refuses) is
     `test_the_gate_OPENS_when_every_declared_writer_asks` — an enforcer whose firing
-    condition can never hold would be the defect, not the refusal.
+    condition can never hold would be the defect, not the refusal, which is exactly why
+    the third condition above is stated rather than waited on.
 ``REFUSE_TARGET_DRIFT``
     The target this run resolved is not the one the plan was built against — compared on
     all four axes that name a store: the graph NAME, `org_id`, `graph_id` and the graph
