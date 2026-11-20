@@ -2660,14 +2660,22 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
 
     Both lines are legal table rows and both are legal table syntax, so the body test had
     nothing to say: the row loop matched the continuation, and `menu[name] = {…}` is an
-    unconditional assign keyed by NAME, so the one-member remainder silently REPLACED the
-    complete row. Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
+    unconditional assign keyed by NAME, so the TWO-member remainder (`assess_source,
+    get_source_reliability`) silently REPLACED row 14's complete THREE-member cell — the
+    overwrite keeps only what it names, and `set_source_tier` is not among them.
+    Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
     `row_errors == []`, the truncated row's own tool rendered "*(no approved row names it)*"
     / **refuted**, and the section count moved 5/7/0 → 4/7/1. Nothing bounded duplicates —
     the count guard checks only for MISSING row numbers (#8930 review, round 3, P1).
     ⛔ The MEASURED example above was taken on row 21 (`tortoise_annotate_operator`); the
-    fixture is row 14 since #12901's final batch, because row 21's third member was
-    privatised and a truncation there no longer changes the artifact (#13899 review, P2).
+    fixture is row 14 since #12901's final batch. NOT because row 21's members were
+    privatised — row 14's are equally private (`_assess_source`, `_set_source_tier`) — but
+    because ONLY `tortoise_assess_source` and `tortoise_set_source_tier` are rendered as
+    DISPUTED rows, so only THEIR cells' members can make the artifact state "*(no approved
+    row names it)*". Measured with the body guards off: truncating row 21 changes 0 artifact
+    lines, row 14 changes 15 — so the discriminator is D4 dispute-set membership, and a
+    fixture moved on the privatisation test alone would mutate nothing observable (#13899
+    review, P2; #13965).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2805,12 +2813,18 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     """Shape 3 — the same NAME on a different number, which no number bound can see.
 
     `menu` is keyed by name, so this is the overwrite from the other side: the tracked row's
-    cell is replaced by the new row's and its later members lose their approved home. (Row 21
-    before #12901's final batch; row 14 since — its third member, `set_source_tier`, is what
-    the asserts below can no longer find. The rule is the same either way.) Renumbering hides it from the missing-number check too, so before the fix
+    cell is replaced by the new row's, which keeps only the members IT names. The overwriting
+    row is `| 24 | `manage_source_trust` | set_source_tier |`, so `set_source_tier` is the
+    member the overwrite CARRIES; what loses its approved home is `assess_source` (and
+    `get_source_reliability`) — `assess_source` is what the assert below checks, and
+    `get_source_reliability` goes the same way. Measured on this
+    mutation with the round-3 guards disabled: `menu["manage_source_trust"]` is `lineno == 24`
+    with members `{"manage_source_trust", "set_source_tier"}`. The shape is the same on row 21
+    before #12901's final batch and on row 14 since; only the surviving member differs.
+    Renumbering hides it from the missing-number check too, so before the fix
     the ONLY thing that fired was the anonymous row count ("only 22 approved rows parsed") —
     a diagnostic that names no row and states no cause, on a document that is otherwise
-    shaped perfectly (#8930 review, round 3, P1).
+    shaped perfectly (#8930 review, round 3, P1; prose corrected in #13965).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
