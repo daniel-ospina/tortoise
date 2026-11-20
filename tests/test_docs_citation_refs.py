@@ -2790,6 +2790,13 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: separate sentences of the D5 cell made — and the second one was not among the three the
 #: review quoted, which is why the correction is a ban over the class and not a patch of one
 #: sentence.
+#: ⛔ AND ONE ROW IS A PRONOUN BINDING, not a description of the filter's output: the companion
+#: measurement beside the filter was described as "the command that counts them" — the nearest
+#: antecedent being the TWO `+`/`-` sign classes stage 1 drops — while the command it named
+#: (`grep -cE '^\+$'`) counts ONE of them (blank ADDED lines) and misses the sign-opening class
+#: and the blank REMOVED line alike. A reader following it over a blank-removed-only diff read
+#: `0` and concluded nothing was there, which is the false negative this whole cell exists to
+#: stop, so the class is banned the same way its siblings are (#13956 review, P2).
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
     "drops exactly the lines whose first non-space character is `#`",
@@ -2802,6 +2809,9 @@ _FILTER_FALSE_DESCRIPTIONS = (
     "prints",
     "a docstring or code line whose content opens with anything else WOULD appear in "
     "its output",
+    # The companion measurement's object, not the filter's: `grep -cE '^\+$'` counts blank
+    # ADDED lines only, so "them" (the two sign classes) is a count it cannot produce.
+    "is the command that counts them at YOUR head",
 )
 
 
@@ -2876,6 +2886,7 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "prints",
         "a docstring or code line whose content opens with anything else WOULD appear in "
         "its output",
+        "is the command that counts them at YOUR head",
     ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
