@@ -2696,6 +2696,16 @@ surfaces:
   # and `tortoise/record_writer.py`, so `core` is its surface (the same
   # `--changed-files` measurement the two `test_12894` rows above record).
   - test_13043_record_allocator_cli.py
+  # #4211 (PR #13919 review, rounds 1-3): the measurement instrument's guards. The diff
+  # adds `tools/measure_4211_session_hierarchy.py`, and `tools/` is a flat
+  # NON_PYTHON_PREFIXES entry — MEASURED: `--changed-files
+  # tools/measure_4211_session_hierarchy.py` -> `surfaces: []`, so no surface row can
+  # select this file from the change it guards, and an unregistered new test file reds
+  # `--integrity` (`❌ manifest drift: ['test_measure_4211_session_hierarchy.py']`, the
+  # measurement taken before this row was added). `core` is the documented default for a
+  # `tools/`-only diff; the file is DB/network/LLM-free (fake graphs + the repo's own
+  # redis-guard subprocess), so it is fast-pool material and not a `slow_files` member.
+  - test_measure_4211_session_hierarchy.py
   - test_10749_health_tail_under_transport_bound.py    # #10749: dual: api
   - test_11609_write_containers.py
   # #11609 P3 (the SDK leg reaches 40): this file was added by the PR and

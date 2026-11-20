@@ -25,6 +25,14 @@ ARMS
                 no ref at all, and every turn naming it. Measures BEFORE and AFTER and
                 reports the DELTA — a replay proves nothing about a writer, so a run
                 that replays a known session reports ``unmeasurable`` instead of numbers.
+
+                ⛔ THIS IS THE ONLY ARM THAT WRITES, so it is NOT in the default set
+                (``--arms`` defaults to ``DEFAULT_ARMS``) and it REFUSES a graph whose
+                name does not look ephemeral (``--allow-non-ephemeral-writes`` is the
+                deliberate override). ``TORTOISE_DB_URI`` is the product's own
+                connection string, not a test-only variable: a bare run must never be
+                able to annotate a served graph with ``m4211-*`` sessions, a claim Point
+                and the Object ``test/repo#42`` that every later census would count.
 ``live``        the graph ``~/.zshrc:48`` configures (``docker://:@localhost:16379/tortoise``)
                 — labelled as exactly that, because the receipt can prove the URI string
                 lives in a shell profile and nothing more. Read-only (``ro_query``).
@@ -45,8 +53,14 @@ Usage
       uv run python tools/measure_4211_session_hierarchy.py \\
         --out docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json
 
-Exit codes: 0 = measured (whatever the numbers are), 2 = could not measure (the reason
-is in the receipt's ``unmeasurable`` block).
+Exit codes:
+    0 = every arm that RAN produced a measurement. A skip BEFORE measuring (no store
+        file on this box, no capture journal, no graph of that name) is NOT a failure —
+        it is recorded in the receipt's ``warnings``.
+    2 = at least one arm ran and could NOT measure. The reason is in the receipt's
+        TOP-LEVEL ``unmeasurable`` block (hoisted from ``arms.<arm>.unmeasurable`` so
+        the documented pointer resolves), and an unmeasurable run does NOT overwrite an
+        existing ``--out`` receipt — it is written beside it as ``<out>.unmeasurable``.
 
 Definition discipline (#4211 review round 1): a *turn* is
 ``coalesce(p.is_episodic,false)=true AND p.pointKind='event'`` — the product's own
@@ -76,6 +90,18 @@ DEFAULT_STORE = "~/.tortoise/tortoise.db"
 DEFAULT_STORE_GRAPH = "tortoise"
 DEFAULT_LIVE_URI = "docker://:@localhost:16379/tortoise"
 DEFAULT_SESSIONS_DIR = "~/.tortoise/session-events"
+
+#: The default arm set is the READ-ONLY one. ``writer`` mutates the target, so it is
+#: opt-in: a bare `python tools/measure_4211_session_hierarchy.py` must not be able to
+#: write into whatever graph ``TORTOISE_DB_URI`` happens to name (#4211 review N8).
+DEFAULT_ARMS = "store,live,instrument,corpus"
+
+#: Graph names the writer arm may write into without an explicit override.
+EPHEMERAL_GRAPH_MARKERS = ("m4211", "test", "tmp", "lane", "scratch", "e2e", "ci_")
+
+#: The product modules the measurement runs THROUGH: their digests are recorded beside
+#: ``instrument.sha256`` so an SDK move is distinguishable from a graph move (#4211 N7).
+MEASURED_THROUGH = ("tortoise/sdk.py", "tortoise/session_link.py")
 
 #: The product's own turn discriminator (``is_episodic`` alone also matches extracted
 #: episodic MEMORY points).
@@ -128,17 +154,28 @@ QUERIES: list[tuple[str, str]] = [
      "MATCH (:Session)-[:CONTAINS]->(p:Point) "
      "RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, "
      "count(*) AS n ORDER BY n DESC"),
-    ("sessions_with_gt1_contains_turn",
+    # ⛔ #4211 review R1: every key whose NAME says *turn* applies the turn filter, and
+    # the every-CONTAINS-point question is asked SEPARATELY rather than published under
+    # a turn label. Without the filter a session holding 1 turn + 1 claim Point counted
+    # as "more than one turn", so the gate's own falsifier ("sessions_with_gt1_*_turn"
+    # ≈ 0) could never fire on the graph it was written to test.
+    ("sessions_with_gt1_turn",
+     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+     f"WHERE {TURN} "
+     "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
+    ("sessions_with_gt1_contains_point",
      "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_entity_linked_turn",
      "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) "
+     f"WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_aboutObject_edge",
      "MATCH (s:Session)-[:aboutObject]->(o:Object) "
      "WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n"),
-    ("turns_per_session_contains_max_avg",
+    ("turns_per_session_max_avg",
      "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+     f"WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, "
      "toFloat(sum(c)) / count(s) AS avg_c"),
     # Which WRITER generation wrote a Session: the current capture writes
@@ -148,6 +185,17 @@ QUERIES: list[tuple[str, str]] = [
      "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC"),
     ("session_turn_count_sum",
      "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n"),
+    # #4211 review N1: the two facts the receipt's reader needs to decide whether the
+    # embedded store is a LEGACY POPULATION or a live defect — the Object kind mix
+    # (0 `pm:issue` ⇒ no GitHub indexer wrote them) and the `created_at` span. Both
+    # stood in the PR body as an inference the artefact could not reproduce.
+    ("object_kinds",
+     "MATCH (o:Object) RETURN coalesce(o.objectKind, '<none>') AS objectKind, "
+     "count(*) AS n ORDER BY n DESC"),
+    ("session_created_at_range",
+     "MATCH (s:Session) WHERE s.created_at IS NOT NULL "
+     "RETURN count(s) AS n, min(s.created_at) AS min_created_at, "
+     "max(s.created_at) AS max_created_at"),
     # ── what a turn -> Object -> turn walk could reach ──
     ("objects_total", "MATCH (o:Object) RETURN count(o) AS n"),
     ("objects_with_gt1_turn",
@@ -239,6 +287,88 @@ def _sha256(path: Path) -> str | None:
         return None
 
 
+def _file_identity(path: Path) -> dict:
+    """sha256 + byte count from ONE pass over ONE file.
+
+    #4211 review N3: ``source_sha256`` hashed the COPY (after the embedded engine had
+    been pointed at it, so an RDB rewrite changed the value) while ``source_bytes``
+    read the ORIGINAL — a pair a re-run cannot verify against, because its two halves
+    described two files at two times. Both now come from the same read.
+    """
+    h = hashlib.sha256()
+    total = 0
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+            total += len(chunk)
+    return {"sha256": h.hexdigest(), "bytes": total}
+
+
+def _module_digests() -> dict:
+    """The digests of the product modules the measurement runs THROUGH (#4211 N7)."""
+    return {rel: _sha256(_REPO_ROOT / rel) for rel in MEASURED_THROUGH}
+
+
+#: The per-graph queries the ``instrument`` arm runs, NAMED so a failure is attributed
+#: to the query that raised instead of to "this graph" (#4211 review R2).
+INSTRUMENT_QUERIES: list[tuple[str, str]] = [
+    ("sessions_total", "MATCH (s:Session) RETURN count(s)"),
+    ("turns_total", f"MATCH (p:Point) WHERE {TURN} RETURN count(p)"),
+    ("contains_edges", "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r)"),
+    ("contains_distinct_pairs",
+     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+     "RETURN count(DISTINCT s.id + '|' + p.id)"),
+    ("contains_duplicate_pairs",
+     "MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
+     "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"),
+    ("aboutObject_edges", "MATCH ()-[r:aboutObject]->() RETURN count(r)"),
+    ("turns_with_aboutObject",
+     "MATCH (p:Point)-[:aboutObject]->(:Object) "
+     f"WHERE {TURN} RETURN count(DISTINCT p)"),
+    ("contains_targets_by_kind",
+     "MATCH (:Session)-[:CONTAINS]->(p:Point) "
+     "RETURN p.pointKind, count(*) ORDER BY count(*) DESC"),
+]
+_INSTRUMENT_BY_KEY = dict(INSTRUMENT_QUERIES)
+
+
+class _QueryError(Exception):
+    """A named per-graph query raised — attributed, never swallowed (#4211 R2)."""
+
+    def __init__(self, key: str, exc: Exception):
+        self.key = key
+        self.exc = exc
+        super().__init__(f"{key}: {type(exc).__name__}: {exc}")
+
+
+def _q(g, key: str, *, rows: bool = False):
+    try:
+        result = g.query(_INSTRUMENT_BY_KEY[key]).result_set
+    except Exception as exc:
+        raise _QueryError(key, exc) from exc
+    if rows:
+        return [list(r) for r in result]
+    return result[0][0] if result else 0
+
+
+def _head(rows: list[dict], limit: int) -> tuple[list[dict], int]:
+    """(kept, omitted) — the omitted count is PUBLISHED, so the aggregate stays
+    re-derivable from the artefact (#4211 N5: 25 of 60 rows were cut with no marker)."""
+    return rows[:limit], max(0, len(rows) - limit)
+
+
+def _every_graph_has_fewer_turns_than_contains(rows: list[dict]) -> bool | None:
+    """``None`` over an EMPTY population.
+
+    ``all([])`` is ``True``, so the old expression asserted "every graph satisfies X"
+    with zero graphs measured — the same state this module refuses three functions up
+    (``_is_empty``) (#4211 review N4).
+    """
+    if not rows:
+        return None
+    return all(r["turns"] <= r["contains_edges"] for r in rows)
+
+
 def _git_head() -> str | None:
     """The commit the run started from — a LABEL, never a claim that the tree was
     clean. ``instrument.sha256`` is what a re-run keys on, because this commit may
@@ -255,17 +385,37 @@ def _git_head() -> str | None:
 
 # ── ARM `store`: a read-only copy of a real embedded store ────────────────
 
+def _open_embedded(path: Path):
+    """The repo's OWN embedded choke-point, never a raw redislite construction.
+
+    #4211 review N2: a direct ``redislite.falkordb_client`` FalkorDB import trips the
+    repo's redis-guard (pattern 2) — CI is green over it because the workflow runs the
+    guard with no argv, but pre-commit sees ``tools/`` — and it writes no owner record,
+    so the reaper cannot confirm the server this arm starts. ``tortoise.FalkorDB`` is
+    the guarded subclass: absolute-path only, idempotent ``close()`` and atexit
+    registration (#1005), which is what makes the close in ``measure_store`` reachable.
+    """
+    from tortoise import FalkorDB
+
+    return FalkorDB(str(path))
+
+
 def measure_store(db_path: str, graph_name: str) -> dict:
     src = Path(os.path.expanduser(db_path))
     if not src.exists():
         return {"skipped": f"store not found at {src}"}
+    # The identity is taken from the ORIGINAL, before the copy and before any engine
+    # opens anything (N3) — ``source_bytes`` and ``source_sha256`` describe the same
+    # file at the same moment.
+    source = _file_identity(src)
     tmpdir = Path(tempfile.mkdtemp(prefix="m4211-store-"))
     dst = tmpdir / "store.db"
     t0 = time.time()
     shutil.copy2(src, dst)  # the ORIGINAL is never opened by the engine
+    copy = _file_identity(dst)  # the bytes the engine is about to get, measured pre-open
+    db = None
     try:
-        from redislite.falkordb_client import FalkorDB
-        db = FalkorDB(str(dst))
+        db = _open_embedded(dst)
         names = [n for n in db.connection.execute_command("GRAPH.LIST")]
         if graph_name not in names:
             return {"skipped": f"graph {graph_name!r} is not among the {len(names)} "
@@ -276,8 +426,9 @@ def measure_store(db_path: str, graph_name: str) -> dict:
         counts = _run_queries(g)
         return {
             "source": str(src),
-            "source_sha256": _sha256(dst),
-            "source_bytes": src.stat().st_size,
+            "source_sha256": source["sha256"],
+            "source_bytes": source["bytes"],
+            "copy_matches_source": copy["sha256"] == source["sha256"],
             "read_only_copy": str(dst),
             "graph": graph_name,
             "graphs_in_file": len(names),
@@ -287,6 +438,14 @@ def measure_store(db_path: str, graph_name: str) -> dict:
             "queries": dict(QUERIES),
         }
     finally:
+        # Close the embedded server BEFORE the directory it lives in is deleted —
+        # ``rmtree`` under a still-running child is the shape that writes no owner
+        # record for the reaper (#4211 review N2, second half).
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -355,6 +514,34 @@ def measure_live(uri: str) -> dict:
 
 # ── ARM `instrument`: every graph on the instance that holds a turn store ──
 
+def _instrument_row(g, name: str) -> dict | None:
+    """One graph's row, or ``None`` for the TWO legitimate exclusions.
+
+    #4211 review R2: a query that RAISES must not be the same event as "this graph
+    holds no turn store". Both used to be one ``except Exception: continue``, so an
+    errored graph left BOTH the numerator and the denominator of "0 aboutObject in N
+    of N" while the aggregate still read as a complete census. Failures now raise
+    ``_QueryError`` (attributed to the query by name); only the two filters below
+    return ``None`` and they are counted separately.
+    """
+    if not _q(g, "sessions_total"):
+        return None                       # legitimately: no :Session at all
+    sessions = _q(g, "sessions_total")
+    if not _q(g, "turns_total"):
+        return None                       # legitimately: Sessions, but no turns
+    return {
+        "graph": name,
+        "sessions": sessions,
+        "turns": _q(g, "turns_total"),
+        "contains_edges": _q(g, "contains_edges"),
+        "contains_distinct_pairs": _q(g, "contains_distinct_pairs"),
+        "contains_duplicate_pairs": _q(g, "contains_duplicate_pairs"),
+        "aboutObject_edges": _q(g, "aboutObject_edges"),
+        "turns_with_aboutObject": _q(g, "turns_with_aboutObject"),
+        "contains_targets_by_kind": _q(g, "contains_targets_by_kind", rows=True),
+    }
+
+
 def measure_instrument(uri: str) -> dict:
     """Aggregate every graph on the instance holding Sessions + episodic turns.
 
@@ -365,56 +552,36 @@ def measure_instrument(uri: str) -> dict:
     """
     db, _spec = _open_live(uri)
     names = [n for n in db.connection.execute_command("GRAPH.LIST")]
-    rows = []
-    inspected = 0
+    rows: list[dict] = []
+    errors: list[dict] = []
     for n in names:
-        g = db.select_graph(n)
         try:
-            sess = g.query("MATCH (s:Session) RETURN count(s)").result_set[0][0]
-            if not sess:
-                continue
-            turns = g.query(f"MATCH (p:Point) WHERE {TURN} RETURN count(p)"
-                            ).result_set[0][0]
-            if not turns:
-                continue
-            contains = g.query("MATCH (:Session)-[r:CONTAINS]->(:Point) "
-                               "RETURN count(r)").result_set[0][0]
-            # Multiplicity guard on the biggest number this arm publishes: a
-            # double-wired CONTAINS (the #12244 write-bug class the gate cites) would
-            # inflate a raw row count undetected. Pairs are measured, not inferred.
-            pairs = g.query("MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-                            "RETURN count(DISTINCT s.id + '|' + p.id)"
-                            ).result_set[0][0]
-            dupes = g.query("MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
-                            "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"
-                            ).result_set[0][0]
-            about = g.query("MATCH ()-[r:aboutObject]->() RETURN count(r)"
-                            ).result_set[0][0]
-            turn_about = g.query("MATCH (p:Point)-[:aboutObject]->(:Object) "
-                                 f"WHERE {TURN} RETURN count(DISTINCT p)"
-                                 ).result_set[0][0]
-            kinds = g.query("MATCH (:Session)-[:CONTAINS]->(p:Point) "
-                            "RETURN p.pointKind, count(*) ORDER BY count(*) DESC"
-                            ).result_set
-            inspected += 1
-            rows.append({"graph": n, "sessions": sess, "turns": turns,
-                         "contains_edges": contains,
-                         "contains_distinct_pairs": pairs,
-                         "contains_duplicate_pairs": dupes,
-                         "aboutObject_edges": about,
-                         "turns_with_aboutObject": turn_about,
-                         "contains_targets_by_kind": [list(r) for r in kinds]})
-        except Exception:
+            row = _instrument_row(db.select_graph(n), n)
+        except _QueryError as exc:
+            errors.append({"graph": n, "query": exc.key,
+                           "error": f"{type(exc.exc).__name__}: {exc.exc}"})
             continue
+        except Exception as exc:          # noqa: BLE001 — select_graph itself failed
+            errors.append({"graph": n, "query": "select_graph",
+                           "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        if row is not None:
+            rows.append(row)
     total = lambda k: sum(r[k] for r in rows)  # noqa: E731
     kinds: dict[str, int] = {}
     for r in rows:
         for kind, cnt in r["contains_targets_by_kind"]:
             kinds[str(kind)] = kinds.get(str(kind), 0) + cnt
-    return {
+    per_graph, omitted = _head(
+        sorted(rows, key=lambda r: -(r["sessions"] + r["turns"])), 25)
+    body = {
         "uri": uri,
         "graphs_on_instance": len(names),
-        "graphs_with_turn_store": inspected,
+        "graphs_with_turn_store": len(rows),
+        "graphs_excluded_no_turn_store": len(names) - len(rows) - len(errors),
+        # Every graph that ERRORED, with the query that raised: these are in NEITHER
+        # side of the aggregate, so their absence must be visible (#4211 R2).
+        "errors": errors,
         "totals": {
             "sessions": total("sessions"),
             "turns": total("turns"),
@@ -428,14 +595,23 @@ def measure_instrument(uri: str) -> dict:
                                                  key=lambda kv: -kv[1])),
         "graphs_with_any_aboutObject": sum(1 for r in rows if r["aboutObject_edges"]),
         "graphs_with_zero_aboutObject": sum(1 for r in rows if not r["aboutObject_edges"]),
-        "every_graph_has_fewer_turns_than_contains": all(
-            r["turns"] <= r["contains_edges"] for r in rows),
-        "per_graph": sorted(rows, key=lambda r: -(r["sessions"] + r["turns"]))[:25],
+        "every_graph_has_fewer_turns_than_contains":
+            _every_graph_has_fewer_turns_than_contains(rows),
+        "per_graph": per_graph,
+        "per_graph_omitted": omitted,
         "note": "these stores are written by the fixture seeder "
                 "(tools/ask_spotcheck.seed_capture_turn_store), which writes the "
                 "Session->turn CONTAINS edges but does NOT run the entity-link pass — "
                 "so 0 aboutObject here is the SEEDER's shape, not the writer's",
     }
+    if errors:
+        body["unmeasurable"] = (
+            f"{len(errors)} graph(s) ERRORED and are in NEITHER side of the aggregate "
+            f"(first: {errors[0]['graph']} / {errors[0]['query']}: "
+            f"{errors[0]['error']}) — the '0 of {len(rows)}' counts only the graphs "
+            "that answered, so it cannot be read as a complete census. Re-run, or read "
+            "per_graph together with errors.")
+    return body
 
 
 # ── ARM `writer`: the REAL capture path ───────────────────────────────────
@@ -509,11 +685,46 @@ def _delta(before: dict, after: dict) -> dict:
     return out
 
 
-def measure_writer() -> dict:
+def _looks_ephemeral(graph: str) -> bool:
+    g = (graph or "").lower()
+    return any(marker in g for marker in EPHEMERAL_GRAPH_MARKERS)
+
+
+def _writer_target(uri: str) -> tuple[dict | None, str | None]:
+    """(target, refusal) — refuse rather than WRITE into a graph we cannot prove is a
+    lane's throwaway (#4211 review N8).
+
+    The module already refuses in the READ arms when the target is not what the caller
+    thinks it is (``measure_store``/``measure_live`` will not ``select_graph()`` and
+    publish invented zeros). The arm that MUTATES had no equivalent check while being
+    in the DEFAULT set: ``TORTOISE_DB_URI`` is the product's connection string, so a
+    bare run annotated whatever graph it named with fixture sessions that every later
+    census — including the one this tool exists to unlock — would count.
+    """
+    try:
+        spec = _parse_uri(uri)
+    except ValueError as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    target = {"host": spec["host"], "port": spec["port"], "graph": spec["graph"]}
+    if not _looks_ephemeral(spec["graph"]):
+        return target, (
+            f"refusing to WRITE into graph {spec['graph']!r} on {spec['host']}:{spec['port']} "
+            "— the writer arm mints 3 fixture sessions ('m4211-*'), one shared claim "
+            "Point and the Object 'test/repo#42' into whatever graph TORTOISE_DB_URI "
+            "names, and every later census would then count them. The graph name must "
+            f"contain one of {EPHEMERAL_GRAPH_MARKERS}; pass "
+            "--allow-non-ephemeral-writes to write anyway (the receipt records the argv).")
+    return target, None
+
+
+def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
         return {"skipped": "TORTOISE_DB_URI is not exported — run the lane seam first "
                            "(uri=\"$(uv run python tools/test_lane.py uri)\"; eval \"$uri\")"}
+    target, refusal = _writer_target(uri)
+    if refusal and (target is None or not allow_non_ephemeral):
+        return {"skipped": refusal, "target": target}
     # #4211: the offline extractor seam. It IS load-bearing for the extractor's own
     # Points (a canned claim per session) — so those are counted separately below and
     # never folded into the turn counts. The turn-level link pass runs on the STORED
@@ -548,7 +759,12 @@ def measure_writer() -> dict:
         replayed = [sid for sid, c in captures.items()
                     if c.get("extraction_mode") == "replayed"]
         body = {
+            # WHERE it wrote, not only which graph NAME: the receipt used to carry
+            # `uri_graph` alone, so a lane container and a served store were
+            # indistinguishable in the artefact. Never the password.
+            "target": target,
             "uri_graph": uri.rsplit("/", 1)[-1],
+            "non_ephemeral_write_override": bool(refusal and allow_non_ephemeral),
             "sdk": "TortoiseSDK() against TORTOISE_DB_URI",
             "object_mint": {"name": "test/repo#42", "kind": "pm:issue",
                             "advisory": obj.get("kind_layer_routed")
@@ -650,14 +866,64 @@ def measure_corpus(sessions_dir: str) -> dict:
     }
 
 
+def _unmeasurable_reasons(receipt: dict) -> list[str]:
+    """Every arm's own reason, HOISTED to the block the docstring points at.
+
+    #4211 review R3: the replay branch set ``arms.writer.unmeasurable`` while the
+    documented contract says the reason is in the receipt's top-level ``unmeasurable``
+    block, and ``main`` returned 0 either way — so ``… || exit 1`` accepted a replay as
+    a measurement and overwrote the good receipt with it.
+    """
+    out = []
+    for arm, body in (receipt.get("arms") or {}).items():
+        if isinstance(body, dict) and body.get("unmeasurable"):
+            out.append(f"{arm}: {body['unmeasurable']}")
+    return out
+
+
+def _collect_warnings(receipt: dict) -> list[str]:
+    """Populate ``warnings`` — it was initialised and never written (#4211 R2)."""
+    out = []
+    for arm, body in (receipt.get("arms") or {}).items():
+        if isinstance(body, dict) and body.get("skipped"):
+            out.append(f"{arm}: skipped — {body['skipped']}")
+    inst = receipt.get("arms", {}).get("instrument")
+    if isinstance(inst, dict) and inst.get("per_graph_omitted"):
+        out.append(f"instrument: per_graph carries {len(inst['per_graph'])} of "
+                   f"{inst['graphs_with_turn_store']} rows; "
+                   f"{inst['per_graph_omitted']} omitted (totals still cover all of them)")
+    for reason in _unmeasurable_reasons(receipt):
+        out.append(f"unmeasurable — {reason}")
+    return out
+
+
+def _write_receipt(out: str, receipt: dict, *, measured: bool) -> str:
+    """Write the artefact; an UNMEASURABLE run never replaces a good one.
+
+    Returns the path actually written. ``<out>.unmeasurable`` is the sibling a failed
+    run lands in when ``<out>`` already exists (#4211 review R3).
+    """
+    p = Path(out)
+    if not measured and p.exists():
+        p = p.with_name(p.name + ".unmeasurable")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(receipt, indent=1, allow_nan=False) + "\n")
+    return str(p)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--store", default=DEFAULT_STORE)
     ap.add_argument("--store-graph", default=DEFAULT_STORE_GRAPH)
     ap.add_argument("--live-uri", default=DEFAULT_LIVE_URI)
     ap.add_argument("--sessions-dir", default=DEFAULT_SESSIONS_DIR)
-    ap.add_argument("--arms", default="store,writer,live,instrument,corpus",
-                    help="comma-separated subset of store,writer,live,instrument,corpus")
+    ap.add_argument("--arms", default=DEFAULT_ARMS,
+                    help="comma-separated subset of store,writer,live,instrument,corpus "
+                         f"(default: {DEFAULT_ARMS} — the READ-ONLY set; 'writer' "
+                         "MUTATES the graph TORTOISE_DB_URI names and is opt-in)")
+    ap.add_argument("--allow-non-ephemeral-writes", action="store_true",
+                    help="let the writer arm write into a graph whose name does not "
+                         "look ephemeral (default: refuse)")
     ap.add_argument("--out", default=None, help="receipt JSON path")
     args = ap.parse_args(argv)
 
@@ -669,9 +935,12 @@ def main(argv: list[str] | None = None) -> int:
         "instrument": {
             "path": "tools/measure_4211_session_hierarchy.py",
             "sha256": _sha256(_TOOL_PATH),
+            "measured_through": _module_digests(),
             "argv": sys.argv[1:],
             "note": "code_head is the tree this run STARTED from; it may predate the "
-                    "commit that carries this file, so the sha256 is what a re-run keys on",
+                    "commit that carries this file, so the sha256 is what a re-run keys "
+                    "on. measured_through pins the product modules the numbers come "
+                    "THROUGH, so an SDK move is distinguishable from a graph move",
         },
         "purpose": "does a session-hierarchy structure exist for the #4211 "
                    "candidate-expansion arm to walk?",
@@ -700,7 +969,8 @@ def main(argv: list[str] | None = None) -> int:
         if "store" in arms:
             receipt["arms"]["store"] = measure_store(args.store, args.store_graph)
         if "writer" in arms:
-            receipt["arms"]["writer"] = measure_writer()
+            receipt["arms"]["writer"] = measure_writer(
+                allow_non_ephemeral=args.allow_non_ephemeral_writes)
         if "live" in arms:
             receipt["arms"]["live"] = measure_live(args.live_uri)
         if "instrument" in arms:
@@ -713,18 +983,25 @@ def main(argv: list[str] | None = None) -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc()[-3000:],
         }
+        receipt["warnings"] = _collect_warnings(receipt)
         if args.out:
-            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.out).write_text(json.dumps(receipt, indent=1, allow_nan=False)
-                                      + "\n")
+            print(f"receipt: {_write_receipt(args.out, receipt, measured=False)}")
         print(f"UNMEASURABLE: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
-    rendered = json.dumps(receipt, indent=1, allow_nan=False)
+    # R3: the reason goes to the TOP-LEVEL block the docstring points at, and the
+    # process exits 2 — a replay is not a measurement, and `… || exit 1` must see it.
+    reasons = _unmeasurable_reasons(receipt)
+    if reasons:
+        receipt["unmeasurable"] = {
+            "arms": reasons,
+            "note": "at least one arm RAN and could not measure; the numbers beside it "
+                    "describe the graph's PRE-EXISTING content, not this run",
+        }
+    receipt["warnings"] = _collect_warnings(receipt)
+    measured = not reasons
     if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(rendered + "\n")
-        print(f"receipt: {args.out}")
+        print(f"receipt: {_write_receipt(args.out, receipt, measured=measured)}")
 
     for arm in ("store", "writer", "live"):
         body = receipt["arms"].get(arm)
@@ -740,10 +1017,17 @@ def main(argv: list[str] | None = None) -> int:
         print("  CONTAINS edges / pairs  :", c.get("contains_edges"), "/",
               c.get("contains_distinct_pairs"), "dupes:",
               c.get("contains_duplicate_pairs"))
-        print("  sessions w/ >1 turn     :", c.get("sessions_with_gt1_contains_turn"))
+        # The label says what the number now is (R1): the first is TURN-filtered, the
+        # second is every CONTAINS-wired Point, printed so the divergence is visible
+        # rather than silently standing in for a turn count.
+        print("  sessions w/ >1 turn     :", c.get("sessions_with_gt1_turn"),
+              " (->1 CONTAINS point:", c.get("sessions_with_gt1_contains_point"), ")")
+        print("  turns/session max, avg  :", c.get("turns_per_session_max_avg"))
         print("  aboutObject by endpoint :", c.get("aboutObject_by_endpoint"))
         print("  turns w/ aboutObject    :", c.get("turns_with_aboutObject"))
         print("  CONTAINS targets by kind:", c.get("contains_targets_by_kind"))
+        print("  objects by kind         :", c.get("object_kinds"))
+        print("  session created_at span :", c.get("session_created_at_range"))
         print("  events/w-aboutObject    :", c.get("events_total"), "/",
               c.get("events_with_aboutObject"))
         if body.get("delta_this_run"):
@@ -754,7 +1038,9 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(inst, dict) and "totals" in inst:
         print("\n== arm instrument (all turn-store graphs on the instance) ==")
         print("  graphs with a turn store:", inst["graphs_with_turn_store"], "of",
-              inst["graphs_on_instance"])
+              inst["graphs_on_instance"], "| excluded (no turn store):",
+              inst.get("graphs_excluded_no_turn_store"), "| ERRORED:",
+              len(inst.get("errors") or []))
         print("  totals                  :", inst["totals"])
         print("  graphs with 0 aboutObject:", inst["graphs_with_zero_aboutObject"])
         print("  CONTAINS targets by kind:", inst["contains_targets_by_kind"])
@@ -767,6 +1053,10 @@ def main(argv: list[str] | None = None) -> int:
         print("  turns distinct          :", corp["turns_distinct"])
         print("  turns naming a ref      :", corp["turns_naming_a_ref_distinct"])
         print("  sessions w/ >1 turn     :", corp["sessions_with_gt1_turn"])
+    if not measured:
+        for reason in reasons:
+            print(f"UNMEASURABLE: {reason}", file=sys.stderr)
+        return 2
     return 0
 
 
