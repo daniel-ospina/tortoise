@@ -1570,7 +1570,8 @@ class TestConfidenceArms:
         assert 0.0 <= float(posterior["mean"]) <= 1.0, posterior
         assert float(posterior["variance"]) >= 0.0, posterior
 
-    def test_recall_arm_answers_the_seeded_claim_in_state_mode(self, seeded):
+    @pytest.mark.parametrize("mode", ["state", "gaps", "custom"])
+    def test_recall_arm_answers_the_seeded_claim(self, seeded, mode):
         """`recall=True` is the arm the retired ``tortoise_recall`` door retires
         INTO — the container names it in its own dispatch set
         (``mcp_server.py:8220``) and dispatches it at ``:8358``. It was the ONE
@@ -1582,17 +1583,19 @@ class TestConfidenceArms:
         ``_transport_mode`` guard and no ``_http_excluded_error()``, so this is
         a measured gap in the row, not an environmental one.
 
-        Anchored on the seeded CLAIM and on the `mode` the arm ECHOES, so a
-        dispatch that fell through to the calibration view (or clamped to
-        ``gaps``) cannot pass by returning a well-formed payload of another
-        arm."""
+        The three state-family modes are parameterised because ``gaps`` reads a
+        DIFFERENT accessor (``recall_gaps``) under its own presets while
+        ``custom`` skips the preset tuning — three queries behind one mode
+        argument, and the ``mode`` the arm ECHOES is asserted alongside the
+        seeded claim so a dispatch that clamped every mode to the default cannot
+        pass by returning a well-formed payload of another arm."""
         door, s, _ = seeded
         status, out = door.call("tortoise_check_confidence",
-                                {"recall": True, "mode": "state",
+                                {"recall": True, "mode": mode,
                                  "query": "capstone"})
         assert status == 200
         assert isinstance(out, dict), out
-        assert out.get("mode") == "state", out
+        assert out.get("mode") == mode, out
         rows = out.get("results")
         assert isinstance(rows, list) and rows, out
         by_id = {r.get("id"): r for r in rows if isinstance(r, dict)}
