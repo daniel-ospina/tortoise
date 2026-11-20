@@ -78,7 +78,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlencode
+from urllib.parse import quote, unquote, urlencode
 
 #: Imported, not restated: the one vocabulary the read surfaces use. The
 #: `Row.eligible` predicate below is the CALLERS' rule, so it reads the rule from
@@ -629,7 +629,10 @@ def _authority_hosts(netloc: str) -> list[str]:
     for entry in netloc.split(","):
         entry = entry.strip()
         if "@" in entry:                       # userinfo is not a host
-            entry = entry.rsplit("@", 1)[1]
+            # ⛔ FIRST `@`, matching `_split_uri` and libpq: for
+            # `postgresql://a@b@127.0.0.1/db` libpq's host is `b@127.0.0.1`
+            # (measured), so a last-`@` split would disagree with its own guard.
+            entry = entry.split("@", 1)[1]
         if entry.startswith("["):              # [::1]:5432
             end = entry.find("]")
             hosts.append(entry[1:end] if end != -1 else entry[1:])
@@ -677,7 +680,7 @@ def _split_uri(dsn: str) -> tuple[str, str]:
     ⛔ TWO BOUNDARIES, IN THIS ORDER — measured with `PQconninfoParse` (and
     `psql` dials what it reports), never read off a grammar:
 
-    1. the USERINFO ends at the LAST `@` in the region before the first `/`;
+    1. the USERINFO ends at the FIRST `@` in the region before the first `/`;
     2. the AUTHORITY ends at the first `/` AFTER that userinfo, **or** at the
        first `?` after it when no `/` intervenes — that `?` starts the query.
 
@@ -688,6 +691,14 @@ def _split_uri(dsn: str) -> tuple[str, str]:
             -> user='127.0.0.1', password='p?ss', host='203.0.113.9'  (query: none)
         postgresql://127.0.0.1:5432?host=db.prod.example.com
             -> host='db.prod.example.com'                            (a query!)
+        postgresql://u@localhost?host=203.0.113.9&password=p@localhost
+            -> user='u', password='p@localhost', host='203.0.113.9'
+
+    ⛔ THE `@` THAT ENDS USERINFO IS THE **FIRST** ONE, not the last: an `@` in a
+    password (`&password=p@localhost`) or in a host (`postgresql://a@b@h/db` ->
+    host `b@h`) is part of what FOLLOWS. Taking the LAST `@` moves the boundary
+    into the query, the query then looks like userinfo, and the remote `?host=`
+    becomes invisible — the same bypass one `@` further along.
 
     ⛔ EACH HALF-FIX IS A BUG. Splitting at the first `?` anywhere truncates the
     authority inside a password, so the guard certifies a REMOTE store as local.
@@ -700,7 +711,7 @@ def _split_uri(dsn: str) -> tuple[str, str]:
     offset = scheme_end + 3 if scheme_end != -1 else 0
     slash = rest.find("/")
     pre_slash = rest if slash == -1 else rest[:slash]
-    at = pre_slash.rfind("@")
+    at = pre_slash.find("@")
     after_userinfo = 0 if at == -1 else at + 1
     query_at = rest.find("?", after_userinfo)
     if query_at == -1:
@@ -736,7 +747,17 @@ def _uri_hosts(dsn: str) -> tuple[list[str], set[str]]:
         # where the authority ends, so the shape is refused, not resolved.
         if "#" in base:
             return [RECORD_DSN_AMBIGUOUS], set()
-        query = parse_qs(query_string)
+        # ⛔ NOT `parse_qs`: it DECODES `+` AS A SPACE, which libpq does not.
+        # `?host=127.0.0.1+` is host `127.0.0.1+` to libpq (measured: PQhostaddr
+        # gives 127.0.0.1) and `127.0.0.1` to `parse_qs` — a different dialled
+        # name, and a DNS search domain can make them different hosts. Split on
+        # `&` and percent-decode only, exactly the decoding libpq does.
+        query: dict[str, list[str]] = {}
+        for pair in query_string.split("&"):
+            if not pair:
+                continue
+            name, _, raw = pair.partition("=")
+            query.setdefault(unquote(name), []).append(unquote(raw))
         for key in ("hostaddr", "host", "service"):
             for value in query.get(key, []):
                 keys.add(key)
@@ -840,7 +861,11 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
     this restates its rule with the refusal that names ``--allow-remote-writes``,
     so an unresolvable host is refused unless the caller opts in deliberately.
     """
-    if not dsn:
+    # ⛔ `None` means NO record store was configured — nothing to guard. The EMPTY
+    # STRING is different: libpq reads PGHOST/PGHOSTADDR/PGSERVICE for it, so
+    # short-circuiting on `not dsn` would certify a `""` as provably local on a box
+    # whose environment points at a production server.
+    if dsn is None:
         return
     for host in _record_dsn_hosts(dsn) or [RECORD_DSN_NO_HOST]:
         if host.startswith("/"):
@@ -1426,7 +1451,14 @@ def run(args) -> dict:
     store = None
     if args.record_dsn:
         record = RecordStore(args.record_dsn, org, graph)
-        record.require_schema()
+        try:
+            # ⛔ INSIDE the connection's lifetime: a `CannotRun` raised here must
+            # close the connection, or a run that refused its target leaves one
+            # open against the store it just declined to touch.
+            record.require_schema()
+        except BaseException:
+            record.close()
+            raise
     if args.graph_port:
         store = GraphStore(args.graph_host, args.graph_port, graph_name)
 
