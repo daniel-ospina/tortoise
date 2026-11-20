@@ -1665,6 +1665,29 @@ def test_the_storage_attribute_allowlist_catches_every_legal_spelling() -> None:
             f"fail-open it pins, so its premise must be re-derived"
         )
 
+    # ── the other direction: a name a browser never makes an attribute ───────
+    # Reading the parser is only worth what it buys in BOTH directions. A source
+    # pattern counted an attribute NAME written inside a comment, a raw-text
+    # element or an inert `<template>` as a reader-facing attribute — so a page
+    # could be reddened by a string the browser never renders, while the guard's
+    # own name says "attributes the section carries". Pinned here because the
+    # parser route is the fix, and this is the half of it that a reader cannot
+    # check by looking at the allowlist's positive cases.
+    for label, wrapper in (
+        ("comment", '<!-- <h3 title="{claim}"> -->'),
+        ("script body", '<script>var s = "<h3 title=\'{claim}\'>";</script>'),
+        ("inert template", '<template><h3 title="{claim}"></h3></template>'),
+    ):
+        inert = wrapper.format(claim=marker)
+        with_inert = section.replace(opening, inert + opening, 1)
+        assert with_inert != section, f"could not insert the {label} case"
+        assert _attributes_outside_allowlist(with_inert) == [], (
+            f"an attribute name written inside a {label} is reported as a "
+            f"reader-facing attribute: the guard reds a correct page for a "
+            f"string no browser renders, and the allowlist's "
+            f"'the section carries' claim stops being true of its own answer"
+        )
+
 
 def test_faq_toc_anchors_all_resolve() -> None:
     """Every TOC entry must land on a real heading id."""
