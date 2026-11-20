@@ -1389,3 +1389,68 @@ def test_the_exit_contract_names_where_a_PRE_ARM_refusal_puts_its_reason(tmp_pat
     assert not out.exists(), (
         "a pre-arm refusal wrote a receipt, which is what made the old contract read "
         "as accurate")
+
+
+# ── #13919 review round 8 ───────────────────────────────────────────────────
+def test_r8_the_docstring_does_not_name_ONE_writer_for_the_mixed_population():
+    """R8: round 7 corrected the note, the policy comment and the receipt — and left
+    the MODULE DOCSTRING (lines ~33-38), which is what ``--help`` prints and what a
+    re-runner reads first, still asserting the refuted single-writer attribution.
+
+    ``tortoise/retrieval.py`` records that ``session-transcript`` is written ONLY by
+    the eval ingest lane and "⚠️ NOR the ask-fixture seeder" (which hardcodes
+    ``"k": "event"``), while the artifact's ``contains_targets_by_kind`` is
+    event=24999 / session-transcript=12606 — so a third of the population cannot be
+    that seeder's. This pin makes the correction stick in the one place a prose fix
+    forgets.
+    """
+    text = _TOOL.read_text()
+    assert "those stores are written\n" not in text, (
+        "the docstring still attributes the whole instrument population to one writer")
+    assert "MIXED" in text or "mixed" in text, (
+        "the docstring must say the population is mixed, not silently drop the claim")
+    # …and the module exposes the derivation it should be pointing at.
+    assert hasattr(mod, "_instrument_note")
+
+
+def test_r8_an_ABBREVIATED_flag_cannot_smuggle_a_credential_into_the_receipt(
+        tmp_path):
+    """R8: ``allow_abbrev`` defeated ``_redact_argv``'s exact-spelling match.
+
+    argparse accepts ``--live-ur`` by default, and ``_redact_argv`` keys on the exact
+    flag spelling — so the abbreviated form's value was recorded VERBATIM into
+    ``instrument.argv``, which is committed under ``docs/scoping/receipts/``. Measured
+    before the fix: ``main(["--arms","live","--live-ur","docker://:hunter2@h:1/g",
+    "--out",…])`` wrote ``hunter2`` into the receipt.
+    """
+    uri = "docker://:hunter2@127.0.0.1:1/tortoise"
+    out = tmp_path / "r.json"
+    # argparse reports a usage error by RAISING SystemExit(2) — that is the tool's
+    # documented "could not run" code, and it fires before any arm runs.
+    try:
+        rc = mod.main(["--arms", "live", "--live-ur", uri, "--out", str(out)])
+    except SystemExit as exc:
+        rc = exc.code
+    assert rc == 2, (
+        "an abbreviated flag must be REFUSED (argparse usage error, exit 2), not "
+        "silently accepted with an unredacted value")
+    assert not out.exists(), "a refused invocation must not write a receipt at all"
+
+
+def test_r8_redact_argv_catches_a_URI_VALUE_with_no_recognised_flag():
+    """R8, defence in depth: a bare token carrying a DB URI is redacted too.
+
+    With ``allow_abbrev=False`` the abbreviated spelling cannot reach this, but the
+    argv redaction should not depend on which flag spelled the value — a token that IS
+    a credentialed URI is the thing being kept out of git.
+    """
+    redacted = mod._redact_argv(["--arms", "live", "docker://:hunter2@h:1/g"])
+    assert "hunter2" not in " ".join(redacted), redacted
+    assert redacted == ["--arms", "live", "docker://h:1/g"], redacted
+
+    # Ordinary arguments are recorded VERBATIM — the receipt has to stay reproducible.
+    plain = ["--arms", "live", "--out", "r.json", "--sessions-dir", "/tmp/x"]
+    assert mod._redact_argv(plain) == plain
+    # The exact flag still takes the paired-value path.
+    assert mod._redact_argv(["--live-uri", "docker://:hunter2@h:1/g"]) == [
+        "--live-uri", "docker://h:1/g"]

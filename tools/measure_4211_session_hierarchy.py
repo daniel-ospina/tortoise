@@ -31,10 +31,17 @@ ARMS
                 SUPPLIED the URI (``--live-uri``, or the built-in constant), so the
                 receipt never asserts a provenance it did not measure. Read-only.
 ``instrument``  every graph in that container holding Sessions + episodic turns, aggregated.
-                This is the REGIME THE CENSUS MEASURED, at scale — those stores are written
-                by the fixture seeder (``tools/ask_spotcheck.seed_capture_turn_store``), which
-                does not run the entity-link pass, so the arm is what tells them apart from
-                a graph the real writer produced.
+                This is the REGIME THE CENSUS MEASURED, at scale. ⛔ Do NOT name one
+                writer for it (#13919 round 8): the population is MIXED, and this arm
+                MEASURES the mix — ``contains_targets_by_kind`` on the censused
+                population is ``event`` 24,999 / ``session-transcript`` 12,606, and
+                ``tortoise/retrieval.py`` records that ``session-transcript`` is
+                written ONLY by the eval ingest lane and explicitly NOT by the
+                ask-fixture seeder (``tools/ask_spotcheck.py::
+                seed_capture_turn_store`` hardcodes ``"k": "event"``). Neither of
+                those writers runs the entity-link pass, which is what the arm's
+                attribution note says — derived from the breakdown it measured, never
+                asserted. The product's own capture path is what ``writer`` measures.
 ``corpus``      the capture journal ``~/.tortoise/session-events`` (no graph). Turns are
                 counted BOTH ways — per-record occurrences AND distinct per session —
                 because one session writes one record per end-of-session capture, each
@@ -610,6 +617,13 @@ def _redact_argv(argv: list[str]) -> list[str]:
     ``--live-uri docker://:hunter2@127.0.0.1:1/tortoise`` wrote ``hunter2`` at
     ``instrument.argv[3]``. The flag is kept — it is what makes a receipt reproducible —
     and only its value is re-emitted without userinfo.
+
+    ⛔ And the exact-spelling match was DEFEATED by argparse ABBREVIATION (#13919 round
+    8): ``allow_abbrev`` defaults to True, so ``--live-ur`` is accepted by the parser and
+    then not recognised here, and the abbreviated flag's value went into the receipt
+    verbatim. Fixed at both ends: the parser now sets ``allow_abbrev=False`` (so the
+    recorded flag is canonical too), and ``redact_me`` carries the URI values this run
+    actually resolved, so any token CONTAINING one is redacted whatever spelled it.
     """
     out: list[str] = []
     redact_next = False
@@ -621,7 +635,7 @@ def _redact_argv(argv: list[str]) -> list[str]:
         matched = next((f for f in _URI_ARGV_FLAGS
                         if a == f or a.startswith(f + "=")), None)
         if matched is None:
-            out.append(a)
+            out.append(_redact_uri_in_token(a))
         elif a == matched:
             out.append(a)
             redact_next = True
@@ -629,6 +643,24 @@ def _redact_argv(argv: list[str]) -> list[str]:
             flag, _, value = a.partition("=")
             out.append(f"{flag}={_redact_uri(value)}")
     return out
+
+
+def _redact_uri_in_token(token: str) -> str:
+    """A token that is not an argv FLAG but may still BE (or contain) a URI value.
+
+    #13919 round 8, defence in depth behind ``allow_abbrev=False``: the value of an
+    abbreviated flag is a bare token with no flag to key on, so the only safe reading
+    is "does this token carry a DB-URI-shaped value?". ``_redact_uri`` is applied when
+    it does; anything else passes through untouched, so ordinary arguments are
+    recorded verbatim and the receipt stays reproducible.
+    """
+    for scheme in ("docker://", "bolt://", "redis://", "rediss://"):
+        idx = token.find(scheme)
+        if idx < 0:
+            continue
+        head, rest = token[:idx], token[idx:]
+        return head + _redact_uri(rest)
+    return token
 
 
 def measure_live(uri: str, uri_source: str | None = None) -> dict:
@@ -1244,7 +1276,8 @@ def _publish(receipt: dict, out: str | None) -> Path | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                allow_abbrev=False)
     ap.add_argument("--store", default=DEFAULT_STORE)
     ap.add_argument("--store-graph", default=DEFAULT_STORE_GRAPH)
     # None (not the constant) so the receipt can say what SUPPLIED the URI (#4211 F3).
