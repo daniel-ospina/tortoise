@@ -291,7 +291,24 @@ SWEEP_NAMES = 66
 #: re-pointing them at a private spelling would break the double's fidelity, which is exactly the
 #: `super().query` / `declared_markers.update` precedent declared above. No SDK-holding receiver is
 #: added, and no new shape appears: the typed-reference count is `0` on this tree, measured.
-SWEEP_RESIDUE = (11829, "0a549dd352726b5c")
+#:
+#: RE-CUT AGAIN → (11832, "d96145e7d7b3d741") by the SAME PR, and this move is a REPAIR of a
+#: MIS-TYPED receiver rather than a new allowance. `#13899`'s sweep renamed
+#: `tortoise/onboarding/seed.py`'s seed-surface calls from `create_subject`/`create_edge` to the
+#: private spellings, because the parameter holding the surface is NAMED `sdk` and this tool's
+#: own contract (`_SDKISH`) says such a name IS the SDK. It is not one here: the object is the
+#: seed surface (`hosted_api._OrgSeedSurface` / `onboarding.selfhost._SdkSeedSurface`), whose
+#: published doors ARE `create_subject`/`create_edge` — the private spellings are what the
+#: surface calls on the real SDK underneath, so the swept form could only raise `AttributeError`
+#: (measured: twelve `test_onboarding_selfhost_w12.py` cases and four `test_onboarding_seed.py`
+#: cases red, plus a 500 from the REST seed route). The receiver is renamed `surface` there and
+#: the public doors are restored, so the three call sites become UNTYPED receivers — `create_edge`
+#: was already a residue row (`proj.create_edge`), and `surface.create_subject` ×2 /
+#: `surface.create_edge` ×1 are the same ordinary-word shape on an object no typing can decide.
+#: +3 = 11832 − 11829; the typed-reference count went 3 → 0 and is `0` at this pin, measured.
+#: ⛔ The alternative — giving a SURFACE private-looking doors so a name-based sweep stays quiet —
+#: is the sweep dictating the adapter's API, and it is what this re-cut undoes.
+SWEEP_RESIDUE = (11832, "d96145e7d7b3d741")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
