@@ -933,14 +933,30 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int] | None = None
             "AFFIRMATIVELY for them. The product's own capture path is what the "
             "`writer` arm measures separately.")
 
-    mixed = ("This population is not one writer's output \u2014 `tortoise/retrieval.py` "
-             "records that `session-transcript` is written only by the eval ingest "
-             "lane, and `tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes "
-             '`"k": "event"`' + ", so it writes none of them. " if chunk_n else
-             "This population carries only `event` targets, which the ask-fixture "
-             "seeder does write; `tortoise/retrieval.py` records that "
-             "`session-transcript` is written only by the eval ingest lane, and "
-             "NONE was measured here. ")
+    # ⛔ THREE branches, selected on what was MEASURED (#13919 cycle 10). Selecting on
+    # `chunk_n` alone made the `else` arm assert "carries only `event` targets" for ANY
+    # population without `session-transcript` — including one whose breakdown is
+    # `event=5, statement=3`, i.e. a sentence contradicted by `{parts}` in the SAME
+    # string and by `contains_targets_by_kind` in the SAME body. That is not
+    # hypothetical: the committed receipt's own WRITER arm carries
+    # `[['event', True, 22], ['statement', False, 3]]`, so the population shape this arm
+    # exists to census has non-event targets and no chunks. `turn_n` was computed and
+    # never used in the selection — which is how the wrong arm got chosen.
+    non_event = total - turn_n
+    if chunk_n:
+        mixed = ("This population is not one writer's output \u2014 `tortoise/retrieval.py` "
+                 "records that `session-transcript` is written only by the eval ingest "
+                 "lane, and `tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes "
+                 '`"k": "event"`' + ", so it writes none of them. ")
+    elif non_event:
+        mixed = (f"This population carries no `session-transcript` targets and is NOT "
+                 f"event-only either ({parts}) \u2014 this arm measured no writer for the "
+                 "non-`event` kinds, so it attributes none of them. ")
+    else:
+        mixed = ("This population carries only `event` targets, which the ask-fixture "
+                 "seeder does write; `tortoise/retrieval.py` records that "
+                 "`session-transcript` is written only by the eval ingest lane, and "
+                 "NONE was measured here. ")
 
     return (
         f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "

@@ -2006,3 +2006,44 @@ def test_c9_a_BEFORE_side_partial_read_is_a_verdict_even_with_a_READABLE_delta(
         "one BEFORE-side query raised, the delta was readable, and the arm published "
         "itself as MEASURED")
     assert "aboutObject_by_endpoint" in body["unmeasurable"]
+
+
+# ── #13919 review cycle 10 ──────────────────────────────────────────────────
+def test_c10_no_kinds_but_events_is_not_reported_as_only_event(monkeypatch):
+    """C10 (P2): the note's `else` arm was selected on `chunk_n` ALONE.
+
+    So ANY population without `session-transcript` was described as "carries only
+    `event` targets" — including one whose own breakdown is `event=5, statement=3`,
+    i.e. a sentence contradicted by `{parts}` in the SAME string and by
+    `contains_targets_by_kind` in the SAME body. Not hypothetical: the committed
+    receipt's own WRITER arm carries `[['event', True, 22], ['statement', False, 3]]`,
+    so the population shape this arm exists to census has non-event targets and no
+    chunks. `turn_n` was computed and never used in the selection, which is how the
+    wrong arm got chosen.
+    """
+    zero = {"aboutObject_edges": 0, "turns_with_aboutObject": 0}
+    note = mod._instrument_note({"event": 5, "statement": 3}, zero)
+    assert "carries only `event` targets" not in note, note
+    assert "event=5" in note and "statement=3" in note
+    assert "NOT event-only" in note, note
+
+    # Non-event kinds and NO `event` at all: same arm, and it must not claim otherwise.
+    only_other = mod._instrument_note({"statement": 5}, zero)
+    assert "carries only `event` targets" not in only_other, only_other
+    assert "NOT event-only" in only_other, only_other
+
+    # The other two arms are unchanged, so the receipt's population is unaffected.
+    assert "not one writer's output" in mod._instrument_note(
+        {"event": 7, "session-transcript": 3}, zero)
+    assert "carries only `event` targets" in mod._instrument_note({"event": 10}, zero)
+
+    # …and drive the ARM, so the helper cannot be fixed while the arm ignores it.
+    class _MixedKinds(_FakeInstrumentGraph):
+        def query(self, cypher: str, params=None) -> _Result:
+            if "pointKind, count(*)" in cypher:
+                return _Result([["event", 5], ["statement", 3]])
+            return super().query(cypher, params)
+
+    body = _instrument(monkeypatch, {"g": _MixedKinds(sessions=2, turns=5)})
+    assert body["contains_targets_by_kind"] == {"event": 5, "statement": 3}
+    assert "carries only `event` targets" not in body["note"], body["note"]
