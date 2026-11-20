@@ -605,8 +605,21 @@ _TAG = (r'<(?:"(?:[^"\n]|' + _SOFT + r')*"|\'(?:[^\'\n]|' + _SOFT + r')*\''
         r'|[^>"\n]|' + _SOFT + r')*>')
 #: …and an ESCAPED character inside a label is a unit too (`[a\]b]` is one label), which
 #: is the same ordering rule as the tag's quoted value: the escape is tried first so the
-#: `]` it protects cannot end the run.
-_BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
+#: `]` it protects cannot end the run. ⛔ AND THAT ORDERING IS TIE-BREAKING ONLY — it says
+#: nothing about PARSE COUNT (#13921 review, finding 1, MEASURED). The catch-all below
+#: EXCLUDES `\`, so a backslash is reachable through the escape ALONE: the two branches are
+#: DISJOINT and this closure repeats a disjoint set. While it admitted `\` the pair
+#: OVERLAPPED and a `[` whose `]` was unreachable matched 2^n ways — and this file's walk,
+#: which calls `_unit_pat.match` at EVERY position, must therefore evaluate `_BRACKET` on
+#: every `[`, where the single-pass gap this replaced could skip it. MEASURED through that
+#: walk, `[` + 20 backslashes took 0.0196 s, 24 -> 0.0973, 28 -> 0.5960, 32 -> 3.8566 s
+#: (≈x1.6 per character, i.e. a hang with no diagnostic and no witness that reds), and
+#: 0.00004 s flat at every one of them once the pair is disjoint — the walk's boundary list
+#: IDENTICAL on those rows and the ANSWER identical on every bracket witness row (`[\]`,
+#: `[a\]b]`, `[a\]b`, `[^note]`, `[12]`, `[]`, `[x `), `[a\]b]` still ONE label. Disjoint
+#: branches is the remedy the ReDoS literature prescribes for exactly this shape (each
+#: character parses one way); an atomic group would mask the ambiguity without removing it.
+_BRACKET = r"\[(?:\\.|[^\\\]\n]|" + _SOFT + r")*\]"
 #: ⛔ ONE GAP, UNITS ONLY — NO PROSE (#13900 verification, MEASURED). A prose-crossing gap
 #: was tried and it flags FIVE live-document sentences, two of them QUOTATIONS of refuted
 #: claims ("`prints nothing` would over-claim") which the arm's contract says must not be read
@@ -619,7 +632,13 @@ _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
 #: CORRECTED: those two reproductions are NOT graded by this gap and this PR no longer claims
 #: they are (#13921 review, F2/P1-1) — what the retry fixes is a listed verb sitting INSIDE the
 #: separator (`is`, a URL's `:`), not a word between the command and the verb.
-_OPEN_BRACKET = r"\[(?![^\]\n]*\])"
+#: ⛔ AND THE LOOKAHEAD MUST LEARN THE SAME INTERIOR AS `_BRACKET` (#13921 review, finding 1).
+#: `(?![^\]\n]*\])` counts a `\` as ORDINARY, so it asks "is a `]` reachable?" under a
+#: different grammar from the unit it guards, and the two disagree on `[a\]b]`-shaped input —
+#: the very residual this pair exists to keep bounded. The pair therefore moves TOGETHER: the
+#: one-constant variant (`_BRACKET` widened alone) stops matching `[\]` and `[a\]b`, so the walk
+#: would stop dead on those two shapes (MEASURED: `[\]` went graded -> `[]`).
+_OPEN_BRACKET = r"\[(?!(?:\\.|[^\\\]\n])*\])"
 #: ⛔ AND AN UNTERMINATED TAG IS ONE TOO (#13921 review, finding 1, MEASURED). `_TAG` requires a
 #: closing `>`, so BEFORE this constant a bare `<` matched NOTHING in the alternation and the
 #: separator walk stopped dead on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
@@ -627,12 +646,21 @@ _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
 #: it. That is a fail-open regression wearing a widening's clothes — the same argument the `&`
 #: branch and `_OPEN_BRACKET` were added under — and the comment at item 1 asserting that `<`
 #: "has exactly one way to parse" was FALSE for an unterminated one: it had ZERO.
-#: The pair stays disjoint by the same construction as the brackets, and the ORDER matters:
-#: `_TAG` is tried first and requires the `>`, so this lookahead is reached only when `_TAG`
-#: failed. Its `[^>\n]*` is line-bounded, so a tag whose interior crosses a SOFT break
-#: (`<span\ntitle="a">`) is taken whole by `_TAG` and never reaches here — the same declared,
-#: bounded residual as `[a\n]` under `_BRACKET`/`_OPEN_BRACKET`.
-_OPEN_TAG = r"<(?![^>\n]*>)"
+#: The ORDER is what keeps the pair disjoint — `_TAG` is tried first and requires the `>`, so
+#: a `<` reaches this alternative only when `_TAG` cannot parse. ⛔ AND THE LOOKAHEAD THAT USED
+#: TO GUARD IT WAS ITSELF A REGRESSION, SO IT IS GONE (#13921 review, finding 2, MEASURED):
+#: `_OPEN_TAG` is a bare `<`. `(?![^>\n]*>)` asserted MORE than "_TAG failed" — it REFUSED a
+#: `<` whose `>` WAS reachable but which `_TAG` still could not parse, and `_TAG`'s catch-all
+#: excludes `"`, so an UNBALANCED `"` did exactly that: at `8f108b5211` the separators `<">`,
+#: `<…!">` and `<"-$>→` returned `[]` where `origin/main` GRADED them. A 30,000-case
+#: punctuation fuzz found 10 such losses and ALL 10 were `<` + an unbalanced `"` + a later `>`;
+#: every other difference carried a word character, i.e. the DECLARED prose limit. With the bare
+#: `<` those three grade again and **0 of 24 witness rows moved** — `<` unterminated, terminated
+#: tags and tag-over-soft-break stay byte-identical. Dropping the lookahead cannot buy back an
+#: `_OPEN_BRACKET`-style residual: a bare `<` is ONE character, so there is nothing left to scan
+#: to the end of a line. A tag whose interior crosses a SOFT break (`<span\ntitle="a">`) is
+#: taken whole by `_TAG` as before, so that declared residual is untouched.
+_OPEN_TAG = r"<"
 #: ⛔ ONE GAP, ONE UNIT LIST, AND THE UNITS ARE WHAT THE MATCHER WALKS (#13921 review, F5).
 #: `_GAP_UNIT` is the single alternation every separator character goes through; the separator is
 #: its `*`-CLOSURE, and the matcher walks that closure unit by unit (below) instead of letting a
