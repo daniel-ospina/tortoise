@@ -5164,6 +5164,73 @@ jobs:
             ${{ runner.temp }}/record-postgres/pytest.log
             ${{ runner.temp }}/record-postgres/junit.xml
           if-no-files-found: ignore
+      # ── #13337: the cache-graph declaration's END-TO-END legs ───────────────
+      #
+      # ⛔ WHY THEY ARE HERE AND NOT ON A SURFACE LANE (PR #14068 review, finding
+      # 3). `test_13337_cache_graph_declaration.py` is registered on `api` + `core`
+      # so its DB-FREE pins run on any diff that can break them — but its two
+      # end-to-end legs (an org-wide write reconciling CLEAN on the READ name, and
+      # the same tenant written through BOTH doors) need a record DSN **and** a
+      # graph URI. On the fast matrix they collect and SKIP, so the issue's own
+      # acceptance — the headline claim of this change — had NO machine coverage
+      # anywhere, and a revert of the very block they pin would have merged green.
+      #
+      # ⛔ THE FALKORDB PROVISION IS PLACED AFTER EVERY ARMED RECORD STEP, on
+      # purpose: `uri_graph` exports `TORTOISE_DB_URI` into `$GITHUB_ENV`, so it is
+      # visible to every LATER step of this job. The twelve files above are record
+      # lanes that build their graphs themselves and deliberately run with NO URI
+      # (this job's `TORTOISE_TEST_CARVE_OUT: 1` is that opt-in), so provisioning
+      # before them would silently hand them a server they were never written for.
+      # `legacy: "false"` — this job had no `services:` block to preserve, and the
+      # file reads only `TORTOISE_DB_URI`; the passwordless 16379 family is not
+      # used by anything here.
+      - name: Provision FalkorDB for the cache-graph end-to-end legs (#13337)
+        uses: ./.github/actions/falkordb-provision
+        with:
+          uri_graph: tortoise_test_matrix
+          legacy: "false"
+      - name: Run the cache-graph declaration's end-to-end legs (#13337 — both stores)
+        # The whole FILE runs, not a `-k` subset: its DB-free cases are cheap and
+        # re-running them here means an armed lane never reports a smaller set of
+        # pins than the surface lane that skipped its end-to-end half.
+        #
+        # ⛔ WHY THIS IS AN ARM AND NOT A HOPE: the file's own `_both_stores()`
+        # reads the ENVIRONMENT, never a switch — `TEST_RECORD_DB_URI` (this
+        # job) and `TORTOISE_DB_URI` (the provision above) both set means the
+        # legs MUST run, exactly one set is a FAILURE, and neither set is the
+        # only shape that may skip. A `REQUIRE_*` switch nobody exports would be
+        # an inert guard that only ever skips, which is why there is none here.
+        # The wiring itself is pinned by
+        # `test_the_armed_CI_job_supplies_BOTH_stores` in this file, so deleting
+        # the step or the provision reds a test instead of quietly restoring the
+        # unexecuted gate (#13337 review, finding 3).
+        run: |
+          set +e
+          SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
+          mkdir -p "$SCRATCH"
+          timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
+            tests/test_13337_cache_graph_declaration.py \
+            -v --timeout=300 -p no:cacheprovider -r fEs \
+            --junitxml="$SCRATCH/junit-13337.xml" -o junit_family=xunit1 \
+            2>&1 | tee "$SCRATCH/pytest-13337.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$SCRATCH/pytest-13337-rc"
+          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest-13337.log" --rc "$rc" \
+            --junit "$SCRATCH/junit-13337.xml"
+          exit $rc
+      - name: Stop FalkorDB for the cache-graph end-to-end legs (#13337)
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
+      - name: Upload the cache-graph end-to-end log (#13337)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-13337-cache-graph
+          path: |
+            ${{ runner.temp }}/record-postgres/pytest-13337.log
+            ${{ runner.temp }}/record-postgres/junit-13337.xml
+          if-no-files-found: ignore
       - name: Stop Postgres (#9551)
         if: always()
         uses: ./.github/actions/postgres-teardown

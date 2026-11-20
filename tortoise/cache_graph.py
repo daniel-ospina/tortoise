@@ -22,10 +22,15 @@ of an Object and an Event
 
 * record: 1 object + 1 event under ``(org, gid)``
 * cache ``org_<org>`` (the FACT in ``graphs.namespace``): 1 Object + 1 Event
-* cache ``org_<org>_<gid>`` (the canonical derivation): 0 / 0
+* cache ``org_<org>_<gid>`` (the canonical derivation): **ABSENT — the graph was
+  never created**, not "present and empty" (the capture records
+  ``GRAPH_NOT_FOUND``/``absent``, which is why the derived reconcile below grades
+  every key missing rather than mismatched)
 * ``record-reconcile --cache-graph org_<org>_<gid>``: ``divergent``,
   ``missing_in_cache=2`` — on a tenant whose cache is complete
-* the same command on ``org_<org>``: ``missing_in_cache=0``
+* the same command on ``org_<org>``: ``missing_in_cache=0``, ``field_mismatches=6``
+  (all six on the Event — that is #12949's root, projection fidelity, and this
+  module does not touch it)
 
 Nothing failed. The write path was coherent; the NAME was derived.
 
@@ -46,7 +51,9 @@ whose namespace is the legacy ``org_<org>``. Guessing wrong there opens an EMPTY
 graph, and every record key reports ``missing_in_cache``: a coherent cache grades
 ``divergent``. A wrong VERDICT is worse than no verdict, which is why the shipped
 verbs refused ``--cache-graph``-less use rather than guess. They can stop
-refusing *only* because a fact is now available.
+refusing *only* for the arm where a FACT is available — and both verbs still
+refuse (exit 2) on the arm where nothing can answer, which is the recorded
+decision ``#13337`` states and this module does not reverse.
 
 THE SOURCES, in order, and each says which one answered:
 
@@ -56,10 +63,14 @@ THE SOURCES, in order, and each says which one answered:
    plane, the same read ``hosted_api._assert_graph_owned`` makes and the same
    surface ``record_writer.record_tenant_for`` derives the tenant from.
 3. :data:`SOURCE_DERIVED` — :func:`canonical_cache_graph_name`, the registry
-   spelling. ⛔ LABELLED, never presented as a fact: a verdict computed on a
-   derived name carries ``source="derived"`` so an operator can see that the
-   coordinate was assumed. Only reachable when the control plane cannot answer
-   (self-host, a registry-only deployment, an unreachable control plane).
+   spelling. ⛔ LABELLED, never presented as a fact, and NEVER GRADED: the two
+   shipped consumers (``record-reconcile``, ``record-restore``) REFUSE on this
+   source — exit 2, nothing compared / nothing wiped — because an assumed
+   coordinate yields a wrong verdict (or an emptied graph) instead of no answer.
+   It is returned so they can name the spelling they would have used. See
+   ``#13337``'s recorded decision: the refusal "is correct and must stay".
+   Only reachable when the control plane cannot answer (self-host, a
+   registry-only deployment, an unreachable control plane).
 
 ⛔ **THE RECORD ROLE CANNOT ANSWER THIS.** ``public.graphs`` is not readable by
 ``tortoise_record_app`` (measured: ``permission denied for table graphs``), so the
@@ -109,7 +120,16 @@ class CacheGraph:
 
     @property
     def is_fact(self) -> bool:
-        """Was this READ (the operator's word, or the control plane)? """
+        """Is this name ANSWERED rather than assumed?
+
+        ⚠️ Read the name precisely (review P3). It means *"this coordinate is
+        not the derived fallback"*, NOT *"this coordinate was READ":
+        :data:`SOURCE_FLAG` is the operator's ASSERTION, which this code cannot
+        verify and does not try to. So ``is_fact`` is a permission — "this name
+        may be graded / wiped" — and the exact provenance is ``source``, which
+        every consumer reports. A caller that needs "was it READ" must test
+        ``source == SOURCE_CONTROL_PLANE``.
+        """
         return self.source in (SOURCE_FLAG, SOURCE_CONTROL_PLANE)
 
 
@@ -132,6 +152,15 @@ def namespace_from_control_plane(org_id: str, graph_id: str) -> str | None:
     absent row, a blank namespace, an unimportable client) rather than raising or
     guessing: this is a name resolution, and a name that could not be read must
     fall through to the labelled derivation, not turn a reconcile run into a 500.
+
+    ⛔ THE VALUE IS WHITESPACE-TRIMMED, and that is a NORMALISATION rather than
+    a rewrite: ``namespace`` is an operator-supplied TEXT column, so it can
+    carry padding, and ``declared_cache_graph`` trims the STATED name (what an
+    operator typed). Two readers of one value must agree on its normalisation or
+    a caller that compares them (the verbs' "stated name disagrees with the fact"
+    WARNING) prints a disagreement for an operator who stated exactly the fact —
+    measured, with ``namespace = ' org_x '``. Trimming here means the ONE place a
+    namespace enters the process is the ONE place it is normalised.
     """
     if not org_id or not graph_id:
         return None
@@ -152,7 +181,7 @@ def namespace_from_control_plane(org_id: str, graph_id: str) -> str | None:
     namespace = rows[0].get("namespace")
     if not isinstance(namespace, str) or not namespace.strip():
         return None
-    return namespace
+    return namespace.strip()
 
 
 def declared_cache_graph(*, org_id: str, graph_id: str,

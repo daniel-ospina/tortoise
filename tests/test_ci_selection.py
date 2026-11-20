@@ -10447,6 +10447,13 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
     # row and nothing reds.
     "test_vector_parity_13906.py",
+    # #13337 (PR #14068) — the fold that READ a tenant's cache graph instead of
+    # deriving it from the credential. A file this fold ADDED and registered on
+    # `api` + `core`; its first cut shipped the surface rows but no `durations:`
+    # row, which is exactly the #3400/#4348 trap (a default is not a reading), so
+    # it is listed here. Its end-to-end legs are armed in `test-record-postgres`
+    # (see that file's `test_the_armed_CI_job_supplies_BOTH_stores`), not here.
+    "test_13337_cache_graph_declaration.py",
 )
 
 
