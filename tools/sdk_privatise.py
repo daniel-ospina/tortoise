@@ -197,24 +197,40 @@ SWEEP_NAMES = 66
 #: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
-#: RE-PINNED → (11804, "e0c67cf6a5e97d20") by the lane that found `main` RED on `surface-guard` and
-#: traced it to this pin, not to a typed reference. ⛔ `surface-guard` is NOT in the
-#: `DEFERRABLE_LEGS` set (`python-ci.yml:5457`), so its red is never excused as main's own and it reds
-#: the REQUIRED `python-ci-gate` for every open PR — measured on `44747206237`: `surface-guard`
-#: failure, `ci-introduced-failure` success, `python-ci-gate` failure. So this is a fleet-wide block,
-#: and the pin is the only arm still red: `typed references still pointing at a public name: 0` on
-#: this tree (that half was repaired separately).
-#: The move is +10 from the pin, and all ten rows are one new file, `#13950`'s (`959c030659`)
-#: `tests/test_business_map_filer.py` — plain `dict.update(...)` on a parsed map document, which is
-#: the same documented ordinary-word edge as `declared_markers.update` and
-#: `retired_vector_labels.update` above, not a reference to a retired public name:
-#:   * `d['points'][0].update` 3, `d['events'][0].update` 1, `d['subjects'][0].update` 1 — the
-#:     `(lambda d: d[…][0].update(…), "<reason>")` mutant table (`:677`, `:680`, `:681`);
-#:   * `next((e for e in d['edges'] if 'op' in e).update` 4 and
-#:     `next((o for o in d['objects'] if …).update` 1 — the same table's edge/object mutants
-#:     (`:682`, `:685`, `:1344`, `:1346`).
-#: Each was attributed by re-running `edits_for` on that one file, never by arithmetic: the row set
-#: on the pinned tree was diffed against this one per file, and this file is the ONLY delta.
+#: ⛔ WHY THIS PIN'S RED IS NEVER EXCUSABLE AS `main`'s OWN: `surface-guard` is NOT in the
+#: `DEFERRABLE_LEGS` set (`python-ci.yml:5457`), so the loop at `:5563` sends it straight to
+#: `FAILED_LEGS` and it reds the REQUIRED `python-ci-gate` for EVERY open PR — measured on
+#: `44747206237`: `surface-guard` failure, `ci-introduced-failure` success, `python-ci-gate` failure.
+#: A wrong pin here is therefore a fleet-wide block, not one PR's inconvenience; the typed-reference
+#: arm is a separate repair and reads `0` on this tree.
+#: The +10 rows below the previous pin are all ONE file, `#13950`'s (`959c030659`)
+#: `tests/test_business_map_filer.py` — plain `dict.update(...)` on a parsed map document, the same
+#: documented ordinary-word edge as `declared_markers.update` / `retired_vector_labels.update`
+#: above, and NOT a reference to a retired public name. Counted at THIS tree's copy of that file
+#: (so it is a row list taken from this head, not another head's — the D5 rule): `d["points"][0]`
+#: 3 (`:687`, `:1346`, `:1348`), `d["events"][0]` 1 (`:686`), `d["subjects"][0]` 1 (`:683`),
+#: `next(e for e in d["edges"] …)` 4 (`:688`, `:691`, `:1350`, `:1352`), objects 1 (`:1344`) = 10.
+#: ⛔ RE-CUT AGAIN onto `origin/main` `6fbd96f270` → (11804, "e0c67cf6a5e97d20"), MEASURED with
+#: `--repin` on THIS tree. The value is the same one `origin/main` observes on its OWN tree
+#: (`uv run python tools/sdk_privatise.py --repin` in a clean checkout of `6fbd96f270` prints
+#: `(11804, 'e0c67cf6a5e97d20')`), so NONE of the rows below the previous pin are this PR's:
+#: the four typed references this lane exists to fix were already re-pointed on `main` by
+#: `#13973` (`tests/test_13826_write_gate.py` calls `_ingest_corpus` at `6fbd96f270`, and this
+#: PR's diff no longer touches that file at all), so `typed references still pointing at a
+#: public name: 0` on both sides. The +10 over `main`'s own pin of 11794 are the BASE's, from
+#: the merges that landed while this PR waited (`#13914`, `#13950`, `#13972`-era); they are not
+#: enumerated here, because a row list taken from another head is the D5 rot this repo forbids
+#: (`docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`, deviation D5). ⛔ The
+#: practical effect is that `main`'s `--check` is RED on its own tree at `6fbd96f270` and this
+#: re-cut turns it green; re-derive the pair with `--repin`, never by arithmetic on the last one.
+#: RE-MEASURED AT THE MERGE onto `origin/main` `3d99bd51d6` (the merge that resolved this file's
+#: provenance conflict): `--check` exits **0** — `typed references … 0` and
+#: `untyped receivers … 11804` against a pin of `(11804, "e0c67cf6a5e97d20")`, so observed ==
+#: pinned on the merged tree, and the three commits `main` gained after the pin's own re-cut did not
+#: move the residue. ⚠️ `3d99bd51d6` (`#13956`) had ALREADY landed this same pin on `main`, so after
+#: this merge the PR's remaining delta against `main` is comment-only: the block above is the
+#: provenance this PR contributes for a re-pin that is already in the tree, and the value below is
+#: confirmed rather than newly chosen. Re-derive with `--repin` on your own tree, never by arithmetic.
 SWEEP_RESIDUE = (11804, "e0c67cf6a5e97d20")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
