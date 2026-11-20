@@ -2878,7 +2878,8 @@ surfaces:
   # cut-over graph the chokepoint does not append, so one number space remains and
   # `position_divergence` is unreachable in steady state. `core` selection rationale: the DB-FREE
   # legs (the decision incl. its real helper, the chokepoint's skip, the seam's two `seq is None`
-  # states, the coverage reading's export flag, and the wiring gate's ten mutants) are the ones
+  # states, the coverage reading's export flag, and the wiring gate's ELEVEN mutants — five
+  # chokepoint values, five door shapes, and the arming leg that makes the rule run at all) are the ones
   # that catch a deletion — and BOTH files they pin resolve the
   # `core` fallback, measured: `--changed-files tortoise/live_write.py` -> `surfaces: [core], full:
   # false`, and the same for `tortoise/record_writer.py`. So this row is LOAD-BEARING, not a rider
