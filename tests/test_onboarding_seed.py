@@ -375,10 +375,12 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
     for surface_cls in (hosted_api._OrgSeedSurface, selfhost._SdkSeedSurface):
         missing = sorted(name for name in required if not hasattr(surface_cls, name))
         assert not missing, (
-            f"{surface_cls.__name__} does not publish {missing}, which "
-            f"`tortoise/onboarding/seed.py` calls as `surface.{missing[0]}(…)` — a seed "
-            "against this lane would raise AttributeError, and a double renamed in "
-            "lockstep would keep the suite green")
+            f"{surface_cls.__name__} does not publish {missing}. The seed's handle surface "
+            "requires them — the write doors directly (`surface.create_subject(...)`) and "
+            "`query` through `_run(handle, ...)` from `find_subject_by_name(surface, ...)` — "
+            "so a seed on this lane raises AttributeError, and a double renamed in lockstep "
+            "keeps the suite green. Do not narrow this set: `query` is the door whose "
+            "indirection is why the scan alone was not enough.")
 
 
 def test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk():
