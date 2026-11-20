@@ -16556,8 +16556,8 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         # the NUMBER is part of it, because without the number the predicate reds a true
         # sentence about another call site (cycle 4, P2 — MEASURED). Residual: a
         # restatement that drops the number is out of scope, which is a different claim.
-        ("45728", "a DIFFERENT call site"),
-        "measured at this head: `:45728` is a NAME in an import list "
+        ("45867", "a DIFFERENT call site"),
+        "measured at this head: `:45867` is a NAME in an import list "
         "(`subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,`), not a call. The "
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
         "prints (#13794 measurement, P2)",
@@ -16696,6 +16696,24 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "hosted_api",
         "if count + est > max_points:",
     ),
+    # ⛔ THE I7 SPAN'S `#13841` RE-POINT. This row states the CURRENT `nodes_used` and
+    # `max_nodes` addresses, and until these two entries existed NO ARM read them — the
+    # `_i7` arms bind `04-plan.md`'s range endpoints, not this row's pair of anchors, so a
+    # stale address here read as current indefinitely. That is the false-PASS the
+    # `_D5_CURRENT_CLAIMS` mechanism exists to close (measured: staling BOTH `:15375` and
+    # `:15385` left the whole file green before these were added).
+    (
+        "the I7 `nodes_used` read",
+        r"its `nodes_used` read at `:(?P<n>\d+)`",
+        "hosted_api",
+        "nodes_used = await asyncio.to_thread(",
+    ),
+    (
+        "the I7 `max_nodes` read",
+        r"and its `max_nodes` at `:(?P<n>\d+)`",
+        "hosted_api",
+        'max_nodes = org.get("max_points")',
+    ),
 )
 
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
@@ -16733,7 +16751,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     text = d5[0]
     # ⛔ THE ROW'S OWN COUNT IS NOW TYPED (#13900 review, P2-1). The row states how
     # many `:N` tokens share its line, and until this assert NOTHING read that figure — which is
-    # why `~50` survived four sibling corrections and disagreed with the `262` this file already
+    # why `~50` survived four sibling corrections and disagreed with the count this file already
     # stated elsewhere. It is re-MEASURED here rather than typed as a constant, so the row cannot
     # drift from the line it describes: the sentence is the claim, the line is its subject.
     _stated_count = re.search(r"carrying (\d+) numbers", text)
