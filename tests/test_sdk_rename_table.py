@@ -1824,12 +1824,19 @@ def test_every_group_has_a_pinned_representative() -> None:
     members are all "quiet". This closes that hole for every group in the partition.
     """
     got = {r["name"]: r["target"] for r in part_a_rows()}
-    # ⛔ #12901 FINAL batch re-cut. Ten representatives were privatised, so ten groups
-    # have no live member and their pin cannot be "this member maps to this target" —
-    # there is no member and no row. Those ten move to `emptied` below, where the pin
-    # is the fact that survives: the group IS empty, which is what §C5 reports. Nothing
-    # was dropped: every group in the partition is still pinned to exactly one of the
-    # two sets, and the two-way closure at the end still reds on a group that escapes
+    # ⛔ #12901 FINAL batch re-cut. SIX groups have no live member and their pin cannot be
+    # "this member maps to this target" — there is no member and no row. They move to
+    # `emptied` below, where the pin is the fact that survives: the group IS empty, which
+    # is what §C5 reports. ⛔ THE SIX ARE NOT SIX OF THIS BATCH'S MAKING: W6, W7, W16, N5
+    # and N6 had no live member BEFORE it (`#4282` deleted their only members), so this
+    # batch emptied R9 and INHERITED the rest — and the C5 arm above records that history
+    # and now names all six, R9 included, because R9's emptiness is a different shape (the
+    # canonical doc still names its two members). An earlier cut of this comment said "ten
+    # representatives were privatised, so TEN groups have no live member", which the
+    # `emptied` literal below refutes (#13899 re-cut review, P2) — the count that matters
+    # here is GROUPS, and it is six.
+    # Nothing was dropped: every group in the partition is still pinned to exactly one of
+    # the two sets, and the two-way closure at the end still reds on a group that escapes
     # both.
     representatives = {
         # Every entry below is a group whose LIVE member set is non-empty, pinned to the
