@@ -845,9 +845,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     #    sentence claimed `match` gave "exactly the parse the greedy closure took", which is
     #    FALSE): a `*`-closure BACKTRACKS into a different partition of the same characters —
     #    `[<]a>` is `_BRACKET` whole, or a bare `[` plus the tag `<]a>` — and `match` commits to
-    #    the first. MEASURED: `origin/main` graded `[<]a>`, `[<]1>` and `<[>a]`, and this head
-    #    returns `[]`, because the committed parse stalls 2 units in on the word character and the
-    #    closure's partition is never tried. THREE admissions, and ⛔ THE NESTING RUNS IN EITHER
+    #    the first. MEASURED: `origin/main` graded `[<]a>`, `[<]1>`, `<[>a]` and `<[>1]`, and this
+    #    head returns `[]`: ONE unit is consumed (`[<]` or `<[>`), and the next cannot start on the
+    #    word character, so the closure's partition is never tried. FOUR admissions (#13921 review,
+    #    final round, finding 1: an earlier form said THREE, having tested `<[>1>` — with `>` —
+    #    which is not graded by `origin/main` either; the lost string is `<[>1]`, with `]`), and
+    #    ⛔ THE NESTING RUNS IN EITHER
     #    DIRECTION (#13921 review, final round, finding 2, MEASURED — an earlier form of this
     #    sentence called all three "a bracketed run whose interior contains a tag's `<`", which
     #    describes only two of them): `[<]a>` and `[<]1>` are `_BRACKET` whole (`[<]`, abandoned
@@ -1953,13 +1956,17 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # on the word character behind it, and the closure's partition is never tried. ⛔ THE NESTING
     # RUNS IN EITHER DIRECTION: `[<]a>` and `[<]1>` are `_BRACKET` whole (`[<]`), while `<[>a]` is
     # `_TAG` whole (`<[>`) — the mirror, not the same shape (MEASURED, correcting an earlier form
-    # of this comment that named only the bracketed direction). `origin/main` graded all three of
-    # these and this head returns `[]`. They are DECLARED as a residual, not fixed — the fix is to
+    # of this comment that named only the bracketed direction). `origin/main` graded all FOUR of
+    # these and this head returns `[]`. ⛔ AND THE PIN MUST CARRY THE STRINGS THAT ARE ACTUALLY
+    # LOST: an earlier form pinned `<[>a>` and omitted `<[>1]`, but `<[>a>` is NOT graded by
+    # `origin/main` either — the lost one is `<[>a]`, with a `]` — so that row witnessed nothing
+    # (#13921 review, final round, finding 1, MEASURED). A pin row that can never red for the
+    # reason it states is the over-stated-attribution class this file keeps recording. They are DECLARED as a residual, not fixed — the fix is to
     # enumerate every partition at `[`/`<`, which is a larger change than this PR carries — and
     # they are pinned so the behaviour cannot drift silently. None occurs in the live tree: all
     # 855 `docs/**/*.md`, both subjects, are identical to `origin/main`. If a future document reds
     # one of these rows, that is the signal to fix the walk rather than to widen this list.
-    for _lost in ("[<]a>", "[<]1>", "<[>a]"):
+    for _lost in ("[<]a>", "[<]1>", "<[>a]", "<[>1]"):
         assert _typed_answers_to_tortoise_cmd(
             f"`` `-- tortoise/` {_lost} prints TWO paths ``", "-- tortoise/") == [], (
             f"the walk now reaches {_lost!r} — the DECLARED first-match residual is gone, which "
