@@ -227,18 +227,27 @@ confidence:
    `AnnAssign` (`globals()["k"]: str = "embedding"`) and `AugAssign`, with the dynamic subscript
    nested inside a `Tuple`/`List` target — an `AnnAssign` target reached the generic assignment
    arm, where `_poison` understands names only, and the writer certified while storing. **And the
-   RECEIVER is an axis like the binding form** (measured by the review of this branch): `ns =
-   globals(); ns["k"] = "embedding"`, the chain `d = ns`, and the mutator spellings through the
-   alias (`ns.update({…})`, `ns |= {…}`) all carried the same write past an arm that required a
-   CALL — so names bound to the namespace object are resolved to a fixpoint (tuple targets and
-   one scope down included) and routed through the same predicate. A name
+   RECEIVER is not modelled at all** (`#14001`, measured by the reviews of this branch): every
+   attempt to model which expressions CARRY the namespace lost one spelling later —
+   `ns = globals(); ns["k"] = …` (the arm required a CALL), then `ns, *_r = globals(), 1, 2`, a
+   conditional value `globals() if f else {}`, `globals() or {}`, `[globals()][0]`,
+   `box = (ns,); box[0]["k"] = …`, `for ns in (globals(),)`, `match globals(): case ns:`, a
+   parameter default `ns=globals()`, and the FUNCTION alias `g = globals; g()["k"] = …`. So the
+   tool stops asking *which value is the namespace* and asks the only question it can answer:
+   **does the writer mention one at all** (`_is_dynamic_namespace_reference`, a
+   `globals`/`locals`/`vars` NAME anywhere, including the `builtins.globals` attribute form). If
+   it does, every name the scope declares `global`/`nonlocal` is unproven and the stop arm
+   refuses — a writer that merely READS a dynamic namespace is refused too, which is the
+   over-refusal the doctrine accepts and which costs nothing on the real population (pinned: no
+   declared entity writer mentions one). A name
    with no `global`/`nonlocal` declaration is either unproven (absent from the binding map ⇒
    refuse) or out of
    reach (a `locals()` write does not rebind a fast local — measured: the writer stores nothing).
    Pinned by the `globals-*` and `namespace-alias-*` rows in `DEFEATED_RESOLVER_ROWS`.
-   ⛔ THE BOUNDARY: an alias built by a helper (`ns = _namespace()`) or reached through `exec` is
-   NOT resolved — residual 1 covers `exec`, and the `_fold_consults_gate` population is where
-   that stays visible. The claim here is "every shape in the pinned rows", not "every shape".
+   ⛔ THE BOUNDARY: a writer that reaches a namespace WITHOUT NAMING IT — a helper returning one
+   (`ns = _namespace()`), or `exec` — is not covered; residual 1 covers `exec`, and the
+   `_fold_consults_gate` population is where that stays visible. The claim is "every spelling that
+   names a dynamic namespace", not "every spelling".
 
 THE REMOVAL ITSELF
 ==================
@@ -4539,82 +4548,44 @@ _TRANSPARENT_SOURCE_CALLS = frozenset({
 })
 
 
+_DYNAMIC_NAMESPACE_NAMES = ("globals", "locals", "vars")
+
+
+def _is_dynamic_namespace_reference(node) -> bool:
+    """Does this node MENTION a dynamic namespace at all — `globals`, `builtins.globals`, `g()`?
+
+    ⛔ THE ONLY QUESTION THIS TOOL IS ENTITLED TO ASK HERE (`#14001`, measured by the reviews of
+    this branch). Every attempt to model *which expressions carry the namespace* was defeated one
+    spelling later, each time the same way: `ns = globals(); ns["k"] = …` was missed because the
+    arm required a CALL; then `ns, *_r = globals(), 1, 2`, `ns = globals() if f else {}`, `ns =
+    globals() or {}`, `ns = [globals()][0]`, `ns = globals(); box = (ns,); box[0]["k"] = …`,
+    `for ns in (globals(),)`, `match globals(): case ns:`, a parameter DEFAULT `ns=globals()`, and
+    the FUNCTION alias `g = globals; g()["k"] = …` each defeated the next cut. That is the issue's
+    own root: a recogniser of a Turing-complete language, extended one row at a time.
+
+    So the question is not "can I prove this value is the namespace" but "does this writer touch a
+    dynamic namespace at all". If it does, EVERY name the scope declares `global`/`nonlocal` is
+    unproven — the write could reach any of them — and the stop arm refuses. No spelling can
+    evade it, because the mention is what is checked, not the path from the mention to the write.
+    A writer that only READS `globals()` is refused too: that is the over-refusal the doctrine
+    accepts, and it costs nothing on the real population (no entity writer mentions one — pinned).
+    """
+    import ast
+
+    if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `builtins.globals()` / `import builtins as b; b.globals()` — the attribute spelling.
+    return isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMESPACE_NAMES
+
+
 def _is_namespace_source(expr) -> bool:
     """Is this expression the module/scope namespace itself — `globals()`, `locals()`, `vars()`?"""
     import ast
 
-    return isinstance(expr, ast.Call) and _callee_name(expr) in ("globals", "locals", "vars")
+    return isinstance(expr, ast.Call) and _callee_name(expr) in _DYNAMIC_NAMESPACE_NAMES
 
 
-def _names_in_target(target) -> set[str]:
-    """Every NAME a binding target assigns, through `Starred`/`Tuple`/`List` — else `set()`. """
-    import ast
-
-    if isinstance(target, ast.Name):
-        return {target.id}
-    if isinstance(target, ast.Starred):
-        return _names_in_target(target.value)
-    if isinstance(target, ast.Tuple | ast.List):
-        found: set[str] = set()
-        for element in target.elts:
-            found |= _names_in_target(element)
-        return found
-    return set()
-
-
-def _namespace_aliases(statements) -> set[str]:
-    """Names bound to the namespace object — `ns = globals()`, and chains `d = ns`.
-
-    ⛔ THE RECEIVER IS AN AXIS LIKE THE BINDING FORM (`#14001`, measured by the review of this
-    branch): every arm above recognises `globals()` as a CALL, so `ns = globals(); ns["gk"] =
-    "embedding"` CERTIFIED while storing — the same "a partial rule claims coverage" failure,
-    one axis over, and the residual-4 docstring's "CLOSED for every shape measured" is what it
-    defeated. The alias set is computed from the WHOLE writer (nested scopes included) because
-    poisoning only ever ADDS refusals; a chain (`d = ns`) is followed to a fixpoint so one hop
-    cannot launder the name.
-    """
-    import ast
-
-    aliases: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for sub in statements:
-            if not isinstance(sub, ast.Assign | ast.AnnAssign | ast.NamedExpr):
-                continue
-            if isinstance(sub, ast.Assign):
-                targets, value = sub.targets, sub.value
-            elif isinstance(sub, ast.AnnAssign):
-                targets, value = [sub.target], sub.value
-            else:
-                targets, value = [sub.target], sub.value
-            if value is None:
-                continue
-            def _is_namespace(expr) -> bool:
-                return _is_namespace_source(expr) or (isinstance(expr, ast.Name)
-                                                      and expr.id in aliases)
-
-            for target in targets:
-                paired = []
-                if (isinstance(target, ast.Tuple | ast.List)
-                        and isinstance(value, ast.Tuple | ast.List)
-                        and len(target.elts) == len(value.elts)):
-                    # ⛔ PAIRWISE, so `ns, _z = globals(), 1` names `ns` — a whole-value test
-                    # saw a TUPLE and missed it.
-                    paired = [name for element, element_value
-                              in zip(target.elts, value.elts, strict=False)
-                              if _is_namespace(element_value)
-                              for name in _names_in_target(element)]
-                elif _is_namespace(value):
-                    paired = list(_names_in_target(target))
-                for name in paired:
-                    if name not in aliases:
-                        aliases.add(name)
-                        changed = True
-    return aliases
-
-
-def _dynamic_namespace_mutation(call, aliases=frozenset()) -> bool:
+def _dynamic_namespace_mutation(call) -> bool:
     """Is this CALL a write into a dynamic namespace — `globals().update({…})`?
 
     ⛔ THE MUTATOR SPELLING IS THE SUBSCRIPT SPELLING ONE VERB OVER (`#14001`, measured by the
@@ -4626,23 +4597,19 @@ def _dynamic_namespace_mutation(call, aliases=frozenset()) -> bool:
 
     func = call.func
     receiver = func.value if isinstance(func, ast.Attribute) else None
-    if _is_namespace_source(receiver) or (isinstance(receiver, ast.Name)
-                                          and receiver.id in aliases):
+    if _is_namespace_source(receiver):
         return True
     # `dict.__setitem__(globals(), …)` / `dict.update(globals(), …)` — the unbound method form.
     if (isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "dict"
             and func.attr in ("__setitem__", "update") and call.args
-            and (_is_namespace_source(call.args[0])
-                 or (isinstance(call.args[0], ast.Name) and call.args[0].id in aliases))):
+            and _is_namespace_source(call.args[0])):
         return True
     if isinstance(func, ast.Name) and func.id in ("setattr",) and call.args:
-        first = call.args[0]
-        return _is_namespace_source(first) or (isinstance(first, ast.Name)
-                                               and first.id in aliases)
+        return _is_namespace_source(call.args[0])
     return False
 
 
-def _dynamic_namespace_write(target, aliases=frozenset()) -> bool:
+def _dynamic_namespace_write(target) -> bool:
     """Is this subscript target a write into a DYNAMIC namespace — `globals()[k] = …`?
 
     ⛔ THAT WRITE REBINDS A NAME THE BINDING WALK BELIEVES IT PROVED (`#14001`, measured by the
@@ -4659,10 +4626,10 @@ def _dynamic_namespace_write(target, aliases=frozenset()) -> bool:
     if not isinstance(target, ast.Subscript):
         return False
     value = target.value
-    return _is_namespace_source(value) or (isinstance(value, ast.Name) and value.id in aliases)
+    return _is_namespace_source(value)
 
 
-def _dynamic_namespace_target(target, aliases=frozenset()) -> bool:
+def _dynamic_namespace_target(target) -> bool:
     """Does this assignment TARGET write into a dynamic namespace, however deeply nested?
 
     ⛔ `globals()["k"], _z = …` IS THE SAME WRITE INSIDE A TUPLE TARGET (`#14001`, measured by
@@ -4671,16 +4638,16 @@ def _dynamic_namespace_target(target, aliases=frozenset()) -> bool:
     """
     import ast
 
-    if _dynamic_namespace_write(target, aliases):
+    if _dynamic_namespace_write(target):
         return True
     if isinstance(target, ast.Starred):
-        return _dynamic_namespace_target(target.value, aliases)
+        return _dynamic_namespace_target(target.value)
     if isinstance(target, ast.Tuple | ast.List):
-        return any(_dynamic_namespace_target(element, aliases) for element in target.elts)
+        return any(_dynamic_namespace_target(element) for element in target.elts)
     return False
 
 
-def _assigns_into_dynamic_namespace(node, aliases=frozenset()) -> bool:
+def _assigns_into_dynamic_namespace(node) -> bool:
     """Does this assignment rebind a dynamic-namespace name — `Assign`, `AnnAssign` or `AugAssign`?
 
     ⛔ THE SPELLINGS ARE ONE WRITE (`#14001`, measured by the review of `#14050` at its merged
@@ -4696,7 +4663,7 @@ def _assigns_into_dynamic_namespace(node, aliases=frozenset()) -> bool:
         targets = [node.target]
     else:
         return False
-    return any(_dynamic_namespace_target(target, aliases) for target in targets)
+    return any(_dynamic_namespace_target(target) for target in targets)
 
 
 def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
@@ -4745,10 +4712,14 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         for leaf in ast.walk(statement)
         if isinstance(leaf, ast.Nonlocal | ast.Global) for name in leaf.names}
 
-    # ⛔ AND THE NAMESPACE OBJECT ITSELF CAN BE BOUND TO A NAME (`#14001`, measured by the review
-    # of this branch): `ns = globals(); ns["gk"] = "embedding"` defeats a receiver test that
-    # requires a CALL, in this scope and one level down. Computed once, over the WHOLE writer.
-    namespace_aliases: set[str] = _namespace_aliases(whole)
+    # ⛔ A WRITER THAT MENTIONS A DYNAMIC NAMESPACE AT ALL CANNOT PROVE ANY DECLARED NAME
+    # (`#14001`, measured by the reviews of this branch — see `_is_dynamic_namespace_reference`):
+    # `ns = globals(); ns["gk"] = "embedding"`, a chain, a tuple target, a conditional value, a
+    # `for`/`match` binding, a parameter default and the FUNCTION alias `g = globals; g()[…]` each
+    # defeated a receiver-shape model one spelling later. The mention is the evidence; every name
+    # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
+    if any(_is_dynamic_namespace_reference(node) for node in whole):
+        poisoned |= _scope_declarations    # `|=`: see the residue note in `_poison`'s arm
 
     # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
     # round-2 review): `def w(props, ev, key="x"): … props[key] = vec … key = "y"` resolved
@@ -4768,19 +4739,12 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
 
         if isinstance(target, _ast.Starred):
             _poison(target.value)
-        elif isinstance(target, _ast.Name) and target.id in namespace_aliases:
-            # ⛔ `ns |= {…}` REBINDS FILTERED THROUGH THE NAMESPACE NAME (`#14001`, measured by
-            # the review of this branch): the target is the ALIAS, not a `Subscript`, so neither
-            # the name arm (which poisons `ns`, not the name it rebinds) nor the subscript arm
-            # saw it. Tested FIRST because the name arm would otherwise win.
-            poisoned.add(target.id)
-            poisoned.update(_scope_declarations)
         elif isinstance(target, _ast.Name):
             poisoned.add(target.id)
         elif isinstance(target, _ast.Tuple | _ast.List):
             for element in target.elts:
                 _poison(element)
-        elif _dynamic_namespace_write(target, namespace_aliases):
+        elif _dynamic_namespace_write(target):
             # ⛔ A DYNAMIC-NAMESPACE SUBSCRIPT IS A BINDING IN **EVERY** FORM THAT CAN BIND IT
             # (`#14001`, measured by the review of the `AnnAssign` repair): `Assign`,
             # `AnnAssign`, `AugAssign`, a `for` target, a comprehension target and a
@@ -4816,7 +4780,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
                 poisoned.add(sub.rest)
         elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
             poisoned.add(sub.rest)
-        elif _assigns_into_dynamic_namespace(sub, namespace_aliases):
+        elif _assigns_into_dynamic_namespace(sub):
             # ⛔ `globals()[<name>] = …` REBINDS A NAME THIS WALK BELIEVES IT PROVED (`#14001`,
             # measured by the round-5 review): the store's VALUE is a constant, so the
             # Subscript arm above is not even a key-bearing site, and the poisoned-name set
@@ -4834,8 +4798,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
             # typed-reference count it exists for stayed 0. The augmented assignment is the same
             # store and adds no row that has to be declared.
             poisoned |= _scope_declarations
-        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(
-                sub, namespace_aliases):
+        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
             # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
             # measured by the round-8 review): the mutator form rebinds a module name exactly
             # as the subscript form does, and the subscript-only arm certified it.
@@ -4864,7 +4827,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # definition time, and its `Subscript` target poisoned nothing because the generic
         # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
         # List targets — the branch written for it was unreachable.
-        if _assigns_into_dynamic_namespace(sub, namespace_aliases):
+        if _assigns_into_dynamic_namespace(sub):
             # `|=`: see the residue note in the own-scope arm (`Assign` / `AnnAssign` /
             # `AugAssign` with the subscript nested in a tuple/list target are ONE write).
             poisoned |= _scope_declarations
@@ -4899,8 +4862,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # `_poison`s the rest — so the arm that used to sit here could not run, and it only cost
         # a residue row the privatisation sweep had to declare. Do not re-add it; the LIVE
         # spelling is the block above, pinned by `globals-subscript-in-class-body`.
-        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(
-                sub, namespace_aliases):
+        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
             # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
             # measured by the round-8 review): the mutator form rebinds a module name exactly
             # as the subscript form does, and the subscript-only arm certified it.

@@ -69,8 +69,11 @@ def _record_write(*args, **kwargs) -> None:
     measurement.
     """
     _HANDED.clear()
-    for argument in args:
-        _HANDED.append(argument)
+    _HANDED.extend(args)
+    # ⛔ A KEYWORD HANDOFF IS THE SAME HANDOFF (`#14001`, measured by the review of this branch):
+    # `_write(props={**props, k: vec})` certifies and lands, and an oracle that recorded only
+    # `args` reported `lands=False` — the direction that turns a pin vacuous.
+    _HANDED.extend(kwargs.values())
 
 
 _HANDED: list = []
@@ -776,6 +779,71 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ AND THE SPELLINGS THAT DEFEATED THE FIRST RECEIVER MODEL (`#14001`, measured by the
+    # cycle-3 review): the tool now refuses on the MENTION of a dynamic namespace, so none of
+    # these can evade it by holding the namespace in a shape nobody modelled.
+    ("namespace-starred-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns, *_r = globals(), 1, 2
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-conditional-value", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals() if _f() else {}
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-box-indirection", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        box = (ns,)
+        box[0]["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-for-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        for ns in (globals(),):
+            ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-match-capture", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        match globals():
+            case ns:
+                ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-function-alias", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        g = globals
+        g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
     ("namespace-unbound-setitem", """
     global gk
     gk = "x"
@@ -1090,3 +1158,58 @@ def test_a_recognised_store_is_still_refused_by_the_recogniser():
 """):
         assert _stage_one_sees_a_store(body) is True, (
             "stage 1 no longer recognises a literal store — the composition has changed")
+
+
+def test_the_oracle_records_a_KEYWORD_handoff_to_the_write_channel():
+    """⛔ THE MEASUREMENT MUST SEE BOTH CALL SPELLINGS (`#14001`, measured by the cycle-3 review).
+
+    `_write(props={**props, k: vec})` certifies at HEAD and lands — the store is in the mapping the
+    channel RECEIVES — but an oracle that recorded only `args` reported `lands=False`, which is the
+    direction that turns a pin vacuous: a future row written on the keyword spelling would claim
+    "this no longer stores the vector, so it documents nothing".
+    """
+    body = """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write(props={**props, k: _encode(ev)})
+        return None
+    _write(props)
+"""
+    assert _oracle(body)["lands"] is True, (
+        "the oracle cannot see a keyword handoff, so every `_write(...)` pin is half-measured")
+
+
+def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
+    """The blanket dynamic-namespace rule costs ZERO refusals on the real population — PINNED.
+
+    ⛔ `_string_bindings` refuses every declared name of a writer that mentions `globals`/
+    `locals`/`vars` at all (`_is_dynamic_namespace_reference`). That over-refusal is only
+    acceptable while no real writer does it: the day one does, this pin reds, and the fix has to
+    argue the trade instead of silently losing a writer's gate. This is the same non-vacuity
+    discipline the residual pins use, pointed at the over-refusal side.
+    """
+    import ast
+
+    from tortoise import embed_writer_register as register
+
+    offenders: list[str] = []
+    examined = 0
+    for key in sorted(register.EMBED_WRITER_CLASSES):
+        module_name, _, symbol = key.partition("::")
+        try:
+            source = strip._module_source(module_name)
+        except Exception:               # an unreadable module is the gate's refusal, not this pin
+            continue
+        if symbol not in strip._function_bodies(source):
+            continue
+        function = strip._function_bodies(source)[symbol][0]
+        examined += 1
+        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(function)):
+            offenders.append(key)
+    assert examined, (
+        "NO writer could be read, so this pin asserts nothing — the register or the source "
+        "loader changed shape and the over-refusal cost it guards is unmeasured")
+    assert offenders == [], (
+        "a declared entity writer now mentions a dynamic namespace, so the blanket rule refuses "
+        "it: argue the trade (is the writer's stop arm provable another way?) before either "
+        f"narrowing the rule or accepting the refusal: {offenders}")
