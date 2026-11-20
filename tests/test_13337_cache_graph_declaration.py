@@ -460,6 +460,37 @@ def test_record_restore_REFUSES_when_the_name_would_be_DERIVED(
 # (restore, the one where it reached the wipe path).
 
 
+def test_the_DERIVED_refusal_precedes_the_WIPE_it_protects(monkeypatch, capsys):
+    """⛔ A CHECK THAT FIRES AFTER THE ``DETACH DELETE`` PROTECTS NOTHING.
+
+    ``test_record_restore_REFUSES_when_the_name_would_be_DERIVED`` pins the exit
+    code and the message; this pins the ORDER, which is the property that makes
+    the refusal protective rather than decorative. Removing the old usage refusal
+    was the dangerous half of #13337: a derived coordinate handed to
+    ``record-restore`` is a coordinate handed to a bulk wipe, so the guard has to
+    answer BEFORE the composition is entered — it is NOT enough that the run ends
+    2. The seam that passes ``confirm_destructive=True``
+    (``record_restore.restore_from_record_view``) is replaced with an
+    ``AssertionError``, so a refusal moved below it cannot pass.
+    """
+    import tortoise.record_restore as rr
+
+    _no_control_plane(monkeypatch)
+    _stub_psycopg2(monkeypatch)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError(
+            "the wipe ran on an ASSUMED coordinate — the refusal must precede it")
+
+    # The verb imports the seam INSIDE the function, so patching the module
+    # attribute is what it resolves.
+    monkeypatch.setattr(rr, "restore_from_record_view", _boom)
+
+    code = cli._cmd_record_restore(_restore_args(cache_graph=None))
+
+    assert code == 2, capsys.readouterr().err
+
 def test_record_restore_HANDS_THE_FACT_to_the_composition(monkeypatch, capsys):
     """⛔ THE WIRING, ASSERTED (#14068 review finding 5).
 
@@ -822,9 +853,8 @@ def test_a_PADDED_namespace_fact_does_not_fake_a_disagreement(monkeypatch, capsy
 
 def test_the_control_plane_read_TRIMS_the_namespace(monkeypatch):
     """The ONE place a namespace enters the process is where it is normalised."""
-    from tortoise import supabase_control
-
     import tortoise.cache_graph as cg
+    from tortoise import supabase_control
 
     monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(
