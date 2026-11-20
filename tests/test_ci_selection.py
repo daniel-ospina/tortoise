@@ -10264,7 +10264,7 @@ def test_duration_coverage_guard_boundary_and_realistic():
 # on a shallow CI checkout, which is the #10356 shallow-channel trap this same file
 # already carries a control for).
 ROWED_BY_THIS_FOLD = (
-    "test_10084_graph_argument_omit_first.py",
+    "test_vector_parity_13906.py",
     "test_10084_graph_disclosure.py",
     "test_4051_gate_graph.py",
     "test_9548_record_search_keys_shape.py",

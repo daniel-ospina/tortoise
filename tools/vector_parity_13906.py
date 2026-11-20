@@ -82,6 +82,17 @@ from tortoise.live import TERMINAL_EXCLUDED_STATUSES as TERMINAL_STATUSES
 
 DIM = 384
 
+
+class CannotRun(RuntimeError):
+    """The run could not measure — exit 2, which is NOT "a comparison diverged".
+
+    ⛔ `raise SystemExit("cannot run: …")` exits **1**, and this module's own exit
+    table defines 1 as *"a required comparison diverged"*. The falsifier's repro
+    loop (`--poison id; echo exit=$?`) would then read a missing pgvector
+    extension, a refused non-local DSN or a never-ready index as **"falsifier
+    confirmed"** when nothing was measured at all. Measured in review.
+    """
+
 #: The record's application role — `NOBYPASSRLS`, the role `scope_connection`
 #: will accept (`tortoise/record_serve.py` names it as the runbook's role).
 #: A connect-time `options=-c role=` is libpq's spelling of `SET ROLE`; the
@@ -272,6 +283,15 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     cand = list(candidate_ids)
     cand_set, truth_set = set(cand), set(truth_ids)
     overlap = cand_set & truth_set
+    # ⛔ MULTIPLICITY IS PART OF THE ANSWER. `set(cand) == set(truth)` is TRUE for
+    # `["a","b","c","a"]` against `["a","b","c"]`, and the positional loop is
+    # bounded by the shorter list — so a leg that returns `k+1` rows with one key
+    # repeated (a remainder appended to a primary answer, a fold join without
+    # DISTINCT) used to print PARITY with recall 1.0. Measured in review; the
+    # docstring above promised the opposite and the `extra id` pin could not see
+    # it because a REPEATED key is neither missing nor novel.
+    duplicates = sorted({key for key in cand if cand.count(key) > 1})
+    count_equal = len(cand) == len(truth_ids)
 
     distance_of = {key: dist for key, dist in truth_rows}
     tie_groups: dict[float, set[str]] = {}
@@ -298,7 +318,14 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
             break
 
     distance = {"ok": None, "max_delta": None, "worst": None}
-    if candidate_distances is not None:
+    if candidate_distances is not None and len(candidate_distances) != len(cand):
+        # ⛔ A SHORT DISTANCE LIST IS A DEFECT, NOT A PASS. `zip` stops at the
+        # shorter side, so a length mismatch used to leave `ok: True` having
+        # compared only its first element (measured in review).
+        distance = {"ok": False, "max_delta": None, "worst": None,
+                    "reason": f"{len(candidate_distances)} distances for "
+                              f"{len(cand)} candidate ids"}
+    elif candidate_distances is not None:
         worst, worst_delta = None, 0.0
         for key, dist in zip(cand, candidate_distances):
             if key not in distance_of or dist is None:
@@ -311,9 +338,15 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
 
     return {
         "distance": distance,
-        "ids_equal": cand_set == truth_set,
+        "count_equal": count_equal,
+        "duplicates": duplicates,
+        "ids_equal": cand_set == truth_set and count_equal and not duplicates,
         "order": order,
-        "recall": (len(overlap) / len(truth_set)) if truth_set else 1.0,
+        # ⛔ `1.0` for an empty truth set was an empty measurement reported as a
+        # perfect one — `--k 0` made every comparison pass and the tool print
+        # PARITY having measured nothing. `main` refuses `k < 1` now, and an
+        # empty oracle is reported as `None` (UNMEASURED) so the verdict fails.
+        "recall": (len(overlap) / len(truth_set)) if truth_set else None,
         "missing": sorted(truth_set - cand_set)[:10],
         "extra": sorted(cand_set - truth_set)[:10],
         "order_mismatches": mismatches,
@@ -322,22 +355,32 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     }
 
 
-def poison(candidate_ids: list[str], truth_rows: list[tuple[str, float]],
-           kind: str) -> list[str]:
+def poison(pairs: list[tuple[str, float | None]],
+           truth_rows: list[tuple[str, float]], kind: str
+           ) -> list[tuple[str, float | None]]:
     """Deliberately corrupt a candidate list so the harness must report a diff.
 
     ⛔ THIS IS THE FALSIFIER, and it is why the harness is allowed to say "pass".
     A comparison that has never returned ``False`` is not evidence about either
     store; it is evidence about the comparison's own blind spots.
+
+    ⛔ IT OPERATES ON `(id, distance)` PAIRS, and that is a correctness fix, not a
+    tidiness one. The earlier ids-only version permuted the ids while the
+    distances stayed in their original positions, so the comparator's `zip`
+    paired id *i* with distance *j* and reported a **0.8967** `distance_delta`
+    that no store ever produced (`poison-order.json`, `q_anchor`) — an artifact
+    of misalignment presented as the falsifier's evidence. A re-order now moves
+    the row, distance included, exactly as a store returning the same rows in a
+    different order would.
     """
-    out = list(candidate_ids)
+    out = [(key, dist) for key, dist in pairs]
     if kind == "id":
-        # Replace the best hit with a key that is in the corpus but NOT a hit.
+        # Replace the best hit with a key that is NOT a hit, keeping ITS distance.
         if out:
-            out[0] = "r999_absent_from_truth"
+            out[0] = ("r999_absent_from_truth", out[0][1])
     elif kind == "order":
-        # Swap two hits that do NOT share a distance bucket.
-        i = next((n for n in range(1, len(out)) if out[n] != out[0]), None)
+        # Swap two rows that do NOT share a distance bucket — row and distance.
+        i = next((n for n in range(1, len(out)) if out[n][0] != out[0][0]), None)
         if i is not None:
             out[0], out[i] = out[i], out[0]
     elif kind == "recall":
@@ -365,7 +408,7 @@ def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
     """
     if allow_remote or host in LOOPBACK:
         return
-    raise SystemExit(
+    raise CannotRun(
         f"refusing to seed a NON-LOCAL {what} ({host}): this harness writes "
         f"(org, graph, node_identity, point rows) and deleting them afterwards "
         f"does not make the write safe if the run is interrupted. Pass "
@@ -396,7 +439,7 @@ class RecordStore:
                 "WHERE table_schema='public' AND table_name='point' "
                 "AND column_name='embedding_vec'")
             if not cur.fetchone():
-                raise SystemExit(
+                raise CannotRun(
                     "cannot run: public.point.embedding_vec is absent — the "
                     "pgvector migration has not been applied to this database, "
                     "so every comparison would report the graph fallback as a "
@@ -662,7 +705,7 @@ def run(args) -> dict:
         store = GraphStore(args.graph_host, args.graph_port, graph_name)
 
     if record is None or store is None:
-        raise SystemExit(
+        raise CannotRun(
             "cannot run: both --record-dsn (a Postgres carrying the record "
             "migrations AND pgvector) and --graph-port (a FalkorDB) are "
             "required — a one-sided run is not a parity measurement")
@@ -730,11 +773,17 @@ def run(args) -> dict:
             "mechanisms": mechanisms,
         }
         report["arms"]["graph_index"]["index_params"] = store.index_params()
-        if ready and mechanisms != ["index"]:
-            raise SystemExit(
-                f"cannot run: the graph index is ready but the arm answered via "
-                f"{mechanisms} — the indexed comparison is not measuring the "
-                f"index, so any parity it reports would be about the scan")
+        # ⛔ `if ready and …` was an INERT GUARD in exactly the case it exists for:
+        # when `wait_index_ready` TIMED OUT it returned False, the conjunct was
+        # False, and the arm was then published as "run_vector_query HNSW" while
+        # measuring the `#8429` scan fall-through — exit 0, PARITY, about the
+        # scan. Readiness failing, or the arm falling back, both mean this is not
+        # the index arm. `ready` now decides the MESSAGE, never whether to refuse.
+        if mechanisms != ["index"]:
+            raise CannotRun(
+                f"cannot run: the indexed arm answered via {mechanisms} "
+                f"(index ready={ready}) — the indexed comparison is not measuring "
+                f"the index, so any parity it reports would be about the scan")
 
         # ── the efRuntime diagnostic ──────────────────────────────────────
         # Run ONLY when the default-arm recall is short: it exists to explain a
@@ -753,7 +802,7 @@ def run(args) -> dict:
             store.rebuild_with_ef(
                 ef, [r for r in store_rows if r.tenant == "ours"])
             if not store.wait_index_ready(queries[0][1]):
-                raise SystemExit("cannot run: the ef-diagnostic index never answered")
+                raise CannotRun("cannot run: the ef-diagnostic index never answered")
             ef200_answers = {qid: store.read(qvec, k) for qid, qvec in queries}
             report["arms"][f"graph_index_ef{ef}"] = {
                 "driver": f"run_vector_query HNSW at efRuntime={ef} (diagnostic)",
@@ -766,11 +815,15 @@ def run(args) -> dict:
             t_euc = truth(rows, qvec, k, metric="euclidean")
 
             rec_ids = [key for key, _d, _r in rec_answers[qid]]
+            rec_dists = [d for _k2, d, _r in rec_answers[qid]]
             scan_ids = [key for key, _d in scan_answers[qid]["rows"]]
             idx_ids = [key for key, _d in index_answers[qid]["rows"]]
 
             if args.poison in ("id", "order", "recall"):
-                rec_ids = poison(rec_ids, t_cos, args.poison)
+                rec_pairs = poison(list(zip(rec_ids, rec_dists)), t_cos,
+                                   args.poison)
+                rec_ids = [key for key, _d in rec_pairs]
+                rec_dists = [d for _key, d in rec_pairs]
             if args.poison == "vector":
                 # The graph arm is re-read AFTER the rewrite; that is the point.
                 index_answers[qid] = store.read(qvec, k)
@@ -786,9 +839,8 @@ def run(args) -> dict:
                 # `_verdict` treats "unmeasured" as "not failed". Two lengths that
                 # disagree now simply stop the zip, so the ids check (which is the
                 # one that fails) still sees the whole poisoned list.
-                "record": compare(
-                    t_cos, rec_ids, k=k,
-                    candidate_distances=[d for _k2, d, _r in rec_answers[qid]]),
+                "record": compare(t_cos, rec_ids, k=k,
+                                  candidate_distances=rec_dists),
                 "graph_index": compare(
                     t_cos, idx_ids, k=k,
                     candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]),
@@ -828,8 +880,16 @@ def run(args) -> dict:
             try:
                 record.teardown()
             finally:
-                store.close()
-                record.close()
+                # ⛔ THE CYPHER GRAPH WAS NEVER DELETED, while the record rows
+                # were — so every non-`--keep` run left a 55-node graph AND an
+                # HNSW index behind on the FalkorDB instance, invisible because
+                # `_assert_loopback`'s description of what this harness writes
+                # named only the record's tables. Measured in review.
+                try:
+                    store.reset()
+                finally:
+                    store.close()
+                    record.close()
 
     report["verdict"] = _verdict(report, poisoned=args.poison)
     return report
@@ -856,11 +916,16 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
     metric drift this issue does not decide:
 
     * ``graph_index`` vs ``truth_cosine`` — measured on a real store at
-      FalkorDB's DEFAULT ``efRuntime: 10``, where it under-returns (recall 0.33
-      at k=3, 0.80 at k=10, 0.95 at k=40 on a 55-vector corpus). Gating on it
-      would red this harness for the state of the leg the record replaces; the
-      ``graph_index_ef200`` diagnostic arm exists to show the shortfall is an ef
-      setting and not a semantic difference;
+      FalkorDB's DEFAULT ``efRuntime: 10``, where it UNDER-RETURNS: `k=10`
+      returns **8 rows** on two of six queries because `queryNodes` picks its
+      `$limit` before `#689`'s predicate lands between `YIELD` and `RETURN`
+      (filed as #13911). Gating on it would red this harness for the state of
+      the leg the record REPLACES. ⛔ The ``graph_index_ef200`` diagnostic arm
+      does NOT explain it away — it returned the same 8 rows at
+      `efRuntime: 200`, i.e. the shortfall is a row COUNT, not an ef. An earlier
+      draft of this docstring claimed the diagnostic "shows the shortfall is an
+      ef setting"; its own artifact refutes that, and the real cause is the one
+      that IS gateable, through ``graph_index_shortfall``;
     * ``graph_scan`` vs ``truth_cosine`` — the cosine/euclidean drift.
     """
     failures: list[str] = []
@@ -870,22 +935,31 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
         # REQUIRED: the arm the migration is moving TO, against the metric the
         # record's index is built with.
         cmp_ = entry["record"]
+        # ⛔ `is False` was FAIL-OPEN on its own absence: `distance.ok` is `None`
+        # when the check never ran, and `None is False` is False — so an arm that
+        # dropped its `candidate_distances=` kwarg would delete the only
+        # value-level check with every DB-free pin still green (measured in
+        # review). A required arm must be MEASURED and agree.
+        dist_ok = (cmp_.get("distance") or {}).get("ok")
         if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
-                or (cmp_.get("distance") or {}).get("ok") is False):
+                or cmp_["recall"] is None or dist_ok is not True):
             failures.append(
                 f"{q}: record diverged from truth_cosine "
-                f"(recall={cmp_['recall']:.3f}, order={cmp_['order']}, "
+                f"(recall={cmp_['recall']}, order={cmp_['order']}, "
+                f"distance_ok={dist_ok}, "
                 f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
         # REQUIRED, as the COMPARATOR'S OWN sanity check: the graph scan must
         # reproduce its own oracle. If it does not, the harness's distance
         # inversion or its eligibility predicate is wrong and every other column
         # here is unverified.
         cmp_ = entry["graph_scan_vs_euclidean"]
+        dist_ok = (cmp_.get("distance") or {}).get("ok")
         if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
-                or (cmp_.get("distance") or {}).get("ok") is False):
+                or cmp_["recall"] is None or dist_ok is not True):
             failures.append(
                 f"{q}: graph_scan diverged from truth_euclidean "
-                f"(recall={cmp_['recall']:.3f}, order={cmp_['order']}, "
+                f"(recall={cmp_['recall']}, order={cmp_['order']}, "
+                f"distance_ok={dist_ok}, "
                 f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
         divergences += len(entry["metric_divergence_ids"])
 
@@ -926,6 +1000,34 @@ def _queries(rows: list[Row], count: int) -> list[tuple[str, list[float]]]:
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
+def _validate_args(args) -> None:
+    """Refuse argument shapes that cannot measure, BEFORE either store is touched.
+
+    ⛔ Three shapes used to reach a crash or a false green (measured in review):
+    `--n-random 0` raised `IndexError` at `build_corpus`'s `rows[0]`; `--queries 0`
+    raised `IndexError` at `queries[0]` after BOTH stores had been seeded; `--k 0`
+    asked each leg for `LIMIT 0` and reported PARITY over an empty comparison.
+    """
+    if not args.graph_port:
+        raise CannotRun(
+            "no --graph-port and no TORTOISE_TEST_DOCKER_PORT — start one with "
+            "`uv run python tools/test_lane.py uri`")
+    if not args.record_dsn:
+        raise CannotRun(
+            "no --record-dsn / TEST_RECORD_DB_URI — a one-sided run is not a "
+            "parity measurement")
+    if args.k < 1:
+        raise CannotRun(f"--k {args.k}: limitting to zero compares nothing")
+    if args.queries < 1:
+        raise CannotRun("--queries 0: no query is measured")
+    if args.n_random < 4:
+        # The tie group is built FROM `rows[0]`, so the corpus needs at least one
+        # random row to derive it from.
+        raise CannotRun(
+            f"--n-random {args.n_random}: the tie group is derived from the "
+            f"first random row, so fewer than 4 leaves nothing to compare")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--record-dsn", default=os.environ.get("TEST_RECORD_DB_URI")
@@ -955,17 +1057,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json-out", default=None)
     args = ap.parse_args(argv)
 
-    if not args.graph_port:
-        print("cannot run: no --graph-port and no TORTOISE_TEST_DOCKER_PORT — "
-              "start one with `uv run python tools/test_lane.py uri`",
-              file=sys.stderr)
+    try:
+        _validate_args(args)
+        report = run(args)
+    except CannotRun as e:
+        print(f"cannot run: {e}", file=sys.stderr)
         return 2
-    if not args.record_dsn:
-        print("cannot run: no --record-dsn / TEST_RECORD_DB_URI — a one-sided "
-              "run is not a parity measurement", file=sys.stderr)
-        return 2
-
-    report = run(args)
     text = json.dumps(report, indent=2, default=str)
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
@@ -988,7 +1085,17 @@ def main(argv: list[str] | None = None) -> int:
     if v.get("poison_status"):
         print(f"poison: {v['poison_status']}")
     if v["ok"]:
-        print("PARITY: all required comparisons agree")
+        # ⛔ THE HEADLINE NAMES ITS GATE. "the two legs agree" would be broader
+        # than what was checked: the required arms are each leg against ITS OWN
+        # oracle (record↔cosine, graph scan↔euclidean). The record-vs-graph-index
+        # column is reported and NOT gated (that leg under-returns — #13911), so
+        # a reader must not read exit 0 as "the stores return the same thing".
+        print("PARITY: record matches the cosine oracle and graph_scan matches "
+              "the euclidean oracle (ids, order, recall@k, distances)")
+        print("informational, NOT gated: record-vs-graph_index recall="
+              f"{[e['record_vs_graph_index']['recall'] for e in report['queries']]}"
+              " — the replaced leg's under-return (#13911); and the "
+              "scan-vs-cosine metric drift (#13912)")
         return 0
     for f in v["failures"]:
         print(f"  FAIL {f}", file=sys.stderr)

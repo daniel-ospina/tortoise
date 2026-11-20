@@ -1,6 +1,6 @@
 {
   "issue": "#13906",
-  "generated_at": "2026-11-20T00:11:53Z",
+  "generated_at": "2026-11-20T00:25:26Z",
   "k": 10,
   "seed": 13906,
   "n_rows": 59,
@@ -62,11 +62,13 @@
       ],
       "record": {
         "distance": {
-          "ok": false,
-          "max_delta": 0.8966973735514021,
-          "worst": "r036",
+          "ok": true,
+          "max_delta": 4.665883013288408e-09,
+          "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "diverged",
         "recall": 1.0,
@@ -120,6 +122,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "exact",
         "recall": 0.8,
@@ -159,6 +163,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -196,6 +202,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.5,
@@ -282,6 +290,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "exact",
         "recall": 0.8,
@@ -377,6 +387,8 @@
           "worst": "r006",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -415,6 +427,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -453,6 +467,8 @@
           "worst": "r013",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -490,6 +506,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.5,
@@ -576,6 +594,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -662,11 +682,13 @@
       ],
       "record": {
         "distance": {
-          "ok": false,
-          "max_delta": 0.0243503678896011,
+          "ok": true,
+          "max_delta": 1.707291197305949e-08,
           "worst": "r005",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "diverged",
         "recall": 1.0,
@@ -720,6 +742,8 @@
           "worst": "r009",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -758,6 +782,8 @@
           "worst": "r004",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -795,6 +821,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.2,
@@ -887,6 +915,8 @@
           "worst": "r009",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -990,6 +1020,8 @@
           "worst": "r003",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -1028,6 +1060,8 @@
           "worst": "r039",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.9,
@@ -1078,6 +1112,8 @@
           "worst": "r036",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1115,6 +1151,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.2,
@@ -1207,6 +1245,8 @@
           "worst": "r031",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "tie",
         "recall": 1.0,
@@ -1309,11 +1349,13 @@
       ],
       "record": {
         "distance": {
-          "ok": false,
-          "max_delta": 0.031509799267375405,
-          "worst": "r011",
+          "ok": true,
+          "max_delta": 1.1012964984402629e-08,
+          "worst": "r007",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "diverged",
         "recall": 1.0,
@@ -1367,6 +1409,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1405,6 +1449,8 @@
           "worst": "anchor",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1442,6 +1488,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.4,
@@ -1530,6 +1578,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1620,11 +1670,13 @@
       ],
       "record": {
         "distance": {
-          "ok": false,
-          "max_delta": 0.019258767646614716,
-          "worst": "r017",
+          "ok": true,
+          "max_delta": 7.921950873068795e-09,
+          "worst": "r037",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "diverged",
         "recall": 1.0,
@@ -1678,6 +1730,8 @@
           "worst": "r017",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "exact",
         "recall": 0.8,
@@ -1717,6 +1771,8 @@
           "worst": "r011",
           "tolerance": 0.0001
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": true,
         "order": "exact",
         "recall": 1.0,
@@ -1754,6 +1810,8 @@
           "max_delta": null,
           "worst": null
         },
+        "count_equal": true,
+        "duplicates": [],
         "ids_equal": false,
         "order": "diverged",
         "recall": 0.4,
@@ -1842,6 +1900,8 @@
           "worst": "r017",
           "tolerance": 0.0001
         },
+        "count_equal": false,
+        "duplicates": [],
         "ids_equal": false,
         "order": "exact",
         "recall": 0.8,
@@ -1926,10 +1986,10 @@
     "poison": "order",
     "poison_status": "POISON DETECTED",
     "failures": [
-      "q_anchor: record diverged from truth_cosine (recall=1.000, order=diverged, distance_delta=0.8966973735514021)",
-      "q00: record diverged from truth_cosine (recall=1.000, order=diverged, distance_delta=0.0243503678896011)",
-      "q02: record diverged from truth_cosine (recall=1.000, order=diverged, distance_delta=0.031509799267375405)",
-      "q03: record diverged from truth_cosine (recall=1.000, order=diverged, distance_delta=0.019258767646614716)"
+      "q_anchor: record diverged from truth_cosine (recall=1.0, order=diverged, distance_ok=True, distance_delta=4.665883013288408e-09)",
+      "q00: record diverged from truth_cosine (recall=1.0, order=diverged, distance_ok=True, distance_delta=1.707291197305949e-08)",
+      "q02: record diverged from truth_cosine (recall=1.0, order=diverged, distance_ok=True, distance_delta=1.1012964984402629e-08)",
+      "q03: record diverged from truth_cosine (recall=1.0, order=diverged, distance_ok=True, distance_delta=7.921950873068795e-09)"
     ],
     "informational": {
       "metric_divergence_ids_total": 76
