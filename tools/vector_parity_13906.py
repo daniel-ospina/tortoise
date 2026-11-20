@@ -350,6 +350,20 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         distance = {"ok": False, "max_delta": None, "worst": None,
                     "reason": f"{len(candidate_distances)} distances for "
                               f"{len(cand)} candidate ids"}
+    elif candidate_distances is not None and not cand:
+        # ⛔ ZERO ROWS COMPARED IS NOT A PASSED VALUE CHECK. `zip([], [])` runs
+        # zero times, so `worst_delta` stayed `0.0` and an EMPTY candidate list
+        # published `distance.ok: True, max_delta: 0.0` — which is how the record
+        # leg's own failure path (`run()` answers a raise with `rec_answers[qid]
+        # = []`) produced a green distance check, and how `_verdict` then read
+        # that arm as MEASURED. Measured in review: the reachable state for a
+        # raised record leg was `ids_equal False, recall 0.0, distance.ok True`.
+        # `ok` stays `None` (UNMEASURED) so any consumer that requires a positive
+        # measurement fails on it.
+        distance = {"ok": None, "max_delta": None, "worst": None,
+                    "unmeasured": 0,
+                    "reason": "no candidate row was compared, so there is no "
+                              "distance to verify"}
     elif candidate_distances is not None:
         worst, worst_delta = None, 0.0
         # `strict=True` because the branch above already returned when the two
@@ -1078,6 +1092,57 @@ def _cross_recall(a: list[str], b: list[str]) -> dict:
             "only_a": sorted(sa - sb)[:10], "only_b": sorted(sb - sa)[:10]}
 
 
+def _arm_failure(q: str, label: str, cmp_: dict, *, oracle: str,
+                 error: str | None = None) -> tuple[str | None, bool]:
+    """(message, measured) for one REQUIRED arm. `message is None` = it agreed.
+
+    ⛔ `measured` is the whole point of this function: it separates a failure that
+    is EVIDENCE from a failure that is an ABSENCE OF EVIDENCE, and the falsifier's
+    proof rests on that difference (see `_verdict`'s `poison_status`).
+
+    A failure is MEASURED only when the arm actually produced comparable numbers:
+
+    * the leg did not raise — a raised leg's empty answer is a consequence of the
+      exception, not a divergence the poison produced;
+    * the oracle was not empty (`recall is None`);
+    * at least one candidate row had a scoreable distance. `compare` now reports
+      `distance.ok is None` over zero compared rows, and `unmeasured == len(cand)`
+      means every reported distance was NaN/inf/absent (pgvector's NaN on a
+      zero-norm vector is the reachable case) — neither says anything about what
+      the comparison can SEE.
+
+    Everything else is a `measured` divergence: wrong ids, a cross-bucket
+    re-order, a distance beyond tolerance over rows that WERE scored, or an
+    empty/under-width answer the leg genuinely returned.
+    """
+    if error:
+        return (f"{q}: the {label} leg FAILED — {error}", False)
+    dist = cmp_.get("distance") or {}
+    dist_ok = dist.get("ok")
+    ids_bad = (not cmp_["ids_equal"]) or cmp_["order"] == "diverged"
+    oracle_empty = cmp_["recall"] is None
+    if not ids_bad and not oracle_empty and dist_ok is True:
+        return None, True
+    # ⛔ ZERO ROWS IS NOT A MEASUREMENT, and it is caught TWICE here on purpose:
+    # `compare` answers `distance.ok is None` over zero compared rows (so `dist_ok
+    # is True` is False), and `unmeasured(0) < total(0)` is False as well — which
+    # is why there is no separate `total > 0` conjunct: it was dead, and a
+    # condition no test can observe is a condition nobody is checking.
+    total = len(cmp_.get("candidate_ids") or [])
+    measured = (not oracle_empty) and (
+        dist_ok is True or int(dist.get("unmeasured") or 0) < total)
+    # ⛔ THE TEXT IS PART OF THE COMMITTED EVIDENCE. The five artifacts under
+    # `docs/research/2026-11-20-13906-vector-parity/` store the failure strings
+    # these arms produced, and they must keep replaying bit-identically through
+    # this verdict (checked after every edit here) — so the shape below is the one
+    # they were minted with. New diagnostics belong in `compare`'s returned dict,
+    # which the artifacts carry whole, not appended to the sentence.
+    return (f"{q}: {label} diverged from {oracle} "
+            f"(recall={cmp_['recall']}, order={cmp_['order']}, "
+            f"distance_ok={dist_ok}, "
+            f"distance_delta={dist.get('max_delta')})", measured)
+
+
 def _verdict(report: dict, *, poisoned: str | None) -> dict:
     """Which comparisons are REQUIRED, and did any fail?
 
@@ -1145,37 +1210,37 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
             unmeasured.append(missing)
         # REQUIRED: the arm the migration is moving TO, against the metric the
         # record's index is built with.
-        cmp_ = entry["record"]
-        # ⛔ `is False` was FAIL-OPEN on its own absence: `distance.ok` is `None`
-        # when the check never ran, and `None is False` is False — so an arm that
-        # dropped its `candidate_distances=` kwarg would delete the only
-        # value-level check with every DB-free pin still green (measured in
-        # review). A required arm must be MEASURED and agree.
-        if entry.get("record_error"):
-            why = f"{q}: the record leg FAILED — {entry['record_error']}"
-            failures.append(why)
-            unmeasured.append(why)
-        dist_ok = (cmp_.get("distance") or {}).get("ok")
-        if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
-                or cmp_["recall"] is None or dist_ok is not True):
-            failures.append(
-                f"{q}: record diverged from truth_cosine "
-                f"(recall={cmp_['recall']}, order={cmp_['order']}, "
-                f"distance_ok={dist_ok}, "
-                f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
+        #
+        # ⛔ ONE DECISION FUNCTION, not a hand-written `if` per arm. This arm used
+        # to append the "diverged" failure EVEN WHEN THE LEG HAD RAISED (the
+        # `record_error` branch above appends its own message, and then this one
+        # fired too on the empty answer `run()` substitutes), so the second
+        # message landed in `failures` but not in `unmeasured` — and the round-7
+        # `detected = any(f … not in unmeasured)` read it as a MEASURED
+        # divergence. Measured on the reachable state a raised record leg actually
+        # produces (`ids_equal False, recall 0.0, distance.ok None`):
+        # `--poison id|order|recall` all printed `POISON DETECTED` and exited 1
+        # with the poison never exercised on a gated arm — the exact
+        # self-certification round 7 set out to close, one door over, and its pin
+        # could not see it because the fixture paired the error with a GREEN arm.
+        mine, measured = _arm_failure(
+            q, "record", entry["record"], oracle="truth_cosine",
+            error=entry.get("record_error"))
+        if mine:
+            failures.append(mine)
+            if not measured:
+                unmeasured.append(mine)
         # REQUIRED, as the COMPARATOR'S OWN sanity check: the graph scan must
         # reproduce its own oracle. If it does not, the harness's distance
         # inversion or its eligibility predicate is wrong and every other column
         # here is unverified.
-        cmp_ = entry["graph_scan_vs_euclidean"]
-        dist_ok = (cmp_.get("distance") or {}).get("ok")
-        if (not cmp_["ids_equal"] or cmp_["order"] == "diverged"
-                or cmp_["recall"] is None or dist_ok is not True):
-            failures.append(
-                f"{q}: graph_scan diverged from truth_euclidean "
-                f"(recall={cmp_['recall']}, order={cmp_['order']}, "
-                f"distance_ok={dist_ok}, "
-                f"distance_delta={(cmp_.get('distance') or {}).get('max_delta')})")
+        mine, measured = _arm_failure(
+            q, "graph_scan", entry["graph_scan_vs_euclidean"],
+            oracle="truth_euclidean")
+        if mine:
+            failures.append(mine)
+            if not measured:
+                unmeasured.append(mine)
         divergences += len(entry["metric_divergence_ids"])
 
     # ⛔ AN EMPTY REPORT IS NOT PARITY. `_validate_args` refuses `--queries < 1`,
