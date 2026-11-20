@@ -638,34 +638,73 @@ def test_the_guard_answers_what_libpq_would_DIAL_not_what_this_string_says(
         harness._assert_local_record_dsn("postgresql:///db", False)
 
 
-def test_the_app_role_dsn_keeps_values_that_need_quoting(harness):
-    """`shlex` UNQUOTES — so re-joining raw destroyed the DSN it was given.
+def test_the_app_role_dsn_changes_the_options_PAIR_and_nothing_else(harness):
+    """⛔ BYTE-PRESERVATION, asserted structurally — because every tokenising
+    rebuild here was wrong in a different way.
 
-    `app_role_dsn` rebuilt the conninfo with `" ".join(shlex.split(dsn))`, which
-    drops the quotes carrying a whitespace value (`dbname='tortoise record'` came
-    back as `dbname=tortoise record`, which libpq answers with `missing "=" after
-    "record"`), and it filtered `options` by token PREFIX, so a spaced
-    `options = '-c search_path=a'` left a DANGLING `=` after the filter (libpq:
-    `invalid connection option ""`). Either way `self.app_dsn` — the RECORD READ
-    leg — failed on every query, so a legitimate local DSN produced a
-    cannot-measure run that exited 2.
+    `" ".join(shlex.split(dsn))` lost the quotes carrying a whitespace value
+    (`dbname='tortoise record'` → `dbname=tortoise record`: libpq answers
+    `missing "=" after "record"`). Then a pairs loop that understood `key = value`
+    still destroyed the ONE-SIDED spacings libpq also allows — measured with real
+    `PQconninfoParse`, 8 of 15 legal spellings broke: `host =127.0.0.1` came back
+    as `host= =127.0.0.1` (host `"=127.0.0.1"`), `host= 127.0.0.1` as
+    `host='' 127.0.0.1=` (`invalid connection option "127.0.0.1"`),
+    `dbname ='tortoise record'` as `missing "=" after "record'"`.
+
+    The earlier version of THIS test asserted `" = " not in out`, which only
+    catches the doubly-spaced form: deleting the spaced-`=` handling entirely
+    kept all 59 pins green while libpq rejected the rebuilt DSN. So the property
+    asserted here is the one the function actually promises — the caller's string
+    is returned intact apart from the `options` pair, which is why no spelling a
+    test never imagined can be corrupted. `app_role_dsn` no longer tokenises:
+    it deletes the `options` pair with a whitespace-tolerant matcher and appends
+    its own.
     """
-    for dsn in ("dbname='tortoise record' host=127.0.0.1",
-                "options = '-c search_path=a' host=127.0.0.1",
-                "host=127.0.0.1 password='a b' dbname=x"):
+    import re as _re
+
+    def core(text: str) -> str:
+        """The DSN with any `options` pair removed, whitespace-normalised."""
+        stripped = _re.sub(r"""(?<![A-Za-z0-9_])options\s*=\s*(?:'[^']*'|\S+)""",
+                           " ", text, flags=_re.IGNORECASE)
+        return " ".join(stripped.split())
+
+    spellings = (
+        # the plain form, and every spacing libpq admits around `=`
+        "host=127.0.0.1 dbname=x",
+        "host =127.0.0.1 dbname=x",
+        "host= 127.0.0.1 dbname=x",
+        "host = 127.0.0.1 dbname=x",
+        "host\t=\n127.0.0.1 dbname=x",
+        # …with values that NEED quoting
+        "dbname ='tortoise record' host=127.0.0.1",
+        "password='a b' host=127.0.0.1",
+        "application_name ='my app' host=127.0.0.1",
+        # …and with an `options` pair already present, in both spacings
+        "options ='-c search_path=a' host=127.0.0.1",
+        "options='-c search_path=a' host=127.0.0.1",
+        "host=127.0.0.1 options='-c role=old' dbname=x",
+    )
+    for dsn in spellings:
         out = harness.app_role_dsn(dsn)
-        # the role option is always appended, and always quoted (it has spaces)
-        assert out.endswith(f"options='-c role={harness.APP_ROLE}'"), out
-        # …no orphan `=` survives the options filter
-        assert " = " not in out, out
-        # …quoted values stay quoted, so libpq can still read them
-        if "tortoise record" in dsn:
-            assert "dbname='tortoise record'" in out, out
-        if "password='a b'" in dsn:
-            assert "password='a b'" in out, out
-        # …and the hosts the guard would re-check are unchanged
-        hosts, _keys = harness._conninfo_hosts(out)
-        assert hosts == ["127.0.0.1"], (dsn, out, hosts)
+        assert out.rstrip().endswith(
+            f"options='-c role={harness.APP_ROLE}'"), (dsn, out)
+        # the harness owns `options` and NOTHING else
+        assert core(out) == core(dsn), (
+            "the rebuilt conninfo differs from the caller's outside the options "
+            f"pair — a tokenising rebuild corrupts a legal spelling: {dsn!r} -> {out!r}")
+        assert out.count("options") == 1, (dsn, out)
+        assert harness._conninfo_hosts(out)[0] == harness._conninfo_hosts(dsn)[0], (
+            f"the rebuild changed the hosts the guard would re-check: {dsn!r} -> {out!r}")
+
+    # A URI keeps its shape too, including the authority-less spelling that
+    # `urlunsplit` used to collapse to `postgresql:/db`.
+    for dsn in ("postgresql:///tortoise_record?host=localhost",
+                "postgresql://127.0.0.1:5432/db?host=127.0.0.1&sslmode=disable",
+                "postgresql://u:p@localhost/db"):
+        out = harness.app_role_dsn(dsn)
+        assert out.startswith(dsn.split("?")[0] + "?"), (dsn, out)
+        assert "options=-c%20role%3D" in out, out
+        assert out.count("options=") == 1, out
 
 
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):

@@ -73,7 +73,6 @@ import json
 import math
 import os
 import re
-import shlex
 import sys
 import time
 import uuid
@@ -808,6 +807,14 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
         _assert_loopback(host, "record database", allow_remote)
 
 
+#: libpq's conninfo `options` pair, whitespace-tolerant on BOTH sides of `=` and
+#: with a quoted value. Used to DELETE the keyword the harness owns; nothing else
+#: in a caller's conninfo is rewritten (see `app_role_dsn`).
+_OPTIONS_KV = re.compile(
+    r"""(?<![A-Za-z0-9_])options\s*=\s*(?:'((?:[^'\\]|\\.)*)'|(\S+))""",
+    re.IGNORECASE)
+
+
 def _quote_conninfo_value(value: str | None) -> str:
     """Quote one conninfo VALUE the way libpq reads it — only when it must be.
 
@@ -858,26 +865,22 @@ def app_role_dsn(dsn: str) -> str:
         # `head` is kept VERBATIM — never re-serialized — so `postgresql:///db`
         # keeps all three slashes.
         return f"{head}?{urlencode(params, quote_via=quote)}"
-    pairs: list[tuple[str, str | None]] = []
-    tokens = shlex.split(dsn)
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        if token == "=" and pairs:            # spaced form: `key = value`
-            key, _ = pairs.pop()
-            pairs.append((key, tokens[i + 1] if i + 1 < len(tokens) else ""))
-            i += 2
-            continue
-        key, sep, value = token.partition("=")
-        if sep and not value and i + 1 < len(tokens) and tokens[i + 1] == "=":
-            pairs.append((key, tokens[i + 2] if i + 2 < len(tokens) else ""))
-            i += 3
-            continue
-        pairs.append((key, value if sep else None))
-        i += 1
-    rebuilt = [f"{k}={_quote_conninfo_value(v)}" for k, v in pairs if k != "options"]
-    rebuilt.append(f"options={_quote_conninfo_value(options)}")
-    return " ".join(rebuilt)
+    # ⛔ DO NOT TOKENISE AND REBUILD — REPLACE ONLY `options`. Every hand-rolled
+    # tokeniser here was wrong in a different way, and libpq's conninfo grammar
+    # admits spaces on EITHER side of `=`, so a `key =value` pair alone (or a
+    # `key= value` one) defeated each successive version: measured with real
+    # `PQconninfoParse`, 8 of 15 legal spellings were destroyed —
+    # `host =127.0.0.1` came back as `host= =127.0.0.1` (host `"=127.0.0.1"`),
+    # `host= 127.0.0.1` as `host='' 127.0.0.1=` (`invalid connection option`),
+    # `dbname ='tortoise record'` as `missing "=" after "record'"`.
+    #
+    # The caller's string is already a DSN libpq accepts — that is what the guard
+    # certified. So the only thing this function may change is the `options`
+    # keyword it owns: delete that one pair (whitespace-tolerant, quoted or bare)
+    # and append its own. Everything else stays BYTE-FOR-BYTE, which cannot
+    # corrupt a spelling no test imagined.
+    stripped = _OPTIONS_KV.sub(" ", dsn).strip()
+    return f"{stripped} options={_quote_conninfo_value(options)}"
 
 
 def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
