@@ -3098,12 +3098,21 @@ def _d5_head_bound_verdicts(doc: str) -> list[str]:
 def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
     """Two typed per-head verdicts the re-cut merge restored, and the tree refuted (#13853 r17).
 
-    MEASURED at `84b94ad74f` (the head that merged), against the base `290912f303`:
+    MEASURED at `84b94ad74f` (the head that merged), against its merge base `b23528fa93` with
+    `290912f303` — ⛔ the base is NAMED and the TWO-ARG form is used, because `A...B` silently
+    takes `merge-base(A,B)` as its base: `290912f303` is NOT an ancestor of `84b94ad74f`, so
+    spelling it as `290912f303...84b94ad74f` would print this block's `(no output)` while a
+    reader reproducing the sentence with the two-arg form gets the OPPOSITE answer (5
+    `tortoise/` paths) — measured:
 
     ```
-    $ git diff --name-only 290912f303...HEAD -- tortoise/
+    $ git merge-base 290912f303 84b94ad74f
+    b23528fa93a2adebf6abb0183f2907f8ad9298e7
+    $ git diff --name-only b23528fa93 84b94ad74f -- tortoise/
     (no output)                       # so "no runtime behaviour change" DOES hold here
-    $ git diff --name-only 290912f303...HEAD -- docs/epics/…/04-plan.md
+    $ git diff --name-only 290912f303 84b94ad74f -- tortoise/ | wc -l
+    5                                 # the answer a reader gets from the WRONG base
+    $ git diff --name-only b23528fa93 84b94ad74f -- docs/epics/…/04-plan.md
     (no output)                       # so the FIRST of the two members prints NOTHING
     ```
 
