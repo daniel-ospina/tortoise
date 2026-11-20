@@ -2877,9 +2877,9 @@ def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
     ⛔ NOT a mutant: the `time.sleep` line's own condition. After that
     normalisation `wait` is `None` or in `[1.0, 120.0]`, so the sleep line can
     never see a falsy non-`None` and mutating its test reds NOTHING (measured at
-    #13950 review round 35, and re-measured twice since — on `main` at
-    `959c0306` (where the finding was first filed) and again at this head: the
-    suite stays fully green, no row reds. The green TOTAL this note used to quote
+    #13950 review round 35, and re-measured twice since: on `main` at `959c0306`
+    — where the finding was first filed — and again at this head, where the suite
+    stays fully green with no row reds). The green TOTAL this note used to quote
     is not repeated, because every row added since has falsified it. The
     load-bearing guard is the normalisation, and an earlier version of this
     docstring named the inert line.
