@@ -2096,28 +2096,37 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
         # (`{k: v for k, v in {"embedding": vec}.items()}`) both place the key and both
         # CERTIFIED, while `update({"embedding": vec})` was refused. The mapping under
         # `.items()` is a LITERAL the check can read (`_mapping_operand_stores_the_vector`
-        # decides it, wrappers included). `.keys()`/`.values()` place no vector and are not
-        # answered here.
+        # decides it, wrappers included).
+        # ⛔ AND `.keys()`/`.values()` DO PLACE THE VECTOR WHEN THEIR ELEMENTS ARE PAIRS
+        #    (`#13788`, measured at `f55c1b8942`): the sentence that stood here said they
+        #    "place no vector and are not answered here", which is FALSE — `dict.__ior__` and
+        #    `dict.update` UNPACK each element, so a view of a mapping whose elements are
+        #    pairs is an iterable of pairs exactly as `.items()` is. Six stop-arm spellings
+        #    CERTIFIED at `f55c1b8942` while storing, each runtime-checked by executing the
+        #    writer: `{"a": ("embedding", vec)}.values()` and
+        #    `{("embedding", vec): 1}.keys()` bare, through `list(...)`/`tuple(...)`/`set(...)`,
+        #    and in the `update(...)` position. `.keys()` is the third attribute of the same
+        #    rule — round 10 and round 11 each closed one attribute and left the next open.
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
                 and not node.args and not node.keywords):
             return _mapping_operand_stores_the_vector(node.func.value, alias_keys=alias_keys)
-        # ⛔ THE `.values()` VIEW OF A PAIRS-VALUED MAPPING IS THE SAME STORE, AND THIS ARM
-        #    ANSWERED ONLY `.items()` (`#13788` review round 11, P1, measured through
-        #    `_writer_consults_gate` with a runtime oracle on every row). `dict.__ior__` and
-        #    `dict.update` both accept an iterable of PAIRS, and a values view of a mapping
-        #    whose values ARE pairs is one — so the operand store was answered one attribute
-        #    name to the left:
+        # ⛔ A VIEW OF A PAIRS-VALUED / PAIRS-KEYED MAPPING IS THE SAME STORE (`#13788`
+        #    review round 11, P1; `.keys()` added by the round-12 lane, measured). `dict.__ior__`
+        #    and `dict.update` both accept an iterable of PAIRS, and a `values()`/`keys()` view
+        #    of a mapping whose VALUES/KEYS are pairs is one — so the operand store was answered
+        #    one attribute name to the left:
         #
-        #        props.update({"embedding": _encode(ev)}.items())          refused
-        #        props.update({"a": ("embedding", _encode(ev))}.values())  CERTIFIED, stores
-        #        props |= dict({"a": ("embedding", _encode(ev))}.values()) CERTIFIED, stores
+        #        props.update({"embedding": _encode(ev)}.items())                  refused
+        #        props.update({"a": ("embedding", _encode(ev))}.values())          CERTIFIED, stores
+        #        props |= dict({"a": ("embedding", _encode(ev))}.values())         CERTIFIED, stores
+        #        props |= {("embedding", _encode(ev)): 1}.keys()                   CERTIFIED, stores
         #
         #    The question is the pair question — is the KEY the property, and is the paired
         #    VALUE a real store rather than a constant — asked of `_mapping_items_pairs`, the
         #    ONE resolver for a mapping's pairs, instead of a second vocabulary here. A
         #    constant value cannot be the vector (`{"embedding": 1}.values()` yields `1`), so
         #    that half is what keeps the honest key-source spellings certified.
-        if (isinstance(node.func, ast.Attribute) and node.func.attr == "values"
+        if (isinstance(node.func, ast.Attribute) and node.func.attr in ("values", "keys")
                 and not node.args and not node.keywords):
             pairs = _mapping_items_pairs(node)
             if pairs is None:
@@ -2131,9 +2140,11 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
         #    CERTIFIED, because both arms above resolve the receiver of a BOUND view only. The
         #    unbound family is already modelled in this module (`dict.__setitem__(props, …)`),
         #    so it is the same voice one spelling over. Rebuilding the BOUND call and recursing
-        #    into the SAME arm keeps one rule for both spellings.
+        #    into the SAME arm keeps one rule for both spellings. `.keys()` joins the family
+        #    for the same reason it joins the bound arm: `dict.keys({("embedding", vec): 1})`
+        #    is an iterable of pairs when unpacked.
         if (isinstance(node.func, ast.Attribute) and len(node.args) == 1
-                and not node.keywords and node.func.attr in ("items", "values")
+                and not node.keywords and node.func.attr in ("items", "values", "keys")
                 and isinstance(node.func.value, ast.Name)
                 and _is_mapping_constructor(node.func.value.id)):
             bound = ast.Call(
@@ -2539,17 +2550,22 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
         #    CERTIFIED, because the bound-view arm below resolves the RECEIVER only. This
         #    module already recognises the unbound family elsewhere (`dict.__setitem__
         #    (props, …)`), so it is the same voice, one spelling over. Rebuilding the BOUND
-        #    form and recursing keeps ONE rule for both spellings — a second arm here is
-        #    exactly the per-resolver vocabulary this branch keeps deleting. `.keys()` is
-        #    deliberately absent: a keys view is not a pairs sequence, and the constructor
-        #    paths ask it through `_comprehension_source_yields`.
+        #    form and recursing keeps ONE rule for both spellings, so there is no second
+        #    arm.
+        #    ⛔ THAT SENTENCE IS FALSIFIED BY MEASUREMENT (`#13788`, at `f55c1b8942`):
+        #    `dict.__ior__`/`dict.update` unpack every element, so a KEYS view whose
+        #    keys are pairs is an iterable of pairs too —
+        #    `props |= {("embedding", _encode(ev)): 1}.keys()` stored and CERTIFIED,
+        #    and so did its `list(...)`/`tuple(...)`/`update(...)` spellings. `.keys()`
+        #    is therefore IN the family, bound and unbound — the third attribute of one
+        #    rule, not a second vocabulary.
         #    ⛔ AND IT MUST SIT OUTSIDE THE `not mapping.args` GUARD BELOW — an unbound view has
         #    exactly one positional, so an arm nested inside that guard is DEAD CODE that looks
         #    like a fix (measured: it survived its own mutation sweep until the row that reaches
         #    it was written).
         if (len(mapping.args) == 1 and not mapping.keywords
                 and isinstance(mapping.func, ast.Attribute)
-                and mapping.func.attr in ("items", "values")
+                and mapping.func.attr in ("items", "values", "keys")
                 and isinstance(mapping.func.value, ast.Name)
                 and _is_mapping_constructor(mapping.func.value.id)):
             bound = ast.Call(
@@ -2557,16 +2573,29 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
                                    ctx=ast.Load()),
                 args=[], keywords=[])
             return _mapping_items_pairs(bound, _depth + 1)
+        #    ⛔ AND THE THIRD VIEW IS THE SAME RULE, ONE VIEW OVER (`#13788`, measured):
+        #    `.keys()` is a pairs source exactly when its KEYS are pairs — `dict.__ior__`
+        #    unpacks each element, so `props |= {("embedding", vec): 1}.keys()` places the
+        #    vector. Round 10 shipped `.items()`/`.values()` and left `.keys()` out, so the
+        #    family stayed open on the third spelling: `props |= {("embedding",
+        #    _encode(ev)): 1}.keys()`, its `list(...)`/`tuple(...)` twins and the `update(…)`
+        #    position all CERTIFIED while the `.values()` twin was refused. The element
+        #    selection is the ONLY difference — `keys` reads the pair out of the key side,
+        #    `values` out of the value side — so it is one loop, not a second rule.
         if not mapping.args and not mapping.keywords and isinstance(mapping.func, ast.Attribute):
             if mapping.func.attr == "items":
                 return _mapping_items_pairs(mapping.func.value, _depth + 1)
-            if mapping.func.attr == "values":
+            if mapping.func.attr in ("values", "keys"):
                 inner = _mapping_items_pairs(mapping.func.value, _depth + 1)
                 if inner is None:
                     return None
+                # `keys` reads the element out of the KEY side, `values` out of the VALUE side;
+                # every element is then read as a PAIRS ROW, which is what unpacking it does.
+                elements = [(_key if mapping.func.attr == "keys" else value)
+                            for _key, value in inner]
                 values: list = []
-                for _key, value in inner:
-                    rows = _sequence_options(value, _depth + 1)
+                for element in elements:
+                    rows = _sequence_options(element, _depth + 1)
                     if rows is None:
                         return None
                     for row in rows:
@@ -3184,9 +3213,14 @@ def _sequence_options(node, _depth: int = 0):
     #    whole rule: an option is an element list, and a view's element is a pair. Refusal-only
     #    (the elements are the mapping's own keys/values, asked by the key question), and an
     #    unreadable receiver stays `None`.
+    #    ⛔ AND THE VIEW FAMILY IS THREE ATTRIBUTES, NOT TWO (`#13788`, measured): `.keys()`
+    #    is the same pairs source when its KEYS are pairs, so naming only `items`/`values`
+    #    left `list({"embedding": vec: 1}.keys())`-shaped spellings one wrapper late — the
+    #    exact asymmetry this arm exists to remove, one attribute over. `_mapping_items_pairs`
+    #    answers all three, so the resolver asks it rather than re-listing the vocabulary.
     if (isinstance(node, ast.Call) and not node.args and not node.keywords
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in ("items", "values")):
+            and node.func.attr in ("items", "values", "keys")):
         pairs = _mapping_items_pairs(node, _depth + 1)
         if pairs is None:
             return None
