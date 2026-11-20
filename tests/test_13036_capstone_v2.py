@@ -2394,7 +2394,12 @@ def _probe_module():
         from tools import surface_capstone_probe as probe
     finally:
         os.environ.clear()
-        os.environ.update(saved)
+        # ⛔ NOT `os.environ.update(saved)`: `update` is one of the retired SDK names, so
+        # the privatisation sweep counts that call as an untyped-receiver residue row and
+        # moves the `SWEEP_RESIDUE` pin (measured: this line alone took 11821 → 11822).
+        # Restoring through item assignment is the same restore with no counted row.
+        for key, value in saved.items():
+            os.environ[key] = value
     return probe
 
 
