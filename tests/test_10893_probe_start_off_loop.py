@@ -474,6 +474,134 @@ def test_a_start_that_fails_asynchronously_is_reconciled_and_can_recover(
     assert probe.info()["start_error"] is None
 
 
+def test_a_failed_start_stays_visible_while_the_retry_is_in_flight(monkeypatch):
+    """/health must not report a start failure as "probe in flight" (round 2, P2).
+
+    The `/health` read sequence is ``snapshot()`` -> ``begin()`` (which
+    reconciles the previous attempt, then starts ``_start_locked``) -> the view.
+    ``_start_locked`` cleared ``_start_error`` BEFORE the hand-off was known to
+    succeed, so within ONE read the cause was recorded and then wiped and the
+    read fell through to the "probe in flight" branch: measured 5/5 reads at
+    ``db.error='probe in flight (0.0s)'``, ``start_error=None`` — the exact
+    signature this change exists to remove, on the surface an operator reads.
+
+    The failure must survive until a start LANDS (``_run`` clears it), so a retry
+    in flight cannot mask the failure that caused it.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    class _AcceptThenFail:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def submit(self, fn):
+            self.calls += 1
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            if self.calls == 1:
+                future.set_exception(RuntimeError("can't start new thread"))
+            # 2nd+ : never settles -> the retry legitimately stays "starting"
+            return future
+
+    stub = _AcceptThenFail()
+    monkeypatch.setattr(monitoring, "_probe_starter", lambda: stub)
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.3)
+
+    first = probe.wait()
+    assert "can't start new thread" in (first.get("error") or "")
+
+    # This is the /health read: it inherits the failure AND starts a retry.
+    snapshot = probe.snapshot()
+    info = probe.info()
+
+    assert stub.calls == 2, "the retry was not handed off"
+    assert info["starting"] is True, "the retry should be in flight"
+    assert info["start_error"], (
+        "/health dropped the start failure as soon as a retry was in flight — it "
+        "reads as a healthy in-flight probe")
+    assert "start" in (snapshot.get("error") or ""), (
+        f"the read reported {snapshot.get('error')!r} instead of the start "
+        "failure it inherited")
+
+
+def test_the_sync_wait_path_reconciles_a_failed_start_too(monkeypatch):
+    """``wait()`` is ``run()``'s non-async twin and must reconcile as well.
+
+    It is what the selfhost probe loop and most tests call, and it had no row
+    covering a failed start at all: a reconcile removed from it burns the whole
+    bound on every call while reporting the same terminal state, so only the
+    ELAPSED assertion can see it.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    class _AcceptThenFail:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            future.set_exception(RuntimeError("can't start new thread"))
+            return future
+
+    monkeypatch.setattr(monitoring, "_probe_starter", _AcceptThenFail)
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=2.0)
+
+    started = time.monotonic()
+    result = probe.wait()
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False
+    assert "can't start new thread" in (result.get("error") or "")
+    assert elapsed < probe._timeout / 2, (
+        f"wait() took {elapsed:.2f}s of a {probe._timeout:g}s bound after a "
+        "failed start — the failure was only reconciled at the deadline")
+    assert probe.info()["in_flight"] is False
+
+
+def test_constructing_a_probe_warms_the_starter_off_the_loop():
+    """The ONE remaining blocking start() is paid at CONSTRUCTION, not on a read.
+
+    Every production coordinator is constructed at module import, so this warm-up
+    is what keeps a ``begin()`` on the event loop from ever building the pool —
+    i.e. it is the load-bearing half of the fix, and nothing pinned it: removing
+    it left every row green, because ``reset_probe_starter()`` pre-creates the
+    pool and so masked the gap in tests while production has no reset.
+    """
+    _fresh_starter()
+    with monitoring._PROBE_STARTER_LOCK:
+        monitoring._PROBE_STARTER_CACHE = None
+        monitoring._DAEMON_WORKERS.pop(monitoring.PROBE_STARTER_NAME, None)
+    assert monitoring._PROBE_STARTER_CACHE is None
+
+    monitoring.HealthProbe(lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.2)
+
+    assert monitoring._PROBE_STARTER_CACHE is not None, (
+        "the starter was left to be built on the first READ path instead of at "
+        "construction — that is the loop block this change removes")
+
+
+def test_the_starter_hatch_drops_the_cached_pool_too():
+    """``reset_daemon_worker(PROBE_STARTER_NAME)`` must not be a silent no-op.
+
+    The coordinator caches the pool (lock-free hot path), so dropping only the
+    registry entry left the cached pool alive: the operator pulls the documented
+    ops hatch and gets no effect and no signal.
+    """
+    _fresh_starter()
+    before = monitoring._probe_starter()
+    assert monitoring._PROBE_STARTER_CACHE is before
+
+    monitoring.reset_daemon_worker(monitoring.PROBE_STARTER_NAME)
+
+    assert monitoring._PROBE_STARTER_CACHE is None, (
+        "the starter cache survived the documented reset hatch — the hatch is a "
+        "no-op while the cached pool keeps being reused")
+    after = monitoring._probe_starter()
+    assert after is not before, "the reset handed back the pool it was asked to drop"
+
+
 def test_the_starter_is_its_own_pool():
     """The start must not queue behind the probe QUERY (#10893 design rule).
 

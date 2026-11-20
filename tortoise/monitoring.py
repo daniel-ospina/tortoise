@@ -3479,9 +3479,26 @@ def reset_daemon_worker(name: str) -> None:
     for #11892's quota-state worker, which had no hatch of its own (fresh review
     of #12426, P2: a black-holed count would have silenced `health.quota` until
     the next deploy).
+
+    ⛔ ``PROBE_STARTER_NAME``'s pool is ALSO cached by the probe coordinator
+    (``_PROBE_STARTER_CACHE``, so the probe-start hot path takes no lock).
+    Dropping only the registry entry left this hatch a silent NO-OP: the cached
+    pool is still alive, so the next start reuses it and the operator sees no
+    effect AND no signal — from the hatch they were told to pull. Both handles
+    are dropped together.
+
+    ⛔ The cache is assigned WITHOUT taking ``_PROBE_STARTER_LOCK``, and must
+    stay that way: this is reachable from ``reset_probe_starter()``, which
+    already HOLDS that lock, and it is the INNER lock of the order
+    ``_probe_starter`` takes (cache lock -> this registry lock). Re-entering the
+    outer lock here is a straight deadlock on a non-reentrant Lock (measured:
+    the whole suite hung inside ``reset_probe_starter``).
     """
+    global _PROBE_STARTER_CACHE
     with _DAEMON_WORKERS_LOCK:
         _DAEMON_WORKERS.pop(name, None)
+        if name == PROBE_STARTER_NAME:
+            _PROBE_STARTER_CACHE = None
 
 
 def _consume_future_exception(future) -> None:
@@ -5601,7 +5618,16 @@ class HealthProbe:
         seq = self._seq
         self._running = True
         self._started_at = time.monotonic()
-        self._start_error = None
+        # ⛔ `_start_error` is deliberately NOT cleared here (review round 2,
+        # P2). Clearing it before the hand-off was known to SUCCEED made
+        # `/health` report a start failure as an ordinary in-flight probe: the
+        # read sequence is `snapshot()` -> `begin()` (which reconciles the
+        # previous attempt and records its cause, then calls this) -> the view,
+        # so the cause was recorded and wiped inside ONE read. Measured 5/5
+        # reads returning `db.error='probe in flight (0.0s)'`,
+        # `start_error=None` — the exact signature this change exists to remove,
+        # on the one surface an operator reads (`hosted_api.py:8575-8580`).
+        # `_run` clears it when a start actually LANDS.
         worker = threading.Thread(
             target=self._run, args=(seq,),
             name=HEALTH_PROBE_THREAD_NAME, daemon=True,
