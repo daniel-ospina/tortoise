@@ -227,12 +227,15 @@ make this the case that goes wrong:
    product; archive the OLD path and treat the new one as new code.
 
 The gate that reads this is `check --base-ref` (bare `--base-ref` = the default branch), which
-compares the MERGE BASE's package set with this tree's, adding package ancestors on both sides so
-that deleting an `__init__.py` whose package still imports is not a removal. It is part of the
-`surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2), never a
-quiet pass. If the deletion is already recorded somewhere this gate cannot read, state it:
-`--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a local-shell
-record — CI passes no waiver, see "Restoring a removed symbol" below).
+compares the MERGE BASE's module set with this tree's and grades an `__init__.py` by its
+**CONTENT**, not by its path: deleting one that carries only a docstring (or nothing) is
+scaffolding, so the package still resolves and nothing left the product — while deleting one
+that carries statements IS a removal even though the package name still resolves through a
+surviving sibling, because the code that answered as that package's front door left. It is part
+of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
+never a quiet pass. If the deletion is already recorded somewhere this gate cannot read, state
+it: `--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a
+local-shell record — CI passes no waiver, see "Restoring a removed symbol" below).
 
 ## Restoring a removed symbol
 

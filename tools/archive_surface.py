@@ -1267,7 +1267,21 @@ def shrink_violations(
     # false record that makes a later reader believe a departure was checked (#12237's rule).
     for key in sorted(set(waivers) - used):
         kind, symbol = key
-        if key in base_entries:
+        if kind == MODULE:
+            # ⛔ THE ARCHIVE IS NOT THE ARM-1 RECORD, so `base_entries` is the wrong question and
+            # its answer was false in the ORDINARY case: a module present at the base AND here
+            # printed "does not record `tortoise.x` (module) at all" while the same run listed it
+            # on both sides. A `module` removal is answered by the PACKAGE TREE (arm 1 above), so
+            # ask the set that decides; the round-3 wording split just never reached this branch
+            # (review F2 of PR #14039, the same "the verdict was right, the stated fact was
+            # false" class the sibling branch was fixed for).
+            why = (
+                f"{base_label} carries `{symbol}` ({kind}) and this tree still carries it, so "
+                "nothing was removed for it to waive"
+                if symbol in base_modules
+                else f"{base_label} carries no `{symbol}` ({kind}) module at all"
+            )
+        elif key in base_entries:
             # The base DOES record it and it is still here: the stated fact must not claim
             # otherwise (review round 3 — "does not record `symbol` at all" was false on this
             # path, and misdirects the operator to look for a removal that never happened).
@@ -1961,7 +1975,13 @@ def main(argv: list[str] | None = None) -> int:
                 _sha, label = resolve_base(ROOT, args.base_ref)
                 shrink = f" Shrink checked against {label}"
                 if args.allow_archive_shrink:
-                    shrink += f" (waived: {', '.join(args.allow_archive_shrink)})"
+                    # ⛔ THE REASON IS REQUIRED AND WAS THEN DISCARDED (review N1 of PR #14039):
+                    # a WHY that is validated and never printed is a one-flag decoration, and
+                    # the green line is the only surviving record that a departure was checked.
+                    shrink += (
+                        f" (waived: {', '.join(args.allow_archive_shrink)}"
+                        f" — reason: {args.allow_archive_shrink_reason})"
+                    )
             print(f"OK — archive consistent: {len(entries)} entries ({counts}).{shrink}")
             return 0
         if args.cmd == "verify-anchors":

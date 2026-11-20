@@ -8034,3 +8034,129 @@ def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
     problems = sm.shrink_problems(doc, doc, allowed=[f"sdk:{symbol}"])
 
     assert any("waives nothing" in p for p in problems), problems
+
+
+def test_a_recorded_SDK_rename_is_green_on_the_shrink_arm():
+    """Review F1 of PR #14039: a RENAME is the one shape that needs no freeze, and the
+    enforcing path had no way to say so.
+
+    `RETIRED_SDK_METHODS` is the rename record (`tortoise/sdk_retired.py:27-29`), every entry
+    is pinned to the owner-approved `docs/product/beta-sdk-surface.md` by
+    `tests/test_sdk_retirement.py`, and `removal_report`'s own docstring calls a rename "the
+    one shape that needs no freeze". But the rename route required a WAIVER, and the CI step
+    passes only `--base-ref` (deliberately), while `cut --allow-removal` is a LOCAL flag that
+    `cmd_cut` persists nowhere — so an ordinary rename PR reddened the required job and the
+    printed remedy said "FREEZE IT", the one thing the record says is not coming back.
+
+    Non-vacuity: the symbol is taken from the REAL maps and required to be one that is NOT
+    archived, which is the shape a rename PR lands (a frozen one is already accounted).
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    archived = {symbol for _kind, symbol in records["archived"]}
+    renames = sorted(set(records["sdk_renamed"]) - archived)
+    assert renames, (
+        "the fixture needs a rename that is NOT frozen — that is the shape a rename PR lands"
+    )
+    symbol = renames[0]
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+
+    assert sm.shrink_problems(base, now) == [], (
+        f"{symbol} left the surface with its `RETIRED_SDK_METHODS` entry, which IS the record "
+        "for a rename (owner-approved, no freeze needed and no waiver available in CI)"
+    )
+
+
+def test_a_REMOVED_SDK_departure_still_needs_its_FREEZE_on_the_shrink_arm():
+    """The other direction: the rename route must not blanket-accept the DEPARTURE map.
+
+    `REMOVED_SDK_METHODS` names NO replacement, so it keeps no code and the freeze is still
+    required — accepting it would strip a caller with a bare `AttributeError` and archive
+    nothing (the round-18 defect of PR #12313, re-opened through the new route).
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    archived = {symbol for _kind, symbol in records["archived"]}
+    departures = sorted(set(records["sdk_retired"]) - set(records["sdk_renamed"]) - archived)
+    assert departures, "the fixture needs a departure with no replacement and no freeze"
+    symbol = departures[0]
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+    problems = sm.shrink_problems(base, now)
+
+    assert any("FREEZE IT" in p and symbol in p for p in problems), problems
+    assert any("REMOVED_SDK_METHODS" in p for p in problems), problems
+
+
+def test_an_unrecorded_sdk_removal_is_still_red_on_the_shrink_arm():
+    """Non-vacuity for the fix: a method in NEITHER map is unrecorded and must still red."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_sdk_ghost_method"
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+    problems = sm.shrink_problems(base, now)
+
+    assert any("DROPPED with no record" in p and symbol in p for p in problems), problems
+
+
+def test_the_shrink_arm_refusal_exits_2_like_the_archive_arm(checker, tmp_path, monkeypatch):
+    """Review F3 of PR #14039: the workflow comment and `archive/README.md` both promise 2.
+
+    `archive_surface.py` returns 2 for this same refusal and this tool's argparse pairings
+    already do; returning 1 sent an operator debugging a refused step looking for a removal
+    that does not exist. An invocation defect is not a finding about the tree.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    repo = tmp_path / "scratch"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+    doc["cut_at_commit"] = _git(repo, "rev-parse", "HEAD")
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "commit", "-qam", "record provenance on the default branch")
+    monkeypatch.setattr(sm, "ROOT", repo)
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="refs/heads/does-not-exist")
+
+    assert rc == 2, f"an unresolvable base ref is a REFUSAL, not a finding about the tree: {out}"
+    assert "REFUSED" in out, out
+    assert "merge base" in out, f"the refusal must be the BASE REF one, not another arm: {out}"
+
+
+def test_the_green_line_echoes_the_waiver_reason(checker, tmp_path, monkeypatch):
+    """Review N1 of PR #14039: a required-and-discarded reason is a decoration.
+
+    The LINE is what is under test (the accounting itself has its own rows above), so the
+    shrink arm's verdict is pinned green here rather than re-graded — which also keeps this
+    row off `removal_records()`'s ~55 s archive re-grade.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: ([], "origin/main (merge base abc)"))
+
+    rc, out = _check(
+        sm,
+        doc,
+        tmp_path,
+        base_ref="origin/main",
+        allow_surface_shrink=["tool:tortoise_deliberate_drop"],
+        allow_surface_shrink_reason="deliberate: measured no callers",
+    )
+
+    assert rc == 0, out
+    assert "waived: tool:tortoise_deliberate_drop" in out, out
+    assert "reason: deliberate: measured no callers" in out, out
+

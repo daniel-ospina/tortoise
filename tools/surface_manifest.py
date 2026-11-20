@@ -505,10 +505,10 @@ class SurfaceEvidenceUnreadable(Exception):
     """
 
 
-def _refuse(exc: SurfaceEvidenceUnreadable) -> int:
+def _refuse(exc: SurfaceEvidenceUnreadable, code: int = 1) -> int:
     print(f"::error::{exc}")
     print(f"REFUSED {exc}")
-    return 1
+    return code
 
 
 def commit_present(sha: str, root: Path | None = None) -> bool | None:
@@ -2752,6 +2752,8 @@ def removal_report(
     records: dict,
     *,
     allowed: set[str] | None = None,
+    committed_rename_record: bool = False,
+    flag: str = "--allow-removal",
 ) -> tuple[list[RemovalProblem], dict[tuple[str, str], str]]:
     """`(problems, accounting)` for the symbols that disappeared from the surface.
 
@@ -2792,6 +2794,24 @@ def removal_report(
     surface-class)` — the same key the gate itself uses — so a bare symbol that would waive
     a dropped TOOL and a dropped SDK METHOD of the same name at once is ambiguous and is
     refused rather than counted as one record for two removals (review of PR #12313).
+
+    ⛔ `committed_rename_record` IS FOR THE CALLER WITH NO WAIVER TO PASS — the CI shrink arm,
+    whose workflow deliberately supplies no `--allow-surface-shrink` (a standing flag in the
+    job that is supposed to require a record for every removal is the decoration this gate
+    exists to refuse). There `cut --allow-removal` cannot clear a RENAME, because that flag
+    is a LOCAL override that `cmd_cut` prints (its `REMOVAL OVERRIDE` line) and persists
+    NOWHERE, so the enforcing path could never see it: an owner-approved rename with a `RETIRED_SDK_METHODS` entry was
+    refused, with only two exits — freeze code the record says is not coming back, or add a
+    permanent waiver — and the printed remedy never named the route (review F1 of PR #14039).
+    The map entry IS a record a reviewer can read in the diff: it names the replacement, and
+    `tests/test_sdk_retirement.py` pins every entry to the owner-approved
+    `docs/product/beta-sdk-surface.md`. So on the path that has no override, the rename
+    record alone accounts for it — still only for `RETIRED_SDK_METHODS` (a RENAME); a
+    `REMOVED_SDK_METHODS` departure keeps no replacement and still needs its freeze.
+
+    `flag` is the name this caller's override is spelled with (`cut`'s `--allow-removal` or
+    `check`'s `--allow-surface-shrink`), so a refusal never names a flag the operator's command
+    does not have (review N3 of PR #14039).
     """
     entries = [parse_waiver(e) for e in (allowed or ())]
 
@@ -2843,8 +2863,8 @@ def removal_report(
             # The map records the DEPARTURE; it does not keep the code.
             if (
                 not archived
-                and _waived(symbol, cls)
                 and symbol in records.get("sdk_renamed", ())
+                and (_waived(symbol, cls) or committed_rename_record)
             ):
                 # ⛔ A STATED RENAME IS A ROUTE HERE, and it has to be: the repo's recorded
                 # SDK rename procedure is EXACTLY this shape (`tortoise/sdk_retired.py`: the
@@ -2858,8 +2878,11 @@ def removal_report(
                 if _waived_by_bare(symbol) and not _waived_by_qualified(symbol, cls):
                     waived.setdefault(symbol, []).append(cls)
                 accounting[(symbol, cls)] = (
-                    "`--allow-removal` (deliberate rename, stated in the PR) + the "
+                    f"`{flag}` (deliberate rename, stated in the PR) + the "
                     "`RETIRED_SDK_METHODS` rename record"
+                    if _waived(symbol, cls)
+                    else "the `RETIRED_SDK_METHODS` rename record alone — a rename keeps no "
+                    "code by design, and this path has no override to pass"
                 )
                 continue
             if not archived:
@@ -2881,8 +2904,12 @@ def removal_report(
                        "name the replacement in `RETIRED_SDK_METHODS` instead — a rename is the "
                        "one shape that needs no freeze"
                        if not renamed_entry else
-                       "FREEZE IT: restore the method into `tortoise/sdk.py` from the commit you "
-                       "are removing it at FIRST, then `uv run python "
+                       "OR — this symbol IS in `RETIRED_SDK_METHODS`, so its map entry already "
+                       "names the replacement and a rename keeps no code BY DESIGN: pass "
+                       f"`{flag} sdk:{symbol}` with a stated reason instead of freezing, and the "
+                       "map entry plus that override is the record. FREEZE IT ONLY if it is "
+                       "really a removal: restore the method into `tortoise/sdk.py` from the "
+                       "commit you are removing it at FIRST, then `uv run python "
                        f"tools/archive_surface.py archive sdk-method {symbol} --batch <slug> "
                        "--reason <text>`, then re-delete it (the freeze and the map entry are ONE "
                        "record, and this cut requires BOTH halves)")
@@ -2959,7 +2986,7 @@ def removal_report(
                 problems.append(RemovalProblem(
                     "redundant-override",
                     f"{symbol} ({cls}) is already accounted for by {found[0]}, so "
-                    "`--allow-removal` waives nothing — an override that replaces a real "
+                    f"`{flag}` waives nothing — an override that replaces a real "
                     "record with a rename claim is a false record"
                 ))
                 continue
@@ -2996,7 +3023,7 @@ def removal_report(
                 # either (review of PR #12313, round 22).
                 problems.append(RemovalProblem(
                     "no-record",
-                    f"{symbol} (sdk) has no departure record: `--allow-removal` states the "
+                    f"{symbol} (sdk) has no departure record: `{flag}` states the "
                     "rename but a caller of the old name needs the fail-closed `AttributeError` "
                     "the map raises. If this is a RENAME, add the old name to "
                     "`RETIRED_SDK_METHODS` in `tortoise/sdk_retired.py` FIRST (that also runs "
@@ -3027,7 +3054,7 @@ def removal_report(
             # line below it (review of PR #12313, round 24). The verified rename is the SDK
             # arm above, which reads `sdk_renamed` and says so.
             accounting[(symbol, cls)] = (
-                "`--allow-removal` (deliberate removal, stated in the PR)"
+                f"`{flag}` (deliberate removal, stated in the PR)"
             )
             continue
         problems.append(RemovalProblem(
@@ -3044,7 +3071,7 @@ def removal_report(
             problems.append(RemovalProblem(
                 "redundant-override",
                 f"{symbol} ({cls}) is already accounted for by {label}, so "
-                f"`--allow-removal {symbol}` waives nothing — an override that replaces a "
+                f"`{flag} {symbol}` waives nothing — an override that replaces a "
                 "real record with a rename claim is a false record",
             ))
             # The refusal is the verdict, so the record it names is not part of an `accounted`
@@ -3155,6 +3182,13 @@ def shrink_problems(
     review rounds are the record rule, and a second implementation here would be a second
     answer — so the only thing this function adds is the PRIOR set, which is the half no
     same-tree check can supply: the PR authors both sides of every comparison it could make.
+
+    ⛔ `committed_rename_record=True`: this is the path with NO override to pass (the workflow
+    supplies no `--allow-surface-shrink`, deliberately), so a RENAME is accounted for by its
+    own committed record — the `RETIRED_SDK_METHODS` entry, owner-approved in
+    `docs/product/beta-sdk-surface.md`. Without it an ordinary rename PR reddened a required
+    job with no route that could clear it: `cut --allow-removal` is persisted nowhere, so CI
+    could never see it (review F1 of PR #14039).
     """
     prior = surface_symbols(base_doc)
     derived = surface_symbols(doc)
@@ -3164,7 +3198,16 @@ def shrink_problems(
         # file, the same work `archive_surface.py check` does), so it is paid only when a
         # symbol actually left the surface — exactly when the accounting is the question.
         records = removal_records()
-        problems, _accounting = removal_report(prior, derived, records, allowed=list(allowed))
+        problems, _accounting = removal_report(
+            prior,
+            derived,
+            records,
+            allowed=list(allowed),
+            # The enforcing path has no override to pass, so the committed rename record is
+            # what it can read — and a rename is the shape that needs no freeze.
+            committed_rename_record=True,
+            flag="--allow-surface-shrink",
+        )
         out = [str(p) for p in problems]
         # ⛔ A WAIVER THAT WAIVES NOTHING IS A FALSE RECORD, and `removal_report` cannot report
         # every shape of it: it only grades a waiver against a removal it met, so a waiver
@@ -3214,8 +3257,10 @@ def shrink_report(
 
     A symbol in the BASE ref's baseline and absent from the COMMITTED one is a removal, and
     it is accounted for exactly as `cut` would demand: an `archive/MANIFEST.json` entry of
-    the symbol's own kind, or (for an SDK method) that freeze PLUS the retirement-map entry,
-    or a waiver that NAMES the symbol and surface (see `shrink_problems`).
+    the symbol's own kind, or (for an SDK method) that freeze PLUS the retirement-map entry —
+    except a RENAME, whose `RETIRED_SDK_METHODS` entry names the replacement, is owner-approved
+    in `docs/product/beta-sdk-surface.md`, and keeps no code by design, so that entry is its
+    record; or a waiver that NAMES the symbol and surface (see `shrink_problems`).
 
     `base_ref` is `""` for "the default branch, as this clone names it" (the CLI's `const`).
     An unresolvable ref is a REFUSAL, not an empty removal set.
@@ -4459,7 +4504,12 @@ def cmd_check(args: argparse.Namespace) -> int:
                 allowed=getattr(args, "allow_surface_shrink", ()) or (),
             )
         except SurfaceEvidenceUnreadable as exc:
-            return _refuse(exc)
+            # ⛔ EXIT 2, LIKE `archive_surface.py`'s SAME REFUSAL AND LIKE THIS TOOL'S OWN
+            # argparse pairings: an unresolvable/missing base ref is a defect in the
+            # INVOCATION, never a finding about the tree, and the workflow comment and
+            # `archive/README.md` both say 2. Returning 1 here sent an operator debugging a
+            # refused step looking for a removal that does not exist (review F3 of PR #14039).
+            return _refuse(exc, code=2)
         problems.extend(_shrink_problems)
 
     for p in problems:
@@ -4467,6 +4517,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     if problems:
         print(f"\n{len(problems)} problem(s)")
         return 1
+    _waived_note = ""
+    if _base_ref is not None and getattr(args, "allow_surface_shrink", ()):
+        # ⛔ A REQUIRED REASON THAT IS NEVER PRINTED IS A DECORATION (review N1 of PR #14039).
+        # `cut` prints its reason in its `REMOVAL OVERRIDE` block, so the green line is where a
+        # waiver's WHY belongs:
+        # it is the only surviving record that the departure was checked, and CI passes none.
+        _waived_note = (
+            "; waived: "
+            + ", ".join(sorted(getattr(args, "allow_surface_shrink", ()) or ()))
+            + f" — reason: {getattr(args, 'allow_surface_shrink_reason', '')}"
+        )
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
         "fourteen properties hold (eleven structural, one derived-from-code, "
@@ -4476,6 +4537,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             if _shrink_compared is not None
             else ""
         )
+        + _waived_note
     )
     return 0
 

@@ -1550,6 +1550,58 @@ def test_a_waiver_that_waives_nothing_is_reported(tree: Path) -> None:
     assert any("waives nothing" in p for p in problems), problems
 
 
+def test_a_MODULE_waiver_that_waives_nothing_does_not_claim_the_base_lacks_it(tree: Path) -> None:
+    """Review F2 of PR #14039: the round-3 wording split never reached the MODULE branch.
+
+    `base_entries` is the ARCHIVE's rows, and arm 1's question — "does the base carry this
+    module?" — is answered by the PACKAGE TREE, so a module present at BOTH ends printed
+    "does not record `tortoise.sdk` (module) at all" while the same run compared it on both
+    sides. A verdict that is right and a stated fact that is false is the exact defect the
+    archive-row branch was fixed for, and it points the operator at a removal that never
+    happened.
+    """
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.sdk"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "does not record" not in waived[0], waived[0]
+    assert "still carries it" in waived[0], waived[0]
+
+
+def test_the_green_line_echoes_the_waiver_reason(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Review N1 of PR #14039: the reason is REQUIRED and was then discarded.
+
+    A WHY that is validated and never printed is a one-flag decoration, and this line is the
+    only surviving record that the departure was checked (`cut` already prints its reason).
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    rc = arch.main(
+        [
+            "archive_surface.py",
+            "check",
+            "--base-ref",
+            "HEAD~1",
+            "--allow-archive-shrink",
+            "module:tortoise.gone",
+            "--allow-archive-shrink-reason",
+            "deliberate: measured no callers",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "waived: module:tortoise.gone" in out, out
+    assert "reason: deliberate: measured no callers" in out, out
+
+
 def test_a_waiver_must_name_a_real_kind_and_symbol(tree: Path) -> None:
     with pytest.raises(arch.ArchiveRefused, match="not `<kind>:<symbol>`"):
         arch.shrink_violations(tree, base_ref="HEAD", allowed=["tortoise.gone"])
