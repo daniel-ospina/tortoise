@@ -279,3 +279,15 @@ def test_the_verdict_reds_on_a_distance_only_divergence(harness):
     v = harness._verdict(report, poisoned=None)
     assert v["ok"] is False
     assert any("distance_delta=1.9" in f for f in v["failures"])
+
+
+def test_a_non_loopback_store_is_refused_without_an_explicit_opt_in(harness):
+    """The harness WRITES. A fire-and-forget cleanup is not a safety property."""
+    with pytest.raises(SystemExit) as exc:
+        harness._assert_loopback("db.example.com", "record database", False)
+    assert "NON-LOCAL" in str(exc.value)
+    assert "--allow-remote-writes" in str(exc.value)
+    # …and the deliberate act is allowed, so the guard cannot wedge a real run.
+    harness._assert_loopback("db.example.com", "record database", True)
+    for host in ("127.0.0.1", "localhost", "::1"):
+        harness._assert_loopback(host, "record database", False)
