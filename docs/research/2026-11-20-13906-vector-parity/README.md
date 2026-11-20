@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (59 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (60 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -365,6 +365,22 @@ Mutants, each reddening exactly its own pin: the authority read as one host → 
 unix-socket skip removed → **1 failed**; the vector arm keeping stale parameters → **1 failed**.
 Restored tree: **56 passed**.
 
+### Round 13: libpq dispatches URI-vs-conninfo by PREFIX, and `"://" in dsn` asked the wrong question
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** `_record_dsn_hosts` and `app_role_dsn` both chose the URI parser with `if "://" in dsn:`. libpq's own dispatch (`connectOptions1`) tests whether the string **STARTS WITH** `postgresql://` / `postgres://`; anything else is a keyword/conninfo string. So a conninfo DSN whose ANY VALUE contains `://` — `host=db.prod.example.com password=vault://localhost/secret` — was parsed as a URI, the "authority" was read out of the PASSWORD, and the real remote host was never examined: the guard passed a DSN that dials, seeds and then deletes in a remote record | libpq's `PQconninfoParse` + `PQhostaddr` on three shapes (`password=vault://localhost/x`, `application_name=postgresql://localhost/db`, `sslrootcert=x://localhost/y`, each with a remote `host`/`hostaddr`), and a 68-spelling × 4-environment sweep found six bypasses, all this one root | `_is_uri_dsn()` — `dsn.lstrip().startswith(("postgresql://", "postgres://"))` — is now the ONE dispatch, used by both functions so a certified conninfo DSN is not rebuilt in URI syntax. Pinned by `test_a_conninfo_value_containing_a_url_is_not_parsed_as_a_uri`; the mutant restoring `"://" in dsn` reds it |
+| **P2 (non-blocking, disputed figure)** this artifact quotes the euclidean median as `28.283`. A reviewer measured `28.848` over the 48 draws and `28.044` over the 52-row eligible population; an earlier reviewer measured `28.283`. ⛔ The committed artifacts do not contain the per-draw distances, so NEITHER figure is verifiable from the evidence in this directory — it is recorded here as disputed rather than "corrected", because a correction that is itself wrong is the failure mode §8 documents | `build_corpus(13906, 48)` + median over the draws, both reviewers' recipes | left as-is with this note. A live re-run regenerating `parity-run.json` with the per-draw distances would settle it; rewriting the number from a second unverifiable recipe would not |
+| **P2 (non-blocking, artifact staleness)** the committed `parity-run.json` has no `arms.record.index` key, although round 11's K5 states the verified `indexdef` "is recorded under `arms.record.index`". The artifact predates that fix — the same staleness O4 records for `poison-vector.json`'s params | read the JSON | noted here; a fresh live run records it. Nothing else in the artifact depends on it |
+
+### Round 14: libpq dispatches URI-vs-conninfo by PREFIX, and `"://" in dsn` asked the wrong question
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** `_record_dsn_hosts` and `app_role_dsn` both chose the URI parser with `if "://" in dsn:`. libpq's own dispatch (`connectOptions1`) tests whether the string **STARTS WITH** `postgresql://` / `postgres://`; anything else is a keyword/conninfo string. So a conninfo DSN whose ANY VALUE contains `://` — `host=db.prod.example.com password=vault://localhost/secret` — was parsed as a URI, the "authority" was read out of the PASSWORD, and the real remote host was never examined: the guard passed a DSN that dials, and `run()` then seeds in it and `teardown()` deletes by `org_id` | libpq's `PQconninfoParse` + `PQhostaddr` on three shapes (`password=vault://localhost/x`, `application_name=postgresql://localhost/db`, `sslrootcert=x://localhost/y`, each with a remote `host`/`hostaddr`); a 68-spelling × 4-environment sweep found six bypasses, all one root | `_is_uri_dsn()` — `dsn.lstrip().startswith(("postgresql://", "postgres://"))` — is now the ONE dispatch, used by both functions so a certified conninfo DSN is not rebuilt in URI syntax. Pinned by `test_a_conninfo_value_containing_a_url_is_not_parsed_as_a_uri`; restoring `"://" in dsn` reds exactly that pin |
+| **P2 (non-blocking, disputed figure)** this artifact quotes the euclidean median as `28.283`. One reviewer measured `28.848` over the 48 draws (and `28.044` over the 52-row eligible population); an earlier one measured `28.283`. ⛔ The committed artifacts do not carry the per-draw distances, so NEITHER figure is verifiable from the evidence in this directory — recorded as disputed rather than "corrected", because a correction that is itself wrong is the failure mode §8 documents | `build_corpus(13906, 48)` + median over the draws | left as-is with this note; a live re-run that records the per-draw distances would settle it |
+| **P2 (non-blocking, artifact staleness)** the committed `parity-run.json` has no `arms.record.index`, although round 11's K5 says the verified `indexdef` "is recorded under `arms.record.index`" — the artifact predates that fix, the same staleness O4 records for `poison-vector.json`'s params | read the JSON | noted; a fresh live run records it |
+
 ## 6. Reproducing
 
 ```bash
@@ -394,7 +410,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **59 passed**.
+tests/test_vector_parity_13906.py -q` → **60 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:

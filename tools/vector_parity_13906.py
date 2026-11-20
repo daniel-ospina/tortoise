@@ -534,6 +534,10 @@ def perturb_for_vector_poison(rows: list[Row], victim: str = "anchor") -> list[R
 
 # ── stores ──────────────────────────────────────────────────────────────────
 
+#: Loopback by construction, plus `host.docker.internal`: that name resolves to
+#: the HOST machine, which is where the lane's own database listens when this
+#: harness runs INSIDE a container — local to the run, not adjacent to it. It is
+#: not a loopback ADDRESS, so it is named here rather than inferred.
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
 
 
@@ -569,6 +573,21 @@ RECORD_DSN_AMBIGUOUS = (
 #: absent host and is refused the same way.
 RECORD_DSN_SERVICE = ("<service — the dialled host is whatever pg_service.conf "
                       "says, so it cannot be PROVEN local>")
+
+
+def _is_uri_dsn(dsn: str) -> bool:
+    """Does libpq read this as a URI DSN? — by PREFIX, never by containment.
+
+    ⛔ `"://" in dsn` ANSWERS A DIFFERENT QUESTION. libpq's own dispatch
+    (`connectOptions1`) tests whether the string STARTS with `postgresql://` or
+    `postgres://`; anything else is a keyword/conninfo string. So a conninfo whose
+    ANY VALUE happens to contain `://` —
+    `host=db.prod.example.com password=vault://localhost/secret` — was parsed here
+    as a URI, the "authority" was read out of the password, and the REAL host was
+    never examined: the guard passed a DSN that dials and then seeds/deletes in a
+    remote record (measured with `PQconninfoParse` + `PQhostaddr`).
+    """
+    return dsn.lstrip().startswith(("postgresql://", "postgres://"))
 
 
 def _split_host_list(value: str) -> list[str]:
@@ -733,7 +752,7 @@ def _record_dsn_hosts(dsn: str) -> list[str]:
     would hide behind a fragment is still seen here.
     """
     try:
-        if "://" in dsn:
+        if _is_uri_dsn(dsn):
             hosts, keys = _uri_hosts(dsn)
         else:
             hosts, keys = _conninfo_hosts(dsn)
@@ -821,7 +840,7 @@ def app_role_dsn(dsn: str) -> str:
     every query would carry a `record_error`, i.e. a cannot-measure run.
     """
     options = f"-c role={APP_ROLE}"
-    if "://" in dsn:
+    if _is_uri_dsn(dsn):
         head, sep, raw_query = dsn.partition("?")
         # ⛔ `parse_qsl` DECODES `+` AS A SPACE; libpq does not. A password or an
         # `application_name` carrying a literal `+` would silently change under the

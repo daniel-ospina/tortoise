@@ -1747,3 +1747,39 @@ def test_the_graph_store_locality_guard_is_called_by_run(harness):
                     if isinstance(n, ast.FunctionDef) and n.name == "run")
     called = _called_names(run_node)
     assert {"_assert_loopback", "_assert_local_record_dsn"} <= called, sorted(called)
+
+
+def test_a_conninfo_value_containing_a_url_is_not_parsed_as_a_uri(harness):
+    """libpq dispatches URI-vs-conninfo by PREFIX; `"://" in dsn` asked the wrong thing.
+
+    A whitespace-conninfo DSN whose ANY VALUE contains `://` —
+    `host=db.prod.example.com password=vault://localhost/secret` — was parsed as a
+    URI, so the "authority" was read out of the PASSWORD and the real remote host
+    was never examined: the guard passed a DSN that dials, seeds and then deletes
+    in a remote record. Measured with libpq (`PQconninfoParse` + `PQhostaddr`):
+    libpq reads `host='db.prod.example.com'` from that string.
+    """
+    remote = (
+        "host=db.prod.example.com dbname=tortoise_record password=vault://localhost/secret",
+        "hostaddr=203.0.113.9 dbname=db application_name=postgresql://localhost/db",
+        "host=db.prod.example.com sslrootcert=x://localhost/y",
+    )
+    for dsn in remote:
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act survives
+
+    # …and the dispatch itself: a URI is a PREFIX, not a substring.
+    assert harness._is_uri_dsn("postgresql://127.0.0.1/db")
+    assert harness._is_uri_dsn(" postgres://127.0.0.1/db")   # leading space
+    assert not harness._is_uri_dsn("host=127.0.0.1 dbname=x password=vault://localhost/y")
+    # controls, so this is about the dispatch and not a blanket refusal
+    for dsn in ("postgresql://127.0.0.1:5432/db", "host=127.0.0.1 dbname=x"):
+        harness._assert_local_record_dsn(dsn, False)
+
+    # `app_role_dsn` must dispatch the same way, or a certified conninfo DSN is
+    # rebuilt in URI syntax and libpq cannot read it.
+    rebuilt = harness.app_role_dsn(
+        "host=127.0.0.1 dbname=x password=vault://localhost/secret")
+    assert "options='" in rebuilt and "?options=" not in rebuilt, rebuilt
