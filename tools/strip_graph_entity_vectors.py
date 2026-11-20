@@ -1105,7 +1105,11 @@ _STATEMENT_RUNNERS = ("run", "query", "execute", "write")
 #: Callee names that RETURN THE SAME ELEMENTS they are given, so a wrapper of this family never
 #: changes WHICH element the check sees — `list`, `tuple`, `set` (re-columned), `sorted` (re-ordered),
 #: `reversed` (re-ordered) and `iter` (the one-shot view of the same elements). ⛔ ONE INCLUDE LIST, ASKED AT EVERY SEAM THAT UNWRAPS A CONTAINER
-#: (`#13788` round 12, measured): the family used to be spelled out FOUR times with four different
+#: (`#13788` round 12, measured) — `_source_holds_the_store_anywhere`'s container arm included: it
+#: asks THIS list through `_container_call_operand` and subtracts only
+#: `_CONTAINER_CALLS_ANSWERED_UPSTREAM`, so a name added here reaches that seam too unless it is
+#: excluded there by name, with its measurement beside it. The family used to be spelled out FOUR
+#: times with four different
 #: member sets, and the two names missing from all four — `sorted`/`reversed` — CERTIFIED a stop arm
 #: that STORES the vector, 21 of 100 generated rows, each runtime-checked:
 #:
@@ -1138,6 +1142,37 @@ def _container_call_operand(node):
     if _callee_name(node) not in _CONTAINER_CALLS:
         return None
     return node.args[0]
+
+
+#: The names of the pass-through family that `_source_holds_the_store_anywhere`'s container arm
+#: deliberately does NOT answer, because an upstream leg has already decided their spellings.
+#: ⛔ A SUBTRACTION FROM `_CONTAINER_CALLS`, NEVER A SECOND MEMBER SET — the whole reason that list
+#: exists is that the family was spelled out four times with four different member sets, and the
+#: two names missing from all four CERTIFIED a stop arm that stored the vector (21 of 100 rows).
+#: A tuple re-spelled at the site is that defect again: adding a name to `_CONTAINER_CALLS` would
+#: silently not reach this seam and NOTHING would redden. So membership lives in one place and only
+#: the DISPOSITION is local — and an excluded name is SUBTRACTED, so a NEW family member is asked
+#: at this seam by default (fail-closed: it can only add refusals).
+#:
+#: ⛔ ONLY SAFE WHILE IT IS REDUNDANT, and that is measured, not assumed (`#13788` round 12;
+#: re-measured for the review of PR #13928 at `fc5e67cc49`). In the position this seam is asked
+#: from — a NON-`Name` key over a container-wrapped pairs source — every one of the six names is
+#: answered BEFORE the fourth leg: sampled all six names x five inner shapes (literal, `.copy()`,
+#: `if`-expression, `Starred` splice, set literal) = **30 rows**; leg 1
+#: (`_pairs_operand_stores_the_vector`) answered 30/30 and leg 3
+#: (`_comprehension_source_pairs_the_property_with_a_value`) 30/30, so this arm was the SOLE
+#: decider of **0/30**. Emptying its name set moves **no** row of
+#: `test_the_stop_arm_must_not_store_the_vector` either (measured by emptying it, and again by
+#: deleting the arm outright). `set`/`list`/`tuple` are SAMPLED here — not extrapolated from the
+#: `sorted`/`reversed`/`iter` sweep that named only three of the six.
+#: ⛔ THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 is ever thinned so that it stops
+#: answering an excluded name,
+#: `test_the_container_arm_this_seam_does_not_answer_is_covered_one_leg_earlier` reddens — instead
+#: of this exclusion quietly losing the legs that were doing the work.
+#: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
+#: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
+#: DISCLOSED here, never left looking load-bearing.
+_CONTAINER_CALLS_ANSWERED_UPSTREAM = ("set", "sorted", "reversed", "iter")
 
 
 def _runs_statements(call) -> bool:
@@ -2333,19 +2368,23 @@ def _source_holds_the_store_anywhere(node) -> bool:
     if isinstance(node, ast.Starred):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
-        # ⛔ DELIBERATELY NOT WIDENED TO THE PASS-THROUGH FAMILY (`#13788` round 12, measured):
-        # this scan's container arm is answered by NOTHING — disabling it outright moved NO
-        # verdict across six candidate spellings (`sorted([*(("embedding", vec),)])`,
-        # `sorted(x.copy())`, `sorted(x if f else [])`, and the `reversed`/`iter` twins),
-        # because the pairs resolver in `_pairs_operand_stores_the_vector` answers every
-        # container spelling this scan can reach, one leg before this one. A leg with no
-        # witness is not a closed hole, and widening an unreachable arm would CLAIM a fix that
-        # no row could ever redden — so it keeps the two-name tuple it had, and the three seams
-        # that ARE reached (`_pairs_operand_stores_the_vector`, `_comprehension_source_yields`,
+        # ⛔ THIS SEAM ASKS THE ONE INCLUDE LIST, AND ANSWERS A MEASURED PART OF IT (`#13788`
+        # round 12; re-measured for the review of PR #13928). The MEMBER SET comes from
+        # `_container_call_operand`/`_CONTAINER_CALLS` — which is also what keeps that helper's
+        # documented keyword semantics here (`key=`/`reverse=` re-order without re-selecting, so
+        # for the ELEMENT question this arm asks they are transparent). The site re-spells
+        # neither: a second tuple here is how the family came to have four different member sets.
+        # What is local is only the DISPOSITION — the names in
+        # `_CONTAINER_CALLS_ANSWERED_UPSTREAM` are dropped because an upstream leg decides their
+        # spellings first (see that constant for the measurement and for the guard that keeps the
+        # cover honest). A leg with no witness is not a closed hole, and WIDENING an unreachable
+        # arm would CLAIM a fix that no row could ever redden — so the arm stays disclosed
+        # rather than claiming protection, and the three seams that ARE reached
+        # (`_pairs_operand_stores_the_vector`, `_comprehension_source_yields`,
         # `_sequence_options`) carry the fix.
-        name = _callee_name(node)
-        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
-            return _source_holds_the_store_anywhere(node.args[0])
+        if (_callee_name(node) not in _CONTAINER_CALLS_ANSWERED_UPSTREAM
+                and (operand := _container_call_operand(node)) is not None):
+            return _source_holds_the_store_anywhere(operand)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
                 and not node.args and not node.keywords):
             return _source_holds_the_store_anywhere(node.func.value)
