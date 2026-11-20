@@ -3068,27 +3068,46 @@ _D5_BLANK_COUNT_RE = re.compile(
 #:
 #: ⛔ AND THE FLAGS AND THE QUOTE ARE PART OF THE MATCH, BECAUSE "PREFIX-INDEPENDENT" WAS NOT
 #: (#13962, MEASURED). The cut above read `grep -c[A-Za-z]* '<expr>'` — ONE spelling of a count
-#: command — while claiming to read the expression "whatever command prefix". Four OTHER
+#: command — while claiming to read the expression "whatever command prefix". SEVEN other
 #: spellings of the SAME prescription left this arm GREEN, each measured by appending one line
-#: to the bundle and running the cell that calls `_d5_blank_count_expression` (all four:
-#: `1 passed`): `grep -Ec '^\+$'` (flag before the `c`), `grep -cE "^\+$"` (double-quoted
-#: expression — the exact byte pattern the row's own examples avoid and a re-wrap can produce),
-#: `grep -c -E '^\+$'` (flags split) and `grep --count '^\+$'` (long form). In every one the row
-#: carried TWO BLANK-class prescriptions — the retired, narrower one among the ungraded ones —
-#: while the arm whose whole job is to refuse that reported the class as graded once. So the
-#: flags are read as a RUN of `-…` words and asked only whether they request a count, and the
-#: expression may be single- OR double-quoted.
+#: to the bundle and running the cell that calls `_d5_blank_count_expression` (`1 passed` for
+#: every one): `grep -Ec '^\+$'` (flag before the `c`), `grep -cE "^\+$"` (double-quoted
+#: expression), `grep -c -E '^\+$'` (flags split), `grep --count '^\+$'` (long form),
+#: `grep -c -- '^\+$'` (POSIX end-of-flags `--`), `grep -c --color=never '^\+$'` (a long flag
+#: WITH a value) and `grep -c $'^\+$'` (ANSI-C quoting). In every one the row carried TWO
+#: BLANK-class prescriptions — the retired, narrower one among the ungraded ones — while the arm
+#: whose whole job is to refuse that reported the class as graded once.
+#: ⛔ THE FIRST CUT OF THIS FIX READ FOUR OF THESE AND WAS ITSELF GUILTY OF THE SAME OVER-CLAIM
+#: (#13995 review, P1 — MEASURED): its flag word was `-{1,2}[A-Za-z][\w-]*`, which cannot
+#: express a bare `--` (a letter is required after the dashes) nor `--flag=value` (`=` is outside
+#: `[\w-]`), and its quote could not express `$'…'` — so the last three mutants above were
+#: invisible to it while its own paragraph called the claim "every count command spelled
+#: `grep <flags> '<expr>'`". The flag word is now `-`-ANCHORED and otherwise OPEN
+#: (`[^\s'\"]*`): a flags token may not contain whitespace or a quote, which is what keeps the
+#: match from running past the command into the sentence, and every word must still begin with
+#: `-`, which is what keeps a non-flag token (a filename, a revision) out of the run. The
+#: expression may be single-, double- or ANSI-C-quoted.
 #:
 #: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
-#: itself as complete (this file's own rule at `:1468`, and the over-claim was half of #13962):
-#: an UNQUOTED expression (`grep -cE ^[+-]$`), flags written AFTER the expression (`grep
-#: '^\+$' -c`), a count performed by another tool (`rg -c '^\+$'`) or assembled from a shell
-#: variable. Each of those carries a second prescription this reader cannot see, so "exactly
-#: one BLANK-class count command" is a claim about every count command spelled `grep
-#: <flags> '<expr>'` — not a claim that the class is prescribed once in the document.
+#: itself as complete — this file's own rule (`_typed_answers_to_tortoise_cmd`'s closing
+#: sentence, cited by NAME rather than by line because the number is exactly what rots):
+#:   * an UNQUOTED expression — `grep -cE ^[+-]$`;
+#:   * flags written AFTER the expression — `grep '^+$' -c`;
+#:   * a count performed by another tool — `rg -c '^+$'`, `awk`;
+#:   * an expression built by CONCATENATION — `grep -cE '^'"[+-]"'$'` is read only up to its
+#:     first quoted fragment (`^`), so a class constraint living in the tail is invisible. This
+#:     is NOT uniformly a gap (`"^[+-]$"''` reads the whole class, because the class is inside
+#:     the first quoted fragment) — which is exactly why it is listed as a shape to check rather
+#:     than dismissed.
+#: One shape is seen but NOT classifiable, which is a different thing and is said separately so
+#: the list above is not read as covering it: an expression held in a shell variable
+#: (`grep -cE "$RE"` IS read — its expression arrives as `$RE`, which no class test can
+#: classify). Each of these carries a second prescription this reader cannot grade, so "exactly
+#: one BLANK-class count command" is a claim about count commands whose quoted expression the
+#: reader can SEE — never a claim that the class is prescribed once in the document.
 _D5_ANY_COUNT_EXPR_RE = re.compile(
-    r"grep\s+(?P<flags>-{1,2}[A-Za-z][\w-]*(?:\s+-{1,2}[A-Za-z][\w-]*)*)\s+"
-    r"(?P<quote>['\"])(?P<expr>[^'\"]+)(?P=quote)"
+    r"grep\s+(?P<flags>-{1,2}[^\s'\"]*(?:\s+-{1,2}[^\s'\"]*)*)\s+"
+    r"(?:\$)?(?P<quote>['\"])(?P<expr>[^'\"]+)(?P=quote)"
 )
 _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
 
@@ -3096,14 +3115,13 @@ _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
 def _requests_a_count(flags: str) -> bool:
     r"""Does this run of grep flags ask for a COUNT?
 
-    Word by word, because the flag run #13962 measured is not always ONE word: its four mutants
-    spell the count `-Ec`, `-cE` (in the double-quoted one), `-c -E` — TWO words — and
-    `--count`, alongside the `-c` that already worked. A whole-run test (`-` then
-    `[\w-]*c[\w-]*` anchored at both ends) reads the single-word forms and NOT the split
-    `-c -E`, which is one of the mutants — the defect this function exists for, one size
-    smaller. `c` is a count flag in GNU grep's short set and nothing else there means count, so
-    a word containing `c` IS a count request; a long flag must be the one long spelling,
-    `--count`.
+    Word by word, because the flag run is not always ONE word: the measured spellings split it
+    as `-c -E`, `-c --` and `-c --color=never`. A whole-run test (`-` then `[\w-]*c[\w-]*`
+    anchored at both ends) reads the single-word forms and NOT the split one — the defect this
+    function exists for, one size smaller. `c` is a count flag in GNU grep's short set and
+    nothing else there means count, so a short word containing `c` IS a count request; a long
+    flag must be the one long spelling, `--count` — which is why `--` (end of flags) and
+    `--color=never` are correctly NOT counts, and why `-C3` (context) is not either.
     """
     return any(
         word == "--count" or (word.startswith("-") and not word.startswith("--") and "c" in word[1:])
@@ -3148,8 +3166,11 @@ def _d5_blank_count_expression() -> str:
     # on the head where the sentence's expression had merely been re-spelled (`^-$`). A fixer
     # reading it is told to look for a second command that does not exist.
     assert blank_prescriptions, (
-        "05-verify.md prescribes NO BLANK-line count command at this head "
-        f"(count commands seen: {prescriptions!r}), so this arm executes nothing")
+        "this arm SEES no BLANK-line count command at this head "
+        f"(count commands read: {prescriptions!r}), so it executes nothing — note the wording: "
+        "the `05-verify.md` row may still PRESCRIBE one in a spelling `_D5_ANY_COUNT_EXPR_RE` "
+        "cannot read (e.g. an unquoted expression), in which case the fixer is looking at a "
+        "reader gap, not at a deleted command (#13995 review, P2)")
     assert len(blank_prescriptions) == 1, (
         f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
         f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
@@ -3199,14 +3220,21 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     """#13962 — the count arm must read a COMMAND, not one SPELLING of one.
 
     MEASURED on the pre-fix reader, which was `re.compile(r"grep -c[A-Za-z]* '([^']+)'")`
-    (if you are tempted to narrow it back, run this test first): each of the FOUR MUTANTS in
+    (if you are tempted to narrow it back, run this test first): each of the SEVEN MUTANTS in
     the loop below was appended to `05-verify.md` on its own and the cell that calls
     `_d5_blank_count_expression()` was run — `1 passed` every time. Each mutant is a SECOND
     prescription for the same BLANK class, and the arm whose entire job is to refuse a second
     prescription reported the class as graded once, so the row told its reader to run one
-    command while it carried two. (The loop's fifth entry is not a mutant: it is the spelling
+    command while it carried two. (The loop's LAST entry is not a mutant: it is the spelling
     that already worked before the fix, kept as the floor so a future narrowing cannot pass by
     breaking the case that was never broken.)
+
+    ⛔ THE LAST THREE MUTANTS WERE MISSED BY THE FIRST CUT OF THIS FIX AND FOUND BY REVIEW
+    (#13995 review, P1 — MEASURED, and the reader was widened in the same commit that added
+    them here): its flag word required a LETTER after the dashes, so a bare `--` and a
+    `--flag=value` were unreadable, and its quote could not express `$'…'`. All three are
+    POSIX-idiomatic spellings of the row's own command, i.e. the shape a future hardening pass
+    would actually write — which is why they are pinned rather than just described.
 
     The control is the mutation itself, not a list of regexes: what is asserted is the outcome
     the arm needs — one BLANK-class expression seen per spelling, and none from the two
@@ -3217,6 +3245,9 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         'grep -cE "^\\+$"',            # double-quoted expression
         "grep -c -E '^\\+$'",          # flags split across two words
         "grep --count '^\\+$'",        # the long form
+        "grep -c -- '^\\+$'",          # POSIX end-of-flags `--`
+        "grep -c --color=never '^\\+$'",  # a long flag WITH a value
+        "grep -c $'^\\+$'",            # ANSI-C quoting
         "grep -c '^\\+$'",             # the spelling that already worked, kept as the floor
     ):
         seen = _d5_count_prescriptions(f"a prescription: `{spelling}`\n")
@@ -3233,6 +3264,15 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     assert _d5_count_prescriptions(
         "`grep -E '^[+-][^+-]'` and `grep -vE '^[+-][[:space:]]*#'`") == []
     assert _d5_count_prescriptions("`grep -cE '^\\+import '") == ["^\\+import "]
+    # `-C3` is CONTEXT, not count — a short flag containing no `c` — and it must not be read as
+    # a prescription at all (#13995 review measured it too, on the pre-widening regex).
+    assert _d5_count_prescriptions("`grep -C3 '^\\+$'`") == []
+    # …and the residual is pinned as a residual, so the comment's "does not read" list cannot
+    # silently become false in the other direction: an expression in a shell variable IS read
+    # (the command is seen) and is NOT classifiable, which is the sentence the comment now
+    # makes. `rg -c` is not read at all.
+    assert _d5_count_prescriptions('`grep -cE "$RE"`') == ["$RE"]
+    assert _d5_count_prescriptions("`rg -c '^\\+$'`") == []
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
