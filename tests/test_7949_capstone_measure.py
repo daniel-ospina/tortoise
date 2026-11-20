@@ -16670,6 +16670,54 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
         "limit (b) of its stated false-red surfaces.")
 
 
+def test_the_D5_row_describes_the_comment_filter_as_the_pattern_it_is():
+    """The `#` filter's SUBJECT was described as the wrong character — twice (#13853).
+
+    ⛔ MEASURED, and that is why this is a pin: the filter D5 prescribes is
+    ``grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'``. The lines REACHING it already
+    carry a diff marker, so no line's first non-space character is the `#` itself — the
+    pattern drops a line whose first non-space character AFTER THE MARKER is `#`, which is
+    exactly the shape of a docstring line whose CONTENT starts with `#`. Reproduced on the
+    shipped command: ``printf '+#2521 (C5 #2513) — text\n' | grep -E '^[+-][^+-]' |
+    grep -vE '^[+-][[:space:]]*#'`` prints NOTHING although that line passed the first
+    stage — so "an empty result therefore means nothing but a `#` comment changed" was an
+    over-claim, and it shipped TWICE: #13853 review P2, then again at round 16 (P2-1)
+    inside the sentence that was correcting the first.
+
+    Two things are asserted: the row carries the accurate QUALIFIER, and it does not
+    restate the refuted attribution word-for-word. ⛔ STATED LIMITS: (a) the presence arm
+    is one literal, so a contradicting sentence in another spelling elsewhere on the row is
+    not detected — D5 is ONE line of ~118k characters and prose is not parseable; (b) the
+    absence fragment is word-sequence matched with DOUBLE-quoted retractions stripped
+    (`_d5_words` / `_D5_QUOTED_SPAN`), so a retraction must be marked with `"`; and (c) it
+    pins the DESCRIPTION, never a tree measurement — the cites are graded by the arms that
+    read the tree.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    row = d5[0]
+    assert "first non-space character AFTER the diff marker is `#`" in row, (
+        "D5 no longer states what the `#` filter's pattern actually keys on — the lines it "
+        "sees already carry `+`/`-`, so the qualifier 'AFTER the diff marker' is the part "
+        "that makes the sentence true. MEASURED: the filter drops a docstring line that "
+        "starts with `#` exactly like a comment, so without the qualifier the claim is "
+        "false in the direction that reads an empty result as proof (#13853 review P2 and "
+        "round 16, P2-1)")
+    asserted = _d5_words(_D5_QUOTED_SPAN.sub("", row))
+    _refuted = "drops only lines whose first non-space character is `#`"
+    assert _d5_words(_refuted) not in asserted, (
+        "D5 restates the refuted attribution of the `#` filter: the `#` is NOT the line's "
+        "first non-space character — the diff marker is — and the filter is textual, so it "
+        "drops a docstring line whose content starts with `#` as readily as a comment. "
+        "Describe the PATTERN ('after the diff marker'), not the character the line begins "
+        "with. ⛔ If you are DELETING this wording, mark it with DOUBLE quotes — that is the "
+        "retraction convention `_D5_REFUTED_READINGS` states and this arm reuses")
+
+
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
