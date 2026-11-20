@@ -78,6 +78,26 @@ def _limits(allowance_mb: int | None = 102) -> dict:
     return limits
 
 
+class _ColumnBlindCP:
+    """A control plane whose orgs read rejects ONE column, like PostgREST 400.
+
+    This is the shape a schema one migration behind produces: the statement names
+    a column that does not exist, and the error does not say which one.
+    """
+
+    def __init__(self, missing: str):
+        self.missing = missing
+        self.calls: list[list[str]] = []
+
+    def query(self, table: str, *, select: list[str] | None = None,
+              filters=None, **_kwargs):
+        self.calls.append(list(select or []))
+        if select and self.missing in select:
+            raise RuntimeError(
+                f'column organizations.{self.missing} does not exist (PGRST204)')
+        return [_org_row()]
+
+
 class _Reading:
     """The shape `allowance_gate.read_dimension` returns (a MeterReading)."""
 
@@ -561,6 +581,37 @@ def test_an_uncertifiable_enumeration_sends_nothing():
 class TestDriftAndStaleness:
     """The review round's four behavioural fixes, each pinned by its own case."""
 
+    def test_a_schema_older_than_0015_still_reads_the_account(self):
+        """#1096: `suspended_at` is ADDITIVE (0015) — not a base column — so its
+        absence must degrade to "not suspended", never take the feature down.
+
+        A flat select addition cannot do that: the 400 is the same whether the
+        missing column is the additive one or the LEDGER, so a schema one
+        migration behind would report `notice-mark-unavailable` for the whole
+        fleet and silently never send. The retry without the soft column is what
+        separates the two cases.
+        """
+        cp = _ColumnBlindCP(missing="suspended_at")
+        account = cn.read_account(cp, ORG_ID)
+        assert account is not None
+        assert account.suspended is False
+        assert len(cp.calls) == 2, "exactly one drift-soft retry"
+        assert "suspended_at" in cp.calls[0]
+        assert "suspended_at" not in cp.calls[1]
+        assert "storage_notice_pct" in cp.calls[1], (
+            "the retry must never drop the ledger column — that is the "
+            "fail-closed half of the split")
+
+    def test_a_missing_ledger_column_still_refuses_to_read_unset(self):
+        """The other half: dropping the soft column does not rescue a missing
+        ledger — it re-raises, so the account reports `notice-mark-unavailable`
+        instead of "never notified" and re-sending every pass.
+        """
+        cp = _ColumnBlindCP(missing="storage_notice_pct")
+        with pytest.raises(RuntimeError, match="storage_notice_pct"):
+            cn.read_account(cp, ORG_ID)
+        assert len(cp.calls) == 2, "one retry, then fail closed"
+
     def test_a_stale_gauge_is_not_a_reading(self, monkeypatch):
         """The gate treats a stale gauge as UNARMED; the notice must not state a
         figure from one (#14038 review, P3 — a 5-day-old 110 MB reading against a
@@ -767,6 +818,84 @@ class TestSweepPass:
         assert summary["statuses"]["no-reading"] == 1
         assert summary["checked"] == 1
         assert send.calls == []
+
+
+class TestKnobs:
+    """The env knobs, ASSERTED rather than described (#14038 review, P2 residue).
+
+    `notices_enabled()` and `sweep_interval_s()` shipped with no test, and the
+    enumeration cap this PR removed had none either — so an inverted default, a
+    `sleep(0)` busy loop against every tenant's gauge, or a re-added cap would
+    each have shipped green.
+    """
+
+    def test_the_pass_is_armed_by_default_and_garbage_cannot_disarm_it(
+            self, monkeypatch):
+        """Unset/blank/garbage -> the default (ON). Only an explicit falsy value
+        disarms: a typo must never silently kill the only trigger these notices
+        have.
+        """
+        for raw in (None, "", "   ", "maybe", "2"):
+            if raw is None:
+                monkeypatch.delenv(cn.NOTICE_ENABLED_ENV, raising=False)
+            else:
+                monkeypatch.setenv(cn.NOTICE_ENABLED_ENV, raw)
+            assert cn.notices_enabled() is True, raw
+        for raw in ("0", "false", "no", "off"):
+            monkeypatch.setenv(cn.NOTICE_ENABLED_ENV, raw)
+            assert cn.notices_enabled() is False, raw
+
+    def test_the_interval_refuses_zero_and_garbage(self, monkeypatch):
+        """A zero/negative interval is REFUSED, not accepted: `asyncio.sleep(0)`
+        returns immediately and would turn the pass into a busy loop.
+        """
+        monkeypatch.delenv(cn.NOTICE_INTERVAL_ENV, raising=False)
+        assert cn.sweep_interval_s() == cn.NOTICE_INTERVAL_DEFAULT_S
+        monkeypatch.setenv(cn.NOTICE_INTERVAL_ENV, "60")
+        assert cn.sweep_interval_s() == 60
+        for raw in ("0", "-5", "abc", ""):
+            monkeypatch.setenv(cn.NOTICE_INTERVAL_ENV, raw)
+            assert cn.sweep_interval_s() == cn.NOTICE_INTERVAL_DEFAULT_S, raw
+
+    def test_the_per_pass_send_cap_refuses_zero_and_garbage(self, monkeypatch):
+        """`0` is not a cap, it is an off switch — and the off switch is
+        `TORTOISE_CAPACITY_NOTICE=0`.
+        """
+        monkeypatch.delenv(cn.NOTICE_MAX_SENDS_ENV, raising=False)
+        assert cn.max_sends_per_pass() == cn.NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+        monkeypatch.setenv(cn.NOTICE_MAX_SENDS_ENV, "3")
+        assert cn.max_sends_per_pass() == 3
+        for raw in ("0", "-1", "abc"):
+            monkeypatch.setenv(cn.NOTICE_MAX_SENDS_ENV, raw)
+            assert cn.max_sends_per_pass() == (
+                cn.NOTICE_MAX_SENDS_PER_PASS_DEFAULT), raw
+
+    def test_the_sweep_never_caps_the_enumeration(self):
+        """P2-1's mutant guard: the removed knob can only come back by passing a
+        cap to the enumerator, and this is the row that reds when it does.
+
+        `billing._enumerate_billed_orgs(limit=N)` truncates a keyset walk to a
+        deterministic lowest-id PREFIX, so the same first N accounts were
+        re-processed forever and the fleet's tail was never notified — one layer
+        up, the silent partial pass the certified walk exists to prevent.
+        """
+        calls: list[tuple[tuple, dict]] = []
+
+        def enumerator(*args, **kwargs):
+            calls.append((args, kwargs))
+            return [_org_row()]
+
+        with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(None)):
+            summary = asyncio.run(cn.sweep_pass(
+                cp=_fake_cp(), send=_Sender(), enumerate_orgs=enumerator,
+                max_sends=1))
+        assert calls == [((), {})], (
+            "the enumeration must be called with NO cap — a limit here is the "
+            "#14038 P2 defect returning")
+        assert summary["checked"] == 1
+        assert not hasattr(cn, "sweep_limit"), (
+            "the enumeration-cap knob was removed (#14038 review, P2) and must "
+            "not be reintroduced")
 
 
 class TestHostedWiring:
@@ -989,6 +1118,24 @@ def _ddl_only(sql: str) -> str:
     text would red on the prose that prevents the bug.
     """
     return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+
+def test_the_module_docstring_names_the_post_rename_table():
+    """P3-1: the module a reader opens FIRST must not name the retired table.
+
+    The ledger lives on `organizations.storage_notice_pct`. The pre-rename
+    spelling `teams.storage_notice_pct` fails with `relation does not exist` —
+    which the migration header records as the blocker this PR fixed — and it
+    survived three review rounds in the module docstring while the SQL and the
+    readers were already correct (#14038 review, P3).
+    """
+    doc = cn.__doc__ or ""
+    assert "organizations.storage_notice_pct" in doc, (
+        "the ledger's table is no longer named in the module docstring")
+    assert "teams.storage_notice_pct" not in doc, (
+        "the docstring still names the pre-rename table (`teams` was renamed by "
+        "20260915000001_tenancy_team_to_org.sql) — the migration and the readers "
+        "say `organizations`")
 
 
 def test_the_mark_migration_targets_the_post_rename_table():
@@ -1232,30 +1379,123 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
     assert problems == [], "\n".join(problems)
 
 
+def _scope_bindings(body: list[ast.stmt]) -> set[str]:
+    """Names bound DIRECTLY in ONE scope's body.
+
+    Nested `def`/`class` bodies are NOT descended into: their bindings belong to
+    their own scope, and inheriting them is exactly the blindness this guard was
+    rewritten to remove.
+    """
+    bound: set[str] = set()
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)      # its NAME is bound here; its body is not
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.ImportFrom):
+            bound |= {alias.asname or alias.name for alias in node.names}
+        elif isinstance(node, ast.Import):
+            bound |= {(alias.asname or alias.name).split(".")[0]
+                      for alias in node.names}
+        elif isinstance(node, ast.Assign):
+            bound |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        elif (isinstance(node, (ast.AnnAssign, ast.AugAssign))
+              and isinstance(node.target, ast.Name)):
+            bound.add(node.target.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return bound
+
+
+def _iter_own_scope(body: list[ast.stmt]):
+    """Yield the nodes belonging to THIS scope (nested scopes not descended)."""
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _ladder_import_problems(tree: ast.Module,
+                            label: str) -> tuple[list[str], int]:
+    """Every tier Name load, resolved against ITS OWN scope's bindings.
+
+    The pre-fix guard built one ``bound`` set per MODULE, so a module that
+    imported a tier in two functions stayed green when one of the two imports was
+    deleted — the defect its docstring names ("a NameError on a schema-drift
+    read") is per-CALL-SITE, and a module-wide set cannot see it (#14038 review,
+    mutation-attribution rule 2/3).
+    """
+    tiers = set(_additive_tiers())
+    module_bound = _scope_bindings(tree.body)
+    scopes: list[tuple[str, list[ast.stmt], set[str]]] = [
+        ("<module>", tree.body, module_bound)]
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scopes.append((fn.name, fn.body,
+                           module_bound | _scope_bindings(fn.body)))
+    problems: list[str] = []
+    checked = 0
+    for scope_name, body, bound in scopes:
+        for node in _iter_own_scope(body):
+            if not (isinstance(node, ast.Name) and node.id in tiers
+                    and isinstance(node.ctx, ast.Load)):
+                continue
+            checked += 1
+            if node.id not in bound:
+                problems.append(
+                    f"{label}:{node.lineno} {scope_name} uses {node.id} "
+                    "without binding it")
+    return problems, checked
+
+
 def test_every_ladder_module_imports_the_tiers_it_names():
     """A tier named but not imported is a NameError on a schema-drift read.
 
-    The import blocks live inside the endpoint functions, so a missing name is
-    not caught at module import — only on the path that is already degraded.
-    A module may also DEFINE a tier (`supabase_control` owns the registry), so
-    "bound" is imported-or-assigned, not imported alone.
+    Resolved PER SCOPE, not per module: the import blocks live inside the
+    endpoint functions, so a missing name is not caught at module import — only
+    on the path that is already degraded, and that path is the drift ladder it is
+    supposed to make survivable. A module may also DEFINE a tier
+    (`supabase_control` owns the registry), so "bound" is
+    imported-or-assigned *in the scope that loads it*.
+
+    Complement of `test_every_ladder_call_site_can_name_the_shared_tuple`: that
+    one asks whether the LADDER TUPLE is bound where it is passed, this one
+    whether every TIER NAME is bound where it is loaded.
     """
-    tiers = set(_additive_tiers())
     problems: list[str] = []
+    checked = 0
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        tree = _parse(path)
-        bound = {alias.name
-                 for node in ast.walk(tree)
-                 if isinstance(node, ast.ImportFrom)
-                 for alias in node.names}
-        bound |= {target.id
-                  for node in ast.walk(tree)
-                  if isinstance(node, (ast.Assign, ast.AnnAssign))
-                  for target in (node.targets if isinstance(node, ast.Assign)
-                                 else [node.target])
-                  if isinstance(target, ast.Name)}
-        used = {node.id for node in ast.walk(tree)
-                if isinstance(node, ast.Name) and node.id in tiers}
-        for name in sorted(used - bound):
-            problems.append(f"{path.relative_to(ROOT)} uses {name} without binding it")
+        found, seen = _ladder_import_problems(
+            _parse(path), str(path.relative_to(ROOT)))
+        problems.extend(found)
+        checked += seen
+    assert checked >= 5, (
+        f"only {checked} tier uses found — the scan broke, it is not green")
     assert problems == [], "\n".join(problems)
+
+
+def test_the_ladder_import_guard_resolves_per_call_site():
+    """The guard's own non-vacuity: a module-wide set cannot catch this mutant.
+
+    `b` loads the tier without binding it while `a` binds it. The pre-fix guard
+    collected every `ImportFrom` in the module into ONE set, so `a`'s import made
+    `b` look bound and the row stayed green — the review measured exactly that.
+    """
+    source = (
+        "def a():\n"
+        "    from tortoise.supabase_control import _ORG_ADDITIVE_0015_TIER\n"
+        "    return list(_ORG_ADDITIVE_0015_TIER)\n"
+        "def b():\n"
+        "    return list(_ORG_ADDITIVE_0015_TIER)\n"
+    )
+    problems, checked = _ladder_import_problems(ast.parse(source), "synthetic")
+    assert checked == 2, ("both loads must be examined — a scanner that saw only "
+                          f"one proves nothing: {checked}")
+    assert len(problems) == 1, problems
+    assert " b uses _ORG_ADDITIVE_0015_TIER " in problems[0], problems
