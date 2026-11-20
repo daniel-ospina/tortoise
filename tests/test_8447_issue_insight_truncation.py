@@ -296,7 +296,9 @@ class TestIssueInsightTruncation:
         So the leg pins the SCOPE too: the refusal is this method's own, and
         conversion is attributed to the BOUNDARY rather than to the method.
         """
-        doc = type(sdk).issue_insight.__doc__ or ""
+        # #12901 FINAL batch: `issue_insight` was PRIVATISED (`_issue_insight`); the
+        # method (and its docstring) is unchanged, the public spelling is a tombstone.
+        doc = type(sdk)._issue_insight.__doc__ or ""
         assert "never raises" not in doc, (
             "the docstring claims unconditional non-raising while the `limit` "
             "guard raises ValueError")

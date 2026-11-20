@@ -1186,7 +1186,11 @@ def _drive_door(sdk, door: str, prop: str, value: str) -> dict:
         return sdk._create_point(value, "point for the #5475 door probe")
     if door == "entity":
         return sdk.create_entity("object", f"probe-{value}", **{prop: value})["node"]
-    return getattr(sdk, f"create_{door}")(f"probe-{value}", **{prop: value})
+    # ⛔ #12901 FINAL batch: `create_object` / `create_subject` / `create_event` were
+    # PRIVATISED — the bodies are unchanged under the underscore, and the public
+    # spellings are tombstones that raise. The door is the same door; only the
+    # spelling moved, so the probe drives the private one.
+    return getattr(sdk, f"_create_{door}")(f"probe-{value}", **{prop: value})
 
 
 class TestSdkWriteDoorsRefuseUnapprovedPacks5475:
@@ -1437,11 +1441,11 @@ class TestMCPEntityDoors5475:
 
     @pytest.mark.parametrize("tool,prop,kind,sdk_method", [
         ("tortoise_create_object", "objectKind", "marketing:campaign",
-         "create_object"),
+         "_create_object"),
         ("tortoise_create_subject", "subjectKind", "marketing:persona",
-         "create_subject"),
+         "_create_subject"),
         ("tortoise_create_event", "eventKind", "agent-ops:ruleRevised",
-         "create_event"),
+         "_create_event"),
     ])
     def test_mcp_entity_tool_refuses_and_does_not_widen(self, mcp_sdk, tool,
                                                         prop, kind,

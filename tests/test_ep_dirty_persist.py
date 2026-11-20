@@ -161,7 +161,8 @@ def test_fresh_sdk_sees_persisted_dirty_state():
             assert hydrated, "persisted dirty roots must hydrate into a fresh SDK"
             assert ids[0] in hydrated and ids[1] in hydrated
             # no-arg local EP over the persisted dirty subgraph (#395 AC8)
-            result = b.compute_confidence()
+            # #12901 FINAL batch: `compute_confidence` was PRIVATISED.
+            result = b._compute_confidence()
             assert result.get("diagnostic") != "no_dirty_roots", result
             assert result.get("confidences"), \
                 "local EP must produce confidences over the persisted zone"

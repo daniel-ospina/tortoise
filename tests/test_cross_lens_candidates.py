@@ -347,7 +347,10 @@ def test_mcp_tool_registered_readonly():
     pointer = RETIRED_USE_INSTEAD["tortoise_find_cross_lens_candidates"]
     assert pointer.startswith("tortoise_review_link_candidates("), pointer
     assert 'kind="cross_lens"' in pointer, pointer
-    assert td.sdk_method == "get_cross_lens_candidates"
+    # #12901 FINAL batch PRIVATISED the SDK method this door binds to (`_get_cross_lens_
+    # candidates`, body unchanged); the binding moves with it, the read-only posture
+    # does not change.
+    assert td.sdk_method == "_get_cross_lens_candidates"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False
     assert td.http_policy is True

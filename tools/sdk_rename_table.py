@@ -99,6 +99,41 @@ from tools.bridge_table import _sdk_targets  # noqa: E402
 # the ledger is the same rule as the line above: a second copy would be a second answer.
 from tortoise.sdk_retired import RETIRED_SDK_METHODS  # noqa: E402
 
+# The machine-readable record of EVERY name that LEFT the surface, in the four blocks the
+# ledger keeps (`#4282`'s 26 name surplus, the `#12901` wave-1 and wave-2 control-plane
+# blocks, the FINAL batch's privatised engine surface, plus the unhinted-but-live
+# destination cell). Importing it here is the same rule as the two imports above: a second
+# copy of "which names departed" would be a second answer.
+#
+# ⛔ WHY THIS EXISTS — the `STALE canonical member` arm (below) needs a second question
+# asked of it. `docs/product/canonical-sdk-methods.md`'s GROUP tables are DELIBERATELY the
+# HISTORICAL partition — the doc says so in its own words (“the groups answer a HISTORICAL
+# question — they partition the surface as it stood before the retirement waves”), because
+# the departure sections cite that partition as the record. So a group member that is no
+# longer a public `def` is not necessarily DRIFT: it may be a departure the record already
+# holds. The check therefore reds on `grouped - live - recorded`, which still catches an
+# unrecorded vanishing (the case the arm exists for) and does not destroy the record to do
+# it (re-cutting the tables would be a reopen of that decision, #13905).
+from tortoise.sdk_retired import (  # noqa: E402
+    FINAL_DELETION_DESTINATIONS,
+    REMOVED_SDK_METHODS,
+    SURPLUS_DELETION_DESTINATIONS,
+    UNHINTED_LIVE_DESTINATIONS,
+    WAVE1_DELETION_DESTINATIONS,
+    WAVE2_DELETION_DESTINATIONS,
+)
+
+#: Every name the ledger records as having LEFT the public surface. Read, never restated.
+DEPARTED_METHODS: frozenset[str] = frozenset(
+    set(RETIRED_SDK_METHODS)
+    | set(SURPLUS_DELETION_DESTINATIONS)
+    | set(WAVE1_DELETION_DESTINATIONS)
+    | set(WAVE2_DELETION_DESTINATIONS)
+    | set(FINAL_DELETION_DESTINATIONS)
+    | set(REMOVED_SDK_METHODS)
+    | set(UNHINTED_LIVE_DESTINATIONS)
+)
+
 SDK_SRC = ROOT / "tortoise" / "sdk.py"
 BETA_DOC = ROOT / "docs" / "product" / "beta-sdk-surface.md"
 CANON_DOC = ROOT / "docs" / "product" / "canonical-sdk-methods.md"
@@ -1254,6 +1289,15 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
     errs: list[str] = []
 
     # 1. The canonical partition must cover the public surface exactly.
+    #
+    #    ⛔ It must cover the surface exactly AS IT STOOD, not as it stands: the GROUP
+    #    tables are the HISTORICAL partition by the doc's own declaration, and the
+    #    departure sections cite them as the record. So the STALE arm asks
+    #    `grouped - live - DEPARTED_METHODS` — the name must be gone from the surface
+    #    **and** recorded as gone. An unrecorded disappearance still fails, which is the
+    #    drift this arm exists to catch; a recorded departure cannot, because the table is
+    #    not claiming it is live. The `UNMAPPED` arm is unchanged and still exact: every
+    #    LIVE method must sit in a group, so a new public `def` cannot arrive unnoticed.
     partitioned = [m for members in groups.values() for m in members]
     dupes = {m for m in partitioned if partitioned.count(m) > 1}
     for m in sorted(dupes):
@@ -1264,15 +1308,20 @@ def _validate(methods: dict[str, int], groups: dict[str, list[str]],
     grouped = set(partitioned)
     for m in sorted(set(methods) - grouped):
         errs.append(f"UNMAPPED public method (no canonical group, no row): {m}")
-    for m in sorted(grouped - set(methods)):
-        errs.append(f"STALE canonical member (not a public `def` on TortoiseSDK): {m}")
+    for m in sorted(grouped - set(methods) - DEPARTED_METHODS):
+        errs.append(f"STALE canonical member (not a public `def` on TortoiseSDK, and no "
+                    f"recorded departure): {m}")
 
     # 2. Every public method must have a disposition row, and no row may be stale.
+    #    A row for a DEPARTED name is kept on purpose: it is the record of where that name
+    #    went (`canonical-sdk-methods.md`'s *Removed from the surface* tables carry the same
+    #    fact for a reader). Deleting the rows would delete the answer to "what replaces
+    #    this?" — so the STALE arm exempts exactly the names the ledger records as gone.
     mapped = set(OVERRIDE) | grouped
     for m in sorted(set(methods) - mapped):
         errs.append(f"UNMAPPED public method (no disposition): {m}")
-    for m in sorted(set(OVERRIDE) - set(methods)):
-        errs.append(f"STALE map key (not a public method): {m}")
+    for m in sorted(set(OVERRIDE) - set(methods) - DEPARTED_METHODS):
+        errs.append(f"STALE map key (not a public method, and no recorded departure): {m}")
 
     # 3. Every target must be a real target name, or a recognised non-target.
     known = set(targets) | set(NON_TARGET)
@@ -1590,12 +1639,16 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
             )
 
     # 9. Cross-artifact. Every disagreement with the sibling bridge table carries a
-    #    determination, and no determination is stale.
+    #    determination, and no determination is stale — except one whose SDK side has
+    #    DEPARTED: the divergence is then resolved by the retirement rather than by a
+    #    judgement, so the determination is the record of a disagreement that no longer
+    #    exists to be decided. Kept, and exempt by the ledger's own list, never by a
+    #    hand-maintained second copy of it.
     diverged = {m for m, _t, _d, _tool in _bridge_divergences(rows)}
     for m in sorted(diverged - set(BRIDGE_DETERMINATION)):
         errs.append(f"BRIDGE DIVERGENCE UNDETERMINED: {m} diverges from "
                     f"{BRIDGE_DOC.name} but carries no determination")
-    for m in sorted(set(BRIDGE_DETERMINATION) - diverged):
+    for m in sorted(set(BRIDGE_DETERMINATION) - diverged - DEPARTED_METHODS):
         errs.append(f"STALE BRIDGE DETERMINATION: {m} no longer diverges from "
                     f"{BRIDGE_DOC.name} — remove it")
 
@@ -1605,11 +1658,16 @@ def _validate_rows(rows: list[dict], targets: list[str]) -> list[str]:
 
     # 10. C6's fold record must agree with Part A. A record that drifted from the table
     #     it records is worse than none: it would claim a destination the surface does
-    #     not carry.
+    #     not carry. A fold row for a DEPARTED name is the same shape as (2): it records
+    #     where that name went, and the departure is what the ledger has already said.
     for name, (dest, _authority) in sorted(C6_FOLD.items()):
         if name not in target_of:
-            errs.append(f"C6 FOLD STALE: {name} is not a public method")
-        elif target_of[name] != dest:
+            # A departed name has no Part A row to disagree with — the record stands on
+            # its own, and the disagreement arm below simply has nothing to compare.
+            if name not in DEPARTED_METHODS:
+                errs.append(f"C6 FOLD STALE: {name} is not a public method")
+            continue
+        if target_of[name] != dest:
             errs.append(
                 f"C6 FOLD DISAGREES WITH PART A: {name} is {target_of[name]!r} in Part A "
                 f"but the C6 record says {dest!r}"

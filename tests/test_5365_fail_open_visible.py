@@ -224,7 +224,9 @@ def test_promote_point_reports_a_supersede_skipped_in_its_result(sdk):
     pytest.importorskip("tortoise.sdk")
     import inspect
 
-    src = inspect.getsource(type(sdk).promote_point)
+    # #12901 FINAL batch: `promote_point` was PRIVATISED (`_promote_point`); the
+    # body is unchanged and the public spelling is a tombstone.
+    src = inspect.getsource(type(sdk)._promote_point)
     # Pin the contract at the source level: the field is written only on the
     # skip path, so an end-to-end assertion requires a draft point carrying
     # temporal_replacement plus a live target whose window refuses — the

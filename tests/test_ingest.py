@@ -1497,7 +1497,10 @@ def test_sc4_deprecation_markers_present():
     import re
 
     # every still-live legacy surface carries its marker + a LIVE replacement
-    for method_name in ("ingest_corpus", "_index_sessions"):
+    # #12901 FINAL batch: `ingest_corpus` was PRIVATISED (`_ingest_corpus`, body
+    # unchanged); the public spelling is a tombstone, so the surface to inspect is
+    # the private one. `_index_sessions` was already private and is unchanged.
+    for method_name in ("_ingest_corpus", "_index_sessions"):
         doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
         assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
         assert "index_sources_from_directory" in doc, \

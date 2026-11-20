@@ -940,7 +940,11 @@ def test_registry_entry_readonly_and_sdk_method(sdk_factory, tmp_path):
     """
     from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
     td = next(t for t in RETIRED_TOOL_REGISTRY if t.name == "tortoise_review_connections")
-    assert td.sdk_method == "review_connections"
+    # #12901 FINAL batch PRIVATISED the SDK method this door binds to — the body is
+    # unchanged under the underscore, so the BINDING moves with it and the read-only
+    # posture this case exists for is unchanged. A row still naming the retired public
+    # spelling would not resolve at all.
+    assert td.sdk_method == "_review_connections"
     assert td.annotations.readOnlyHint is True
     assert td.annotations.destructiveHint is False
     assert td.http_policy is True
