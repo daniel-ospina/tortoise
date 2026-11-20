@@ -1185,10 +1185,17 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
     checked = 0
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
         tree = _parse(path)
+        # MODULE SCOPE ONLY. `owners` reports 0 for any node that is not inside a
+        # function, so a module-level import nested in `try:`/`if TYPE_CHECKING:`
+        # still counts. Taken with `ast.walk` alone the set ALSO collects the
+        # function-local imports below, so `module_bound | per_function[...]`
+        # could never narrow and deleting one endpoint's import stayed green.
+        owners = _enclosing_functions(path)
         module_bound = {alias.name
                         for node in ast.walk(tree)
                         if isinstance(node, ast.ImportFrom)
-                        for alias in node.names}
+                        for alias in node.names
+                        if owners.get(node.lineno, 0) == 0}
         # ...or DEFINED at module level (`supabase_control` owns the tuple).
         module_bound |= {t.id
                          for node in tree.body
@@ -1204,7 +1211,6 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
                     for sub in ast.walk(node)
                     if isinstance(sub, ast.ImportFrom)
                     for alias in sub.names}
-        owners = _enclosing_functions(path)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name)
