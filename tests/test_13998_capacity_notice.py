@@ -1420,8 +1420,8 @@ _LADDER_TUPLE = "_ORG_ADDITIVE_TIERS"
 
 
 def _ladder_tuple_binding_problems(tree: ast.Module,
-                                   label: str) -> tuple[list[str], int]:
-    """Every load of the shared ladder tuple — resolved, and counted.
+                                   label: str) -> tuple[list[str], int, int]:
+    """Every load of the shared ladder tuple — resolved, counted, COVERED.
 
     Two questions, ONE resolver (#14038 review, P2). The CALL SITES that hand the
     tuple to `_orgs_row_fail_soft` are counted here, so a row that found none
@@ -1438,6 +1438,15 @@ def _ladder_tuple_binding_problems(tree: ast.Module,
     mutant kept the alias at nesting depth 1 and nothing at function scope.
     `_ladder_import_problems` maps a load to its OWN scope and inherits only
     lexical ancestors, so the nested import binds the helper and nothing else.
+
+    ⛔ AND THE THIRD NUMBER IS THE ONE THAT KEEPS THIS HONEST: `covered`, the
+    loads the resolver actually EXAMINED. `sites` counts `ast.Call` nodes, which a
+    narrowing bug in the resolver cannot affect — so a resolver that examined ZERO
+    loads still reported every site and zero problems. That was the state measured
+    at the merged head (`checked=0` on `hosted_api`, `sites=2`), because both
+    ladders are built inside a `lambda`. The caller asserts `covered` against an
+    INDEPENDENT `ast.walk` count of the same name, so "examined nothing" cannot
+    read green.
     """
     sites = 0
     for node in ast.walk(tree):
@@ -1448,9 +1457,9 @@ def _ladder_tuple_binding_problems(tree: ast.Module,
         names = {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)}
         if _LADDER_TUPLE in names:
             sites += 1
-    problems, _checked = _ladder_import_problems(
+    problems, covered = _ladder_import_problems(
         tree, label, names=frozenset({_LADDER_TUPLE}))
-    return problems, sites
+    return problems, sites, covered
 
 
 def test_every_ladder_call_site_can_name_the_shared_tuple():
@@ -1470,15 +1479,43 @@ def test_every_ladder_call_site_can_name_the_shared_tuple():
     arms are gone — the binding verdict is `_ladder_import_problems`', the same
     resolver the tier rows use, so there is one narrowing rule in this file and a
     row cannot be blind to a shape its sibling catches (#14038 review, P2).
+
+    ⛔ AND IT COUNTS ITS OWN COVERAGE (#14038 review, P2 — measured live). The
+    binding verdict is only worth what the resolver EXAMINED. At the merged head
+    this row reported `sites=2, problems=[]` while the resolver examined ZERO
+    loads, because both ladders sit inside a `lambda: _orgs_row_fail_soft(...)`
+    and `_iter_own_scope` refused to descend into a lambda body. `sites` could not
+    catch it — it counts `ast.Call` nodes, which a narrowing bug cannot
+    perturb. So the row now compares the resolver's own `covered` count with an
+    INDEPENDENT `ast.walk` count of the same name: if the two ever disagree, this
+    row reds instead of silently guarding nothing. That assertion is what makes
+    the lambda descent a fix rather than a comment.
     """
     problems: list[str] = []
     checked = 0
+    covered_total = 0
+    expected = 0
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
-        found, sites = _ladder_tuple_binding_problems(
-            _parse(path), str(path.relative_to(ROOT)))
+        tree = _parse(path)
+        found, sites, covered = _ladder_tuple_binding_problems(
+            tree, str(path.relative_to(ROOT)))
         problems.extend(found)
         checked += sites
+        covered_total += covered
+        expected += sum(
+            1 for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == _LADDER_TUPLE
+            and isinstance(node.ctx, ast.Load))
     assert checked >= 4, f"only {checked} shared-ladder call sites found — the scan broke"
+    assert expected >= 4, (
+        f"only {expected} loads of {_LADDER_TUPLE} in tortoise/ — either the shape "
+        "this row guards has vanished or the counter broke; neither is a pass")
+    assert covered_total == expected, (
+        f"the resolver EXAMINED {covered_total} of the {expected} loads of "
+        f"{_LADDER_TUPLE} in tortoise/ — a load it never looked at cannot be "
+        "reported unbound, so this guard would be green over the very NameError "
+        "it names (#14038 review: `checked=0` with `sites=2` while both ladders "
+        "sat inside a lambda)")
     assert problems == [], "\n".join(problems)
 
 
@@ -1516,12 +1553,36 @@ def _iter_own_scope(body: list[ast.stmt]):
     """Yield the nodes belonging to THIS scope (nested scopes not descended)."""
     stack: list[ast.AST] = list(body)
     while stack:
-        node = stack.pop()
-        yield node
+        node, shadowed = stack.pop()
+        yield node, shadowed
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef, ast.Lambda)):
+                             ast.ClassDef)):
             continue
-        stack.extend(ast.iter_child_nodes(node))
+        if isinstance(node, ast.Lambda):
+            # A `LAMBDA` body IS the enclosing scope (#14038 review, P2). It holds
+            # an expression, so it can bind nothing but its own parameters; a load
+            # inside it resolves against those and then the ENCLOSING scope. Both
+            # of `hosted_api`'s ladders are built that way —
+            # `_cp_offload(lambda: _orgs_row_fail_soft(..., additive_tiers=list(
+            # _ORG_ADDITIVE_TIERS)))` — so refusing to descend here made this
+            # resolver check ZERO loads on `hosted_api` while its call-site counter
+            # reported two: a green guard over the exact `NameError` it names.
+            # The parameters ride along so a lambda that shadows a watched name
+            # still reports honestly.
+            stack.append((node.body, shadowed | _lambda_params(node)))
+            continue
+        for child in ast.iter_child_nodes(node):
+            stack.append((child, shadowed))
+
+
+def _lambda_params(node: ast.Lambda) -> frozenset[str]:
+    """Every name a lambda binds — its parameters, and nothing else."""
+    a = node.args
+    names = {arg.arg for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+    for opt in (a.vararg, a.kwarg):
+        if opt is not None:
+            names.add(opt.arg)
+    return frozenset(names)
 
 
 def _ladder_import_problems(tree: ast.Module, label: str, *,
@@ -1554,12 +1615,12 @@ def _ladder_import_problems(tree: ast.Module, label: str, *,
         """
         nonlocal checked
         bound = inherited | _scope_bindings(body)
-        for node in _iter_own_scope(body):
+        for node, shadowed in _iter_own_scope(body):
             if not (isinstance(node, ast.Name) and node.id in tiers
                     and isinstance(node.ctx, ast.Load)):
                 continue
             checked += 1
-            if node.id not in bound:
+            if node.id not in bound or node.id in shadowed:
                 problems.append(
                     f"{label}:{node.lineno} {scope_name} uses {node.id} "
                     "without binding it")
@@ -1626,10 +1687,13 @@ def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
         "    from somewhere import _ORG_ADDITIVE_TIERS\n"
         "    return _orgs_row_fail_soft(select=1, additive_tiers=list(\n"
         "        _ORG_ADDITIVE_TIERS))\n")
-    problems, sites = _ladder_tuple_binding_problems(_parse(fake), str(fake))
+    problems, sites, covered = _ladder_tuple_binding_problems(_parse(fake), str(fake))
     assert sites == 2, (
         f"both call sites must be counted — a scanner that saw one proves "
         f"nothing: {sites}")
+    assert covered == 2, (
+        "both loads must be EXAMINED — a resolver that looks at none of them "
+        f"cannot report either as unbound: {covered}")
     assert len(problems) == 1, (
         "the sibling's import must leave the OTHER function's use unbound, and "
         f"a helper's import must not bind its parent; got {problems}")
@@ -1638,6 +1702,72 @@ def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
     assert "helper" not in problems[0], (
         "the helper BINDS the name — it is `outer` that does not; the report "
         f"must name the scope that fails: {problems}")
+
+
+def test_the_ladder_guard_checks_a_load_built_inside_a_lambda(tmp_path):
+    """The PRODUCTION shape: both ladders are built inside a `lambda` (#14038 P2).
+
+    Measured at the merged head: `checked=0` on `hosted_api` while the row reported
+    `sites=2`. `_iter_own_scope` treated `ast.Lambda` as a foreign scope and never
+    descended, so the resolver examined NONE of the two loads it exists to guard —
+    and because `sites` counts `ast.Call` nodes, nothing noticed. The row was green
+    over the exact `NameError` its docstring names.
+
+    A lambda holds an EXPRESSION, so it binds nothing but its parameters: a load
+    inside it resolves against the enclosing function. This fixture plants the
+    breakage that shape can hide — the alias exists only in a nested `def`, so the
+    call-site load inside the lambda is genuinely unbound and must be REPORTED.
+    """
+    fake = tmp_path / "lambda_module.py"
+    fake.write_text(
+        "from somewhere import OTHER\n"
+        "\n"
+        "\n"
+        "def outer():\n"
+        "    def helper():\n"
+        "        from somewhere import _ORG_ADDITIVE_TIERS\n"
+        "    return offload(lambda: _orgs_row_fail_soft(\n"
+        "        select=1, additive_tiers=list(_ORG_ADDITIVE_TIERS)))\n"
+        "\n"
+        "\n"
+        "def sound():\n"
+        "    from somewhere import _ORG_ADDITIVE_TIERS\n"
+        "    return offload(lambda: _orgs_row_fail_soft(\n"
+        "        select=1, additive_tiers=list(_ORG_ADDITIVE_TIERS)))\n")
+    problems, sites, covered = _ladder_tuple_binding_problems(_parse(fake), str(fake))
+    assert sites == 2, (
+        f"both ladder call sites are in the fixture: {sites}")
+    assert covered == 2, (
+        "BOTH loads sit inside a lambda and both must be examined — `covered` "
+        f"is the number that catches the merged head's `checked=0`: {covered}")
+    assert len(problems) == 1, (
+        "exactly `outer` must be unbound: its import lives in a nested helper, "
+        f"which binds nothing for the enclosing lambda; got {problems}")
+    assert "outer" in problems[0], problems
+    assert "sound" not in problems[0], (
+        "`sound` imports at function scope and reads it inside its own lambda — "
+        f"that is legal Python and must not be reported: {problems}")
+
+
+def test_a_lambda_that_shadows_a_watched_name_is_reported(tmp_path):
+    """Descending into lambdas must not credit a SHADOWING parameter.
+
+    `lambda _ORG_ADDITIVE_TIERS: _ORG_ADDITIVE_TIERS` binds the name to the
+    parameter; the enclosing function's import does not resolve that load. This is
+    the arm that justifies tracking lambda parameters at all — without it the
+    shadow set would be dead weight.
+    """
+    fake = tmp_path / "shadow_module.py"
+    fake.write_text(
+        "def holder():\n"
+        "    from somewhere import _ORG_ADDITIVE_TIERS\n"
+        "    return (lambda _ORG_ADDITIVE_TIERS: _ORG_ADDITIVE_TIERS)(1)\n")
+    problems, checked = _ladder_import_problems(
+        _parse(fake), str(fake), names=frozenset({_LADDER_TUPLE}))
+    assert checked == 1, f"the shadowed load must still be examined: {checked}"
+    assert len(problems) == 1, (
+        f"a lambda parameter shadows the enclosing import; got {problems}")
+    assert "holder" in problems[0], problems
 
 
 def test_the_ladder_resolver_credits_an_enclosing_closure(tmp_path):
