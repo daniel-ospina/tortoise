@@ -880,7 +880,7 @@
     {
       "from": "pt:supermemory-no-asof",
       "to": "obj:comp-supermemory",
-      "op": "IMPL",
+      "op": "NAND",
       "label": "refutes",
       "direction": "->",
       "why": "A capability gap that counts against the competitor, not against a claim of ours."

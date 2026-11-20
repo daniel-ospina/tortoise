@@ -17,10 +17,16 @@ WHY THIS SHAPE
   is a `:Point` (`pointKind: statement`). The map declares those, this script
   re-checks them before it writes anything.
 * **Edges are the difference between filed and findable.** Support and
-  contradiction are OPERATORS (`IMPL`/`NAND`, with a Layer-2 `semantics` label);
-  structural relations are plain typed edges (`memberOf`, `holdsRole`,
-  `aboutObject`, `performs`, `produces`, …). A node with no edge is an orphan,
-  so the filer reports any ref that ends up unconnected.
+  contradiction are OPERATORS (`IMPL`/`NAND`). The map's Layer-2 `semantics` is
+  sent on every operator write, where the gate records it as the operator's
+  `direction_basis` and REFUSES a mechanism that contradicts it — `validate()`
+  refuses that pair before the write and a returned `mechanism_mismatch` is a
+  failure, because an `IMPL` wire carrying a `NAND` meaning raises where the
+  meaning says it must lower. ⛔ This surface has no `label` parameter, so a
+  domain label is NOT filed; the mechanism IS the filed meaning. Structural
+  relations are plain typed edges (`memberOf`, `holdsRole`, `aboutObject`,
+  `performs`, `produces`, …). A node with no edge is an orphan, so the filer
+  reports any ref that ends up unconnected.
 
 USAGE
 -----
@@ -111,6 +117,13 @@ SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
              "mutuallyExclusive", "hasPart", "causes", "produces", "dependsOn",
              "transacts", "related", "ownedBy", "managedBy"}
 DIRECTIONS = {"->", "<-", "<->", "-"}
+#: Fallback for `pack_registry.SEMANTICS_MECHANISMS` — used only on a bare box
+#: with no checkout. The shipped mapping governs when the repo is importable.
+SEMANTICS_MECHANISMS_FALLBACK = {
+    "addresses": "IMPL", "causes": "IMPL", "dependsOn": "IMPL", "hasPart": "IMPL",
+    "supports": "IMPL", "mutuallySupportive": "IMPL", "produces": "IMPL",
+    "refutes": "NAND", "mutuallyExclusive": "NAND",
+}
 
 
 # ── validation ────────────────────────────────────────────────────────────
@@ -159,6 +172,16 @@ def shipped_vocab() -> dict | None:
         relations = set(_VALID_EDGE_PREDICATES)
     except Exception:  # the fallback is the transcription, not a silent pass
         relations = set(STRUCTURAL_RELS)
+    # The MECHANISM each Layer-2 meaning declares (`SEMANTICS_MECHANISMS`). The
+    # write gate COMPARES the two and only warns (#9963, warn-not-block), so a
+    # pair that inverts the meaning — `IMPL` carrying `refutes` — is filed as
+    # asked and raises where the judgement said it must lower. This validator is
+    # the only gate that can refuse it before it is written.
+    try:
+        from tortoise.pack_registry import SEMANTICS_MECHANISMS
+        mechanisms = dict(SEMANTICS_MECHANISMS)
+    except Exception:
+        mechanisms = dict(SEMANTICS_MECHANISMS_FALLBACK)
     return {
         "point": set(vocab.point_kinds),
         "event": set(vocab.event_kinds),
@@ -166,6 +189,7 @@ def shipped_vocab() -> dict | None:
         "object": object_kinds,
         "goal_state": set(GOAL_STATE_VALUES),
         "relation": relations,
+        "mechanism": mechanisms,
     }
 
 
@@ -179,6 +203,7 @@ def validate(doc: dict) -> list[str]:
     object_kinds = vocab["object"] if vocab else OBJECT_KINDS
     goal_states = vocab["goal_state"] if vocab else GOAL_STATES
     structural_rels = vocab["relation"] if vocab else STRUCTURAL_RELS
+    mechanisms = vocab["mechanism"] if vocab else SEMANTICS_MECHANISMS_FALLBACK
     if vocab is None:
         print("! shipped vocabularies unavailable — validating against the "
               "transcription in this file", file=sys.stderr)
@@ -242,6 +267,13 @@ def validate(doc: dict) -> list[str]:
                 errs.append(f"{where}: op_type {e['op']!r} not a mechanism")
             if e.get("label") and e["label"] not in SEMANTICS:
                 errs.append(f"{where}: label {e['label']!r} not in the Layer-2 semantics vocabulary")
+            if e.get("label") and e["label"] in mechanisms:
+                declared = mechanisms[e["label"]]
+                if declared != e["op"]:
+                    errs.append(
+                        f"{where}: op {e['op']} contradicts the meaning {e['label']!r}, "
+                        f"which declares {declared} — an {e['op']} wire carrying a "
+                        f"{declared} meaning INVERTS what the judgement said")
             if e.get("direction") and e["direction"] not in DIRECTIONS:
                 errs.append(f"{where}: direction {e['direction']!r} not one of {sorted(DIRECTIONS)}")
             # a target must be epistemic: Point/Subject/Object/Event
@@ -452,6 +484,24 @@ def _unknown(tool: str, reason: object) -> str:
             "it is not retried; re-run and let --verify decide what landed")
 
 
+def _mechanism_mismatch(result: dict) -> str | None:
+    """The `mechanism_mismatch` warning a write returned, if any.
+
+    ⛔ The write gate warns and PROCEEDS (#9963, warn-not-block), so an operator
+    whose `op_type` contradicts its declared `semantics` is stored as asked and
+    inverts what the meaning says (`sdk.py`: "An IMPL wire carrying a NAND
+    meaning RAISES the target's confidence where the meaning says it must LOWER
+    it"). `validate()` refuses the pair before the write; this catches the case
+    where the surface disagrees with the map anyway — the one class a filer must
+    never report as filed.
+    """
+    payload = _json_of(result)
+    for warn in (payload.get("warnings") or []) if isinstance(payload, dict) else []:
+        if isinstance(warn, dict) and warn.get("code") == "mechanism_mismatch":
+            return f"mechanism_mismatch — {str(warn.get('message'))[:300]}"
+    return None
+
+
 def _refusal(result: dict) -> str | None:
     """The reason, when a `tools/call` result reports a refusal — BOTH channels.
 
@@ -515,7 +565,16 @@ def load_state() -> dict:
 
 
 def save_state(st: dict) -> None:
-    STATE_PATH.write_text(json.dumps(st, indent=1, sort_keys=True) + "\n")
+    """Write the resume record ATOMICALLY.
+
+    The record is what the duplicate-safety argument rests on: a kill inside a
+    plain `write_text` truncates it, and the next run loses the `write_once`
+    intent markers — which is how a truncated state file re-issues the
+    non-idempotent writes it exists to protect.
+    """
+    tmp = STATE_PATH.with_name(STATE_PATH.name + ".tmp")
+    tmp.write_text(json.dumps(st, indent=1, sort_keys=True) + "\n")
+    os.replace(tmp, STATE_PATH)
 
 
 def write_map(doc: dict) -> int:
@@ -711,7 +770,15 @@ def write_map(doc: dict) -> int:
                     args["semantics"] = e["label"]
                 if e.get("direction"):
                     args["direction"] = e["direction"]
-                write_once(marker, "tortoise_create_operator", args)
+                res = write_once(marker, "tortoise_create_operator", args)
+                mismatch = _mechanism_mismatch(res)
+                if mismatch:
+                    # The write LANDED (warn-not-block), so the marker stays —
+                    # unmarking would re-issue a non-idempotent write. It is
+                    # recorded as a failure because the mechanism stored is not
+                    # the one the meaning declares: the judgement is filed
+                    # inverted and only a re-filing can fix it.
+                    failures.append(f"{marker}: {mismatch}")
             else:
                 mcp.call("tortoise_create_edge",
                          {"source_id": src, "target_id": dst,
@@ -831,12 +898,26 @@ def edge_marker(edge: dict) -> str:
     return f"edge:{edge['from']}->{edge['to']}:{edge.get('op') or edge['relation']}"
 
 
+#: The label each map section is filed as (`tortoise_create_*` kind → label).
+SECTION_LABELS = {"subjects": "Subject", "objects": "Object", "sources": "Source",
+                  "events": "Event", "points": "Point"}
+
+
 def identity_by_ref(doc: dict) -> dict[str, tuple[str, str]]:
     """ref -> the (property, value) that identifies the node it writes."""
     out: dict[str, tuple[str, str]] = {}
     for section in ("subjects", "objects", "sources", "events", "points"):
         for item in doc[section]:
             out[item["ref"]] = declared_identity(item)
+    return out
+
+
+def label_by_ref(doc: dict) -> dict[str, str]:
+    """ref -> the LABEL the node is filed under."""
+    out: dict[str, str] = {}
+    for section, label in SECTION_LABELS.items():
+        for item in doc[section]:
+            out[item["ref"]] = label
     return out
 
 
@@ -852,9 +933,30 @@ def map_identities(doc: dict) -> list[tuple[str, str]]:
     return list(identity_by_ref(doc).values())
 
 
-def _row_identities(row: list) -> set[tuple[str, str]]:
-    return {(prop, value) for prop, value in zip(IDENTITY_PROPS, row, strict=False)
-            if value}
+def _row_matches(row: list, label: str, ident: tuple[str, str]) -> bool:
+    """Does this read-back row carry the DECLARED label + identity?
+
+    ⛔ BOTH, and only the declared property. Two mistakes were measured here:
+
+    * harvesting every non-empty column lets a node's NON-identity props stand in
+      as identities — an Event written with `name` AND `props.content` yields
+      both, so a declared POINT whose content restates that Event was certified
+      present without ever being written, and a correct graph produced a phantom
+      duplicate;
+    * ignoring the LABEL lets that same Event row satisfy the Point's identity at
+      all. The map declares one label and one identity per node; the read-back
+      asks about exactly those.
+    """
+    prop, value = ident
+    if not value or not row or row[0] != label:
+        return False
+    idx = IDENTITY_PROPS.index(prop) + 1     # row layout: [label, name, url, content]
+    return idx < len(row) and row[idx] == value
+
+
+def _matched_identities(row: list,
+                        declared: set[tuple[str, tuple[str, str]]]) -> set[tuple[str, tuple[str, str]]]:
+    return {(label, ident) for label, ident in declared if _row_matches(row, label, ident)}
 
 
 def presence(doc: dict, node_rows: list, edge_rows: list,
@@ -871,18 +973,20 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
 
     Pure, so the verdict can be exercised without a database.
     """
-    present: set[tuple[str, str]] = set()
-    for row in node_rows:
-        present |= _row_identities(row)
     by_ref = identity_by_ref(doc)
-    missing_nodes = [(prop, value) for prop, value in by_ref.values()
-                     if (prop, value) not in present]
+    by_label = label_by_ref(doc)
+    declared = {(by_label[ref], ident) for ref, ident in by_ref.items()}
+    present = {key for key in declared
+               if any(_row_matches(row, key[0], key[1]) for row in node_rows)}
+    missing_nodes = [(label, ident[0], ident[1]) for label, ident in sorted(declared)
+                     if (label, ident) not in present]
 
+    # endpoint slice layout: [label, name, url, content]
     structural: set[tuple[str, tuple[str, str], tuple[str, str]]] = set()
     for row in edge_rows:
         kind = row[0]
-        for a in _row_identities(row[1:4]):
-            for b in _row_identities(row[4:7]):
+        for a in _matched_identities(row[1:5], declared):
+            for b in _matched_identities(row[5:9], declared):
                 structural.add((kind, a, b))
 
     # An operator is a NODE whose typed edges reach its endpoints, and the SLOT
@@ -892,7 +996,7 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
     # on an unordered endpoint SET would read a REVERSED operator as the declared
     # edge — 46 of this map's 51 operators declare `->`, i.e. the direction is
     # what EP propagates (#13913 review round 4).
-    operators: dict[object, tuple[str, dict[int, set[tuple[str, str]]]]] = {}
+    operators: dict[object, tuple[str, dict[int, set[tuple[str, tuple[str, str]]]]]] = {}
     for row in op_rows:
         nid, kind, idx = row[0], row[1], row[2]
         _kind, slots = operators.setdefault(nid, (kind, {}))
@@ -900,11 +1004,12 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
             slot = int(idx)
         except (TypeError, ValueError):
             slot = -1
-        slots.setdefault(slot, set()).update(_row_identities(row[3:6]))
+        slots.setdefault(slot, set()).update(_matched_identities(row[3:7], declared))
 
     missing_edges: list[tuple[str, str, str]] = []
     for e in doc["edges"]:
-        a, b = by_ref[e["from"]], by_ref[e["to"]]
+        a = (by_label[e["from"]], by_ref[e["from"]])
+        b = (by_label[e["to"]], by_ref[e["to"]])
         if "op" in e:
             held = any(
                 kind == e["op"]
@@ -929,12 +1034,14 @@ def duplicates(doc: dict, node_rows: list) -> list[tuple[str, str]]:
     existence check; the SDK mints a fresh `eventId` per call), so the read-back
     owes the count as well as the membership.
     """
-    counts: dict[tuple[str, str], int] = {}
+    by_ref = identity_by_ref(doc)
+    by_label = label_by_ref(doc)
+    declared = {(by_label[ref], ident) for ref, ident in by_ref.items()}
+    counts: dict[tuple[str, tuple[str, str]], int] = {}
     for row in node_rows:
-        for ident in _row_identities(row):
-            counts[ident] = counts.get(ident, 0) + 1
-    declared = set(identity_by_ref(doc).values())
-    return sorted(ident for ident in declared if counts.get(ident, 0) > 1)
+        for key in _matched_identities(row, declared):
+            counts[key] = counts.get(key, 0) + 1
+    return sorted((key[1][0], key[1][1]) for key in declared if counts.get(key, 0) > 1)
 
 
 def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
@@ -949,8 +1056,8 @@ def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
     if missing_nodes:
         print(f"MISSING — {len(missing_nodes)} declared node(s) are not in the graph:",
               file=sys.stderr)
-        for prop, value in missing_nodes[:20]:
-            print(f"  - {prop}: {value[:70]!r}", file=sys.stderr)
+        for label, prop, value in missing_nodes[:20]:
+            print(f"  - {label} {prop}: {value[:70]!r}", file=sys.stderr)
         if len(missing_nodes) > 20:
             print(f"  … and {len(missing_nodes) - 20} more", file=sys.stderr)
     if dupes:
@@ -1006,8 +1113,8 @@ def verify(doc: dict) -> int:
                  "RETURN coalesce(e.content,'')  , type(r), coalesce(o.name, o.url, o.content, '')"):
         print(f"  {row[0][:70]}... -[{row[1]}]-> {row[2][:44]}")
 
-    node_rows = q("MATCH (n) RETURN coalesce(n.name,''), coalesce(n.url,''), "
-                  "coalesce(n.content,'')")
+    node_rows = q("MATCH (n) RETURN labels(n)[0], coalesce(n.name,''), "
+                  "coalesce(n.url,''), coalesce(n.content,'')")
     # ⛔ NULL-SAFE, not `NOT (a.is_operator = true OR …)`: a Subject/Object/
     # Source/Event carries NO `is_operator` property, so that predicate evaluates
     # to `null` for every one of this map's 50 structural edges (their sources are
@@ -1016,9 +1123,9 @@ def verify(doc: dict) -> int:
     # (`sdk.py`: `(x.is_operator IS NULL OR x.is_operator = false)`).
     edge_rows = q("MATCH (a)-[e]->(b) "
                   f"WHERE {NON_OPERATOR_PREDICATE} "
-                  "RETURN type(e), coalesce(a.name,''), coalesce(a.url,''), "
-                  "coalesce(a.content,''), coalesce(b.name,''), coalesce(b.url,''), "
-                  "coalesce(b.content,'')")
+                  "RETURN type(e), labels(a)[0], coalesce(a.name,''), "
+                  "coalesce(a.url,''), coalesce(a.content,''), labels(b)[0], "
+                  "coalesce(b.name,''), coalesce(b.url,''), coalesce(b.content,'')")
     # An operator is a NODE: its typed edges reach its endpoints, so the declared
     # operator is matched by (mechanism, both endpoints) grouped per operator id
     # — never by a direct `(from)-[:IMPL]->(to)` edge, which the writer does not
@@ -1027,7 +1134,8 @@ def verify(doc: dict) -> int:
                 "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
                 "RETURN coalesce(o.id, o.nodeKey, toString(id(o))), "
                 "coalesce(o.op_type, e.op_type, ''), coalesce(e.idx, -1), "
-                "coalesce(x.name,''), coalesce(x.url,''), coalesce(x.content,'')")
+                "labels(x)[0], coalesce(x.name,''), coalesce(x.url,''), "
+                "coalesce(x.content,'')")
     return verdict(doc, node_rows, edge_rows, op_rows)
 
 

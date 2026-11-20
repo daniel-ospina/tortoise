@@ -288,9 +288,9 @@ def test_the_edge_arm_ignores_edges_that_are_not_the_map_s(map_doc):
     Mutant: credit an edge whenever each endpoint matches ANY identity present
     (`& present`) — both foreign-edge cases go green with zero declared edges.
     """
-    foreign_nodes = [["", f"foreign-{i}", ""] for i in range(30)]
-    foreign_edges = [["IMPL", "", f"foreign-{i}", "", "", f"foreign-{i + 1}", ""]
-                     for i in range(29)]
+    foreign_nodes = [["Object", "", f"foreign-{i}", ""] for i in range(30)]
+    foreign_edges = [["IMPL", "Object", "", f"foreign-{i}", "",
+                      "Object", "", f"foreign-{i + 1}", ""] for i in range(29)]
     assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes,
                          foreign_edges, []) == 1
     padded = [foreign_edges[i % len(foreign_edges)] for i in range(len(map_doc["edges"]))]
@@ -335,9 +335,9 @@ def test_an_operator_over_a_THIRD_node_does_not_cover_a_declared_pair(map_doc):
     structural, _operators = _edge_rows(map_doc)
     op_edges = [e for e in map_doc["edges"] if "op" in e]
     first = op_edges[0]
-    rows = [[ "opX", first["op"], 0, *_row_for(map_doc, first["to"])],
-            [ "opX", first["op"], 1, *_row_for(map_doc, first["from"])],
-            [ "opX", first["op"], 1, *_row_for(map_doc, first["to"])]]
+    rows = [["opX", first["op"], 0, *_row_for(map_doc, first["to"])],
+            ["opX", first["op"], 1, *_row_for(map_doc, first["from"])],
+            ["opX", first["op"], 1, *_row_for(map_doc, first["to"])]]
     assert filer.verdict(map_doc, _node_rows(map_doc), structural, rows) == 1
 
 
@@ -464,6 +464,99 @@ def test_a_state_whose_SOURCE_ids_are_urls_is_legitimate(map_doc, tmp_path, monk
     capsys.readouterr()
 
 
+def test_a_node_is_matched_by_its_LABEL_and_its_declared_property(map_doc):
+    """An Event row cannot stand in for a declared POINT.
+
+    An Event is written with `name` AND `props.content`; harvesting every
+    non-empty column (and ignoring the label) let that row satisfy a declared
+    Point whose content it restates — the Point was certified present without
+    ever being written, and a correct graph produced a phantom duplicate.
+
+    Mutant: match on any non-empty column of any row — `verdict` returns 0 here.
+    """
+    point = map_doc["points"][0]
+    # The graph holds the Event (name + content), and NOT the Point, but the
+    # Event's content column carries the Point's content.
+    rows = [["Event", "a different event entirely", "", point["content"]]]
+    assert filer.presence(map_doc, rows, [], [])[0] != []
+    assert filer.verdict(map_doc, rows, [], []) == 1
+    # And the same row does not double-count as a duplicate of anything.
+    full = _node_rows(map_doc)
+    assert filer.duplicates(map_doc, full) == []
+    extra_row = ["Event", "a different event entirely", "", point["content"]]
+    assert filer.duplicates(map_doc, [*full, extra_row]) == []
+
+
+def test_validate_refuses_a_mechanism_that_CONTRADICTS_its_meaning(map_doc):
+    """`IMPL` + `refutes` is the pair that INVERTS the judgement.
+
+    The write gate only warns (#9963, warn-not-block), so this validator is the
+    last gate before an inverted operator is filed. The shipped map had exactly
+    one such pair (a `refutes` edge wired `IMPL`) and it is now a `NAND`.
+
+    Mutant: drop the pairing arm — the inverted pair validates clean.
+    """
+    assert not [e for e in filer.validate(map_doc) if "contradicts the meaning" in e]
+    inverted = json.loads(json.dumps(map_doc))
+    for edge in inverted["edges"]:
+        if edge.get("label") == "refutes":
+            edge["op"] = "IMPL"
+            break
+    else:  # pragma: no cover - the map carries a refutes edge
+        pytest.fail("no refutes edge in the map")
+    errs = filer.validate(inverted)
+    assert any("contradicts the meaning" in e for e in errs), errs
+
+
+def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_doc, capsys):
+    """A write that lands with the WRONG mechanism is reported, not filed silently.
+
+    The gate warns and proceeds, so the marker must stay (unmarking would
+    re-issue a non-idempotent write) while the run must NOT exit 0.
+
+    Mutant: ignore `warnings` — this run exits 0 over an inverted operator.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _Warns(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                self._n += 1
+                inner = {"id": f"{tool}:{self._n}"}
+                if tool == "tortoise_create_operator":
+                    inner["warnings"] = [{"code": "mechanism_mismatch",
+                                          "message": "IMPL carrying refutes"}]
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": inner}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Warns)
+    assert filer.write_map(map_doc) == 1
+    state = json.loads(state_path.read_text())
+    assert any("mechanism_mismatch" in f for f in state["failed"])
+    assert len([m for m in state["written"] if m.startswith("edge:")]) == len(map_doc["edges"])
+    capsys.readouterr()
+
+
+def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
+    """The resume record is replaced in one step (a truncated file loses the
+    `write_once` intent markers and re-issues the non-idempotent writes)."""
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    filer.save_state({"ids": {"a": "1"}, "written": ["x"], "failed": []})
+    assert json.loads((tmp_path / "state.json").read_text())["written"] == ["x"]
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
 def test_validate_refuses_an_undeclared_object_kind(map_doc):
     """A kind neither core nor an installed pack declares is refused.
 
@@ -491,16 +584,10 @@ def _row_for(doc: dict, ref: str) -> list[str]:
     prop, not as a parameter).
     """
     item = filer.doc_by_ref(doc, ref)
-    if any(e["ref"] == ref for e in doc["events"]):
-        prop, value = "name", filer.event_name(item)
-    elif "url" in item:
-        prop, value = "url", item["url"]
-    elif "content" in item:
-        prop, value = "content", item["content"]
-    else:
-        prop, value = "name", item["name"]
-    row = ["", "", ""]  # `filer.IDENTITY_PROPS` order
-    row[filer.IDENTITY_PROPS.index(prop)] = value
+    row = ["", "", "", ""]      # [label, name, url, content]
+    row[0] = filer.label_by_ref(doc)[ref]
+    prop, value = filer.declared_identity(item)
+    row[filer.IDENTITY_PROPS.index(prop) + 1] = value
     return row
 
 
@@ -698,7 +785,7 @@ def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
 
     Mutant: `return 0 if got >= expected * 0.9 else 1` over a whole-graph count.
     """
-    unrelated = [["", f"unrelated-{i}", ""] for i in range(71)]
+    unrelated = [["Object", f"unrelated-{i}", "", ""] for i in range(71)]
     assert filer.verdict(map_doc, unrelated, [], []) == 1
 
 
