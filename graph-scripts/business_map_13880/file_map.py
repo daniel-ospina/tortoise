@@ -734,16 +734,34 @@ def write_map(doc: dict) -> int:
         return 2
 
     declared_markers = {edge_marker(e) for e in doc["edges"]}
-    orphan_markers = sorted(m for m in st["written"]
-                            if m.startswith("edge:") and m not in declared_markers)
+    for section in NODE_MARKER_SECTIONS:
+        declared_markers.update(item_marker(section, item)
+                                for item in doc[section])
+    orphan_markers = sorted(m for m in st["written"] if m not in declared_markers)
     if orphan_markers:
-        print(f"state.json names {len(orphan_markers)} edge marker(s) this map does "
-              f"not declare (e.g. {orphan_markers[0]!r}) — an edge was added, "
-              f"removed or re-typed since it was written, or the markers are the "
-              f"INDEX-keyed spelling an older version wrote. Resuming would skip "
-              f"the edited edges and re-issue the rest. Remove those 'edge:*' "
-              f"entries from {STATE_PATH} (KEEP the ids) and re-run.",
+        edge_orphans = [m for m in orphan_markers if m.startswith("edge:")]
+        node_orphans = [m for m in orphan_markers if not m.startswith("edge:")]
+        print(f"state.json names {len(orphan_markers)} marker(s) this map does not "
+              f"declare (e.g. {orphan_markers[0]!r}) — a node's declared identity, "
+              f"or an edge's endpoints/mechanism/direction/label, changed since it "
+              f"was written, or the markers are an older spelling. Resuming would "
+              f"skip the edited items and re-issue the rest, so the run stops.",
               file=sys.stderr)
+        if edge_orphans:
+            print("  STRUCTURAL edges: remove those entries from "
+                  f"{STATE_PATH} (KEEP the ids) and re-run.\n"
+                  "  ⛔ OPERATOR edges: removing the marker RE-ISSUES "
+                  "`tortoise_create_operator`, and the door has no existence "
+                  "check — it would write a SECOND operator over endpoints that "
+                  "already carry one, double-counting the claim's EP weight "
+                  "(#10849). The existing operator must be deleted first; this "
+                  "filer never deletes.", file=sys.stderr)
+        if node_orphans:
+            print("  NODES: this filer never updates or deletes a node, so an "
+                  "edited identity cannot be repaired from here — restore the "
+                  "declaration, or delete the node in the graph first. Removing "
+                  "the marker re-creates the node (a duplicate) for every kind "
+                  "without a dedup key.", file=sys.stderr)
         return 2
 
     #: Markers whose write was ATTEMPTED and whose outcome is still unknown:
@@ -841,12 +859,12 @@ def write_map(doc: dict) -> int:
 
     # 1. Subjects — the actors.
     for s in doc["subjects"]:
-        if already(f"subject:{s['ref']}") and s["ref"] in ids:
+        if already(item_marker("subjects", s)) and s["ref"] in ids:
             continue
         res = mcp.call("tortoise_create_subject",
                        {"name": s["name"], "subjectKind": s["subjectKind"]})
         ids[s["ref"]] = _resolve(s["ref"], s["name"], res, "subject")
-        mark(f"subject:{s['ref']}")
+        mark(item_marker("subjects", s))
         print(f"  subject  {s['name']:<34} -> {ids[s['ref']]}")
 
     # 2. Objects — products, competitors, programmes, goals, standards.
@@ -854,7 +872,7 @@ def write_map(doc: dict) -> int:
     #    (`tortoise_create_object(name, objectKind, props, goalState)`);
     #    `goalState` is the one object field the surface names explicitly.
     for o in doc["objects"]:
-        if already(f"object:{o['ref']}") and o["ref"] in ids:
+        if already(item_marker("objects", o)) and o["ref"] in ids:
             continue
         args = {"name": o["name"], "objectKind": o["objectKind"]}
         if o.get("status"):
@@ -863,28 +881,28 @@ def write_map(doc: dict) -> int:
             args["goalState"] = o["goalState"]
         res = mcp.call("tortoise_create_object", args)
         ids[o["ref"]] = _resolve(o["ref"], o["name"], res, "object")
-        mark(f"object:{o['ref']}")
+        mark(item_marker("objects", o))
         print(f"  object   {o['name'][:44]:<44} -> {ids[o['ref']]}")
 
     # 3. Sources — the documents claims were read from.
     #    `documentKind` is caller-settable but NOT a parameter of
     #    `tortoise_create_source(url, sourceKind, tier, sourceDate, props)`.
     for s in doc["sources"]:
-        if already(f"source:{s['ref']}") and s["ref"] in ids:
+        if already(item_marker("sources", s)) and s["ref"] in ids:
             continue
         args = {"url": s["url"], "sourceKind": s["sourceKind"]}
         if s.get("documentKind"):
             args["props"] = {"documentKind": s["documentKind"]}
         res = mcp.call("tortoise_create_source", args)
         ids[s["ref"]] = _resolve(s["ref"], s["url"], res, "source")
-        mark(f"source:{s['ref']}")
+        mark(item_marker("sources", s))
         print(f"  source   {s['url'][:60]:<60} -> {ids[s['ref']]}")
 
     # 4. Events — decisions belong on the timeline, not in the belief layer.
     #    `tortoise_create_event(name, eventKind, props)`: the content and the
     #    start time are PROPS, and `name` is required.
     for e in doc["events"]:
-        marker = f"event:{e['ref']}"
+        marker = item_marker("events", e)
         if already(marker):
             if e["ref"] in ids:
                 pending.discard(marker)   # a resolved id confirms the write
@@ -901,7 +919,7 @@ def write_map(doc: dict) -> int:
         props = {"content": e["content"]}
         if e.get("startedAt"):
             props["startedAt"] = e["startedAt"]
-        res = write_once(f"event:{e['ref']}", "tortoise_create_event",
+        res = write_once(item_marker("events", e), "tortoise_create_event",
                          {"name": event_name(e), "eventKind": e["eventKind"],
                           "props": props})
         ids[e["ref"]] = _resolve(e["ref"], e["content"], res, "event")
@@ -912,7 +930,7 @@ def write_map(doc: dict) -> int:
     #    `create_point` validates and `_link_source` reads); there is no
     #    `source_url` parameter on this surface.
     for p in doc["points"]:
-        if already(f"point:{p['ref']}") and p["ref"] in ids:
+        if already(item_marker("points", p)) and p["ref"] in ids:
             continue
         args = {"content": p["content"], "kind": p.get("kind", "statement"), "dedup": True}
         src = p.get("source")
@@ -920,7 +938,7 @@ def write_map(doc: dict) -> int:
             args["props"] = {"extractedFrom": doc_by_ref(doc, src)["url"]}
         res = mcp.call("tortoise_create_point", args)
         ids[p["ref"]] = _resolve(p["ref"], p["content"], res, "point")
-        mark(f"point:{p['ref']}")
+        mark(item_marker("points", p))
         print(f"  point    {p['ref']:<34} -> {ids[p['ref']]}")
 
     # 6. Edges — the whole point. Operators carry a mechanism + a meaning;
@@ -936,8 +954,9 @@ def write_map(doc: dict) -> int:
                 failures.append(
                     f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued. "
                     "Run --verify: if the edge is present it landed — delete this "
-                    "marker from `unconfirmed` in state.json and KEEP it in "
-                    "`written`; if it is absent, delete it from BOTH and re-run.")
+                    "marker from `unconfirmed` in state.json, KEEP it in `written`, "
+                    "and delete the matching line from `failed`; if it is absent, "
+                    "delete it from `written` (and its `failed` line) and re-run.")
                 print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
@@ -983,10 +1002,36 @@ def write_map(doc: dict) -> int:
     st["unconfirmed"] = sorted(pending)
     save_state(st)
     if carried:
+        # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
+        # `written`, so it is never re-attempted, so `done` never contains it, so
+        # the line can never clear itself. Saying so — with the exact edit — is
+        # the difference between a fail-closed report and a permanent false red
+        # with no route out (#13913 review round 11, measured: the printed remedy
+        # for the UNCONFIRMED arm cleared `unconfirmed` and the run still exited 1
+        # forever, because nothing named the `failed` line).
         print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
-              "(their markers were not re-written this run) — see state.json", file=sys.stderr)
+              "(their markers were not re-written this run) — see state.json",
+              file=sys.stderr)
         for line in carried[:10]:
             print(f"  ! {line}", file=sys.stderr)
+        print("  → to resolve one: `--verify` decides what is in the graph. If the "
+              "write is correct, delete its line from `failed` and keep its marker "
+              "in `written`. If it is wrong (e.g. a mechanism inversion, which "
+              "`--verify` cannot see), delete the node in the graph, then delete "
+              "its marker from `written` and its line from `failed`, and re-run. "
+              "Never delete `state.json` to clear these — a re-run would re-issue "
+              "every non-idempotent write.", file=sys.stderr)
+        # A failure whose marker the map no longer declares can never be
+        # re-observed either: name it, instead of blocking `--write` silently
+        # (#13913 review round 11).
+        declared_markers = {edge_marker(e) for e in doc["edges"]}
+        declared_markers |= {f"event:{e['ref']}" for e in doc["events"]}
+        for line in carried:
+            marker = line.split(": ", 1)[0]
+            if marker.startswith(("edge:", "event:")) and marker not in declared_markers:
+                print(f"  ? {marker} is no longer declared by this map — that line "
+                      "can never clear itself; drop it from `failed` in "
+                      "state.json", file=sys.stderr)
     if ambiguous:
         print(f"\n{len(ambiguous)} item(s) were recorded but returned no id — an "
               "UNKNOWN outcome, NOT re-written (a second write would duplicate a "
@@ -1098,6 +1143,27 @@ def declared_identity(item: dict) -> tuple[str, str]:
     if "name" in item:
         return ("name", item["name"])
     return ("content", item["content"])
+
+
+NODE_MARKER_SECTIONS = {"subjects": "subject", "objects": "object",
+                        "sources": "source", "events": "event",
+                        "points": "point"}
+
+
+def item_marker(section: str, item: dict) -> str:
+    """The marker a NODE is remembered by: its section, ref AND identity.
+
+    ⛔ A `ref` IS NOT THE NODE'S VALUE. Keyed on `f"subject:{ref}"`, an edit to
+    the declaration (a renamed Subject, a corrected Point content) left the marker
+    unchanged, so the resume made ZERO calls and printed `all nodes and edges
+    written` with exit 0 while the graph kept the OLD value — the same silent skip
+    the edge markers were hardened against, one arm over (measured: rename
+    `sub:premise-labs` and the second run makes 0 calls, exit 0; #13913 review
+    round 9). The declared identity is part of the marker, so an edit ORPHANS it
+    and `write_map` refuses by name.
+    """
+    _prop, value = declared_identity(item)
+    return f"{NODE_MARKER_SECTIONS[section]}:{item['ref']}:{value}"
 
 
 def edge_key(edge: dict) -> str:
@@ -1263,7 +1329,16 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
     #   dropped the keyword turned 46 one-way IMPL edges bidirectional while the
     #   slot order still looked right (#13913 review round 5). The slot says
     #   which END is which; the direction says whether confidence flows back.
-    operators: dict[object, tuple[str, str, dict[int, set[tuple[str, str, str]]]]] = {}
+    # ⛔ A SLOT HOLDS ROWS, NOT A SET OF IDENTITIES. `_row_identities` returns
+    # one identity PER NON-EMPTY IDENTITY PROPERTY, and an Event carries BOTH
+    # `name` and `content` (measured on the engine: `create_event` writes a props
+    # set including both). Flattening a slot into a set therefore made
+    # `len(slot) == 1` FALSE for every operator edge whose endpoint is an Event —
+    # 8 declared edges read back absent on a CORRECTLY filed map, and
+    # `duplicate_operators()` blind on the same edges (#13913 review round 9).
+    # Rows are the endpoints; a row's identity set is only matched INTO.
+    operators: dict[object,
+                    tuple[str, str, dict[int, list[set[tuple[str, str, str]]]]]] = {}
     for row in op_rows:
         nid, kind, idx, direction = row[0], row[1], row[2], row[3]
         _kind, _dir, slots = operators.setdefault(
@@ -1272,7 +1347,7 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
             slot = int(idx)
         except (TypeError, ValueError):
             slot = -1
-        slots.setdefault(slot, set()).update(_row_identities(row[4:8]))
+        slots.setdefault(slot, []).append(_row_identities(row[4:8]))
 
     missing_edges: list[tuple[str, str, str]] = []
     for e in doc["edges"]:
@@ -1289,14 +1364,14 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
                 # the writer's OWN shape: slot 0 = source, slot 1 = the single
                 # target. An operator over three endpoints holds both of a
                 # declared pair's identities and would otherwise certify it.
-                and a in slots.get(0, set())
-                and b in slots.get(1, set())
+                and len(slots.get(0, ())) == 1
+                and len(slots.get(1, ())) == 1
+                and a in slots[0][0]
+                and b in slots[1][0]
                 # ⛔ ONE ENDPOINT PER SLOT, not merely one SLOT KEY: a slot holds
                 # a SET, so an operator with TWO targets in slot 1 held both of a
                 # declared pair's identities and certified both edges while
                 # pricing them as one three-input factor (#13913 review round 8).
-                and len(slots.get(0, ())) == 1
-                and len(slots.get(1, ())) == 1
                 and not (set(slots) - {0, 1})
                 for kind, direction, slots in operators.values()
             )
@@ -1342,7 +1417,8 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
     """
     by_ref = identity_by_ref(doc)
     aliases = DIRECTION_ALIASES
-    grouped: dict[object, tuple[str, str, dict[int, set[tuple[str, str, str]]]]] = {}
+    grouped: dict[object,
+                  tuple[str, str, dict[int, list[set[tuple[str, str, str]]]]]] = {}
     for row in op_rows:
         nid, kind, idx, direction = row[0], row[1], row[2], row[3]
         _kind, _dir, slots = grouped.setdefault(
@@ -1351,7 +1427,7 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
             slot = int(idx)
         except (TypeError, ValueError):
             slot = -1
-        slots.setdefault(slot, set()).update(_row_identities(row[4:8]))
+        slots.setdefault(slot, []).append(_row_identities(row[4:8]))
 
     # ⛔ COUNTED PER ENDPOINT PAIR — UNORDERED, and by what the node actually
     # PRICES. Three blind shapes this closes (#13913 review round 9, each
@@ -1373,16 +1449,36 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
 
     holders: dict[frozenset, set[object]] = {}
     for nid, node in grouped.items():
-        slots = node[2]      # (mechanism, direction, slots) — the census is blind to the first two
-        sources = slots.get(0, set())
-        targets = slots.get(1, set())
-        for source in sources:
-            for target in targets:
-                if source == target:
-                    continue
-                key = frozenset((source, target))
-                if key in declared_by_pair:
-                    holders.setdefault(key, set()).add(nid)
+        slots = node[2]
+        # ⛔ ROWS, not identity SETS: an Event endpoint carries two identities
+        # (`name` AND `content`), so a set-flattened slot made the arity check
+        # below false for 8 declared operator edges and this census blind on the
+        # same edges (#13913 review round 9). The pair itself stays UNORDERED
+        # (`frozenset`), so a duplicate priced with a flipped direction or a
+        # swapped mechanism is still a duplicate.
+        # ⛔ PRICING, NOT SHAPE. The question here is "does this operator charge
+        # this claim pair a second time?", so EVERY endpoint row counts: a WIDE
+        # operator (`A -> [B, C]`) prices `(A, B)`, and a REVERSED one prices the
+        # same unordered pair. (Presence is the strict arm — it certifies nothing
+        # unless the shape is exactly one source slot and one target slot —
+        # because certifying a declared edge is a different claim from noticing a
+        # second charge on it.)
+        source_ids: set = set()
+        for row_ids in slots.get(0, []):
+            source_ids |= row_ids
+        target_ids: set = set()
+        for slot, rows in slots.items():
+            if slot == 0:
+                continue
+            for row_ids in rows:
+                target_ids |= row_ids
+        for key in declared_by_pair:
+            ends = sorted(key, key=repr)
+            if len(ends) != 2:
+                continue
+            if ((ends[0] in source_ids and ends[1] in target_ids)
+                    or (ends[0] in target_ids and ends[1] in source_ids)):
+                holders.setdefault(key, set()).add(nid)
     out: list[tuple[str, str, str]] = []
     for key, ids in sorted(holders.items(), key=lambda kv: sorted(map(repr, kv[0]))):
         if len(ids) > declared_by_pair[key]:

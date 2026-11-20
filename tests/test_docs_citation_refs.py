@@ -506,6 +506,76 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
+#: ⛔ TWO GAPS, BECAUSE THE TWO SUBJECTS ASK DIFFERENT QUESTIONS (#13900 review, cycles 9-13).
+#:
+#: The FULL command (`git diff --name-only origin/main...HEAD -- tortoise/`) names THIS head, so
+#: anything behind it is a claim about this head and the gap is WIDE: at most 40 units of
+#: non-`;`, non-`|`, non-newline text. A period is NOT a terminator — an inline tag's attribute
+#: carries one (`<span class="x">`, in-house spelling: 44 uses under `docs/`), and a claim one
+#: clause past the command is safer graded than skipped.
+#:
+#: The ABBREVIATION (`-- tortoise/`) is a SUBSTRING of every longer `git diff <other revs> --
+#: tortoise/` invocation, so its gap must stay NARROW — no word characters outside a unit — or a
+#: quoted invocation's later clause is refused (the F4 fail-open, measured: three true, head-named
+#: history sentences on the live document red under a wide gap and none red under this one).
+#:
+#: Both gaps are built from FOUR UNIT KINDS and nothing else — all four in BOTH gaps (the wide
+#: gap's budget is 40 units, the narrow one's is unbounded, and the bracket unit was missing
+#: from the wide gap until a verification round measured it). Listing them is not an enumeration
+#: of SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
+#: itself, stated once, and each kind is defined structurally:
+#:
+#:   1. a single character — a non-word one (plus `_`, which Python counts as a word character and
+#:      markdown emphasis depends on), and for the wide gap any other non-`;`, non-`|`, non-`<`
+#:      character;
+#:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is one unit (so
+#:      `title="a > b"` does not close early: CommonMark allows any character but the matching
+#:      quote inside a quoted value) and in which a SOFT break is allowed but a BLANK line is not:
+#:      `_TAG` below;
+#:   3. a BRACKETED run — `[…]`, which covers `[^1]`, `[^note]`, `[^A]`, `[12]` and a markdown
+#:      link label alike; a run of DIGITS or of LETTERS is not spelled separately anywhere;
+#:   4. an AMPERSAND — `_AMP` below, which is EITHER an entity (`&…;` with `[#\w]{1,10}` inside,
+#:      covering `&nbsp;`, `&#160;` and `&#xA0;`) OR a bare `&` that does not begin one. Both gaps
+#:      take `&` out of their single-character unit and reach it ONLY through `_AMP`, whose two
+#:      branches a negative lookahead keeps mutually exclusive, so `&` has one parse.
+#:      ⛔ THE BARE BRANCH IS NOT DECORATION (#13900 review, cycles 9-13, MEASURED): the first form
+#:      of this unit dropped it, and ``… -- tortoise/` R&D prints TWO paths`` then returned `[]` —
+#:      a claim left GREEN. `&` is a character `origin/main`'s gap already admitted, and a closure
+#:      that drops a form the previous rule had is a regression wearing a widening's clothes.
+#:
+#: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
+#: crossed, a BLANK line is the boundary. Every unit in the WIDE gap begins with a different
+#: character, so that run has one parse. The narrow gap is not fully DISJOINT — `<` can begin
+#: both a tag and a single-character unit — because the single-character branch matching a bare
+#: `<` is the wider reading and is kept; a tag probe that then fails costs one bounded scan
+#: (measured: 3,200 `<` with no `>` / 9.6 KB → 0.001-0.002 s). The measured cost is linear:
+#: 8/16/28/40/80/200 spaces and 40 repeated units of each kind → 0.000-0.002 s; the ambiguous
+#: form `7557a52cf5` replaced took 15.8 s at 24 spaces.
+_AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
+#: ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT, NOT ONLY BETWEEN UNITS (#13900 review,
+#: verification round, MEASURED). Three holes, each reproduced on the LIVE document:
+#:   * a BRACKETED run was `\[[^\]\n]*\]`, newline-excluded — so
+#:     "`-- tortoise/` [the census\nsection above] prints FIVE paths" returned `[]`
+#:     and the suite stayed `592 passed` over a false claim (the label unwrapped reds);
+#:   * a QUOTED attribute value was `"[^"\n]*"`, so a soft break inside a tag's value
+#:     was refused although the tag is a unit and the newline rule is B3's;
+#:   * the tag catch-all excluded `'`, so `<that row's own path>` — live-document
+#:     vocabulary, twice — was refused while `<path>` graded. A LONE apostrophe is
+#:     ordinary text: the quoted alternatives are ordered FIRST, so a real quoted run is
+#:     still one unit, and anything else falls through to the catch-all.
+#: The blank line remains the boundary in every one of them (`(?!...\n)` in each unit).
+_SOFT = r"\n(?![^\S\n]*\n)"
+_TAG = (r'<(?:"(?:[^"\n]|' + _SOFT + r')*"|\'(?:[^\'\n]|' + _SOFT + r')*\''
+        r'|[^>"\n]|' + _SOFT + r')*>')
+#: …and an ESCAPED character inside a label is a unit too (`[a\]b]` is one label), which
+#: is the same ordering rule as the tag's quoted value: the escape is tried first so the
+#: `]` it protects cannot end the run.
+_BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
+_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+             + r"|" + _SOFT + r"){0,40}?")
+_GAP_ABBREV = (r"(?:[^\w&\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+               + r"|" + _SOFT + r")*")
+
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
 
@@ -556,10 +626,16 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     """
     answers: list[tuple[str, bool]] = []
     # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
-    # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
+    # review): a HARD-WRAPPED ANSWER is not detected — the ANSWER window is cut at the first
     # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
-    # closure claim above is read as "closed under formatting ON ONE LINE".
+    # closure claim above is read as "closed under formatting ON ONE LINE". ⛔ THE SEPARATOR
+    # IS NOT CUT THERE (#13900 review, cycle 10, P2): a hard-wrapped COMMAND→VERB pair stays
+    # graded, because the gap crosses ONE newline through its own soft-break branch
+    # (`\n(?![^\S\n]*\n)` — a soft break is not a paragraph break) and `origin/main` graded it
+    # too. ⛔ NOT "because `\s` is in the separator class" (#13900 review, P2-3): the
+    # single-character unit excludes `\n` in both gaps, so a newline is graded ONLY by that
+    # branch — the earlier wording named a mechanism the code no longer had.
     # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
     # (#13845): a claim that names the command by PRONOUN — "the command this clause
     # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
@@ -584,7 +660,57 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # enforce it mechanically was measured fail-open and false-blocking, and is deleted).
     for match in re.finditer(
             r"`?" + re.escape(cmd)
-            + r"[`_\s*]*(?:(?:still|now|actually|also)\s+)?"
+            # ⛔ THE SEPARATOR CLASS ADMITS A TABLE CELL AND A PARENTHETICAL (#13900
+            # review, finding 2, MEASURED): with `` [`_\s*]* `` alone,
+            # `| `-- tortoise/` | prints ONE path at this head |` and
+            # `(`-- tortoise/`) prints ONE path at this head.` both returned `[]` — and the
+            # table-cell spelling is the natural one for this bundle, whose own D5 row is a
+            # table row. Widening the class is the difference between "every occurrence" and
+            # "every occurrence with no punctuation after it", which is not a closure at all.
+            # ⛔ AND NO ENUMERATION OF PUNCTUATION CAN CLOSE IT (#13900 review, cycle 9
+            # P1, MEASURED at `eec3593423`). Adding `|` and `)` moved the same hole to
+            # `—`, `–`, `;`, `,`, `/`, `(`, `…`, `[^1]`, a quote character and an inline tag:
+            # all returned `[]`, and an em-dash claim appended to the LIVE document left the
+            # file GREEN — this document uses `—` 402 times, so that spelling is natural here.
+            # A list of separators is the same mistake as a list of skips: closed only
+            # against what someone thought of. So the separator is NOT enumerated — it is any
+            # run of non-word characters, plus the two FORMS through which a word character
+            # legitimately reaches a separator (an inline tag, a footnote marker). Words
+            # cannot cross it, so a sentence such as
+            # "`-- tortoise/` — see the row below — prints …" is deliberately NOT graded as
+            # an answer: admitting prose there is how a rule loses the ability to tell a
+            # claim from a sentence about one.
+            # `_` IS A WORD CHARACTER in Python's `\w`, so markdown emphasis spelled with
+            # underscores has to be named here or this rule loses the `_prints_` family the
+            # older, enumerated class used to admit (measured: `2 failed` when it was left
+            # out — a closure that drops a form the previous rule already had is a
+            # regression wearing a widening's clothes).
+            # ⛔ NO SEPARATOR GRAMMAR AT ALL (#13900 review, cycles 9-11, MEASURED). Three
+            # attempts to describe the gap between the command and the verb each left a hole the
+            # next cycle measured, because a described gap is an enumeration however it is spelled:
+            #   * an enumerated set (`[`_\s*|)]`) missed `—`, `;`, `,`, `/`, `(`, `…`, a quote
+            #     character (cycle 9);
+            #   * a repetition BOUND (`{0,4}`) missed five and six spaces — a REGRESSION against
+            #     `origin/main`, whose class was unbounded — and a table cell that spent the budget
+            #     (cycle 10);
+            #   * a bounded tag/footnote FORM missed `<span class="x">`, `[^1234]` and `&nbsp;`,
+            #     all three of which left the LIVE document GREEN (cycle 11).
+            # So the gap is not a grammar of SPELLINGS. It is the four UNIT KINDS stated at the
+            # constants, repeated: 40 of them for the wide gap (`;`, `|` and the blank line stop
+            # it; a `.` does NOT), unbounded for the narrow one, and lazy either way so a match
+            # starts at the reported occurrence and stops at the first listed verb.
+            # That admits prose between the command and the verb, which is deliberate and is the
+            # correct side to err on: a sentence that names the command and then states an answer
+            # IS a claim about the command, and this file's own rule is that a false PASS costs
+            # more than an over-block (D5: `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`).
+            # A true history sentence is written in the PAST TENSE, which is outside the verb list
+            # and therefore outside this matcher — that is the one half of the convention measured
+            # to work, and it is stated as a RESIDUAL at THIS function's head (the
+            # "RESIDUAL, stated" note immediately above the `rest = doc[...]` slice below) rather
+            # than pointed at by line number: a `:NNNN` here was measured to have drifted onto a
+            # bare assignment (#13900 review, verification round, P2).
+            + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV)
+            + r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
@@ -598,53 +724,48 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # there. Both passed only while this head happened to be non-empty, and both would
         # have been REFUSED on a docs-only head — a false block on the guard whose job is to
         # protect history, the one direction this file's docstring forbids.
-        # So an occurrence that is the PATHSPEC of a longer invocation is skipped: the
-        # writer named the revs, which is exactly what this document's own rule asks for,
-        # and this arm cannot fetch that head. A STANDALONE short-form claim is still graded
-        # (the witness below pins that half, so the skip cannot widen into silence), and a
-        # full `… origin/main...HEAD -- tortoise/` claim is still graded — by the caller's
-        # `cmd` pass, which is the spelling that names THIS head.
-        # RESIDUAL, stated: a standalone short-form claim about ANOTHER head is graded
-        # against this head, because nothing here reads which head a bare `-- tortoise/` is
-        # about. Such a claim has to carry its head in the full command form, which this rule
-        # then skips — which is why the live document spells its own history that way.
-        # The executed test is stated with the code below (a `git diff` with NO backtick and
-        # no sentence break between it and this occurrence); it was tightened twice after
-        # being measured fail-open, and each tightening's measurement is recorded there.
-        # ⛔ AND THE INVOCATION MUST NOT CROSS A SENTENCE BREAK (#13845 review, cycle 5,
-        # MEASURED): the first cut of this skip was `git\s+diff\b[^`\n]*$`, which matched
-        # ANY unbackticked `git diff` earlier on the same LINE, so
-        # `Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this
-        # head.` returned `[]` and the arm went GREEN while the same claim with the prose
-        # changed returned an answer and RED — one dropped backtick defeated it.
-        # (Requiring the text to END with the `-- ` separator does not work: the separator is
-        # the START of this match, so it is never in `_before` — measured, the rule matched
-        # nothing and the true head-named history was refused again.)
-        # What separates a pathspec of a live invocation from a claim about one is that the
-        # invocation runs on: no sentence boundary (a `.` followed by whitespace) between
-        # `git diff` and the occurrence. `origin/main...2a7f24e241` has dots, but none
-        # followed by a space, which is exactly the discrimination wanted.
-        # ⛔ AND A BACKTICK BETWEEN THEM ENDS IT (#13845 review, cycle 6, MEASURED — this
-        # is the rule the first cut had and the sentence-break test replaced; BOTH are
-        # needed, and the measurements say why). The sentence-only test still skipped a
-        # claim that merely SHARED a sentence with another invocation:
+        # ⛔ NO SKIP — EVERY OCCURRENCE IS GRADED. Four attempts to tighten a pathspec skip
+        # each closed the reported spelling and left another open, so it is gone. NINE
+        # spellings defeated it; SIX of them were measured returning `[]` against a rule that
+        # actually skipped them, and the other three are kept in the witness list below as
+        # the shapes the LAST rule let through. (A review of #13900 measured three of the
+        # nine against `origin/main`'s arm and found they were GRADED there, so the honest
+        # record is six-plus-three, not nine — the justification does not need the other
+        # three, and stating them as skipped would be a claim this file cannot support.)
+        # The six, in the order each was found: a dropped backtick; an `—` separator; a `? `
+        # (not a sentence break); markdown emphasis around the command; a fenced transcript;
+        # and two invocations in one sentence. The three that survived the last rule: no
+        # backticks at all; a command split across two code spans; and a bare `git diff`
+        # earlier on the SAME line.
         #
-        #   "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints
-        #    the two COMMENT-ONLY modules at this head."            -> [] (skipped)  WRONG
-        #   "…`-- tortoise/` prints ONE path at this head" on the LIVE document (:134,
-        #    93 chars after a `-- docs/00_index.md` command, no `. ` between)  -> GREEN WRONG
+        # Prose and a command line are not distinguishable by punctuation, so the arm does
+        # not try. The property the skip reached for is kept by the DOCUMENT instead: a claim
+        # about another head is written so it is not an answer to the command — PAST TENSE
+        # (`returned`, `named`, `printed`, which are not in the verb list). ⛔ NAMING THE HEAD
+        # FIRST DOES NOT PROTECT ANYTHING, and that is measured, not argued (#13900 review,
+        # cycle 11, P1): `at `2a7f24e241` `git diff … -- tortoise/` names exactly …` is still
+        # GRADED, because this matcher reads the VERB and not the head. The convention is
+        # stated in the RESIDUAL note at
+        # THIS function's head (`_typed_answers_to_tortoise_cmd`, immediately above the
+        # matcher) — NOT in the module docstring, which states the NAME-vs-line rule and says
+        # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
+        # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
+        # graded wherever it sits on the line, whatever surrounds it — the gap between the
+        # command and the verb is a run of separator UNITS (the four kinds stated at the
+        # constants, not a character class), and the budget and the boundary differ BY SUBJECT:
+        # the FULL command admits at most 40 units and the ABBREVIATION is unbounded; in both, a
+        # SOFT break is crossed and a BLANK line is the boundary, `;` and `|` stop the wide gap
+        # and a `.` does not. ⛔ An earlier form of this sentence said "up to 40 characters with no
+        # newline and no sentence terminator", which was wrong on four counts at once — measured
+        # (#13900 review, verification round, P2): a newline is crossed, the abbreviation's gap is
+        # unbounded, a `.` is not a terminator, and the budget counts UNITS (a tag or a bracket is
+        # one, however long). The exceptions are the residuals THIS docstring declares (a
+        # hard-wrapped ANSWER, a verb or an answer word outside the listed classes, a pronoun
+        # subject), and they are named THERE, not left to be inferred from this sentence.
         #
-        # In both, a backtick sits between `git diff` and the occurrence: the first command's
-        # code span CLOSED, so this occurrence starts its own span and its own claim. Ten of
-        # the document's twenty-one `-- tortoise/` occurrences are that class. The true
-        # pathspec case (`(`git diff … -- tortoise/` names exactly …)`) has NO backtick
-        # between, because both sides are inside ONE span.
-        _before = doc[max(0, match.start() - 200):match.start()]
-        _invocation = re.search(r"git\s+diff\b", _before)
-        if _invocation:
-            _gap = _before[_invocation.start():]
-            if "`" not in _gap and not re.search(r"\.\s", _gap):
-                continue
+        # RESIDUAL, stated: a PRESENT-TENSE answer about another head is now refused here.
+        # That is the deliberate trade — re-word a sentence, in exchange for a class of
+        # fail-open that nine punctation rules could not close.
         rest = doc[match.end():match.end() + 90]
         rest = re.split(r"[.;|)\n]", rest, maxsplit=1)[0].strip()
         window = f"{match.group(1)} {rest}".strip()
@@ -658,6 +779,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # `` prints `two` path `` forms this witness list pins are MUTATIONS of those, not
         # quotations of the tree — stated as mutations so the comment cannot go stale with it.
         low = re.sub(r"[`*_]", "", low).strip()
+        # ⛔ PUNCTUATION AFTER THE VERB IS NOT A DIFFERENT ANSWER (#13900 review, cycle 10,
+        # P2, MEASURED at `706709c4df` and still open at `47b3ea7001`): `_member` and
+        # `_empty` below are anchored at `^`, so `prints — two modules at this head`,
+        # `prints: two modules …` and `prints (two modules …` all returned `[]` while
+        # `prints two modules …` was graded — a ONE-CHARACTER edit silenced a red, in a
+        # document that writes `—` 402 times. The lead here is punctuation, never content,
+        # so it is stripped to the first word; a head that is ONLY punctuation leaves an
+        # empty window and is skipped as before. Repeated because one mark may sit behind
+        # another (`— **nothing**`).
+        _lead = None
+        while _lead != low:
+            _lead = low
+            low = re.sub(r"^[^\w\s]+", "", low).strip()
         if not rest:
             continue
         # ⛔ THE HEAD OF THE ANSWER DECIDES, AND NOTHING ELSE DOES (#13795 review,
@@ -744,9 +878,14 @@ _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
 #: full command, so a membership verdict stated on the abbreviation was unread by ANY arm:
 #: `_TORTOISE_MEMBERSHIP_SPELLINGS` covers the spellings that were LIVE, one row per incident
 #: (`returns ONE module`, round 5), which is a list that grows after each miss. The matcher
-#: already reads this subject correctly; only the call was missing — so it is called, and
-#: the pathspec SKIP inside the matcher keeps a `git diff … -- tortoise/` invocation (and the
-#: rev-pinned history sentences) out of it, exactly as it does for the full command.
+#: already reads this subject correctly; only the call was missing — so it is called.
+#: ⛔ THERE IS NO PATHSpec SKIP ANY MORE (#13900 review, finding 3): every occurrence is
+#: graded, and the reason is recorded at the matcher. A claim about another head is written
+#: so it is not an answer to the command. PAST TENSE is the only form that does that, and it
+#: is measured (#13900 review, cycle 10, finding 5): naming the head FIRST does not help,
+#: because the matcher reads the VERB — `at `2a7f24e241` `git diff … -- tortoise/` names
+#: exactly …` is still GRADED and still refused. So the convention this arm relies on is the
+#: convention the document keeps, and it is the half this arm relies on now.
 _TORTOISE_CENSUS_CMD_ABBREV = "-- tortoise/"
 
 #: Every SUBJECT arm `(c-ii)` grades. A tuple, not two calls at the assertion, so that a row
@@ -1384,17 +1523,32 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the abbreviated subject does not read an EMPTINESS verdict as emptiness, so the "
         "fragment pass is inert in the direction the retired rows cover "
         "(#13807 review round 16)")
-    # …and the two FALSE-RED directions the pathspec skip and the pointer rule exist for.
-    assert _typed_answers_to_the_census_command(
-        "See `git diff origin/main...HEAD -- tortoise/` for it.") == [], (
-        "the abbreviated subject read the TAIL OF A LONGER INVOCATION as a typed answer, so "
-        "the document's own pointer to the command would be refused "
-        "(#13845 review, cycle 3 — the skip must survive the second subject)")
+    # …and the FALSE-RED direction the POINTER RULE exists for. (The pathspec skip that used
+    # to be named here is deleted — #13900 review, finding 3 — so a pointer is the only
+    # false-red shape left to pin.)
     assert _typed_answers_to_the_census_command(
         "`-- tortoise/` is the command that answers it") == [], (
         "the abbreviated subject treats the document's POINTER as a typed answer, the "
-        "over-block direction (#13795 review, note 5 — the skip must survive the second "
-        "subject)")
+        "over-block direction (#13795 review, note 5)")
+    # ⛔ AND THE DELETED SKIP'S OWN WITNESS IS REPLACED, NOT KEPT (#13900 review, finding 3).
+    # The row that stood here asserted `== []` on
+    #   "See `git diff origin/main...HEAD -- tortoise/` for it."
+    # and COULD NOT FAIL: `for` is not in the verb list, so `re.finditer` yields no match and
+    # the value is `[]` with the skip PRESENT or ABSENT — MEASURED by extracting this function
+    # from `origin/main` and from here and running both (old -> [], new -> []). On `main` it
+    # returned `[]` *via* the skip, so it never distinguished the two states. It was presented
+    # as the guard that the skip could not widen into silence and guarded nothing
+    # (agent-infra#3442 rule 3) — and a comment explaining its failure message cannot make it
+    # fail. The row that DOES vary pins the contract the deletion creates: a claim whose
+    # subject is the TAIL OF A LONGER `git diff …` invocation is GRADED. Measured, old -> `[]`,
+    # new -> one emptiness answer, so reintroducing the skip reds it.
+    assert _typed_answers_to_the_census_command(
+        "See `git diff origin/main...HEAD -- tortoise/` prints NOTHING for it.") == [
+            ("prints NOTHING for it", True)], (
+        "the abbreviated subject did not read a claim whose SUBJECT is the TAIL OF A LONGER "
+        "INVOCATION as a typed answer — reintroducing a pathspec skip reverses exactly this. "
+        "The row this replaced asserted `[]` on the same shape WITHOUT an answer token and "
+        "could not red under any mutation (#13900 review, finding 3)")
 
     # (c-ii) THE DOCUMENT ASSERTIONS — no measurement, so both directions, always.
     # ⛔ A TYPED VERDICT IS REFUSED IN EITHER DIRECTION (#13807 review, F1, and the
@@ -1448,49 +1602,200 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "restored for, so the regression this arm was repaired for would go unreported "
         "(#13807 review round 16, F1)")
 
-    # ⛔ AND THIS PASS BRINGS A SKIP THAT MUST BE WITNESSED (#13807 review round 16, F2 —
-    # MEASURED). `"-- tortoise/"` is a SUFFIX of every longer `git diff … -- tortoise/`
-    # invocation, so the matcher skips an occurrence that is the pathspec of a longer
-    # invocation: the writer named the revs, which is the head-pinned spelling this document
-    # asks for, and this arm cannot fetch that head. Both halves are pinned, because the two
-    # ways this rule fails are opposite and both silent — a skip that WIDENS to every
-    # occurrence looks green while grading nothing, and a skip that no witness reaches is dead
-    # code nothing reads (measured: with the skip disabled, `main`'s arm test reds and this
-    # file's arm test was GREEN before this block existed).
+    # ⛔ THIS PASS USED TO BRING A SKIP, AND NOW BRINGS ITS ABSENCE (#13807 review round 16,
+    # F2; #13900 review, findings 1 and 3). `"-- tortoise/"` is a SUFFIX of every longer
+    # `git diff … -- tortoise/` invocation, so an occurrence that is a pathspec was skipped
+    # here: the writer named the revs, which is the head-pinned spelling this document asks
+    # for, and this arm cannot fetch that head. Four attempts to keep that skip honest each
+    # closed the reported spelling and left another open — the last exempted any claim that
+    # merely SHARED A LINE with an unbackticked `git diff` — so it is DELETED, and the
+    # blocking direction it protected is now carried by the CONVENTION (a claim about another
+    # head is written as one, in PAST TENSE — the named-head-first form was measured NOT to
+    # protect anything, since the matcher reads the verb (#13900 review, cycle 10, finding 5)). Both halves of that are
+    # pinned below, because the two ways this rule fails are opposite and both silent: a skip
+    # that widens to every occurrence looks green while grading nothing, and a skip no
+    # witness reaches is dead code nothing reads.
+    # ⛔ THE OPPOSITE CONTRACT, PINNED IN NINE SPELLINGS (#13845 review, cycles 3-7). There
+    # is no skip: a claim that is an answer to this command is graded wherever it sits on the
+    # line and whatever surrounds it. SIX of the nine were measured returning `[]` against
+    # the rule that was live at the time; the remaining three are the shapes that survived
+    # the LAST rule and are kept as regressions, not as history.
+    for _refuted in (
+            "Some history here. We ran git diff earlier. `-- tortoise/` prints ONE path at this head.",
+            "See `git diff origin/main...HEAD -- docs/` for the docs; `-- tortoise/` prints the two COMMENT-ONLY modules at this head.",
+            "We ran git diff --name-only origin/main...HEAD -- docs/ and then `-- tortoise/` prints ONE path at this head.",
+            "History — git diff origin/main...HEAD -- docs/ — and `-- tortoise/` names two modules at this head.",
+            "Did it change? git diff origin/main...HEAD -- docs/ was clean, and `-- tortoise/` lists two modules at this head.",
+            "History: *git diff origin/main...HEAD -- docs/* then *`-- tortoise/` returns ONE path at this head*.",
+            "git diff origin/main...HEAD -- docs/ then git diff origin/main...HEAD -- tortoise/ prints ONE path at this head.",
+            "(`git diff --name-only origin/main...2a7f24e241` `-- tortoise/` names exactly `tortoise/activation_scorecard.py`)",
+            "(`git diff --name-only origin/main...2a7f24e241 -- tortoise/` names exactly `tortoise/activation_scorecard.py`)",
+    ):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — it is an answer to the command in a form the arm "
+            "must grade. A pathspec skip was measured fail-open in SIX spellings and is "
+            "DELETED; if this reds, one was reintroduced (#13845 review, cycles 3-7)")
+    # ⛔ AND THE SEPARATOR CASE, which is a hole a review of #13900 MEASURED and this
+    # witness now holds shut: a table cell and a parenthetical both came back `[]`.
+    for _refuted in ("| `-- tortoise/` | prints ONE path at this head |",
+                     "(`-- tortoise/`) prints ONE path at this head.",
+                     "`-- tortoise/` | prints ONE path at this head"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — punctuation between the command and the verb "
+            "is still the same claim (#13900 review, finding 2)")
+    # ⛔ AND THE TWO SHAPES CYCLE 10 FOUND STILL OPEN (#13900 review, cycle 10, P2,
+    # MEASURED at `706709c4df` AND STILL OPEN at `47b3ea7001`): (i) ONE punctuation mark
+    # AFTER the verb, which `_member`/`_empty` miss because they are anchored at `^` — a
+    # one-character edit silenced a red — and (ii) a HARD-WRAPPED pair, which the separator
+    # class excluded by excluding `\n` although `origin/main` graded it. Non-vacuity is
+    # MEASURED against `47b3ea7001`'s own function, not asserted: the three lead-punctuation
+    # rows and the hard-wrap row each returned `[]` there and are graded here. The last two
+    # rows are REGRESSION PINS instead, and say so: the unbounded quantifier that commit
+    # shipped already grades them, and they returned `[]` only under the retired `{0,4}`.
+    for _refuted in ("`-- tortoise/` prints — two modules at this head",
+                     "`-- tortoise/` prints: two modules at this head",
+                     "`-- tortoise/` prints (two modules at this head)",
+                     "`-- tortoise/`      prints ONE path at this head",
+                     "| **`-- tortoise/`** | prints ONE path at this head |"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb and a "
+            "separator run longer than four are the SAME answer; each returned `[]` before "
+            "this fix (#13900 review, cycle 10, P2)")
+    # ⛔ AND THE FOUR SEPARATOR UNITS, EACH PINNED (#13900 review, cycles 9-13). The unit list IS
+    # the closure, so a unit with no witness is a claim and not a test. Non-vacuity is MEASURED
+    # against `ff83caa198`'s own function, not asserted, and the ABBREVIATION rows below are SPLIT
+    # by what that measurement said: five returned `[]` there (repaired holes), one was already
+    # graded (a regression pin). Two earlier forms of the closure bounded the tag at the first
+    # `>` and the footnote at `[\^?\d+]`, which is why a tag whose QUOTED attribute carries `>`
+    # and a NAMED footnote (`[^note]`, in-house spelling) walked through.
+    for _refuted in ("`-- tortoise/`[^note] prints TWO paths",
+                     "`-- tortoise/`[^A] prints TWO paths",
+                     "`-- tortoise/`&#160;prints TWO paths",
+                     "`-- tortoise/`&#xA0;prints TWO paths",
+                     '`-- tortoise/`<span title="a > b">prints TWO paths'):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a bracketed run, a NUMERIC entity and a tag whose "
+            "quoted attribute carries `>` are each one separator unit, and each of these "
+            "returned `[]` at `ff83caa198` (#13900 review, cycles 9-13)")
+    # THIS row is a REGRESSION pin, not a repaired hole: `ff83caa198` graded `[12]` (through the
+    # digit-only footnote form) and the structural bracketed unit must keep grading it.
     assert _typed_answers_to_tortoise_cmd(
-        "(`git diff --name-only origin/main...2a7f24e241 -- tortoise/` names exactly "
-        "`tortoise/activation_scorecard.py`)", "-- tortoise/") == [], (
-        "the short-form pass grades the pathspec of a command pinned to ANOTHER rev against "
-        "this head's tree, so true, head-named history is refused (#13845 review, cycle 3, "
-        "P1)")
+        "`-- tortoise/`[12] prints TWO paths", "-- tortoise/"), (
+        "the BRACKETED unit regressed a spelling the digit-only footnote form already "
+        "graded — `[12]` was GREEN-to-RED at `ff83caa198` (#13900 review, cycles 9-13)")
+    # …and on the subject that grades a claim about THIS head, where the entity unit was open
+    # in the same way (both rows measured `[]` at `ff83caa198`).
+    _full_subject = _TORTOISE_CENSUS_CMD
+    for _refuted in (f"`{_full_subject}`&#160;prints TWO paths",
+                     f"`{_full_subject}`&#xA0;prints TWO paths"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, _full_subject), (
+            f"the arm SKIPPED {_refuted!r} — a NUMERIC entity between the command and the "
+            "verb is a separator, and it returned `[]` at `ff83caa198` "
+            "(#13900 review, cycles 9-13)")
+    # ⛔ AND `&` IS NOT DROPPED BY THE ENTITY UNIT (#13900 review, cycles 9-13, MEASURED). This is
+    # a REGRESSION pin, and it says so: `ff83caa198` GRADED this row (its single-character class
+    # admitted `&`), and the first form of the entity unit excluded `&` from that class, so a `&`
+    # that forms no entity STOPPED the gap and this claim went GREEN. `_AMP`'s second branch is
+    # what keeps the character the previous rule already had.
+    _seen_amp = _typed_answers_to_tortoise_cmd(
+        f"`{_full_subject}` R&D prints TWO paths", _full_subject)
+    assert _seen_amp and _seen_amp[0][1] is False, (
+        "the arm SKIPPED a bare `&` that forms no entity (`R&D`) — it was graded at "
+        "`ff83caa198`, so the entity unit narrowed the gap below what the previous rule "
+        "admitted (#13900 review, cycles 9-13)")
+    # ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT TOO, AND EACH UNIT KIND GETS ITS OWN WITNESS
+    # (#13900 review, verification round, P2, MEASURED). The comment beside `_TAG` / `_BRACKET`
+    # says "three holes, each reproduced on the LIVE document" — and before this block NOTHING
+    # asserted any of them: reverting all three (the bracket's interior, the quoted attribute's
+    # value, the tag catch-all's `'`) left this suite byte-for-byte identical, which is this
+    # file's own rule — "a unit with no witness is a claim and not a test" — failing in the
+    # direction that matters, because the fix could be silently reverted. Each row is ONE line,
+    # and each returned `[]` under the reverted form (measured against the pre-fix constants).
+    for _refuted in ("`-- tortoise/` [the census\nsection above] prints FIVE paths",
+                     '`-- tortoise/`<span title="a\nb">prints TWO paths',
+                     "`-- tortoise/`<that row's own path> prints TWO paths",
+                     "`-- tortoise/`[a\\]b] prints TWO paths"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a soft break inside a bracket, a soft break inside "
+            "a tag's quoted value, a bare apostrophe in a tag and an ESCAPED character in a "
+            "label are each one unit; each was measured `[]` when its unit was narrowed "
+            "(#13900 review, verification round, P2)")
+    # …AND THE BRACKET UNIT IS IN THE **WIDE** GAP TOO, which no row reached either: `;` STOPPS
+    # the wide gap, so this claim parses ONLY if the bracketed run is one unit there. Dropping
+    # `_BRACKET` from `_GAP_FULL` reds this row and nothing else (measured).
     assert _typed_answers_to_tortoise_cmd(
-        "(`git diff --name-only e61694255a...2584a86ec1 -- tortoise/` prints FIVE paths "
-        "there)", "-- tortoise/") == [], (
-        "the same skip must cover a SECOND rev range — the shape is 'the pathspec of a "
-        "longer invocation', never that one particular range (#13845 review, cycle 3, P1)")
+        f"`{_full_subject}` in the note [a; b] above prints TWO paths", _full_subject), (
+        "the WIDE gap's bracketed unit is gone — a `;` inside a bracket must not stop the gap "
+        "(#13900 review, verification round, P2)")
+    # ⛔ A SOFT BREAK IS GRADED, A PARAGRAPH BREAK IS THE BOUNDARY (kept from `7557a52cf5`,
+    # whose measurement this replaces the earlier "hard wrap is a residual" pin with a measured
+    # one). A single newline is a CommonMark SOFT BREAK — the claim continues — so the wrapped
+    # form must be read. A BLANK line ends the paragraph, and crossing it is how a rule joins
+    # two unrelated clauses, so that form must NOT be read.
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/`\nprints ONE path at this head", "-- tortoise/"), (
+        "a hard-wrapped answer (one SOFT break) is not graded — it is one claim on two lines")
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/`\n\nprints ONE path at this head", "-- tortoise/") == [], (
+        "the gap crossed a BLANK line — a paragraph break is the boundary, and crossing it "
+        "joins two unrelated clauses (over-block side)")
+    # …and the run stays LINEAR when no verb follows, which is what `7557a52cf5` measured as
+    # exponential in the earlier ambiguous form. Bounded here so a regression reds instead of
+    # hanging: 28 spaces is the size that took 15.8 s there.
+    import time as _time
+    _t0 = _time.monotonic()
+    _typed_answers_to_tortoise_cmd("`-- tortoise/`" + " " * 28 + "no verb here", "-- tortoise/")
+    assert _time.monotonic() - _t0 < 2.0, (
+        "the separator's alternatives are ambiguous again — 28 spaces after the subject took "
+        "longer than 2 s, and at `d38f9152af` 24 spaces alone took 15.8 s (measured)")
+    # ⛔ AND THE SAME BOUND FOR AN AMBIGUOUS UNIT, WHICH THE SPACES ROW CANNOT SEE (#13900
+    # review, verification round, P2, MEASURED). Spaces are unambiguous, so timing them proves
+    # nothing about the alternations that ARE ambiguous: `\\.` and `[^\]\n]` both consume a
+    # backslash-led pair, and the tag catch-all admits `'` that the quoted branch also consumes.
+    # MEASURED growth of an unterminated `<a''''…` run (no verb, so the gap is fully explored):
+    # n=20 0.004 s, n=24 0.024 s, n=26 0.068 s, n=28 0.194 s — ≈×1.7 per character.
+    # ⚠️ DECLARED RESIDUAL, not a fixed hole: that cost is EXPONENTIAL in the run length and is
+    # left as one, deliberately — making the alternations disjoint (excluding `\` and `'` from
+    # the single-character classes) CHANGES which inputs parse and is therefore a behaviour change
+    # this cycle did not measure. What is pinned is that it does not get WORSE, and what is
+    # declared is that it exists: the live tree's slowest file is 16.7 ms and 855 files take
+    # ~1.0 s, so the hazard is a future document with a long unterminated tag or label, not today's
+    # tree. A `docs/` file that reds this row is a RESOURCE regression to be measured, not a red
+    # to be silenced.
+    _t0 = _time.monotonic()
+    _typed_answers_to_tortoise_cmd("`-- tortoise/`<a" + "'" * 28, "-- tortoise/")
+    assert _time.monotonic() - _t0 < 2.0, (
+        "an ambiguous UNIT's alternatives exploded — an unterminated 28-character tag run took "
+        "longer than 2 s; measured 0.194 s at this head, growing ≈×1.7 per character "
+        "(#13900 review, verification round, P2)")
+    # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
+    # these returned `[]` when the separator was an enumerated character class.
+    for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
+                     "`-- tortoise/` – prints ONE path at this head.",
+                     "`-- tortoise/`; prints ONE path at this head.",
+                     "`-- tortoise/`, prints ONE path at this head.",
+                     "`-- tortoise/` / prints ONE path at this head.",
+                     "`-- tortoise/` (prints ONE path at this head).",
+                     "`-- tortoise/`… prints ONE path at this head.",
+                     "`-- tortoise/`[^1] prints ONE path at this head.",
+                     "`-- tortoise/`\" prints ONE path at this head."):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a separator is not a different claim, and this "
+            "one is spelled the way this bundle writes (#13900 review, cycle 9, P1)")
+    # …and the control: a standalone short form is still read, so the live question cannot
+    # go ungraded.
     assert _typed_answers_to_tortoise_cmd(
         "and `-- tortoise/` prints NOTHING at this head", "-- tortoise/") == [
             ("prints NOTHING at this head", True)], (
-        "the skip widened to a STANDALONE short-form claim — the control this witness exists "
-        "for: a rule that silences the live question hides every refuted claim "
-        "(#13845 review, cycle 3, P1)")
-    # ⛔ READ OFF THE DOCUMENT, so the witness tracks its spelling instead of quoting one
-    # sentence and rotting (#13845 review, cycle 3, P1). Measured before the boundary:
-    # `_typed_answers_to_tortoise_cmd(doc, "-- tortoise/")` returned FOUR answers on this
-    # document, two of them true history about other revs refused on a differently-shaped
-    # head and one its own head had already falsified.
-    _live_invocations = re.findall(r"\(`git diff [^`]*-- tortoise/`", doc)
-    assert _live_invocations, (
-        "the live document no longer spells a `git diff … -- tortoise/` invocation, so this "
-        "witness reads nothing — restore the shape or retire the witness, do not leave it "
-        "vacuous (#13845 review, cycle 3, P1)")
-    for _invocation in _live_invocations:
-        assert _typed_answers_to_tortoise_cmd(
-            _invocation + " names exactly `tortoise/activation_scorecard.py`",
-            "-- tortoise/") == [], (
-            f"the short-form pass grades {_invocation!r} — a command pinned to something "
-            "other than a bare `-- tortoise/` — against this head, so the document's "
-            "correctly head-pinned history is refused (#13845 review, cycle 3, P1)")
+        "the arm stopped reading a STANDALONE short-form answer — the live question would go "
+        "ungraded (#13845 review, cycle 3, P1)")
+    # …and an ANSWER-FREE pointer is still not an answer (the arm must not over-block the
+    # document's own pointer to the command). ⛔ THAT ROW ALREADY EXISTS TWICE ABOVE, at the
+    # `is the command that prints the paths` assertions in the (c-i) block, with the same
+    # input and the same expectation; the third copy this PR's first cut added here was
+    # DELETED rather than kept as apparent new coverage (#13900 review, finding 3). A
+    # duplicate cannot add discriminating power, and a comment claiming it does is the kind
+    # of claim this file exists to refuse.
 
 
 def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatch):
