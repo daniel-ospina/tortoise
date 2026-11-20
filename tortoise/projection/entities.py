@@ -118,8 +118,13 @@ def _derived_mirror_required(entity_type: str) -> bool:
     conjunct) answer stop, an id the record has no row for loses its only copy, and `#5004`
     forbids re-encoding it. Today the aggregate answers KEEP (≈37,099 record point vectors
     against 37,158 in the graph, measured 2026-11-19), and the `operator` half is held back
-    by a numerator/denominator asymmetry — accidental protection, not a bound. The correct
-    fix is a PER-ID ask (does the record hold THIS row), which is `#13971`'s remaining work,
+    STRUCTURALLY, not by luck: `record_vectors >= graph_vectors` is unreachable while any
+    plain point carries an embedding (its graph denominator is the whole `:Point` label and
+    its record numerator is the operator subset), pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`.
+    So `:Point`'s cut-over is an OPERATOR act — or a later, kind-aware denominator — not a
+    backfill that will eventually measure true. The correct fix is a PER-ID ask (does the
+    record hold THIS row), which is `#13971`'s remaining work,
     recorded there with the measured shape; the gate stays where it is until it lands,
     because the restore is the one writer whose mistake cannot be repaired afterwards.
 

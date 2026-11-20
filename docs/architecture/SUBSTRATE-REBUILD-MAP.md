@@ -252,7 +252,7 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2338`, at this head — re-derived by
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2343`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
 returns that one line; the sentence used to name `2313` (then `2297`, which `#13971`'s review round
 moved +16 when it corrected the capture path's own docstring above, and before that
