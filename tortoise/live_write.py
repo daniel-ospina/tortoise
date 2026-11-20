@@ -41,6 +41,11 @@ What IS true here, and what the falsifiers measure:
    — a line whose projection failed — is the direction `derived =
    replay(journal)` was built to heal.
 
+   ⛔ ON A CUT-OVER GRAPH THERE IS NO LINE TO DISAGREE WITH (#14002): see
+   *THE PER-GRAPH CUTOVER* below — the write is recorded by the RECORD alone,
+   so this quantity is `0` and the write's own outcome (`applied`) is the whole
+   answer.
+
 3. **That disagreement is NAMED, not silent.** Every outcome this function
    RETURNS says whether the record took the write (`LiveWrite.record`), and a
    failure leaves `unprojected` set with the journal position. The named
@@ -78,6 +83,12 @@ replay can repair. The truth store never waits for a derived store. So this
 module refuses BEFORE the append only when the CALLER has not committed
 anything yet, and otherwise it appends and reports — never appends conditionally.
 
+⚠️ AND THE ONE PLACE IT DOES NOT APPEND IS NOT A REFUSAL (#14002): a CUT-OVER
+graph's write never appends, because the record owns the ordinal and there is no
+second allocator to agree with. That is the healthy path, not a withheld write —
+the RECORD is the truth there, and it is written. The paragraph above still
+governs every graph whose record is NOT the allocator.
+
 ──────────────────────────────────────────────────────────────────────────────
 THE PER-GRAPH CUTOVER (#13331 requirement 4)
 ──────────────────────────────────────────────────────────────────────────────
@@ -92,6 +103,31 @@ not this module's to restate beyond naming it: `sweep` → `seed --journal <path
 holding a cursor row refuses the enumerated replay whether or not that flag is
 set, which is exactly why the flag is rolled AFTER every graph is seeded and
 armed (`tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` is the authority).
+
+⛔ AND ONCE ARMED, THE JSONL IS OFF THE WRITE PATH (#14002). Every step above
+used to leave TWO allocators on the live door — the file append's position and
+the counter's allocation — which had to AGREE, and under concurrent writers they
+cannot: the journal is ordered by append and the counter by allocation, so two
+in-flight writes can be numbered in the opposite order to their lines and the
+guard refuses one of them. With 20+ writers that is steady state, not an edge
+case: `record.ok: false`, `status: degraded`, and a stream of
+`position_divergence` refusals. So this chokepoint now asks
+`record_writer.record_owns_position` BEFORE the append, and when the graph is
+cut over and armed it does not append at all — ONE number space, the counter's.
+Consequences, all of them intended:
+
+* the JSONL stops growing (it is an EXPORT from here on, produced by an
+explicit export job, not by the write path);
+* `position_divergence` is unreachable on the production path, while the guard
+  itself is untouched — it still refuses every disagreeing ordinal a direct
+  caller hands it;
+* `unprojected_journal` / `record-reconcile --journal` become the wrong
+  question for such a graph (the file is behind the record by construction, and
+  an enumerated replay there is refused). The record's own coverage readers are
+  the ones to use;
+* the ordering guarantee changes hands, and it does not weaken: for that write
+  the RECORD's commit is the commit point, so a record row still cannot exist
+  for a write that did not land, and the fold still runs last.
 
 ──────────────────────────────────────────────────────────────────────────────
 THE DENSE LEG'S ARMING (#13331 requirement 5)
@@ -123,10 +159,21 @@ __all__ = ["LiveWrite", "write"]
 #: fact, never a cue to invent a number (#9190).
 Append = Callable[[], int | None]
 
-#: The record half: `(record, seq) -> RecordWrite | None`. The default is
-#: `record_writer.write_live_record`; `TortoiseSDK._emit_event` supplies its own
-#: wrapper so the door's import guard and durability read keep ONE home.
-Project = Callable[[Mapping[str, Any], int | None], Any]
+#: The record half: `(record, seq, *, journal_skipped) -> RecordWrite | None`.
+#: The default is `record_writer.write_live_record`; `TortoiseSDK._emit_event`
+#: supplies its own wrapper so the door's import guard and durability read keep
+#: ONE home.
+#:
+#: ⛔ THE THIRD ARGUMENT IS NOT OPTIONAL IN PRACTICE (#14002). On a CUT-OVER graph
+#: this chokepoint does not append (:func:`record_writer.record_owns_position`),
+#: so the record does not receive the journal's ordinal — and the seam cannot tell
+#: "no line, the counter owns the number" from the `#9307` "the append could not
+#: prove a position" state without being told. A door that supplies its own
+#: callable and DROPS the flag turns every write on a cut-over graph into a
+#: `position_unverifiable` refusal (counted, WARNed, permanent), which is why
+#: `tools/record_wiring_check.py::live_call_sites_forward_the_journal_skip` holds
+#: every door to forwarding it.
+Project = Callable[..., Any]
 
 #: This module's OWN refusal token for the one arm where the record seam never
 #: ANSWERED — it raised, or could not be imported, after the append committed.
@@ -161,14 +208,51 @@ def _is_durable_decline(outcome: Any) -> bool:
     return getattr(outcome, "refusal", None) == NON_DURABLE_JOURNAL_REFUSAL
 
 
+def _record_owns_position(*, durable: bool, tenant: tuple[str, str] | None,
+                          ) -> bool:
+    """Does the RECORD own this write's ordinal? Never raises (#14002).
+
+    The chokepoint's ONE use of :func:`record_writer.record_owns_position`: it is
+    asked BEFORE the append, so nothing has committed and a raise here would hand
+    the producer an exception for a write that has not happened yet — a
+    behaviour change on every unarmed deployment the moment the record module
+    failed to import. So the import AND the call are both guarded, and every
+    failure answers ``False`` (= append, today's path).
+
+    ``False`` is the fail-open direction and it is chosen deliberately: the
+    append is the durable copy, so the worst case of a failed measurement is the
+    pre-#14002 behaviour (both allocators, guarded by the divergence refusal),
+    while assuming the record owns it would skip the line for a graph whose
+    allocation then refuses — a write in neither store.
+    """
+    try:
+        from . import record_writer
+
+        return record_writer.record_owns_position(
+            tenant=tenant, durable=durable)
+    except Exception:  # noqa: BLE001, RUF100
+        return False
+
+
 @dataclass(frozen=True)
 class LiveWrite:
     """What ONE write did, in the order the contract requires it.
 
-    ``appended`` is always ``True`` on a returned value: an append that raised
+    ``appended`` is ``True`` on every returned value EXCEPT the record-only arm
+    (#14002): a cut-over graph's write does not touch the JSONL, so
+    ``appended=False`` is a measurement and not a failure — the RECORD is the
+    durable copy and its counter issued the number. An append that raises
     propagates out of :func:`write` (the callers' existing contract — a failed
-    append is the truth store's failure, not a record refusal), so a caller
-    never receives an outcome that claims a write whose line is missing.
+    append is the truth store's failure, not a record refusal), so a caller never
+    receives an outcome that claims a write whose line is missing.
+
+    ⛔ ``appended=False`` TOGETHER WITH ``applied=False`` MEANS THE WRITE IS IN
+    NEITHER STORE — the one shape this module cannot report as a disagreement,
+    because there is no line for the record to have missed. Read the two booleans
+    together on the record-only arm; `unprojected` stays the line-vs-row
+    quantity it is documented to be, and is ``0`` there (a skipped append is not
+    an unprojected line). The door's WARNING and `record_write_failures` are what
+    an operator sees for it.
 
     ``record`` is ``None`` on THREE arms, and they are NOT the same fact
     (#13345 review P3-1/P3-3): the UNARMED deployment (no DSN) — the one case
@@ -311,6 +395,25 @@ def write(event: Mapping[str, Any], *,
     and returns ``False``); swallowing it here would make a lost line look like
     a successful write with a pending record, which is the opposite of the
     direction this module guarantees.
+
+    ⛔ ON A CUT-OVER GRAPH THE APPEND DOES NOT HAPPEN AT ALL (#14002). Before
+    the append, :func:`record_writer.record_owns_position` is asked whether the
+    RECORD owns this write's ordinal; when it answers yes, the file append is
+    skipped and the counter issues the number. That is what removes the SECOND
+    allocator, and with it the `position_divergence` refusal that two allocators
+    ordered by different events (append vs allocation) produce under concurrent
+    writers. Nothing about the ordering contract moves: the record's commit is
+    the commit point for that write, the fold still runs last, and the answer is
+    forwarded to the seam as ``journal_skipped=`` so the two `seq is None`
+    states stay distinguishable.
+
+    ⛔ AND THE UNMEASURED ANSWER IS "APPEND". `record_owns_position` fails open
+    (no DSN, an unreadable cursor row, an open breaker ⇒ ``False``): the
+    pre-#14002 path then runs unchanged, which costs at worst the divergence
+    refusals the guard already handles. Assuming the record owns it instead
+    would skip the append for a graph whose allocation then refuses — the write
+    would be in NEITHER store, which is not a failure mode any refusal can
+    represent. The direction is chosen, not inherited.
     """
     if (log is None) == (append is None):
         raise TypeError(
@@ -320,8 +423,21 @@ def write(event: Mapping[str, Any], *,
     if durable is None:
         durable = getattr(log, "durable", True) if log is not None else True
 
-    # ── 1. THE TRUTH. The append is the commit point (#7951). ──────────────
-    seq: int | None = (append() if append is not None else log.append(event))
+    journal_skipped = _record_owns_position(durable=durable, tenant=tenant)
+
+    # ── 1. THE TRUTH. The append is the commit point (#7951) — unless the
+    #      record owns the ordinal, in which case the counter is (#14002).
+    # ⛔ A TERNARY IS REFUSED HERE ON PURPOSE (`SIM108` is suppressed for this
+    # statement): the wiring gate reads this guard from the AST —
+    # `tools/record_wiring_check.py::the_chokepoint_skips_the_append` asserts the
+    # append sits inside an `if` whose test references the decision, so a
+    # one-line conditional expression would either defeat the check or force it
+    # to parse expressions. The block form IS the contract, not a style choice.
+    seq: int | None
+    if journal_skipped:  # noqa: SIM108 — see above
+        seq = None
+    else:
+        seq = append() if append is not None else log.append(event)
 
     # ── 2. THE RECORD, on ONE transaction, after the append. ───────────────
     try:
@@ -339,12 +455,14 @@ def write(event: Mapping[str, Any], *,
             from . import record_writer
 
             def _default_project(record: Mapping[str, Any],
-                                 seq: int | None) -> Any:
+                                 seq: int | None, *,
+                                 journal_skipped: bool = False) -> Any:
                 return record_writer.write_live_record(
-                    record, durable=durable, seq=seq, tenant=tenant)
+                    record, durable=durable, seq=seq, tenant=tenant,
+                    journal_skipped=journal_skipped)
 
             project = _default_project
-        outcome = project(event, seq)
+        outcome = project(event, seq, journal_skipped=journal_skipped)
     except Exception as exc:
         # ⛔ NEVER RAISE AFTER THE APPEND. The line is committed; a raise would
         # hand the producer an exception for a write that persisted, and would
@@ -356,14 +474,31 @@ def write(event: Mapping[str, Any], *,
         # above is inside the `try`, so an unimportable `record_writer` lands
         # here as `projection_raised` rather than as an exception out of the
         # chokepoint.
-        LOGGER.warning(
-            "live_write: the record projection RAISED after the journal append "
-            "committed (%s: %s) — the journal holds position %s and the record "
-            "does not. This is a NAMED disagreement: `record_projection."
-            "journal_coverage` counts it, `python -m tortoise record-reconcile "
-            "--journal <path>` reports it as unprojected_journal, and "
-            "`tools/record_runner.py apply` heals it idempotently (#13331)",
-            type(exc).__name__, exc, seq)
+        #
+        # ⛔ ON THE RECORD-ONLY ARM THERE IS NO LINE TO DISAGREE WITH (#14002).
+        # The message must not claim a committed position that does not exist,
+        # and it must not offer a replay of a journal that never received the
+        # record: a raise here means the write reached NEITHER store.
+        if journal_skipped:
+            LOGGER.warning(
+                "live_write: the record projection RAISED on the RECORD-ONLY "
+                "arm (%s: %s) — the journal append was SKIPPED because the "
+                "record owns the ordinal (#14002), and the record did not take "
+                "the write, so this record is in NEITHER store and no replay "
+                "can heal it. The remedy is the record itself: "
+                "`tools/record_allocator_cli.py status` (the counter's mode), "
+                "then a re-emit once it is healthy",
+                type(exc).__name__, exc)
+        else:
+            LOGGER.warning(
+                "live_write: the record projection RAISED after the journal "
+                "append committed (%s: %s) — the journal holds position %s and "
+                "the record does not. This is a NAMED disagreement: "
+                "`record_projection.journal_coverage` counts it, `python -m "
+                "tortoise record-reconcile --journal <path>` reports it as "
+                "unprojected_journal, and `tools/record_runner.py apply` heals "
+                "it idempotently (#13331)",
+                type(exc).__name__, exc, seq)
         outcome = None
         raised = True
     else:
@@ -375,13 +510,20 @@ def write(event: Mapping[str, Any], *,
     # scratch buffer has no journal, so there is no line it failed to take
     # (#13345 review I1). Every OTHER `applied is False` IS a line the record did
     # not take, and `refusal` keeps the seam's own token or names the loss.
+    #
+    # ⛔ EXCEPT ON THE RECORD-ONLY ARM (#14002), where there is no line for the
+    # record to have missed: `unprojected` is the JOURNAL-vs-RECORD quantity and
+    # a skipped append is neither a line nor a miss. It stays 0 and the loss, if
+    # the record refused, is the pair (`appended=False`, `applied=False`) — which
+    # reads as "in neither store" rather than as "one replay away". Setting 1
+    # here would make a LOST write indistinguishable from a recoverable one.
     unprojected = 0
     if (outcome is not None and not getattr(outcome, "applied", False)
             and not _is_durable_decline(outcome)):
-        unprojected = 1
+        unprojected = 0 if journal_skipped else 1
         refusal = refusal or "write_failed"
     if raised:
-        unprojected = 1
+        unprojected = 0 if journal_skipped else 1
         refusal = PROJECTION_RAISED
 
     if record_sink is not None:
@@ -425,12 +567,18 @@ def write(event: Mapping[str, Any], *,
         else:
             denial = cache_fold_denial()
         if denial is not None:
+            # ⛔ The store that holds this write, spelled for the arm that ran: on
+            # a cut-over graph no journal line exists (#14002), so the original
+            # sentence would name a position that was never written.
+            holder = ("The journal append was SKIPPED (the record owns the "
+                      "ordinal)" if journal_skipped
+                      else f"The journal holds position {seq}")
             LOGGER.warning(
                 "live_write: the DERIVED cache DECLINED this write (#13829) — "
-                "%s. The journal holds position %s and the record took the "
-                "write; the cache is at/over its cap, so it lags until a "
-                "replay folds this record. Reads are served from the record.",
-                getattr(denial, "detail", denial), seq)
+                "%s. %s and the record took the write; the cache is at/over "
+                "its cap, so it lags until a replay folds this record. Reads "
+                "are served from the record.",
+                getattr(denial, "detail", denial), holder)
         else:
             from .projection import _live_write_scope
 
@@ -438,6 +586,6 @@ def write(event: Mapping[str, Any], *,
                 projection.apply(event)
             folded = True
 
-    return LiveWrite(event=event, seq=seq, appended=True, record=outcome,
-                     folded=folded, refusal=refusal, unprojected=unprojected,
-                     cache_fold=denial)
+    return LiveWrite(event=event, seq=seq, appended=not journal_skipped,
+                     record=outcome, folded=folded, refusal=refusal,
+                     unprojected=unprojected, cache_fold=denial)

@@ -70,9 +70,69 @@ def _markdown_files(root: Path | str) -> list[Path]:
     )
 
 
+def _journal_rebuild_refusal() -> str | None:
+    """Why `tortoise rebuild` must REFUSE on this deployment, or ``None`` (#14002).
+
+    ⛔ THE CONSEQUENCE #14002 CREATES, NAMED AT THE DOOR THAT WOULD ACT ON IT.
+    `tortoise rebuild` is a wipe + journal-only replay, and
+    `docs/architecture/STORAGE-ARCHITECTURE.md` §3 states the precondition it
+    relies on verbatim: *"`derived = replay(journal)` holds only if every write is
+    carried by the journal … Journal completeness is a PRECONDITION of this
+    design, not an observation about it"* (the gap is tracked as `#5089`). On a
+    CUT-OVER graph the journal stops being written — the record owns the ordinal
+    and the file is an export — so a rebuild from it would produce a graph as of
+    the arming point and **silently drop every later record**, which is the
+    direction nothing can see: `rebuild_all` prints `Done:` and the counts it
+    prints are the journal's, not the record's.
+
+    ⛔ SO THE GATE IS FAIL-CLOSED, AND DELIBERATELY BROADER THAN PERFECT. It asks
+    the two facts a rebuild CAN know without an org (a `record_cursor` row is
+    scoped per `(org_id, graph_id)` and this door has neither): this deployment
+    is ARMED (`TORTOISE_RECORD_ALLOCATE`) and a record DSN resolves. That can
+    refuse a rebuild on an armed box where no graph is cut over yet — the
+    intentional over-block, and the escape is explicit: unset the flag (or run on
+    a deployment that is not armed) if the journal really is complete here. The
+    opposite polarity cannot be undone: a partial rebuild presented as a full one
+    destroys work with no error.
+
+    A MALFORMED DSN is NOT an armed record (`record_dsn` raises on it, and with no
+    usable DSN the write path cannot allocate either, so the append stays and the
+    journal IS the source): that arm allows the rebuild.
+    """
+    try:
+        from tortoise import record_writer
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable seam must not
+        # turn a recovery tool into an error; the pre-#14002 behaviour stands.
+        return None
+    try:
+        if not record_writer.record_live_allocate():
+            return None
+        if record_writer.record_dsn() is None:
+            return None
+    except Exception:  # noqa: BLE001, RUF100 — see above
+        return None
+    return (
+        "this deployment's record OWNS the journal's ordinal "
+        f"({record_writer.RECORD_ALLOCATE_ENV} is set and a record DSN is "
+        "configured), so the JSONL is an EXPORT on every graph that has been cut "
+        "over — it stops being appended to, and `derived = replay(journal)` no "
+        "longer holds for it (STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
+        "rebuild from it would produce a graph as of the arming point and "
+        "silently drop every later record. Nothing was wiped. If no graph on "
+        "this box is cut over yet, unset "
+        f"{record_writer.RECORD_ALLOCATE_ENV} (the journal is complete there and "
+        "this refusal does not apply); otherwise restore the graph from the "
+        "record's own backup, not from the journal"
+    )
+
+
 def _cmd_rebuild(args):
     from tortoise.log import TornTailResurrectionError
 
+    refusal = _journal_rebuild_refusal()
+    if refusal is not None:
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
     print(f"Rebuilding from {args.dir} → {args.db}")
     proj = None
     try:

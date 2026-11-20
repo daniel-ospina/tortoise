@@ -333,6 +333,26 @@ document, never in a Python module — V5 item 7).
 
 ## 4. The residual that decides the flag: DO NOT ARM THIS YET
 
+> **⛔ STATUS UPDATE, 2026-11-20 (#14002): THE BLOCKER IS REMOVED.** Everything
+> below describes the tree as it stood when this was written, and it is kept as
+> the record of WHAT the wedge was and why the flag stayed off. The repair is not
+> the per-graph lock §4 names as one of two options, and not `#9318`'s journal
+> identity: it is the third option the sentence above did not consider — **remove
+> the second allocator**. `tortoise.live_write.write` now asks
+> `record_writer.record_owns_position` BEFORE it appends, and on a cut-over armed
+> graph the JSONL append does not happen at all, so the append/allocation
+> ordering wedge is not expressible. The divergence guard is untouched and still
+> refuses every out-of-order ordinal a caller holds, which is why
+> `test_an_out_of_order_pair_WEDGES_the_graph_and_the_wedge_is_measured` still
+> passes — it pins the GUARD's behaviour, not the production path's, and the
+> production path no longer reaches it. Measurements (120 concurrent writes, 0
+> divergence refusals; the same window pre-fix: **117 of 120 refused**), the
+> falsifier and the new residuals: `docs/evidence/14002-record-only-journal/`.
+> ⚠️ §3's verdict (*"the append stays the commit point"*) is unchanged in the
+> sense that matters there: the JSONL LINE is still not reproducible from the
+> record, so it cannot yet be an export that a rebuild replays — the write path
+> just stops feeding it on a cut-over graph.
+
 The cutover invariant compares the counter's number with the journal's
 **position**, and the two are ordered by different events: the journal by
 **append** (the `sdk` site appends, then calls the door — no lock across the two),

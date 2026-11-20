@@ -16224,6 +16224,11 @@ class TortoiseSDK:
         # failure is this door's accounting, not a record refusal) and the
         # chokepoint never withdraws it: the truth store does not wait for a
         # derived store (see `tortoise/live_write.py`).
+        #
+        # ⛔ EXCEPT ON A CUT-OVER GRAPH, WHERE IT DOES NOT APPEND AT ALL (#14002).
+        # There the record owns the ordinal, the chokepoint skips the file append
+        # and forwards `journal_skipped=True` to this door's project — which is
+        # why `tenant=` is passed below (see its note).
         from . import live_write
 
         try:
@@ -16231,12 +16236,19 @@ class TortoiseSDK:
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
             live_write.write(
-                # ⛔ NO `tenant=` HERE (#13345 review P3-2): it is consumed only by
-                # `live_write`'s DEFAULT project, and this door supplies its own
-                # (`_write_record_projection`), which reads `self._record_tenant`
-                # itself and hands it to `write_live_record` by value. Passing it
-                # here was inert and read as load-bearing.
+                # ⛔ THE TENANT IS LOAD-BEARING HERE SINCE #14002 (#13345 review
+                # P3-2 reviewed the opposite). The chokepoint asks
+                # `record_owns_position` — which graph is cut over — BEFORE it
+                # appends, and it can only ask for the tenant this write belongs
+                # to. #9192's rule is that this door's tenant is the one the
+                # request RESOLVED, so it is passed by value rather than left to
+                # the chokepoint's ambient resolution: a chokepoint that resolved
+                # scope/env while this SDK carried a different pair would skip the
+                # append on one graph and allocate on another. The tenant still
+                # reaches the seam through `_write_record_projection` (same
+                # attribute, same value), so there is one answer on both halves.
                 event, log=log, fold=False,
+                tenant=self._record_tenant,
                 record_sink=record_sink,
                 project=self._write_record_projection,
                 scope_label="sdk._emit_event")
@@ -16290,7 +16302,8 @@ class TortoiseSDK:
         return True
 
     def _write_record_projection(self, record: dict,
-                                 seq: int | None) -> Any:
+                                 seq: int | None, *,
+                                 journal_skipped: bool = False) -> Any:
         """Hand one just-appended journal record to the Postgres record (#9188).
 
         THE production call site. Until this existed, `tortoise/record_projection.py`
@@ -16315,6 +16328,16 @@ class TortoiseSDK:
         invented number); it is the silent default that is removed, and
         `tools/record_wiring_check.py::live_call_sites_pass_the_ordinal` holds
         every caller to it.
+
+        ⛔ ``journal_skipped`` IS FORWARDED, NOT DECIDED HERE (#14002). On a
+        cut-over graph the chokepoint does not append, so ``seq`` is ``None``
+        with NO line behind it — a different fact from the ``#9307`` "appended
+        but could not prove the position" state, and the only party that knows
+        which one this is is the chokepoint that made the decision. Dropping it
+        would turn every write on a cut-over graph into a
+        ``position_unverifiable`` refusal (counted, WARNed, permanent), which is
+        why `tools/record_wiring_check.py::live_call_sites_forward_the_journal_skip`
+        holds this method to forwarding it.
 
         Deliberately fail-soft: the graph write and the journal append have
         already committed, so a record failure is a LOSS TO REPORT (counted in
@@ -16346,7 +16369,8 @@ class TortoiseSDK:
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
         return record_writer.write_live_record(
-            record, durable=durable, seq=seq, tenant=self._record_tenant)
+            record, durable=durable, seq=seq, tenant=self._record_tenant,
+            journal_skipped=journal_skipped)
 
     def _bind_record_tenant(self, org_id: str, graph_id: str) -> None:
         """Bind this SDK's writes to one record tenant (#9188).
