@@ -17086,6 +17086,106 @@ def test_the_D5_row_names_every_hit_of_the_literal_it_calls_the_only_one():
         "(#13956 review, F1)")
 
 
+#: The TWO D5 clauses that state a PAIR of current addresses, each pair named by the
+#: sentence itself — and neither had a reader (#13956 review, MEASURED twice).
+#:
+#: ⛔ WHY THEY ARE NOT `_D5_CURRENT_CLAIMS` ENTRIES: that tuple carries ONE named `n` per
+#: entry, and each of these clauses asserts TWO numbers in one sentence, so a per-entry row
+#: could grade at most half of it — and a half-graded pair is exactly the state that let both
+#: of these ship unread. Each entry is (label, a pattern naming `a` and `b`, the
+#: `_EPIC_CITE_SOURCES` key, the fragment `a`'s line must carry, the fragment `b`'s): the
+#: number and the anchor it denotes are read by the same regex, so a re-point that moves one
+#: number onto the other's slot reds here instead of passing.
+#:
+#: ⛔ A NEEDLE IS ONE LINE'S TEXT, OR A TUPLE OF CONSECUTIVE LINES, AND THE TUPLE EXISTS
+#: BECAUSE OF A MEASURED FALSE PASS (#13956 review, round 6, P3 — MEASURED): the empty-gate
+#: return dict's `"provider": None, "route": None, "failover_used": False,` line is written
+#: FOUR times in `sdk.py` (19664, 19700, 20483, 20784 — 20784 inside `_extract_session_llm`
+#: itself, 376 lines from the docstring the row pairs it with), so a single-line needle
+#: accepted TWO addresses the row does not name: `:20483` -> `:20784` and `:20483` -> `:19664`
+#: both stayed GREEN under the very arm that exists to stop that. The lines that FOLLOW the
+#: fragment are what make it unique (`"warnings": [], "mode": "empty", "stats": {},`
+#: occurs once in the file).
+_D5Needle = str | tuple[str, ...]
+
+
+def _fragment_hits(lines: list[str], fragment: tuple[str, ...]) -> list[int]:
+    """The 1-based lines where `fragment` occurs, each member on its own consecutive line."""
+    return [
+        n for n in range(1, len(lines) - len(fragment) + 2)
+        if all(part in lines[n - 1 + k] for k, part in enumerate(fragment))
+    ]
+
+
+_D5_PINNED_PAIRS: tuple[tuple[str, str, str, _D5Needle, _D5Needle], ...] = (
+    (
+        "the alreadyDecided / _dedup_content_candidates pair",
+        r"the same two symbols read `:(?P<a>\d+)` and `:(?P<b>\d+)`",
+        "sdk",
+        '"IMPL", pid, [prior], label="alreadyDecided",',
+        "def _dedup_content_candidates",
+    ),
+    (
+        "the _extract_session_llm docstring / empty-gate return dict pair",
+        r"is at `:(?P<a>\d+)`, and the empty-gate return dict beside it "
+        r"\(`[^`]+`\) is at `:(?P<b>\d+)`",
+        "sdk",
+        "Runs the two-stage LLMExtractor on the conversation transcript",
+        (
+            '"provider": None, "route": None, "failover_used": False,',
+            '"errors": ["no extractable content — empty or blank conversation"],',
+            '"warnings": [], "mode": "empty", "stats": {},',
+        ),
+    ),
+)
+
+
+def test_the_D5_row_states_each_pair_it_names_at_the_head_it_names():
+    """Two D5 pairs this PR re-derived had no reader at all (#13956 review).
+
+    ⛔ MEASURED, which is why this is an arm and not a comment: this PR re-pointed the
+    `_dedup_content_candidates` / `alreadyDecided` pair and the `_extract_session_llm`
+    docstring / empty-gate return dict pair, and restoring EITHER number to its pre-fix
+    value left this file's whole D5 selection GREEN — `_D5_CURRENT_CLAIMS` named neither,
+    and a `_pin_row_failures` row is satisfied by ANY `:N` on a line that carries 270 of
+    them. A row whose own thesis is that a typed line number rots cannot re-point a figure
+    and leave it unread; that is the class #13879 review named when a reverted address
+    "reddened no arm at all".
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    sources = {key: path.read_text(encoding="utf-8").splitlines()
+               for key, path in _EPIC_CITE_SOURCES.items()}
+
+    failures: list[str] = []
+    for label, pattern, source_key, needle_a, needle_b in _D5_PINNED_PAIRS:
+        found = re.search(pattern, d5[0])
+        if found is None:
+            failures.append(
+                f"D5 no longer states {label!r} in the shape this pin reads "
+                f"({pattern!r}) — re-derive the sentence and update the row, do not drop "
+                "it: an unread present-tense pair is what rotted here")
+            continue
+        lines = sources[source_key]
+        for slot, needle in (("a", needle_a), ("b", needle_b)):
+            number = int(found.group(slot))
+            fragment = (needle,) if isinstance(needle, str) else needle
+            hits = _fragment_hits(lines, fragment)
+            if number not in hits:
+                actual = lines[number - 1].strip()[:90] if 0 < number <= len(lines) else ""
+                failures.append(
+                    f"D5 states {label} with `{slot}` at `:{number}`, but "
+                    f"{fragment!r} occurs at {hits} in `{source_key}` — "
+                    f"`: {number}` is {actual!r}")
+    assert not failures, (
+        "D5's present-tense PAIRS are not the lines they name (#13956 review):\n  - "
+        + "\n  - ".join(failures))
+
+
 def test_one_markdown_line_carries_one_pair_for_one_cite():
     """`03-test-design.md:142` stated TWO different pairs for ONE `sdk.py` cite (#13602 F2).
 
