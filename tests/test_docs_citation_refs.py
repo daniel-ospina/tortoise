@@ -3272,7 +3272,7 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     """`(option, attached_value)` for a plausible `grep` flag TOKEN, or `None` if it is not one.
 
     `None` is what keeps prose out: while the flag word was a bag of characters it swallowed
-    the closing backtick and the comma, so `` `grep -c`, '^[+ -]$' `` became a prescription. A
+    the closing backtick and the comma, so `` `grep -c`, '^[+-]$' `` became a prescription. A
     flag token here is `--`/`-` plus alphanumerics (which still expresses `-c`, `-Ec`,
     `--count`, `-C3`, `-m2`), optionally followed by an ATTACHED value — `=value` or a quoted
     section — and an attached value is only possible on a flag that TAKES one, so
@@ -3281,11 +3281,11 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     if text in ("-", "--"):
         return text, ""
     if text.startswith("--"):
+        # A long option may carry a value under ANY name (grep is the judge of the name), so the
+        # `=`-form below admits it; the short cluster is the case that needs the arg-taking set.
         match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
-        takes_an_argument = True  # long options may carry a value; grep is the judge of the name
     elif text.startswith("-"):
         match = re.fullmatch(r"(-[A-Za-z0-9]+)(.*)", text, re.S)
-        takes_an_argument = False
     else:
         return None
     if match is None:
