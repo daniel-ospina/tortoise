@@ -1071,8 +1071,12 @@ def _restore_retires_vector(node_labels) -> bool:
     from tortoise.projection.entities import _derived_mirror_required
 
     # ⛔ A NON-GATED label means the vector may not be a mirror at all (#13854 review, P1):
-    # a restored ``:Point:Object`` node carries its Point's RECORD-TRUTH vector, so the
-    # ``object`` counter's stop is not authority over it. Keep it, and report nothing.
+    # a restored ``:Session:Object`` node carries a :Session's OWN vector, which no counter
+    # is authority over, so the ``object`` counter's stop cannot retire it. Keep it, and
+    # report nothing. ⚠️ THE EXAMPLE HERE USED TO BE ``:Point:Object`` and no longer can be
+    # (`#13971`): ``:Point`` IS gated now, so such a node is decided by the ``point`` /
+    # ``operator`` pair as well as the Object one — leaving the old sentence in place read as
+    # an instruction to un-gate ``:Point``.
     if set(node_labels or ()) - set(_GATED_RESTORE_LABELS):
         return False
     if "Object" in node_labels and _derived_mirror_required("object"):

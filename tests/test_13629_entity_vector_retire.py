@@ -279,11 +279,14 @@ def test_the_retired_population_is_every_served_label_including_point():
 
     `:Point` was OUT of this set under `#13629` (`NOT_IN_SCOPE == ("Point",)`), because
     the armed cutover and `#13330` owned it while its record coverage was unproven and
-    every writer still mirrored it unconditionally. `#13971` removes both conditions:
-    coverage for `point`/`operator` is measurable from a fresh process and every declared
-    `:Point` writer asks that same predicate. The exclusion is therefore no longer
-    asserted — what IS asserted is that the population is COMPLETE, so a future edit
-    cannot silently drop a label from a destructive tool's set either.
+    every writer still mirrored it unconditionally. `#13971` removes the MEASUREMENT
+    condition — coverage for `point`/`operator` is now taken from a fresh process — and
+    the exclusion is therefore no longer asserted; what IS asserted is that the population
+    is COMPLETE, so a future edit cannot silently drop a label from a destructive tool's
+    set either. ⚠️ Joining the population is not the same as being strip-ready: the writer
+    gate still refuses `:Point` (see
+    `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`), which is a
+    statement about WHERE the copy is the only one, not about scope.
     """
     assert [label for _t, label, _k in parity.RETIRED] == [
         "Object", "Subject", "Event", "Source", "Point"]
@@ -830,6 +833,30 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
     assert strip._writer_consults_gate(prose, "_upsert_object", ("object",))[0] is False
 
 
+#: ⛔ WRITERS THAT MUST **NOT** ASK, per label — a RECORDED EXCEPTION, not a gap
+#: (`#13971` review, P1). The rule the census below enforces is "a strip must not be undone by
+#: the label's next writer"; these two writers break the PREMISE of that rule rather than the
+#: rule, because the graph copy they place is the SOLE store on their lanes:
+#:
+#:   * `sdk::_write_capture_turns` — the turn batch write runs exactly where the record cannot
+#:     hold the turn (no journal, a scratch buffer, no tenant, an open connect breaker), and the
+#:     per-turn fallback runs for a turn the record REFUSED. Gating it on `record_vector.coverage`
+#:     (a LABEL aggregate) blanked `emb` there and wrote the turn's vector to NEITHER store;
+#:   * `projection::_rebuild_all_replay` — pass-1b restores a snapshot vector only for ids the
+#:     journal wrote NO vector for (`pid not in journal_embed_write`), i.e. only where the
+#:     snapshot is the sole carrier of a graph-only id's vector.
+#:
+#: The set is EXACT and per label, so a THIRD writer losing its gate reds this test; and the
+#: strip's own census names both, which is why its plan refuses `:Point` (see
+#: `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`).
+SOLE_CARRIER_WRITERS: dict[str, frozenset[str]] = {
+    "Point": frozenset({
+        "tortoise.sdk::_write_capture_turns",
+        "tortoise.projection::_rebuild_all_replay",
+    }),
+}
+
+
 def test_every_declared_writer_of_a_retired_label_asks_the_gate():
     """⛔ `#13626`'s DELIVERABLE, AS A CENSUS OVER THE REAL TREES.
 
@@ -841,13 +868,24 @@ def test_every_declared_writer_of_a_retired_label_asks_the_gate():
 
     Mutation: un-wire any single writer (drop its `if _derived_mirror_required(...)`, or its
     `props.pop("embedding")` stop arm) and the label it serves reds here with its name.
+    ⛔ EXCEPT the two `:Point` writers in `SOLE_CARRIER_WRITERS`, which may not ask because
+    their copy is the only one on the lanes they run on (`#13971` review, P1) — and that
+    exception is itself pinned, both by set membership and by the equality below.
     """
     ungated: dict[str, list[str]] = {}
     for _table, label, _key in parity.RETIRED:
         writers, refusal = strip._writers_for(label)
         assert refusal is None, f":{label} population unreadable: {refusal}"
         types = tuple(parity.affected_entity_types(label))
+        excused = SOLE_CARRIER_WRITERS.get(label, frozenset())
+        # every excused name must still be a DECLARED writer of this label: an exemption for a
+        # writer that no longer stores it would silently outlive the code it was written for.
+        assert excused <= set(writers), (
+            f"SOLE_CARRIER_WRITERS names a writer that is not a declared writer of :{label}: "
+            f"{sorted(excused - set(writers))}")
         for key in writers:
+            if key in excused:
+                continue
             module_name, _, symbol = key.partition("::")
             if not any(strip._writer_consults_gate(module_name, symbol, (t,))[0]
                        for t in types):
@@ -855,6 +893,11 @@ def test_every_declared_writer_of_a_retired_label_asks_the_gate():
     assert ungated == {}, (
         "a declared writer of a retired label still sets `embedding` without asking the "
         f"gate, so a strip would be undone by its next call: {ungated}")
+    # ⛔ AND THE EXCEPTION IS NOT A DOOR LEFT AJAR: `:Point`'s two, and only those two.
+    assert {"Point": frozenset({
+        "tortoise.sdk::_write_capture_turns",
+        "tortoise.projection::_rebuild_all_replay",
+    })} == SOLE_CARRIER_WRITERS, SOLE_CARRIER_WRITERS
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -2148,19 +2191,32 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
     assert "has not proved" not in blocked, blocked
 
 
-def test_the_plan_is_STRIP_READY_for_POINT_from_a_fresh_process(stores, monkeypatch):
-    """`#13971` acceptance: `strip_ready: True` for `point` FROM A FRESH PROCESS, with the
-    reason naming BOTH counts, and with the WRITER half GENUINELY CLOSED.
+def test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers(stores, monkeypatch):
+    """`#13971` (review P1, corrected): `:Point` is MEASURED from a fresh process and
+    REFUSED on the writer half — the honest state, and the one the first cut of this PR
+    certified as `strip_ready: True`.
 
-    ⛔ NO `_fold_consults_gate` MONKEYPATCH — that is the whole difference between this pin
-    and the two `#13796` tests above. Those drive the writer check closed on purpose,
-    because on that tree every label still had a writer that stored `embedding` without
-    asking; a `:Point` pin written the same way would certify `strip_ready` while the gate
-    it is about was stubbed out. `#13971` gates `:Point`'s five declared writers, so the
-    REAL census runs here and is part of what this pin certifies.
+    ⛔ NO `_fold_consults_gate` MONKEYPATCH — the REAL census runs here, which is the whole
+    difference between this pin and the two `#13796` tests above. The first cut asserted
+    `strip_ready is True` for `:Point` and stayed green only because two writers were gated
+    on a LABEL aggregate that is not an authority over them:
 
-    The denominator comes from `_Projection`, i.e. from the graph handle this run already
-    holds — never from a constant — so a supplier that asked the wrong question reds here.
+      * `tortoise.sdk::_write_capture_turns` — its graph batch runs exactly where the record
+        cannot hold the turn (no journal, no tenant, an open connect breaker, or a record
+        write that REFUSED it), so the graph copy there is the SOLE store, not a mirror;
+      * `tortoise.projection::_rebuild_all_replay` — pass-1b restores a snapshot vector only
+        for ids the journal wrote NO vector for, i.e. only where the snapshot is the sole
+        carrier of a graph-only id.
+
+    Gating either on `record_vector.coverage` (`record_vectors >= graph_vectors` over a
+    LABEL) wrote those vectors to NEITHER store. Both are reverted, so the plan must now
+    refuse and NAME them: the refusal is the artefact, and it is checkable rather than a
+    shrug. ⛔ A `strip_ready: True` here would be the vacuous pass this file exists to
+    prevent.
+
+    The MEASUREMENT half is still asserted, and it must be: the coverage verdict for
+    `point`/`operator` is taken in THIS process (the counts sentence names both numbers),
+    and it is only the WRITER arm that refuses.
     """
     graph, record = stores
     for key in ("pt-1", "pt-2"):
@@ -2175,19 +2231,32 @@ def test_the_plan_is_STRIP_READY_for_POINT_from_a_fresh_process(stores, monkeypa
         graph_population=strip.graph_vector_population(_Projection(graph)))
 
     row = plan["labels"][0]
-    assert row["strip_ready"] is True, row["blocked_reason"]
-    assert plan["ready"] is True
-    # The READY reason is the MEASUREMENT, and it names both counts for `point`.
-    assert _counts_sentence(2, 2, label="point") in row["readiness_reason"], (
-        row["readiness_reason"])
-    # ⛔ BOTH `:Point` TYPES WERE CLEARED. One label, two populations (`point`,
-    # `operator`): a gate that cleared one half would strip into a writer the other half
-    # still feeds, which is the `#13854` rule for `:Source` arriving one label over.
-    assert "point" in row["readiness_reason"]
-    assert "operator" in row["readiness_reason"]
-    # …and the writer half is the real census's answer, not a stub: every declared
-    # `:Point` writer asks the gate, INCLUDING the fold the register cannot enumerate.
-    assert "calls the gate" in row["readiness_reason"], row["readiness_reason"]
+    assert row["strip_ready"] is False, (
+        "the plan certified a `:Point` strip while two writers keep that copy on the lanes "
+        f"where it is the only one ({row})")
+    assert plan["ready"] is False
+    blocked = row["blocked_reason"]
+    # ⛔ BOTH `:Point` TYPES WERE ASKED (one label, two populations, `#13854`'s rule one
+    # label over) — the census's writer walk asks each entity type of the label.
+    assert "point" in blocked or "operator" in blocked, blocked
+    # …and the refusal NAMES the two writers, so an operator can see what must change.
+    assert "_write_capture_turns" in blocked, blocked
+    assert "_rebuild_all_replay" in blocked, blocked
+    # ⛔ THE OTHER TWO WRITERS ARE STILL CLEARED — `_update_entity` and `restore_graph` DO
+    # ask, and a refusal that named them would hide the two that genuinely must keep the
+    # copy behind writers that have already stopped.
+    assert "_update_entity" not in blocked, blocked
+    assert "restore_graph" not in blocked, blocked
+    # …and the MEASUREMENT half is the reason on the READY side of the gate: the coverage
+    # verdict for `point` was taken in this process and names both counts, so the refusal
+    # above is the writer arm and not "this process took no verdict".
+    ready, reason = strip.readiness_probe(
+        graph_population=strip.graph_vector_population(_Projection(graph)),
+        org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")("Point")
+    assert ready is False
+    assert _counts_sentence(2, 2, label="point") in reason, reason
+    assert "has not proved" not in reason, reason
 
 
 def test_the_plan_refuses_a_SHORT_record_for_POINT_and_names_both_counts(stores, monkeypatch):

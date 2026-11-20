@@ -66,9 +66,18 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
     asks the gate** — not "the fold does". The gate therefore refused all four entity
-    labels until `#13854` closed them, and it refuses `:Point` today: `#13971` gates that
-    label's writers (`_upsert_point_props`, `_write_capture_turns`, `_update_entity`,
-    `_rebuild_all_replay`, `restore_graph`) on the SAME measured predicate. When the
+    labels until `#13854` closed them, and it REFUSES `:Point` today — not because the label
+    is out of scope, but because two of its four declared writers must keep the copy:
+    `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
+    where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
+    or a record write that REFUSED the turn) and `tortoise.projection::_rebuild_all_replay`
+    (pass-1b restores a snapshot vector only for ids the journal wrote NO vector for, i.e.
+    only where the snapshot is the sole carrier). `#13971`'s first cut gated all four on the
+    label's coverage verdict and was reverted on review: that verdict is
+    `record_vectors >= graph_vectors` over a LABEL, so blanking on it wrote those turns'
+    vectors to NEITHER store. The two writers that place a genuinely redundant copy
+    (`tortoise.sdk::_update_entity`, `tortoise.hosted_backup::restore_graph`) DO ask, and
+    do stop. When the
     coverage predicate is present it names
     each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
     it names the requirement rather than the writers. That is the
@@ -163,15 +172,20 @@ journal IS mandatory: those rows are the transcript, and a rebuild that resurrec
 is the failure. Here a rebuild that re-derives a vector is the SEQUENCED re-write, and
 the write gate above is what keeps it from happening by accident.
 
-⚠️ **The graph-side `:Point` vector IS in scope since `#13971`** — it joined
+⚠️ **The graph-side `:Point` vector is IN `RETIRED` since `#13971`** — it joined
 `entity_vector_parity_census.RETIRED` once its record coverage became measurable from a
-fresh process and every writer of the label was gated on that same predicate. It is the
+fresh process. It is the
 largest reclaimable block left (37,158 stored vectors, ≈67 MB), the in-graph `:Point`
 HNSW index is RETIRED (`#13330`) so nothing reads the property, and `#5004`'s "a Point
-vector is RECORD TRUTH" is now the reason the graph copy is a redundant MIRROR — not a
-reason to keep it. The tool's own refusals still apply: it will not strip `:Point`
-unless the record's coverage for `point`/`operator` MEASURES true in this process and
-every declared `:Point` writer asks the gate. The population remains
+vector is RECORD TRUTH" is now the reason a graph copy that the record also holds is a
+redundant MIRROR — not a reason to keep it. ⛔ **BUT THE PLAN STILL REFUSES `:Point`**, and
+the refusal is the honest half: two declared writers must keep the copy because on their
+lanes it is the SOLE carrier (`sdk::_write_capture_turns` on every lane where the record
+cannot hold the turn; `projection::_rebuild_all_replay`, whose pass-1b restore runs only
+for ids the journal wrote no vector for). The census names them, so the refusal is
+checkable rather than a shrug. The tool's refusals are otherwise unchanged: it will not
+strip `:Point` unless the record's coverage for `point`/`operator` MEASURES true in this
+process. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
 
 Usage::
@@ -5010,7 +5024,10 @@ def render_plan(plan: dict) -> str:
             "",
             "⚠️ `:Point` durability: a `rebuild_all` REPLAYS the journal, which re-adds "
             "every journalled `:Point` vector — re-run this tool after a rebuild. Ordinary "
-            "creates and updates do not re-add it (all four live writers ask the gate).",
+            "creates and updates do not re-add it (the SDK update door and the DR restore "
+            "ask the gate and stop; the capture writer and the pass-1b snapshot restore keep "
+            "the vector on the lanes where it is the ONLY copy, which is why this plan "
+            "refuses `:Point` while the writer census names them).",
         ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured

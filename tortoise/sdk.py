@@ -3370,19 +3370,30 @@ def _write_capture_turns(
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
-        # ⛔ `#13971`: the graph copy of a turn's vector is a MIRROR, not the store. The
-        # RECORD owns a Point's vector (`#5004`), the in-graph `:Point` HNSW index is
-        # RETIRED (`#13330`) so nothing reads this property, and once the record's
-        # coverage for `point` is measured true every capture would otherwise re-add
-        # 37k vectors the operator just stripped. Asked through the fold's ONE predicate,
-        # in the encode-guard shape `#13826`'s census reads as a write-stop — an
-        # unconditional store with a late gate would still place the vector. A `False`
-        # answer leaves `emb` None, whose CYPHER arm (`turn.emb IS NOT NULL`) then falls to
-        # the PRESERVE/CLEAR pair: an unchanged text keeps whatever the node holds (nothing,
-        # after a strip) and a changed text clears it — never a vector written back.
-        embedding = None
-        if _derived_mirror_required("point"):
-            embedding = turn_embs[i]
+        # ⛔ `#13971` (review P1, corrected): THIS WRITER DOES **NOT** ASK THE GATE, and that is a
+        # correction rather than an omission. `#13971`'s first cut blanked `emb` when the
+        # label's coverage verdict answered "stop", on the premise that "the graph copy of a
+        # turn's vector is a MIRROR, not the store". That premise is FALSE on every lane where
+        # this batch statement actually runs:
+        #
+        #   * `_record_first` False (no journal, a scratch buffer, no tenant, or the record's
+        #     connect breaker open) — this batch write IS the store, so the vector must go with
+        #     the turn;
+        #   * a turn the record REFUSED after the preflight approved it — see the fallback arm
+        #     below, which now re-attaches the vector for exactly those turns.
+        #
+        # The verdict it was gated on is also the wrong SHAPE for this writer:
+        # `record_vector.coverage` is `record_vectors >= graph_vectors` over a LABEL, and a
+        # label-level aggregate cannot say "the record holds THIS turn" — which is the only
+        # question that would make the graph copy redundant. Blanking on it wrote the turn's
+        # vector to NEITHER store on those lanes, and `#5004` forbids re-encoding while the
+        # journal heals only on a replay that may never come.
+        #
+        # ⚠️ THE CONSEQUENCE IS STATED, NOT HIDDEN: the strip's writer census now reports
+        # `sdk::_write_capture_turns` as a writer that does not ask
+        # (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`), so the plan REFUSES
+        # `:Point` until the capture path can answer per-turn. That is the honest state: a strip
+        # the operator cannot run yet is cheap, a capture that drops the only copy is not.
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
@@ -3399,7 +3410,7 @@ def _write_capture_turns(
             "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
-            "emb": embedding,
+            "emb": turn_embs[i],
         })
 
     # #7405 (audit G8): the batched turn store rides the SAME bounded write
@@ -4016,6 +4027,13 @@ def _write_capture_turns(
         _unrecorded = [i for i, _row in enumerate(turn_rows)
                        if not _landed(_record_outcome.get(_row["id"]))]
         if _unrecorded:
+            # ⛔ THESE TURNS' GRAPH WRITE **IS** THEIR STORE, and their rows carry the vector
+            # (`#13971` review P1, arm 2). The row loop stores `turn_embs[i]` unconditionally —
+            # precisely so this arm, the one where the RECORD REFUSED the turn after the
+            # preflight approved it, does not leave the turn in neither store (the record
+            # declined it, and a NULL `emb` would leave the graph without the vector). The
+            # journal is not a rescue: it heals only on a replay that may never come, and
+            # `#5004` forbids re-encoding.
             # Loud, because a re-capture's journalled snapshot for these turns is
             # this capture's `now`/`draft` rather than the values a read-back
             # would have given — the residual of deciding after the append. The

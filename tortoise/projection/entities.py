@@ -94,17 +94,24 @@ def _derived_mirror_required(entity_type: str) -> bool:
     fold from crashing if the record's arming module cannot be imported, which is
     a WRITE-path fault and must never take a write down.
 
-    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS, PLUS THE `:Point` MIRROR AT EVERY
-    WRITER **EXCEPT THE JOURNAL FOLD** (#13971). A `:Point`'s vector IS record truth
+    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS, PLUS THE `:Point` MIRROR AT THE TWO
+    WRITERS WHERE THAT COPY IS REDUNDANT (#13971). A `:Point`'s vector IS record truth
     (`#5004`), and the test that decides which writers ask is **"is this copy the redundant
-    one?"**: the live capture, the SDK door, the snapshot restore and
-    `hosted_backup.restore_graph` all place a copy the record already holds, so with
-    coverage measured true they stop — the graph property is unread (`#13330` retired the
-    in-graph `:Point` index) and re-writing it would undo a strip (`#13610` option 2's
-    "write it back on the next call" race). ⛔ `_upsert_point_props` is the exception ON
-    PURPOSE: it is the journal fold, its vector is the JOURNAL's own record truth, and
-    `MIRROR_RETIRED_LABELS` must not contain `point` so that fold keeps writing the dense
-    leg a named fallback.
+    one?"**: `hosted_backup.restore_graph` and `sdk::_update_entity` place a copy the record
+    already holds, so with coverage measured true they stop — the graph property is unread
+    (`#13330` retired the in-graph `:Point` index) and re-writing it would undo a strip
+    (`#13610` option 2's "write it back on the next call" race).
+
+    ⛔ TWO `:Point` WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the reason is the
+    same test read honestly: on their lanes the copy is NOT redundant. `_upsert_point_props`
+    is the journal fold — its vector is the JOURNAL's own record truth, and
+    `MIRROR_RETIRED_LABELS` must not contain `point` so that fold keeps writing the dense leg
+    a named fallback. `sdk::_write_capture_turns` writes the graph batch on exactly the lanes
+    where the record cannot hold the turn (no journal, no tenant, an open connect breaker, or
+    a record write that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot
+    vector only for ids the journal wrote none for — gating either on the label aggregate put
+    those vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both, so its
+    plan refuses `:Point` rather than stripping into them.
 
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
@@ -2994,8 +3001,10 @@ class _EntityHandlers:
         # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`), and
         # that set must equal the labels the folds stop writing. The consequence is stated
         # rather than hidden: a `rebuild_all` re-materialises the journal's vectors, so
-        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Every OTHER
-        # `:Point` writer — capture, SDK door, snapshot restore, `restore_graph` — asks.
+        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Three OTHER
+        # `:Point` writers also keep their copy on lanes where it is the sole carrier — the
+        # capture turn write, the pass-1b snapshot restore in `projection::_rebuild_all_replay`
+        # (`#13971` review P1) — while the SDK door and `restore_graph` DO ask.
         elif not op and p.get("content"):
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:

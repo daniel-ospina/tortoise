@@ -7506,7 +7506,6 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     BELIEF_PROPS,
     _belief_bool_value_ok,
     _belief_prop_value_ok,
-    _derived_mirror_required,
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
@@ -17440,21 +17439,30 @@ class FalkorProjection(
             if (sp.get("content_hash") is not None
                     and pid not in journal_hash_write):
                 gap["content_hash"] = sp["content_hash"]
-            # ⛔ `#13971`: the SNAPSHOT's vector is restored as a MIRROR, so it goes the
-            # same way the fold's store does. This pass exists for a graph-only (synthetic)
-            # id whose JOURNAL carries no vector; the vector it restores comes from the
-            # pre-wipe snapshot. With the record's coverage for `point` measured true, the
-            # record holds that vector — that is what "coverage" means here — so writing it
-            # back into the graph would re-add exactly what a strip removed, and nothing
-            # reads the property any more (`#13330` retired the in-graph index). Asked
-            # through the fold's ONE predicate: an UNVERIFIED or unreadable answer keeps
-            # the restore, so a deployment that still needs the graph copy is untouched.
-            # The removal is spelled `pop("embedding")` because the strip's writer census
-            # reads the stop by that exact literal (`tools/strip_graph_entity_vectors.py::
-            # _removes_embedding`), and a form it cannot read would report this writer as
-            # STILL EMITTING forever.
-            if not _derived_mirror_required("point"):
-                sp.pop("embedding", None)
+            # ⛔ `#13971` (review P1, corrected): the SNAPSHOT restore is NOT a mirror of anything,
+            # so it is NEVER gated. `#13971`'s first cut popped `embedding` here on the coverage
+            # verdict, justified by "with coverage measured true the record holds that vector —
+            # that is what coverage means". It is not: `record_vector.coverage` is
+            # `record_vectors >= graph_vectors` over a LABEL (an aggregate), while this pass
+            # runs for a GRAPH-ONLY id whose journal carries no record of it at all — see the
+            # `#4305` comment below, and this file's own statement of the class a few thousand
+            # lines up ("`embedding` is stripped because this is a SYNTHETIC event for a
+            # GRAPH-ONLY id — the journal holds no record of it at all … The rebuild restores it
+            # from the live pre-wipe capture in the pass-1b tail").
+            #
+            # The restore below is ALREADY restricted to ids the journal does not own a vector
+            # for (`restore_embedding` requires `pid not in journal_embed_write`), so the pop
+            # could only ever delete the SOLE carrier of a vector: after the wipe, for an id with
+            # no journal vector and no record row, the node came back vectorless and nothing
+            # could heal it (`#5004` forbids re-encoding). That is the same data-loss class the
+            # journal fold is exempted from by decision — a `:Point`'s vector is RECORD TRUTH
+            # (`#5004`), and for a graph-only id the graph is the record.
+            #
+            # ⚠️ The consequence is stated, not hidden: `:Point` therefore does NOT satisfy the
+            # strip's writer census (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`
+            # names this writer as the one that does not ask), so the plan refuses `:Point` until
+            # the snapshot-restore population can be answered per-id by the record. A strip an
+            # operator cannot run is cheap; a rebuild that drops the only copy is not.
             emb = sp.get("embedding")
             # #4305 review P2: only a numeric vector is writable through
             # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,

@@ -695,8 +695,9 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: and `operator` (a `:Point` subset, `#13630`) has no fold of its own — so the dense leg
 #: keeps the graph as a named fallback on `point`, the primary retrieval label, exactly as
 #: `main` answered (`#13617` review F1). ⛔ `#13971` retires the STORED `:Point` vectors and
-#: gates the four writers that place a redundant copy, and it deliberately does NOT gate
-#: the journal fold — so this set must stay without `point`, which
+#: gates the two writers that place a redundant copy (`sdk::_update_entity` and
+#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — so
+#: this set must stay without `point`, which
 #: `test_13610_graph_vector_copy.py::
 #: test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback` pins.
 #:

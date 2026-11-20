@@ -175,13 +175,22 @@ CensusError = census_mod.CensusError
 #: `#13629` scope boundary that used to be pinned here (`NOT_IN_SCOPE == ("Point",)`).
 #: The boundary existed because the armed cutover and `#13330` owned `:Point` *while the
 #: record's coverage for it was unproven and the label was still being mirrored by
-#: ungated writers*. Both conditions are gone: the record holds ~37,099 point vectors
+#: ungated writers*. The MEASUREMENT half is gone: the record holds ~37,099 point vectors
 #: (PARITY after `#13685`), the in-graph `:Point` HNSW index is RETIRED (`#13330`) so
-#: nothing reads the property, and `#13971` gates every declared `:Point` writer on the
-#: same measured predicate the entity labels use — so `#5004`'s "a Point vector is RECORD
-#: TRUTH" is exactly the reason the GRAPH copy is a mirror that may go, not a reason to
-#: keep it. The tool still refuses to strip a label whose record coverage does not
-#: measure true in its own process (`strip_readiness`), so the reversal cannot delete a
+#: nothing reads the property, and `#13971` gates the two writers that place a genuinely
+#: redundant copy (the SDK update door and the DR restore) on the same measured predicate
+#: the entity labels use — so `#5004`'s "a Point vector is RECORD TRUTH" is exactly the
+#: reason a graph copy the record ALSO holds is a mirror that may go.
+#:
+#: ⛔ BUT THE WRITER HALF DID NOT CLOSE, and review reverted the attempt to close it by
+#: force: the turn capture writes its vector wherever the graph is the SOLE store (no
+#: journal, no tenant, an open connect breaker, or a record write that REFUSED the turn),
+#: and pass-1b restores a snapshot vector only for ids the journal wrote none for. Gating
+#: either on THIS label aggregate put those vectors in NEITHER store, so neither may ask.
+#: The stripper therefore REFUSES `:Point` and names both writers — the row is here so the
+#: population, the per-key parity and the coverage measurement all exist before it can
+#: open. The tool still refuses any label whose record coverage does not
+#: measure true in its own process (`strip_readiness`), so nothing can delete a
 #: vector the record cannot answer with.
 RETIRED: tuple[tuple[str, str, str], ...] = (
     # (record table, graph label, graph identity property)

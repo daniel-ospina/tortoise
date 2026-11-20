@@ -311,14 +311,18 @@ def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch)
       * that set must equal the labels the folds stop writing — a fold that asked would
         break the equality from the other side.
 
-    So the graph copy of `:Point` is retired by the STRIP plus the four writers that place a
-    redundant copy (live capture, the SDK update door, the snapshot restore,
-    `hosted_backup.restore_graph`), and the consequence is stated rather than hidden: a
-    `rebuild_all` re-materialises the journal's vectors, so the strip is an operator action
-    to re-run after a rebuild. `tools/strip_graph_entity_vectors.py` names that consequence
-    in its own output and leaves `:Point` out of `FOLD_WRITERS`; the census still requires
-    all four register writers to ask, which is what makes the strip durable across an
-    ordinary create or update.
+    So the graph copy of `:Point` is retired by the STRIP plus the two writers that place a
+    redundant copy (the SDK update door and `hosted_backup.restore_graph`), and the
+    consequence is stated rather than hidden: a `rebuild_all` re-materialises the journal's
+    vectors, so the strip is an operator action to re-run after a rebuild.
+    `tools/strip_graph_entity_vectors.py` names that consequence in its own output and
+    leaves `:Point` out of `FOLD_WRITERS`. ⛔ AND TWO MORE `:Point` WRITERS DELIBERATELY DO
+    NOT ASK (`#13971` review, P1): `sdk::_write_capture_turns` (the graph batch runs exactly
+    where the record cannot hold the turn, so the copy there is the SOLE store) and
+    `projection::_rebuild_all_replay` (pass-1b restores a snapshot vector only for ids the
+    journal wrote none for). The census therefore REFUSES `:Point` and names both — the
+    strip stays unavailable until the capture path can answer per-turn, which is cheaper
+    than a capture that writes a turn's vector to neither store.
     """
     from tortoise import embeddings
 
@@ -440,6 +444,16 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
         "a `:Point` write was retired on ONE half's answer (`point` verified) while "
         "`operator` was unverified — one label, two populations, the `:Source` rule")
+    # ⛔ THE DISCRIMINATING ARM (#13971 review, P3 on the first cut): the SAME question from
+    # the OTHER half. `keep={"point"}` above proves the code asks `point`; on its own it is
+    # also satisfied by a mutant that asks ONLY `point` and dropped the `operator` conjunct
+    # (`point` True -> keep), so the pair of arms is what pins the CONJUNCTION.
+    g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
+    _gate_map(monkeypatch, {"operator"})
+    sdk.update_knowledge("pt-13826", embedding=list(VEC))
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
+        "a `:Point` write was retired with `operator` KEEPING — the ask is not `point` "
+        "alone, exactly as for `:Source`'s two halves")
     g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
     _gate_map(monkeypatch, set())
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
@@ -935,6 +949,18 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     result = restore_graph(proj.g, both)
     assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
         "the restore retired a `:Point` vector while `operator` was unverified")
+    assert "retired_vectors" not in result, result
+    # ⛔ THE DISCRIMINATING ARM (#13971 review, P3 on the first cut): the same question from
+    # the OTHER half, and it is what makes the pair an arm pair rather than one arm. With
+    # only `keep={"point"}`, a mutant that asks `point` ALONE and dropped the `operator`
+    # conjunct still passes (`point` True -> keep); `keep={"operator"}` is satisfied by no
+    # such mutant, because `point` answers stop.
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    _gate_map(monkeypatch, keep={"operator"})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+        "the restore retired a `:Point` vector while `point` answered STOP but `operator` "
+        "said keep — one label, two populations (`#13854`'s rule)")
     assert "retired_vectors" not in result, result
     proj.g.query("MATCH (n) DETACH DELETE n")
     _gate_map(monkeypatch, keep={""})
