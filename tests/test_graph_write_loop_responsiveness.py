@@ -112,29 +112,37 @@ MIN_TICKS_IN_STALL = 10
 # `test_dream_default_branch_marks_queued_roots_off_loop`, which pre-seeds a
 # `_DREAM_QUEUES` root so the branch executes at all. `url` (not `path`) is the
 # httpx request kwarg.
+# ⛔ The names in this table are the SDK's PRIVATE seams, not its retired public
+# wrappers. #12901's final batch privatised `create_point`/`create_object`/
+# `create_subject`/`dream` onto `_create_point`/`_create_object`/
+# `_create_subject`/`_dream`, so naming the public form here does not merely pin a
+# stale string: `_install_blocking_graph_call` resolves it with
+# `getattr(TortoiseSDK, method_name)`, which RAISES before the request is ever
+# driven — the row reds on an AttributeError and measures nothing. `poll_events`
+# did not retire and stays public.
 _ENDPOINTS = [
-    ("points", "create_point",
+    ("points", "_create_point",
      {"method": "POST", "url": "/v1/points",
       "json": {"content": "the release needs a normalization pass",
                # #1643: drives the create_about_edge sub-call in the same
                # worker hand-off, so the branch executes at all.
                "about_object": "3718-about-object"}}),
-    ("objects", "create_object",
+    ("objects", "_create_object",
      {"method": "POST", "url": "/v1/objects",
       "json": {"name": "3718-object"}}),
-    ("subjects", "create_subject",
+    ("subjects", "_create_subject",
      {"method": "POST", "url": "/v1/subjects",
       "json": {"name": "3718-subject"}}),
     ("events", "poll_events",
      {"method": "GET", "url": "/v1/events"}),
-    ("dream", "dream",
+    ("dream", "_dream",
      {"method": "POST", "url": "/v1/dream"}),
     # The other two /v1/dream branches (I1 precedence: an explicit mode wins
     # over full). A refactor that put only one branch back on the loop would
     # otherwise pass.
-    ("dream-mode", "dream",
+    ("dream-mode", "_dream",
      {"method": "POST", "url": "/v1/dream", "params": {"mode": "local"}}),
-    ("dream-full", "dream",
+    ("dream-full", "_dream",
      {"method": "POST", "url": "/v1/dream", "params": {"full": "true"}}),
 ]
 
@@ -610,7 +618,7 @@ def test_enqueued_dream_worker_does_not_freeze_the_event_loop(
     state: dict = {}
     _record_loop_thread_of(monkeypatch, "_mark_dirty", state,
                            "mark_dirty_on_loop")
-    _install_blocking_graph_call(monkeypatch, "dream", state, delegate=False)
+    _install_blocking_graph_call(monkeypatch, "_dream", state, delegate=False)
     # #3773: the drain's SDK build was the third on-loop graph call — record
     # whether ANY `_make_sdk` (the handler's `_data_sdk` open AND the worker's)
     # ran on the loop.
