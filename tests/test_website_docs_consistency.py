@@ -337,14 +337,6 @@ def test_docs_states_the_formulas_quadrature_actually_computes() -> None:
     )
 
 
-# ⛔ `create_point` was PUBLIC until #12901's final batch privatised it; the extraction
-# write inside `_extract_session_v2` now names the private spelling
-# (`self._create_point(...)`). A scan keyed on the retired name found NO call and
-# left the FAQ's evidence sentence with no live proof — so the pin keys on what the
-# tree says, and `assert calls` still reds if the write path moves for any reason.
-_EXTRACTION_WRITE_ATTR = "_create_point"
-
-
 def _extraction_write_calls() -> list[ast.Call]:
     """Every `create_point(...)` call inside `SDK._extract_session_v2`.
 
@@ -360,7 +352,10 @@ def _extraction_write_calls() -> list[ast.Call]:
                 if (
                     isinstance(sub, ast.Call)
                     and isinstance(sub.func, ast.Attribute)
-                    and sub.func.attr == _EXTRACTION_WRITE_ATTR
+                    # #12901 FINAL batch: `create_point` was PRIVATISED to
+                    # `_create_point` (body unchanged); the extraction write is the
+                    # same call, so the pin follows the spelling the class holds.
+                    and sub.func.attr in ("create_point", "_create_point")
                 ):
                     out.append(sub)
     return out
