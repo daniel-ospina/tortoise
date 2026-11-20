@@ -3883,11 +3883,15 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     carries a `\` line where the class counts 2. Accepted because it is a spelling a document
     plausibly writes, with the cost (one impossible diff line) stated rather than implied. Two
     backslashes can still pass (`^[\+\-]$` counts `3` — the same superset, not a separate case).
-    The REAL bound, and it is narrower in one direction only (#13995 review round 17, P3,
-    MEASURED): an inside RANGE (`[a-z]`), a DESCENDING range (`^[\-+]$`, which grep refuses with
-    `Invalid range end`) and a backslash that TRAILS the content (`^[-+\]$`) are all refused — the
-    safe direction. Accepted brackets are exactly those whose members are `+`, `-` and at most a
-    literal `\`, so an accepted spelling counts `2` or `3` and never more. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    The REAL bound, and it is one-sided (#13995 review rounds 17-19, MEASURED): acceptance is the
+    ESCAPE MODEL's verdict, not a member-set test. A `\` before a `-` that is followed by another
+    member reads as a RANGE (so `^[\-+]$` is refused — and grep refuses it too, `Invalid range
+    end`, rc 2); a `\` that TRAILS the content is an INCOMPLETE ESCAPE (so `^[-+\]$` and
+    `^[\\+-]$` are refused even though grep runs them and counts `3`). Those refusals are the safe
+    direction: the ONLY guarantee offered is that an ACCEPTED spelling counts `2` or `3` and never
+    more, which is what makes the superset cost one impossible diff line. It is not a
+    biconditional — the docstring does not claim to accept every bracket whose members happen to
+    be `+`, `-` and `\`, and two spellings with exactly those members are refused. Three spellings are NOT among them, all measured: `^[\-+]$` (the
     DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
     `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
     counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
