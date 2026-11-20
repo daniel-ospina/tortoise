@@ -1922,7 +1922,27 @@ _TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3
 #: A copula is deliberately NOT an event verb: `#10215` shipped that; at this head …` is a
 #: claim about THIS head introduced by an unrelated citation, and round 12's counterexamples
 #: are all of that shape.
-_TORTOISE_HEAD_BINDING_AT = re.compile(r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?")
+#: ⛔ AND THE BINDING IS CASE-INSENSITIVE BECAUSE THE BAN IS (#13802, round 21 — MEASURED).
+#: `_TORTOISE_SET_DIRECTION_CLAIM` compiles `re.IGNORECASE` (its own contract: "FORMATTING IS
+#: NOT CONTENT … the form matched case-insensitively"), and these two constants did not — so
+#: the SAME sentence was refused when its binding was spelled at a sentence start, which is
+#: the most ordinary spelling of a named head in this corpus (`At `945817d22a`, the base this
+#: branch was re-derived on`). Measured in-process on the round-20 head:
+#:
+#:   "At `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> REFUSED
+#:   "at `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> allowed
+#:   "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all"          -> REFUSED
+#:
+#: That is a FALSE BLOCK on head-named history — the one direction this file's docstring
+#: forbids — and a contract inconsistency inside one module. The widening is only the CASE of
+#: the SAME bound constructions (the sha class accepts `[0-9A-F]`, which every git object id
+#: spelling allows), never a third construction: measured over all 855 `docs/**/*.md`, the ban's
+#: hit set is UNCHANGED by the flag (6 -> 6, 0 newly refused, 0 newly allowed, and the witness
+#: test above passes untouched), so no claim that was refused on its merits is now excused.
+#: NO LIVE VICTIM at the head this was written (0 case-only false blocks in the corpus) — this
+#: closes the class before the next historical sentence is written in the capitalised form.
+_TORTOISE_HEAD_BINDING_AT = re.compile(
+    r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE)
 _TORTOISE_HEAD_BINDING = re.compile(
     r"(?:(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?"
     # ⛔ AND THE `#PR` FORM REQUIRES ITS EVENT VERB TOO (round 13 review, P1 — MEASURED):
@@ -1938,7 +1958,9 @@ _TORTOISE_HEAD_BINDING = re.compile(
     r"|`?[0-9a-f]{7,40}`?\s+"
     r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
     r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
-    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)")
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)",
+    # case as well as spelling — see the measurement on `_TORTOISE_HEAD_BINDING_AT` above
+    re.IGNORECASE)
 
 
 #: ⛔ MARKDOWN EMPHASIS IS ABSORBED WHERE IT OCCURS — THE TEXT IS NOT STRIPPED (#13802 review,
@@ -2122,7 +2144,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
     # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
     r"now|still|actually|also)\s+)?"
-    r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{1,30}?\s*[—–])?\s*"
+    r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?\s*"
     # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
     # between the command and the verb, and `set (measured with `git diff …`) is empty`,
     # were GREEN in BOTH arms while the comma and bare forms were refused)
@@ -2139,7 +2161,8 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
-    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
+    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entry|entries|"
+    r"modules?|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
     # ⛔ AND THE SPACE SPELLING OF `non-empty` (#13802 review, cycle 6, P1 — MEASURED):
     # the detector's own class is `non[- ]?empty`, so it reads `is non empty`; this
     # pattern listed only the hyphen and closed spellings, so
@@ -2490,6 +2513,13 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` **_prints_** `two` paths at this head.",
         "The `-- tortoise/` set prints — at this head — NOTHING.",
         "There is NOTHING in the `tortoise/` set at this head.",
+        # ⛔ AND THE SINGLE DASH, AND THE `no <noun>` SET THE BAN'S OWN COUNT CLASS CARRIES
+        # (#13802 review, round 21 — the dash alternative required a CLOSING dash, and the `no`
+        # alternative listed 5 of the 13 nouns its own count class lists)
+        "The `tortoise/` set prints — NOTHING at this head.",
+        "The `tortoise/` set shows no changes at this head",
+        "The `tortoise/` set carries no edits at this head",
+        "The `tortoise/` set reports no rows at this head",
         # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
         # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
         # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
@@ -2541,6 +2571,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # MEASURED: the unanchored verb-before-path alternative refused a named-head
         # emptiness claim, and the bundle already ships one in README.md)
         "`#10215`'s `8bc2fbed1` touches no `tortoise/` file at all",
+        # ⛔ AND ITS CAPITALISED SPELLINGS (#13802, round 21 — MEASURED: both were REFUSED at
+        # the round-20 head while the lowercase witnesses above were allowed, because the two
+        # binding constants were compiled without `re.IGNORECASE` while the ban itself is not
+        # — a sentence-initial `At `…`` is the corpus's own spelling and case is not content).
+        # Non-vacuity: the first two FAIL on the pre-fix code (`ban.findall` returns them).
+        "At `2584a86ec1` the `tortoise/` set was non-empty — five paths.",
+        "In `2584a86ec1` the `tortoise/` set was non-empty",
+        "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "
