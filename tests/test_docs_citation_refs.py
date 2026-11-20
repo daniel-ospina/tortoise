@@ -2063,7 +2063,12 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320`, and the
     # ban returned False for it; with the `set` anchor NEITHER arm read it, at a head where the
     # real answer is `nothing`)
-    r"|(?:an?\s+)?(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
+    # ⛔ AND A DETERMINER FROM THE DETECTOR'S OWN STRIP LIST (#13802 review, round 15, P2 —
+    # MEASURED: `the` is in `_typed_answers_to_tortoise_cmd`'s determiner list at `:698` and
+    # NOT here, so `returns the empty set` was detector-read and ban-blind — and the ban is the
+    # only arm over 12 of the 13 bundle documents. `an empty set` was already carried; `the`
+    # is the same answer with a determiner the sibling strips.
+    r"|(?:an?|the|THE)\s+(?:empty|EMPTY|non[- ]?empty|not[- ]empty)|(?:empty|EMPTY|non[- ]?empty|not[- ]empty)"
     r"|exactly those two|exactly (?:one|two)"
     r"|ONE module|TWO modules|one module|two modules|both modules"
     r"|ONE path|TWO paths|one path|two paths|no module"
@@ -2293,6 +2298,10 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # idiom reaches for, and both comma and bare forms of the same sentence were refused.
         "`-- tortoise/` returns a non-empty set",
         "the `tortoise/` set returns a non-empty set",
+        # ⛔ AND THE DETERMINER `the` (#13802 review, round 15, P2 — detector-read, ban-blind)
+        "`-- tortoise/` returns the empty set at this head",
+        "`-- tortoise/` prints the empty list at this head",
+        "the `tortoise/` set holds the empty set at this head",
         "`-- tortoise/` (run at this head) prints nothing",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
