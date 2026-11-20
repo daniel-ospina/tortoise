@@ -16981,8 +16981,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
     # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
     # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
-    # halves were false: the diff's OLD side is `sdk.py:28718` (never `:28682`, which no
-    # head the document was read at carries), and `:15346-15423` is on BOTH sides —
+    # halves were false: the diff's OLD side is `sdk.py:28718` (never `:28682`, which is the
+    # pre-`#13750` value — `b68883c11b` wrote it and `aeb4882c18` re-pointed it to `:28718`), and
+    # `:15346-15423` is on BOTH sides —
     # `main` made that move — so naming it as this diff's pair was a CHIMERA of two
     # heads. The pin was green over it, which is exactly the class it exists to close, so
     # it now pins the measured pair and REFUSES the chimera.
