@@ -16770,6 +16770,27 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "sdk",
         "subject_binding_available, SUBJECT_BINDING_UNAVAILABLE,",
     ),
+    # ⛔ THE TWO `sed -n '<n>p'` QUOTES F1 CORRECTED, AND THE REASON THEY ARE HERE
+    # (#13956 review, F1 — MEASURED). F1 re-pointed them from `'19560p'`/`'25346p'` to
+    # `'19732p'`/`'25563p'` and left NO reader behind: reverting either number to its
+    # pre-fix value kept this file's whole D5 selection green, because no entry named it
+    # and a `_pin_row_failures` row is satisfied by ANY `:N` on the line. A row whose own
+    # thesis is that a typed line number rots cannot ship its newest corrections unread —
+    # that is the class #13879 review named when a reverted address "reddened no arm at
+    # all". The pattern binds the QUOTED TEXT to the number, so the number and the
+    # fragment it is supposed to denote are read by the same regex.
+    (
+        "the replay-skips-capture `sed -n` quote",
+        r"`sed -n '(?P<n>\d+)p' tortoise/sdk\.py` is `# capture — a REPLAY",
+        "sdk",
+        "capture — a REPLAY of an existing session_id SKIPS them, exactly",
+    ),
+    (
+        "the `# then resolved to the row it replaced.` `sed -n` quote",
+        r"`sed -n '(?P<n>\d+)p' tortoise/sdk\.py` is `# then resolved to the row it replaced",
+        "sdk",
+        "then resolved to the row it replaced",
+    ),
 )
 
 #: The labels `_D5_CURRENT_CLAIMS` must still carry, one per entry. Compared as a SET, never
@@ -16786,6 +16807,8 @@ _D5_CURRENT_CLAIM_LABELS = frozenset({
     "the file's ONLY `dedup_reviewed IS NULL`",
     "the quota guard `if count + est > max_points:`",
     "the `sdk.py` import's OTHER hit",
+    "the replay-skips-capture `sed -n` quote",
+    "the `# then resolved to the row it replaced.` `sed -n` quote",
 })
 
 
@@ -17010,6 +17033,50 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "D5's present-tense anchors are not the lines they name "
         "(the class #13602 review findings 1 and 2 measured):\n  - "
         + "\n  - ".join(failures))
+
+
+#: The D5 clause that states a `the ONLY …` population of TWO numbers:
+#: ``the only `AND o.eventId IS NULL` literals are at `:19840` and `:19908```.
+#: ⛔ Kept as its own arm rather than a `_D5_CURRENT_CLAIMS` entry because that tuple
+#: carries ONE named `n` per entry and this claim has TWO failure modes: either number
+#: going stale, and a THIRD hit appearing while the row still calls the pair the ONLY
+#: ones (`grep -n 'AND o.eventId IS NULL' tortoise/sdk.py` is the command the row itself
+#: hands the reader, so the row's population claim is checkable against the same grep).
+_D5_ONLY_LITERAL_RE = re.compile(
+    r"the only `(?P<literal>[^`]+)` literals are at `:(?P<a>\d+)` and `:(?P<b>\d+)`")
+
+
+def test_the_D5_row_names_every_hit_of_the_literal_it_calls_the_only_one():
+    """F1 corrected these numbers and NOTHING read them afterwards (#13956 review, F1).
+
+    ⛔ MEASURED on the tree this pin ships with, which is why it exists: F1 re-pointed
+    `AND o.eventId IS NULL` from `:19668`/`:19736` to `:19840`/`:19908`, and reverting
+    either number to its pre-fix value left the whole D5 selection GREEN (4 passed,
+    420 deselected) — `_D5_CURRENT_CLAIMS` carried no entry naming it, and a
+    `_pin_row_failures` row is satisfied by ANY `:N` on the line, of which D5 has many.
+    The row's own sentence is the claim and `tortoise/sdk.py` is its subject, so the two
+    are compared here rather than typed.
+    """
+    d5 = [
+        line for line in
+        _EPIC_CITE_DOCS["05-verify.md"].read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("| **D5** |")
+    ]
+    assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
+    found = _D5_ONLY_LITERAL_RE.search(d5[0])
+    assert found is not None, (
+        "D5 no longer states the `AND o.eventId IS NULL` population in the shape this pin "
+        f"reads ({_D5_ONLY_LITERAL_RE.pattern!r}) — re-derive the sentence and update the "
+        "row, do not drop it: an unread present-tense number is what rotted here")
+    literal = found.group("literal")
+    stated = sorted({int(found.group("a")), int(found.group("b"))})
+    sdk = _EPIC_CITE_SOURCES["sdk"].read_text(encoding="utf-8").splitlines()
+    live = [n for n, line in enumerate(sdk, 1) if literal in line]
+    assert stated == live, (
+        f"D5 states `:{stated[0]}`/`:{stated[1]}` as the ONLY lines carrying "
+        f"{literal!r}, but `tortoise/sdk.py` carries it at {live}. Re-derive by CONTENT "
+        f"(`grep -n '{literal}' tortoise/sdk.py`), never by carrying the number forward "
+        "(#13956 review, F1)")
 
 
 def test_one_markdown_line_carries_one_pair_for_one_cite():
