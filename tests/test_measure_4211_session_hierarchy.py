@@ -769,3 +769,200 @@ def test_f2_argv_records_this_invocations_arguments_not_the_interpreters(tmp_pat
     assert argv[:3] == ["--arms", "corpus", "--sessions-dir"], argv
     assert "no:cacheprovider" not in argv, argv
     assert not any("test_measure_4211" in a for a in argv), argv
+
+
+# ── #13919 review round 5: four ways the guards failed OPEN ──────────────────
+def test_f1_a_keyless_replay_is_unmeasurable_and_the_token_is_not_the_invariant(
+        monkeypatch, tmp_path):
+    """F1 (P1): keying "replay" on ``extraction_mode == "replayed"`` failed OPEN.
+
+    ``TortoiseSDK._capture_session`` puts its KEYLESS branch BEFORE the #1727 replay
+    branch on purpose (`tortoise/sdk.py`: "a keyless call must ALWAYS be reported as
+    keyless, never as a silent 'replayed'"). So a replay performed under a keyless
+    extraction reports ``no-provider``: the ``replayed`` list stayed empty, no
+    ``unmeasurable`` was set, the run exited 0 — and ``--out <receipt> || exit 1``
+    then OVERWROTE the committed receipt with pre-existing counts. Reachable because
+    the arm arms its mock with ``os.environ.setdefault``, which does not override an
+    ambient ``TORTOISE_SESSION_LLM_MOCK`` that is present but not ``"1"``.
+
+    The invariant is "this run wrote nothing", which the arm already measured as
+    ``delta_this_run`` and then ignored.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "0")  # present, and not "1"
+
+    counts = {"points_total": 1, "turns_total": 3, "contains_edges": 3,
+              "sessions_total": 3, "objects_total": 1,
+              "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+              "sessions_with_aboutObject": 0}
+    # before == after: this run wrote NOTHING (a replay) — every delta is 0.
+    monkeypatch.setattr(mod, "_run_queries", lambda g: dict(counts))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            # A keyless capture of an ALREADY-PRESENT session: no-provider, not
+            # "replayed" — the exact shape that slipped through.
+            return {"ok": True, "turns": 0, "extraction_mode": "no-provider",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+    body = mod.measure_writer()
+    assert body.get("unmeasurable"), (
+        "a keyless REPLAY reported itself as a measured run — `--out <receipt> || "
+        "exit 1` accepts that and overwrites the committed receipt")
+    assert "wrote NOTHING" in body["unmeasurable"]
+    assert "no-provider" in body["unmeasurable"], (
+        "the reason must name the modes observed, so a reader can tell a keyless "
+        "extraction from a replayed one without re-running")
+    assert body["extraction_modes"]["m4211-ref-2of8"] == "no-provider"
+
+    # …and the EXIT CODE, not only the body (this is what `|| exit 1` reads).
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "writer", "--out", str(out)]) == 2
+
+
+def test_f1_a_real_capture_under_the_same_keyless_env_still_measures(monkeypatch):
+    """The anti-vacuity half of F1: the delta test must not red a genuine capture.
+
+    A keyless extraction still STORES its turns (`tortoise/sdk.py` — the mechanical
+    turn loop runs before the provider branch), so a FIRST run in the same keyless
+    env writes points and this arm must report a measurement, not a refusal.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "0")
+    before = {"points_total": 0, "turns_total": 0, "contains_edges": 0,
+              "sessions_total": 0, "objects_total": 0,
+              "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+              "sessions_with_aboutObject": 0}
+    after = dict(before, points_total=22, turns_total=22, contains_edges=25,
+                 sessions_total=3, objects_total=1)
+    seq = iter([dict(before), dict(after)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 22, "extraction_mode": "no-provider",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    body = mod.measure_writer()
+    assert "unmeasurable" not in body, body.get("unmeasurable")
+    assert body["delta_this_run"]["turns_total"] == 22
+
+
+def test_f2_an_unparseable_uri_refusal_does_not_carry_the_password(tmp_path):
+    """F2 (P2): the refusal path interpolated the RAW uri, credential included.
+
+    ``urlsplit`` answers ``hostname=None, password='hunter2'`` for a host-less
+    credentialed URI, so this shape takes the refusal path rather than the redacted
+    one — and the message is serialised into the receipt and its traceback by every
+    arm that catches it.
+    """
+    uri = "docker://:hunter2@/tortoise"
+    try:
+        mod._parse_uri(uri)
+    except ValueError as exc:
+        assert "hunter2" not in str(exc), "the refusal itself carried the password"
+    else:  # pragma: no cover - the shape must refuse
+        raise AssertionError("a host-less URI was accepted")
+
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "live", "--live-uri", uri, "--out", str(out)]) == 2
+    assert "hunter2" not in out.read_text(), (
+        "the password reached the receipt through the arm's error/`traceback` field")
+
+
+def test_f3_a_graph_whose_name_only_CONTAINS_a_marker_is_not_ephemeral():
+    """F3 (P2): substring matching admitted real production names.
+
+    ``test`` is a substring of ``latest`` and of ``contest``, so
+    ``any(marker in graph ...)`` let the writer arm mint three fixture sessions, the
+    shared claim Point and the Object ``test/repo#42`` into ``tortoise_latest`` /
+    ``prod_latest`` / ``contest_graph`` — the consequence N8's refusal exists to
+    prevent.
+    """
+    for prod in ("tortoise", "graphs", "tortoise_latest", "prod_latest",
+                 "contest_graph", "protest"):
+        assert not mod._looks_ephemeral(prod), (
+            f"{prod!r} was admitted as a lane throwaway — the write refusal failed open")
+    for lane in ("m4211_hierarchy", "m4211-x", "test_graph", "ci_lane",
+                 "tmp.scratch", "e2e", "lane_42"):
+        assert mod._looks_ephemeral(lane), lane
+    # A name that merely STARTS with a marker but carries no delimiter is NOT
+    # admitted: the refusal is the safe direction, so `scratchpad` refuses rather
+    # than writes into a graph nobody proved was a throwaway.
+    assert not mod._looks_ephemeral("scratchpad")
+
+
+def test_f4_the_embedded_arm_takes_the_embedded_resolver_not_the_server_one(
+        monkeypatch):
+    """F4 (P2): the correction this PR makes is otherwise unpinned.
+
+    ``tests/test_bounded_raw_clients_3065.py`` accepts EITHER shape (an explicit
+    ``socket_timeout=`` or a ``**…socket_kwargs…`` spread), so reverting
+    ``_open_embedded`` to ``**_bounded_server_socket_kwargs()`` keeps that guard green
+    while re-installing both harms: a ``socket_connect_timeout`` that redis-py DROPS
+    on the unix-socket branch (a knob that reads as wired and bounds nothing), and the
+    HOST lane's retry policy in place of the embedded lane's.
+    """
+    from tortoise.projection import _socket_timeouts
+
+    seen: dict = {}
+
+    def _fake(path, **kwargs):
+        seen["path"] = path
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("tortoise.FalkorDB", _fake)
+    mod._open_embedded(Path("/tmp/m4211-embedded-pin.db"))
+
+    assert "socket_connect_timeout" not in seen, (
+        "the SERVER-lane pair was spread onto a unix-socket client: redis-py drops "
+        "socket_connect_timeout on that branch, so the kwarg is a bound that does "
+        "not exist (the trap #3421 removed from projection's own embedded branch)")
+    assert seen["socket_timeout"] == _socket_timeouts()[1], (
+        "the embedded read bound must come from _socket_timeouts(), like the "
+        "product's own embedded branch")
+    assert getattr(seen.get("retry"), "_retries", None) == 1, (
+        "the embedded lane's retry policy (_embedded_retry: ONE reconnect for a real "
+        "transport blip) was replaced by the host lane's (_no_server_retry: zero)")

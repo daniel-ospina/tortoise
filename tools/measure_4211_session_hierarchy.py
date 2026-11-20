@@ -108,6 +108,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -136,7 +137,17 @@ DEFAULT_ARMS = "store,live,instrument,corpus"
 KNOWN_ARMS = (*DEFAULT_ARMS.split(","), "writer")
 
 #: Graph names the writer arm may write into without an explicit override.
-EPHEMERAL_GRAPH_MARKERS = ("m4211", "test", "tmp", "lane", "scratch", "e2e", "ci_")
+#:
+#: ⛔ Matched as a DELIMITED SEGMENT, never as a substring (#13919 review F1). A
+#: substring test reads "ephemeral" out of ordinary production names — `test` is a
+#: substring of `latest` and of `contest`, so a substring `any(m in g ...)` silently
+#: admitted `tortoise_latest`, `prod_latest` and `contest_graph`, and the writer arm
+#: would then mint its three `m4211-*` fixture sessions, the shared claim Point and
+#: the Object `test/repo#42` into a graph N8's refusal exists to protect. The
+#: strings here are segmented names (the trailing `_` on `ci_` is dropped because the
+#: delimiter already carries it); `_looks_ephemeral` splits the candidate on the same
+#: delimiters, so `m4211_hierarchy` and `ci_x` still match while `latest` does not.
+EPHEMERAL_GRAPH_MARKERS = ("m4211", "test", "tmp", "lane", "scratch", "e2e", "ci")
 
 #: The product modules the measurement runs THROUGH: their digests are recorded beside
 #: ``instrument.sha256`` so an SDK move is distinguishable from a graph move (#4211 N7).
@@ -435,8 +446,13 @@ def _open_embedded(path: Path):
     # wire a CONNECT bound that does not exist — a knob that reads as wired and does
     # nothing, which is the trap #3421 removed from the product's own embedded
     # branch. The embedded lane takes its read bound from ``_socket_timeouts()``
-    # directly and its retry policy from ``_embedded_retry()`` — exactly what
-    # ``projection``'s embedded branch does with these same two helpers.
+    # directly and its retry policy from ``_embedded_retry()`` — the same two helpers
+    # ``projection``'s embedded branch resolves. One DELIBERATE divergence, stated so
+    # it is not misread as parity (#13919 review F4): ``projection`` also calls
+    # ``_apply_embedded_connect_timeout(self.db, connect_to)`` to deliver the CONNECT
+    # bound to the POOL, and this site does not — a redislite handle spawns its own
+    # local daemon, so there is no foreign host for that leg to bound. The READ bound,
+    # which is what a stalled engine parks, is wired here.
     _connect_to, read_to = _socket_timeouts()
     return FalkorDB(str(path), socket_timeout=read_to, retry=_embedded_retry())
 
@@ -495,7 +511,15 @@ def _parse_uri(uri: str) -> dict:
     from urllib.parse import urlsplit
     parts = urlsplit(uri)
     if not parts.hostname:
-        raise ValueError(f"unparseable DB URI: {uri!r}")
+        # ⛔ NEVER interpolate the input (#13919 review F2). `urlsplit` answers
+        # `hostname=None, password=<secret>` for a host-less credentialed URI
+        # (`docker://:hunter2@/tortoise`), so the refusal path is reachable with a
+        # real password — and this message is serialised into the receipt (and its
+        # traceback) by every arm that catches it. `_redact_uri` already answers
+        # `<unparseable-uri>` for exactly this shape, so reuse it rather than
+        # re-deriving a redaction that could drift from the one the cited arms use.
+        raise ValueError(
+            f"unparseable DB URI (userinfo redacted): {_redact_uri(uri)}")
     return {
         "host": parts.hostname,
         "port": parts.port or 6379,
@@ -833,8 +857,18 @@ def _delta(before: dict, after: dict) -> dict:
 
 
 def _looks_ephemeral(graph: str) -> bool:
+    """Is this graph name a lane throwaway? SEGMENT-match, never substring.
+
+    #13919 review F1: `any(marker in graph for marker in ...)` admitted
+    "tortoise_latest", "prod_latest" and "contest_graph" — `test` is a substring of
+    `latest` and of `contest` — so the N8 refusal failed open on exactly the
+    production names it exists to protect. Splitting on the delimiters the fleet
+    actually uses (`_`, `-`, `.`) keeps `m4211_hierarchy` / `ci_x` ephemeral and
+    makes `latest` a segment of its own, not evidence of a test.
+    """
     g = (graph or "").lower()
-    return any(marker in g for marker in EPHEMERAL_GRAPH_MARKERS)
+    segments = [s for s in re.split(r"[_\-.]", g) if s]
+    return any(marker in segments for marker in EPHEMERAL_GRAPH_MARKERS)
 
 
 def _writer_target(uri: str) -> tuple[dict | None, str | None]:
@@ -909,6 +943,8 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
         after = _run_queries(g)
         replayed = [sid for sid, c in captures.items()
                     if c.get("extraction_mode") == "replayed"]
+        delta = _delta(before, after)
+        modes = {sid: c.get("extraction_mode") for sid, c in captures.items()}
         body = {
             # WHERE it wrote, not only which graph NAME: the receipt used to carry
             # `uri_graph` alone, so a lane container and a served store were
@@ -928,17 +964,43 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
             "per_session": per_session,
             "counts": after,
             "counts_before_any_write": before,
-            "delta_this_run": _delta(before, after),
+            "delta_this_run": delta,
+            # The extraction MODE per session, recorded so a reader can tell a mocked
+            # extraction from a keyless one without re-running (#13919 review F1).
+            "extraction_modes": modes,
             "queries": dict(QUERIES),
             "per_session_queries": _PER_SESSION,
         }
-        if replayed:
+        # ── did this run WRITE anything? Ask the INVARIANT, not a label ──────
+        # #13919 review F1: the previous test was `extraction_mode == "replayed"`,
+        # and that token is not the invariant. `TortoiseSDK._capture_session` puts
+        # its KEYLESS branch BEFORE the #1727 replay branch on purpose
+        # (`tortoise/sdk.py`, "a keyless call must ALWAYS be reported as keyless,
+        # never as a silent 'replayed'"), so a replay performed under a keyless
+        # extraction reports `no-provider` — `replayed` stayed empty, no
+        # `unmeasurable` was set, and `--out <receipt> || exit 1` returned 0 and
+        # OVERWROTE the committed receipt with pre-existing counts. Reachable
+        # because the mock is armed with `os.environ.setdefault`, which does not
+        # override an ambient `TORTOISE_SESSION_LLM_MOCK` that is present but not
+        # "1".
+        #
+        # The fixture writes three known sessions, so "this run wrote nothing" is
+        # decidable from the delta alone — the numbers this arm ALREADY measured
+        # and then ignored. A first run under the same keyless env still writes its
+        # turns (the mechanical turn loop and link pass are mock-independent), so
+        # this cannot mask a real capture.
+        if delta.get("turns_total") == 0 and delta.get("points_total") == 0:
             # A replay proves nothing about a writer: nothing was written. The numbers
             # that follow are the PRE-EXISTING content of this graph.
+            why = ("sessions replayed, not captured: " + ", ".join(replayed)
+                   if replayed else
+                   "this run wrote NOTHING (no new turns and no new points) — the "
+                   "three fixture session ids were already in this graph, so the "
+                   "counts describe an earlier run")
             body["unmeasurable"] = (
-                "sessions replayed, not captured: " + ", ".join(replayed) +
-                " — this graph already held these session ids, so the run wrote nothing "
-                "and the counts describe an earlier run. Re-run on a FRESH graph name.")
+                why + ". Extraction modes observed: " +
+                ", ".join(f"{sid}={mode}" for sid, mode in sorted(modes.items())) +
+                ". Re-run on a FRESH graph name.")
         return body
     finally:
         sdk.close()
