@@ -1466,10 +1466,17 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     before this arm: `[]` raised `AttributeError: 'list' object has no attribute 'get'` and
     `{"packs": "x"}` raised `'str' object has no attribute 'items'` — the crash-after-a-paid-run
     class the loader fault at F4b closed one function over, left open on the ARTIFACT side.
-    A truncated or hand-edited artifact is the shape this column exists to survive, so both
-    directions of the shape fault are armed.
+    A truncated or hand-edited artifact is the shape this column exists to survive, so every
+    direction of the shape fault is armed — including the one the first cut missed: a surface value
+    that is not a LIST (`"relations": 42` raised `TypeError: 'int' object is not iterable`),
+    measured after the guard was written for the two coarser shapes.
     """
-    for payload, why in (("[]", "a LIST"), ("{\"packs\": \"x\"}", "non-object packs")):
+    for payload, why in (("[]", "a LIST"),
+                         ("{\"packs\": \"x\"}", "non-object packs"),
+                         ("{}", "no packs at all"),
+                         ("{\"packs\": null}", "null packs"),
+                         ("{\"packs\": {\"dev\": {\"relations\": 42}}}", "non-LIST surface"),
+                         ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}", "bool surface")):
         bad = tmp_path / "census.json"
         bad.write_text(payload)
         cells, source = measure._e6_write_cells(str(bad))
@@ -16320,7 +16327,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #: restating the tuple inline (`#11695` review F4d/Finding 2), which is the second half of
     #: the body's "stated once" claim: the record's block and this map are re-derived together.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 19}, (
+                        "probes/capstone_measure.py": 20}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")

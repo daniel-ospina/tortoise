@@ -4229,18 +4229,35 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
         return {}, (f"{census_path} holds a {type(artifact).__name__}, not a JSON object; "
                     f"its `written` cells are UNMEASURED")
     cells: dict[tuple, dict] = {}
+    faults: list[str] = []
     blocks = artifact.get("packs")
-    if blocks is not None and not isinstance(blocks, dict):
-        return {}, (f"{census_path} carries a {type(blocks).__name__} under `packs`, not a "
-                    f"JSON object; its `written` cells are UNMEASURED")
-    for pack, block in (blocks or {}).items():
+    if not isinstance(blocks, dict):
+        return {}, (f"{census_path} carries "
+                    f"{'no' if blocks is None else 'a ' + type(blocks).__name__} `packs` "
+                    f"object; its `written` cells are UNMEASURED")
+    for pack, block in blocks.items():
         if not isinstance(block, dict):
+            faults.append(f"pack {pack!r} is a {type(block).__name__}")
             continue
         for surface in E6_SURFACES:
-            for row in block.get(surface) or []:
+            # ⛔ THE CONTAINER, not only the rows inside it: a truncated artifact's
+            # `"relations": 42` made `for row in 42` raise `TypeError: 'int' object is not
+            # iterable` — the THIRD shape of the same class (#14060 review round 5, measured:
+            # `{"packs": {"dev": {"relations": 42}}}` and `{"hierarchies": true}`).
+            here = block.get(surface)
+            if not isinstance(here, list):
+                faults.append(f"{pack}.{surface} is a {type(here).__name__}, not a list")
+                continue
+            for row in here:
                 if not isinstance(row, dict):
                     continue
                 cells[_e6_key(pack, surface, row)] = row
+    if faults:
+        # ⛔ THE FAULT IS NAMED, never folded into a normal-read `source`: a silent skip is the
+        # half of this defect that leaves every affected row reading `unmeasured` while the
+        # beside column claims it was read (#14060 review round 5, the arm found it twice).
+        return cells, (f"{census_path} is MALFORMED ({'; '.join(faults)}); "
+                       f"its `written` cells are UNMEASURED")
     generated = artifact.get("generated_by") or "an unstated command"
     return cells, f"{census_path} (generated_by: {generated})"
 
@@ -4268,7 +4285,12 @@ def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
         if not isinstance(block, dict):
             continue
         for surface in E6_SURFACES:
-            for row in block.get(surface) or []:
+            # The same container guard as `_e6_write_cells`: the census arrives from the tool,
+            # but a malformed one must degrade rather than raise inside a paid run.
+            here = block.get(surface)
+            if not isinstance(here, list):
+                continue
+            for row in here:
                 if isinstance(row, dict):
                     rows.append((pack, surface, row))
     return rows

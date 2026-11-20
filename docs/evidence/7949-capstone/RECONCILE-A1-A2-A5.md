@@ -222,7 +222,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
    bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 52 hits are the bundle's own registration**
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 53 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
    the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
@@ -794,7 +794,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16103`) that derives the doc's cite, two are the
+                                                          # (`:16110`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -804,7 +804,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:16103` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the `:16110` cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
@@ -878,10 +878,10 @@ git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup qu
 # not a producer — the bundle CITES the predicate, it does not produce it. The producer
 # claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 52 lines, exit 0 — all in the bundle
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 53 lines, exit 0 — all in the bundle
                                                             # (PRE-REGISTRATION.md 24,
                                                             # preregistration.json 9,
-                                                            # probes/capstone_measure.py 19)
+                                                            # probes/capstone_measure.py 20)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \
