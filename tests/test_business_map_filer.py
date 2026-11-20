@@ -22,6 +22,7 @@ import ast
 import importlib.util
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -146,6 +147,102 @@ def test_write_map_refuses_a_response_with_no_id(tmp_path, monkeypatch, map_doc)
 
     with pytest.raises(RuntimeError, match="returned no id"):
         filer.write_map(map_doc)
+
+
+class _RecordingMcp:
+    """A transport that records every call it is asked to make."""
+
+    instances: ClassVar[list[_RecordingMcp]] = []
+
+    def __init__(self, *_a, **_k) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        _RecordingMcp.instances.append(self)
+
+    def initialize(self) -> None:
+        return None
+
+    def call(self, tool: str, args: dict, **_kw) -> dict:
+        self.calls.append((tool, dict(args)))
+        return {"structuredContent": {"id": f"{tool}:{len(self.calls)}"}}
+
+
+def test_write_map_refuses_a_state_whose_ids_are_item_identities(tmp_path, monkeypatch, map_doc):
+    """A `state.json` full of NAMES is not proof of filing, and must not be
+    resumed over.
+
+    This is the on-disk shape of the false PASS the PR body documents: the
+    pre-fix run recorded each item's name/url/content as its "id". A resume then
+    finds every marker present, prints "all nodes and edges written" and exits 0
+    with nothing in the graph.
+
+    Mutant: delete the `named` guard in `write_map` — this run makes zero calls
+    and returns 0, which is exactly the silent success it refuses.
+    """
+    stale = {"ids": {}, "written": [], "failed": []}
+    for section in ("subjects", "objects", "sources", "events", "points"):
+        for item in map_doc[section]:
+            _prop, value = filer.declared_identity(item)
+            stale["ids"][item["ref"]] = value            # an identity, not an id
+    stale["written"] = [f"{section[:-1]}:{item['ref']}"
+                        for section in ("subjects", "objects", "sources", "events", "points")
+                        for item in map_doc[section]]
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(stale))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+
+    assert filer.write_map(map_doc) == 2
+    assert _RecordingMcp.instances[-1].calls == []
+
+
+def test_write_map_resumes_a_state_whose_ids_are_real(tmp_path, monkeypatch, map_doc, capsys):
+    """Non-vacuity: a state file of REAL ids still resumes (skips) as before."""
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    before = len(_RecordingMcp.instances)
+    assert filer.write_map(map_doc) == 0                       # second run
+    assert len(_RecordingMcp.instances) == before + 1          # it ran...
+    assert _RecordingMcp.instances[-1].calls == []             # ...and wrote nothing
+    capsys.readouterr()
+
+
+def test_the_edge_arm_ignores_edges_that_are_not_the_map_s(map_doc):
+    """101 edges among FOREIGN nodes are not the map's 101 edges.
+
+    Mutant: credit an edge whenever each endpoint matches ANY identity present
+    (`& present`) — both foreign-edge cases go green with zero declared edges.
+    """
+    foreign_nodes = [["", f"foreign-{i}", ""] for i in range(30)]
+    foreign_edges = [["IMPL", "", f"foreign-{i}", "", "", f"foreign-{i + 1}", ""]
+                     for i in range(29)]
+    assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes,
+                         foreign_edges, []) == 1
+    padded = [foreign_edges[i % len(foreign_edges)] for i in range(len(map_doc["edges"]))]
+    assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes, padded, []) == 1
+
+
+def test_the_edge_arm_reads_the_relation_not_only_the_endpoints(map_doc):
+    """101 edges between the right nodes with the WRONG relations is not filed.
+
+    `NAND` vs `IMPL` is the one distinction whose inversion changes what the graph
+    MEANS, so a census blind to the relation certifies exactly that defect.
+
+    Mutant: drop the relation from the match — every case here goes green.
+    """
+    structural, operators = _edge_rows(map_doc)
+    unrelated = [["related", *row[1:]] for row in structural]
+    assert filer.verdict(map_doc, _node_rows(map_doc), unrelated, operators) == 1
+
+    inverted = [["IMPL" if row[1] == "NAND" else row[1], *row[2:]] for row in operators]
+    assert sum(1 for e in map_doc["edges"] if e.get("op") == "NAND") > 0
+    assert filer.verdict(map_doc, _node_rows(map_doc), structural, inverted) == 1
 
 
 def test_validate_refuses_an_undeclared_object_kind(map_doc):

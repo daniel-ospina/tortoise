@@ -511,6 +511,23 @@ def write_map(doc: dict) -> int:
     ids: dict[str, str] = st["ids"]
     failures: list[str] = []
 
+    # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
+    # taken on trust. The pre-fix run recorded every item's own name/url/content
+    # as its "id" (that is what the false PASS looked like on disk); a resume
+    # over that file finds every marker present, prints "all nodes and edges
+    # written" and exits 0 with nothing filed. So the resume state is CHECKED
+    # before it is believed — the read-back's discipline applied to the only
+    # input it cannot see.
+    named = [(ref, got) for ref, got in ids.items() if _is_identity_of(doc, ref, got)]
+    if named:
+        ref, got = named[0]
+        print(f"state.json is not a filing record: {len(named)} id(s) are the "
+              f"item's OWN identity, not an id the door returned "
+              f"(e.g. {ref!r} -> {got[:60]!r}). Delete {STATE_PATH} and re-run "
+              f"--write; resuming over it would report success over an empty "
+              f"graph.", file=sys.stderr)
+        return 2
+
     def already(marker: str) -> bool:
         return marker in st["written"]
 
@@ -675,6 +692,15 @@ def doc_by_ref(doc: dict, ref: str) -> dict:
     raise KeyError(ref)
 
 
+def _is_identity_of(doc: dict, ref: str, value: str) -> bool:
+    """Is `value` this ref's own identity — i.e. a name masquerading as an id?"""
+    try:
+        item = doc_by_ref(doc, ref)
+    except KeyError:
+        return False
+    return declared_identity(item)[1] == value
+
+
 def event_name(event: dict) -> str:
     """The `name` the event door requires, taken from the map's own handle.
 
@@ -707,19 +733,23 @@ CLEAN_GRAPH = "org_3326a01ea34ae595d84de5d8f9_g_311d79c684de4d0e8953d189ed"
 IDENTITY_PROPS = ("name", "url", "content")
 
 
+def declared_identity(item: dict) -> tuple[str, str]:
+    """The (property, value) that identifies the node ONE map item writes."""
+    if "url" in item:
+        return ("url", item["url"])
+    if "eventKind" in item:
+        return ("name", event_name(item))
+    if "name" in item:
+        return ("name", item["name"])
+    return ("content", item["content"])
+
+
 def identity_by_ref(doc: dict) -> dict[str, tuple[str, str]]:
     """ref -> the (property, value) that identifies the node it writes."""
     out: dict[str, tuple[str, str]] = {}
-    for s in doc["subjects"]:
-        out[s["ref"]] = ("name", s["name"])
-    for o in doc["objects"]:
-        out[o["ref"]] = ("name", o["name"])
-    for s in doc["sources"]:
-        out[s["ref"]] = ("url", s["url"])
-    for e in doc["events"]:
-        out[e["ref"]] = ("name", event_name(e))
-    for p in doc["points"]:
-        out[p["ref"]] = ("content", p["content"])
+    for section in ("subjects", "objects", "sources", "events", "points"):
+        for item in doc[section]:
+            out[item["ref"]] = declared_identity(item)
     return out
 
 
