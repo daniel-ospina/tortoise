@@ -15902,7 +15902,8 @@ class TortoiseSDK:
                     point: dict | None = None,
                     id: str | None = None,
                     recorded_ts: str | None = None,
-                    record_sink: list | None = None, **extra) -> bool | None:
+                    record_sink: list | None = None,
+                    write_sink: list | None = None, **extra) -> bool | None:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
@@ -15912,10 +15913,28 @@ class TortoiseSDK:
         indistinguishable from "nothing happened" at the only place a consumer
         can see it.
 
-        **Return value (the #7951 commit signal):** ``True`` when the record was
-        appended to a configured JSONL journal, ``False`` when a configured
-        journal's append RAISED, and ``None`` when there is nothing to log or no
-        journal is configured.
+        **Return value (the #7951 commit signal, corrected for #14002):**
+        ``True`` when THIS write reached a durable store, ``False`` when it
+        reached NEITHER, and ``None`` when there is nothing to log or no journal
+        is configured. Which store that is depends on the arm the chokepoint
+        took, and a caller does not have to know:
+
+        * **the append arm** — ``True``, or ``False`` if the append RAISED. The
+          journal line is the commit point; this is the pre-#14002 behaviour,
+          unchanged.
+        * **the RECORD-ONLY arm (#14002)** — the append does not happen at all,
+          so ``True`` answers for the RECORD's own ``applied`` outcome and
+          ``False`` means the record did not take the write: it is in NEITHER
+          store (the pair ``appended=False, applied=False``, which
+          `tortoise/live_write.py` names as unrecoverable). ⛔ BEFORE THIS the
+          return was ``True`` on that arm unconditionally, so the door's only
+          per-call signal told two consumers — `hosted_api`'s narrative-home
+          reporter and this class's own `_create_point` gate — that a REFUSED
+          write had landed, and neither could raise or report a loss.
+
+        ⛔ IT IS NOT A JOURNAL-LINE DETECTOR. A caller that has to NAME the
+        store that holds the write reads ``write_sink`` (below); a caller asking
+        "did this land at all?" — every gate written before #14002 — reads this.
 
         **``record_sink`` (#10000): the RECORD's outcome, not the journal's.**
         A caller that supplied a list gets this emit's
@@ -15932,6 +15951,20 @@ class TortoiseSDK:
         write on: a shared instance counter can be incremented by a CONCURRENT
         writer (#5612), which would report a committed record as failed and
         invite a duplicate re-issue.
+
+        **``write_sink`` (#14002): the CHOKEPOINT's own result, verbatim.** A
+        caller that supplied a list gets the
+        :class:`~tortoise.live_write.LiveWrite` this emit produced appended to
+        it — ``None`` on the paths that return before the chokepoint (nothing to
+        log, no journal). Same per-call discipline as ``record_sink`` and for the
+        same reason (the SDK is shared by concurrent writers, #5612), and it is
+        needed because the boolean above deliberately declines to say WHICH
+        store holds the write: `hosted_api._report_narrative_home` has to tell
+        "no durable journal exists" (the remedy is to arm one) from "the append
+        was SKIPPED because the record owns the ordinal" (the journal exists and
+        is NOT the recovery source), and ``LiveWrite.appended`` is that fact.
+        Without it the only channels are a boolean and a refusal token, and
+        neither distinguishes those two states.
 
         Four call styles supported:
         1. ``_emit_event("PointAdded", {"id": ..., ...})``
@@ -16231,11 +16264,12 @@ class TortoiseSDK:
         # why `tenant=` is passed below (see its note).
         from . import live_write
 
+        write: Any | None = None
         try:
             # #9190: the append's return value IS the record's journal position;
             # it is threaded to the record so layer 1 stops being empty on live
             # writes. `None` (an in-memory log) means there is nothing to number.
-            live_write.write(
+            write = live_write.write(
                 # ⛔ THE TENANT IS LOAD-BEARING HERE SINCE #14002 (#13345 review
                 # P3-2 reviewed the opposite). The chokepoint asks
                 # `record_owns_position` — which graph is cut over — BEFORE it
@@ -16307,7 +16341,25 @@ class TortoiseSDK:
         # is still the SDK's own record half (its import guard, durability read
         # and fail-soft accounting have one home), it is just no longer
         # ORDERED here.
-        return True
+        if write_sink is not None:
+            write_sink.append(write)
+        # ⛔ THE PER-CALL COMMIT SIGNAL, FOR THE ARM THIS CALL ACTUALLY TOOK
+        # (#14002 review cycle 7, blocking). The append arm is untouched: a line
+        # was committed to the journal, which is the truth store, so every
+        # pre-existing gate (`_create_point`'s `WriteNotLandedError`,
+        # `_update_point`'s, the evidence fold's, and
+        # `hosted_api._report_narrative_home`'s `journalled`) keeps meaning what
+        # it always meant. `write is None` is not reachable through
+        # `live_write.write` and is answered as LANDED on purpose: a chokepoint
+        # that ever reported nothing must not be able to turn every write into a
+        # "not landed" refusal.
+        if write is None or write.appended:
+            return True
+        # The record-only arm: no line exists, so the RECORD is the only store
+        # that could hold this write and its own verdict is the commit signal.
+        # `False` here is the `appended=False, applied=False` pair — in NEITHER
+        # store — which is the one outcome a caller must never be told landed.
+        return bool(getattr(write.record, "applied", False))
 
     def _write_record_projection(self, record: dict,
                                  seq: int | None, *,
@@ -18625,6 +18677,16 @@ class TortoiseSDK:
         # read and the check, which would report THIS call's committed record as
         # failed and invite a duplicate re-issue (#5612; the sibling doors still
         # use the delta — plan §6.10).
+        #
+        # ⛔ AND SINCE #14002 IT ANSWERS FOR WHICHEVER STORE OWNS THE WRITE,
+        # which is why this gate is unchanged and the fix is one layer down. On
+        # a cut-over graph the append does not happen at all — the record owns
+        # the ordinal — so the chokepoint returns `False` unless the RECORD
+        # applied it (`_emit_event`'s return-value contract). Without that, this
+        # arm could no longer fire on a cut-over graph: a write the record
+        # REFUSED read as landed, the CREATE below went ahead, and the caller got
+        # success for an event in NEITHER store — the exact reported-opposite
+        # state R2 exists to prevent (review cycle 7, FINDING 1).
         _record_committed = self._emit_event(
             "PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
             point=_intended)
@@ -18658,9 +18720,11 @@ class TortoiseSDK:
         # exactly as it was before this write, and the record holds the event, so
         # `derived = replay(journal)` folds the whole event later, atomically.
         #
-        # ⚠️ Nothing is lost and nothing is refused: the journal line and the
-        # record row are already committed above (the `WriteNotLandedError` gate
-        # two lines up proves the record took it), reads for this point fall back
+        # ⚠️ Nothing is lost and nothing is refused: the write is in the store
+        # that OWNS it — the journal line on the append arm, the record row on
+        # the cut-over arm — and the `WriteNotLandedError` gate two lines up is
+        # what proved it (it refuses BOTH "the append raised" and, on a cut-over
+        # graph, "the record did not take it"); reads for this point fall back
         # to the record, and the outcome is NAMED on the returned `LiveWrite`
         # (`cache_fold`) rather than being silent. #10976 is untouched — no byte is
         # deleted here, the cache simply stops growing.

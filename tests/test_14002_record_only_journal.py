@@ -170,14 +170,29 @@ def owns_position(monkeypatch):
     return state
 
 
-def test_an_unarmed_deployment_never_asks_and_never_reads(monkeypatch):
+def test_an_unarmed_deployment_never_asks_and_never_reads(monkeypatch, caplog):
     """OFF is today's behaviour byte for byte — no socket, no read, no query.
 
     `record_live_allocate()` is checked FIRST for that reason: an unarmed
     deployment is the overwhelming majority of installs, and a switch that costs
     a database round trip when it is OFF is a switch nobody leaves off.
+
+    ⛔ AND THE BOMB ALONE COULD NOT RED THIS LEG (#14002 review cycle 7,
+    FINDING 2 — `#3442` rule 3). It used to raise `AssertionError`, an
+    `Exception`: the helper's own fail-open `except Exception` arm CAUGHT it by
+    design, warned, and returned `False` — the exact value this test asserted. So
+    deleting the flag-first return (R4, the switch's whole cost story) left this
+    leg GREEN: the bomb could not escape the arm it was aimed at, and nothing
+    looked at whether the read was ATTEMPTED. The falsifier is now the
+    ATTEMPT — `asked` — which no fail-open answer can produce, plus the warning
+    the swallowed read emits and the throttle stamp it sets. Measured: with
+    `record_writer.py`'s `if not record_live_allocate(): return False` deleted,
+    `asked == [((), {})]` and the stamp moves, so both new arms red.
     """
-    def bomb(*_a, **_kw):
+    asked: list = []
+
+    def bomb(*args, **kwargs):
+        asked.append((args, kwargs))
         raise AssertionError(
             "an unarmed deployment opened the record to ask a cutover question")
 
@@ -185,8 +200,27 @@ def test_an_unarmed_deployment_never_asks_and_never_reads(monkeypatch):
     monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
     monkeypatch.setattr(rw, "_default_connect", bomb)
     monkeypatch.setattr(rw, "record_live_allocate", lambda: False)
+    #: A sentinel, not `0.0`: the fail-open arm's warning is throttled per
+    #: process by `OWNS_POSITION_WARN_SECONDS`, and a zeroed stamp would let the
+    #: throttle hide the mutant's warning instead of exposing it.
+    monkeypatch.setattr(rw, "_owns_position_warned_at", 1234.5)
 
-    assert rw.record_owns_position(tenant=("o", "g")) is False
+    with caplog.at_level("WARNING", logger="tortoise.record_writer"):
+        assert rw.record_owns_position(tenant=("o", "g")) is False
+
+    assert asked == [], (
+        "an unarmed deployment opened the record to ask a cutover question — "
+        f"the flag-first return is GONE and every write on every non-cutover "
+        f"deployment now pays a round trip for a question the flag answered "
+        f"(#14002 R4); connects attempted: {asked}")
+    assert rw._owns_position_warned_at == 1234.5, (
+        "the answer came from the fail-open arm, not from the flag-first "
+        "return — a read was measured (and warned about) on a deployment that "
+        "must not touch the record at all")
+    assert not any("could not be MEASURED" in rec.getMessage()
+                   for rec in caplog.records), (
+        "an unarmed deployment emitted the could-not-be-MEASURED warning: it "
+        "tried to read the cursor row it must never open")
 
 
 def test_the_row_must_be_in_active_mode_and_the_read_is_committed(owns_position,
@@ -400,6 +434,186 @@ def test_the_real_helper_forwards_the_tenant_and_durable_and_the_DECISION(
         "helper's ANSWER is not reaching the decision")
     assert result.appended is False
     assert seen and seen[0]["journal_skipped"] is True
+
+
+# ── 2b. the DOOR's per-call commit signal, on the arm #14002 creates ────
+
+
+def _refused_record(refusal: str = "circuit_open"):
+    """The seam's own REFUSED report — the reachable shape, not a stand-in."""
+    return rw.RecordWrite(outcome=rw.RecordWriteOutcome.REFUSED, refusal=refusal)
+
+
+def _applied_record():
+    return rw.RecordWrite(outcome=rw.RecordWriteOutcome.APPLIED, statements=1)
+
+
+@pytest.fixture()
+def sdk_with_journal(tmp_path, monkeypatch):
+    """A real SDK with its own embedded graph and its own JSONL journal."""
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "door.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        yield sdk, events / "events.jsonl"
+    finally:
+        sdk.close()
+
+
+def test_a_refused_record_only_write_is_reported_NOT_landed(
+        sdk_with_journal, monkeypatch):
+    """⛔ R2, ONE LAYER OUT (#14002 review cycle 7, FINDING 1 — blocking).
+
+    On a cut-over graph the append is skipped, so the RECORD is the only store
+    this write could reach. `_emit_event` returned `True` there unconditionally
+    ("it did not raise, so it landed"), and two consumers read that `True` as a
+    durable copy: `_create_point`'s `WriteNotLandedError` gate could no longer
+    fire, and `hosted_api._report_narrative_home` reported the prose as readable
+    from a journal that never received the line.
+
+    (1) FAILS PRE-FIX: `_emit_event` answers `True`, so both assertions on the
+        returned value red, and the sibling leg below proves `_create_point`
+        then WRITES the Point.
+    (2) DISCRIMINATING THE OTHER WAY — the second half of this leg: a refused
+        record on the APPEND arm must still answer `True`. The journal line is
+        the commit point there, and a fix that reds that case would turn every
+        record refusal into a lost write on every deployment that has not cut
+        over.
+    """
+    sdk, journal = sdk_with_journal
+    monkeypatch.setattr(live_write, "_record_owns_position", lambda **_kw: True)
+    monkeypatch.setattr(sdk, "_write_record_projection",
+                        lambda record, seq, *, journal_skipped=False:
+                        _refused_record())
+
+    writes: list = []
+    landed = sdk._emit_event(
+        "PointAdded", point={"id": "p-refused-14002", "content": "c"},
+        write_sink=writes)
+
+    assert writes, "`write_sink` received nothing — the skip fact never left the door"
+    assert writes[0].appended is False, (
+        "this leg did not reach the record-only arm (the append was not "
+        "skipped), so it proves nothing about the cut-over signal")
+    assert not journal.exists() or journal.read_text() == "", (
+        "the append landed on disk on a graph the helper said is cut over")
+    assert landed is False, (
+        "a write the record REFUSED was reported as landed: on a cut-over "
+        "graph nothing else can hold it (`appended=False, applied=False`), so "
+        "`True` here is the door telling its callers a lost write succeeded")
+
+    # …and the APPEND arm keeps the #7951 semantics: the line is the commit point.
+    monkeypatch.setattr(live_write, "_record_owns_position", lambda **_kw: False)
+    assert sdk._emit_event(
+        "PointAdded", point={"id": "p-journalled-14002", "content": "c"}) is True, (
+        "a refused record on the append arm was reported as NOT landed — the "
+        "journal line is committed there, and reporting otherwise rolls back a "
+        "write that persisted")
+
+
+def test_a_skipped_append_the_record_APPLIED_is_landed(sdk_with_journal,
+                                                       monkeypatch):
+    """The negative control for the leg above: the cut-over arm is not a
+    permanent "not landed" either. When the record takes the write, the write
+    IS durable (the counter is the allocator) and every pre-existing gate must
+    keep passing — otherwise the fix trades a false pass for a total outage."""
+    sdk, _journal = sdk_with_journal
+    monkeypatch.setattr(live_write, "_record_owns_position", lambda **_kw: True)
+    monkeypatch.setattr(sdk, "_write_record_projection",
+                        lambda record, seq, *, journal_skipped=False:
+                        _applied_record())
+
+    assert sdk._emit_event(
+        "PointAdded", point={"id": "p-applied-14002", "content": "c"}) is True, (
+        "a cut-over write the record APPLIED was reported as not landed — the "
+        "record owns the ordinal, so writing it IS the commit")
+
+
+def test_create_point_refuses_when_the_record_only_arm_lost_the_write(
+        sdk_with_journal, monkeypatch):
+    """FINDING 1's second consumer, end to end: `add_point` cannot report a
+    success for a write that is in NEITHER store.
+
+    Pre-fix there was NO arm on which `_create_point`'s `WriteNotLandedError`
+    could fire on a cut-over graph (the append — the only thing that can raise —
+    is skipped), so the graph CREATE proceeded and the caller got a Point id
+    for an event the record refused.
+
+    (1) FAILS PRE-FIX: no exception, and the Point EXISTS in the cache.
+    (2) The Point assertion is the one that matters: a raise alone would be
+        satisfied by a gate that fired AFTER the cache write (§17.1's ordering).
+    """
+    from tortoise.exceptions import WriteNotLandedError
+
+    sdk, _journal = sdk_with_journal
+    monkeypatch.setattr(live_write, "_record_owns_position", lambda **_kw: True)
+    monkeypatch.setattr(sdk, "_write_record_projection",
+                        lambda record, seq, *, journal_skipped=False:
+                        _refused_record())
+
+    with pytest.raises(WriteNotLandedError) as ei:
+        sdk._create_point("statement", "a claim the record refused")
+
+    assert ei.value.record_committed is False, (
+        "the record refused the write, so it is not committed")
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content CONTAINS $c RETURN count(n)",
+        params={"c": "a claim the record refused"}).result_set
+    assert int(rows[0][0]) == 0, (
+        "the Point was written although nothing holds its record — the cache "
+        "led the truth on the one arm where there is no truth store either")
+
+
+def test_the_narrative_home_is_nowhere_on_a_skipped_append_and_names_the_RECORD(
+        caplog):
+    """FINDING 1's first consumer (#14022 review cycle 7, blocking).
+
+    `_report_narrative_home` excluded `no_durable_journal` from the `journal`
+    branch because a scratch buffer is not a recovery source. #14002 adds a
+    SECOND "true but no line" arm — the append was SKIPPED — and it fell into
+    the `journalled` branch on the bool, then into the `nowhere` ERROR written
+    for the no-journal shape, whose remedy ("arm `TORTOISE_JOURNAL`") is advice
+    an operator on a cut-over graph cannot act on: they HAVE a journal, and no
+    line will ever be written to it for this record.
+
+    (1) FAILS PRE-FIX: the reporter returned `"journal"` for a refused record on
+        the skip arm — the one term that promises a replay heals it.
+    (2) DISCRIMINATING: the no-journal arm must still name the journal, or the
+        fix has moved the wrong report.
+    """
+    from tortoise import hosted_api
+
+    caplog.clear()
+    home = hosted_api._report_narrative_home(
+        session_id="test-14002-narrative", outcome=_refused_record(),
+        journalled=False, journal_skipped=True)
+    text = " ".join(rec.getMessage() for rec in caplog.records
+                    if rec.levelname == "ERROR")
+    assert home == "nowhere", (
+        f"a refused record on a cut-over graph was reported as {home!r} — the "
+        "narrative is in NO store and no replay can heal it")
+    assert "record_allocator_cli.py status" in text, (
+        "the skip arm's ERROR names no remedy an operator can act on — the "
+        f"remedy is the RECORD, not the journal; got: {text!r}")
+    assert "TORTOISE_JOURNAL" not in text, (
+        "the skip arm told the operator to arm a journal that EXISTS and is "
+        "deliberately not being written (#14002) — the fix would be spent on a "
+        "no-op")
+
+    # the OTHER `nowhere` shape is unchanged: no journal at all still names it.
+    caplog.clear()
+    assert hosted_api._report_narrative_home(
+        session_id="test-14002-narrative", outcome=None,
+        journalled=None) == "nowhere"
+    other = " ".join(rec.getMessage() for rec in caplog.records
+                     if rec.levelname == "ERROR")
+    assert "TORTOISE_JOURNAL" in other, (
+        "the no-journal `nowhere` arm lost its remedy — the two shapes have "
+        "different fixes and must not be collapsed into one message")
 
 
 def test_the_import_failure_arm_appends(monkeypatch):
