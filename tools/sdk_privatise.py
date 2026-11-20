@@ -203,6 +203,11 @@ SWEEP_NAMES = 66
 #: name will find nothing to fix and start distrusting the gate.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
+#: ⛔ THE PARAGRAPH ABOVE IS MAINTENANCE HISTORY, NOT A LIVE CLAIM — corrected by `#13919` at the
+#: merge of `origin/main` `6fbd96f270` (see the `#13919` block immediately below). The four typed
+#: references it records were `main`'s own red and are **0** on this tree, measured with `--check`
+#: (exit 0); a reader must not re-derive `main`'s red from this paragraph.
+#:
 #: ⛔ WHY THIS PIN'S RED IS NEVER EXCUSABLE AS `main`'s OWN: `surface-guard` is NOT in the
 #: `DEFERRABLE_LEGS` set (located with `grep -n 'DEFERRABLE_LEGS="' .github/workflows/python-ci.yml`
 #: — one hit; it read `:5450` at `fe322247d1`, and the number is cited this way rather than typed
@@ -211,10 +216,6 @@ SWEEP_NAMES = 66
 #: measured on `44747206237`: `surface-guard` failure, `ci-introduced-failure` success,
 #: `python-ci-gate` failure. A wrong pin here is therefore a fleet-wide block, not one PR's
 #: inconvenience; the typed-reference arm is a separate repair and reads `0` on this tree.
-#: ⛔ THE PARAGRAPH ABOVE IS MAINTENANCE HISTORY, NOT A LIVE CLAIM — corrected by `#13919` at the
-#: merge of `origin/main` `6fbd96f270` (see the `#13919` block immediately below). The four typed
-#: references it records were `main`'s own red and are **0** on this tree, measured with `--check`
-#: (exit 0); a reader must not re-derive `main`'s red from this paragraph.
 #:
 #: RE-CUT to the MERGED tree → (11822, "05e0ff542dfb8e62") by `#13919` (the `#4211` hierarchy-census
 #: lane), merging `origin/main` `6fbd96f270` into `chore/4211-edge-census-mac`. The pin is an
