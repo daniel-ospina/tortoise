@@ -323,7 +323,13 @@ def test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped(harness):
     for dsn in ("postgresql://u:p@127.0.0.1:5432/tortoise_record",
                 "postgresql://u:p@localhost/tortoise_record"):
         harness._assert_local_record_dsn(dsn, False)
+    # ⛔ `None` is "no record DSN configured", which is local by construction. The
+    # EMPTY string is NOT: libpq reads the environment for it, so the guard must
+    # consult `PGHOST`/`PGHOSTADDR`/`PGSERVICE` rather than return early.
     harness._assert_local_record_dsn(None, False)
+    with pytest.raises(harness.CannotRun) as refused:
+        harness._assert_local_record_dsn("", False)
+    assert "NON-LOCAL" in str(refused.value)
 
     # The CALL SITE too: `run()` must go through the decision, or the guard is
     # one `if host:` away from being skipped again.
@@ -1981,3 +1987,153 @@ def test_a_pathless_uri_still_carries_a_query(harness):
     built = harness.app_role_dsn("postgresql://127.0.0.1:5432?host=x")
     assert built.count("?") == 1, built
     assert "options=" in built and built.startswith("postgresql://127.0.0.1:5432?host=x&"), built
+
+def _libpq():
+    """libpq via ctypes, or None — the ONLY authority this file trusts for grammar."""
+    import ctypes
+    import ctypes.util
+    from pathlib import Path
+
+    candidates = []
+    found = ctypes.util.find_library("pq")
+    if found:
+        candidates.append(found)
+    # psycopg2-binary bundles libpq in site-packages, where find_library is blind
+    for pattern in ("psycopg2_binary.libs/libpq*.so*", "psycopg2_binary.libs/libpq*.dylib"):
+        candidates.extend(str(path) for path in Path(sys.prefix).rglob(pattern))
+    for candidate in candidates:
+        try:
+            lib = ctypes.CDLL(candidate)
+        except OSError:
+            continue
+        lib.PQconninfoParse.restype = ctypes.c_void_p
+        lib.PQconninfoParse.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
+        lib.PQconninfoFree.argtypes = [ctypes.c_void_p]
+
+        class Opt(ctypes.Structure):
+            _fields_ = [("keyword", ctypes.c_char_p), ("envvar", ctypes.c_char_p),
+                        ("compiled", ctypes.c_char_p), ("val", ctypes.c_char_p),
+                        ("label", ctypes.c_char_p), ("dispchar", ctypes.c_char_p),
+                        ("dispsize", ctypes.c_int)]
+
+        def parse(dsn: str, lib=lib) -> dict:
+            err = ctypes.c_char_p()
+            handle = lib.PQconninfoParse(dsn.encode(), ctypes.byref(err))
+            if not handle:
+                return {"__error__": (err.value or b"").decode()}
+            out = {}
+            try:
+                for option in ctypes.cast(handle, ctypes.POINTER(Opt)):
+                    if option.keyword is None:
+                        break
+                    if option.val:
+                        out[option.keyword.decode()] = option.val.decode()
+            finally:
+                lib.PQconninfoFree(ctypes.c_void_p(handle))
+            return out
+
+        return parse
+    return None
+
+
+def test_the_guard_agrees_with_libpq_across_the_dsn_grammar_axes(harness, monkeypatch):
+    """A DIFFERENTIAL GATE, because sixteen rounds of hand-parsing libpq each found
+    the next spelling by review rather than by test.
+
+    The axes below are the ones that actually moved the boundary in those rounds —
+    scheme dispatch, userinfo, the `?` separator on both sides of `@`, failover
+    lists, brackets, percent-encoding, query overrides, and the noise a password
+    may contain. The question each case asks is the one that matters: **does the
+    guard see every host libpq would dial?** A shape the guard passes while libpq
+    answers a non-loopback `host`/`hostaddr`/`service` is a bypass, and it fails
+    here rather than in a review thread.
+
+    Skipped only where libpq genuinely cannot be loaded (the guard is then the
+    sole authority, and `test_*` above pin its decisions case by case).
+    """
+    parse = _libpq()
+    if parse is None:
+        pytest.skip("libpq is not loadable on this box")
+    for env in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.delenv(env, raising=False)
+
+    loopback = {"", "127.0.0.1", "localhost", "::1"}
+    shapes = ["postgresql://127.0.0.1:5432/db", "postgresql://localhost/db",
+              "postgresql://[::1]:5432/db", "postgresql://127.0.0.1:5432",
+              "postgresql:///db", "postgresql://u@localhost/db",
+              "postgresql://u:p@127.0.0.1/db", "postgresql://u@b@127.0.0.1/db",
+              "postgresql://u:p@ss@127.0.0.1/db", "postgresql://127.0.0.1:p?ss@h/db",
+              "postgresql://127.0.0.1:1,203.0.113.9/db", "postgresql://%2Ftmp/db",
+              "postgresql://127.0.0.1/db@203.0.113.9/x",
+              # PATHLESS + USERINFO — the axis that hid the last-`@` bypass: with no
+              # `/` the "authority" spans the query, so a last-`@` boundary lands
+              # inside a query value and the `?` looks like userinfo.
+              "postgresql://u@127.0.0.1:5432", "postgresql://u@localhost",
+              "postgresql://u@[::1]:5432"]
+    overrides = ["?host=db.prod.example.com", "?hostaddr=10.1.2.3",
+                 "?host=db.prod.example.com&password=p@localhost",
+                 "?hostaddr=10.1.2.3&user=u@db.prod.example.com",
+                 "?service=prod&application_name=a@b", "?host=127.0.0.1+",
+                 "?sslmode=require", "?host=a@b"]
+
+    bypasses = []
+    for shape in shapes:
+        for override in overrides:
+            dsn = shape + override
+            answer = parse(dsn)
+            if "__error__" in answer:
+                continue                      # libpq refuses it: nothing to dial
+            dialled = [host for host in
+                       (answer.get("hostaddr") or answer.get("host") or "").split(",")
+                       if host and host not in loopback and not host.startswith("/")]
+            if answer.get("service") is not None:
+                dialled.append("<service>")   # matched against the guard's sentinel below
+            if not dialled:
+                continue
+            seen = harness._record_dsn_hosts(dsn)
+            def covered(want: str, seen=seen) -> bool:
+                if want == "<service>":
+                    return any("service" in str(got) for got in seen)
+                return any(want == str(got) for got in seen)
+            if not all(covered(want) for want in dialled):
+                bypasses.append((dsn, dialled, seen))
+            try:
+                harness._assert_local_record_dsn(dsn, False)
+            except harness.CannotRun:
+                pass
+            else:
+                bypasses.append((dsn, dialled, "GUARD PASSED IT"))
+    assert not bypasses, "the guard disagrees with libpq:\n" + "\n".join(map(str, bypasses))
+
+def test_an_at_sign_in_a_query_value_does_not_move_the_userinfo_boundary(harness):
+    """libpq ends userinfo at the FIRST `@`; a later `@` — in a password, in a host —
+    is part of what follows, so the query separator after it is still live.
+
+    ⛔ Measured with `PQconninfoParse`, and `psql` dials it:
+
+        postgresql://u@localhost?host=203.0.113.9&password=p@localhost
+            -> user='u', password='p@localhost', host='203.0.113.9'
+        postgresql://u@127.0.0.1?hostaddr=203.0.113.9&password=p@127.0.0.1
+            -> host='127.0.0.1', hostaddr='203.0.113.9'   (hostaddr is dialled)
+        postgresql://a@b@127.0.0.1/db
+            -> user='a', host='b@127.0.0.1'
+
+    Choosing the LAST `@` moves the boundary into the query: the `?host=` then reads
+    as userinfo, the authority is re-derived from the tail, and the guard sees only
+    the loopback name it was told to expect.
+    """
+    shapes = (
+        ("postgresql://u@localhost?host=203.0.113.9&password=p@localhost", "203.0.113.9"),
+        ("postgresql://u@127.0.0.1?hostaddr=203.0.113.9&password=p@127.0.0.1", "203.0.113.9"),
+        ("postgresql://u@127.0.0.1?host=db.prod.example.com&password=p@127.0.0.1",
+         "db.prod.example.com"),
+        ("postgresql://a@b@127.0.0.1/db", "b@127.0.0.1"),
+    )
+    for dsn, remote in shapes:
+        assert remote in harness._record_dsn_hosts(dsn), (dsn, harness._record_dsn_hosts(dsn))
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+    # the userinfo-first rule still holds in the other direction
+    harness._assert_local_record_dsn("postgresql://u:p@127.0.0.1:5432/db", False)
+    assert harness._split_uri("postgresql://u@127.0.0.1:5432?host=x") == (
+        "postgresql://u@127.0.0.1:5432", "host=x")

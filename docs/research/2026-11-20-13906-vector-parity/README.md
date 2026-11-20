@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (63 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (65 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -404,6 +404,16 @@ rebuild still wrong for two legal conninfo spellings — both measured on real
 | **P2 (non-blocking, latent)** `_assert_local_record_dsn` skips any host string starting with `/` as a unix-socket path, and `_authority_hosts` percent-decodes before that test (`postgresql://%2Ffoo:5432` → host `/foo` → skipped). No independently exploitable case found, and libpq also reads `/foo` as a socket dir | `PQconninfoParse` + `PQhost` | noted as a hardening seam, not a defect |
 | **T2 (P2)** a DSN whose LAST keyword has an EMPTY value was rebuilt into a string libpq REJECTS: `host=127.0.0.1 dbname=` re-emitted as `dbname=` and then ` options=…` appended, and since libpq skips whitespace AFTER `=`, `dbname` took `options='-c` as its value and the tail became the bogus keyword `role=tortoise_record_app'` (`invalid connection option "role"`). 96 of 676 fuzz DSNs hit it, every one carrying a trailing empty value; 0 silent value changes. This also falsified Round 14's claim that inter-keyword whitespace is not read by libpq — it IS, as the value separator | `PQconninfoParse` on every rebuild | an empty value re-emits quoted (`dbname=''`), the form libpq parses; three spellings added to the matrix (`dbname=`, `dbname=x sslmode=`, `user=`). Mutant: emit it bare → **1 failed** |
 
+### Round 17: userinfo ends at the FIRST `@` — and a DIFFERENTIAL GATE, because seventeen rounds of review each found the next spelling
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** round 16 chose the userinfo boundary as the LAST `@` before the first `/`. libpq uses the **FIRST**. An `@` in a password (`&password=p@localhost`) or in a host (`postgresql://a@b@127.0.0.1/db` → host `b@127.0.0.1`) then moves the boundary INTO the query, the `?host=`/`?hostaddr=` reads as userinfo, and the guard certifies a remote store: `postgresql://u@localhost?host=203.0.113.9&password=p@localhost` → libpq `host='203.0.113.9'` (`PQconninfoParse`, and `psql "…&connect_timeout=2"` fails `connection to server at "203.0.113.9"`), guard `hosts=['localhost']` and PASSED — on the seed/teardown path. A 2,880-spelling sweep found **1,536** such spellings, all this one family | `PQconninfoParse` + `PQconnectStart` + `psql` | `at = pre_slash.find("@")`, and `_authority_hosts` strips userinfo with `split("@", 1)[1]` so both agree with libpq. Pinned by `test_an_at_sign_in_a_query_value_does_not_move_the_userinfo_boundary`; mutants taking the last `@` in EITHER place red it and the differential gate |
+| **P2 (the real lesson)** every one of rounds 12–17 found the next libpq spelling by REVIEW, not by test — and each round's README stated "0 bypasses" about an axis set that did not contain the shape that broke next. So the fix is not another case: `test_the_guard_agrees_with_libpq_across_the_dsn_grammar_axes` is a **differential gate**. It builds the cross-product of the axes that actually moved the boundary (scheme dispatch, userinfo incl. multiple `@`, pathless authorities, the `?` on both sides of `@`, failover lists, brackets, percent-encoding, query overrides, `@`/`+-/noise` inside values) and compares `_record_dsn_hosts` against libpq's own answer via `ctypes` — skipping only where libpq cannot be loaded. **The gate immediately found a real divergence the suite had missed**: `?host=127.0.0.1+` is host `127.0.0.1+` to libpq and `127.0.0.1` to `parse_qs`, which decodes `+` as a space — so `_uri_hosts` no longer uses `parse_qs` (manual `&`-split + percent-decode, the same rule `app_role_dsn` already used) | `ctypes` + `PQconninfoParse` for the oracle; `parse_qs` divergence measured with `PQhostaddr` | differential gate added, `parse_qs` removed from `_uri_hosts`; lint on the new code (`ruff`) |
+| **P2 (non-blocking, fixed anyway)** `_assert_local_record_dsn` short-circuited `if not dsn: return` BEFORE reading the environment, so an EMPTY DSN was "provably local" on a box whose `PGHOST`/`PGHOSTADDR` points elsewhere — the opposite of what `_record_dsn_hosts("")` reports. Now: `None` (no store configured) returns, `""` is decided by the same predicate as any other DSN | `_record_dsn_hosts("")` under `PGHOST`/`PGHOSTADDR` | fixed and pinned in `test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped` |
+| **P2 (non-blocking, fixed anyway)** `run()` constructed `RecordStore` and called `require_schema()` OUTSIDE the `try`, so a `CannotRun` from the schema check left the connection open | read the call site | `require_schema()` is now inside a `try`/`except BaseException: close(); raise` |
+| **P2 (non-blocking, noted)** the write leg is not gated by a successful READ: `app_role_dsn`'s rebuilt DSN is what the read queries use, and `teardown()` runs in `finally`, so a shape that seeds successfully and then fails to read still deletes by `org_id` in that store. The guard is what makes this safe, not the read | read `run()`/`teardown()` | stated here explicitly so no later round assumes an ordering that does not exist |
+
 ## 6. Reproducing
 
 ```bash
@@ -433,7 +443,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **63 passed**.
+tests/test_vector_parity_13906.py -q` → **65 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
