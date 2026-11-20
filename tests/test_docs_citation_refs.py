@@ -3928,10 +3928,11 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     # AN UNGROUPED ALTERNATION IS NOT A CLASS (#13995 review round 14, P2, MEASURED). ERE binds
     # the anchors to each BRANCH, so `^\+|-$` is `(^\+)|(-$)`: starts with `+` OR ends with `-`.
     # Measured on `x`/`+`/`-`/empty/`++`/`+-`/`-+`/`--`/`a`/`\`/`1`/`~` it matches FIVE lines
-    # (`+ - ++ +- --`) where the class has two — 22 such spellings are accepted by the sign loop
-    # below, none of them the class, and the retired spelling-list regex refused all of them, so
-    # this was a widening onto a WRONG class, not a residual. A multi-branch body must therefore
-    # be a GROUP; only the `( ... )` branch above may set `grouped`.
+    # (`+ - ++ +- --`) where the class has two — and 22 two- and three-branch spellings WERE
+    # accepted here before this guard (4 at k=2, 18 at k=3; the count grows with the branch count:
+    # 64 at k=4, 210 at k=5), none of them the class, while the retired spelling-list regex refused
+    # all of them — so this was a widening onto a WRONG class, not a residual. A multi-branch body
+    # must therefore be a GROUP; only the `( ... )` branch above may set `grouped`.
     if len(alternatives) > 1 and not grouped:
         return False
     # A BARE `+` IS NOT A BRANCH OF THIS CLASS (#13995 review round 13, P2, MEASURED). The
@@ -4409,11 +4410,19 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
     # special case for the literal form.
     for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$",
-                       "^(+|-)$", "^(-|+)$", "^\\+|-$", "^-|\\+$"):
+                       "^(+|-)$", "^(-|+)$", "^\\+|-$", "^-|\\+$",
+                       # ⛔ AND A THREE-BRANCH BODY, so the guard cannot be narrowed to `== 2`
+                       # without a row going RED (#13995 review round 15, P2 — MEASURED: with the
+                       # guard rewritten as `len(alternatives) == 2`, every d5 test still passed and
+                       # these two were graded as the class, on a `grep -cE` count of 6).
+                       "^\\+|-|-$", "^-|\\-|\\+$"):
         assert not _d5_counts_the_blank_class(half_class), (
-            f"{half_class!r} must NOT be graded as the blank class: each names ONE line shape "
-            "(`^-$` counts only the removed half, measured 0 on a diff whose only blank line is "
-            "added; `^+$` matches only `+` lines; `^(?:\\+|-)$` loses its group to POSIX ERE). "
+            f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
+            "the two class lines (`^-$` counts only the removed half, measured 0 on a diff whose "
+            "only blank line is added; `^+$` names one shape — the EMPTY line under `-E`; "
+            "`^(?:\\+|-)$` loses its group to POSIX ERE; `^\\\\+|-|-$` and its siblings are UNGROUPED "
+            "alternations, where ERE binds `^` to one branch and `$` to another and five or more "
+            "lines match). "
             "Grading it would let the "
             "row's instrument narrow while this arm reported the class as graded "
             "(#13995 review rounds 10-11, P2)")
