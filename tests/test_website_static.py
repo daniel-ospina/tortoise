@@ -10582,7 +10582,6 @@ class TestProductTeamsCopy:
                 "DECLARATION in this same block wins too — read the value that "
                 "wins, not whether the string appears (#14020 review P2.4, "
                 "cycle 3 P1)")
-        # commented-out declaration inside its own rule — would satisfy this row
         # Comment-blanked, like the alignment rows above: a raw-sheet reader
         # would let `#beat-hero .hero-links { /* display: flex; */ }` — a
         # commented-out declaration inside its own rule — satisfy this row
