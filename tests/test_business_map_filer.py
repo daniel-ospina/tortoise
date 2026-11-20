@@ -1838,6 +1838,72 @@ def test_a_TOOL_LEVEL_failure_on_a_NON_IDEMPOTENT_door_is_an_UNKNOWN_outcome(
         pre.call("tortoise_create_operator", {}, retry_safe=False)
 
 
+class _OperatorRefusingMcp:
+    """Every OPERATOR write is refused PRE-handler: the JSON-RPC envelope failed.
+
+    A refusal is the one class where nothing can have landed, so the intent must
+    be RETIRED — not kept — or 51 operator intents wedge forever (the round-6
+    incident). Injected at `_post` so the real `Mcp.call` classifies it.
+    """
+
+    def __init__(self, *_args, **_kw) -> None:
+        self._n = 0
+        self._inner = _RealMcp("not-a-real-key")
+
+        def _post(body: dict):
+            tool = (body.get("params") or {}).get("name")
+            self._n += 1
+            if tool == "tortoise_create_operator":
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "error": {"code": -32000,
+                                        "message": "unauthorized"}}, {})
+            return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+        self._inner._post = _post
+
+    def initialize(self) -> None:  # pragma: no cover - no session to open
+        return None
+
+    def call(self, tool: str, args: dict, **kw) -> dict:
+        return self._inner.call(tool, args, **kw)
+
+
+def test_a_REFUSED_operator_retires_its_intent_instead_of_wedging_it(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A pre-handler REFUSAL wrote nothing, so its intent must be RETIRED.
+
+    The `except Refusal` arm in `write_once` is what keeps a 4xx / envelope
+    refusal from stranding every non-idempotent intent forever: the intent is
+    recorded before the call, and a refusal leaves it in `unconfirmed` while its
+    marker is already in `written` — so a resume neither re-issues it (nothing
+    landed) nor clears it (nothing re-observes it). Measured: with the arm
+    replaced by a bare `raise`, the operator's marker stays in `written` and its
+    intent stays in `unconfirmed` after a refused run (#13913 review round 16 —
+    this pin was LOST when the edge-refusal fake was narrowed to the edge door).
+
+    Mutant: `except Refusal:` → `raise`, i.e. keep the intent — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _OperatorRefusingMcp)
+
+    first = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+
+    st = json.loads(state_path.read_text())
+    assert marker not in st["written"], (
+        "a REFUSED write retires its marker only if `write_once` says so — but "
+        f"{marker!r} is in `written`: a resume now skips an operator that was "
+        "never filed")
+    assert marker not in st["unconfirmed"], (
+        f"{marker!r} stayed in `unconfirmed` after a refusal — nothing will ever "
+        "clear it (a refusal cannot land, and no resume re-observes it)")
+
+
 def test_a_TOOL_LEVEL_failure_does_not_REISSUE_the_operator_on_resume(
         tmp_path, monkeypatch, map_doc, capsys):
     """The consequence, on disk: the resume issues ZERO second operators.
@@ -2413,6 +2479,59 @@ def test_a_MECHANISM_MISMATCH_is_on_disk_the_moment_it_is_observed(
         f"{on_disk['failed']}")
 
 
+def test_the_mid_run_mismatch_write_KEEPS_an_earlier_runs_diagnosis(
+        tmp_path, monkeypatch, map_doc):
+    """The mid-run save MERGES; a plain assignment silently erases history.
+
+    The mismatch arm writes `st["failed"]` while the run is still going, and the
+    end-of-run `carried` is recomputed FROM that key — so a non-cumulative write
+    (`st["failed"] = failures`) drops every line an earlier run recorded and the
+    diagnosis it belonged to is gone, with exit 1 still pointing only at today's
+    lines. Measured (the mutant active): a seeded `mechanism_mismatch` line for a
+    DIFFERENT, already-`written` operator disappeared from disk on the next
+    mismatch (#13913 review round 15).
+
+    Mutant: `st["failed"] = failures` in the mismatch arm — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    ops = [e for e in map_doc["edges"] if "op" in e]
+    assert len(ops) >= 2, "the fixture must hold two operator edges"
+    earlier = ops[0]
+    earlier_marker = filer.edge_marker(earlier)
+    seeded = f"{earlier_marker}: mechanism_mismatch — NAND carrying addresses"
+
+    class _OneMismatch(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                return {"structuredContent": {
+                    "id": "op-later",
+                    "warnings": [{"code": "mechanism_mismatch",
+                                  "message": "IMPL carrying a refutes meaning"}]}}
+            return super().call(tool, args, **_kw)
+
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        # ⛔ The earlier operator's marker is already in `written`, so this run
+        # never re-observes it: only a MERGE keeps its line.
+        "written": [earlier_marker],
+        "unconfirmed": [],
+        "failed": [seeded],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _OneMismatch)
+
+    assert filer.write_map(map_doc) == 1
+    on_disk = json.loads(state_path.read_text())["failed"]
+    assert seeded in on_disk, (
+        "the mid-run write ERASED an earlier run's diagnosis: "
+        f"{seeded!r} is gone from {on_disk}")
+    # …and the run's OWN diagnosis is recorded too, in the same write.
+    assert [f for f in on_disk if f != seeded], on_disk
+
+
 def test_an_operator_over_an_UNDECLARED_extra_endpoint_certifies_nothing(map_doc):
     """The per-slot ARITY leg is load-bearing only against an undeclared extra.
 
@@ -2465,4 +2584,7 @@ def test_a_two_mechanism_pair_is_not_a_duplicate_edge(map_doc):
     doc = dict(map_doc, edges=[*map_doc["edges"], b])
     assert filer.edge_key(a) != filer.edge_key(b)
     assert not [e for e in filer.validate(doc) if "judged twice" in e], (
-        "a legitimate two-mechanism pair was refused as one edge judged twice")
+        "a declared two-mechanism pair was refused as one edge judged twice "
+        "(a census property, not a filable state: `create_operator` and "
+        "`create_direct_edge` both refuse it at the door via "
+        "`_mechanism_pair_conflicts`)")

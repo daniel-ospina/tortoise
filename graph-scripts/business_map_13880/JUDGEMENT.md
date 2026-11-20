@@ -58,7 +58,7 @@ The map is **78 nodes / 101 edges** (4 subjects + 27 objects + 6 sources + 14 ev
   failure). **The word itself is not readable back** — the surface stores no operator `label` — so
   `--verify` checks the mechanism and the direction, never the Layer-2 term; a label-only correction
   would require deleting the existing operator first, which this filer never does. The map's five `refutes` edges are therefore `NAND`s, not `IMPL`s (three of them against the
-  single-write-door finding, which is what §3 rests on) — an `IMPL` wire carrying
+  single-write-door finding, which is what §2 rests on) — an `IMPL` wire carrying
   a `refutes` meaning RAISES the target where the judgement says it must lower it.
 - **Nothing is mitigated.** A mitigation is 0.10-0.50 and must be written one at a time; none of these
   edges needed dampening, and inventing one to look thorough would have dampened EP for no reason.
