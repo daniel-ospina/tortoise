@@ -101,9 +101,9 @@ continuously), scaled down to a deterministic count.
 
 Run: `TEST_RECORD_DB_URI=… TORTOISE_TEST_CARVE_OUT=1 uv run pytest
 tests/test_14002_record_only_journal.py -q` →
-**30 tests** (25 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
-reports **25 passed, 5 skipped** — measured at this head, and the split the `core`
-matrix leg sees; `--collect-only -q` prints `28 tests collected`, which is the
+**34 tests** (29 DB-free + 5 live). Without `TEST_RECORD_DB_URI` the same file
+reports **29 passed, 5 skipped** — measured at this head, and the split the `core`
+matrix leg sees; `--collect-only -q` prints `34 tests collected`, which is the
 number to diff if this counts claim ever stops reproducing.
 
 **Red-first, the same window with the fix disabled** (`journal_skipped = False`
