@@ -638,6 +638,36 @@ def test_the_guard_answers_what_libpq_would_DIAL_not_what_this_string_says(
         harness._assert_local_record_dsn("postgresql:///db", False)
 
 
+def test_the_app_role_dsn_keeps_values_that_need_quoting(harness):
+    """`shlex` UNQUOTES — so re-joining raw destroyed the DSN it was given.
+
+    `app_role_dsn` rebuilt the conninfo with `" ".join(shlex.split(dsn))`, which
+    drops the quotes carrying a whitespace value (`dbname='tortoise record'` came
+    back as `dbname=tortoise record`, which libpq answers with `missing "=" after
+    "record"`), and it filtered `options` by token PREFIX, so a spaced
+    `options = '-c search_path=a'` left a DANGLING `=` after the filter (libpq:
+    `invalid connection option ""`). Either way `self.app_dsn` — the RECORD READ
+    leg — failed on every query, so a legitimate local DSN produced a
+    cannot-measure run that exited 2.
+    """
+    for dsn in ("dbname='tortoise record' host=127.0.0.1",
+                "options = '-c search_path=a' host=127.0.0.1",
+                "host=127.0.0.1 password='a b' dbname=x"):
+        out = harness.app_role_dsn(dsn)
+        # the role option is always appended, and always quoted (it has spaces)
+        assert out.endswith(f"options='-c role={harness.APP_ROLE}'"), out
+        # …no orphan `=` survives the options filter
+        assert " = " not in out, out
+        # …quoted values stay quoted, so libpq can still read them
+        if "tortoise record" in dsn:
+            assert "dbname='tortoise record'" in out, out
+        if "password='a b'" in dsn:
+            assert "password='a b'" in out, out
+        # …and the hosts the guard would re-check are unchanged
+        hosts, _keys = harness._conninfo_hosts(out)
+        assert hosts == ["127.0.0.1"], (dsn, out, hosts)
+
+
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
     """The misalignment the review caught: ids permuted, distances not.
 
