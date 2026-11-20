@@ -2213,8 +2213,16 @@ _GUARD_IMPORT_ALLOW_LIST = frozenset({
     # stdlib — nothing here can be PR-authored, which is the property this list protects.
     "os", "subprocess",
     "yaml",
+    # #12327's shrink pin reads `archive/MANIFEST.json` — the ARCHIVE RECORD that accounts for a
+    # symbol which left the baseline. stdlib, and it is evidence the gate consumes rather than a
+    # helper that could answer for it.
+    "json",
     # the gate EXECUTES the declaration, so it must import the surface it measures
     "tortoise", "tortoise.mcp_auth", "tortoise.sdk", "tortoise.tool_registry",
+    # #12327: the retirement maps are part of the DECLARATION the gate grades (a departure the
+    # maps record is not an unrecorded removal). Same class as `tortoise.tool_registry`, which
+    # already carries `RETIRED_USE_INSTEAD`.
+    "tortoise.sdk_retired",
 })
 
 
@@ -7786,3 +7794,168 @@ def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
     assert (repo / entry["file"]).exists(), entry
     assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
 
+
+
+# ── the SHRINK pin (#12327) ───────────────────────────────────────────────────────────────────
+# Step 7 pins GROWTH. These pin the other direction. Every arm is proven BOTH ways: the
+# violation (a row spliced out of the baseline, a count that disagrees with its own rows, a
+# lowered `high_water_counts`) reds, and the legitimate case (an archive entry, a retirement,
+# a stated waiver, an unchanged baseline) is green. A pin nobody has seen fire is what #12327
+# was filed about.
+
+def _shrink_doc(*, drop=(), counts=None, pin=None, retired=()):
+    """A baseline document with a row REMOVED and the mechanical cells fixed — the splice.
+
+    `MEMORY.md`'s `[surface-cut]` names the four cells a splicer edits; this fixes the two this
+    gate can see (`counts.tools` and the keyword census), so the ONLY thing left describing the
+    removal is the row itself. That is the state that made every gate green before #12327.
+    """
+    doc = copy.deepcopy(_manifest())
+    for name in drop:
+        row = next(r for r in doc["rows"] if r["name"] == name)
+        doc["rows"] = [r for r in doc["rows"] if r["name"] != name]
+        doc["counts"]["tools"] -= 1
+        doc["counts"]["keyword_distribution"][row["keyword"]] -= 1
+    for row in retired:
+        doc["retired"] = [r for r in doc["retired"] if r["name"] != row]
+        doc["counts"]["retired"] -= 1
+    if counts:
+        doc["counts"].update(counts)
+    if pin:
+        doc["high_water_counts"] = pin
+    return doc
+
+
+def _shrink(head, **kwargs):
+    return _load_guard()._shrink_problems(head, base_doc=_manifest(), **kwargs)
+
+
+def test_a_spliced_row_reds_the_shrink_pin_and_names_the_symbol():
+    """#12327's acceptance, first clause: the splice must red and NAME the symbol."""
+    problems = _shrink(_shrink_doc(drop=["tortoise_search"]))
+    assert any("`tortoise_search`" in p and "BASE baseline" in p for p in problems), problems
+    joined = " ".join(problems)
+    assert "archive_surface.py archive mcp-tool tortoise_search" in joined, (
+        "the red must print the runnable route, not only the finding: " + joined
+    )
+    assert "--allow-count-shrink tool:tortoise_search" in joined, (
+        "the stated-override route belongs in the message, or an operator cannot use it"
+    )
+
+
+def test_a_spliced_row_WITH_an_archive_entry_is_green():
+    """Second clause: the recorded removal passes."""
+    head = _shrink_doc(drop=["tortoise_search"])
+    assert _shrink(head, archive_keys={("mcp-tool", "tortoise_search")}) == []
+
+
+def test_a_spliced_sdk_method_WITH_its_retirement_entry_is_green():
+    """Third clause: an SDK departure is recorded by the map (the pairing is `cut`'s job)."""
+    method = next(r["method"] for r in _manifest()["rows"] if r["name"].startswith("sdk:"))
+    head = copy.deepcopy(_manifest())
+    head["rows"] = [r for r in head["rows"] if r.get("method") != method]
+    head["counts"]["sdk_public_methods"] -= 1
+    assert _shrink(head), "positive control: an unrecorded SDK removal must red"
+    assert _shrink(head, retired_sdk={method}) == []
+
+
+def test_a_spliced_tool_WITH_its_forward_entry_is_green():
+    """`RETIRED_USE_INSTEAD` carrying the name is a record of what happened to it."""
+    head = _shrink_doc(drop=["tortoise_search"])
+    assert _shrink(head, forward={"tortoise_search"}) == []
+
+
+def test_a_RETIREMENT_is_not_a_removal():
+    """A name that moved from `rows:` to `retired:` is STILL SERVED (#3883) — not gone.
+
+    Reading only `rows:` would red every legitimate retirement, i.e. a gate that makes the
+    documented procedure impossible (the 27/40 ruling) — the defect this arm must not be.
+    """
+    name = next(r["name"] for r in _manifest()["rows"] if not r["name"].startswith("sdk:"))
+    head = _shrink_doc(drop=[name])
+    head["retired"] = head["retired"] + [{"name": name, "use_instead": "x(...)", "approval": None}]
+    head["counts"]["retired"] += 1
+    assert _shrink(head) == [], "a retirement moved the name, it did not remove it"
+
+
+def test_a_count_that_disagrees_with_its_own_rows_reds():
+    """Arm 8b: a spliced row that leaves the count and the rows disagreeing, no base needed."""
+    head = copy.deepcopy(_manifest())
+    head["rows"] = [r for r in head["rows"] if r["name"] != "tortoise_search"]
+    problems = _shrink(head)
+    assert any("counts.tools" in p and "disagrees with ITSELF" in p for p in problems), problems
+    # …and the census cell is graded the same way.
+    head = _manifest()
+    head["counts"]["keyword_distribution"] = dict(
+        head["counts"]["keyword_distribution"], fetch=0
+    )
+    problems = _shrink(head)
+    assert any("keyword_distribution" in p and "sums to" in p for p in problems), problems
+
+
+def test_a_lowered_high_water_pin_reds():
+    """Arm 8c: step 7 only sees a surface that EXCEEDS the pin, so lowering it disarms growth."""
+    doc = _manifest()
+    pin = doc["high_water_counts"]
+    head = _shrink_doc(pin={**pin, "tools": pin["tools"] - 1})
+    problems = _shrink(head)
+    assert any("LOWERED" in p and "high_water_counts.tools" in p for p in problems), problems
+    assert _shrink(head, allowed=["pin:tools"]) == []
+
+
+def test_raising_the_growth_pin_stays_a_plain_edit():
+    """Growth is a decision, and raising the pin is how it is recorded — never red."""
+    doc = _manifest()
+    pin = doc["high_water_counts"]
+    head = _shrink_doc(pin={**pin, "tools": pin["tools"] + 1})
+    assert _shrink(head) == []
+
+
+def test_a_count_shrink_waiver_must_name_its_target():
+    """A blanket flag is how a gate becomes decoration (`cut --allow-removal`'s rule)."""
+    head = _shrink_doc(drop=["tortoise_search"])
+    with pytest.raises(ValueError, match="not `tool:<name>`"):
+        _shrink(head, allowed=["tortoise_search"])
+    assert _shrink(head, allowed=["tool:tortoise_search"]) == []
+
+
+def test_a_waiver_that_waives_nothing_is_reported():
+    """A false record is worse than no record: it reads as a departure that was checked."""
+    problems = _shrink(_manifest(), allowed=["tool:tortoise_never_existed"])
+    assert any("waives nothing" in p for p in problems), problems
+
+
+def test_an_unchanged_baseline_is_green():
+    """Non-vacuity: the pin must not red an ordinary PR."""
+    assert _shrink(_manifest()) == []
+
+
+def test_the_shrink_pin_ANSWERS_on_the_real_clone():
+    """The pin must RUN where the gate runs, and be green on the tree as committed.
+
+    Two things at once: the current baseline is the pin's own first measurement (so landing it
+    creates no backlog), and the base-ref resolution actually answers here instead of taking the
+    shallow-clone notice — a notice would read as a pass while grading nothing.
+    """
+    guard = _load_guard()
+    problems, notice = guard._shrink_against_base(_manifest())
+    assert notice is None, f"the shrink pin did not answer on this clone: {notice}"
+    assert problems == [], problems
+
+
+def test_the_shrink_pin_cannot_be_deleted_from_main(monkeypatch):
+    """A helper nothing calls is the `#9075` no-op gate; the CALL SITE is what must be red."""
+    guard = _load_guard()
+    monkeypatch.setattr(
+        guard, "_shrink_against_base", lambda doc, **_kw: (["SHRINK-PIN-FIRED"], None)
+    )
+    assert guard.main(["surface-guard.py"]) == 1, (
+        "main() no longer reaches the shrink pin, so every arm above could be perfect and "
+        "grade nothing in CI"
+    )
+
+
+def test_the_shrink_pin_mirrors_the_cut_settled_archive_kind_map():
+    """Two readers, one verdict: a class that maps to a different archive kind is one gate split."""
+    guard, sm = _load_guard(), _load_manifest_tool()
+    assert guard._ARCHIVE_KIND_BY_CLASS == sm.ARCHIVE_KIND_BY_CLASS
