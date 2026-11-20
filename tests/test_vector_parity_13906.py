@@ -678,6 +678,129 @@ def test_a_nan_distance_is_not_a_verified_one(harness):
     assert verdict["ok"] is False
 
 
+def test_a_poisoned_run_that_could_not_measure_is_not_a_detection(harness):
+    """⛔ THE FALSIFIER'S PROOF may only be minted by a MEASURED arm.
+
+    `poison_status` used to be `"POISON DETECTED" if not ok`, so EVERY failure
+    counted as a detection — including the cannot-measure failures the verdict
+    already names. Measured in review: six entries each carrying `record_error`
+    (a `VectorShortfall` on every query — the #13911 shape) printed
+    `poison: POISON DETECTED` and exited **1**, byte-identical to a real
+    detection, from a run in which the poison was never exercised on a gated
+    arm. Three readings, three answers.
+    """
+    def entry(**over):
+        base = {"query": "q0",
+                "record": {"ids_equal": True, "order": "exact", "recall": 1.0,
+                           "distance": {"ok": True, "max_delta": 0.0}},
+                "graph_scan_vs_euclidean": {"ids_equal": True, "order": "exact",
+                                            "recall": 1.0,
+                                            "distance": {"ok": True,
+                                                         "max_delta": 0.0}},
+                "metric_divergence_ids": []}
+        base.update(over)
+        return base
+
+    could_not_measure = {"queries": [entry(record_error="VectorShortfall: 8 of 10")
+                                     for _ in range(6)]}
+    v = harness._verdict(could_not_measure, poisoned="id")
+    assert v["ok"] is False
+    assert v["poison_status"].startswith("POISON UNMEASURED"), v["poison_status"]
+    assert "DETECTED" not in v["poison_status"].replace("UNMEASURED", ""), (
+        "a run that never measured a gated arm reported the poison as DETECTED "
+        "— the falsifier certified itself from a run that could not look")
+    assert v["unmeasured"] is True
+
+    measured = {"queries": [entry(record={"ids_equal": False, "order": "diverged",
+                                         "recall": 0.5,
+                                         "distance": {"ok": True,
+                                                       "max_delta": 0.0}})]}
+    hit = harness._verdict(measured, poisoned="id")
+    assert hit["poison_status"] == "POISON DETECTED"
+    # …and the flag is ABSENT, not False, so the five committed artifacts keep
+    # replaying bit-identically through this verdict (checked: all five do).
+    assert "unmeasured" not in hit, hit
+
+    # A MIXED run still counts as a detection: a real divergence on a measured
+    # arm is a detection however many other queries could not be measured.
+    mixed = {"queries": [measured["queries"][0],
+                         entry(record_error="VectorShortfall: 8 of 10")]}
+    both = harness._verdict(mixed, poisoned="order")
+    assert both["poison_status"] == "POISON DETECTED", both["poison_status"]
+    assert "unmeasured" not in both, both
+
+
+def test_a_poisoned_run_that_could_not_measure_exits_2(harness, monkeypatch):
+    """The three readings must differ in the EXIT CODE, not only in the word.
+
+    README §6's falsifier recipe is `for p in …; do … --poison $p; echo "exit=$?";
+    done` — one bit per run. With an unmeasured run exiting 1 (the code for "a
+    comparison diverged"), that one bit reads as "the poison was confirmed" for a
+    run that never looked, which is exactly how a falsifier certifies itself.
+    """
+    def report_with(record=None, **entry_over):
+        rec = {"ids_equal": True, "order": "exact", "recall": 1.0,
+               "distance": {"ok": True, "max_delta": 0.0}}
+        rec.update(record or {})
+        entry = {"query": "q0", "record": rec,
+                 "graph_index": {"ids_equal": True, "order": "exact",
+                                  "recall": 1.0},
+                 "graph_scan_vs_euclidean": {
+                     "ids_equal": True, "order": "exact", "recall": 1.0,
+                     "distance": {"ok": True, "max_delta": 0.0}},
+                 "graph_scan_vs_cosine": {"recall": 1.0, "order": "exact"},
+                 "metric_divergence_ids": []}
+        entry.update(entry_over)
+        return {"k": 1, "queries": [entry],
+                "verdict": harness._verdict(
+                    {"k": 1, "queries": [dict(entry)]}, poisoned="id")}
+
+    argv = ["--record-dsn", "postgresql://u:p@127.0.0.1/db",
+            "--graph-port", "1", "--poison", "id"]
+
+    could_not_measure = report_with(record_error="VectorShortfall: 8 of 10")
+    monkeypatch.setattr(harness, "run", lambda _args: could_not_measure)
+    assert harness.main(argv) == 2, (
+        "a poisoned run that could not measure exited 1 — the falsifier's recipe "
+        "reads that as 'poison confirmed'")
+
+    detected = report_with(record={"ids_equal": False, "order": "diverged",
+                                   "recall": 0.5})
+    monkeypatch.setattr(harness, "run", lambda _args: detected)
+    assert harness.main(argv) == 1, "a MEASURED detection must keep exit 1"
+
+
+def test_the_indexed_arm_refusal_is_not_inert(harness):
+    """\"Index ready\" may not be a conjunct of the refusal (#13914 round 6).
+
+    `if ready and mechanisms != ["index"]` was a SHIPPED defect: a timed-out
+    `wait_index_ready` returned False, the conjunct was False, and the arm was
+    published as `run_vector_query HNSW` while measuring the `#8429` scan
+    fall-through — exit 0, PARITY, about the scan. A timed-out readiness is the
+    case the guard exists for, so it must refuse there.
+    """
+    harness._require_index_arm(["index"], True)
+    # the arm IS the index: readiness only picks the message
+    harness._require_index_arm(["index"], False)
+    for mechanisms, ready in ((["scan_fallback"], False),
+                              (["scan_fallback"], True),
+                              (["index", "scan_fallback"], True),
+                              ([], True)):
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._require_index_arm(mechanisms, ready)
+        assert "not measuring" in str(refused.value) or "scan" in str(refused.value)
+
+    # …and the CALL SITE: `run()` must go through the seam, or the inert form can
+    # return one `if` away from it (the `_scan_arm` lesson, same round).
+    tree = ast.parse(MODULE_PATH.read_text())
+    run_node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(run_node) if isinstance(c, ast.Call)}
+    assert "_require_index_arm" in called, sorted(called)
+
+
 def test_an_empty_report_is_not_parity(harness):
     """`--queries < 1` is refused at the CLI, but the VERDICT must refuse it too:
     zero measurements is the strongest possible absence of evidence."""
