@@ -248,7 +248,7 @@ def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
     import concurrent.futures
 
     class _RefusingStarter:
-        def submit(self, fn):  # noqa: D401 - mimics _SingleSlotWorker.submit
+        def submit(self, fn):   # mimics _SingleSlotWorker.submit
             future: concurrent.futures.Future = concurrent.futures.Future()
             future.set_exception(
                 monitoring._WorkerBacklogFull("starter backlog full"))
