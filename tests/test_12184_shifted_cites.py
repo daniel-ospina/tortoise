@@ -141,7 +141,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
     # the head this pin was written at, so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
+    (_AUDIT, '`sdk.py:57694` passes `"event"`', _SDK, 57694, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -195,9 +195,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
     # re-derived here to the line that actually carries `search_text = _source_search_text(`
     # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
-    (_AUDIT, 'sdk.py:21867', _SDK, 21867, 'search_text = _source_search_text(topics=topics)'),
-    (_AUDIT, 'sdk.py:21909', 'tortoise/sdk.py', 21909, 's.summary=CASE WHEN $sum'),
-    (_AUDIT, '`:22032`', 'tortoise/sdk.py', 22032, 's.summary, s.topics, s.'),
+    (_AUDIT, 'sdk.py:21889', _SDK, 21889, 'search_text = _source_search_text(topics=topics)'),
+    (_AUDIT, 'sdk.py:21931', 'tortoise/sdk.py', 21931, 's.summary=CASE WHEN $sum'),
+    (_AUDIT, '`:22054`', 'tortoise/sdk.py', 22054, 's.summary, s.topics, s.'),
     (_AUDIT, 'hosted_api.py:23046', 'tortoise/hosted_api.py', 23046, 'MERGE (s:Source {url:$did})'),
     (_AUDIT, '`:22858`', 'tortoise/hosted_api.py', 22858, 'def _execute_commit_writes'),
     (_AUDIT, '`:33809`', 'tortoise/hosted_api.py', 33809, 'MERGE (p:PackInstall {namespace: $ns})'),
@@ -246,8 +246,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
     ("sdk.py:24245", _SDK, 24245, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    ("sdk.py:21909", _SDK, 21909, "s.summary=CASE WHEN $sum"),
-    (":22032", _SDK, 22032, "s.summary, s.topics, s."),
+    ("sdk.py:21931", _SDK, 21931, "s.summary=CASE WHEN $sum"),
+    (":22054", _SDK, 22054, "s.summary, s.topics, s."),
     ("hosted_api.py:23046", "tortoise/hosted_api.py", 23046, "MERGE (s:Source {url:$did})"),
     (":22858", "tortoise/hosted_api.py", 22858, "def _execute_commit_writes"),
 )
@@ -287,13 +287,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2914`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37480`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37503`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37503` |'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37503`)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37480` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57617` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37502`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37525`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37525` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37525`)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37502` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57694` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
@@ -335,14 +335,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `tortoise/sdk.py` insertion independently landed it (`_PINS` above follows it). So `28019` and
     # `28067` are BOTH tokens the documents no longer carry, and a row for either is a false pin.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21867'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21909'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22032`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21889'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21931'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22054`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5366` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7117` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5375` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7181` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28200` at this head'): 1,
@@ -465,9 +465,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "129 of this document's 222",
-        "dedupes the **328** as-written spellings to 222 — **106**",
-        "328 written spellings → 222 pairs → 106 collisions → 129 drifters of the 222",
+        "130 of this document's 225",
+        "dedupes the **328** as-written spellings to 225 — **103**",
+        "328 written spellings → 225 pairs → 103 collisions → 130 drifters of the 225",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
