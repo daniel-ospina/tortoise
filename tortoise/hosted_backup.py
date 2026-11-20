@@ -1059,21 +1059,25 @@ def _restore_retires_vector(node_labels) -> bool:
     dropping one the record does not hold costs the vector — the `#11395` outcome
     no writer may produce.
 
-    A node with NO gated label answers ``False`` (nothing may be dropped), and so
-    does every unreadable/unknown answer, because the predicate behind it is
-    conservative in every unknown.
+    A node with NO gated label answers ``False``, and so does one carrying a label no
+    gate covers — ``:Point``'s vector is RECORD TRUTH (`#5004`) and never gated — or an
+    unreadable/unknown answer, because the predicate behind it is conservative.
     """
     from tortoise.projection.entities import _derived_mirror_required
 
+    # ⛔ A NON-GATED label means the vector may not be a mirror at all (#13854 review, P1):
+    # a restored ``:Point:Object`` node carries its Point's RECORD-TRUTH vector, so the
+    # ``object`` counter's stop is not authority over it. Keep it, and report nothing.
+    if set(node_labels or ()) - set(_GATED_RESTORE_LABELS):
+        return False
     if "Object" in node_labels and _derived_mirror_required("object"):
         return False
     if "Subject" in node_labels and _derived_mirror_required("subject"):
         return False
     if "Event" in node_labels and _derived_mirror_required("event"):
         return False
-    if "Source" in node_labels and (
-            _derived_mirror_required("document")
-            or _derived_mirror_required("source")):
+    if "Source" in node_labels and (_derived_mirror_required("document")
+                                    or _derived_mirror_required("source")):
         return False
     return bool(_gated_labels_of(node_labels))
 

@@ -826,16 +826,22 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
     assert result["retired_vector_labels"] == ["Object", "Subject"], (
         f"the reported labels must be the gated ones the node carries: {result}")
 
-    # ── arm 3: a NON-gated label is never reported as retired ────────────────
+    # ── arm 3: a NON-gated label is never retired, and never reported ────────
+    # ⛔ ARM 3 USED TO ASSERT THE DROP HERE and was wrong (#13854 review, P1): `:Point`'s
+    # vector is RECORD TRUTH (#5004) and no gate answers for it, so a `:Point:Object` node's
+    # `embedding` is the Point's — dropping it because the `object` counter stopped left the
+    # node with a vector in NEITHER store, which is the state restore exists to avoid. The
+    # shipped shape is real: `tests/test_capture_session.py` mints `:Point:Object`.
     proj.g.query("MATCH (n) DETACH DELETE n")
     mixed = _dump({"dump_id": 1, "labels": ["Object", "Point"],
                    "props": {"id": "obj-13826-mixed", "content": "x",
                              "embedding": list(VEC)}})
     result = restore_graph(proj.g, mixed)
-    assert _prop(proj.g, "(n:Object {id:'obj-13826-mixed'})", "embedding") is None
-    assert result["retired_vector_labels"] == ["Object"], (
-        "a label no gate covers was reported as retired (#13854 review, P3): the list is "
-        f"operator-facing, so it must name what answered stop — {result}")
+    assert _prop(proj.g, "(n:Object {id:'obj-13826-mixed'})", "embedding") is not None, (
+        "the restore retired the RECORD-TRUTH vector of a co-labelled `:Point` node")
+    assert "retired_vectors" not in result, (
+        "a node carrying a label no gate covers was reported as a retirement: "
+        f"{result}")
 
 
 def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):
