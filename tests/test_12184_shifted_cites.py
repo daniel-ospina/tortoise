@@ -1364,8 +1364,16 @@ def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() 
     problem, that resolution ran on a header the function never needed it for, so a re-measurement that
     reworded `dedupes the N …` — the case this function is written to REPORT — died on a traceback from an
     unrelated cite instead (`#14010` final review, finding 3). The call is below those returns now, and this
-    is the shape that tells the two orders apart: the text carries an unresolvable two-code-span cite AND
-    no figures sentence, so a hoisted call raises and the correct order returns.
+    test's fixture carries an unresolvable two-code-span cite AND no figures sentence.
+
+    ⛔ THE HOIST IS NOW AN EQUIVALENT MUTANT, and that is recorded here rather than left as a claim the code
+    no longer supports (`#3442` rule 3). Round 6 made a resolution failure GRADED (`except AssertionError`
+    → a problem string), so a hoisted call no longer raises: it appends a problem that the early `return`
+    then discards, and this test goes GREEN. Measured at this head — the hoist mutant is 24/24 green — so
+    this test can NOT tell the two orders apart any more. What it still pins is the property it is named
+    for: this state comes back as a GRADED problem, never a traceback. The crash path itself is pinned by
+    `test_a_two_span_cite_that_does_not_resolve_is_graded_not_raised`. The order is still kept — a header
+    whose figures sentence is gone never pays for the resolver.
     """
     text = (
         "the header writes one pairs as two code spans and cites `no_such_module_zzz.py` `:1`, "
