@@ -313,7 +313,7 @@ DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
 ``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36754`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
 `:Document` docstring lines are `:37339` in `record_decision` (opening `:37319`;
-`:37143` is the `:Source` line immediately above it, which is what a re-measure by that
+`:37338` is the `:Source` line immediately above it, which is what a re-measure by that
 phrase alone lands on) and `:37381` in `_file_human_approval` (opening `:37359`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a

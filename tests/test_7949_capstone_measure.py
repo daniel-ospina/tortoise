@@ -16762,10 +16762,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # at the head being merged, so there is no present-tense address left on the line for
     # these two rows to bind; a row scoped to a sentence that no longer exists can only red
     # as "re-derive the sentence", which is what a DELIBERATELY dropped claim would have to
-    # say. The labelled pair is not unguarded either:
-    # `test_the_merge_head_honours_line_is_what_that_head_carries` reads head-labelled
-    # figures against that head's own blob, which is the arm a `09f5c99afd` label needs.
-    # Deleting these two is therefore a COVERAGE MOVE, not a silence.
+    # say.
     # ⛔ AND THE LABELLED PAIR IS **UNGUARDED**, stated here because an earlier cut of this
     # comment claimed the opposite (fresh review at `1021ff6ed7`, P2, MEASURED):
     # `test_the_merge_head_honours_line_is_what_that_head_carries` hard-codes
@@ -16775,8 +16772,8 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # read by nothing. Guarding them is a follow-up, not a claim this file can make.
     # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
     # review, P2). The I7 pair above closed this class for two anchors and left this
-    # equally bindable clause unbound: the row states `:45867` as CURRENT
-    # ("the same grep also hits `:45867`"), and REVERTING the re-derivation to the
+    # equally bindable clause unbound: the row states `:46062` as CURRENT
+    # ("the same grep also hits `:46062`"), and REVERTING the re-derivation to the
     # pre-fix `:45728` reddened NOTHING — the delta added no `def test_` at `4747fb570e`, so this
     # selection was the same there: `pytest tests/test_7949_capstone_measure.py -k 'D5 and not
     # current_claim' -q` -> `3 passed` (the `current_claim` census arm this branch added is
