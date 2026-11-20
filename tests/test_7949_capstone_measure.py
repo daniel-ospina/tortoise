@@ -1498,7 +1498,7 @@ def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
 
     * `e6_defects`' body replaced by `return []` → the returned list is empty;
     * `if surface != "relations": continue` at its loop head → the hierarchy row drops out
-      silently, which is §10.21's false PASS ("that sums `relations[]` only").
+      silently — the false PASS §10.21 warns about, whose aggregate counts `relations[]` only.
     """
     pnia = measure._pack_census_module().RELATION_PREDICATE_NOT_IN_ALLOWLIST
     unbound = {"predicate": "declaredHierarchy", "from_kind": "dev:theme",
