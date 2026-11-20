@@ -1320,9 +1320,17 @@ def _commit_drop(root: Path, path: str) -> None:
 
 
 def _archive_module(tree: Path, module: str) -> dict:
-    """Write a `module` entry into the fixture's manifest (what `archive` would record)."""
+    """Record a `module` entry AND write its frozen file — what `archive` actually lands.
+
+    Both halves matter: the row alone makes the "row **and** its file" scenario unreachable,
+    and a test that claims to delete a file it never created proves nothing about the guard
+    (review F4).
+    """
     entry = _entry(arch.MODULE, module, batch="b-shrink", file=f"archive/modules/b-shrink/{module}.py")
     arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(f"# frozen {module}\n", encoding="utf-8")
     return entry
 
 
@@ -1359,9 +1367,11 @@ def test_a_renamed_module_is_a_removal_of_the_old_path(tree: Path) -> None:
     _commit(tree, ".")
 
     problems = arch.shrink_violations(tree, base_ref="HEAD~1")
-    assert any("tortoise.old_name" in p for p in problems), problems
-    assert not any("tortoise.new_name" in p for p in problems), (
-        f"the NEW path is new code, not a removal: {problems}"
+    removed = [p for p in problems if "MODULE REMOVED" in p]
+    assert [p.split(":", 1)[0] for p in removed] == ["tortoise.old_name"], (
+        "exactly the OLD dotted path is a removal. Asserting only that `new_name` is absent is "
+        "dead weight (an ADDED path cannot enter `base - head`); asserting the SET is what reds "
+        f"a head-side or symmetric-difference mutant that calls new code a removal: {problems}"
     )
 
 
@@ -1393,16 +1403,106 @@ def test_an_archive_entry_dropped_from_the_manifest_is_reported(tree: Path) -> N
 
 
 def test_dropping_the_row_and_its_file_is_STILL_reported(tree: Path) -> None:
-    """The tidy deletion — row AND frozen file — is an unexplained drop, not a restore."""
-    _archive_module(tree, "tortoise.gone")
+    """The tidy deletion — row AND frozen file — is an unexplained drop, not a restore.
+
+    The file is CREATED and then deleted, so this is the scenario the PR body's mutation table
+    claims to perform (review F4: it used to be byte-identical to the row-only test, and the
+    file never existed, so no mutation could tell the two apart).
+    """
+    entry = _archive_module(tree, "tortoise.gone")
     _commit(tree, ".")
+    assert (tree / entry["file"]).exists(), "the frozen file must exist to be dropped"
     arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
-    _commit(tree, ".")
+    _commit_drop(tree, entry["file"])
+    assert not (tree / entry["file"]).exists(), "the row is not the only thing that must go"
+    assert arch.load_manifest(tree / "archive" / "MANIFEST.json")["entries"] == []
 
     problems = arch.shrink_violations(tree, base_ref="HEAD~1")
-    assert any("tortoise.gone" in p for p in problems), (
+    assert any("tortoise.gone" in p and "REMOVED from archive/MANIFEST.json" in p for p in problems), (
         "an entry whose file is gone is already a `manifest_violations` finding in the OTHER "
         f"direction; dropping BOTH is still a record that vanished: {problems}"
+    )
+
+
+def test_a_row_dropped_for_a_RESTORED_module_is_green(tree: Path) -> None:
+    """The documented restore path, WITH the shrink arm ON — the false block of review F1.
+
+    `archive/README.md` step 3 deletes the row and the frozen file, because the code came back;
+    direction one reds the row if it stays, so dropping it is the only consistent shape. The
+    surface-guard job runs this arm on every PR, so a restore that reds here reds the repo's own
+    documented procedure with no waiver reachable from CI.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    restored = [p for p in arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(modules={"tortoise/gone.py"})
+    ) if "tortoise.gone" in p]
+    assert restored == [], f"a restore is not a loss: {restored}"
+
+    # NON-VACUITY: the SAME drop with the symbol NOT back is still the loss #12291 is about.
+    lost = arch.shrink_violations(tree, base_ref="HEAD~1", surface=_surface())
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in lost), lost
+
+
+def test_a_row_dropped_for_a_RESTORED_sdk_method_is_green(tree: Path) -> None:
+    """The same rule for the other two kinds: liveness is per-kind, not module-only."""
+    entry = _entry(arch.SDK_METHOD, "old_method")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def old_method(self):\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    assert arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    ) == []
+    assert arch.shrink_violations(tree, base_ref="HEAD~1", surface=_surface()), (
+        "without the method live again the row drop is unrecorded code loss"
+    )
+
+
+def test_the_restore_credit_needs_a_KNOWN_surface(tree: Path) -> None:
+    """`surface=None` means liveness UNKNOWN, and that must fail CLOSED (still a violation).
+
+    A caller that has not read the surface can never turn a loss into a green; only `check`
+    (and a test that supplies one) earns the restore credit.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1"), (
+        "an unknown surface was read as 'the symbol is live' — that is the fail-open shape"
+    )
+
+
+def test_check_hands_the_live_surface_to_the_shrink_arm(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CALL SITE, not just the helper: `check` must pass the surface it already read.
+
+    Deleting `surface=surface` from `check`'s call would red every restore in CI while every
+    helper-level test above stayed green — the call-site shape this section exists for.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+    monkeypatch.setattr(
+        arch, "live_surface", lambda root=None: _surface(modules={"tortoise/gone.py"})
+    )
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    problems = arch.check(tree, base_ref="HEAD~1")
+    assert not any("tortoise.gone" in p for p in problems), (
+        "check() did not hand the live surface to the shrink arm, so a documented restore reds: "
+        f"{problems}"
     )
 
 
@@ -1512,6 +1612,48 @@ def test_the_cli_refuses_a_waiver_without_a_reason(tree: Path) -> None:
     assert arch.main(
         ["archive_surface.py", "check", "--allow-archive-shrink-reason", "because"]
     ) == 2
+
+
+def test_the_cli_refuses_a_shrink_waiver_without_a_base_ref(capsys: pytest.CaptureFixture) -> None:
+    """Review F5: the pairing guard needs its own assertion, or deleting it reds nothing.
+
+    A waiver names a removal only the shrink arm can see, so without `--base-ref` it waives
+    nothing while reading as a departure that was checked. Per agent-infra#3442 rule 1, every
+    new fail-closed guard gets a mutant: delete this block and this test is the only red.
+    """
+    rc = arch.main(
+        [
+            "archive_surface.py",
+            "check",
+            "--allow-archive-shrink",
+            "module:tortoise.gone",
+            "--allow-archive-shrink-reason",
+            "because",
+        ]
+    )
+    assert rc == 2, "a waiver with no arm to waive must be refused, not run against no base"
+    assert "--base-ref" in capsys.readouterr().err, (
+        "the refusal must name the flag the operator has to add"
+    )
+
+
+def test_every_readme_section_a_violation_cites_exists() -> None:
+    """Review F3: a printed REMEDY that cites a missing section is a remedy nobody can read.
+
+    The citation is the whole justification the message gives for existing, so it is pinned to
+    the README's own headings: adding a citation to a section that does not exist reds here.
+    """
+    source = (ROOT / "tools" / "archive_surface.py").read_text(encoding="utf-8")
+    readme = (ROOT / "archive" / "README.md").read_text(encoding="utf-8")
+    headings = "\n".join(line for line in readme.splitlines() if line.startswith("#"))
+    cited = set(re.findall(r"archive/README\.md, '([^']+)'", source))
+
+    assert cited, "positive control: the violations cite the procedure doc at all"
+    missing = sorted(section for section in cited if section not in headings)
+    assert missing == [], (
+        f"a violation cites archive/README.md section(s) that do not exist: {missing}; the "
+        "operator following the gate's own remedy would find nothing there"
+    )
 
 
 def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:

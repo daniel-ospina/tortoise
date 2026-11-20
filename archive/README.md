@@ -107,12 +107,14 @@ enforced at two different seams, deliberately:
   there — **whenever a committed baseline exists to compare against** (a first cut has no
   prior to lose, so it is not gated) — **and for exactly the symbols that baseline carries: MCP
   tool rows, public `TortoiseSDK` methods, and the `retired:` forward names.** ⚠️ **A
-  whole-`module` removal is NOT graded by it**: the surface baseline has no module rows, so a
-  module deletion moves nothing `cut` compares, and this `check` iterates the manifest's
-  entries, so a module that was never archived is invisible here too — archive a module by hand
-  from the batch procedure below, and
-  [#12402](https://github.com/daniel-ospina/tortoise/issues/12402) tracks the gate that would
-  enforce it. Do not read this bullet as covering every archive kind. ⚠️ **Two hand-edits defeat the comparison, and neither is
+  whole-`module` removal is NOT graded by `cut`**: the surface baseline has no module rows, so a
+  module deletion moves nothing `cut` compares. It IS graded one seam over, by
+  `tools/archive_surface.py check --base-ref` (the `surface-guard` job runs it on every PR): that
+  compares the MERGE BASE's package set with this tree's, so a module that left `tortoise/` with
+  no `module` entry is RED
+  ([#12402](https://github.com/daniel-ospina/tortoise/issues/12402)); archive a module by hand
+  from the batch procedure below ("Archive a whole module"). Do not read this bullet as
+  covering every archive kind. ⚠️ **Two hand-edits defeat the comparison, and neither is
   a defect of the gate — no comparison of two documents can see a removal both already agree
   on:** deleting `config/surface-manifest.yml` before the cut (a first cut has no prior), or
   **splicing** the baseline by hand — deleting the row, the derived row, and the four
@@ -120,11 +122,13 @@ enforced at two different seams, deliberately:
   `counts.keyword_distribution`, the `response_fields` entry,
   `config/surface-order.yml`'s `baseline_counts`), which is what the `[surface-cut]` note in
   `MEMORY.md` prescribes for slice PRs because a raw cut rewrites the whole file. A batch that
-  takes the splice path leaves **no** archive entry and **no** retirement record with every
-  required gate green; a shrink pin on the committed counts is the only instrument that would
-  see it ([`#12327`](https://github.com/daniel-ospina/tortoise/issues/12327)), and
-  [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) covers the same absence class
-  for the archive. **Both halves of the baseline are compared** — unless the committed
+  takes the splice path leaves **no** archive entry and **no** retirement record — which is why
+  the SPLICE itself is now graded against a version the PR cannot author:
+  `tools/surface_manifest.py check --base-ref` compares the committed baseline's symbol set with
+  the MERGE BASE's, so a row deleted by hand is RED even though `cut` never ran
+  ([`#12327`](https://github.com/daniel-ospina/tortoise/issues/12327));
+  [`#12291`](https://github.com/daniel-ospina/tortoise/issues/12291) closed the same absence class
+  for the archive, one artifact over. **Both halves of the baseline are compared** — unless the committed
   baseline carries no `retired:` half at all: `check` already reds that shape, so `cut`
   is repairing it, and the cut then says so and does NOT compare that half. With both
   halves present they are compared because a
@@ -209,6 +213,27 @@ uv run python tools/test_lane.py run -- tests/test_archive.py -q
 uv run python tools/archive_surface.py verify-anchors
 ```
 
+### Archive a whole module
+
+A `module` row is the only record that a whole module left the product (`#12402`): the surface
+baseline carries no module rows, so `cut` and `surface-guard` compare nothing for it. Two things
+make this the case that goes wrong:
+
+1. **`archive module` reads the source from the WORKING TREE** and refuses without it, so
+   restoring the file from the base is a PREREQUISITE, not an afterthought —
+   `git checkout <base-sha> -- <path>` → `archive module <dotted.path> --batch <slug> --reason
+   <text>` → delete it again in the same batch. Archiving AFTER the deletion cannot work.
+2. **A renamed or moved file is the same case.** The old dotted path is the symbol that left the
+   product; archive the OLD path and treat the new one as new code.
+
+The gate that reads this is `check --base-ref` (bare `--base-ref` = the default branch), which
+compares the MERGE BASE's package set with this tree's, adding package ancestors on both sides so
+that deleting an `__init__.py` whose package still imports is not a removal. It is part of the
+`surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2), never a
+quiet pass. If the deletion is already recorded somewhere this gate cannot read, state it:
+`--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a local-shell
+record — CI passes no waiver, see "Restoring a removed symbol" below).
+
 ## Restoring a removed symbol
 
 **The archived file is the source of record** — reading it needs no git history. Two things do
@@ -218,12 +243,26 @@ a full-history clone), and it refuses an archive with **no entries at all** so a
 manifest cannot pass vacuously. `check` itself is green at zero entries on purpose, because the
 restore path legitimately ends there; pass `--require-entries` when zero must be a failure.
 
-⚠️ **What no gate sees: ONE entry REMOVED from a non-empty manifest.** A shrink guard is not
-built. `cut`'s refusal covers the SURFACE direction (a live symbol disappearing with no
-record); it does not cover a manifest that quietly loses a row which the surface also no
-longer carries — the code would then be gone from the repo with every gate green. Tracked in
-[#12291](https://github.com/daniel-ospina/tortoise/issues/12291), separately from #12237, which
-closed the surface direction only.
+⚠️ **ONE entry REMOVED from a non-empty manifest IS graded** — `check --base-ref`
+([#12291](https://github.com/daniel-ospina/tortoise/issues/12291)) compares the manifest's rows
+with the merge base's and reports a row that **left**, or one whose CLAIM was **rewritten** in
+place (`kind`, `symbol`, `file`, `archived_from`, `archived_at`, `sources`, `blocks` — appending a
+tombstone field is what an append-only record does, so it is not a rewrite). Passing `--base-ref`
+needs no special handling for a restore, because the two legitimate shapes are both green:
+
+* **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again:
+  in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`. The code is back in the
+  product, so nothing the archive promised is missing — and the row CANNOT stay, because the
+  other direction reds an archived symbol that is live again. The frozen bytes remain readable in
+  git history at the deletion commit (`git log -- archive/<kind>s/…`). This is why the arm is
+  safe in CI: the CI job runs it with `--base-ref` on every PR, and a restore is green there.
+* **a stated waiver** — `--allow-archive-shrink <kind>:<symbol>
+  --allow-archive-shrink-reason <why>`, for a drop that is neither a restore nor a mistake, and
+  it goes in the PR body. It needs `--base-ref` (the arm it waives) and it is a LOCAL-SHELL
+  record: **CI passes no waiver flag, deliberately** — every non-restore deletion has a record
+  route (archive it), and a waiver committed to the workflow would be a standing excuse for
+  every later PR while one that waives nothing is itself reported. A waiver is therefore never
+  what a restore needs.
 
 1. open `archive/mcp-tools/<batch>/<tool>.py` (or `sdk-methods/…`, `modules/…`) and copy **each**
    verbatim block back into the file named in **its own** `verbatim from <path>` banner — one
@@ -235,7 +274,8 @@ closed the surface direction only.
    of a live function;
 2. re-add the registry/declaration row and re-cut the manifest (`tools/surface_manifest.py cut`);
 3. delete the manifest row and the archived file, then `tools/archive_surface.py index`;
-4. `tools/archive_surface.py check` must be clean. **Restoring the LAST entry leaves a legal
+4. `tools/archive_surface.py check` must be clean — and it stays clean with `--base-ref` too,
+   because the arm treats a dropped row whose symbol is live again as the restore it is. **Restoring the LAST entry leaves a legal
    empty archive** — the plain form is green at zero entries on purpose, so this step works;
    `check --require-entries` and `verify-anchors` are the forms that refuse an empty one, and
    CI runs the latter, where an empty archive means the code was deleted rather than restored.

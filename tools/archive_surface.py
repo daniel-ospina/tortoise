@@ -596,6 +596,32 @@ def anchor_unverified(root: Path | None = None) -> list[str]:
 
 # ── violations: the surface half (pure — no filesystem) ─────────────────────────
 
+def live_return(entry: dict, surface: dict) -> str | None:
+    """WHERE this entry's symbol is LIVE again, or `None` — the ONE definition of "came back".
+
+    Both directions read this, because the two arms grade the same event from opposite sides:
+    `surface_violations` reds an archived row whose symbol is live again, and
+    `shrink_violations` (arm 2) treats a DROPPED row whose symbol is live again as the RESTORE
+    it is rather than the loss it otherwise is. Two definitions of "live" would let the two
+    arms disagree about the same tree — one reding a restore, the other calling it clean.
+    """
+    kind = entry.get("kind")
+    symbol = str(entry.get("symbol") or "")
+    if kind == MCP_TOOL:
+        return symbol if symbol in surface["tools"] else None
+    if kind == SDK_METHOD:
+        return symbol if symbol in surface["methods"] else None
+    if kind == MODULE:
+        # A whole module archived from INSIDE the package. Its file must be GONE from the
+        # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
+        # ships in the wheel, which is the opposite of "not available".
+        base = symbol.replace(".", "/")
+        for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
+            if candidate in surface.get("modules", set()):
+                return candidate
+    return None
+
+
 def surface_violations(entries: list[dict], surface: dict) -> list[str]:
     """Every way an archived symbol can be back on the live surface, or mis-recorded.
 
@@ -604,10 +630,8 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
     cannot.
     """
     tools = surface["tools"]
-    methods = surface["methods"]
     forward = surface["forward"]
     sdk_retired = surface["sdk_retired"]
-    installed_modules = surface.get("modules", set())
     out: list[str] = []
     for entry in entries:
         kind = entry.get("kind")
@@ -615,8 +639,9 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
         if kind not in KINDS:
             out.append(f"{symbol or '<no symbol>'}: unknown kind {kind!r} (expected one of {KINDS})")
             continue
+        back = live_return(entry, surface)
         if kind == MCP_TOOL:
-            if symbol in tools:
+            if back is not None:
                 out.append(
                     f"{symbol}: REAPPEARED on the live MCP surface — an archived tool must not "
                     "be in TOOL_REGISTRY (archive/README.md, 'not available')"
@@ -628,7 +653,7 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
                     "these are different mechanisms and must not hold the same name"
                 )
         elif kind == SDK_METHOD:
-            if symbol in methods:
+            if back is not None:
                 out.append(
                     f"{symbol}: REAPPEARED as a public TortoiseSDK method — an archived method "
                     "must not be importable from the product package"
@@ -639,18 +664,11 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
                     "REMOVED_SDK_METHODS — a caller would then hit a bare AttributeError "
                     "instead of the recorded departure, so the removal is not accounted for"
                 )
-        else:
-            # A whole module archived from INSIDE the package. Its file must be GONE from the
-            # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
-            # ships in the wheel, which is the opposite of "not available".
-            base = symbol.replace(".", "/")
-            for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
-                if candidate in installed_modules:
-                    out.append(
-                        f"{symbol}: REAPPEARED as an importable module in the shipped package "
-                        f"({candidate}) — archived code must not ship"
-                    )
-                    break
+        elif back is not None:
+            out.append(
+                f"{symbol}: REAPPEARED as an importable module in the shipped package "
+                f"({back}) — archived code must not ship"
+            )
     return out
 
 
@@ -1096,6 +1114,7 @@ def shrink_violations(
     *,
     base_ref: str | None = None,
     allowed: tuple[str, ...] | list[str] = (),
+    surface: dict | None = None,
 ) -> list[str]:
     """Every removal this tree made that left NO trace, graded against the base ref.
 
@@ -1105,6 +1124,16 @@ def shrink_violations(
       · an archive entry that left (or was rewritten in) `archive/MANIFEST.json` must be
         restored, or waived with a stated reason, because that manifest is the only index of
         what was removed.
+
+    A DROPPED row is not always a loss. `archive/README.md`'s restore procedure ends by
+    deleting the row AND its frozen file, because the code came back to the product — and a
+    restore CANNOT keep the row, since direction one reds an archived symbol that is live
+    again. So a drop whose symbol `live_return` finds live is a RESTORE: green, no waiver,
+    nothing lost (the code is in the product; the frozen bytes stay readable in git history at
+    the deletion commit). `surface` is what answers that question, and the same answer
+    `surface_violations` reds from its own side. `surface=None` means "liveness UNKNOWN" and
+    gives no restore credit — fail-closed toward the violation, so a caller that has not read
+    the surface can never turn a loss into a green.
 
     `allowed` is the deliberate-departure escape hatch, applied to a NAMED record only — there
     is no blanket flag, for the same reason `cut --allow-removal` has none: a blanket flag is
@@ -1148,16 +1177,25 @@ def shrink_violations(
             if key in waivers:
                 used.add(key)
                 continue
+            if surface is not None and live_return(base_entry, surface) is not None:
+                # A RESTORE, not a loss: the row left because the code came BACK (direction
+                # one reds the row if it stays — archived ⇔ absent), so there is nothing the
+                # archive promised that the product no longer carries. Recognising it here is
+                # what keeps `archive/README.md`'s own restore procedure green in CI, which
+                # runs this arm with `--base-ref` on every PR.
+                continue
             out.append(
                 f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
                 "it and this tree does not, so the only index of what was removed from the "
                 "product no longer names it. The frozen file under archive/ may still be on "
                 "disk; without its row it is code nothing indexes, and every other arm here "
                 "iterates the rows it FINDS, so the drop is invisible to them (#12291). "
-                "REMEDY: restore the entry, or — if the code was RESTORED to the product — "
-                "delete its frozen file in the same commit and state the restore: "
-                f"`--allow-archive-shrink {kind}:{symbol} --allow-archive-shrink-reason <why>`, "
-                "naming the restore in the PR body."
+                "REMEDY: restore the entry — or, if the code came back to the PRODUCT too, "
+                "delete its frozen file in the same commit (that is the restore procedure in "
+                "archive/README.md, and this arm treats a live symbol as a restore, so no "
+                "waiver is needed). If the drop is neither, state it: "
+                f"`--allow-archive-shrink {kind}:{symbol} --allow-archive-shrink-reason <why>`. "
+                "A waiver is a local-shell record: CI passes none, deliberately."
             )
         elif _entry_claim(working[key]) != _entry_claim(base_entry):
             if key in waivers:
@@ -1209,12 +1247,16 @@ def check(
     a ref to compare against: every other arm here iterates the entries the manifest FINDS, so
     none of them can see an entry that is gone or a module that was deleted. `None` = the arm
     does not run; a string (possibly empty → the default branch) = it runs, and an unresolvable
-    ref is a REFUSAL rather than a silent pass.
+    ref is a REFUSAL rather than a silent pass. Arm 2 recognises a RESTORE (the row left AND
+    the symbol is live again) and stays green, so the restore procedure in `archive/README.md`
+    is untouched by turning the arm ON — the live surface read for `surface_violations` below is
+    the same answer it reads, passed through rather than derived twice.
     """
     root = Path(root or ROOT)
     manifest = load_manifest(root / "archive" / "MANIFEST.json")
     entries = manifest["entries"]
     problems: list[str] = []
+    surface = live_surface(root)
     problems += manifest_violations(manifest, root / "archive")
     if require_entries and not entries:
         # A VACUOUS PASS. With no entries every arm below is silent, so a PR that empties the
@@ -1226,11 +1268,13 @@ def check(
             "an empty manifest means the archived code was deleted, not that there is none"
         )
     problems += file_violations(entries, root / "archive", root)
-    problems += surface_violations(entries, live_surface(root))
+    problems += surface_violations(entries, surface)
     problems += package_violations(root)
     problems += index_violations(entries, root)
     if base_ref is not None:
-        problems += shrink_violations(root, base_ref=base_ref, allowed=allowed_shrink)
+        problems += shrink_violations(
+            root, base_ref=base_ref, allowed=allowed_shrink, surface=surface
+        )
     return problems
 
 
