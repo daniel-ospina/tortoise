@@ -550,9 +550,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "127 of this document's 223",
-        "dedupes the **328** as-written spellings to 223 — **105**",
-        "328 written spellings → 223 pairs → 105 collisions → 127 drifters of the 223",
+        "132 of this document's 229",
+        "dedupes the **341** as-written spellings to 229 — **112**",
+        "341 written spellings → 229 pairs → 112 collisions → 132 drifters of the 229",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1409,7 +1409,7 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 #: in the range the token names — without it a range row could pin a line the range does not cover.
 _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     ("sdk.py:17861", "tortoise/sdk.py", 17861, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 2),
-    ("sdk.py:41542", "tortoise/sdk.py", 41542, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 2),
+    ("sdk.py:41542", "tortoise/sdk.py", 41542, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 3),
     ("sdk.py:42300", "tortoise/sdk.py", 42300, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 1),
     ("sdk.py:58756", "tortoise/sdk.py", 58756, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
     ("sdk.py:19955-19958", "tortoise/sdk.py", 19958, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
