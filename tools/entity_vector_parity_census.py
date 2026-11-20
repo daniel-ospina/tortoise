@@ -175,12 +175,14 @@ CensusError = census_mod.CensusError
 #: `#13629` scope boundary that used to be pinned here (`NOT_IN_SCOPE == ("Point",)`).
 #: The boundary existed because the armed cutover and `#13330` owned `:Point` *while the
 #: record's coverage for it was unproven and the label was still being mirrored by
-#: ungated writers*. The MEASUREMENT half is gone: the record holds ~37,099 point vectors
-#: (PARITY after `#13685`), the in-graph `:Point` HNSW index is RETIRED (`#13330`) so
-#: nothing reads the property, and `#13971` gates the two writers that place a genuinely
-#: redundant copy (the SDK update door and the DR restore) on the same measured predicate
-#: the entity labels use — so `#5004`'s "a Point vector is RECORD TRUTH" is exactly the
-#: reason a graph copy the record ALSO holds is a mirror that may go.
+#: ungated writers*. The MEASUREMENT half is gone: the record's dense leg is armed since
+#: `#13685` and holds ~37,099 point vectors against 37,158 in the graph (measured
+#: 2026-11-19 — a 59-vector shortfall, so coverage still answers KEEP and nothing pops, and
+#: this census is the authority on when that flips), the in-graph `:Point` HNSW index is
+#: RETIRED (`#13330`) so nothing reads the property, and `#13971` gates the two writers that
+#: place a genuinely redundant copy (the SDK update door and the DR restore) on the same
+#: measured predicate the entity labels use — so `#5004`'s "a Point vector is RECORD
+#: TRUTH" is exactly the reason a graph copy the record ALSO holds is a mirror that may go.
 #:
 #: ⛔ BUT THE WRITER HALF DID NOT CLOSE, and review reverted the attempt to close it by
 #: force: the turn capture writes its vector wherever the graph is the SOLE store (no

@@ -102,16 +102,19 @@ def _derived_mirror_required(entity_type: str) -> bool:
     (`#13330` retired the in-graph `:Point` index) and re-writing it would undo a strip
     (`#13610` option 2's "write it back on the next call" race).
 
-    ⛔ TWO `:Point` WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the reason is the
-    same test read honestly: on their lanes the copy is NOT redundant. `_upsert_point_props`
-    is the journal fold — its vector is the JOURNAL's own record truth, and
-    `MIRROR_RETIRED_LABELS` must not contain `point` so that fold keeps writing the dense leg
-    a named fallback. `sdk::_write_capture_turns` writes the graph batch on exactly the lanes
-    where the record cannot hold the turn (no journal, no tenant, an open connect breaker, or
-    a record write that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot
-    vector only for ids the journal wrote none for — gating either on the label aggregate put
-    those vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both, so its
-    plan refuses `:Point` rather than stripping into them.
+    ⛔ TWO `:Point` DECLARED WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the
+    reason is the same test read honestly: on their lanes the copy is NOT redundant.
+    `sdk::_write_capture_turns` writes the graph batch on exactly the lanes where the record
+    cannot hold the turn (no journal, no tenant, an open connect breaker, or a record write
+    that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot vector only
+    for ids the journal wrote none for — gating either on the label aggregate put those
+    vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both, so its plan
+    refuses `:Point` rather than stripping into them.
+
+    ⛔ AND THE JOURNAL FOLD IS A THIRD THAT DOES NOT ASK, outside that declared population:
+    `_upsert_point_props` is the journal's own record truth — its vector is what makes
+    `derived == replay(journal)` hold, and `MIRROR_RETIRED_LABELS` must not contain `point`
+    so that fold keeps writing the dense leg a named fallback.
 
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
