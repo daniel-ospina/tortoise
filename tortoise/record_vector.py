@@ -666,7 +666,7 @@ class Coverage:
 #: WRITES did, and it is over: the folds (`_upsert_subject`, `_upsert_object`,
 #: `_upsert_event`, `_upsert_document`, `_upsert_source`, `_event_plain_merge`) and the
 #: writers outside them (`sdk::_update_entity`, `sdk::_event_raw_write_door`,
-#: `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`, `sdk::ingest_corpus`,
+#: `sdk::_session_event_write`, `sdk::_embedding_repair_attempt`, `sdk::_ingest_corpus`,
 #: `session_indexer::main`, `hosted_backup::restore_graph`) each ask this same predicate
 #: before they store `embedding`. A single ungated writer would re-add the vector on its
 #: next call and make :mod:`tools.strip_graph_entity_vectors`'s strip pointless — which

@@ -1577,7 +1577,7 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     for outside in ("tortoise.sdk::_session_event_write",
                     "tortoise.sdk::_embedding_repair_attempt",
                     "tortoise.sdk::_event_raw_write_door",
-                    "tortoise.sdk::ingest_corpus",
+                    "tortoise.sdk::_ingest_corpus",
                     "tortoise.session_indexer::main"):
         assert outside in writers, outside
 
