@@ -1,0 +1,539 @@
+---
+title: "Dense-leg query parity — both stores, one corpus, four readers (#13906)"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-11-20
+updated: 2026-11-20
+subjects.team: epistemic-team
+issue: "#13906"
+aboutSubjects: dense (vector) retrieval leg, pgvector HNSW, FalkorDB vector index, query parity
+aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004; #13108; #8429"
+---
+
+# Dense-leg query parity — both stores, one corpus, four readers (#13906)
+
+**Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
+`tests/test_vector_parity_13906.py` (80 DB-free tests) · **Artifacts, this
+directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
+
+The question this answers, in one sentence: **for the same tenant data and the
+same query, does the record's dense leg return what the graph's dense leg
+returns — same ids, same order, same recall@k, same distances?**
+
+## 0. Preflight — what could and could not be read
+
+- **Rung 1 (`mcp__seo-intelligence__perplexity_search`) is not available on this
+  box** — it is absent from the MCP catalogue entirely. Recorded as
+  *unavailable*, not skipped. The external pass was made against the Perplexity
+  API directly with `"model": "sonar"` named on every request (the research
+  skill's cheap rung; no `sonar-deep-research`, no `sonar-reasoning-pro`), key
+  read from the `PERPLEXITY_API_KEY` environment variable on the developer box
+  (never committed, never echoed). **2 queries, both returned, no 429,
+  total billed $0.01134.**
+- **The live hosted graph could not be read**: this worktree carries no
+  `TORTOISE_DB_URI` and no record DSN, so nothing here re-measures the live
+  graph's index census. That census is #13906's own audit (7 indexes, all
+  range/fulltext) and is cited, not re-derived.
+- **The Tortoise graph could not be read**: `[mandate-preflight]` reports
+  `TORTOISE-GRAPH-BRIEF.md` missing on this cell (the agent state directory,
+  `${CELL_HOME:-$HOME}/.pi/agent/state/`),
+  and there is no provisioning path (#1193 owns the content, #3377 the report).
+  The internal pass therefore rests on the docs and the code, and the graph is
+  recorded as **not readable here** — never as "empty".
+- **The box:** both stores are REAL and local, and the versions are taken from
+  the stores and recorded in the artifact (`environment` in `parity-run.json`),
+  not from memory: **pgvector 0.8.7** on **PostgreSQL 16.16** (`pgvector/pgvector:pg16`,
+  the image `test-record-postgres` pins, every migration applied by the tree's
+  own `_ensure_record_schema`), and **FalkorDB 4.20.6** (module ver 42006; this
+  lane's `tools/test_lane.py` container).
+
+## 1. What the external pass contributed, and what was verified locally
+
+| taken from the research rung | verified locally, in this artifact |
+|---|---|
+| probe pgvector HNSW at its **defaults** (`m=16`, `ef_construction=64`, `ef_search=40`); `ef_search` is the first knob and a query-time one | the migration leaves `m`/`ef_construction` at pgvector's defaults on purpose (`20261109000001:225`), and `record_vector` sets `hnsw.iterative_scan` explicitly. The record arm scored **recall@10 = 1.000 on all 6 queries** at the defaults — no tuning was needed or done. |
+| ground truth must be an **exact scan over the same corpus snapshot, metric and precision**, and must never be regenerated from the destination index | `truth()` is computed in-process in numpy from the corpus the harness itself wrote. Neither store's index participates. Its one numeric path is float64, so the stores' float32 rounding is **measured against it, not assumed**: `test_the_float64_oracle_agrees_with_a_float32_store` casts the shipped corpus and all six queries down to float32 and requires the same top-10 ids, with any permutation confined to one distance bucket by `compare()`'s own tie policy. (This cell previously claimed an "fp32 vs fp64 oracle" cross-check that no artifact and no test performed — corrected here.) |
+| compare **ids (recall@k) and ORDER separately**, with an explicit **tie policy** | `compare()` reports `ids_equal`, `order ∈ {exact, tie, diverged}` and `recall`, and classifies a permutation INSIDE one distance bucket as `tie`. Pinned by `test_a_within_tie_permutation_is_NOT_a_divergence` vs `test_a_cross_distance_permutation_IS_a_divergence`. |
+| the acceptance is exact set equality when the migration intends to preserve exact results | required: `record` vs `truth_cosine` — ids, order-except-ties AND distances. |
+| — (not from the rung; found here) | **distances must be compared too.** Ids can be identical while a value moved; see §4. |
+
+## 2. The corpus, and why each edge is there
+
+**59 rows** in total (`n_rows` in the artifact): 56 under the measured tenant —
+55 of them carrying an embedding, one with none — plus **3 rows under a second
+tenant**. Of the 55 vector-bearing rows, one is the caller-owned 768-wide one.
+Generated by `build_corpus(seed=13906)`:
+
+| edge | why |
+|---|---|
+| 48 **un-normalised** random vectors — a standard-normal draw scaled by a per-row factor in **0.35–2.5**, giving resulting euclidean norms of **7.223696–47.633002** (measured over the 48 draws; the *factor* is not the norm — `0.35·√384 ≈ 6.9` and `2.5·√384 ≈ 49` bound it, and the `1.0` norms belong to the UNIT edge rows below, not to these draws. This cell has been wrong twice: first as a factor-as-norm conflation, then as "1–48", both times under a parenthetical claiming it was measured) | `embeddings.compute_embeddings` stores the model's raw output; a corpus of unit vectors HIDES the cosine/euclidean divergence in the direction that reads as parity |
+| a 3-member **exact tie group** | the stores tie-break by recency-then-id, the oracle by id — a swap inside the group is legitimate |
+| 1 **768-wide** caller-owned vector | PR #3018 stores these VERBATIM; `#5004` forbids narrowing. It must be stored on both sides and ANN-invisible on both |
+| 1 row with **no embedding** | both legs must skip it |
+| 1 **retracted** + 1 **outdated** row whose vector IS the query | if `#689`'s cage fails on either leg, they rank FIRST — a loud diff, not a subtle one |
+| 3 rows under a **second tenant**, same vectors as the query | a tenancy leak on the **record** leg ranks foreign first. ⛔ RECORD-ONLY: `seed_foreign_tenant()` exists only on `RecordStore` and `GraphStore.seed` skips every `tenant != "ours"` row, so no second cypher graph is created and the graph leg's tenancy behaviour is **untested** — this row used to imply otherwise |
+
+## 3. The clean run — `parity-run.json`
+
+`k=10`, 6 queries (`q_anchor`, `q_tie`, 4 random).
+
+```text
+q_anchor: record recall=1.000 order=exact | graph_index recall=0.800 rows=8  | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.500
+q_tie   : record recall=1.000 order=tie   | graph_index recall=1.000 rows=10 | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.500
+q00     : record recall=1.000 order=exact | graph_index recall=1.000 rows=10 | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.200
+q01     : record recall=1.000 order=tie   | graph_index recall=0.900 rows=10 | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.200
+q02     : record recall=1.000 order=exact | graph_index recall=1.000 rows=10 | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.400
+q03     : record recall=1.000 order=exact | graph_index recall=0.800 rows=8  | graph_scan(euc) recall=1.000 | scan-vs-cosine 0.400
+
+PARITY: record matches the cosine oracle and graph_scan matches the euclidean oracle
+        (ids, order, recall@k, distances)
+informational, NOT gated: record-vs-graph_index recall=[0.8, 1.0, 1.0, 0.9, 1.0, 0.8]
+        — the replaced leg's under-return (#13911); and the scan-vs-cosine metric drift (#13912)
+```
+
+⚠️ The headline names its gate on purpose. The two **required** arms are each leg
+against **its own** oracle (record↔cosine, graph-scan↔euclidean). The
+record-vs-graph-index column is measured and **not** gated — that leg
+under-returns (§4.1) — so exit 0 must not be read as "the two stores return the
+same thing".
+
+- **`record` (pgvector HNSW, cosine) matches the oracle exactly** — ids, order
+  and distances (max delta inside 1e-4) — on every query, at pgvector's default
+  index parameters.
+- **`graph_scan` reproduces ITS oracle exactly** (euclidean), which is the
+  comparator's own sanity check: if this column were short, the harness's
+  eligibility predicate or distance inversion would be wrong and no other column
+  would be trustworthy.
+- The record returned **10 rows for every query**. The graph index returned 8 on
+  two of them (below).
+
+## 4. Three findings, each measured rather than argued
+
+### 4.1 The graph index leg SILENTLY UNDER-RETURNS (`k=10` → 8 rows)
+
+On `q_anchor` and `q03`, `graph_index_returned = 8`. The cause is in the
+replaced leg's Cypher, not in the corpus: `queryNodes` picks its `$limit` rows
+BEFORE `#689`'s terminal-status predicate is applied between `YIELD` and
+`RETURN`, so a terminal row inside the candidate window shrinks the answer below
+`k`, and nothing over-fetches or asserts a shortfall. The record applies the
+predicate server-side ahead of its `LIMIT` and returns 10.
+
+That is §6.1's filtered-ANN hazard in its *under-returning* form, and `#5090`
+Q2 ("nothing is silently invisible") in one line of measurement. It is
+**pre-existing production behaviour in the leg being replaced**, not something
+this PR introduces.
+
+### 4.2 The two graph branches rank by DIFFERENT metrics
+
+The index branch scores **cosine** (`similarityFunction: 'cosine'`, `1 - d`);
+the brute-force scan scores **euclidean** (`vec.euclideanDistance`, `1/(1+d)`).
+Our embeddings are un-normalised, so the orderings differ: **76 ids** across the
+6 queries are ranked differently by the scan than by the metric the decision
+names canonical. Per query the symmetric difference of the two top-10 lists is
+**10, 10, 16, 16, 12, 12** — i.e. up to 8 of each list's 10 members.
+
+On the live graph — measured in #13906 as having **no vector index at all** —
+the graph branch that answers is the scan, so production today ranks by
+euclidean, while the record leg ranks by cosine. This is informational in the
+harness (the scan's metric is not this issue's decision to change) and it is the
+single most useful number for a future "is the flip a ranking change?" review.
+
+### 4.3 The graph HNSW is not recall-complete at FalkorDB's defaults
+
+`CALL db.indexes()` on the built index reports
+`{dimension: 384, similarityFunction: 'cosine', M: 16, efConstruction: 200,
+efRuntime: 10}` — **`efRuntime: 10` is FalkorDB's default**, and on FalkorDB
+4.20.6 `queryNodes` takes exactly **four** arguments (a fifth, `{efRuntime: N}`,
+is refused: *"requires 4 arguments, got 5"*), so the ef cannot be raised per
+query.
+
+2 of 6 queries returned fewer than `k` rows (§4.1), which alone explains their
+recall shortfall. The `graph_index_ef200` diagnostic arm re-created the index at
+`efRuntime: 200` and **did not recover the missing ids** (still 0.8 on those two
+queries) — which is the useful negative: the shortfall is a *row count* problem,
+not an ef problem.
+
+## 5. The falsifier — `poison-*.json`
+
+⛔ A harness that has never reported a difference is not a harness.
+
+| run | verdict | first divergence (verbatim from the artifact) |
+|---|---|---|
+| `--poison id` | **POISON DETECTED** | `record … recall=0.9, order=diverged, distance_ok=False, distance_delta=4.665883013288408e-09` |
+| `--poison order` | **POISON DETECTED** | `record … recall=1.0, order=diverged, distance_ok=True, distance_delta=4.665883013288408e-09` |
+| `--poison recall` | **POISON DETECTED** | `record … recall=0.9, order=exact, distance_ok=True, distance_delta=4.665883013288408e-09` |
+| `--poison vector` | **POISON DETECTED** | `graph_scan … recall=0.9, order=diverged, distance_ok=False, distance_delta=1.2572615322170577e-06` |
+
+⚠️ `distance_ok=False` on the `id` and `vector` runs is **correct, not a
+regression**: those poisons introduce a row the oracle cannot score (an invented
+key, or a victim pushed out of the window), so the distance claim for it is
+UNMEASURED rather than agreed.
+
+⛔ **Every delta above is ~0 on purpose.** The first three poisons move IDENTITY
+and ORDER, not values, so a large distance delta would have been a **defect in
+the falsifier** — and it was: see §5.1. The divergences these runs report are
+exactly the ones the poison injected.
+
+The first three corrupt the candidate list the comparator receives; `vector`
+corrupts the **graph store's data at seed time** and leaves the oracle on the
+unperturbed corpus — a real store divergence rather than a synthetic one.
+
+**How `vector` earned the harness a fix.** On its first run it reported
+`POISON NOT DETECTED`: negating one stored vector moved its distance from 0.0 to
+exactly **2.000** under both metrics, while for `q_anchor` the eligible corpus
+rows that are not near-copies of the query sat **7.224–47.653** away under
+**euclidean** (median 28.283) and **0.897–1.148** under **cosine** (recomputed
+from `build_corpus(seed=13906)`; an earlier draft of this paragraph quoted an
+unreproducible "0.6–47.6" that mixed the two metrics).
+
+That single fact explains the silent run, and it is worth being exact about
+which arm was quiet: under **euclidean — the scan, the arm that is GATED —
+2.000 is nearer than every other row**, so the negated row stayed comfortably
+inside the top-10 and its ids and order were unchanged. Under **cosine** 2.000 is
+*further* than every row, so the index arm's ids would have moved — but that arm
+is reported **informational, never gated** (§3), so nothing redid. The gated arms
+said nothing, and a genuinely different store was called "parity". `compare()` now takes the candidates' distances and reports
+`distance.ok` / `max_delta` / `worst`, `_verdict` fails on a distance-only
+divergence, and the poison now pushes the row beyond the whole corpus. Pinned by
+`test_a_distance_change_with_identical_ids_is_a_divergence`.
+
+**A second instrument bug the live run exposed**, recorded because it is exactly
+the failure this harness is about: a freshly-created FalkorDB HNSW index answers
+**zero** rows while it builds, and `run_vector_query` answers that with the
+`#8429` fall-through to the scan. The "indexed" arm therefore measured the SCAN
+and reported its recall under the index's name (`q_anchor` 0.5 = the scan's
+number). `wait_index_ready()` now blocks until `queryNodes` answers and the arm
+**fails loudly** if it still falls back.
+
+## 5.1 What the review caught in THIS artifact, and what changed
+
+A fresh-context review of the harness found two P1 comparator holes and several
+P2s. Each was verified against the source before being applied; all are fixed
+here, and each has a DB-free pin.
+
+| finding | verified how | fix |
+|---|---|---|
+| **A1** `set(cand) == set(truth)` is TRUE for `["a","b","c","a"]`, and the positional loop is bounded by the shorter list → a leg returning `k+1` rows with one key repeated printed PARITY at recall 1.0 | reproduced against the committed blob | `ids_equal` now requires `count_equal` and no `duplicates`; new fields `count_equal` / `duplicates`; pinned by `test_a_repeated_id_is_not_set_agreement` |
+| **A2** `distance.ok is False` was fail-open on its **absence** (`None is False` is False), and `zip` truncated a short distance list into `ok: True` | reproduced both | short list → `ok: False` with a reason; required arms demand `ok is True`; pinned by two tests |
+| **A2b** this artifact's own `poison-recall.json` carried `distance: {ok: null}` on all six queries — the fail-open state was IN the committed evidence | read the artifact | distances are now always passed (no conditional `else None`) |
+| **A3** an empty measurement reported PARITY (`--k 0` → LIMIT 0 everywhere → exit 0) | reproduced | `recall` is `None` for an empty oracle; `main` refuses `k < 1`, `--queries 0`, `--n-random < 4` with exit **2** |
+| **A4** exit-0 headline over-claimed: "the two legs agree" while record-vs-graph_index recall was 0.8 | read `parity-run.json` | the headline names the two required gates and prints the un-gated column beside them |
+| **A5** `if ready and mechanisms != ["index"]` made the readiness guard INERT in exactly its own case (a timed-out `wait_index_ready` returned False, so the arm measured the scan and still exited 0) | read the line | the guard now refuses whenever the arm is not the index arm; `ready` only chooses the message |
+| **B1** the Cypher graph was never torn down — 20 stale `g13906parity*` graphs on the lane's instance, while the record rows were removed | `GRAPH.LIST` | `store.reset()` in the `finally`; verified `graphs after run: []` |
+| **D1** `--n-random 0` and `--queries 0` raised `IndexError` (the second AFTER both stores were seeded) | read the lines | `_validate_args` refuses before either store is touched |
+| **E1** no `durations:` row and no `ROWED_BY_THIS_FOLD` entry, so the fold-rule pin could not see this file | loaded the manifest | both added |
+| **E3** a `record.read` failure (`VectorShortfall` / `RecordVectorError` / `RecordVectorDeclined`) escaped `main` as a traceback — exit **1**, with no diagnosis and indistinguishable from a crash in the harness | read the call | captured per query as `record_error`; `_verdict` fails it by name (`test_a_record_leg_failure_is_a_named_divergence_not_a_traceback`) |
+| **E4** the scan arm inverted `1/(1+d)` and was compared at the record arm's `1e-4` tolerance — a relative float32 error `eps` in the score is ~`(1+d)²·eps` in the distance, i.e. ~1e-3 at d≈100, so a CORRECT scan would have been a FALSE RED on any far-apart corpus | arithmetic, pinned | the scan arm compares at `1e-3` with the reason stated (`test_the_scan_arm_tolerates_the_inversion_it_performs`) |
+| **F1** driver/setup failures (`psycopg2` absent, Postgres unreachable, a refused role, a seeding/index error) escaped `main` as a traceback — exit **1**, the code reserved for "a comparison diverged", so the falsifier's own loop read a crash as "poison confirmed" | read `main`'s catch | ANY exception reaching `main` is now "cannot run" → exit **2** (a divergence never raises; it returns a report) |
+| **F2** an all-`None` distance list published `ok: True, max_delta: 0.0` — the same fail-open one branch from the one round 1 closed. The REACHABLE case is a **NaN** distance (pgvector answers NaN, not NULL, for a zero-norm vector); `None` is defensive, since `record_vector.vector_search` carries `WHERE t.embedding_vec IS NOT NULL` (`tortoise/record_vector.py:2671`). ⚠️ An earlier draft of this row (and of the code comment and the test docstring) claimed `None` was reachable through a NULL generated column sorted last — false, corrected in round 5 | reproduced, and the NULL claim read against `record_vector.py:2671` | `distance.unmeasured` counted; any non-finite or absent distance → `ok: False`; pinned by `test_a_none_distance_is_not_a_verified_one` and `test_a_nan_distance_is_not_a_verified_one` |
+| **F3** this PR's `ROWED_BY_THIS_FOLD` edit **replaced** `test_10084_graph_argument_omit_first.py` instead of appending — the tuple is append-only and the silent drop would later hide a deleted `durations:` row | read the diff | restored and APPENDED; the diff is now `+1` line |
+| **F4** the `durations:` insert landed INSIDE the `test_13629_entity_vector_retire.py` line, splitting off its ~2,900-char rationale, and my row then carried a false claim ("the four poisons" pinned when `vector` had none) | read the file | file restored from `origin/main` and the row inserted as a NEW line; `perturb_for_vector_poison()` extracted so the `vector` poison IS pinned, and the row's text now matches what the tests cover |
+| **F5** five numbers in this README were unsupported (test count, the 0.35–2.5 *scale factor* quoted as a norm, "up to 5 of 10", "55-row", "15–25 away") | recomputed from `build_corpus` and the artifacts | all five corrected above, and the store versions are now RECORDED in `parity-run.json` (`environment`) instead of quoted from memory |
+| **F6** the order poison's docstring promised a bucket check the code did not make — on a one-tie-group answer the swap was classified `tie` and the falsifier was masked by the comparator's own policy (`q_tie`, `q01` in the old artifact) | reproduced | the swap now requires a different distance bucket; all six queries report `diverged` |
+| **F7** `duplicates` was O(n²) over a list the comparator deliberately does not truncate — a leg ignoring `LIMIT` on the production corpus (~35,312 rows) would turn the loud red into a hang | arithmetic | `Counter`, linear |
+| **E2** `raise SystemExit("cannot run: …")` exits **1**, which this module's own table defines as "a comparison diverged" — so a poisoned repro loop that could not measure printed `exit=1`, i.e. "falsifier confirmed" | read the contract | a typed `CannotRun` → exit **2**, pinned by `test_the_cli_refuses_argument_shapes_that_cannot_measure` |
+
+### Round 5: the numbers the verdict RESTS ON were unpinned
+
+No fail-open defect was found in the comparison itself. What was found is that the
+instrument's own gates could be widened with every falsifier still green — the same
+"pinned by NOTHING" class, one abstraction down. Each row below was mutant-verified
+(apply the edit, watch exactly one pin red, restore).
+
+| finding | verified how | fix |
+|---|---|---|
+| **G1** `--n-random 4 --k 10` seeds **8** eligible rows; `truth()` returns 8, `compare()` reads `k` only to default it, so both legs report `ids_equal / order=exact / recall=1.0` and `_verdict` returns `ok: True` — the under-return shape (#13911) this harness exists to EXPOSE, printed as PARITY, with `graph_index_shortfall` computing the 2 and gating nothing | reproduced DB-free against the corpus | `_validate_args` counts the eligible population from `build_corpus` (no store opened) and refuses `k` above it; `_verdict` refuses an oracle shorter than `report["k"]` as well, so a `run()` caller that skips validation cannot inherit the green |
+| **G2** the `CORE_ALSO` entry's comment cited two comparator falsifiers as its coverage, and **neither calls `select()`** — deleting the entry left them green while a harness-only diff collapsed to `surfaces: []` (tier-1 smoke), the silent-drop class the entry exists to close | measured control | added `test_a_vector_parity_harness_only_diff_selects_its_pins` (THE ARM ITSELF: `surfaces == ["core"]` + the pin file in `test_files`, the `test_problem_map_2820.py` shape); the comment now cites it and records why the old citation was wrong |
+| **G3** the two tolerances the REQUIRED arms rest on were themselves ungated: `TIE_TOL` 1e-6 → 1e-3 excuses a genuine cross-distance re-rank as a `tie` (a PASS), and the scan arm's literal `distance_tol` 1e-3 → 10.0 makes its value check inert — both left 30/30 green | mutants, then the same wideners at the CALL SITE | `SCAN_DISTANCE_TOL` is a module constant read through a named `_scan_arm()` seam (`compare` reports the tolerance it was given, so it is assertable with no store); pins: distances 2e-6 apart must report `diverged`, a half-unit scan error must report `ok: False` while a delta inside the tolerance still passes, and `run()`'s body is AST-read so the tolerance cannot leave the constant |
+| **G4** two docstrings overclaimed: `_verdict` said the under-return "IS gateable, through `graph_index_shortfall`" (nothing in it reads that field — the index arm is informational, the count is REPORTED), and the `None`-distance justification claimed a reachable NULL `<=>` (see the corrected **F2** row) | read the source | both corrected in the code and in this artifact; the `None` branch stays as defence with its real justification stated |
+
+### Round 6: the record-DSN guard skipped exactly when it could not decide
+
+Found by a **second dispatch of the same PR** (measurement posted to the PR, not a
+review record); reproduced here before it was touched. No gated comparison changed.
+
+| finding | verified how | fix |
+|---|---|---|
+| **H1** `run()` wrote `host = urlsplit(args.record_dsn).hostname; if host:` — and `hostname` is `None` for **two legal libpq spellings that both reach a remote host** (`postgresql:///db?host=db.example.com`, PostgreSQL §34.1.1's query-string form, and the whitespace conninfo `host=db.example.com dbname=x`). The guard was therefore SKIPPED exactly when it could not decide, on the path that seeds that store and deletes rows by `org_id` — a no-op on the destructive path R1 advertises. It also inverted `tortoise.config.is_loopback_uri`'s fail-closed rule (`tortoise/config.py:375`: an absent hostname is NOT loopback) | measured both spellings: `urlsplit(dsn).hostname is None` | the decision is now `_assert_local_record_dsn()` — a DSN whose host cannot be resolved is REFUSED unless `--allow-remote-writes`, with the unresolvable host named in the refusal; pinned by `test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped`, which also AST-reads `run()` so the call site cannot go back to `if host:` (mutant: restore the old shape → **1 failed, 35 passed**) |
+| **H2** `agent-infra-ci / lint` was red at this head with **18** ruff findings, all in this PR's own two files (8× `RUF100` for a `BLE001`-only `noqa` where this repo spells both codes, 4× `B905`, 2× `SIM105`, plus `SIM103`/`F841`/`RUF015`/`SIM300`) | `ruff 0.16.4` (the `python-ci.yml` pin) over both files | all 18 fixed; `ruff check` → **All checks passed**. Not a required context (so it never blocked the merge), but it is this change's own new code |
+
+### Round 7: a falsifier that certifies itself from a run that could not look
+
+The attestation review at the previous head found no fail-open defect in the gated
+comparison, and two defects in what the instrument CLAIMS about itself. Both were
+reproduced here before being touched, and neither changes a measured value — all
+five committed artifacts still replay **bit-identically** through the verdict
+(verified, because the new field is present only in the state it describes).
+
+| finding | verified how | fix |
+|---|---|---|
+| **I1** the falsifier's own proof was minted from runs that never looked: `poison_status = "POISON DETECTED" if not ok` counted EVERY failure as a detection, including the cannot-measure ones this verdict already names. Six queries each carrying `record_error` (a `VectorShortfall` — the #13911 shape) printed `poison: POISON DETECTED` and exited **1**, byte-identical to a real detection, while the poison was never exercised on a gated arm. §6's recipe collapses the three readings into one `echo exit=$?` | reproduced DB-free: six `record_error` entries → `POISON DETECTED`, exit 1 | three readings, three answers: **POISON DETECTED** (a failure from a MEASURED arm — a mixed run still counts), **POISON UNMEASURED …** → exit **2** (the same class as every other cannot-run), **POISON NOT DETECTED — HARNESS BLIND** → exit **3** (a measurement AGAINST the instrument; it must not share exit 1, which §6's one-bit recipe reads as "the poison was confirmed"). Pinned by `test_a_poisoned_run_that_could_not_measure_is_not_a_detection` and `…_exits_2` (the exit code, not only the word) |
+| **I2** the index-arm refusal had no pin, so the inert form the `_require_index_arm` docstring says was removed could come back silently: reintroducing `if ready and mechanisms != ["index"]` left **35/35 green**. Consequence: a timed-out `wait_index_ready` publishes `run_vector_query HNSW` over `mechanisms: ["scan_fallback"]` — the SCAN's numbers under the index's name, the arm #13911 is diagnosed from — while the gated arms are unaffected, so nothing reds | mutant: 35/35 green | the decision is a named seam (`_require_index_arm`, the `_scan_arm` treatment), pinned DB-free across five `(mechanisms, ready)` cases — a timed-out readiness REFUSES, since it is the case the guard exists for — plus an AST read of `run()` so the call site cannot inline the `if` again (mutant: restore the inert form → **1 failed**) |
+
+### Round 7b: the round-7 fix was inert on the state `run()` actually emits
+
+The attestation review at `9b7b4362` confirmed every pin still discriminates and the
+diff is pure additions — and then drove the REAL `run()` with fake stores, which is
+what round 7's own pin had failed to do. Two findings, both reproduced here first.
+
+| finding | verified how | fix |
+|---|---|---|
+| **J1** round 7's three-way `poison_status` was **INERT on the reachable state**. When the record leg raises, `run()` substitutes `rec_answers[qid] = []` (`:931`), so `compare(t_cos, [])` yields `ids_equal False / recall 0.0`, and `_verdict` appended a "record diverged" failure to `failures` but NOT to `unmeasured` — the `detected = any(f … not in unmeasured)` test read it as a MEASURED divergence. Driving the real `run()` with a record leg raising `VectorShortfall` on all six queries: `--poison id`/`order`/`recall` each printed `POISON DETECTED` and exited **1**, byte-identical to a genuine detection. Round 7's pin could not see it because its fixture paired `record_error` with a GREEN record arm — a state `run()` never emits. Same root, second instance: an all-NaN distance list (pgvector's NaN on a zero-norm vector) also reaches DETECTED | drove `run()` with fake stores; also replayed the reachable entry through `_verdict` | the per-arm decision is now ONE function (`_arm_failure`) that says whether a failure is EVIDENCE or an ABSENCE of it: a raised leg, an empty oracle, zero compared rows, or every distance unmeasurable are cannot-measure — so `POISON UNMEASURED` / exit **2**, and a mixed run with any measured divergence still reports DETECTED. Pinned with fixtures the comparator GENERATES, and the fixture-generation helper says why |
+| **J2** `compare` published `distance.ok: True, max_delta: 0.0` over **ZERO** compared rows — `zip([], [])` runs no iterations — which is what made a raised leg's empty answer look like a passed value check | read the branch | `ok` is `None` (UNMEASURED) with a reason when no candidate row was compared, so every consumer that requires a positive measurement fails on it; pinned by `test_an_empty_answer_is_not_a_passed_distance_check` |
+| **J3** the header above still carried the round-1 count (**30** DB-free tests) while §6 at that revision said **39** and the tree collected 39 (37 `def test_` + 2 from the one parametrized case) — the D1 stale-count pattern, re-staled by round 7's nine added pins. ⚠️ The first draft of THIS ROW said "36", which was neither the header nor §6; it quoted the round-6/7 *mutation* figures by mistake. Corrected here because the same section two paragraphs down records exactly that failure mode — a correction that asserts a previous text was wrong while being wrong itself | `git show <parent>:README.md` lines 17 and 318, plus the parent revision's own test-count (`def test_` occurrences, counted with grep -c) | corrected to **41**, and §6's count then matched the tree — ⚠️ until the NEXT commit (`961c8c5a`) added the fp32/fp64 producer and bumped neither number, so the count re-staled at **41 vs 42** until review round 9 caught it again (and the K-round below then took it to **43**, stating it). Recorded instead of silently fixed: this cell has now been wrong twice about the same number, which is the argument for the count being DERIVED (see `tools/ci_timing.py`) rather than written by hand anywhere |
+
+### Round 8: a guard that read the AUTHORITY while libpq dialled the QUERY STRING
+
+| finding | verified how | fix |
+|---|---|---|
+| **K1** `_assert_local_record_dsn` decided locality from `urlsplit(dsn).hostname` alone. libpq's URI form lets `host=`/`hostaddr=` in the **query string** OVERRIDE the authority, and `hostaddr` is the address actually dialled — so `postgresql://127.0.0.1/db?host=db.prod.example.com` read as LOCAL here while `psycopg2.connect()` reached a remote record, which `run()` then seeds (org, graph, node_identity, `point` rows) and `teardown()` deletes from by `org_id`. H1 closed the `hostname is None` half of this guard and left this half open: the destructive path R1 advertises was still reachable with a DSN that looks loopback | measured on libpq's own resolver (`PQconninfoParse`, via `ctypes`): `?host=db.prod.example.com` → `host='db.prod.example.com'` (the query wins over the `127.0.0.1` authority); `?hostaddr=203.0.113.9` → `hostaddr='203.0.113.9'`. The shipped guard returned normally on both — measured, not inferred. Controls behaved: `postgresql:///db?host=…` and `host=… dbname=…` are refused, a plain remote authority is refused, plain loopback passes | the decision is now `_record_dsn_hosts()` — EVERY host libpq would dial (query `hostaddr`, query `host`, the authority, comma-separated failover lists, and the whitespace conninfo keywords), each of which must be loopback; the authority is kept even when a query parameter overrides it, because over-blocking costs an `--allow-remote-writes` flag while under-blocking costs a tenant's rows. Pinned by `test_a_host_in_the_query_string_overrides_the_authority_and_is_refused`: 6 remote shapes refused (two of them the new `?host=`/`?hostaddr=` forms) with `--allow-remote-writes` still reaching a real remote run, 5 local shapes passing, 2 no-host shapes refused — plus an AST read so the decision cannot go back to an inlined authority read |
+| **K2** the pin count moved with this round's pin (41 → **43**, `41 def test_` + 2 from the one parametrised case) | `uv run python tools/test_lane.py run -- tests/test_vector_parity_13906.py -q` → `43 passed`; `--collect-only` → `43 tests collected` | the header above and §6 both state **43**, the tree's own count, so the J3 re-stale cannot repeat in this revision |
+| **K3** **R1 was claimed, not held.** `GraphStore.reset()` wrapped `GRAPH.DELETE` in `contextlib.suppress(Exception)` with the comment "a missing graph is the goal". True — and a fail-open, because a delete that failed for ANY OTHER reason was suppressed identically, so the run reported as normal and left the corpus graph plus its HNSW index behind. §5.1 B1's only evidence for "no graph left behind" was a human's out-of-band `GRAPH.LIST`, which is not a property the tool carries. Same suppression on `rebuild_with_ef`'s path, where a failed delete makes `seed()` add a SECOND corpus and the `efRuntime=200` diagnostic is computed over a doubled graph | read the code, then drove `reset()` with a fake transport: delete raises **and** the catalogue still lists the graph → the old body returned normally (no exception, no output); catalogue read fails → also silent | the delete is attempted, its error ignored, and the graph catalogue then READ: a surviving graph, or an unreadable catalogue, is a `CannotRun` naming which — so a run either proves it left nothing behind or refuses to report. Pinned by `test_a_graph_that_survives_teardown_is_loud_not_silent` (three states + an AST read of `run()`'s call site); restoring the suppression reds exactly that pin |
+| **K4** the pin count moved again with K3's pin (43 → **44**) | `pytest --collect-only -q tests/test_vector_parity_13906.py` → `44 tests collected`; `44 passed` | header and §6 state **44**, the tree's own count. ⛔ J3's own advice — the count is DERIVED, not written — is still unimplemented, which is why this cell has now been wrong three times |
+| **K5** **THE RECORD ARM'S IDENTITY WAS ASSERTED, NEVER MEASURED.** `require_schema()` checked only that `public.point.embedding_vec` exists, while `arms.record.driver` was the literal string "pgvector HNSW, cosine". pgvector answers `ORDER BY embedding_vec <=> q LIMIT k` over an index-less column with an EXACT SEQUENTIAL SCAN — no error — and this harness's oracle is ITSELF an exact scan, so an index-less record returns the oracle verbatim: `recall 1.000, order exact`, exit 0, published under the index's name. `record_error` cannot catch it: an exact scan raises no `VectorShortfall`. The graph side already refuses exactly this (`_require_index_arm`); the record side did not | drove the real `run()`/`main()` with a fake record leg returning the oracle verbatim (what an index-less scan returns): `PARITY … EXIT: 0` with `arms.record.driver == "pgvector HNSW, cosine"`. The committed artifact could not distinguish the two cases: `environment.record` carried versions but, unlike `arms.graph_index.index_params`, no index existence or parameters | `require_schema()` now reads `pg_indexes` for the HNSW index on `public.point(embedding_vec)` and REFUSES without it, via the data-level seam `_require_hnsw_indexdef` (so it is pinnable without a database), and the verified `indexdef` is recorded under `arms.record.index`. Pinned by `test_the_record_arm_refuses_a_database_without_its_hnsw_index`: the real index shape and the quoted form accepted, no index refused, a btree on the same column / an HNSW on another column / an unrelated btree all refused, a genuine index alongside decoys still accepted, plus AST reads of the call site AND of the published `arms.record` dict. Restoring the column-only check reds exactly that pin |
+| **K6** the fp32/fp64 pin's docstring said the record's ANN column is `vector(1024)` — it is `vector(384)` (`20261109000001:208-216`, `20261117000001:224-235`), and the harness's own `DIM` is 384, so the sentence described a schema in which the record arm could never match at all | `grep -rn 'vector(1024)'` → no hit anywhere in the tree; the migrations declare `embedding_vec vector(384)` and `USING hnsw (embedding_vec vector_cosine_ops)` | corrected to `public.point.embedding_vec vector(384)`; the argument it supports (float32 vs float64 rounding on the SAME 384 coordinates) is unchanged, which is why it was a citation error and not a design error |
+| **K7** the pin count moved with K5's pin (44 → **45**), and then **again** with the service-DSN pin (`1358b945`, which landed between K5 and this commit) → **46** | `pytest --collect-only -q tests/test_vector_parity_13906.py` → `46 tests collected`; `46 passed` | header and §6 state **46**, the tree's own count — ⛔ and this cell has now re-staled SIX times, so the literal is recorded here as a known defect rather than a thing to keep hand-editing: the command is the authority (`--collect-only`), and J3's advice to DERIVE it is still unimplemented |
+
+### Round 9: the guard read the string libpq parses, but not the FILE libpq reads
+
+The attestation review at `14c311fb` re-earned nothing on the gated comparison (all
+five artifacts still replay bit-identically, `compare`/`_verdict` untouched since the
+clean verdict at `5546af21`) and found one more hole in the record-DSN guard — on
+the same destructive path, one indirection further out.
+
+| finding | verified how | fix |
+|---|---|---|
+| **L1** `_record_dsn_hosts` enumerated the two host-bearing keys libpq knows (`host`, `hostaddr`) and returned them. libpq has a THIRD way to learn the dialled address: `parseServiceInfo` fills every option the conninfo left UNSET from `pg_service.conf`, so a **loopback** DSN with `service=prod` dials that entry's `hostaddr` — and `PGSERVICE` in the environment does the same to a DSN that never mentions it. The guard PASSED all three, and inconsistent with itself: the conninfo spelling `service=prod …` was refused, but only because it named no host | measured with libpq itself — `psql` names the host it tries, service file carrying `hostaddr=203.0.113.9`: `?service=prod` → **203.0.113.9**, `?host=127.0.0.1&service=prod` → **203.0.113.9**, `PGSERVICE=prod` + plain loopback → **203.0.113.9**; the control without a service dialled 127.0.0.1 | a `service` in either spelling, or `PGSERVICE` in the environment, is reported as `RECORD_DSN_SERVICE` — a sentinel no loopback predicate accepts — so it is refused unless `--allow-remote-writes`, exactly like a host that cannot be resolved. Pinned by `test_a_service_dsn_cannot_prove_it_is_local` (4 DSN spellings + the env form + the control that the same DSNs are local again without it) and by three new entries in the `remote` tuple; mutants: ignore the URI `service` → **2 red**, ignore `PGSERVICE` → **1 red**, ignore the conninfo keyword → **1 red** |
+
+### Round 9b: the poison must be seen on the arm it MOVES
+
+Landed as `8d4bccf960` by the concurrent lane editing the same function; given its
+own heading and its own labels because these three rows were merged INTO Round 9's
+table above, whose rows are already `L1`, and the round after it reuses `M1`–`M4`.
+A reader (or a later lane citing "M1") could not tell which finding was meant.
+
+| finding | verified how | fix |
+|---|---|---|
+| **O1** `detected = any(f for f in failures if f not in unmeasured)` answered "was this failure MEASURED", never "was it measured ON THE ARM THE POISON MOVES". `--poison id\|order\|recall` rewrite only the RECORD candidate list (`rec_pairs = poison(…, rec_ids, …)`); `--poison vector` perturbs the rows the GRAPH is seeded with. So a real, measured divergence on the OTHER required arm printed `POISON DETECTED` for a corruption the run never applied to it — the round-7 self-certification one door over. **And** BLIND shared exit **1** with DETECTED, so §6's one-bit recipe read "the harness is blind about this corruption" as "the poison was caught" | reproduced DB-free on the reachable entries: a corrupt `graph_scan` with `--poison id` → `POISON DETECTED`, exit 1; a fully green run with `--poison vector` → `POISON NOT DETECTED`, exit 1 — byte-identical to a real detection in the one field the recipe reads | `POISON_REACH` maps each poison to the arms it can actually move, `_verdict` records which arm every failure came from, and `detected` requires the arm to be in that set; a measured divergence on an UNREACHED arm is now BLIND (not "UNMEASURED" — the instrument did look, at the wrong thing), and BLIND exits **3**. Pinned by `test_a_poison_is_only_detected_on_the_arm_it_reaches` (both directions, so a one-sided pin cannot pass), `test_a_blind_run_does_not_share_the_detected_exit_code` (calls `main`), and `test_an_empty_candidate_list_is_not_perfect_agreement` |
+| **O2** `_cross_recall` published `recall: 1.0` over an EMPTY candidate list — the same "an empty answer is not a passed check" class `compare()`'s recall was already fixed for. A raised record leg answers `[]`, so its artifact rows read as PERFECT agreement over zero rows | read the code; `_cross_recall([], ["a"])` → `1.0` | `None` over an empty `a` (artifacts unaffected: every committed run's `a` is non-empty, and all five still replay bit-identically). Pinned by `test_an_empty_candidate_list_is_not_perfect_agreement` |
+| **O3** the corpus comment and this document's edge table said "the graph side gets its own graph" for the second-tenant rows. `seed_foreign_tenant()` exists only on `RecordStore` and `GraphStore.seed` skips every `tenant != "ours"` row — no second cypher graph is ever created | read the code | the comment and §2's row now say RECORD-ONLY and name the graph leg's tenancy behaviour as untested, rather than implying the edge was measured on both |
+
+### Round 10: the guard read the string libpq parses, but not where each parser STOPS
+
+| finding | verified how | fix |
+|---|---|---|
+| **M1** `_record_dsn_hosts` read the query through `urlsplit(dsn).query`, but **libpq has no FRAGMENT concept**: Python ends the URL at `#` and reports an empty query, while libpq keeps scanning for the first `?` in the RAW string. `postgresql://127.0.0.1/tortoise_record#?hostaddr=203.0.113.9` therefore returned `['127.0.0.1']` from the guard while libpq resolved `hostaddr='203.0.113.9'` and **actually dialled it** — measured as a real connect attempt to that address (`timeout expired`, not a name-resolution error). The guard the previous round had just tightened was still defeatable by one character, on the path that seeds and then deletes a tenant's rows | libpq's own resolver (`PQconninfoParse` via `ctypes`) on the exact string: `{'dbname': 'tortoise_record#', 'host': '127.0.0.1', 'hostaddr': '203.0.113.9'}`, against `urlsplit(...).query == ""` | the query is now read the way libpq reads it (everything after the first `?` of the RAW string), and a `#` anywhere BEFORE that `?` makes the two parsers disagree about where the authority ends — so that shape is REFUSED (`RECORD_DSN_AMBIGUOUS`) rather than resolved one way. Pinned: the `#` shape reds the guard, and the mutant that restores `parse_qs(parts.query)` reds the pin |
+| **M2** `app_role_dsn` destroyed the two spellings the guard had just begun to ACCEPT. `urlunsplit` emits `postgresql:/tortoise_record?…` for an authority-less URI (`postgresql` is not in `urllib.parse.uses_netloc`, so an empty netloc loses a slash — libpq: `invalid connection option "postgresql:/tortoise_record?host"`), and for the whitespace conninfo there is no `?`, so `?options=…` was glued onto the LAST keyword's value (`host=127.0.0.1?options=…`, unresolvable). Either way the tool certified a store it then could not read one row from, and every query carried a `record_error` | rebuilt both DSNs through `app_role_dsn` and parsed the results with `PQconninfoParse` | two syntaxes, two constructions: the URI keeps its `head` VERBATIM (so `postgresql:///db` keeps all three slashes) and gets `options=` in the query; the conninfo gets `options='-c role=…'` as a KEYWORD. An existing `options=` is replaced, never duplicated. Pinned by `test_the_app_role_dsn_keeps_the_spelling_it_was_given` |
+| **M3** the `unmeasured` flag existed only on the POISONED branch, so an ordinary run whose every failure was a cannot-measure one exited **1** — byte-identical to "a required comparison DIVERGED", a claim about a measurement the run never made. The round-7 fix had separated the three readings for the falsifier and left the same conflation in the main path | one report object (a raised record leg on every query) invoked twice: not poisoned → exit 1, `unmeasured` ABSENT; the same run with `--poison id` → exit 2 | the key is now set whenever `not ok` and EVERY failure is a cannot-measure one, and `main` prints a distinct cannot-run message for the unpoisoned case. It stays ABSENT on a measured run so the committed artifacts still replay bit-identically (verified: all five unchanged). Pinned by `test_an_unpoisoned_run_that_could_not_measure_is_not_a_divergence`, whose second half asserts a MEASURED divergence still exits 1 |
+| **M4** *(fixed in `8d4bccf960` by the concurrent lane editing the same function)* `_cross_recall` published `recall: 1.0` for a leg that returned ZERO rows — in the same entry that reports that leg's own recall as `0.000`. `compare()` had been fixed for this class already (an empty truth set is an empty MEASUREMENT, not a perfect one); this was the informational arm of the same mistake, and §3 of this artifact quotes that number | `_cross_recall([], ["a","b"])` → `{'recall': 1.0, …}` | an empty `a` now publishes `None` (unmeasured), not a perfect score. Pinned by `test_an_empty_leg_is_not_a_perfect_cross_recall` |
+| **M5** the HNSW guard accepted an index THIS READ cannot use. HNSW is built for ONE operator class and the record arm reads `ORDER BY t.embedding_vec <=> %s` (cosine), so an `hnsw (embedding_vec vector_l2_ops)` / `vector_ip_ops` index cannot serve it: pgvector does not use it and the read falls back to an EXACT SCAN — the same fail-open, one opclass over. A PARTIAL index (`… WHERE status IS NULL`) covers a subset for the same reason. The repo states the hazard on this very index (`20261109000001_record_embedding_vector.sql:88-90`: "`vector_l2_ops` here would silently change the ranking, which is the one thing the issue forbids") | `_require_hnsw_indexdef([… vector_l2_ops])` → ACCEPTED; same for `vector_ip_ops`, and for a `vector_cosine_ops` index carrying a `WHERE` predicate. The pin's decoy tuple held a btree on the column, an HNSW on ANOTHER column and a btree on `id` — no opclass mismatch, no partial shape | the guard now requires `vector_cosine_ops` and refuses a partial index; the pin's decoys carry l2, ip, partial and a no-opclass index, and the "genuine one beside decoys" assertion keeps them all in the list. Mutant: dropping the two conditions reds exactly this pin |
+| **O4** **THREE GUARDS WERE PINNED AS DECISIONS AND NOT AS WIRING** — each could be deleted from `run()` with all 53 pins green. (a) `require_schema()` is the only caller of `_require_hnsw_indexdef`, and nothing asserted `run()` calls it (deleting the one line → 53 passed). (b) the `arms.record` assertion located the dict by "has a `driver` key", which the `graph_scan` arm also has, so moving `"index": …` to the scan arm still passed. (c) R1's teardown was pinned as `assert "reset" in called`, and `run()` calls `store.reset()` twice (pre-seed at :1228 and the `finally` at :1392) — so the assertion was already satisfied by the PRE-SEED call and BOTH `record.teardown()` and the finally's `store.reset()` could become `pass` with 53 green. (d) the GRAPH-side locality guard had no call-site pin while the record-side one did | five mutants, each restored: the four deletions/relocations above plus moving the `index` key, all left 53 passing before the fix | (a) `assert "require_schema" in run()`'s calls; (b) the dict is now located BY ASSIGNMENT TARGET (`report["arms"]["record"]`), not by key shape; (c) a new pin parses the `ast.Try` that owns the teardown and requires BOTH `teardown` and `reset` inside its `finalbody`; (d) the graph guard joins `_assert_local_record_dsn` in the call-site assertion. After the fix each of the five mutants reds exactly its own pin |
+| **O5** the pin count moved with O4's pins (53 → **55**, and → **58** once the concurrent lane's three pins landed in the same rebase) | `pytest --collect-only -q` → `55 tests collected`; `55 passed` | header and §6 state **55** |
+
+Mutants, each reddening exactly its own pin and nothing else: the `#` shape read through
+`urlsplit().query` → **1 failed**; `app_role_dsn` rebuilt with `urlunsplit` → **1 failed**;
+`recall 1.0` for an empty leg → **1 failed**; the non-poisoned `unmeasured` block disabled →
+**1 failed**. Restored tree: **48 passed**.
+
+### Round 11: two more ways the guard read the string instead of libpq
+
+Landed on top of Round 10's fragment fix (the other lane's, merged here) from the
+same review. Both measured with libpq itself — `psql` prints the host it dials —
+and both are the same class: the guard answering a question about the STRING
+rather than about the CONNECTION.
+
+| finding | verified how | fix |
+|---|---|---|
+| **N1** libpq's conninfo grammar allows SPACES, TABS and NEWLINES around `=`, and single-quoted values. A `shlex` loop requiring `key=value` in ONE token cannot see `hostaddr = 203.0.113.9`, so a sibling loopback `host=` satisfied the guard | `psql` dialled **203.0.113.9** for `host=127.0.0.1 hostaddr = 203.0.113.9`, and again with a newline around `=` | the conninfo form is scanned with a keyword regex that allows whitespace around `=` and quoted values; a form naming no host still refuses (`RECORD_DSN_NO_HOST`). Pinned by reverting the regex to the one-token shape → **1 failed** |
+| **N2** libpq fills every option the conninfo leaves UNSET from `PGHOSTADDR`/`PGHOST`/`PGSERVICE`, and `hostaddr` is the address actually dialled. A PLAIN loopback DSN was therefore remote under `PGHOSTADDR=203.0.113.9` | `psql` dialled **203.0.113.9** for `postgresql://127.0.0.1/db` with `PGHOSTADDR` set — the ordinary, documented command | the environment is read by libpq's own precedence: a variable supplies an option only when the DSN left it unset. Pinned by ignoring `PGHOSTADDR` in that loop → **1 failed**; controls prove it is not a blanket block (a DSN's own `hostaddr=` beats the variable; a LOOPBACK value in the variable is fine; with the variable cleared the same DSNs are local again) |
+
+⛔ THE STRUCTURAL POINT, which is why four rounds of this guard are ONE lesson:
+each fix closed one indirection and the next review found the next one, because the
+guard kept re-deriving libpq's grammar. The question is **"what would
+`psycopg2.connect(dsn)` dial"**, not **"what does this string say"** — and answering
+it keeps needing libpq's own rules, not Python's.
+
+### Round 12: the authority is a failover LIST, and a socket PATH is not a remote host
+
+| finding | verified how | fix |
+|---|---|---|
+| **Q1** the guard read the URI authority as ONE hostname. To libpq the authority is a comma-separated **failover list**: `postgresql://127.0.0.1:1,203.0.113.9/db` has `host='127.0.0.1,203.0.113.9'` and libpq **dials the second entry** when the first refuses (`PQhostaddr` → `203.0.113.9`), while `urlsplit().hostname` returns `127.0.0.1` — and `.port` even raises (`Port could not be cast to integer value as '1,203.0.113.9'`), so urllib itself does not consider that netloc parseable. The realistic trigger is the failover case the list exists for: the local store is down | libpq's resolver + a real connect attempt naming both hosts | `_authority_hosts()` splits the netloc on commas (userinfo stripped, `[::1]:5432` and `host:port` handled, percent-decoded) and every member must be loopback. Pinned by `test_the_uri_authority_is_a_failover_list_not_one_host`, plus the reverse (a single-host authority is still accepted) |
+| **Q2** over-block, fail-closed: a unix-socket PATH (`?host=/var/run/postgresql`, `host=/var/run/postgresql`) was refused, so the operator had to pass `--allow-remote-writes` — a flag whose name asserts the opposite of what they are doing | `_assert_local_record_dsn` on both spellings | a host beginning with `/` is a socket PATH and is local by construction; it is skipped in the loop. Pinned by `test_a_unix_socket_path_is_local_not_a_remote_host` |
+| **Q3** `app_role_dsn` mangled two legitimate local DSNs, the M2 class two spellings further on: re-joining `shlex.split` tokens dropped a conninfo VALUE's quoting (`password='p w'` → `password=p w`, which libpq rejects: `missing "=" after "w"`), and `parse_qsl` decoded a literal `+` in a URI value to a space (libpq does not) | `PQconninfoParse` on the rebuilt strings, before and after | conninfo values are re-emitted through `_quote_conninfo_value` (quoted only when they must be), and the URI side splits the raw query and percent-decodes only what libpq percent-decodes. Pinned inside `test_the_app_role_dsn_keeps_the_spelling_it_was_given` |
+| **Q4** `poison-vector.json` publishes `efRuntime: 200` ANSWERS under `efRuntime: 10` PARAMETERS: that arm's graph answers are re-read after `rebuild_with_ef`, but `index_params` had been captured from the default index. No verdict impact (the poison gates on `graph_scan`), but the artifact misattributes its own numbers | all five artifacts re-derived: only `poison-vector` has `graph_index` identical to `graph_index_ef200` | the arm re-reads `index_params` together with its answers, pinned by an AST read of the branch. ⚠️ The COMMITTED `poison-vector.json` predates this fix and still pairs the default index's parameters with the ef-200 answers — a fresh live run regenerates it; nothing else in that artifact is affected |
+
+Mutants, each reddening exactly its own pin: the authority read as one host → **1 failed**; the
+unix-socket skip removed → **1 failed**; the vector arm keeping stale parameters → **1 failed**.
+Restored tree: **56 passed**.
+
+### Round 13: libpq dispatches URI-vs-conninfo by PREFIX, and `"://" in dsn` asked the wrong question
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1** `_record_dsn_hosts` and `app_role_dsn` both chose the URI parser with `if "://" in dsn:`. libpq's own dispatch (`connectOptions1`) tests whether the string **STARTS WITH** `postgresql://` / `postgres://`; anything else is a keyword/conninfo string. So a conninfo DSN whose ANY VALUE contains `://` — `host=db.prod.example.com password=vault://localhost/secret` — was parsed as a URI, the "authority" was read out of the PASSWORD, and the real remote host was never examined: the guard passed a DSN that dials, seeds and then deletes in a remote record | libpq's `PQconninfoParse` + `PQhostaddr` on three shapes (`password=vault://localhost/x`, `application_name=postgresql://localhost/db`, `sslrootcert=x://localhost/y`, each with a remote `host`/`hostaddr`), and a 68-spelling × 4-environment sweep found six bypasses, all this one root | `_is_uri_dsn()` — `dsn.lstrip().startswith(("postgresql://", "postgres://"))` — is now the ONE dispatch, used by both functions so a certified conninfo DSN is not rebuilt in URI syntax. Pinned by `test_a_conninfo_value_containing_a_url_is_not_parsed_as_a_uri`; the mutant restoring `"://" in dsn` reds it |
+| **P2** this artifact quotes the euclidean median as `28.283`. A reviewer measured `28.848` over the 48 draws and `28.044` over the 52-row eligible population; an earlier reviewer measured `28.283`. ⛔ The committed artifacts do not contain the per-draw distances, so NEITHER figure is verifiable from the evidence in this directory — it is recorded here as disputed rather than "corrected", because a correction that is itself wrong is the failure mode §8 documents | `build_corpus(13906, 48)` + median over the draws, both reviewers' recipes | left as-is with this note. A live re-run regenerating `parity-run.json` with the per-draw distances would settle it; rewriting the number from a second unverifiable recipe would not |
+| **P3** the committed `parity-run.json` has no `arms.record.index` key, although round 11's K5 states the verified `indexdef` "is recorded under `arms.record.index`". The artifact predates that fix — the same staleness O4 records for `poison-vector.json`'s params | read the JSON | noted here; a fresh live run records it. Nothing else in the artifact depends on it |
+
+### Round 14: the "byte-preserving" rebuild was not yet quote- or escape-aware
+
+The attestation review at `f55d48de` re-verified the destructive-path guard (288
+DSN × environment combinations, measured against what libpq actually dials: **0
+cases pass the guard and dial a non-loopback host**) and found the `app_role_dsn`
+rebuild still wrong for two legal conninfo spellings — both measured on real
+`PQconninfoParse` — plus a pin that could not see it.
+
+| finding | verified how | fix |
+|---|---|---|
+| **R1** deleting the `options` pair with a REGEX reached inside another keyword's quoted value and truncated a backslash-escaped space: `host=… password='options=zzz'` rebuilt to `password=' options='-c role=…'` (libpq: `missing "=" after "-c"`), `password='a options=b c'` PARSED with the password silently changed to `'a   c'`, and `options=-c\ search_path=a` truncated its value so the remainder became a bogus keyword (`invalid connection option "search_path"`). A fuzz over 330 libpq-legal DSNs: **170 rebuilds rejected, 86 silently value-mangled**, 0 host/port changes | libpq `PQconninfoParse` on every rebuilt string | the deletion is a scan that tracks single-quote state and backslash escapes and removes `options` only at TOP level, consuming a `'…'` value or a run of escaped/non-space characters. The docstring's claim is now precise: every other keyword and VALUE is preserved exactly; only whitespace between keywords is normalised, and libpq does not read that |
+| **R2** the pin could not see R1: its `core()` helper was **the same regex as the code under test**, so it certified a rebuild libpq rejects | read the helper against the code | the pin uses an INDEPENDENT parser (`shlex`, spacing-normalised) and compares keyword/value PAIRS, plus the 13-spelling matrix including the escaped space and `options=` inside a quoted value. Mutants: restore the regex → **1 failed**; drop the quote-state branch → **1 failed** |
+
+### Round 15: a `?` inside userinfo is not a query separator — libpq resolves the authority FIRST
+
+| finding | verified how | fix |
+|---|---|---|
+| **S1** `_uri_hosts` split the DSN at the FIRST `?` anywhere, which is not libpq's order: libpq takes the AUTHORITY as everything after `://` up to the first `/` (or the end), and only then looks for the `?` separator in what follows. So a `?` inside userinfo/password is not a separator — `postgresql://127.0.0.1:p?ss@203.0.113.9:1/db` has `host='203.0.113.9'` to libpq (`PQconninfoParse`: user `127.0.0.1`, password `p?ss`, host `203.0.113.9`, and `psql` DIALS that address) while the split truncated the authority at `127.0.0.1` and certified the remote store as local — on the path where `run()` seeds and `teardown()` deletes by `org_id`. The same misparse ran in the OTHER direction too: a loopback DSN whose password contained `?` was refused | `PQconninfoParse` + `psql` on three shapes, plus the over-block control | `_split_uri()` implements libpq's order once, and `_uri_hosts` and `app_role_dsn` both use it — so the guard reads the host libpq will dial AND `app_role_dsn` no longer cuts a DSN in the middle of a password. Pinned by `test_a_question_mark_inside_userinfo_is_not_a_query_separator` (three remote shapes refused, the loopback-with-`?`-password shape accepted, and the split itself asserted); the mutant restoring `partition("?")` reds it |
+| **S2** `PGHOST` is still consulted when the DSN sets `hostaddr`: libpq dials `hostaddr` and uses `host` only as the TLS name, so this is a friction-only over-block in the fail-closed direction | `dbname=x hostaddr=127.0.0.1` under `PGHOST=203.0.113.9` → refused, though libpq dials the loopback address | left as-is, deliberately: the over-block is cleared with `--allow-remote-writes`, and narrowing it buys nothing this guard needs |
+
+### Round 16: the authority also ends at a `?` — a pathless URI's query was invisible
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** round 15's `_split_uri` ended the authority at the first `/` **or the end of the string**, then searched for `?` only in what followed. With no `/dbname` before the separator there is nothing to follow, so a PATHLESS URI's query was never examined: `postgresql://127.0.0.1:5432?host=db.prod.example.com` (libpq: `host='db.prod.example.com'`, and `psql 'postgresql://127.0.0.1:1?host=203.0.113.9&connect_timeout=3'` fails with `connection to server at "203.0.113.9", port 1 failed` — a real dial) yielded `hosts=['127.0.0.1']` and PASSED the guard. Same shapes with `?hostaddr=`, `?service=` and a bracketed `[::1]` authority. A differential over ~151k generated spellings found **1,866 bypasses, all one family** (every one pathless); the conninfo/whitespace axis yielded zero | `PQconninfoParse` as the oracle on 15 boundary shapes, plus `psql` for the dial | `_split_uri` now implements BOTH boundaries in libpq's order — userinfo = last `@` before the first `/`; authority = to the first `/` after that, or to the first `?` (which then starts the query). Re-checked against libpq on the 15 boundary shapes: **0 bypasses**, and every shape's guard now agrees with libpq's own answer. Pinned by `test_a_pathless_uri_still_carries_a_query`; the mutant restoring the `/`-or-end rule reds it, and the mutant ignoring userinfo reds BOTH it and round 15's pin |
+| **P1 (same root, second surface)** `app_role_dsn` set its separator with `sep = "?" if raw_query or head != dsn else ""`, so for a pathless URI with a query it appended a SECOND `?` — libpq rejects the result (`extra key/value separator "="`), so a run the guard certified would answer `record_error` on every query and exit 2 | `PQconninfoParse` on the rebuilt DSN | the separator is now unconditional, because `head` already excludes the query; pinned in the same test (`built.count("?") == 1`) |
+| **P2 (docstring)** round 15's prose stated the rule as *"…up to the first `/` (or the end) … and only searches for the `?` in what follows"* — the sentence the hole was built from. Corrected alongside the code, with both boundaries and the two half-fixes' failure modes spelled out | — | docstring rewritten |
+| **P2 (non-blocking, friction)** a `#` in userinfo (`postgresql://u#x@127.0.0.1/db?sslmode=require`) is REFUSED as `RECORD_DSN_AMBIGUOUS` although libpq dials `127.0.0.1` — the docstring's authority-first split exists so a `#` in userinfo is *not* over-blocked, but the `#`-in-base arm still does it whenever a query is present | `PQconninfoParse`: `user='u#x', host='127.0.0.1'` | left as-is: fail-closed, cleared by `--allow-remote-writes` |
+| **P2 (non-blocking, latent)** `_assert_local_record_dsn` skips any host string starting with `/` as a unix-socket path, and `_authority_hosts` percent-decodes before that test (`postgresql://%2Ffoo:5432` → host `/foo` → skipped). No independently exploitable case found, and libpq also reads `/foo` as a socket dir | `PQconninfoParse` + `PQhost` | noted as a hardening seam, not a defect |
+| **T2 (P2)** a DSN whose LAST keyword has an EMPTY value was rebuilt into a string libpq REJECTS: `host=127.0.0.1 dbname=` re-emitted as `dbname=` and then `options=…` appended, and since libpq skips whitespace AFTER `=`, `dbname` took `options='-c` as its value and the tail became the bogus keyword `role=tortoise_record_app'` (`invalid connection option "role"`). 96 of 676 fuzz DSNs hit it, every one carrying a trailing empty value; 0 silent value changes. This also falsified Round 14's claim that inter-keyword whitespace is not read by libpq — it IS, as the value separator | `PQconninfoParse` on every rebuild | an empty value re-emits quoted (`dbname=''`), the form libpq parses; three spellings added to the matrix (`dbname=`, `dbname=x sslmode=`, `user=`). Mutant: emit it bare → **1 failed** |
+
+### Round 16b: a non-progress branch in the options rewrite was an unbounded spin
+
+| finding | verified how | fix |
+|---|---|---|
+| **T1** `_drop_options_pairs` never advanced `i` when a conninfo token STARTED with `=` (`=x host=127.0.0.1`): the word scan stopped immediately, `word` was `""`, and the `not word` branch re-emitted the empty string and `continue`d in place — `while i < n` spun forever, with no refusal, no traceback and no exit. The locality guard CERTIFIES these strings (`_conninfo_hosts` still finds `host=127.0.0.1`), so they reach `app_role_dsn` | `app_role_dsn("host=127.0.0.1 dbname=x = ")` never returned; killed by `timeout 5` → **exit 124**. Reproduced for a leading `=`, a trailing bare `=`, and a bare `=` between keywords. Through `run()` it was masked only because `RecordStore.__init__` connects first and libpq rejects the string (`invalid connection option ""`) — reachable from the module's API and from this suite, not from a live run | the branch consumes the character that stopped the scan, so every path advances; pinned by `test_a_conninfo_token_starting_with_equals_cannot_spin_forever`, which carries `@pytest.mark.timeout(10)` so the mutation FAILS with a stack instead of hanging the suite (pytest-timeout is a declared test dependency). Mutant: the progress branch removed ⇒ that pin reds in ~13s, restored green |
+| **T2** the URI userinfo rule was documented as `LAST @` "measured with `PQconninfoParse`" while libpq ends userinfo at the **FIRST** `@` | `PQconninfoParse("postgresql://u:p@ss@127.0.0.1:1/db")` → `host='ss@127.0.0.1'` | ⛔ **already fixed by the concurrent lane** (`b9242c7f02`) at this head — recorded here so the next round does not re-derive it. No remote write followed either way: libpq's host keeps the extra `@`, so it cannot resolve |
+
+### Round 17: userinfo ends at the FIRST `@` — and a DIFFERENTIAL GATE, because seventeen rounds of review each found the next spelling
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** round 16 chose the userinfo boundary as the LAST `@` before the first `/`. libpq uses the **FIRST**. An `@` in a password (`&password=p@localhost`) or in a host (`postgresql://a@b@127.0.0.1/db` → host `b@127.0.0.1`) then moves the boundary INTO the query, the `?host=`/`?hostaddr=` reads as userinfo, and the guard certifies a remote store: `postgresql://u@localhost?host=203.0.113.9&password=p@localhost` → libpq `host='203.0.113.9'` (`PQconninfoParse`, and `psql "…&connect_timeout=2"` fails `connection to server at "203.0.113.9"`), guard `hosts=['localhost']` and PASSED — on the seed/teardown path. A 2,880-spelling sweep found **1,536** such spellings, all this one family | `PQconninfoParse` + `PQconnectStart` + `psql` | `at = pre_slash.find("@")`, and `_authority_hosts` strips userinfo with `split("@", 1)[1]` so both agree with libpq. Pinned by `test_an_at_sign_in_a_query_value_does_not_move_the_userinfo_boundary`; mutants taking the last `@` in EITHER place red it and the differential gate |
+| **P2 (the real lesson)** every one of rounds 12–17 found the next libpq spelling by REVIEW, not by test — and each round's README stated "0 bypasses" about an axis set that did not contain the shape that broke next. So the fix is not another case: `test_the_guard_agrees_with_libpq_across_the_dsn_grammar_axes` is a **differential gate**. It builds the cross-product of the axes that actually moved the boundary (scheme dispatch, userinfo incl. multiple `@`, pathless authorities, the `?` on both sides of `@`, failover lists, brackets, percent-encoding, query overrides, `@`/`+-/noise` inside values) and compares `_record_dsn_hosts` against libpq's own answer via `ctypes` — skipping only where libpq cannot be loaded. **The gate immediately found a real divergence the suite had missed**: `?host=127.0.0.1+` is host `127.0.0.1+` to libpq and `127.0.0.1` to `parse_qs`, which decodes `+` as a space — so `_uri_hosts` no longer uses `parse_qs` (manual `&`-split + percent-decode, the same rule `app_role_dsn` already used) | `ctypes` + `PQconninfoParse` for the oracle; `parse_qs` divergence measured with `PQhostaddr` | differential gate added, `parse_qs` removed from `_uri_hosts`; lint on the new code (`ruff`) |
+| **P2 (non-blocking, fixed anyway)** `_assert_local_record_dsn` short-circuited `if not dsn: return` BEFORE reading the environment, so an EMPTY DSN was "provably local" on a box whose `PGHOST`/`PGHOSTADDR` points elsewhere — the opposite of what `_record_dsn_hosts("")` reports. Now: `None` (no store configured) returns, `""` is decided by the same predicate as any other DSN | `_record_dsn_hosts("")` under `PGHOST`/`PGHOSTADDR` | fixed and pinned in `test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped` |
+| **P2 (non-blocking, fixed anyway)** `run()` constructed `RecordStore` and called `require_schema()` OUTSIDE the `try`, so a `CannotRun` from the schema check left the connection open | read the call site | `require_schema()` is now inside a `try`/`except BaseException: close(); raise` |
+| **P2 (non-blocking, noted)** the write leg is not gated by a successful READ: `app_role_dsn`'s rebuilt DSN is what the read queries use, and `teardown()` runs in `finally`, so a shape that seeds successfully and then fails to read still deletes by `org_id` in that store. The guard is what makes this safe, not the read | read `run()`/`teardown()` | stated here explicitly so no later round assumes an ordering that does not exist |
+
+### Round 18: the conninfo scanner invented a `host=` libpq never parses
+
+The attestation review at `49d05629` swept 436,296 URI × environment cases (**0
+bypasses** — the URI grammar is sound) and 49,171 conninfo × environment cases,
+where **1,111 pairs over 793 DSNs bypassed** the guard. One root, measured with
+`PQconninfoParse` and `psql`:
+
+| finding | verified how | fix |
+|---|---|---|
+| **U1 (P1)** `_CONNINFO_KV` was a flat regex over `host`/`hostaddr`/`service`. libpq SKIPS whitespace after `=` and honours backslash escapes, so `dbname= host=127.0.0.1` is ONE pair to libpq (`dbname='host=127.0.0.1'`, **no host**) and `dbname=x\ host=127.0.0.1` likewise — while the regex invented a loopback `host=`. Worse, the invented key also went into the "keys the DSN supplies" set, so the `PGHOST`/`PGHOSTADDR`/`PGSERVICE` fallback was SKIPPED: a DSN naming no host at all was certified local while libpq dialled the environment's remote host. `dbname= host=127.0.0.1` is what a templated DSN produces when one variable is empty; `dbname=x\ host=…` is a password or `application_name` carrying the text | `psql` reports `connection to server at "203.0.113.9"` for all three shapes while the guard PASSED | ONE grammar walker (`_conninfo_pairs`) — quotes, backslash escapes, whitespace on both sides of `=`, whitespace AFTER `=` skipped — now feeds BOTH `_conninfo_hosts` (the guard) and `_drop_options_pairs` (the rebuild), so the two interpretations cannot drift. Pinned by `test_a_conninfo_value_that_LOOKS_like_a_host_is_not_one`: the three shapes refused with the environment set, a DSN that really sets a loopback host still passing (the DSN wins over a remote environment, as libpq has it), and remote keywords in either position refusing. Mutants: restore the flat regex → **6 failed**; stop skipping whitespace after `=` → **3 failed** |
+| **U2 (P2)** the differential gate the previous round added to END the review-by-review cycle could not see either axis the bypass lived on: every entry in `shapes` was a `postgresql://` URI and the environment was cleared for the whole test — and its docstring claimed the axes that moved the boundary were covered | read the gate against the sweeps | its oracle is libpq; a conninfo `shapes` list and a second pass with a remote `PG*` environment belong there. Recorded as scoped to the URI grammar in the round-17 row rather than claimed complete — **the gate does not yet cover conninfo × environment** |
+
+## 6. Reproducing
+
+```bash
+# both stores: a pgvector Postgres and this lane's FalkorDB
+# skip this line if the container is already up (`docker ps --filter name=parity-13906`)
+docker run -d --name parity-13906 -e POSTGRES_PASSWORD=postgres \
+    -p 127.0.0.1:15439:5432 pgvector/pgvector:pg16
+# `uri` PRINTS `export …` lines; it cannot export into your shell. `eval` them,
+# and do the whole sequence in ONE shell — a `VAR=… cmd` prefix reaches only
+# that command, so it does not persist to the runs below.
+uri="$(uv run python tools/test_lane.py uri)" || exit 1
+eval "$uri"
+export TEST_RECORD_DB_URI='postgresql://postgres:postgres@127.0.0.1:15439/postgres'
+TORTOISE_TEST_CARVE_OUT=1 uv run python -c \
+  "import os,psycopg2;from tests.test_9078_record_written_by_production_path import _ensure_record_schema as e;c=psycopg2.connect(os.environ['TEST_RECORD_DB_URI']);c.autocommit=True;e(c)"
+echo "graph port=$TORTOISE_TEST_DOCKER_PORT record=$TEST_RECORD_DB_URI"   # both must be non-empty
+
+uv run python tools/vector_parity_13906.py \
+    --record-dsn "$TEST_RECORD_DB_URI" --graph-port "$TORTOISE_TEST_DOCKER_PORT" \
+    --k 10 --json-out docs/research/2026-11-20-13906-vector-parity/parity-run.json
+
+# and the falsifier
+for p in id order recall vector; do
+  uv run python tools/vector_parity_13906.py --record-dsn "$TEST_RECORD_DB_URI" \
+    --graph-port "$TORTOISE_TEST_DOCKER_PORT" --poison $p; echo "exit=$?"
+done
+```
+
+DB-free comparator pins: `uv run python tools/test_lane.py run --
+tests/test_vector_parity_13906.py -q` → **80 passed**.
+
+⚠️ The `--json-out` line above is the recipe that PRODUCED the committed
+artifacts, and it no longer re-produces them: at the shipped corpus size the
+record read plans as a `Seq Scan`, which `assert_index_scan` now refuses with
+exit 2. §7 states that limit and what regenerating would need; read it before
+treating this recipe as a reproduction step.
+
+Falsifier exit codes — the recipe above reads them, so they are part of the
+contract, not decoration:
+
+| code | reading |
+|---|---|
+| **0** | parity: both required arms matched their own oracle |
+| **1** | `--poison`: the corruption was SEEN on a measured arm of the arm it moves — or, without `--poison`, a required comparison diverged |
+| **2** | cannot run: no store/schema/driver, a refused argument shape, or a poisoned run that could not measure what the poison would have to move |
+| **3** | `--poison` and every arm measured but the poison moved NOTHING — the harness is BLIND. ⛔ Not 1: `exit=1` is the one bit §6's loop reads as "confirmed", and a blind harness must never read as confirmed |
+| **4** | cannot run here: the interpreter is below this tool's 3.12 floor, refused by the `#5128` guard above the imports. ⛔ Not 1: a guard wearing 1 makes `--poison id` read "confirmed" on an interpreter that measured nothing — the same false PASS `CannotRun` closes. A separate code from 2 because 2 is a state the tool reports after it loaded; 0/1/2/3 are all readings §6's one-bit loop already consumes, so 4 is the only non-answer left. Pinned EQUAL to the module docstring's own table by `test_every_exit_code_the_tool_can_take_is_documented_in_both_tables` |
+
+## 7. What this artifact does NOT establish
+
+- It does not measure the live tenant corpus. It measures a **59-row** corpus
+  (55 vector-bearing rows + 1 carrying no embedding under the measured tenant,
+  plus 3 under a second tenant whose tenancy edge is exercised on the RECORD leg
+  only — the graph leg seeds `tenant="ours"` rows alone) that exercises
+  the edges; ANN behaviour at production scale (35,312 nodes) is a different
+  measurement, and the live graph has no index to compare against.
+- ⛔ **It does not establish that the RECORD arm was served by the HNSW index.** The
+  five committed artifacts were produced BEFORE round 20's plan check and carry no
+  `arms.record.plan`, so their `arms.record.driver = "pgvector HNSW, cosine"` is a
+  claim, not a measurement. At the shipped corpus size the planner does not choose
+  HNSW: measured on this box (`pgvector/pgvector:pg16`, a 384-dim `public.point`
+  under `idx_point_embedding_vec_hnsw`, 54 rows, `ANALYZE`d) the read's statement
+  plans as **`Seq Scan`**, and `assert_index_scan` now REFUSES exactly that
+  (`CannotRun`, exit 2) — so this tool cannot regenerate its own artifacts at
+  `--n-random 48`. Regenerating them needs a corpus above the planner's crossover (a
+  peer lane measured ~20k rows) with `arms.record.plan` recorded. The PARITY
+  comparison is unaffected — the record leg's answer is whatever its plan produced,
+  and the oracle is an in-process numpy scan — but the ANN claim is unverified until
+  that run exists.
+- It does not decide the graph scan's metric (§4.2). Changing it is a different
+  decision; this harness makes the size of the change visible.
+- It does not remove, stop writing, or migrate any graph copy. The destructive
+  half of #13906 needs this parity evidence **and** a restore drill, in a
+  separate PR.
+
+### Round 19: the appended `options` pair inherits the last value's escape
+
+| finding | verified how | fix |
+|---|---|---|
+| **T1** `_drop_options_pairs` returned the caller's bytes VERBATIM when there was no `options` pair and no empty value, and `app_role_dsn` then APPENDS `options='-c role=…'` (with its own leading space). In libpq's whitespace form a trailing `\` in an UNQUOTED value escapes the very next character — the separating space — so `dbname=x\ options='-c role=…'` parses as `dbname = "x options='-c"` plus a bogus keyword `role=…'` and libpq rejects the whole string. The guard CERTIFIES the input (`_assert_local_record_dsn` passes it), so the operator is told the DSN is good and every record query then carries a `record_error`: no measurement at all (fail-closed toward the artifact, so not a false PASS — the empty-value sibling of the same mechanism was already fixed) | real libpq on this box, exact bytes: input `host=127.0.0.1 dbname=x\` → **parses** (`Connection refused`); rebuilt `host=127.0.0.1 dbname=x\ options='-c role=…'` → **`invalid connection option "role"`**; rebuilt with the value closed `dbname='x\\'` → **parses**. Even counts and quoted spellings were already correct. ⛔ The existing byte-preservation pin could not see it because its independent oracle is `shlex`, which cannot even tokenise the shape (`No escaped character`) | the early return now also requires an EVEN trailing backslash run, so those inputs fall through to the quoting rebuild (`dbname='x\\'`). Pinned by `test_a_value_ending_in_an_ODD_backslash_is_CLOSED_before_options_is_appended` (renamed in round 22, which widened it from "quoted" to "closed") (parametrised over one and three trailing backslashes), whose oracle is the module's own pair parser — every input keyword must survive with the SAME value, `options` must be added, and the value must be CLOSED before the appended pair. Mutant: the early return reverted ⇒ both params red. ⚠️ **T1 had a residue found in round 20**: the guard counted the UNSTRIPPED tail while `app_role_dsn` appends after `.strip()`, so a value ending `x\\` **plus padding** (backslash then a space) saw whitespace ⇒ an even zero-length run ⇒ verbatim return ⇒ the `.strip()` removed the very space the backslash escaped. Measured for `" "`, `"  "`, `\t`, `\n` (all four rejected by libpq as `invalid connection option "role"`). The guard now counts the STRIPPED tail and the pin parametrises the padding, so that spelling cannot regress alone; mutant: unstripped tail ⇒ exactly the four padded params red, the two unpadded ones stay green |
+
+### Round 20: the plan check proved a LISTING, not a PLAN
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1** `require_schema` proved an HNSW index was LISTED; nothing proved the READ got it. pgvector documents that *"if the table is small, a table scan may be faster"* and performs exact nearest-neighbour search by default, and this harness seeds ~55 `public.point` rows — the small-table case. A Seq Scan reproduces the exact-scan oracle VERBATIM, so `recall 1.000` in `parity-run.json` was equally consistent with "the ANN leg never ran", and `arms.record.driver = "pgvector HNSW, cosine"` was a literal string nothing verified | read `require_schema`'s output against the PLAN of a real read on `pgvector/pgvector:pg16` | `RecordStore.assert_index_scan` EXPLAINs the read's statement and raises `CannotRun` on a Seq Scan of `public.point` (and when the verified index is not the one the plan used); the plan node is recorded as `arms.record.plan`. Pinned by `test_a_SEQ_SCAN_is_not_an_index_measurement` and `test_the_plan_check_explains_the_RECORD_LEG_s_own_statement` |
+| **P1 (same class, one indirection out)** an EXPLAIN of a SELECT the HARNESS re-spells proves something about the re-spelling — the reviewed K5 defect, repeated inside its own fix | read the first draft of `assert_index_scan` | the statement comes from `tortoise.record_vector.knn_statement`, the ONE definition `vector_search` also runs. ⛔ The production side is pinned too (round 22): a pin that only watches the harness call is green again the moment the read stops calling the builder |
+| **P2** `pg_index.indisvalid` — an INVALID index's `indexdef` still reads healthy, so the listing check certified an index pgvector ignores | read the `pg_index` rows alongside `pg_indexes` | `require_schema` refuses a non-valid index, and refuses a partial/l2-opclass one; pinned by `test_an_INVALID_index_is_not_an_index_the_record_arm_may_use` and `test_the_record_arm_refuses_a_database_without_its_hnsw_index` |
+
+### Round 21: the index name came from the INDEXED TABLE, and the plan connection's `iterative_scan` was inert
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1** `require_schema` joined `pg_class` on `i.indrelid` — the INDEXED TABLE — and selected that alias's `relname`, so every row's name was `'point'`. It is compared with the `Index Name` an `EXPLAIN` reports, which is the INDEX relation (`idx_point_embedding_vec_hnsw`); relations share one namespace, so a table and an index cannot share a name and the comparison could never succeed: `record_hnsw_index_name = 'point'` vs plan `[('Index Scan', 'idx_point_embedding_vec_hnsw')]` ⇒ `assert_index_scan` → `CannotRun`, exit **2**, on EVERY database. Fail-closed, and therefore invisible to every DB-free assertion about the verdict — but it refused every store, so the record arm was unreachable and the tool could not regenerate its own committed artifacts | measured on `pgvector/pgvector:pg16` with the record schema applied | the join is `pg_class ic ON ic.oid = i.indexrelid` and the name is `ic.relname`. A DB-free pin cannot run the SQL, so `test_the_index_name_comes_from_the_index_relation` pins its SHAPE: restoring `c.relname`, or dropping the `ic` join, each reds it |
+| **P2** `set_config('hnsw.iterative_scan', …, true)` on the PLAN connection was INERT: that connection is AUTOCOMMIT, so a transaction-local setting dies with the statement that set it, and the plan was measured under the default while the read installs `relaxed_order` | read the plan connection's `autocommit` | `is_local` is FALSE on the plan connection, so the setting survives to the EXPLAIN |
+
+### Round 22: the pair parser kept a dangling escape libpq drops — and the pin could not see it
+
+| finding | verified how | fix |
+|---|---|---|
+| **P2 (fail-closed, but a DIFFERENT database)** `_conninfo_pairs` kept a backslash with nothing left to escape, which libpq DROPS: `PQconninfoParse("host=127.0.0.1 dbname=x\")` answers `dbname='x'` while the parser answered `x\`. Nothing failed loudly — the rebuild then closed the value as `dbname='x\\'` (value `x\`), a PARSEABLE DSN naming a database the caller never named. ⛔ Round 19's pin could not see it **by construction**: its oracle is this module's own pair parser, so a value the module and libpq read differently is invisible to it | `PQconninfoParse` on the box, over one..four trailing backslashes × {no padding, space, tab}; the rebuild of each compared against libpq's own reading of the input | an unquoted value's dangling `\` is dropped (a `\` with a character after it still escapes it, and the escape that consumes padding still stays INSIDE the value). Pinned by `test_the_pair_parser_reads_a_TRAILING_escape_the_way_libpq_does`, whose oracle is **libpq**, not this module; mutant: keep the dangling `\` ⇒ that pin reds on `dbname=x\` while round 19's pin stays GREEN, which is the blindness it recorded. ⛔ And `test_a_value_ending_in_an_ODD_backslash_is_CLOSED_before_options_is_appended` now accepts either legal closure (a quoted value, or an even escape run), because the round-19 version asserted the QUOTING form only and would have pinned this defect in place |
+| **P2 (the production side of round 20's pin)** nothing asserted that `tortoise.record_vector.vector_search` builds its statement THROUGH `knn_statement`: re-inlining the kNN `SELECT` leaves every plan-check pin green (the harness still calls the builder) while the read executes a statement the plan check never EXPLAINs | AST of `tortoise/record_vector.py` | `test_vector_search_builds_its_statement_through_knn_statement` asserts the call is present AND that no `<=>`/`ORDER BY` literal is re-spelled inside the function. Mutants: renaming the call, and inlining the SELECT, each red it |

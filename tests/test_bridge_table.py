@@ -2396,9 +2396,12 @@ def test_approved_row_that_reflows_fails_the_build_instead_of_truncating_its_mem
     `cells` is split out of ONE physical line, so a cell that reflows onto a second line
     leaves its continuation unread while the row still parses. Measured before the fix:
     adding a newline inside row 21's cell still parsed 23 rows with no guard firing,
-    `mitigate_operator` silently left the row, and the regenerated artifact told the owner
-    `annotate_operator` had "*no approved row* … refuted" — a false statement about the
-    owner-approved doc, in the artifact #4513 exists to make trustworthy (#8930 review, P1).
+    `mitigate_operator` silently left the row, and the regenerated artifact reported THAT
+    tool — not `annotate_operator`, which the same truncation KEPT — as "*(no approved row
+    names it)*" / **refuted**, its only approved home being the row the reflow cut. A false
+    statement about the owner-approved doc, in the artifact #4513 exists to make
+    trustworthy (#8930 review, P1; this sentence named `annotate_operator`, corrected in
+    #13970 against a replay of this test's own mutation).
 
     The row is DETECTED, not joined: a widened regex would accept the wrap and keep
     guessing at the continuation.
@@ -2670,17 +2673,17 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     ⛔ The MEASURED example above was taken on row 21 (`tortoise_annotate_operator`); the
     fixture is row 14 since #12901's final batch. What decides whether a truncation is
     OBSERVABLE is D4 dispute-set membership — §D4 renders only DISPUTED rows, so only THEIR
-    cells' members can make the artifact state "*(no approved row names it)*" — and that is
-    the same batch's second effect rather than an independent fact: privatising row 21's
-    methods re-pointed their registry `sdk_method` to `_annotate_operator` /
-    `_mitigate_operator`, spellings no beta-doc disposition row cites, so those tools stopped
-    being CITED and therefore stopped being DISPUTED. Privacy of the SDK `def` is not the test
-    (row 14's are private too — `_assess_source`, `_set_source_tier`, which still cite because
-    their bindings were never re-pointed); the RE-POINT is, and it is why privatising a
-    disputed method can silently take its cell out of the artifact (#13965 review, P2).
-    Measured with the body guards off: truncating row 21 changes 0 artifact lines, row 14
-    changes 15 — and restoring the pre-#12901 bindings puts `tortoise_annotate_operator` and
-    `tortoise_mitigate_operator` back in the disputed set (2 rows -> 4).
+    cells' members can make the artifact state "*(no approved row names it)*" — and that batch
+    is also what emptied row 21 out of it: privatising a method re-points its registry
+    `sdk_method` to the underscore spelling, the beta doc names no such spelling, so the tool
+    stops being CITED, and an uncited tool is not disputed. That is not a fact about the SDK
+    `def` (all three of row 14's members are private, and two still cite) — it is a fact about
+    the RE-POINT, and it cuts both ways: `tortoise_get_source_reliability`'s binding was
+    re-pointed in the same batch, and it is no longer cited at all. Measured with the body
+    guards off: truncating row 21 changes 0 artifact lines, row 14 changes 15 — and restoring
+    the two row-21 bindings alone takes the disputed set from 2 rows to 4. Which is why
+    privatising a disputed method can silently take its cell out of the artifact (#13965
+    review, P2).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2853,7 +2856,7 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
         f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
     )
     assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
-        "the named cause must print BEFORE the anonymous row-count complaint"
+        "the named cause must be the FIRST complaint, not an anonymous structural one"
     )
     monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
     assert bt.main() == 1, "a repeated row name did not fail the build"
@@ -2861,8 +2864,10 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     assert "approved row 24 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
-    # ---- MUTATION: no guard fires at all; the row 14 cell is simply GONE, and the only
-    # diagnostic left is the anonymous row count — the failure this guard replaces.
+    # ---- MUTATION: the round-3 guards contribute nothing — the later row simply REPLACES
+    # row 14's cell, the row count stays at 23, and the only complaint left is the anonymous
+    # MISSING-NUMBER one ("approved row number(s) 14 are missing", parsed 23 rows numbered
+    # 1-24): a number but not the cause, on a document otherwise shaped perfectly.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
