@@ -91,6 +91,51 @@ def _capture_alert(monkeypatch) -> list[dict]:
     return alerts
 
 
+def _enforce_quota_double(resource: str = "points", *,
+                         truth_carried: bool = False) -> None:
+    """Stand-in for `tortoise.mcp_server._enforce_quota`, shape-checked below.
+
+    ⛔ A DOUBLE THAT MIRRORS A REAL DOOR MUST BE PINNED TO IT, NOT DESCRIBED
+    (#14003 review, cycle 4, P3 — MEASURED). This stub's shape was wrong twice before
+    any reader existed: `lambda resource:` raised `TypeError` on every `_quota_gated`
+    write once #13829 added `truth_carried`, and its replacement `lambda resource,
+    **kw:` accepted ANY keyword — a real shape drift would then raise in production
+    while these arms stayed green. Reverting either fix leaves the whole file GREEN
+    (measured: `58 passed` on the cycle-2 `**kw` shape), so the comment's "MIRRORS IT
+    EXACTLY" had no force at all. `test_the_enforce_quota_double_is_the_door` reads
+    this signature against the door's, so the next drift reds instead of being
+    described in prose.
+    """
+    return None
+
+
+def test_the_enforce_quota_double_is_the_door():
+    """Name, kind AND default per parameter, read from the door itself.
+
+    ⛔ WHY A READER AND NOT A COMMENT (#14003 review, cycle 4, P3 — MEASURED): the
+    double's two earlier shapes were both wrong and neither was observable — the
+    `**kw` form fails OPEN (an unexpected keyword is swallowed, so a door drift
+    surfaces only in production `TypeError`) and the missing-default form fails
+    CLOSED (a legal zero-arg `_enforce_quota()` would read as a TEST defect). The
+    durable claim the neighbouring `test_13829_cache_cap_at_fold.py`
+    `test_the_mcp_gate_defaults_to_the_protective_arm` already makes for
+    `_quota_gated` is exactly this one, one door down, so it is read here too.
+    """
+    import inspect
+
+    import tortoise.mcp_server as mcp
+
+    def shape(fn):
+        return [(p.name, p.kind, p.default)
+                for p in inspect.signature(fn).parameters.values()]
+
+    assert shape(_enforce_quota_double) == shape(mcp._enforce_quota), (
+        "the `_enforce_quota` double no longer matches the door's signature — a "
+        "wider double (`**kw`) fails OPEN on a shape drift and a narrower one (a "
+        "missing default) reads a legal zero-arg door call as a TEST defect. Fix "
+        "the double, not this assertion")
+
+
 @pytest.fixture(autouse=True)
 def _clean_context():
     """Every test starts and ends with NO active tally (no cross-test bleed)."""
@@ -1252,22 +1297,19 @@ class TestRunnerWiring:
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
         alerts = _capture_alert(monkeypatch)
-        # ⛔ THE STUB MIRRORS THE DOOR'S SIGNATURE, keyword-only `truth_carried` included
-        # (#13829 added it to `_quota_gated`'s call and `lambda resource:` then raised
-        # TypeError on every `_quota_gated` write — a stale stub reads as a test defect).
-        # ⛔ AND IT MIRRORS IT EXACTLY, NOT WITH `**kw` (#14003 review, cycle 2, P3 —
-        # MEASURED): `**kw` accepts ANY keyword, so if `_quota_gated` ever passed a
-        # differently-named one the production door would raise `TypeError` while this arm
-        # stayed green — a fail-open double under a comment claiming a mirror. The door is
-        # `def _enforce_quota(resource="points", *, truth_carried=False)`
-        # (`tortoise/mcp_server.py:3666`) and the only keyword call passes
-        # `truth_carried=` (`:3773`). ⚠️ AND "EXACTLY" INCLUDES THE DEFAULTS (#14003
-        # review, cycle 3, P3 — MEASURED): the first cut carried `resource` with no default,
-        # so the double was strictly NARROWER than the door — `_enforce_quota()` is legal
-        # against the door and would have raised `TypeError` inside `<lambda>` here and read
-        # as a test defect. Name, kind AND default are now equal on both.
-        monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource="points", *, truth_carried=False: None)
+        # ⛔ THE STUB IS `_enforce_quota_double`, AND ITS SHAPE IS READ BY A TEST — not
+        # promised by this comment (#14003 review, cycle 4, P3 — MEASURED). The claim
+        # "mirrors the door exactly" was wrong TWICE with nothing red: `lambda resource:`
+        # raised `TypeError` on every `_quota_gated` write once #13829 added
+        # `truth_carried`, and `lambda resource, **kw:` swallowed any keyword, so a door
+        # drift would have raised in production while this arm stayed green (measured:
+        # reverting to that shape leaves the whole file 58-passed).
+        # `test_the_enforce_quota_double_is_the_door` compares name, kind AND default per
+        # parameter against the door itself, so read the shape from that assertion — and
+        # ⚠️ the two `mcp_server.py` addresses a previous cut typed here are GONE on
+        # purpose: nothing reads a number in a comment, which is the rule this same PR
+        # applies to `tests/test_7949_capstone_measure.py`.
+        monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
@@ -1305,8 +1347,7 @@ class TestRunnerWiring:
         import tortoise.mcp_auth as mcp_auth
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
-        monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource="points", *, truth_carried=False: None)
+        monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default="org-M"))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
