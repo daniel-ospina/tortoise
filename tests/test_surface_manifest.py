@@ -397,12 +397,21 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"canonical-mcp-tools.md states `{lhs} = {rhs}`, which evaluates to {computed} — "
             f"the composed arithmetic does not add up"
         )
+    # ⛔ SIGNED, because #11609 lane P7 is the first wave that ADDS advertised rows: it
+    # registered the four approved target names that had no entry (#13391) and retired five
+    # doors in the same change, and it states them as TWO clauses (`+4 = 44`, then `−5 = 39`)
+    # so each intermediate figure is checkable. A subtraction-only reader silently stopped at
+    # the previous wave's `−2 = 40` and reported a stale head — the exact "record stops before
+    # the head it describes" failure its own message names. The middle prose is free-form
+    # (`with no container row arriving` is FALSE for the registration clause), so it is not
+    # part of the match; the sign and the two numbers are.
     movements = re.findall(
-        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*−\s*(\d+)\s+with no container row arriving\s*"
-        r"=\s*(\d+)",
+        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*(−|\+)\s*(\d+)[^=]*=\s*(\d+)",
         arithmetic)
+    movements = [(wave, ("-" if sign == "−" else "+") + count, stated)
+                 for wave, sign, count, stated in movements]
     assert movements, (
-        "canonical-mcp-tools.md's parenthetical stopped stating a wave's subtraction and its "
+        "canonical-mcp-tools.md's parenthetical stopped stating a wave's movement and its "
         "result; that is how the movement this container's own arithmetic records is told")
     # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
     # five times now (the three container waves, then the door wave, then #11609 lane P1's
@@ -415,8 +424,8 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # the accumulation must land on `live`. A skipped or out-of-order wave reds, an append reds
     # until this reader is extended in the same change, and no clause is identified by position.
     running = int(movements[0][2])
-    for wave, subtracted, stated in movements[1:]:
-        running -= int(subtracted)
+    for wave, delta, stated in movements[1:]:
+        running += int(delta)
         assert running == int(stated), (
             f"canonical-mcp-tools.md says the {wave} wave lands the surface on {stated} "
             f"advertised tools, but the parenthetical's own terms give {running} — the "
@@ -455,19 +464,21 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
         "in the same change rather than reshaping the sentence to fit it"
     )
-    assert int(advertised_eq.group(2)) - int(movements[0][1]) == int(movements[0][2]), (
+    # The delta is SIGNED (see the parse above): #11609 lane P7 is the first wave that ADDS
+    # advertised rows, so the join is an addition of the clause's own sign, not a subtraction.
+    assert int(advertised_eq.group(2)) + int(movements[0][1]) == int(movements[0][2]), (
         f"canonical-mcp-tools.md's first movement clause starts from "
-        f"{advertised_eq.group(2)} and subtracts {movements[0][1]}, but states "
+        f"{advertised_eq.group(2)} and applies {movements[0][1]}, but states "
         f"{movements[0][2]} — the running record does not join the advertised total")
-    # Every door-retirement wave subtracts, so the composition needs ALL of them: the chain's
-    # own terms, applied to the advertised equation's result, must land on `live`. This is
-    # the same accumulation as the walk above, stated as one equation so a wave that is in
-    # the chain but NOT applied advertises itself here rather than only in the loop.
-    assert int(advertised_eq.group(2)) - sum(
-        int(subtracted) for _wave, subtracted, _stated in movements) == live, (
-        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
-        f"{sum(int(s) for _w, s, _t in movements)} = "
-        f"{int(advertised_eq.group(2)) - sum(int(s) for _w, s, _t in movements)}, not {live}"
+    # Every wave's term, SIGNED, applied to the advertised equation's result must land on
+    # `live` — the same accumulation as the walk above, stated as one equation so a wave that
+    # is in the chain but NOT applied advertises itself here rather than only in the loop.
+    # (`+` rather than `-` because P7's registration clause is an ADDITION; see the parse.)
+    assert int(advertised_eq.group(2)) + sum(
+        int(delta) for _wave, delta, _stated in movements) == live, (
+        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} "
+        f"+ {sum(int(d) for _w, d, _t in movements)} = "
+        f"{int(advertised_eq.group(2)) + sum(int(d) for _w, d, _t in movements)}, not {live}"
     )
     assert int(retired_eq.group(2)) == retired, (
         f"canonical-mcp-tools.md's retired-forward arithmetic (`{retired_eq.group(1)}`) states "
@@ -957,7 +968,15 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   manifest the same way — `_caller_lists(_manifest())` reads **7** here, and the arm is `>=`,
 #:   so 27 would have left a twenty-row allowance: exactly the hole this floor forbids. A small
 #:   floor is honest; a floor carried from a surface that no longer exists is not.
-COMPARABLE_CALLER_ROWS_FLOOR = 7
+#:   7 -> 6 on 2026-11-20 (#11609 lane P7): the row that left is `sdk:link_entities` — it was an
+#:   `sdk:` row carrying a caller list in both columns, and P7 REGISTERED it as an MCP tool
+#:   (`tortoise_link_entities`, the approved target row 19), so the `sdk:` row is gone and its
+#:   tool row does not carry the two-column caller evidence this comparison reads. Re-derived on
+#:   the merged manifest the same way: `_caller_lists(_manifest())` reads **6** here, and the arm
+#:   is `>=`, so 7 would have left a one-row allowance — the hole this floor forbids. The other
+#:   three registrations move nothing: `poll_events` and `delete_knowledge` replace rows that
+#:   already existed under other names, and `get_historical_knowledge` never had an `sdk:` row.
+COMPARABLE_CALLER_ROWS_FLOOR = 6
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -5535,7 +5554,13 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #9660 ruling KEEPS (`tortoise_delete`, whose `TortoiseSDK.delete` dispatches by label),
     # so the destination is live under the kept entry's own name: again −2 live, no `+ n`,
     # no SDK movement.
-    assert live["mcp"] == manifest["counts"]["tools"] == 40
+    # #11609 LANE P7 (the last mile): 40 -> 39. This is the first wave with BOTH terms —
+    # FOUR approved target names that had no registry entry were registered
+    # (`link_entities`, `poll_events`, `delete_knowledge`, `get_historical_knowledge`, +4)
+    # and FIVE doors retired forward into them and into `graph_overview`
+    # (`create_edge`, `create_operator`, `events_poll`, `delete`, `list_graphs`, −5) — so
+    # 40 + 4 − 5 = 39, with no SDK movement (all four SDK methods already had a `def`).
+    assert live["mcp"] == manifest["counts"]["tools"] == 39
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same

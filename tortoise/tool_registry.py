@@ -1522,7 +1522,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "instead.",
         risk="destructive",
         http_policy=True,
-        sdk_method="delete_knowledge",
+        # ⛔ `_delete`, NOT the public `delete_knowledge` (#4337). The binding must be
+        # what THIS handler reaches: the preview-then-confirm body resolves
+        # `sdk._delete` and runs the token protocol on top, so `delete_knowledge` is
+        # the SDK's public name for the same writer but is not the call the door
+        # makes. Declaring the public name put a binding in the manifest that the
+        # handler never reaches — the false-declaration drift #3838 calls out.
+        sdk_method="_delete",
     ),
     # ⛔ RETIRED DECLARATION, KEPT ON PURPOSE (#11609 lane P7). `RETIRED_TOOL_REGISTRY`
     # is built from THIS list, so a name that is retired but whose declaration is

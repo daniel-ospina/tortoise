@@ -317,6 +317,46 @@ plan is **smaller than the brief assumed — it is not needed at all** (see §2.
 
 ---
 
+### 1.6 Re-measured at the #11609 lane P7 head — and the step the evidence still refuses
+
+P7 re-ran §1.1's probe set against the merged tree rather than trusting the earlier read.
+What it found **confirms the plan and removes one of its two open questions**:
+
+| door (all `-> list[dict]`) | destination | container annotation | container wraps a LIST today? |
+|---|---|---|---|
+| `tortoise_check_structure` | `graph_overview(section="structure_check")` | `Any` | **yes** — `_row_section_envelope` (#10085) |
+| `tortoise_list_namespaces` | `graph_overview(section="namespaces")` | `Any` | **yes** — same seam |
+| `tortoise_search` / `_sessions` / `_suggest_entry_points` | `search_knowledge(mode=…)` | `Any` | no |
+| `tortoise_list_batches` / `tortoise_diary_read` | `list_knowledge(kind=…)` | `Any` | no |
+| `tortoise_expand_relationships` | `explore_connections(…)` | `Any` | no |
+| `tortoise_calibrate_summary` | `check_confidence(calibrate=True)` | `Any` | no |
+
+Two findings, both load-bearing:
+
+1. **The wrap mechanism is not hypothetical — it already ships.** `_row_section_envelope`
+   (`mcp_server.py:8137`) builds exactly what FastMCP builds for a `list[dict]` annotation
+   (`content` = compact JSON, `structured_content = {"result": rows}`,
+   `_meta = {"fastmcp": {"wrap_result": true}}`), and `tortoise_graph_overview` applies it to
+   every row section. So S1's design has a worked, shipped precedent in this file, and the
+   two `graph_overview` doors are wire-equivalent **today**.
+2. **The #8482 half of every envelope door's reason is already FALSE at this head** — and it
+   was false before P7. #11153 (`_payload_refusal_result`, `mcp_server.py:2420`, applied
+   `:3290`) flips `isError` for **any** tool whose `_safe` payload is a refusal, whatever its
+   annotation, so the failure-channel protection the array envelope was retained for is now
+   provided independently of the annotation. What remains is the **success** shape: a `-> Any`
+   container returning a list ships a bare text block with NO `structuredContent`
+   (fastmcp `base.py:357-369`, the `Any` row), where the door it replaces ships
+   `{"result": [...]}` — the #10085 defect, verbatim.
+
+⛔ **Why the doors still do not retire in THIS batch.** §2.1's decision — the union
+`list[dict] | dict` on six live containers — re-wraps the payload of their already-dict arms
+(`list_knowledge(kind="claim")` is a container DEFAULT, and its `{results, total, hasMore}` is
+what clients read). That is a customer-visible `structuredContent` change on six live tools
+and therefore a **surface change requiring Daniel's approval** under the MCP/SDK surface rule.
+A lane may not absorb that into a "last mile" retirement batch, and P7 does not: the two
+`graph_overview` doors were measured equivalent and the batch that wires the other four
+containers is S1, gated on that approval.
+
 ## 2. The decision
 
 ### 2.1 Envelope doors — declare the list containers `list[dict] | dict`
@@ -421,6 +461,29 @@ paged object, is the shape that keeps the envelope. The second describes the mec
 registry **intended** to have — and measurement showed this tree never wired it (§1.5), which
 is the finding that removed three steps from the plan.
 
+**P7 addendum — the same two questions, against the normative sources.** The search rung named
+by this lane's brief (rung 2, `web_search`/`sonar`) is **not provisioned on this box**
+(`PERPLEXITY_API_KEY` unset) and the `brave-search` MCP closed the connection on load, so the
+primary documents were fetched directly (`web_fetch`). Naming the rung: **rung 2 unavailable;
+primary-source fetch used instead**, which is the stronger citation for a normative claim.
+
+- **AIP-158 (Pagination)** — *"Response messages for collections should define a string
+  `next_page_token` field… The field containing pagination results should be the first field in
+  the message"*, and *"RPCs returning collections of data must provide pagination **at the
+  outset** — it is a backwards-incompatible change to add pagination to an existing method."*
+  Two consequences for S1: a paged collection is an **OBJECT with a repeated field plus a
+  token**, never a bare array — which is `list[dict] | dict`'s dict arm, not a second tool —
+  and paging must not be bolted on later, so the envelope must be settled BEFORE the doors
+  retire rather than after. This is the citation that makes S1 a prerequisite and not a
+  cleanup.
+- **AIP-180 (Backwards compatibility)** — *"APIs are fundamentally contracts with users"*, with
+  three separate compatibilities (**source**, **wire**, **semantic**) that a service change
+  must not break, and an explicit warning that adding pagination after the fact is dangerous
+  because *"older clients will incorrectly assume all results were returned"*. This is the
+  principle behind §1.5's route finding: the **route** is the contract and the writer beneath
+  it may move, which is why retiring a registry ROW deletes nothing on the wire — and why a
+  route may not be re-pointed to a narrower answer without a versioned decision.
+
 ---
 
 ## 4. The ordered steps that remain, and the doors each unblocks
@@ -428,10 +491,10 @@ is the finding that removed three steps from the plan.
 | step | change | unblocks | gate |
 |---|---|---|---|
 | **S1** | `list[dict] \| dict` on `tortoise_list_knowledge`, `tortoise_search_knowledge`, `tortoise_graph_overview`, `tortoise_check_confidence`, `tortoise_explore_connections`, `tortoise_review_link_candidates` | `search_sessions`, `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`, `expand_relationships`, `check_structure`, `calibrate_summary`, **and `search`** (**9**) | **Daniel** — `structuredContent` re-wrap on 6 live tools |
-| **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (12 → 3) in the same change | the 9 above | follows S1 |
-| **S3** | retire `tortoise_issue_insight` and `tortoise_session_context` — **no route work**, because the `rest_spec` reason is stale (§1.5) | `issue_insight`, `session_context` (**2**) | 27/40 ruling batch; update `PROTECTED` with the evidence |
+| **S2** | retire those 9 in S1's batch; move them out of `PROTECTED` (10 → 1) in the same change | the 9 above | follows S1 |
+| **S3** | **DONE** — `tortoise_issue_insight` and `tortoise_session_context` retired in #11609 lane P6 with **no route work**, on §1.5's measurement | `issue_insight`, `session_context` (**2**) | landed in P6 |
 | **S4** | re-point `paginated_query` / `query_points_by_tag`, then retire `query` | `query` (**1**) | migration decision |
-| **S5** | land the six missing destinations (`delete_knowledge`, `link_entities`, `poll_events`, `write_knowledge_batch`, `create_memory_graph`, `list_memory_graphs`) | the 7 `NO_CONTAINER_YET` | out of scope here |
+| **S5** | **DONE for the four MCP destinations** — #11609 lane P7 registered `delete_knowledge`, `link_entities`, `poll_events` and `get_historical_knowledge` and retired `delete`, `create_edge`, `create_operator`, `events_poll` and `list_graphs` forward in the same change (§1.4) | **5 of the 7** | landed in P7; the 2 left (`ingest`, `org_create`) have no MCP destination and need an ARCHIVE batch on the preconditions §1.4 names |
 
 Twelve structural doors: **9 in S1/S2** (8 envelope-only + `search`), **2 in S3** (stale
 reason, no work), **1 (`query`) in S4**. Seven `NO_CONTAINER_YET` (nine when this plan was

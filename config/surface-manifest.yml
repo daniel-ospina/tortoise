@@ -239,7 +239,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 391aa835b8625dfd8df9bf960ae7eed9e40cf593
+cut_at_commit: 416050438a7cdefe148afd5458831fc92155039f
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1720,7 +1720,7 @@ rows:
   family: memory
   family_rank: 1
   served: http
-  sdk_method: delete_knowledge
+  sdk_method: _delete
   group_source: mapped
   keyword: delete
   keyword_rank: 4
@@ -1730,7 +1730,7 @@ rows:
     Event. DESTRUCTIVE and PERMANENT: cannot be undone. The FIRST call changes nothing: it previews which node resolves
     and every edge that would go with it, and returns a confirmation token. Call again with confirmation=<token>
     to delete. When the item is wrong rather than unwanted, supersede it or retract it instead.'
-  dependency: declares TortoiseSDK.delete_knowledge (resolves)
+  dependency: declares TortoiseSDK._delete (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2841,16 +2841,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_knowledge.
-  dependency: 'reached by 1 registered tool(s): tortoise_delete_knowledge'
+  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
   lifecycle: active
   used_by: tooling, docs
-  recommendation: keep
-  reason: reached by 1 registered tool(s)
+  recommendation: review
+  reason: no MCP tool binds it, and no caller outside tests was found
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: agent-reachable
+  class: no-caller-found
 - name: sdk:delete_memory_graph
   method: delete_memory_graph
   approved: true
