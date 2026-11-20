@@ -63,6 +63,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import contextlib
+import http.client
 import json
 import os
 import pathlib
@@ -393,7 +394,7 @@ class Mcp:
         confuse them (#13913 review round 5): a **definite refusal** (the door
         answered no) is a plain `RuntimeError` — nothing was written, so the
         caller un-records its intent — while an **UNCONFIRMED** outcome is
-        `_Unconfirmed`, which the caller re-raises WITHOUT un-recording, because
+        `UnknownOutcome`, which the caller re-raises WITHOUT un-recording, because
         a re-issue could write the node twice. `--verify` is the authority on
         whether an unconfirmed write landed.
         """
@@ -411,7 +412,16 @@ class Mcp:
                     payload = json.loads(body)
                 except json.JSONDecodeError:
                     payload = {"raw": body}
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # ⛔ A BODY WE CANNOT READ IS NOT A REFUSAL. `_post` parses the
+            # response itself (JSON, or the last SSE frame), so a truncated body
+            # (`IncompleteRead`) or a proxy error page on a 2xx raises `http.client`
+            # / `JSONDecodeError` ONE FRAME BELOW this classification. Uncaught,
+            # both escaped to `write_once`'s refusal arm, which un-recorded a
+            # NON-IDEMPOTENT intent the server may well have acted on — measured:
+            # a 2xx with a truncated body re-issued `create_operator` on resume,
+            # the #10849 double-count (#13913 review round 7).
+            except (urllib.error.URLError, TimeoutError, OSError,
+                    http.client.HTTPException, json.JSONDecodeError) as exc:
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, exc)) from exc
                 if attempt == 5:
@@ -431,7 +441,12 @@ class Mcp:
                     time.sleep(min(120, float(retry_after) + 1))
                     continue
                 raise RuntimeError(f"{tool} refused: {err}")
-            if code >= 500:
+            # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS: a timeout may have been
+            # read and acted on, and a rate limiter can sit INSIDE the door
+            # (measured: a 429 un-recorded an operator intent and the resume wrote
+            # a SECOND operator). They take the retryable/UNKNOWN path (#13913
+            # review round 7).
+            if code >= 500 or code in (408, 429):
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, f"HTTP {code}"))
                 if attempt < 5:
@@ -680,7 +695,7 @@ def write_map(doc: dict) -> int:
 
         ⛔ THE TWO EXITS ARE NOT THE SAME EXIT. A **definite refusal** (the door
         answered no) means nothing landed, so the intent is un-recorded and the
-        write may be re-issued. An **UNCONFIRMED** outcome (`_Unconfirmed`) may
+        write may be re-issued. An **UNCONFIRMED** outcome (`UnknownOutcome`) may
         have landed, so the intent STAYS recorded and is reported as unresolved:
         un-recording it there is what re-issued a second operator on resume
         (#13913 review round 5). `--verify` is the authority on what landed.
@@ -1170,10 +1185,64 @@ def duplicates(doc: dict, node_rows: list) -> list[tuple[str, str, str]]:
     return sorted(ident for ident in declared if counts.get(ident, 0) > 1)
 
 
+def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
+    """Declared operator edges the graph holds MORE THAN ONCE.
+
+    ⛔ `duplicates()` cannot see these: an operator is a `:Point` whose
+    `is_operator`/`op_type`/`direction` live on the node and which carries no
+    `name`/`url`/`content`, so it contributes NO identity — and `presence()`'s
+    operator arm is EXISTENTIAL (`any(...)`). A re-issued `create_operator` mints
+    a fresh point id over the same endpoints (no existence check, #10849), so a
+    graph holding TWO copies of every declared operator read `nodes: 78/78 /
+    edges: 101/101` and exited 0 — the one corruption the intent-marker state
+    machine exists to prevent, and `--verify` is appointed its authority
+    (#13913 review round 7, measured).
+
+    Grouped exactly as `presence()` groups them, then required to be UNIQUE.
+    """
+    by_ref = identity_by_ref(doc)
+    aliases = DIRECTION_ALIASES
+    grouped: dict[object, tuple[str, str, dict[int, set[tuple[str, str, str]]]]] = {}
+    for row in op_rows:
+        nid, kind, idx, direction = row[0], row[1], row[2], row[3]
+        _kind, _dir, slots = grouped.setdefault(
+            nid, (kind, aliases.get(direction, direction), {}))
+        try:
+            slot = int(idx)
+        except (TypeError, ValueError):
+            slot = -1
+        slots.setdefault(slot, set()).update(_row_identities(row[4:8]))
+
+    holders: dict[tuple[str, tuple, tuple], set[object]] = {}
+    where: dict[tuple[str, tuple, tuple], tuple[str, str]] = {}
+    for e in doc["edges"]:
+        if "op" not in e:
+            continue
+        want = direction_of(e)
+        want = aliases.get(want, want)
+        a, b = by_ref[e["from"]], by_ref[e["to"]]
+        key = (e["op"], a, b)
+        where[key] = (e["from"], e["to"])
+        for nid, (kind, direction, slots) in grouped.items():
+            if (kind == e["op"] and direction == want
+                    and all(slot in (0, 1) for slot in slots)
+                    and a in slots.get(0, set())
+                    and b in slots.get(1, set())):
+                holders.setdefault(key, set()).add(nid)
+    out: list[tuple[str, str, str]] = []
+    for key, ids in holders.items():
+        if len(ids) > 1:
+            kind, _a, _b = key
+            frm, to = where[key]
+            out.append((kind, frm, to))
+    return sorted(out)
+
+
 def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
     """0 only when every declared node AND every declared edge reads back, once."""
     missing_nodes, missing_edges = presence(doc, node_rows, edge_rows, op_rows)
     dupes = duplicates(doc, node_rows)
+    dup_ops = duplicate_operators(doc, op_rows)
     total = len(map_identities(doc))
     expected_edges = len(doc["edges"])
     print(f"\nnodes: {total - len(missing_nodes)}/{total} declared identities present")
@@ -1191,6 +1260,12 @@ def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
               "more than once (a non-idempotent write landed twice):", file=sys.stderr)
         for label, prop, value in dupes[:20]:
             print(f"  - {label}.{prop}: {value[:70]!r}", file=sys.stderr)
+    if dup_ops:
+        print(f"DUPLICATED OPERATORS — {len(dup_ops)} declared edge(s) are held by "
+              "more than one operator node (a non-idempotent write landed twice, "
+              "#10849 — the claim's EP weight double-counts):", file=sys.stderr)
+        for kind, frm, to in dup_ops[:20]:
+            print(f"  - {kind}: {frm} -> {to}", file=sys.stderr)
     if missing_edges:
         print(f"EDGES MISSING — {len(missing_edges)} declared edge(s) are absent "
               "(an unjoined map is filed but not findable):", file=sys.stderr)
@@ -1198,7 +1273,7 @@ def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
             print(f"  - {kind}: {frm} -> {to}", file=sys.stderr)
         if len(missing_edges) > 20:
             print(f"  … and {len(missing_edges) - 20} more", file=sys.stderr)
-    return 0 if not missing_nodes and not missing_edges and not dupes else 1
+    return 0 if not (missing_nodes or missing_edges or dupes or dup_ops) else 1
 
 
 def verify(doc: dict) -> int:
