@@ -4132,6 +4132,84 @@ def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
     )
 
 
+def _embedder_warmup_manifest_entry() -> str:
+    """The manifest's `TORTOISE_EMBEDDER_WARMUP` entry, its heading line through its declaration.
+
+    Sliced by the entry's own opening line and its declaration line, NOT by a
+    numeric range — the manifest is edited above this entry by other changes, and
+    a range here would silently read a different block (the same defect class
+    `_embedder_warmup_runbook_section` documents for the runbook).
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    heading = next(
+        (i for i, ln in enumerate(lines) if ln.startswith("# TORTOISE_EMBEDDER_WARMUP —")),
+        None,
+    )
+    if heading is None:
+        raise AssertionError(
+            "the manifest has no `# TORTOISE_EMBEDDER_WARMUP — …` entry heading — the "
+            "probe is stale, and a stale probe would pass vacuously"
+        )
+    declaration = next(
+        (
+            i
+            for i in range(heading + 1, len(lines))
+            if lines[i].split()[:1] == ["TORTOISE_EMBEDDER_WARMUP"]
+        ),
+        None,
+    )
+    if declaration is None:
+        raise AssertionError(
+            "the `TORTOISE_EMBEDDER_WARMUP` entry block never reaches its declaration "
+            "line — the probe is stale, and a stale probe would pass vacuously"
+        )
+    return "\n".join(lines[heading : declaration + 1])
+
+
+def test_the_warmup_entries_value_claim_is_a_measurement_not_a_standing_fact():
+    """`0` is what was MEASURED at the move — not what `[env]` supplies today.
+
+    #13941's cross-lane note asked for this line to be owned by the PR that lands
+    the direction, and the reviewer recorded it as the last present-tense survivor
+    of the block (`fly.toml` had already been corrected to call the same value a
+    measurement). The claim is load-bearing, not cosmetic: while the live Fly
+    secret of this name exists it SHADOWS `[env]`, so the sentence "the `[env]`
+    value is the LIVE one" is FALSE in exactly the state the operator reads the
+    block in — and step 4 of the route-(b) block above tells them to verify the
+    value rather than assume it. A present-tense claim beside that instruction is
+    the one sentence that can let them skip the verification (#13938's stated risk:
+    a carried value that diverged from the secret's would flip the boot pre-warm
+    off while the entry still claimed to be behaviour-preserving).
+
+    ⛔ The absence arm reads the WHOLE manifest, not just this entry, so the claim
+    cannot come back in a neighbouring note either; and it is asserted on the
+    pre-fix text, where it is present, so this arm is not vacuous.
+    """
+    entry = _embedder_warmup_manifest_entry()
+    # Non-vacuity: an empty or declaration-only slice would satisfy every arm below
+    # while binding nothing, so the slice must actually span the commentary AND end
+    # on the declaration it annotates.
+    assert entry.rstrip().endswith("fly-toml-env"), (
+        "the entry slice does not reach the declaration line it annotates — the reader "
+        f"is stale and these arms would bind nothing:\n{entry}"
+    )
+    assert "MEASURED at the move" in entry, (
+        "the entry no longer states that `0` was a MEASUREMENT taken at the move, which "
+        "is what keeps it from being read as the value `[env]` supplies today"
+    )
+    assert "SHADOWED" in entry or "SHADOWS" in entry, (
+        "the entry no longer says that the live Fly secret SHADOWS `[env]` — without it "
+        "`0` reads as in force while the secret is the source (#13938's divergence risk)"
+    )
+    standing = "is the LIVE one"
+    assert standing not in REAL_MANIFEST.read_text(), (
+        f"the manifest asserts {standing!r} in the present tense. While a Fly secret of "
+        "this name is live IT supplies the value, so the sentence is false in the state "
+        "the operator reads this block in, and step 4 above tells them to verify rather "
+        "than assume. State it as the value measured at the move (#13941 review)."
+    )
+
+
 def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):
     """The Fly-column guard must red on every equivalent "not here" spelling.
 
