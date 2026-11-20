@@ -197,7 +197,7 @@ agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence 
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
 opens at the pin**: at `ccb49741b2ec` all five of those numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31365p;31347p;24327p;24671p'`,
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31396p;31378p;24358p;24702p'`,
 and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
 reader sent to the pin would have found a different line at every one of them — which is why they are
 enumerated here rather than left to the paragraph's own say-so. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin

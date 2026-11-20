@@ -283,11 +283,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_EVIDENCE, 'called at `sdk.py:28790`', _SDK, 28790, 'result = apply_entity_merge('),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
-    # `origin/main`'s `:2519` to `:2684`, and this branch re-pointed the row to `:1548` — a `+4`
+    # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
+    # aimed at `2684` was aiming at prose), and this branch re-pointed the row to `:1548` — a `+4`
     # applied to a number that was ALREADY wrong at `main` (`:1544` there, on a `restore_graph`
     # comment block). `:1548` opens on a comment whose text has nothing to do with the symbol, so the
     # row shipped naming a symbol at a line that does not carry it. Re-derived by CONTENT:
-    # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
+    # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2683` on this tree (it was
+    # `2666` at the head that first re-derived this row; the pin below is what reddens if it moves
+    # again). Pinned here because
     # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
     (_PLAN_4997, "tortoise/hosted_backup.py:2683", _HB, 2683, "def _index_has_is_operator() -> bool:"),
 )
@@ -1032,7 +1035,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28030` rows above.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
-    # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which is `:2684` at this head
+    # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which was `:2666` at that lane's head
     # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
     # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281`, re-derived from the
     # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2666`
