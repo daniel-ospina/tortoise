@@ -2200,7 +2200,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
     r"|(?:^|[.;:!?]\s|\n)(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
-    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?)"
+    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
+    # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
+    # MEASURED): `entries`, `diffs` and `edits` red in the VERB-THEN-ANSWER arm (`:2169` binds
+    # them) while `Six entries are what the `tortoise/` set holds at this head` stayed GREEN
+    # here — an asymmetry between the two orders of the same sentence, and one the row's own
+    # residual sentence did not cover, because these nouns are inside the ban's own lists.
+    r"entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
     r"|(?:an?|the)\s+(?:empty|non[- ]?empty))"
     # ⛔ AND THE ANCHOR MUST BE FOLLOWED BY THE VERB OR THE SUBJECT-NOUN (#13802 review, round
     # 16 — MEASURED): without that, ordinary prose (`… it is transport only — nothing in
@@ -2208,7 +2214,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # the path answer with no claim behind it. A path is also dropped from the answer class
     # here: `tortoise/x.py is what … returns` is prose this pattern cannot distinguish from a
     # mention, and the row's own rule is that an over-block costs more than a false PASS.
-    r"\b[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
+    # ⛔ A LOOKAHEAD, NOT `\b` (#13802 review, cycle 9, P2 — MEASURED): the answer class above
+    # ENDS with `` `?\[\]`? ``, and a word boundary cannot follow `` ` `` or `]` — so the `[]`
+    # branch was UNREACHABLE here. Measured: `` `-- tortoise/` prints `[]` at this head `` red
+    # in the verb-then-answer arm while `` `[]` is what `-- tortoise/` prints at this head ``
+    # was GREEN, i.e. the same claim in the two orders disagreed. `(?![A-Za-z0-9_])` is the
+    # boundary that is true after a word AND after punctuation, so both spellings are read.
+    r"(?![A-Za-z0-9_])[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
     r"subtree|delta|changes?|holds|holds?|returns?|prints?|reports?|lists?|"
     r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?)\b"
     # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
@@ -2398,6 +2410,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # earlier cut`), and the row's own rule is that an over-block costs more than a false
         # PASS — so this ONE spelling of the membership direction stays a declared residual.
         "A non-empty set is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE TWO FORMS THE SAME ALTERNATIVE COULD NOT SEE (#13802 review, cycle 9, P2 —
+        # each MEASURED GREEN here while its other order RED): `` `[]` `` never matched because a
+        # `\b` cannot follow `` ` `` or `]` (the boundary is a lookahead now), and the count
+        # nouns below `files?|paths?|modules?` were bound in the verb-then-answer arm and not in
+        # this one.
+        "`[]` is what `-- tortoise/` prints at this head",
+        "Six entries are what the `tortoise/` set holds at this head.",
+        "Two diffs are what the `tortoise/` diff carries.",
         "Empty is what `-- tortoise/` prints at this head.",
         # ⛔ AND THE INDEFINITE ARTICLE, AND THE PARENTHETICAL (#13802 review, round 14, P1+P2).
         # `returns a non-empty set` is the DETECTOR's OWN pinned witness string at `:1320` and
