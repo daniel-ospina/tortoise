@@ -797,8 +797,13 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         # — probing `query` tests a binding that no longer exists and passes
         # vacuously. This is the third copy of the probe (two live in
         # test_tool_registry.py); the key must move in ALL of them.
+        # ⛔ #12901 FINAL batch: `paginated_query` was PRIVATISED to
+        # `_paginated_query`, and the registry row this arm keys on
+        # (`tortoise_query.sdk_method`) was re-pointed with it — so the probe's key
+        # moves too. Keying the public spelling now matches no row at all, which
+        # makes the arm pass vacuously (measured: `violations == []`).
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "_paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v

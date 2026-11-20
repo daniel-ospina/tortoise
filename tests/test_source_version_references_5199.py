@@ -466,10 +466,19 @@ def test_document_call_sites_express_derivation_not_containment():
     literal_labels: list[tuple[str, int, str]] = []
     for rel in files:
         tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+        # ⛔ #12901 FINAL batch: there are TWO methods that make a derivation link
+        # at a document call site — the PROJECTION's `link_source_to_entity`
+        # (`proj.link_source_to_entity(...)`, unchanged) and the SDK's, which the
+        # batch PRIVATISED to `_link_source_to_entity` (`sdk._link_source_to_entity(
+        # url, doc_id, "Document")` in `hosted_api`). Matching only the public
+        # spelling dropped that site from the population — the count went 3 -> 2
+        # while the site was still there — which is the "re-point this pin" arm of
+        # the assertion below firing exactly as intended.
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "link_source_to_entity"]
+                 and n.func.attr in ("link_source_to_entity",
+                                     "_link_source_to_entity")]
         # The label VARIABLES that reach a document call site's third argument.
         # The conditional-assignment arm below must be scoped to these: a bare
         # `label = A if c else B` is not a document call site, and matching every

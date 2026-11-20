@@ -265,7 +265,10 @@ def test_sdk_read_uses_the_shared_predicate():
     positional: the guard must appear before the Event query.
     """
     src = _src("tortoise/sdk.py")
-    start = src.index("def get_session(")
+    # #12901 FINAL batch: `get_session` was PRIVATISED to `_get_session` (body
+    # unchanged, public spelling a tombstone) — the ENTRY the positional pin reads
+    # is the same entry.
+    start = src.index("def _get_session(")
     body = src[start:src.index("def _read_captured_session(", start)]
     assert "from tortoise.session_schema import is_demo_session_id" in body, (
         "the SDK read must import the ONE predicate")

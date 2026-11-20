@@ -1385,8 +1385,14 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
                 parents[id(child)] = n
         out: list[tuple[str, bool]] = []
         for node in _ast.walk(tree):
+            # ⛔ #12901 FINAL batch: the seam was PRIVATISED to `_tortoise_fts_query`
+            # (body unchanged, public spelling a tombstone) — and a tombstone can never
+            # be CALLED, so matching only the public spelling found no site at all
+            # (measured: `scanned == []`, the floor below firing on an empty walk).
+            # Both spellings are matched: the census is about the SEAM, not the name,
+            # and a site still spelled publicly would be a live call to a dead name.
             if not (isinstance(node, _ast.Attribute)
-                    and node.attr == "tortoise_fts_query"):
+                    and node.attr in ("tortoise_fts_query", "_tortoise_fts_query")):
                 continue
             # the CALL the mention feeds: either it IS the callee, or it is an
             # argument (``_safe(sdk.tortoise_fts_query, …)``)
@@ -1591,8 +1597,12 @@ def test_a_caller_that_RE_OWNS_the_order_opts_the_rerank_out(sdk, monkeypatch):
         # fail-safe) and it does NOT warm the cross-encoder — no per-arm
         # `elapsed_s` figure may be read as a warm start. The registration is
         # about the CALL SHAPE, not about a warmed model.
+        # #12901 FINAL batch: the seam was PRIVATISED, so the owner that mentions it is
+        # now `_tortoise_fts_query` — the grant set names OWNERS, and the owner moved.
+        # Both spellings are listed: the census matches either (see the walk above), so a
+        # site under either name must find its grant here.
         "tools/capstone_12186_recall.py": frozenset({
-            "tortoise_fts_query", "_query_rows", "run"}),
+            "tortoise_fts_query", "_tortoise_fts_query", "_query_rows", "run"}),
     }
     seen_external: set[str] = set()
     # ⛔ ``docs/runbook`` holds the recorded-baseline diagnostics (gold-rank,
