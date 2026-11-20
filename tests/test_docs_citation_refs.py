@@ -3749,11 +3749,12 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
       * after a `|`, `+` makes grep REFUSE the whole command — `^(-|+)$` and its escaped twin
         `^(\-|+)$` both answer `Unmatched ( or \`, rc 2, counting nothing, and print NO
         warning;
-      * in the FIRST branch, `+` and `?` WARN (`+ at start of expression`) and then quantify an
-        EMPTY expression, so `^(+|-)$` and `^(+|\-)$` match the `-` line and every blank line and
-        NEVER the `+` line — on a file holding just `+` and `x`, `grep -cE '^(+|-)$'` prints 0
-        where this class prints 1. That silent miscount is the direction that matters, and NO
-        returncode guard catches it;
+      * in the FIRST branch, `+` and `?` WARN — per character, `+ at start of expression` and
+        `? at start of expression` respectively — then quantify an EMPTY expression, so
+        `^(+|-)$` and `^(+|\-)$` match the `-` line and every blank line and NEVER the `+` line —
+        on a file holding just `+` and `x`, `grep -cE '^(+|-)$'` prints 0 where this class prints
+        1. That silent miscount is the direction that matters, and NO returncode guard catches
+        it;
       * `{` in the first branch is neither: grep emits NO warning and treats it as a LITERAL, so
         `^({|-)$` matches a `{` line as well as a `-` line (rc 0, measured).
     So only the lead-`+` case needs an entry in the guard below: `*`, `?` and `{` are already
