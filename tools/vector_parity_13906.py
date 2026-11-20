@@ -962,8 +962,21 @@ def _drop_options_pairs(dsn: str) -> str:
     # a "byte-preserving" rebuild still corrupts a legal spelling: `" ".join`
     # collapses the one-sided and doubled spacings libpq admits, so
     # `host=127.0.0.1  =  dbname=x` came back as `host=127.0.0.1 = dbname=x`.
-    if not any(key == "options" or (key is not None and not value)
-               for key, value in pairs):
+    # ⛔ …AND NOT WHEN THE STRING ENDS IN AN **ODD** RUN OF BACKSLASHES. The caller
+    # (`app_role_dsn`) APPENDS ` options='-c role=…'` to whatever this returns, and
+    # in libpq's whitespace form an unquoted value's trailing `\` escapes the very
+    # next character — the separating space — so `dbname=x\ options='-c
+    # role=…'` is parsed as `dbname = "x options='-c"` plus a bogus keyword
+    # `role=…'`, and libpq rejects the whole string (`invalid connection option
+    # "role"`). Measured on this box: the INPUT `host=127.0.0.1 dbname=x\` parses
+    # fine (Connection refused at 127.0.0.1), and the guard CERTIFIES it — so the
+    # operator is told the DSN is good and every record query then carries a
+    # `record_error`, i.e. no measurement at all. Falling through to the rebuild
+    # quotes the value (`dbname='x\\'`), which libpq reads back as `x\`.
+    trailing_backslashes = len(dsn) - len(dsn.rstrip("\\"))
+    if (not any(key == "options" or (key is not None and not value)
+                for key, value in pairs)
+            and trailing_backslashes % 2 == 0):
         return dsn
     out: list[str] = []
     for key, value in pairs:
