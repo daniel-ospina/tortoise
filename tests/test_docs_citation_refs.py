@@ -2860,6 +2860,13 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     # the injection loop green while that description could be re-inserted into the document
     # uncaught — the measured bypass #13807 review finding 5 recorded for the membership
     # ledger, closed here the same way: pin the rows, never the count.
+    #
+    # ⛔ THE MODULE CONSTANT GOES ON THE LEFT, the pinned tuple on the right. Written the
+    # other way round this is `SIM300` (yoda condition) and reds `main-lint`, which reddens
+    # the merge ref of every open PR — measured on `main` at `bd020ff45b`, `main-lint` run
+    # 44689040783: `SIM300 [*] Yoda condition detected --> tests/test_docs_citation_refs.py:2863:12`.
+    # The comparison is symmetric (`_FILTER_FALSE_DESCRIPTIONS` is a tuple), so the flip is
+    # semantics-preserving; the row pinning is unchanged.
     assert _FILTER_FALSE_DESCRIPTIONS == (
         "drops only lines whose first non-space character is `#`",
         "drops exactly the lines whose first non-space character is `#`",
