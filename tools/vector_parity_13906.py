@@ -79,7 +79,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode
 
 #: Imported, not restated: the one vocabulary the read surfaces use. The
 #: `Row.eligible` predicate below is the CALLERS' rule, so it reads the rule from
@@ -596,6 +596,32 @@ _CONNINFO_KV = re.compile(
     re.IGNORECASE)
 
 
+def _authority_hosts(netloc: str) -> list[str]:
+    """Hosts in a URI authority — including libpq's comma-separated FAILOVER LIST.
+
+    ⛔ ``urlsplit(...).hostname`` answers HALF the question. For
+    ``postgresql://127.0.0.1:1,203.0.113.9/db`` libpq's ``host`` is
+    ``'127.0.0.1,203.0.113.9'`` — a failover list whose SECOND entry it dials when
+    the first refuses (measured: ``PQhostaddr`` → ``203.0.113.9``) — while
+    ``urlsplit().hostname`` returns only ``'127.0.0.1'`` and ``.port`` even RAISES
+    (``Port could not be cast to integer value as '1,203.0.113.9'``). Trusting the
+    half-answer passed a DSN that reached a remote record.
+    """
+    hosts: list[str] = []
+    for entry in netloc.split(","):
+        entry = entry.strip()
+        if "@" in entry:                       # userinfo is not a host
+            entry = entry.rsplit("@", 1)[1]
+        if entry.startswith("["):              # [::1]:5432
+            end = entry.find("]")
+            hosts.append(entry[1:end] if end != -1 else entry[1:])
+        elif ":" in entry:
+            hosts.append(entry.rsplit(":", 1)[0])
+        elif entry:
+            hosts.append(entry)
+    return [unquote(host) for host in hosts if host]
+
+
 def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
     """(hosts, keys) named by libpq's whitespace conninfo form.
 
@@ -661,9 +687,12 @@ def _uri_hosts(dsn: str) -> tuple[list[str], set[str]]:
         for key in query:
             if key.lower() in ("host", "hostaddr", "service"):
                 keys.add(key.lower())
-    authority = urlsplit(base)
-    if authority.hostname:
-        hosts.append(authority.hostname)
+    # ⛔ NOT `authority.hostname`: the authority is a comma-separated FAILOVER LIST
+    # to libpq, and `.hostname` returns only its first member.
+    authority_hosts = _authority_hosts(base.split("//", 1)[1].split("/", 1)[0]
+                                       if "//" in base else "")
+    if authority_hosts:
+        hosts.extend(authority_hosts)
         keys.add("host")
     return hosts, keys
 
@@ -744,7 +773,27 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
     if not dsn:
         return
     for host in _record_dsn_hosts(dsn) or [RECORD_DSN_NO_HOST]:
+        if host.startswith("/"):
+            # A unix-socket PATH is local by construction — refusing
+            # `?host=/var/run/postgresql` made the operator pass
+            # `--allow-remote-writes`, a flag whose name asserts the opposite of
+            # what they are doing.
+            continue
         _assert_loopback(host, "record database", allow_remote)
+
+
+def _quote_conninfo_value(value: str) -> str:
+    """Quote one conninfo VALUE the way libpq reads it — only when it must be.
+
+    libpq's whitespace form takes `keyword = value`, where the value is quoted
+    with single quotes (backslash escaping) when it carries whitespace or a quote.
+    Re-joining bare tokens loses that quoting, so `password='p w'` came back as
+    `password=p w` and libpq refused the string.
+    """
+    if value == "" or any(char.isspace() or char in ("'", "\\") for char in value):
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+    return value
 
 
 def app_role_dsn(dsn: str) -> str:
@@ -763,15 +812,32 @@ def app_role_dsn(dsn: str) -> str:
     options = f"-c role={APP_ROLE}"
     if "://" in dsn:
         head, sep, raw_query = dsn.partition("?")
-        params = parse_qsl(raw_query, keep_blank_values=True) if sep else []
-        params = [(k, v) for k, v in params if k != "options"]
+        # ⛔ `parse_qsl` DECODES `+` AS A SPACE; libpq does not. A password or an
+        # `application_name` carrying a literal `+` would silently change under the
+        # app's own connection, so the pairs are split here and percent-decoded
+        # only — exactly the decoding libpq does.
+        params = []
+        for pair in raw_query.split("&") if sep else []:
+            if not pair:
+                continue
+            key, _, value = pair.partition("=")
+            if unquote(key) == "options":
+                continue
+            params.append((unquote(key), unquote(value)))
         params.append(("options", options))
         # `head` is kept VERBATIM — never re-serialized — so `postgresql:///db`
         # keeps all three slashes.
         return f"{head}?{urlencode(params, quote_via=quote)}"
-    tokens = shlex.split(dsn)
-    kept = [t for t in tokens if t.partition("=")[0] != "options"]
-    return " ".join([*kept, f"options='{options}'"])
+    kept = []
+    for token in shlex.split(dsn):
+        key, sep_eq, value = token.partition("=")
+        if key == "options":
+            continue
+        # ⛔ RE-EMIT THE VALUE QUOTED. `" ".join(shlex.split(dsn))` turned
+        # `password='p w'` into `password=p w`, which libpq rejects outright
+        # (`missing "=" after "w"`) — a DSN the guard had certified as local.
+        kept.append(f"{key}={_quote_conninfo_value(value)}" if sep_eq else token)
+    return " ".join([*kept, f"options={_quote_conninfo_value(options)}"])
 
 
 def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
@@ -1324,6 +1390,12 @@ def run(args) -> dict:
             if args.poison == "vector":
                 # The graph arm is re-read AFTER the rewrite; that is the point.
                 index_answers[qid] = store.read(qvec, k)
+                # ⛔ AND THE PARAMETERS ARE RE-READ WITH IT: `index_params` was
+                # captured from the DEFAULT index, so when the ef-diagnostic
+                # rebuild ran this arm published ef=200 answers under efRuntime=10
+                # parameters — "a driver name is a claim, the artifact is the
+                # evidence" broken from the other side.
+                report["arms"]["graph_index"]["index_params"] = store.index_params()
                 idx_ids = [key for key, _d in index_answers[qid]["rows"]]
 
             entry = {
