@@ -162,9 +162,9 @@ _TURN_KEY_EXEMPT = {
         # ⛔ THE EXEMPTION'S REASON, RESTATED TO WHAT THE SDK ACTUALLY WRITES (#13919
         # review round 10, finding 3). The old reason — "the value IS the product's turn
         # counter" — is refuted by the product: the SDK writes
-        # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4143``)
+        # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4150`` in this tree)
         # and says so verbatim, "`turn_count` is a WINDOW LENGTH (`len(turns)`), not a
-        # max id index" (``sdk.py:4149``), overwritten by each append at
+        # max id index" (``sdk.py:4156`` in this tree), overwritten by each append at
         # ``turn_offset > 0``. So this key sums WINDOW LENGTHS: it is not a turn
         # population, and the receipt's 17,934 beside its `turns_total` of 27 is not a
         # like-for-like comparison. The exemption is kept because the property is a
@@ -2405,8 +2405,8 @@ def test_r10_the_turn_count_sum_exemption_cites_the_SDKs_WINDOW_LENGTH():
 
     ``session_turn_count_sum`` is exempt from the turn discriminator on the ground that
     it sums a Session scalar. That is still true — and the scalar is a WINDOW LENGTH:
-    ``turn_count = len(turns)`` (sdk.py:4143), "a WINDOW LENGTH (`len(turns)`), not a max
-    id index" (sdk.py:4149), overwritten by every append at ``turn_offset > 0``. The old
+    ``turn_count = len(turns)`` (sdk.py:4150), "a WINDOW LENGTH (`len(turns)`), not a max
+    id index" (sdk.py:4156), overwritten by every append at ``turn_offset > 0``. The old
     reason ("the value IS the product's turn counter") made the sum read as the turn
     population, which is how ``17,934`` beside ``turns_total: 27`` stayed unexamined in
     the comparison the legacy-population verdict rests on.

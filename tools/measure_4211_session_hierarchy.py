@@ -281,8 +281,8 @@ QUERIES: list[tuple[str, str]] = [
      "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC"),
     # ⛔ WHAT THIS KEY ACTUALLY SUMS (#13919 review round 10, finding 3). `s.turn_count`
     # is a WINDOW LENGTH, not a turn population: the SDK writes it as
-    # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4143``), and
-    # ``sdk.py:4149`` says so verbatim — "`turn_count` is a WINDOW LENGTH
+    # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4150`` in this tree; cited by symbol, `TortoiseSDK._capture_session`), and
+    # ``sdk.py:4156`` says so verbatim — "`turn_count` is a WINDOW LENGTH
     # (`len(turns)`), not a max id index" — overwritten by each append at
     # ``turn_offset > 0``. So this reading is the sum of the windows the LAST write of
     # each Session saw: it UNDER-counts a session captured through several append
