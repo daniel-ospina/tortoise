@@ -981,7 +981,7 @@ def test_a_latched_row_never_mints_a_reopen_on_every_poll(sdk):
     (`entities.py:6399`, `excluded = _terminal_object_statuses()` at `:6065` =
     `commit_ops.OBJECT_TERMINAL_STATUSES`), and while the word is SET no fold path
     clears it (`_STAGE_CLEAR_PROPS` is the pending trio only) — ⚠️ not "for ever": a
-    coherent un-supersede does clear `superseded` (`sdk.py:55731-55740`), and this
+    coherent un-supersede does clear `superseded` (`sdk.py:55926-55935`), and this
     read resumes then because it derives from the stored row. So while the word is
     set the row cannot be moved in either direction, and a reader answering
     `"closed"` for it therefore
@@ -1100,7 +1100,7 @@ def test_a_FROZEN_row_mints_no_transition_in_either_direction(sdk):
     where the fix started looping: the read answered `"closed"` from a LIFECYCLE
     term the fold refuses in BOTH directions while it is set — not one "no writer
     can clear" (a coherent un-supersede DOES clear `superseded`,
-    `sdk.py:55731-55740`) — so each poll minted another `-reopened`
+    `sdk.py:55926-55935`) — so each poll minted another `-reopened`
     (`_next_transition_id` suffixes without bound: `-reopened`, `-reopened-2`, …)
     plus one journal record, for an event the projection then refused
     (`entities.py:6399`).
@@ -1451,7 +1451,7 @@ def test_a_non_scalar_stored_status_does_not_crash_the_reader(sdk):
     Both lifecycle helpers were `frozenset` membership tests, and membership
     HASHES the value — so a stored ARRAY status raised `TypeError: unhashable
     type`. That value is reachable through a PRE-FIX SDK, a raw Cypher producer or a
-    JSONL replay of either (`sdk.py:55579-55581`); it is NOT reachable through
+    JSONL replay of either (`sdk.py:55774-55776`); it is NOT reachable through
     `update_knowledge` any more — the lifecycle doors refuse a non-string status at
     intake (`lifecycle_vocabulary.py:279-286`, reached from `_read_caller_status`),
     so `update_knowledge(id, status=['live'])` raises rather than storing. The row
@@ -3284,19 +3284,23 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # re-measured UNCHANGED at `22629-22804`. The `+194` is the consistency check on a
     # measurement, never its input.
     # ⛔ RE-MEASURED at the `#13854` merge of `origin/main` `f2e5e3a98f0` — and the three later
-    # rows are `55579` / `55731` / `56225` again, NOT `28ca66878d`'s figures plus any offset: this
+    # rows are `55774` / `55926` / `56420` again, NOT `28ca66878d`'s figures plus any offset: this
     # branch's own `sdk.py` inserts sit ABOVE them. Measured on the MERGED tree by each row's own
-    # pinned text: `A row that ALREADY holds a non-scalar` -> `55579`-`55581`, `if (_np_dead ==
-    # [_SUPERSEDED_STATUS]` -> `55731`-`55740` (its bare `continue` at `55740`), the per-label
-    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props` -> `56225`, and `def
-    # update_knowledge(` -> `22651` with its `return self._update_entity_any(id, **props)` at
-    # `22826`. The paragraph above quotes `28ca66878d`'s figures because it describes THAT head.
-    ("sdk.py", 55579, 55581): (
+    # pinned text: `A row that ALREADY holds a non-scalar` -> `55774`-`55776`, `if (_np_dead ==
+    # [_SUPERSEDED_STATUS]` -> `55926`-`55935` (its bare `continue` at `55935`), the per-label
+    # `MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props` -> `56420`, and `def
+    # update_knowledge(` -> `22801` with its `return self._update_entity_any(id, **props)` at
+    # `22976`. The paragraph above quotes `28ca66878d`'s figures because it describes THAT head.
+    # ⛔ RE-MEASURED ONCE MORE at the `#13854` merge of `origin/main` `bd020ff45bb`, which moved
+    # `tortoise/sdk.py` again (+150 above the second insertion point, +195 below it). The four
+    # rows above are the values MEASURED on that merged tree; every one is read from its own
+    # pinned FIRST-line text, never from the previous row plus a guessed offset.
+    ("sdk.py", 55774, 55776): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
-    ("sdk.py", 55731, 55740): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
-    ("sdk.py", 22651, 22826): (
+    ("sdk.py", 55926, 55935): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
+    ("sdk.py", 22801, 22976): (
         "def update_knowledge(", "return self._update_entity_any(id, **props)"),
-    ("sdk.py", 56225, 56225): (
+    ("sdk.py", 56420, 56420): (
         "MATCH (n:{label} {{{match_prop}:$id}}) SET n += $props", None),
 }
 
