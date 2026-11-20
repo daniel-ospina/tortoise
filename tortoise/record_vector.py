@@ -2190,6 +2190,18 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
       readiness asks only ``unprojected`` and ``present``. Issuing it would
       spend the read's budget on a fact nobody consumes.
 
+    ⛔ AND IT IS ``_FIRST_GAP_SQL`` AND NOTHING ELSE THAT ``want_gap`` SWITCHES
+    OFF (#14002 review cycle 4, P3-3). Every coverage read still issues
+    ``CURSOR_PRESENCE_SQL`` (plus its savepoint bookkeeping) to classify the
+    journal, because ``unprojected`` — the ONE thing this gate reads — depends on
+    that classification: :attr:`JournalCoverage.unprojected_unknown_reason`
+    refuses ``present > enumerated`` unless the record owns the ordinal, and on a
+    cut-over graph that shape is the HEALTHY one. Gating the classification on
+    ``want_gap`` would therefore re-arm the cycle-2 P1 this change exists to
+    close (the dense leg disarmed for ever on every cut-over graph), so the cost
+    of this gate is two statements plus the savepoint, never one. Stated because
+    the budget rule here is what the neighbouring refusals cite.
+
     ⛔ AND THE JOURNAL IS COUNTED READ-ONLY (#13331 review F2).
     `EventLog.position_readonly()` is `position()` without its side effects: no
     append lock (so a wedged peer cannot park this call, and a timeout here can

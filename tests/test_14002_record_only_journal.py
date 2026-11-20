@@ -556,6 +556,154 @@ def test_a_cut_over_reading_is_not_reported_as_an_impossible_journal():
     assert "cannot hold a position" in (truncated.unprojected_unknown_reason or "")
 
 
+class _TransactionCursor:
+    """A cursor that obeys PostgreSQL's in-failed-transaction rule (``25P02``).
+
+    ⛔ THIS IS THE FALSIFIER FOR THE FAIL-CLOSED PRESENCE READ (#14002 review
+    cycle 4, P2). In a real transaction a failed statement leaves it ABORTED
+    until ``ROLLBACK`` (or ``ROLLBACK TO SAVEPOINT``), and every subsequent
+    statement then fails with ``25P02``. The double enforces exactly that: it is
+    the only way a DB-free test can tell "the read answered False" from "the read
+    answered False AND poisoned the caller's connection".
+
+    It answers `journal_coverage`'s reads from ``rows`` and records every
+    statement it was asked to issue, so the savepoint ORDER is assertable.
+    """
+
+    def __init__(self, rows, *, presence_raises: bool = False):
+        self._rows = list(rows)
+        self._presence_raises = presence_raises
+        self.statements: list = []
+        self.aborted = False
+        self.closed = 0
+        self._current = None
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        verb = sql.lstrip()
+        if self.aborted and not verb.startswith("ROLLBACK TO SAVEPOINT"):
+            raise RuntimeError(
+                "current transaction is aborted, commands ignored until end of "
+                "transaction block (25P02)")
+        if verb.startswith("SAVEPOINT"):
+            return
+        if verb.startswith("ROLLBACK TO SAVEPOINT"):
+            # The ONE statement PostgreSQL allows in an aborted block, and the
+            # only thing that makes the connection usable again short of a full
+            # ROLLBACK (which would also drop the tenant GUC — #9600's silent
+            # zero-row shape).
+            self.aborted = False
+            return
+        if verb.startswith("RELEASE SAVEPOINT"):
+            return
+        if "set_config" in sql:
+            self._current = (params[0] if params else "o", False)   # scope read-back
+            return
+        if "record_cursor" in sql and self._presence_raises:
+            self.aborted = True
+            raise RuntimeError('relation "public.record_cursor" does not exist (42P01)')
+        self._current = self._rows.pop(0) if self._rows else None
+
+    def fetchone(self):
+        return self._current
+
+    def close(self):
+        self.closed += 1
+
+
+def test_the_export_read_fails_CLOSED_and_REPAIRS_the_callers_transaction(
+        monkeypatch):
+    """⛔ A SWALLOWED FAILED STATEMENT USED TO POISON THE CALLER (#14002 cycle 4, P2).
+
+    `_journal_is_export` answers ``False`` on an unreadable record ON PURPOSE (the
+    pre-#14002 reading then stands, so a failed read cannot quietly bless a
+    rotated journal). But ``False`` was the whole of the recovery: the failed
+    statement left the caller's transaction ABORTED, so the NEXT statement on
+    that handle failed with ``25P02`` — for a caller that keeps using it
+    (`record-reconcile` holds one connection for the whole verb, and a pooled
+    handle outlives both). One unreadable row became a spurious failure
+    somewhere else entirely, with nothing naming this read.
+
+    Three assertions, and each one has a mutant:
+
+    * the classification is still ``False`` AND the pre-#14002 contradiction
+      reading stands (mutant: answer ``True`` — a rotated journal is blessed as
+      an export, suppressing the contradiction arm: #13371/#13331 false-arming);
+    * the recovery is a ``SAVEPOINT`` / ``ROLLBACK TO SAVEPOINT`` pair (mutant:
+      drop the savepoint — the double below is left aborted and the next
+      statement reds; a full `conn.rollback()` would instead un-scope the handle);
+    * the transaction is USABLE afterwards — asserted by issuing one more
+      statement, which is what a caller does and what ``False`` alone fails to
+      guarantee.
+    """
+    from tortoise import record_projection as rp
+
+    # present=9 > enumerated=5: the CONTRADICTION shape, so the fail-closed
+    # answer is visible in the verdict and not only in the flag.
+    cursor = _TransactionCursor([(9, 9, 1, 9), (None,)], presence_raises=True)
+    monkeypatch.setattr(rp, "scope_connection", lambda conn, org_id: cursor)
+
+    cov = rp.journal_coverage(object(), org_id="o", graph_id="g", enumerated=5)
+
+    assert cov.journal_is_export is False, (
+        "a failed presence read was read as 'the record owns the ordinal' — the "
+        "fail-closed direction the docstring promises is gone, so a rotated "
+        "journal is blessed as an export and the dense leg arms on it")
+    assert cov.unprojected is None, "the pre-#14002 contradiction reading was lost"
+    assert "cannot hold a position" in (cov.unprojected_unknown_reason or "")
+
+    assert any(s.startswith("SAVEPOINT") for s in cursor.statements), (
+        f"the presence read was not bracketed in a savepoint: {cursor.statements}")
+    assert any(s.startswith("ROLLBACK TO SAVEPOINT") for s in cursor.statements), (
+        f"the failed read was swallowed WITHOUT rolling back to its savepoint, "
+        f"so the caller's transaction stays aborted: {cursor.statements}")
+
+    # ⛔ THE ASSERTION THE FIX SHIPS WITH: the caller's handle still works. On the
+    # pre-fix code this raises "current transaction is aborted … (25P02)".
+    cursor.execute("SELECT 1")
+
+
+def test_the_export_predicate_answers_False_on_every_unmeasured_arm():
+    """Every fail-closed answer, asserted where it is taken (#14002 cycle 3, P2).
+
+    The only leg that reached this body used to be a `@pytestmark_live` one, so on
+    the DB-free matrix the function returned before any branch ran and the
+    fail-closed mutants survived green: `except → True`, `not row → True` and
+    `mode → True` each bless a journal the record does NOT own. Constructed
+    `JournalCoverage` values cannot pin it — they never call the reader — so the
+    reader is driven directly, and the mode arms are read off the same
+    `SELECT seq, mode` row the enumerated-replay guard uses.
+    """
+    from tortoise import record_projection as rp
+
+    class _Cursor:
+        def __init__(self, row, *, raises: bool = False):
+            self._row = row
+            self._raises = raises
+
+        def execute(self, sql, params=None):
+            # ONLY the presence read fails: the savepoint bookkeeping around it
+            # succeeds, which is the shape a permission error on one table has.
+            if self._raises and "record_cursor" in sql:
+                raise RuntimeError("permission denied for table record_cursor")
+
+        def fetchone(self):
+            return self._row
+
+    assert rp._journal_is_export(_Cursor(None), "o", "g") is False, (
+        "a graph with NO counter row was classified as an export — every "
+        "pre-cutover tenant would then suppress the contradiction arm")
+    assert rp._journal_is_export(_Cursor((4, "seeded")), "o", "g") is False
+    assert rp._journal_is_export(_Cursor((4, "halted")), "o", "g") is False, (
+        "a seeded/halted cursor was classified as an export — the record is not "
+        "allocating this graph's ordinal")
+    assert rp._journal_is_export(_Cursor(None, raises=True), "o", "g") is False, (
+        "an unreadable record was classified as an export — the one direction "
+        "the docstring refuses, because a failed read must not bless a rotated "
+        "journal")
+    assert rp._journal_is_export(_Cursor((4, "active")), "o", "g") is True
+
+
 # ── 4. the rebuild door: the journal is no longer the rebuild source ─────
 
 

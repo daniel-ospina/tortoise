@@ -209,6 +209,19 @@ cutover by the same window. The measured cost above is the alternative.
    is refused by this", which was true before this change. `LiveWrite.unprojected`
    `0` on the skip arm is the same fact one layer down, and the loss case — if the
    record refuses a skip-arm write — is the pair `appended=False, applied=False`.
+   ⚠️ **The classification costs ONE statement plus its SAVEPOINT bookkeeping, and
+   `want_gap=False` does not switch it off** (review cycle 4, P3-3):
+   `JournalCoverage.unprojected` — the ONE thing the dense leg's readiness gate
+   reads — consults `journal_is_export`, so gating the classification on `want_gap`
+   would re-arm cycle 2's P1 (the dense leg disarmed for ever on every cut-over
+   graph). And the read runs UNDER a savepoint (review cycle 4, P2) because a
+   failed statement leaves the caller's transaction ABORTED (`25P02`) in
+   PostgreSQL: the answer is still the fail-closed `False`, but the handle the
+   caller keeps using stays usable and keeps its tenant scope — the same
+   mechanism, for the same measured reason, as `postgres_bytes.measure_written_rows`
+   (`#12781`). Both facts are asserted DB-free in
+   `tests/test_14002_record_only_journal.py::test_the_export_read_fails_CLOSED_and_REPAIRS_the_callers_transaction`
+   and `::test_the_export_predicate_answers_False_on_every_unmeasured_arm`.
 3. **A skip-arm record refusal is not replay-healable.** There is no line. The
    door counts it (`record_write_failures`) and WARNs that the write is in
    NEITHER store, naming the remedy (the allocator's own status/repair), not a

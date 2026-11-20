@@ -28,6 +28,7 @@ prove the record.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -1137,6 +1138,12 @@ def test_a_committed_batch_is_counted_from_the_replay_report_not_from_the_plan(
 
 # ── the low edge of the checkpoint (review P0) ──────────────────────────────
 
+#: The transaction plumbing `journal_coverage` brackets its presence read in
+#: (#14002 review cycle 4, P2) — never a row-returning read, so the doubles below
+#: answer it without consuming a scripted row.
+_SAVEPOINT_STATEMENT = re.compile(
+    r"^\s*(?:SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)\b")
+
 
 class _ScriptedCursor:
     """Answers `journal_coverage`'s reads from a script, in order.
@@ -1153,6 +1160,12 @@ class _ScriptedCursor:
         self.closed = False
 
     def execute(self, sql, params=None):
+        if _SAVEPOINT_STATEMENT.match(sql):
+            # ⛔ Savepoint bookkeeping is not a ROW-returning read (#14002
+            # review cycle 4, P2). `journal_coverage` now brackets its presence
+            # read in `SAVEPOINT`/`RELEASE`, and this double answers the reads it
+            # was scripted for — not the transaction plumbing around them.
+            return
         self._current = self._rows.pop(0)
 
     def fetchone(self):
@@ -1170,7 +1183,11 @@ def _read_checkpoint_with(monkeypatch, *, aggregate, gap_row, allocated=False):
     # Checkpoint does not carry it, so the aggregate's `present` is the honest
     # filler (it is the same count whenever the journal's enumeration is unknown).
     padded = (*tuple(aggregate), aggregate[1])
-    fake = _ScriptedCursor([padded, gap_row])
+    # The THIRD answer is the presence read's (#14002): `read_checkpoint` never
+    # consults `journal_is_export`, but `journal_coverage` issues the statement,
+    # so the double answers it with "no record_cursor row" rather than letting a
+    # scripted-exhaustion IndexError stand in for that fact.
+    fake = _ScriptedCursor([padded, gap_row, None])
     monkeypatch.setattr(record_projection, "scope_connection",
                         lambda conn, org_id: fake)
     return record_runner.read_checkpoint(None, "o", "g", allocated=allocated)

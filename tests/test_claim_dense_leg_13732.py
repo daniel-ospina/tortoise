@@ -1825,6 +1825,52 @@ class TestTheDeclinedWrite:
         assert seed.record_unprojected == 1, seed.as_dict()
         assert seed.record_declined == 0, seed.as_dict()
 
+    def test_a_CUT_OVER_write_is_NOT_a_position_unproven(self, tool_mod, monkeypatch, tmp_path):
+        """⛔ `seq is None` HAS TWO CAUSES AND ONLY ONE IS "unproven" (#14002).
+
+        On a cut-over graph the chokepoint does not append at all — the record owns
+        the ordinal — so the outcome has NO journal position BY DESIGN
+        (`LiveWrite(appended=False, seq=None)`), while an append that could not
+        prove its position is `appended=True, seq=None`. Counting both as unproven
+        made a HEALTHY record-only seed publish `positions_unproven`, which gates
+        this tool's own report: a clean seed read as a broken one and the reported
+        arm was refused on the strength of it.
+
+        ⛔ PRE-FIX THIS LEG DOES NOT EXIST: the whole suite stayed green when the
+        discriminator was reverted to `if outcome.seq is None:` — the report-object
+        tests construct `SeedReport` DIRECTLY, so they never reach this branch. The
+        write path here is the REAL chokepoint (`live_write.write`), not a stub:
+        only the record's two seam answers are doubled, so the outcome under test
+        is the one production produces.
+        """
+        from tortoise import record_writer
+
+        log = _journal_double(monkeypatch)
+        monkeypatch.setattr(record_writer, "record_owns_position",
+                            lambda **_kw: True, raising=True)
+        applied = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
+        monkeypatch.setattr(record_writer, "write_live_record",
+                            lambda record, **_kw: applied, raising=True)
+
+        seed = tool_mod._seed_population(
+            _FoldDouble(),
+            [{"id": "pt-12186000000", "content": "alpha"}],
+            journal_path=tmp_path / "j.jsonl",
+            encode_many=lambda texts: [[0.5] for _ in texts],
+        )
+
+        assert seed.positions_unproven == 0, (
+            "a cut-over write (the record owns the ordinal, so the append was "
+            "skipped) was counted as a position the append could not prove — a "
+            f"healthy seed now reports unproven positions: {seed.as_dict()}")
+        assert seed.record_applied == 1, seed.as_dict()
+        assert log.events == [], (
+            "the chokepoint appended to the journal on a graph the record owns — "
+            "this leg is only about the classification, so the skip is the premise")
+        assert (seed.first_seq, seed.last_seq) == (None, None), (
+            "a position appeared from nowhere: the record-only arm has no journal "
+            "ordinal to report")
+
     def test_the_seed_publishes_the_STORE_it_wrote_never_the_secret(
         self, tool_mod, monkeypatch, tmp_path
     ):
