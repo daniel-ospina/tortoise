@@ -224,13 +224,27 @@ here, and each has a DB-free pin.
 | **E3** a `record.read` failure (`VectorShortfall` / `RecordVectorError` / `RecordVectorDeclined`) escaped `main` as a traceback — exit **1**, with no diagnosis and indistinguishable from a crash in the harness | read the call | captured per query as `record_error`; `_verdict` fails it by name (`test_a_record_leg_failure_is_a_named_divergence_not_a_traceback`) |
 | **E4** the scan arm inverted `1/(1+d)` and was compared at the record arm's `1e-4` tolerance — a relative float32 error `eps` in the score is ~`(1+d)²·eps` in the distance, i.e. ~1e-3 at d≈100, so a CORRECT scan would have been a FALSE RED on any far-apart corpus | arithmetic, pinned | the scan arm compares at `1e-3` with the reason stated (`test_the_scan_arm_tolerates_the_inversion_it_performs`) |
 | **F1** driver/setup failures (`psycopg2` absent, Postgres unreachable, a refused role, a seeding/index error) escaped `main` as a traceback — exit **1**, the code reserved for "a comparison diverged", so the falsifier's own loop read a crash as "poison confirmed" | read `main`'s catch | ANY exception reaching `main` is now "cannot run" → exit **2** (a divergence never raises; it returns a report) |
-| **F2** an all-`None` distance list published `ok: True, max_delta: 0.0` — the same fail-open one branch from the one round 1 closed, and reachable because `(embedding_vec <=> %s)` is NULL for a NULL generated column and `ORDER BY … ASC` puts those last | reproduced | `distance.unmeasured` counted; any unmeasured row → `ok: False`; pinned |
+| **F2** an all-`None` distance list published `ok: True, max_delta: 0.0` — the same fail-open one branch from the one round 1 closed. The REACHABLE case is a **NaN** distance (pgvector answers NaN, not NULL, for a zero-norm vector); `None` is defensive, since `record_vector.vector_search` carries `WHERE t.embedding_vec IS NOT NULL` (`tortoise/record_vector.py:2671`). ⚠️ An earlier draft of this row (and of the code comment and the test docstring) claimed `None` was reachable through a NULL generated column sorted last — false, corrected in round 5 | reproduced, and the NULL claim read against `record_vector.py:2671` | `distance.unmeasured` counted; any non-finite or absent distance → `ok: False`; pinned by `test_a_none_distance_is_not_a_verified_one` and `test_a_nan_distance_is_not_a_verified_one` |
 | **F3** this PR's `ROWED_BY_THIS_FOLD` edit **replaced** `test_10084_graph_argument_omit_first.py` instead of appending — the tuple is append-only and the silent drop would later hide a deleted `durations:` row | read the diff | restored and APPENDED; the diff is now `+1` line |
 | **F4** the `durations:` insert landed INSIDE the `test_13629_entity_vector_retire.py` line, splitting off its ~2,900-char rationale, and my row then carried a false claim ("the four poisons" pinned when `vector` had none) | read the file | file restored from `origin/main` and the row inserted as a NEW line; `perturb_for_vector_poison()` extracted so the `vector` poison IS pinned, and the row's text now matches what the tests cover |
 | **F5** five numbers in this README were unsupported (test count, the 0.35–2.5 *scale factor* quoted as a norm, "up to 5 of 10", "55-row", "15–25 away") | recomputed from `build_corpus` and the artifacts | all five corrected above, and the store versions are now RECORDED in `parity-run.json` (`environment`) instead of quoted from memory |
 | **F6** the order poison's docstring promised a bucket check the code did not make — on a one-tie-group answer the swap was classified `tie` and the falsifier was masked by the comparator's own policy (`q_tie`, `q01` in the old artifact) | reproduced | the swap now requires a different distance bucket; all six queries report `diverged` |
 | **F7** `duplicates` was O(n²) over a list the comparator deliberately does not truncate — a leg ignoring `LIMIT` on the production corpus (~35,312 rows) would turn the loud red into a hang | arithmetic | `Counter`, linear |
 | **E2** `raise SystemExit("cannot run: …")` exits **1**, which this module's own table defines as "a comparison diverged" — so a poisoned repro loop that could not measure printed `exit=1`, i.e. "falsifier confirmed" | read the contract | a typed `CannotRun` → exit **2**, pinned by `test_the_cli_refuses_argument_shapes_that_cannot_measure` |
+
+### Round 5: the numbers the verdict RESTS ON were unpinned
+
+No fail-open defect was found in the comparison itself. What was found is that the
+instrument's own gates could be widened with every falsifier still green — the same
+"pinned by NOTHING" class, one abstraction down. Each row below was mutant-verified
+(apply the edit, watch exactly one pin red, restore).
+
+| finding | verified how | fix |
+|---|---|---|
+| **G1** `--n-random 4 --k 10` seeds **8** eligible rows; `truth()` returns 8, `compare()` reads `k` only to default it, so both legs report `ids_equal / order=exact / recall=1.0` and `_verdict` returns `ok: True` — the under-return shape (#13911) this harness exists to EXPOSE, printed as PARITY, with `graph_index_shortfall` computing the 2 and gating nothing | reproduced DB-free against the corpus | `_validate_args` counts the eligible population from `build_corpus` (no store opened) and refuses `k` above it; `_verdict` refuses an oracle shorter than `report["k"]` as well, so a `run()` caller that skips validation cannot inherit the green |
+| **G2** the `CORE_ALSO` entry's comment cited two comparator falsifiers as its coverage, and **neither calls `select()`** — deleting the entry left them green while a harness-only diff collapsed to `surfaces: []` (tier-1 smoke), the silent-drop class the entry exists to close | measured control | added `test_a_vector_parity_harness_only_diff_selects_its_pins` (THE ARM ITSELF: `surfaces == ["core"]` + the pin file in `test_files`, the `test_problem_map_2820.py` shape); the comment now cites it and records why the old citation was wrong |
+| **G3** the two tolerances the REQUIRED arms rest on were themselves ungated: `TIE_TOL` 1e-6 → 1e-3 excuses a genuine cross-distance re-rank as a `tie` (a PASS), and the scan arm's literal `distance_tol` 1e-3 → 10.0 makes its value check inert — both left 30/30 green | mutants, then the same wideners at the CALL SITE | `SCAN_DISTANCE_TOL` is a module constant read through a named `_scan_arm()` seam (`compare` reports the tolerance it was given, so it is assertable with no store); pins: distances 2e-6 apart must report `diverged`, a half-unit scan error must report `ok: False` while a delta inside the tolerance still passes, and `run()`'s body is AST-read so the tolerance cannot leave the constant |
+| **G4** two docstrings overclaimed: `_verdict` said the under-return "IS gateable, through `graph_index_shortfall`" (nothing in it reads that field — the index arm is informational, the count is REPORTED), and the `None`-distance justification claimed a reachable NULL `<=>` (see the corrected **F2** row) | read the source | both corrected in the code and in this artifact; the `None` branch stays as defence with its real justification stated |
 
 ### The two evidence errors this section exists to correct
 
@@ -278,7 +292,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **30 passed**.
+tests/test_vector_parity_13906.py -q` → **35 passed**.
 
 ## 7. What this artifact does NOT establish
 

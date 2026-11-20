@@ -19,6 +19,7 @@ lane's included — is unverified.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -168,9 +169,10 @@ def test_each_poison_makes_the_comparison_fail(harness, kind):
     poisoned = harness.poison(candidate, truth_rows, kind)
     cmp_ = harness.compare(truth_rows, [k for k, _d in poisoned],
                            candidate_distances=[d for _k, d in poisoned])
-    assert cmp_["order"] != "exact" or cmp_["ids_equal"] is False, (
+    # ONE assertion, not two spellings of the same disjunction: `ids_equal and
+    # order == "exact"` is exactly the PARITY the falsifier must never produce.
+    assert not (cmp_["ids_equal"] and cmp_["order"] == "exact"), (
         f"poison {kind!r} produced NO divergence — the harness is blind to it")
-    assert not (cmp_["ids_equal"] and cmp_["order"] == "exact")
 
 
 def test_the_poisoned_verdict_is_always_red(harness):
@@ -417,13 +419,137 @@ def test_the_scan_arm_tolerates_the_inversion_it_performs(harness):
     assert strict["distance"]["ok"] is False
 
 
+def test_the_cli_refuses_a_corpus_too_small_to_fill_k(harness):
+    """A run whose oracle cannot fill `k` measures a width it never asked for.
+
+    `--n-random 4 --k 10` seeds **8** eligible rows: `truth()` returns 8,
+    `compare()` reads `k` only to default it, and both legs then report
+    `ids_equal / order=exact / recall=1.0` while `_verdict` returns `ok: True` —
+    measured in review before this refusal existed. That is the under-return
+    shape (#13911) the harness exists to EXPOSE, printed as PARITY.
+    """
+    rows = harness.build_corpus(13906, 4)
+    eligible = [r.key for r in rows
+                if r.tenant == "ours" and r.eligible(harness.DIM)]
+    assert eligible == ["r000", "r001", "r002", "r003",
+                        "tie0", "tie1", "tie2", "anchor"], eligible
+
+    class A:
+        graph_port = 1
+        record_dsn = "postgresql://u:p@127.0.0.1/db"
+        k = 10
+        queries = 1
+        n_random = 4
+        seed = 13906
+    with pytest.raises(harness.CannotRun) as refused:
+        harness._validate_args(A())
+    assert "eligible" in str(refused.value), str(refused.value)
+
+    # The refusal is about the WIDTH, not the corpus size: the same 8 rows are
+    # enough for `--k 8`, and the shipped defaults are enough for `--k 10`.
+    A.k = 8
+    harness._validate_args(A())
+    A.k, A.n_random = 10, 48
+    harness._validate_args(A())
+
+
+def test_the_tie_tolerance_is_tight_enough_to_see_a_re_rank(harness):
+    """`TIE_TOL` decides whether a re-rank is a `tie` (a PASS) or a divergence.
+
+    Widening it 1e-6 → 1e-3 left every pin green (measured in review), so the
+    tie policy could be made wide enough to excuse a genuine cross-distance
+    re-rank with no falsifier asleep. Two distances 2e-6 apart are BELOW the
+    bucket width and must still report `diverged`.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.1 + 2e-6), ("c", 0.5)]
+    assert (0.1 + 2e-6) - 0.1 > harness.TIE_TOL
+    cmp_ = harness.compare(truth_rows, ["b", "a", "c"])
+    assert cmp_["order"] == "diverged", (
+        "a re-rank across two distances just outside TIE_TOL was excused as a "
+        f"tie (TIE_TOL={harness.TIE_TOL!r}) — the tie bucket is now wide enough "
+        "to hide a genuine ranking change")
+    # ...and the policy must NOT be tightened into reddening exact ties: this is
+    # the same assertion pair `test_a_within_tie_permutation_is_NOT_a_divergence`
+    # makes, restated here so the two bounds sit side by side.
+    same = harness.compare([("a", 0.1), ("b", 0.1), ("c", 0.5)],
+                           ["b", "a", "c"])
+    assert same["order"] == "tie"
+
+
+def test_the_scan_arm_reads_its_tolerance_from_the_one_constant(harness):
+    """The REQUIRED scan arm's tolerance is a GATE, pinned at its call site.
+
+    `test_the_scan_arm_tolerates_the_inversion_it_performs` pins `compare()` at
+    two tolerances but never reads the literal `run()` passes — so widening that
+    literal to 10.0 made the arm's value check inert with 30/30 green (measured
+    in review). `_scan_arm` is the seam `run()` calls; `compare` reports the
+    tolerance it was given, so this is assertable without a store.
+    """
+    truth_rows = [("a", 100.0), ("b", 101.0)]
+    got = harness._scan_arm(truth_rows, ["a", "b"],
+                            [100.0008, 101.0008], k=2)
+    assert got["distance"]["tolerance"] == harness.SCAN_DISTANCE_TOL
+    assert harness.SCAN_DISTANCE_TOL <= 1e-2, (
+        "the scan arm's tolerance left the `1/(1+d)` inversion's arithmetic "
+        f"({harness.SCAN_DISTANCE_TOL!r}) — past 1e-2 the value check stops "
+        "being a check")
+
+    # DISCRIMINATING, not decorative: a delta INSIDE the tolerance passes, a
+    # delta FAR inside what a widened tolerance would swallow must be red.
+    inside = harness._scan_arm(truth_rows, ["a", "b"],
+                              [100.0001, 101.0001], k=2)
+    assert inside["distance"]["ok"] is True, inside["distance"]
+    far = harness._scan_arm(truth_rows, ["a", "b"],
+                            [100.5, 101.5], k=2)
+    assert far["distance"]["ok"] is False, (
+        "a half-unit distance error passed the required scan arm — its "
+        f"tolerance ({far['distance']['tolerance']!r}) no longer discriminates")
+
+
+def test_run_routes_the_required_scan_arm_through_the_seam(harness):
+    """The CALL SITE, not only the seam — the pre-fix mutant, one function over.
+
+    Round 5 of #13914 reintroduced the widened tolerance at `run()`'s call site
+    instead of inside `_scan_arm` and measured **33/33 green**: the pin above
+    reaches the constant and the seam, so a `compare(..., distance_tol=10.0)`
+    spelled directly in `run()` is invisible to it. That is the same defect the
+    round filed against the `CORE_ALSO` entry — a claim of coverage the pin does
+    not have — so `run()`'s body is READ, the way this repo's other
+    production-consumer pins read production source rather than restating it.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    run = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name == "run")
+    seams, spelled = 0, []
+    for node in ast.walk(run):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                else getattr(node.func, "id", ""))
+        if name == "_scan_arm":
+            seams += 1
+        elif name == "compare":
+            spelled += [kw.arg for kw in node.keywords if kw.arg == "distance_tol"]
+    assert seams == 1, (
+        f"`run()` must route the REQUIRED graph-scan arm through `_scan_arm` "
+        f"exactly once, found {seams} call(s) — inlining `compare()` here is how "
+        f"the tolerance leaves the pinned constant")
+    assert spelled == [], (
+        f"`run()` passes `distance_tol` itself ({spelled}) — the number then has "
+        f"two spellings and only one is pinned; read it from SCAN_DISTANCE_TOL "
+        f"via `_scan_arm`")
+
+
 def test_a_none_distance_is_not_a_verified_one(harness):
     """The second branch of the same fail-open the short-list guard closes.
 
-    `(embedding_vec <=> %s)` is NULL for a row whose generated column is NULL, and
-    `ORDER BY … ASC` puts those last — so an all-None distance list is reachable
-    exactly when the answer is SHORT, and it used to publish `ok: True, max_delta:
-    0.0`.
+    ⛔ The `None` arm is DEFENSIVE, not reachable through the record leg:
+    `record_vector.vector_search` builds `WHERE t.embedding_vec IS NOT NULL`
+    (`tortoise/record_vector.py:2671`), so `(embedding_vec <=> %s)` cannot be NULL
+    for a served row. (An earlier draft of this docstring claimed it was
+    reachable, and an `ORDER BY … ASC` that supposedly sorted the NULLs last —
+    false, and it invited "fixing" a correct guard on a false premise.) The
+    REACHABLE unmeasurable input is NaN; see the test below.
     """
     truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
     cmp_ = harness.compare(truth_rows, ["a", "b", "c"],
@@ -509,7 +635,6 @@ def test_a_nan_distance_is_not_a_verified_one(harness):
                                     "recall": 1.0,
                                     "distance": {"ok": True,
                                                  "max_delta": 0.0}},
-        "graph_index_vs_cosine": {"recall": 1.0, "order": "exact"},
         "metric_divergence_ids": []}], "arms": {}}, poisoned=None)
     assert verdict["ok"] is False
 
@@ -520,3 +645,38 @@ def test_an_empty_report_is_not_parity(harness):
     verdict = harness._verdict({"queries": [], "arms": {}}, poisoned=None)
     assert verdict["ok"] is False
     assert any("no queries" in f for f in verdict["failures"])
+
+
+def test_a_verdict_over_an_oracle_shorter_than_k_is_not_parity(harness):
+    """`_validate_args` refuses it, and the VERDICT refuses it too (#13914 P2).
+
+    Measured before this guard: a `run()` reached with a short oracle reported
+    `ids_equal / order=exact / recall=1.0` → `ok: True`, the under-return shape
+    (#13911) printed as PARITY. Not reachable through `main()` today — which is
+    exactly why it belongs in the verdict, per the empty-report rule below: the
+    next caller of `run()` that skips validation must not inherit a green.
+    """
+    entry = {
+        "query": "q0",
+        "truth_cosine": ["a", "b", "c"],
+        "record": {"ids_equal": True, "order": "exact", "recall": 1.0,
+                   "distance": {"ok": True, "max_delta": 0.0}},
+        "graph_scan_vs_euclidean": {"ids_equal": True, "order": "exact",
+                                    "recall": 1.0,
+                                    "distance": {"ok": True,
+                                                 "max_delta": 0.0}},
+        "metric_divergence_ids": [],
+    }
+    short = harness._verdict({"k": 10, "queries": [entry]}, poisoned=None)
+    assert short["ok"] is False, (
+        "an oracle of 3 rows against `--k 10` reported parity — the answer was "
+        "compared over a width neither leg was asked for")
+    assert any("the oracle served 3 rows" in f for f in short["failures"])
+
+    # ...and it does not fire when the width is genuinely met, or when the report
+    # carries no width to check (a caller-built fixture), so it cannot mask a
+    # real verdict on the shipped shape.
+    ok = harness._verdict({"k": 3, "queries": [entry]}, poisoned=None)
+    assert ok["ok"] is True, ok["failures"]
+    no_width = harness._verdict({"queries": [entry]}, poisoned=None)
+    assert no_width["ok"] is True, no_width["failures"]

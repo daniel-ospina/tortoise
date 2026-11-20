@@ -113,7 +113,26 @@ LABEL_CYPHER = "Point"
 #: Default tie tolerance for a *reported distance*. Cosine on unit-basis
 #: synthetic rows is exact; real vectors carry float noise, so a tie test must
 #: be a tolerance, not equality.
+#: ⛔ THIS NUMBER IS A GATE, not a housekeeping detail: `compare`'s `order`
+#: verdict excuses a permutation inside one bucket of this width, so widening it
+#: turns a genuine cross-distance re-rank into a `tie` — i.e. into a PASS. It
+#: left 30/30 green when widened to 1e-3 (measured in review), because nothing
+#: read it. Pinned by
+#: `test_the_tie_tolerance_is_tight_enough_to_see_a_re_rank`.
 TIE_TOL = 1e-6
+
+#: The REQUIRED `graph_scan_vs_euclidean` arm's distance tolerance — looser than
+#: the other arms' 1e-4, and that is arithmetic rather than indulgence: the scan
+#: reports `1/(1+d)` and this harness inverts it, so a relative float32 error
+#: `eps` in the score becomes `(1+d)·eps/s ≈ (1+d)²·eps` in the distance. At
+#: d≈100 that is ~1e-3, i.e. the record arm's 1e-4 tolerance would report a FALSE
+#: RED on a corpus whose rows are far apart. The record and index arms carry a
+#: distance directly (`<=>`, `1-d`) and keep 1e-4.
+#: ⛔ ALSO A GATE: widening this literal makes the required arm's value check
+#: inert while every falsifier stays green (measured at 10.0 in review), so the
+#: call site reads this constant — never a literal — and
+#: `test_the_scan_arm_reads_its_tolerance_from_the_one_constant` pins both.
+SCAN_DISTANCE_TOL = 1e-3
 
 
 # ── corpus ──────────────────────────────────────────────────────────────────
@@ -344,16 +363,20 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         # `continue`s on both, so an all-None list left `ok: True, max_delta: 0.0`
         # — the SAME fail-open class the short-list branch one line up refuses.
         #
-        # `None` is reachable: the record's `(embedding_vec <=> %s)` is NULL for a
-        # row whose generated column is NULL, and `ORDER BY … ASC` puts those
-        # last, i.e. exactly when the answer is short.
-        #
-        # ⛔ AND NaN IS REACHABLE, which is why the test is `isfinite` and not
-        # `is None`: pgvector answers **NaN**, not NULL, for a zero-norm vector
+        # ⛔ AND THE REACHABLE ONE IS NaN, which is why the test is `isfinite` and
+        # not `is None`: pgvector answers **NaN**, not NULL, for a zero-norm vector
         # (measured on this box: `SELECT '[0,0,0]'::vector <=> '[1,0,0]'::vector`
         # → `NaN`). A NaN delta fails `delta > worst_delta` silently, so an
         # all-NaN arm published `ok: True, max_delta: 0.0` and `main()` printed
         # PARITY — a required arm turned green by the one input it cannot score.
+        #
+        # The `None` branch is DEFENSIVE, and an earlier draft of this comment
+        # said it was reachable through the record leg: it is not.
+        # `record_vector.vector_search` builds
+        # `WHERE t.embedding_vec IS NOT NULL` (`tortoise/record_vector.py:2671`),
+        # so `(embedding_vec <=> %s)` cannot be NULL for a served row. It is kept
+        # because "no distance" from ANY leg must never read as a verified one,
+        # and because a future `WHERE` is not this comparator's to assume.
         def _unmeasurable(d) -> bool:
             return d is None or not math.isfinite(float(d))
 
@@ -380,6 +403,22 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         "candidate_ids": cand,
         "truth_ids": truth_ids,
     }
+
+
+def _scan_arm(t_euc: list[tuple[str, float]], scan_ids: list[str],
+              scan_dists: list[float], *, k: int) -> dict:
+    """The REQUIRED `graph_scan_vs_euclidean` arm, at ITS tolerance.
+
+    ⛔ A NAMED SEAM, not a tidiness pass. The verdict for this arm rests on
+    ``SCAN_DISTANCE_TOL``, and while that number was a literal inside `run()` no
+    DB-free test could reach it: widening it 1e-3 → 10.0 left all 30 pins green
+    (measured in review), i.e. the required arm's value check could be made inert
+    with every falsifier asleep. ``compare`` already REPORTs the tolerance it
+    was called with, so this seam makes the number the arm actually used
+    assertable without a store.
+    """
+    return compare(t_euc, scan_ids, k=k, distance_tol=SCAN_DISTANCE_TOL,
+                   candidate_distances=scan_dists)
 
 
 def poison(pairs: list[tuple[str, float | None]],
@@ -945,16 +984,14 @@ def run(args) -> dict:
                 "graph_index": compare(
                     t_cos, idx_ids, k=k,
                     candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]),
-                # ⛔ A LOOSER TOLERANCE FOR THE SCAN, and it is arithmetic rather
-                # than indulgence: the scan reports `1/(1+d)` and this harness
-                # inverts it, so a relative float32 error `eps` in the score
-                # becomes `(1+d)·eps/s ≈ (1+d)²·eps` in the distance. At d≈100
-                # that is ~1e-3, i.e. the record arm's 1e-4 tolerance would report
-                # a FALSE RED on a corpus whose rows are far apart. The record and
-                # index arms carry a distance directly (`<=>`, `1-d`) and keep 1e-4.
-                "graph_scan_vs_euclidean": compare(
-                    t_euc, scan_ids, k=k, distance_tol=1e-3,
-                    candidate_distances=[d for _k2, d in scan_answers[qid]["rows"]]),
+                # ⛔ A LOOSER TOLERANCE FOR THE SCAN (`SCAN_DISTANCE_TOL`,
+                # read from the module constant and pinned at this call site):
+                # see the constant's comment for the arithmetic. The record and
+                # index arms carry a distance directly (`<=>`, `1-d`) and keep
+                # 1e-4.
+                "graph_scan_vs_euclidean": _scan_arm(
+                    t_euc, scan_ids,
+                    [d for _k2, d in scan_answers[qid]["rows"]], k=k),
                 "graph_scan_vs_cosine": compare(t_cos, scan_ids, k=k,
                                                 candidate_distances=None),
             }
@@ -1033,13 +1070,34 @@ def _verdict(report: dict, *, poisoned: str | None) -> dict:
       `efRuntime: 200`, i.e. the shortfall is a row COUNT, not an ef. An earlier
       draft of this docstring claimed the diagnostic "shows the shortfall is an
       ef setting"; its own artifact refutes that, and the real cause is the one
-      that IS gateable, through ``graph_index_shortfall``;
+      that is REPORTED per query as ``graph_index_shortfall`` — and NOT gated:
+      nothing in this verdict reads that field, because the index arm is
+      informational (the leg the record REPLACES);
     * ``graph_scan`` vs ``truth_cosine`` — the cosine/euclidean drift.
     """
     failures: list[str] = []
     divergences = 0
+    # ⛔ AN ORACLE SHORTER THAN `k` IS NOT A MEASUREMENT AT `k`, and `_validate_args`
+    # is not the only place that has to say so. Its refusal counts the corpus
+    # BEFORE either store is opened (correct: the run must not seed to discover
+    # it cannot measure), but the module's own rule — stated on the empty-report
+    # guard below — is that a guard which only lives at the argument layer is
+    # inherited as a green by the next caller of `run()` that skips validation.
+    # Two of the three earlier shape refusals ARE mirrored here (`recall is None`,
+    # the empty report); this is the third. Measured before it: a `run()` called
+    # with a short oracle reported `ids_equal / order=exact / recall=1.0` and
+    # `ok: True` — the under-return shape (#13911) this harness exists to expose.
+    # `report["k"]` is always set by `run()`; a caller-built report without it is
+    # not measured at a width, so this check abstains rather than inventing one.
+    width = report.get("k")
     for entry in report["queries"]:
         q = entry["query"]
+        truth_ids = entry.get("truth_cosine")
+        if width is not None and truth_ids is not None and len(truth_ids) < width:
+            failures.append(
+                f"{q}: the oracle served {len(truth_ids)} rows for --k {width} — "
+                f"the answer was compared over a SHORTER list than either leg "
+                f"was asked for, so a full-recall parity here measures no width")
         # REQUIRED: the arm the migration is moving TO, against the metric the
         # record's index is built with.
         cmp_ = entry["record"]
@@ -1124,6 +1182,11 @@ def _validate_args(args) -> None:
     `--n-random 0` raised `IndexError` at `build_corpus`'s `rows[0]`; `--queries 0`
     raised `IndexError` at `queries[0]` after BOTH stores had been seeded; `--k 0`
     asked each leg for `LIMIT 0` and reported PARITY over an empty comparison.
+
+    A fourth is a SHAPE rather than a scalar: a corpus too small to fill `k` (see
+    the eligibility count below) reported full-recall parity at an answer width
+    neither store was asked for — the under-return class this harness exists to
+    expose, silently green. Every refusal here runs BEFORE either store is opened.
     """
     if not args.graph_port:
         raise CannotRun(
@@ -1143,6 +1206,31 @@ def _validate_args(args) -> None:
         raise CannotRun(
             f"--n-random {args.n_random}: the tie group is derived from the "
             f"first random row, so fewer than 4 leaves nothing to compare")
+    # ⛔ A CORPUS TOO SMALL TO FILL `k` IS NOT A PARITY MEASUREMENT, and the
+    # `--n-random 4` floor above is NOT the check for it — it is a proxy that
+    # happened to be true for the shipped defaults. `--n-random 4 --k 10` seeds
+    # 8 eligible rows; `truth()` then returns 8, `compare()` reads `k` only to
+    # default it and never validates the width it was handed, so both legs report
+    # `ids_equal / order=exact / recall=1.0` over an answer the run never asked
+    # for and `_verdict` returns `ok: True` — the exact under-return shape
+    # (#13911) this harness exists to EXPOSE, printed as PARITY. Measured in
+    # review: `n_random=4` → 8 eligible rows → `_verdict(...)["ok"] is True`,
+    # with `graph_index_shortfall` computing the 2 and gating nothing.
+    #
+    # Counted from `build_corpus` (pure, no store) so the refusal lands BEFORE
+    # either store is opened — the same reason the other shapes are here. The
+    # tenant filter restates `truth()`'s own `tenant == "ours"` and `DIM` is every
+    # query vector's width (`_queries` builds each one at DIM), so this count is
+    # the population `truth()` will score.
+    eligible = sum(1 for row in build_corpus(args.seed, args.n_random)
+                   if row.tenant == "ours" and row.eligible(DIM))
+    if eligible < args.k:
+        raise CannotRun(
+            f"--k {args.k} over a corpus that serves only {eligible} eligible "
+            f"rows: the oracle returns {eligible}, so recall/order would be "
+            f"measured over a SHORTER answer than either store was asked for "
+            f"and a full-recall parity would be reported at a width the run "
+            f"never checks. Raise --n-random or lower --k")
 
 
 def main(argv: list[str] | None = None) -> int:
