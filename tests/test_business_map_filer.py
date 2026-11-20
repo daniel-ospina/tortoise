@@ -566,6 +566,67 @@ def test_a_mechanism_mismatch_warning_is_a_FAILURE(tmp_path, monkeypatch, map_do
     capsys.readouterr()
 
 
+def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """`carried` reads the ledger AS LOADED, not the mid-run-mutated one.
+
+    The `mechanism_mismatch` arm saves `st["failed"] = old ∪ failures` while it
+    runs — it must, or a run killed before the final save loses the only record
+    of an inverted operator. `carried` was then computed from that SAME list, so
+    this run's own declined lines (whose markers never enter `done`) were
+    re-labelled as an earlier run's failures. Measured at #13950 review round 3:
+    an 11-mismatched + 9-declined run over `failed: []` printed `9 marker(s) from
+    an earlier run are STILL unresolved`, sending the operator to hunt for
+    prior-run state that does not exist.
+
+    `map_doc`'s first six edges are structural and the first operator is index 6,
+    so the declines are appended BEFORE the first mismatch save — which is what
+    makes this deterministic rather than order-dependent.
+
+    Mutant: compute `carried` from `(st.get("failed") or [])` again — this reds
+    on the header.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _DeclinesAndWarns(_RealMcp):
+        def __init__(self, *_a, **_k) -> None:
+            super().__init__("not-a-real-key")
+            self._n = 0
+            inner = self
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                inner._n += 1
+                if tool == "tortoise_create_edge":
+                    payload = {"edge": {}, "created": False, "nudges": []}
+                elif tool == "tortoise_create_operator":
+                    payload = {"id": f"{tool}:{inner._n}",
+                               "warnings": [{"code": "mechanism_mismatch",
+                                             "message": "IMPL carrying refutes"}]}
+                else:
+                    payload = {"id": f"{tool}:{inner._n}"}
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"),
+                              "result": {"structuredContent": payload}}, {})
+
+            self._post = _post
+
+    state_path.write_text(json.dumps(
+        {"ids": {}, "written": [], "failed": [], "unconfirmed": []}))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _DeclinesAndWarns)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    # Sanity: both classes really are present, so the assertion below is about
+    # the label and not about a run that produced nothing.
+    assert "DECLINED by the door" in err, err
+    assert "mechanism_mismatch" in err, err
+    assert "from an earlier run" not in err, (
+        "this run's own failures were labelled an EARLIER run's — `carried` read "
+        "the ledger AFTER the mismatch arm had merged this run into it: " + err)
+
+
 def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
     """The resume record is replaced in one step.
 
@@ -1288,6 +1349,15 @@ def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
     assert err.count(marker) == 1, (
         f"{marker!r} is reported {err.count(marker)}x — once in-loop and again "
         "as an earlier run's line reads as two failures")
+    # ⛔ AND THE SUMMARY MUST NOT SAY "NOT WRITTEN" ABOUT A MAY-HAVE-LANDED
+    # WRITE. `unwritten_n` was `len(failures) - mismatched_n`, i.e. an arithmetic
+    # bucket for everything that was not a mismatch — so an UNCONFIRMED operator
+    # was reported `NOT written` directly beneath a `!!` line saying it may have
+    # landed, inviting a re-issue of a non-idempotent write over endpoints that
+    # may already be joined (#10849) (#13950 review round 3).
+    assert "MAY HAVE LANDED" in err, err
+    assert "edge(s) NOT written" not in err, (
+        "an UNCONFIRMED write was reported as NOT written: " + err)
 
 
 def test_the_carried_header_COUNTS_MARKERS_not_lines(
@@ -1613,7 +1683,7 @@ def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
 
-    for junk in ("10s", [30], {"s": 30}, "nan", "inf", True, b"30"):
+    for junk in ("10s", [30], {"s": 30}, "nan", "inf", True, b"30", 10**400):
         posts: list[int] = []
 
         def _post(_body, _junk=junk, _posts=posts):
@@ -1641,6 +1711,66 @@ def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):
     assert filer._seconds_or_none(float("inf")) is None
     assert filer._seconds_or_none(b"7") is None
     assert filer._seconds_or_none(None) is None
+    # ⛔ AN INT TOO LARGE FOR A FLOAT RAISES `OverflowError`, NOT `ValueError` —
+    # the same defect in another dress, and it escaped `call()` unclassified
+    # until #13950 review round 3. A STRING cannot reach it (`float("1e400")` is
+    # `inf`, refused by the finiteness guard above), so the int path is the hole
+    # this pins.
+    assert filer._seconds_or_none(10**400) is None
+
+
+def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
+    """A non-positive `Retry-After` must not turn the retry loop into a hammer.
+
+    `Retry-After: 0` legally means "retry now", and honouring it literally makes
+    this six-attempt loop fire six back-to-back POSTs at a door that has just
+    answered 429/503 — a server-controlled value deciding that the client hammers.
+    Treating a non-positive value as no usable advice is a DELIBERATE departure
+    from the RFC's literal reading: the ramp waits LONGER than advised, never
+    shorter, and no server-supplied value can induce a tight loop. The bounded
+    over-wait is the accepted trade (#13950 review round 3 measured the `0` case).
+
+    ⛔ TWO CHANNELS, TWO DIFFERENT GUARDS, so both are driven here. A `0` in the
+    BODY reaches `wait` as `0.0` and is turned into the ramp by the sleep
+    expression's truthiness test; a `0` in the HEADER is dropped to the next
+    channel by the `or` in the assignment, and with no body value there is none.
+    An earlier cut of this row drove only the header, so the mutant below — which
+    is the guard the body case depends on — stayed GREEN.
+
+    Mutant: `time.sleep(min(120, wait) if wait else …)` → `… if wait is not None …`
+    — this reds on the body case with `0.0` sleeps.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(headers, body):
+        sleeps.clear()
+
+        def _post(_b, _h=headers, _body=body):
+            raise urllib_error.HTTPError("http://x", 429, "x", _h,
+                                         io.BytesIO(json.dumps(_body).encode()))
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome, match="after 6 attempts"):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps)
+
+    # (a) the BODY channel — this is the one the named mutant reds.
+    assert drive(email.message.Message(),
+                 {"jsonrpc": "2.0", "id": 1,
+                  "error": {"code": -32000, "data": {"retry_after": 0}}}) \
+        == [5, 10, 15, 20, 25]
+    # (b) the HEADER channel.
+    hdrs = email.message.Message()
+    hdrs["Retry-After"] = "0"
+    assert drive(hdrs, {"jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000}}) == [5, 10, 15, 20, 25]
+    # (c) a negative value is likewise not a wait at all.
+    neg = email.message.Message()
+    neg["Retry-After"] = "-5"
+    assert drive(neg, {"jsonrpc": "2.0", "id": 1,
+                       "error": {"code": -32000}}) == [5, 10, 15, 20, 25]
 
 
 def test_the_event_identity_is_the_name_its_door_writes(map_doc):

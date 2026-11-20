@@ -546,6 +546,21 @@ class Mcp:
                     # no longer speak for a non-2xx at all.
                     wait = (_retry_after_seconds(headers)
                             or _body_retry_after(payload))
+                    # ⛔ A NON-POSITIVE VALUE IS TREATED AS NO USABLE ADVICE,
+                    # DELIBERATELY — not as an accident of truthiness. The guard
+                    # is the `if wait else` below (there is no separate clamping
+                    # line: an earlier cut had one and a mutant showed it was
+                    # DEAD, so it is gone). `Retry-After: 0` legally means "retry
+                    # now", and honouring it literally turns this six-attempt loop
+                    # into six back-to-back POSTs at a door that has just answered
+                    # 429/503: a server-controlled value must not be able to make
+                    # the client hammer. So a `0` from the higher-precedence
+                    # channel is dropped to the next channel (the body) and the
+                    # ramp is the fallback — the conservative reading, which waits
+                    # LONGER than advised and never shorter, and never busy-loops
+                    # (#13950 review round 3 measured the `0` case; the bounded
+                    # over-wait is the accepted trade, stated here so the next
+                    # reader does not "fix" the truthiness into a hammer).
                     time.sleep(min(120, wait) if wait else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
@@ -669,6 +684,22 @@ class Refusal(RuntimeError):
     """
 
 
+# ⛔ THE SPELLINGS THIS MODULE'S OWN UNKNOWN/UNCONFIRMED RAISES PRODUCE — ONE
+# definition, read by the exit summary. `Refusal` vs `UnknownOutcome` is this
+# module's central distinction, and the summary must not bucket a
+# MAY-HAVE-LANDED write as "not written": that invites a re-issue of a
+# non-idempotent `create_operator` over endpoints that may already be joined,
+# which is #10849's EP double-count. Three raise sites spell it three ways, so
+# the list is named rather than inlined — a NEW raise site must add its spelling
+# here instead of silently falling into the not-written bucket (#13950 review
+# round 3, which caught the first cut matching only two of the three).
+_UNKNOWN_OUTCOME_MARKERS = (
+    "outcome UNKNOWN",       # `_unknown(...)`
+    "outcome UNCONFIRMED",   # the `already(...) and marker in pending` arm
+    "write is UNCONFIRMED",  # `UnknownOutcome` raised by `Mcp.call`
+)
+
+
 def _unknown(tool: str, reason: object) -> str:
     return (f"{tool}: outcome UNKNOWN ({reason}) — this write is NOT idempotent, so "
             "it is not retried; re-run and let --verify decide what landed")
@@ -692,7 +723,14 @@ def _seconds_or_none(value: object) -> float | None:
         return None
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # ⛔ `OverflowError` IS THE SAME DEFECT IN ANOTHER DRESS: a JSON integer
+        # too large for a float (`10**400`) raises it from `float()`, and an
+        # uncaught one escapes `call()` unclassified — aborting a `--write` run
+        # on its first write with no summary, which is exactly what the
+        # `ValueError` arm above closes. A STRING cannot reach it
+        # (`float("1e400")` is `inf`, refused below); the integer path can
+        # (#13950 review round 3).
         return None
     # ⛔ `nan`/`inf` ARE NOT A WAIT. `min(120, nan)` is NOT 120 — every
     # comparison against `nan` is False, so `min` returns its FIRST argument and
@@ -851,6 +889,18 @@ def write_map(doc: dict) -> int:
     ids: dict[str, str] = st["ids"]
     failures: list[str] = []
     ambiguous: list[str] = []
+    # ⛔ SNAPSHOT THE LEDGER AS LOADED, because a mid-run arm MUTATES `st`.
+    # The `mechanism_mismatch` arm saves `st["failed"] = old ∪ failures` while it
+    # runs (it must — a run killed before the final save would lose the only
+    # record of an inverted operator), so by the time the remedy block computes
+    # `carried` from `st["failed"]`, that list already holds THIS RUN's own
+    # declined/unbound lines. Their markers never enter `done`, so they were then
+    # re-labelled as "marker(s) from an earlier run" — a directive to go looking
+    # for prior-run state that does not exist (#13950 review round 3, measured on
+    # an 11-mismatched + 9-declined run with `failed: []` on disk: it printed
+    # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
+    # statement about what was on disk BEFORE this run, so it reads that.
+    failed_before: list[str] = list(st.get("failed") or [])
 
     # ⛔ A NAME IS NOT AN ID, and `state.json` is the one place that claim is
     # taken on trust. The pre-fix run recorded every item's own name/url/content
@@ -1190,7 +1240,7 @@ def write_map(doc: dict) -> int:
     # nodes and edges written` and erased the only record that the graph stores an
     # operator meaning the opposite of the judgement (#13913 review round 10).
     # A failure is cleared only when THIS run re-wrote its marker successfully.
-    carried = [f for f in (st.get("failed") or [])
+    carried = [f for f in failed_before
                if not any(f.startswith(marker) for marker in done)]
     st["failed"] = sorted({*carried, *failures})
     st["unconfirmed"] = sorted(pending)
@@ -1329,14 +1379,27 @@ def write_map(doc: dict) -> int:
         # review round 2, measured: a run that wrote all 51 operators printed
         # `51 edge(s) not written`). The sentence names each class that is
         # present, because no single verb is true of both.
+        # ⛔ AND "not written" IS A THIRD LIE FOR THE UNKNOWN CLASS. `Refusal` vs
+        # `UnknownOutcome` is this module's central distinction: an UNKNOWN write
+        # MAY HAVE LANDED, and `--verify` is the only authority on whether it did.
+        # An arithmetic bucket of "everything that is not a mismatch" told the
+        # operator it did NOT land while the `!!` line directly above said it may
+        # have — inviting a re-issue of a non-idempotent `create_operator` over
+        # endpoints that may already be joined (#10849's EP double-count, the very
+        # thing `retry_safe=False` exists to prevent) (#13950 review round 3).
         mismatched_n = sum(1 for f in failures if "mechanism_mismatch" in f)
-        unwritten_n = len(failures) - mismatched_n
+        unknown_n = sum(1 for f in failures
+                        if any(m in f for m in _UNKNOWN_OUTCOME_MARKERS))
+        unwritten_n = len(failures) - mismatched_n - unknown_n
         parts = []
         if unwritten_n:
             parts.append(f"{unwritten_n} edge(s) NOT written")
         if mismatched_n:
             parts.append(f"{mismatched_n} operator(s) WRITTEN with a mechanism "
                          "the judgement does not declare (filed INVERTED)")
+        if unknown_n:
+            parts.append(f"{unknown_n} edge(s) MAY HAVE LANDED (outcome UNKNOWN — "
+                         "`--verify` decides; do NOT re-file)")
         print(f"\n{len(failures)} edge(s) failed — {'; '.join(parts)} — "
               "recorded in state.json", file=sys.stderr)
         return 1
