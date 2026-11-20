@@ -671,6 +671,42 @@ def app_role_dsn(dsn: str) -> str:
         query=urlencode(query, doseq=True, quote_via=quote)))
 
 
+def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
+                           column: str = "embedding_vec") -> str:
+    """Return the HNSW indexdef that makes the record arm the leg it CLAIMS.
+
+    ⛔ THE COLUMN IS NOT THE INDEX, AND pgvector DOES NOT ERROR WITHOUT ONE.
+    `ORDER BY embedding_vec <=> q LIMIT k` without an index is a perfectly valid
+    EXACT SEQUENTIAL SCAN — it returns no error, and because the oracle in this
+    harness is itself an exact scan, an index-less record answers the oracle
+    VERBATIM. So `arms.record.driver = "pgvector HNSW, cosine"` was a literal
+    string nothing verified: on a database where the column exists and the index
+    does not (creation failed after the column, the index was dropped, or the
+    schema was hand-built) the record arm would report `recall 1.000, order
+    exact` — measured by a SEQ SCAN and published under the index's name.
+
+    That is the same failure class the GRAPH side already refuses: `_require_index_arm`
+    raises when an "indexed" arm's reported mechanism is not `["index"]`, and
+    `wait_index_ready` exists because "a harness that measures the fallback while
+    claiming to measure the index is the failure class this whole file is about".
+    The `record_error` machinery cannot catch this one — an exact scan has no
+    shortfall and no error.
+
+    The decision lives HERE, on data (`pg_indexes.indexdef` strings), so it is
+    pinnable without a database; `RecordStore.require_schema` only supplies the
+    rows. Quoting is normalised because `indexdef` may carry either form.
+    """
+    for indexdef in indexdefs:
+        normalised = (indexdef or "").replace('"', "").lower()
+        if "using hnsw" in normalised and f"({column}" in normalised:
+            return indexdef
+    raise CannotRun(
+        f"cannot run: no HNSW index on public.{label}({column}) — the record leg "
+        f"would answer by an EXACT SEQUENTIAL SCAN, which returns this harness's "
+        f"own oracle and would publish a perfect match under the index's name. "
+        f"Indexes seen: {sorted(indexdefs) or 'none'}")
+
+
 class RecordStore:
     def __init__(self, dsn: str, org: str, graph: str):
         import psycopg2
@@ -679,6 +715,7 @@ class RecordStore:
         self.conn = psycopg2.connect(dsn)
         self.conn.autocommit = True
         self.app_dsn = app_role_dsn(dsn)
+        self.record_hnsw_index: str | None = None
 
     def require_schema(self) -> None:
         with self.conn.cursor() as cur:
@@ -692,6 +729,12 @@ class RecordStore:
                     "pgvector migration has not been applied to this database, "
                     "so every comparison would report the graph fallback as a "
                     "clean answer")
+            # ⛔ …AND THE INDEX, not just the column: see `_require_hnsw_indexdef`.
+            cur.execute(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname='public' AND tablename='point'")
+            self.record_hnsw_index = _require_hnsw_indexdef(
+                [row[0] for row in cur.fetchall()])
 
     def environment(self) -> dict:
         """The versions the run actually measured on — recorded, not remembered.
@@ -1088,7 +1131,13 @@ def run(args) -> dict:
             except Exception as e:  # noqa: BLE001, RUF100 — record_vector's four, by name
                 rec_answers[qid] = []
                 rec_errors[qid] = f"{type(e).__name__}: {e}"
-        report["arms"]["record"] = {"driver": "pgvector HNSW, cosine"}
+        report["arms"]["record"] = {
+            "driver": "pgvector HNSW, cosine",
+            # ⛔ THE INDEX ITSELF, recorded from `pg_indexes` by `require_schema`
+            # (which now REFUSES without one) — a driver name is a claim, and this
+            # artifact is the evidence.
+            "index": getattr(record, "record_hnsw_index", None),
+        }
 
         # ── graph arms: scan first (production today), then indexed ──────
         scan_answers = {qid: store.read(qvec, k) for qid, qvec in queries}

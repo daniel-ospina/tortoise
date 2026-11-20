@@ -1076,9 +1076,9 @@ def test_the_float64_oracle_agrees_with_a_float32_store(harness):
     recorded the comparison: a measurement named in prose and performed nowhere.
     The claim is not cosmetic either: the stores do NOT share the oracle's
     precision (the graph writes `vecf32(...)`, the record column is
-    `vector(1024)`), so a near tie that float32 rounds the other way would
-    reorder the top-k and the record arm would then red for a PRECISION reason
-    while the harness reported it as a store defect.
+    `public.point.embedding_vec vector(384)`), so a near tie that float32 rounds
+    the other way would reorder the top-k and the record arm would then red for
+    a PRECISION reason while the harness reported it as a store defect.
 
     So the round trip is performed here, on the corpus this harness actually
     seeds and every query it actually asks, in the one posture CI can run it —
@@ -1248,3 +1248,72 @@ def test_a_graph_that_survives_teardown_is_loud_not_silent(harness):
                else getattr(c.func, "id", ""))
               for c in ast.walk(run_node) if isinstance(c, ast.Call)}
     assert "reset" in called, sorted(called)
+
+
+def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
+    """⛔ THE COLUMN IS NOT THE INDEX, AND pgvector DOES NOT ERROR WITHOUT ONE.
+
+    `require_schema()` checked only that `public.point.embedding_vec` exists, and
+    `arms.record.driver` was the literal string "pgvector HNSW, cosine". pgvector
+    answers `ORDER BY embedding_vec <=> q LIMIT k` over an index-less column with
+    an EXACT SEQUENTIAL SCAN — no error — and this harness's oracle is itself an
+    exact scan, so an index-less record returns the oracle VERBATIM: `recall
+    1.000, order exact`, exit 0, published under the index's name. On a database
+    where the column exists and the index does not (creation failed after the
+    column, the index was dropped, a hand-built schema) the harness would certify
+    "pgvector HNSW parity" from a scan. `record_error` cannot catch it — an exact
+    scan raises no `VectorShortfall`.
+
+    The GRAPH side already refuses exactly this (`_require_index_arm`), which is
+    why the record side refusing it is consistency, not extra ceremony.
+    """
+    hnsw = ("CREATE INDEX idx_point_embedding_vec_hnsw ON public.point "
+            "USING hnsw (embedding_vec public.vector_cosine_ops)")
+    # 1. the real index shape the migration creates ⇒ accepted, and returned so
+    #    the artifact can record WHICH index the numbers came from
+    assert harness._require_hnsw_indexdef([hnsw]) == hnsw
+    # quotation form too: `indexdef` is normalized before matching
+    quoted = ('CREATE INDEX "idx" ON public."point" USING hnsw ("embedding_vec" '
+              '"public"."vector_cosine_ops")')
+    assert harness._require_hnsw_indexdef([quoted]) == quoted
+
+    # 2. NO index at all ⇒ refuse (this is the fail-open being closed)
+    with pytest.raises(harness.CannotRun) as refused:
+        harness._require_hnsw_indexdef([])
+    assert "EXACT SEQUENTIAL SCAN" in str(refused.value), str(refused.value)
+
+    # 3. ⛔ AN INDEX IS NOT ENOUGH — it must be the HNSW index on the ANN COLUMN.
+    #    A btree on the same column, an HNSW on a DIFFERENT column, and a plain
+    #    pgvector-compatible index all leave the read as a scan.
+    for decoys in (
+        ["CREATE INDEX p_key ON public.point USING btree (embedding_vec)"],
+        ["CREATE INDEX x ON public.point USING hnsw (other_vec vector_cosine_ops)"],
+        ["CREATE INDEX p_id ON public.point USING btree (id)"],
+    ):
+        with pytest.raises(harness.CannotRun):
+            harness._require_hnsw_indexdef(decoys)
+    # …and a genuine one alongside decoys still wins (no false block)
+    assert harness._require_hnsw_indexdef(
+        [decoys[0], "CREATE INDEX p_id ON public.point USING btree (id)", hnsw]) == hnsw
+
+    # 4. The CALL SITE and the RECORD: `require_schema` must route through the
+    #    decision (not re-inline an existence check), and the run must publish the
+    #    index it verified — a driver name is a claim, the indexdef is evidence.
+    tree = ast.parse(MODULE_PATH.read_text())
+    schema = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "require_schema")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(schema) if isinstance(c, ast.Call)}
+    assert "_require_hnsw_indexdef" in called, sorted(called)
+    run_node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                    and n.name == "run")
+    record_arm = [n for n in ast.walk(run_node)
+                  if isinstance(n, ast.Dict)
+                  and any(isinstance(k, ast.Constant) and k.value == "driver"
+                          for k in n.keys)]
+    assert record_arm, "run() no longer publishes an arms.record dict"
+    assert any(isinstance(k, ast.Constant) and k.value == "index"
+               for d in record_arm for k in d.keys), (
+        "arms.record does not record the index it measured — the driver name is "
+        "an unverified claim without it")
