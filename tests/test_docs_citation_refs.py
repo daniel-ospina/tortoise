@@ -2960,7 +2960,13 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… whose first non-blank character is # …",
              "character is #"),
             ("… whose first character after its leading spaces is `#` …",
-             "character after its leading spaces is `#`")):
+             "character after its leading spaces is `#`"),
+            # ⛔ THE CASE AXIS NEEDS ITS OWN CONTROL (#13948 review round 25, P2 — MEASURED).
+            # Every probe above is lowercase, so recompiling the identical pattern with `re.S`
+            # alone — i.e. REVERTING the round-24 `re.I` fix — left this whole cell GREEN, while
+            # the comment above claimed the probes stop exactly that. This probe reds without it.
+            ("… whose first non-space Character is `#` — a comment …",
+             "Character is `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
@@ -2971,7 +2977,12 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     # naming them is the honest half, and the ledger + review are what cover them.
     for escape in (
             "… whose leading printable glyph amounts to `#` …",
-            "… whose first non-space character (the marker word appears as a decoy) is `#` …"):
+            "… whose first non-space character (the marker word appears as a decoy) is `#` …",
+            # ⛔ THE OTHER HALF OF THE ROUND-24 PIN (#13948 review round 25, P2 — MEASURED).
+            # Without these two, reverting `markers?` to `marker` OR dropping `re.I` from the
+            # MARKER side also left the cell green, so the flag was pinned on one axis only.
+            "… whose first non-space character after the diff Marker is `#` …",
+            "… whose first non-space character after the markers is `#` …"):
         assert _false_filter_property_restatements(escape) == [], (
             f"the arm now catches {escape!r} — good, but then the DECLARED-ESCAPE list above "
             "is stale and must say so (#13853 review round 19)")
