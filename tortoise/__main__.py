@@ -79,9 +79,11 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
     relies on verbatim: *"`derived = replay(journal)` holds only if every write is
     carried by the journal … Journal completeness is a PRECONDITION of this
     design, not an observation about it"* (the gap is tracked as `#5089`). On a
-    CUT-OVER graph the journal stops being written — the record owns the ordinal
-    and the file is an export — so a rebuild from it would produce a graph as of
-    the arming point and **silently drop every later record**, which is the
+    CUT-OVER graph the journal stops being written — the record owns the ordinal,
+    so the file STOPS at the cutover instant (no exporter writes it yet: §A7.8
+    item 6 and §A7.5.6's drainer are unbuilt) — so a rebuild from it would
+    produce a graph as of the arming point and **silently drop every later
+    record**, which is the
     direction nothing can see: `rebuild_all` prints `Done:` and the counts it
     prints are the journal's, not the record's.
 
@@ -130,9 +132,10 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
         return None
     return (
         "this deployment has a RECORD configured, and on any graph that has been "
-        "cut over the record owns the journal's ordinal — the JSONL is an EXPORT "
-        "there, it stops being appended to, and `derived = replay(journal)` no "
-        "longer holds for it (STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
+        "cut over the record owns the journal's ordinal — the JSONL stops being "
+        "appended to there (it is NOT an export yet: nothing writes it, §A7.8 "
+        "item 6), so `derived = replay(journal)` no longer holds for it "
+        "(STORAGE-ARCHITECTURE.md §3; #14002, #5089). A "
         "rebuild from it would produce a graph as of the arming point and "
         "silently drop every later record. Nothing was wiped. If NO graph on this "
         "record is cut over — so the journal really is the full log — re-run with "

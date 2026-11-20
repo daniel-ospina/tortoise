@@ -8056,7 +8056,13 @@ def _export_statement(cursor: Any, statement: str, *, why: str) -> None:
 
 def _journal_is_export(cursor: Any, org_id: str, graph_id: str, *,
                        conn: Any | None = None) -> bool:
-    """Does the RECORD own this graph's ordinal — so the file is an EXPORT (#14002)?
+    """Does the RECORD own this graph's ordinal — so the file is NOT an input (#14002)?
+
+    ⚠️ NOT "an export" — nothing writes the file on a cut-over graph (no drainer
+    ships), so it is a FROZEN PREFIX of the journal, not a rendered one. The
+    question this answers is the READING's: may `present > enumerated` be treated
+    as the healthy shape rather than as an impossible journal?
+
 
     ⛔ ASKED OF THE RECORD, NEVER OF THE CALLER'S ENVIRONMENT (#14002 review
     cycle 3, P2). The first cut of this function also required

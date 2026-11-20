@@ -259,13 +259,21 @@ cutover by the same window. The measured cost above is the alternative.
    pre-change, the same failure left a line a replay could heal. The door counts
    it (`record_write_failures`) and WARNs that it is in neither store — a
    notification, not a recovery.
-4. **The JSONL is now an EXPORT artifact** and no export job writes it yet. The
+4. **The JSONL is off the write path, and NOT yet an export** — it is a FROZEN
+   PREFIX on a cut-over graph, and no export job writes it (and no drainer ships). The
    file's content is not reproducible from the record alone (`event_id`,
    `initiated_by`, `projection_version` are stored by neither column nor
    payload — measured in `docs/evidence/12894-live-wiring/README.md` §3.1), so an
    export that must be replayable needs those keys first (§A7.8 item 6). This
    change does not claim the export exists; it claims the write path no longer
    depends on the file.
+   ⚠️ "NOTHING WRITES IT" IS A CLAIM ABOUT THE WRITE PATH, NOT ABOUT THE PATH:
+   `tortoise restore` REPLACES the destination journal wholesale
+   (`backup.py:638`, "the journal always"), and `journal_segments.seal_active`
+   moves the active file aside and creates a fresh empty one. Both are operator
+   verbs (seal has no production caller), so the frozen prefix holds absent
+   operator action — and after a restore that put a journal BEHIND the counter,
+   the divergence state `record_writer` names is the one you are in.
 5. **A sealed layout (#13050) is still a procedural gate**: `read_cursor` answers
    the file-local/segment-spanning question the same way it did, so *do not arm
    across a seal* continues to hold. Segment-aware numbering is #13050's.

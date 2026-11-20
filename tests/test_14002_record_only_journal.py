@@ -18,7 +18,9 @@ kept the record honest while both allocators existed; it stays, unchanged, for
 every ordinal a caller hands the door. What this change removes is the SECOND
 ALLOCATOR: while the record owns the position, the write path must not append to
 the JSONL at all. One number space, so a disagreement is not expressible; the
-file becomes an export; concurrent writers serialise on a real transaction
+file becomes OPTIONAL (a FROZEN PREFIX on a cut-over graph — not an export:
+nothing writes it, `event_id`/`initiated_by`/`projection_version` have no
+column); concurrent writers serialise on a real transaction
 instead of a file append; and the truncation class of failure disappears because
 nothing numbers off the file.
 
@@ -1066,10 +1068,13 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     # for exactly the people who run it.
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
     refusal = _journal_rebuild_refusal()
-    assert refusal is not None and "EXPORT" in refusal, (
+    assert refusal is not None and "stops being appended to" in refusal, (
         "a deployment with a RECORD configured allowed a journal rebuild while "
         "the flag was absent — the arm an operator shell takes, where the "
         "rebuild silently drops every record after the cutover point")
+    assert "NOT an export yet" in refusal, (
+        "the refusal claims the file is an export — nothing writes it on a "
+        "cut-over graph, so an operator sent looking for one finds nothing")
     assert "Nothing was wiped" in refusal
     assert "--journal-is-complete" in refusal, (
         "the refusal does not name its own escape — an operator has no way to "
