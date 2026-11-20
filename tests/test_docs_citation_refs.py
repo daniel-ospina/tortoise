@@ -3180,8 +3180,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # whose correction then re-typed that `192` as the PARENT head's tuple length — HISTORY,
     # and false at that head too — and whose own correction of THAT typed a further reading,
     # refuted by the round-29 re-review. ⛔ NO numeral in this note is a count of either
-    # tuple's length, and none is re-derived: what is here is a quoted earlier draft, a
-    # refuted history, and issue/round/sha identifiers.
+    # tuple's length, and none is re-derived.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
