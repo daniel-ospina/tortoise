@@ -121,11 +121,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (it is `scored.append({`), nor on `origin/main`, where the statement is `:57423` (the `#13550` / `#13584`
-    # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
+    # head (at this head `:57090` is a BLANK line inside `_no_source_advisory`'s docstring, which
+    # opens at `:57089`; `scored.append({` is `:57284`), nor on
+    # `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, later merges 147 more — 333 in all at the PRE-`#13833`
+    # tip (`:57423`) — and `main`'s `#13833` a further 194, so 527 at `origin/main`). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
     # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
-    # NOT that head's), and `57276 + 147 = 57423` is `origin/main`'s and this head's. Measured per
+    # NOT that head's), and `57276 + 341 = 57617` is `origin/main`'s and this head's — the third hop
+    # being `main`'s `#13833`, which inserted 194 above it (`57276 + 147 = 57423` is what this
+    # comment carried before that landed, and it is HISTORY at this head, not a locator). Measured per
     # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
     # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
@@ -136,10 +141,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57423`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
-    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
-    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
+    # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
+    # further 194), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
     (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -883,7 +889,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
     # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
-    # and 333 by this head (`:57423`).
+    # and 333 by the PRE-`#13833` tip (`:57423`), 527 by this one (`:57617`).
     # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
     # names (`:37144` / `:37186`) had NO pin at all — both shipped one line high (on the `:Source`
     # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose

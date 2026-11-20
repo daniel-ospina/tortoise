@@ -306,19 +306,29 @@ def test_the_outcome_serializes_what_it_claims():
     two rows below pin an armed refusal and the unarmed path, so each published
     value — including the `unprojected` this PR introduces — is derived, not
     assumed.
+
+    ⛔ `cache_fold` was ADDED by #13829 (the derived cache's cap moved from the
+    write door to this fold), so both rows carry it as ``None``: a gated write
+    with no over-cap verdict is still an unremarkable write, and ``None`` is how
+    the artifact says "the fold was not denied" rather than leaving a reader to
+    infer it from a missing key. The denied arm — the one that publishes a dict —
+    is pinned in ``tests/test_13829_cache_cap_at_fold.py``, where the gate that
+    mints it is in scope.
     """
     refused = _outcome(applied=False, refusal="write_failed", outcome="refused")
     armed = live_write.write({"type": "PointAdded"}, log=_Log(seq=9),
                              project=lambda e, s: refused)
     assert armed.as_dict() == {
         "seq": 9, "appended": True, "record": "refused",
-        "refusal": "write_failed", "folded": False, "unprojected": 1}
+        "refusal": "write_failed", "folded": False, "unprojected": 1,
+        "cache_fold": None}
 
     unarmed = live_write.write({"type": "PointAdded"}, log=_Log(seq=3),
                                project=lambda e, s: None)
     assert unarmed.as_dict() == {
         "seq": 3, "appended": True, "record": None,
-        "refusal": None, "folded": False, "unprojected": 0}
+        "refusal": None, "folded": False, "unprojected": 0,
+        "cache_fold": None}
 
 
 def test_the_record_outcome_travels_to_the_capture_sink():
