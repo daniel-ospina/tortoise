@@ -575,9 +575,10 @@ def test_the_real_docs_tree_is_not_empty():
 #: review after cycle 2, finding 4, MEASURED). Its lookahead asked the SAME question as
 #: `_BRACKET` over the SAME alphabet — a strict subset of `_BRACKET`'s interior — so wherever
 #: `_BRACKET` fails, no path through the subset reaches a `]` either and the negative lookahead is
-#: ALWAYS satisfied. MEASURED: replacing it with a bare `[` changed no answer across 69,904 fuzz
-#: cases and HALVED the run (the ONE copy of that figure lives beside `_OPEN_BRACKET` below;
-#: do not restate it here). ⛔ An earlier revision of this
+#: ALWAYS satisfied. ⛔ THAT EXPERIMENT'S FIGURES ARE NOT REPEATED HERE — they live in ONE place,
+#: beside `_OPEN_BRACKET` below, and this sentence used to restate them one line after telling
+#: the reader not to (#13921 review, final round, finding 2: the two copies had already
+#: drifted apart on the companion figure for the same shape). ⛔ An earlier revision of this
 #: paragraph said "the lookahead is what keeps each pair disjoint" and named a `_OPEN_TAG`
 #: lookahead that an earlier round DELETED — the tag half of that sentence described code that no
 #: longer existed, one commit after the sentence was written (#13921 review, finding 3).
@@ -1949,7 +1950,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_escaped!r} — a label closed by an ESCAPED `]` is one unit, and "
             "`origin/main` graded this shape; excluding `\\` from `_BRACKET`'s catch-all without "
             "widening its closer drops it (#13921 review, finding 1 of the next round)")
-    # ⛔ AND THE WALK'S FIRST-MATCH COMMITMENT HAS THREE DECLARED LOSSES, PINNED HERE (#13921
+    # ⛔ AND THE WALK'S FIRST-MATCH COMMITMENT HAS FOUR DECLARED LOSSES, PINNED HERE (#13921
     # review, final round, finding 2, MEASURED). `_unit_pat.match` commits to the FIRST parse of a
     # position, while a `*`-closure can backtrack into another partition of the same characters; so
     # a `[`/`<` run whose interior holds the OTHER pair's opener is taken as ONE unit whole, stalls
@@ -2069,7 +2070,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # …AND A `;` INSIDE A BRACKET DOES NOT END THE GAP: the bracketed run is ONE unit, so this
     # claim parses only if `_BRACKET` is consumed whole. ⛔ THIS ROW IS NOT WHAT A `_BRACKET`
     # REMOVAL REDS FIRST (#13921 review, finding 5, MEASURED): deleting `_BRACKET` from
-    # `_GAP_UNIT` reds the `[^note]` row of the separator-unit block ~190 lines above (it asserts
+    # `_GAP_UNIT` reds the `[^note]` row of the separator-unit block — named, not cited by LINE
+    # NUMBER, because the distance this sentence used to give had already rotted by ~40 lines
+    # inside this same PR (#13921 review, final round, finding 3). That row asserts
     # a GRADED answer, so the mutant's `[]` is what reds it — ⛔ not "it asserts `[]`", which an
     # earlier form of this comment said and which inverts which side fails; #13921 review, last
     # round, finding 3), and this row is masked behind it. The
