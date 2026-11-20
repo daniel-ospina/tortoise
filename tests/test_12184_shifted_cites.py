@@ -151,9 +151,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
-    (_AUDIT, "`mcp_server.py:5183`", _MCP, 5183, "entity_type=entity_type"),
-    (_AUDIT, "`:5653`", _MCP, 5653, "entity_type=entity_type"),
-    (_AUDIT, "`:8205`", _MCP, 8205, "entity_type=entity_type"),
+    # ⛔ RE-DERIVED at the `origin/main` merge that brought in `#13899` (the SDK retirement): that
+    # commit inserts ONE line at `mcp_server.py:4363` (`tortoise_create_point`), so every
+    # `entity_type` passthrough below it moved by `+1` — 5183/5653/8205 -> 5184/5654/8206, each
+    # located by its own pinned text rather than by applying the offset. `#13899` is the ONLY
+    # commit in `bd020ff45b..origin/main` that touches `tortoise/mcp_server.py`.
+    (_AUDIT, "`mcp_server.py:5184`", _MCP, 5184, "entity_type=entity_type"),
+    (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
+    (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -303,9 +308,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5183`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5653`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8205`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,

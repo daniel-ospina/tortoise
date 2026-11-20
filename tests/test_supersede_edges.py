@@ -32,7 +32,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
-    return sdk.create_point(
+    return sdk._create_point(
         kw.pop("kind", "statement"), kw.pop("content", "test content"), **kw
     )
 
@@ -62,11 +62,11 @@ def test_supersede_transfers_impl_to_target(sdk):
     """IMPL evidence→claim_A: supersede A→B should move IMPL edge to B."""
     claim_a = _make_point(sdk, content="Claim A: original version")
     evidence = _make_point(sdk, kind="evidence", content="Evidence for claim")
-    sdk.create_operator("IMPL", evidence["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B: revised version")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
 
     # Return value
     assert result["invalidated"] is True
@@ -75,8 +75,8 @@ def test_supersede_transfers_impl_to_target(sdk):
     assert result["edges_transferred"] >= 1
 
     # A is outdated, B is not
-    assert sdk.get_point(claim_a["id"])["outdated"] is True
-    assert not sdk.get_point(claim_b["id"]).get("outdated")
+    assert sdk._get_point(claim_a["id"])["outdated"] is True
+    assert not sdk._get_point(claim_b["id"]).get("outdated")
 
     # IMPL edge moved to B
     incoming_b = _incoming(sdk, claim_b["id"], "IMPL")
@@ -92,11 +92,11 @@ def test_supersede_transfers_nand_to_target(sdk):
     """NAND evidence→claim_A: supersede A→B should move NAND edge to B."""
     claim_a = _make_point(sdk, content="Claim A: disputed")
     evidence = _make_point(sdk, kind="evidence", content="Contradicting evidence")
-    sdk.create_operator("NAND", evidence["id"], [claim_a["id"]])
+    sdk._create_operator("NAND", evidence["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B: revised")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] >= 1
 
     # NAND edge moved to B
@@ -113,11 +113,11 @@ def test_supersede_transfers_source_edge(sdk):
     """IMPL claim_A→target: supersede A→B should move source role to B."""
     claim_a = _make_point(sdk, content="Claim A (source)")
     target = _make_point(sdk, content="Target claim")
-    sdk.create_operator("IMPL", claim_a["id"], [target["id"]])
+    sdk._create_operator("IMPL", claim_a["id"], [target["id"]])
 
     claim_b = _make_point(sdk, content="Claim B (supersedes A)")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] >= 1
 
     # B now has incoming IMPL (as source of the operator)
@@ -137,12 +137,12 @@ def test_supersede_transfers_multiple_edges(sdk):
     claim_a = _make_point(sdk, content="Claim A")
     evidence_1 = _make_point(sdk, kind="evidence", content="Evidence 1")
     evidence_2 = _make_point(sdk, kind="evidence", content="Evidence 2")
-    sdk.create_operator("IMPL", evidence_1["id"], [claim_a["id"]])
-    sdk.create_operator("IMPL", evidence_2["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence_1["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence_2["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] == 2
 
     incoming_b = _incoming(sdk, claim_b["id"], "IMPL")
@@ -155,12 +155,12 @@ def test_supersede_transfers_mixed_edges(sdk):
     claim_a = _make_point(sdk, content="Claim A")
     evidence_support = _make_point(sdk, kind="evidence", content="Supporting")
     evidence_oppose = _make_point(sdk, kind="evidence", content="Opposing")
-    sdk.create_operator("IMPL", evidence_support["id"], [claim_a["id"]])
-    sdk.create_operator("NAND", evidence_oppose["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence_support["id"], [claim_a["id"]])
+    sdk._create_operator("NAND", evidence_oppose["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert result["edges_transferred"] == 2
 
     impl_to_b = _incoming(sdk, claim_b["id"], "IMPL")
@@ -193,7 +193,7 @@ def test_supersede_no_edges_transfers_zero(sdk):
     claim_a = _make_point(sdk, content="Claim A (no edges)")
     claim_b = _make_point(sdk, content="Claim B")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert result["invalidated"] is True
     assert result["edges_transferred"] == 0
 
@@ -208,20 +208,20 @@ def test_supersede_then_supersede_again_transfers_zero(sdk):
     (updated from the #547 no-op contract, code-review #803)."""
     claim_a = _make_point(sdk, content="Claim A")
     evidence = _make_point(sdk, kind="evidence", content="Evidence")
-    sdk.create_operator("IMPL", evidence["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B")
     claim_c = _make_point(sdk, content="Claim C")
 
     # First supersede: A → B
-    r1 = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    r1 = sdk._supersede_point(claim_a["id"], claim_b["id"])
     assert r1["edges_transferred"] == 1
 
     # Second supersede: A → C — A is terminal ('superseded'), the guard
     # rejects the transition, so no duplicate edge writes can occur (#432).
     import pytest
     with pytest.raises(ValueError, match="already terminal"):
-        sdk.supersede_point(claim_a["id"], claim_c["id"])
+        sdk._supersede_point(claim_a["id"], claim_c["id"])
 
 
 # ── #329: edge-type validation (two-pass, zero mutation on failure) ────
@@ -233,7 +233,7 @@ def test_supersede_unknown_edge_type_zero_mutation(sdk):
     old = _make_point(sdk, content="Old (crafted edge)")
     new = _make_point(sdk, content="New")
     # Create a real operator, then craft an unknown-type edge from it
-    sdk.create_operator("IMPL", old["id"], [new["id"]])
+    sdk._create_operator("IMPL", old["id"], [new["id"]])
     op_rows = proj.g.query(
         "MATCH (op:Point {is_operator:true}) RETURN op.id LIMIT 1"
     ).result_set
@@ -244,10 +244,10 @@ def test_supersede_unknown_edge_type_zero_mutation(sdk):
         params={"oid": op_id, "oldid": old["id"]},
     )
     with pytest.raises(ValueError, match="Invalid relationship type"):
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
 
     # Zero mutation: old not outdated, no CORRECTS edge from new
-    old_now = sdk.get_point(old["id"])
+    old_now = sdk._get_point(old["id"])
     assert not old_now.get("outdated")
     rows = proj.g.query(
         "MATCH (a:Point {id:$nid})-[r:CORRECTS]->(b:Point {id:$oid}) RETURN count(r)",
@@ -262,7 +262,7 @@ def test_supersede_mixed_valid_and_invalid_zero_mutation(sdk):
     proj = sdk._get_proj()
     a = _make_point(sdk, content="A")
     ev = _make_point(sdk, content="Evidence")
-    sdk.create_operator("IMPL", ev["id"], [a["id"]])  # valid IMPL edge
+    sdk._create_operator("IMPL", ev["id"], [a["id"]])  # valid IMPL edge
     b = _make_point(sdk, content="B")
     op_rows = proj.g.query(
         "MATCH (op:Point {is_operator:true}) RETURN op.id LIMIT 1"
@@ -274,8 +274,8 @@ def test_supersede_mixed_valid_and_invalid_zero_mutation(sdk):
         params={"oid": op_id, "oldid": a["id"]},
     )
     with pytest.raises(ValueError):
-        sdk.supersede_point(a["id"], b["id"])
-    a_now = sdk.get_point(a["id"])
+        sdk._supersede_point(a["id"], b["id"])
+    a_now = sdk._get_point(a["id"])
     assert not a_now.get("outdated")
     # IMPL edge still on old (untouched — zero mutation)
     impl_rows = proj.g.query(
@@ -293,13 +293,13 @@ def test_supersede_mitigated_point_transfers(sdk):
     old = _make_point(sdk, content="Old mitigated")
     new = _make_point(sdk, content="New")
     # Create a mitigation Point + mitigated_by edge like mitigate_operator does
-    mit = sdk.create_point("mitigation", "mitigation rationale")
+    mit = sdk._create_point("mitigation", "mitigation rationale")
     proj.g.query(
         "MATCH (m:Point {id:$mid}), (t:Point {id:$oid}) "
         "CREATE (m)-[:mitigated_by]->(t)",
         params={"mid": mit["id"], "oid": old["id"]},
     )
-    result = sdk.supersede_point(old["id"], new["id"])
+    result = sdk._supersede_point(old["id"], new["id"])
     assert result["invalidated"] is True
     # mitigated_by edges are not part of the transfer (only operator→old edges
     # transfer) — but the supersede must not raise
@@ -314,14 +314,14 @@ def test_superseded_point_excluded_from_default_read(sdk):
     are not served as current."""
     old = _make_point(sdk, content="strategy alpha is our current strategy")
     new = _make_point(sdk, content="strategy beta is our current strategy")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     # query() excludes it by default
-    assert old["id"] not in [p["id"] for p in sdk.query()]
+    assert old["id"] not in [p["id"] for p in sdk._query()]
     # FTS excludes it (the terminal-status filter lives in the base query)
-    hits = sdk.tortoise_fts_query("strategy alpha", limit=10)
+    hits = sdk._tortoise_fts_query("strategy alpha", limit=10)
     assert old["id"] not in [h["id"] for h in hits]
     # the new (current) point remains findable
-    hits_new = sdk.tortoise_fts_query("strategy beta", limit=10)
+    hits_new = sdk._tortoise_fts_query("strategy beta", limit=10)
     assert new["id"] in [h["id"] for h in hits_new]
 
 
@@ -330,12 +330,12 @@ def test_terminal_status_audit_opt_in(sdk):
     terminal statuses; an explicit status= filter controls visibility."""
     old = _make_point(sdk, content="old approach still referenced")
     new = _make_point(sdk, content="new approach adopted")
-    sdk.supersede_point(old["id"], new["id"])
-    ids_default = [p["id"] for p in sdk.query()]
+    sdk._supersede_point(old["id"], new["id"])
+    ids_default = [p["id"] for p in sdk._query()]
     assert old["id"] not in ids_default
-    ids_all = [p["id"] for p in sdk.query(include_retracted=True)]
+    ids_all = [p["id"] for p in sdk._query(include_retracted=True)]
     assert old["id"] in ids_all
-    ids_explicit = [p["id"] for p in sdk.query(status="superseded")]
+    ids_explicit = [p["id"] for p in sdk._query(status="superseded")]
     assert old["id"] in ids_explicit
 
 
@@ -344,7 +344,7 @@ def test_outdated_status_excluded_too(sdk):
     the exclusion covers the full terminal set, not just retracted."""
     old = _make_point(sdk, content="the outdated claim")
     new = _make_point(sdk, content="the current claim")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
@@ -352,7 +352,7 @@ def test_outdated_status_excluded_too(sdk):
     ).result_set
     status, outdated = rows[0]
     assert status in ("superseded", "outdated") or outdated is True
-    assert old["id"] not in [p["id"] for p in sdk.query()]
+    assert old["id"] not in [p["id"] for p in sdk._query()]
 
 
 def test_outdated_flag_excluded_even_when_status_live(sdk):
@@ -361,7 +361,7 @@ def test_outdated_flag_excluded_even_when_status_live(sdk):
     status values."""
     p = _make_point(sdk, content="the invalidated claim")
     replacement = _make_point(sdk, content="the replacement claim")
-    sdk.invalidate_point(p["id"], corrected_by_id=replacement["id"])
+    sdk._invalidate_point(p["id"], corrected_by_id=replacement["id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
@@ -369,9 +369,9 @@ def test_outdated_flag_excluded_even_when_status_live(sdk):
     ).result_set
     status, outdated = rows[0]
     assert outdated is True or status in ("superseded", "outdated")
-    assert p["id"] not in [x["id"] for x in sdk.query()]
+    assert p["id"] not in [x["id"] for x in sdk._query()]
     # audit opt-in surfaces it
-    assert p["id"] in [x["id"] for x in sdk.query(include_retracted=True)]
+    assert p["id"] in [x["id"] for x in sdk._query(include_retracted=True)]
 
 
 # ── E6 (#1538) additive regression — window stamping is additive ──────────
@@ -381,11 +381,11 @@ def test_supersede_window_stamps_additive(sdk):
     without changing the supersede return shape or the transfer behavior."""
     claim_a = _make_point(sdk, content="Claim A: original version")
     evidence = _make_point(sdk, kind="evidence", content="Evidence for claim")
-    sdk.create_operator("IMPL", evidence["id"], [claim_a["id"]])
+    sdk._create_operator("IMPL", evidence["id"], [claim_a["id"]])
 
     claim_b = _make_point(sdk, content="Claim B: revised version")
 
-    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+    result = sdk._supersede_point(claim_a["id"], claim_b["id"])
 
     # Return shape unchanged
     assert set(result) == {"invalidated", "id", "corrected_by",
@@ -418,14 +418,14 @@ def test_supersede_transfers_operator_input_mirror(sdk):
 
     old = _make_point(sdk, content="Old supported source")
     target = _make_point(sdk, content="Target claim")
-    sdk.create_operator("IMPL", old["id"], [target["id"]])
+    sdk._create_operator("IMPL", old["id"], [target["id"]])
     new = _make_point(sdk, content="New supported source")
     proj = sdk._get_proj()
 
     pre = assemble_why_blocks(proj, [target["id"]])[target["id"]]["support_chain"]
     assert pre, "precondition: the support chain resolves before the supersede"
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     old_in = proj.g.query(
         "MATCH (old:Point {id:$o})-[r:INPUT]->(:Point {is_operator:true}) "
@@ -448,9 +448,9 @@ def test_supersede_transfers_target_input_mirror(sdk):
     edge is left behind."""
     claim = _make_point(sdk, content="Claim A")
     evidence = _make_point(sdk, kind="evidence", content="Evidence")
-    sdk.create_operator("IMPL", evidence["id"], [claim["id"]])
+    sdk._create_operator("IMPL", evidence["id"], [claim["id"]])
     new = _make_point(sdk, content="Claim B")
-    sdk.supersede_point(claim["id"], new["id"])
+    sdk._supersede_point(claim["id"], new["id"])
     proj = sdk._get_proj()
 
     old_in = proj.g.query(
@@ -474,12 +474,12 @@ def test_supersede_keeps_alreadydecided_input_mirror(sdk):
     """
     old = _make_point(sdk, content="Old decision")
     target = _make_point(sdk, content="Target")
-    op_keep = sdk.create_operator("IMPL", old["id"], [target["id"]],
+    op_keep = sdk._create_operator("IMPL", old["id"], [target["id"]],
                                   label="alreadyDecided")
     control_target = _make_point(sdk, content="Control target")
-    op_move = sdk.create_operator("IMPL", old["id"], [control_target["id"]])
+    op_move = sdk._create_operator("IMPL", old["id"], [control_target["id"]])
     new = _make_point(sdk, content="New decision")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     proj = sdk._get_proj()
 
     kept = {r[0] for r in proj.g.query(
@@ -505,8 +505,8 @@ def test_supersede_mitigation_point_without_idx(sdk):
     """
     source = _make_point(sdk, content="source")
     target = _make_point(sdk, content="target")
-    op = sdk.create_operator("IMPL", source["id"], [target["id"]])
-    mit = sdk.mitigate_operator(op["id"], "no control group", 0.3)
+    op = sdk._create_operator("IMPL", source["id"], [target["id"]])
+    mit = sdk._mitigate_operator(op["id"], "no control group", 0.3)
     new = _make_point(sdk, content="new mitigation context")
     proj = sdk._get_proj()
 
@@ -516,7 +516,7 @@ def test_supersede_mitigation_point_without_idx(sdk):
     assert pre and pre[0][0] is None, (
         f"precondition: the edge is idx-less, got {pre}")
 
-    sdk.supersede_point(mit["id"], new["id"])  # must not raise
+    sdk._supersede_point(mit["id"], new["id"])  # must not raise
 
     moved = proj.g.query(
         "MATCH (op:Point {id:$op})-[r:mitigated_by]->(m:Point {id:$m}) "
@@ -538,7 +538,7 @@ def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
     target = _make_point(sdk, content="target")
     old = _make_point(sdk, content="old")
     new = _make_point(sdk, content="new")
-    op = sdk.create_operator("IMPL", old["id"], [target["id"]])
+    op = sdk._create_operator("IMPL", old["id"], [target["id"]])
     proj = sdk._get_proj()
     # Caller pre-wires the shared edge onto the successor — and the shared
     # INPUT mirror — before the supersede.
@@ -555,7 +555,7 @@ def test_supersede_does_not_duplicate_a_prewired_operator_edge(sdk):
         params={"op": op["id"], "new": new["id"]},
     )
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     typed = proj.g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL {idx:0}]->(new:Point {id:$new}) "
@@ -585,7 +585,7 @@ def test_supersede_carries_about_edge_confidence(sdk):
     proj = sdk._get_proj()
     old = _make_point(sdk, content="Old: the subject binding")
     new = _make_point(sdk, content="New: the same claim, restated")
-    subject = sdk.create_point("statement", "The bound subject")
+    subject = sdk._create_point("statement", "The bound subject")
 
     # Wire the about* edge exactly as the binder does: MERGE + SET r.confidence
     proj.g.query(
@@ -594,7 +594,7 @@ def test_supersede_carries_about_edge_confidence(sdk):
         params={"sid": old["id"], "tid": subject["id"], "conf": 0.83},
     )
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     rows = proj.g.query(
         "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
@@ -631,7 +631,7 @@ def test_supersede_does_not_delete_the_successors_own_confidence(sdk):
     proj = sdk._get_proj()
     old = _make_point(sdk, content="Old: the subject binding")
     new = _make_point(sdk, content="New: the same claim, restated")
-    subject = sdk.create_point("statement", "The bound subject")
+    subject = sdk._create_point("statement", "The bound subject")
 
     # The OLD point's binding.
     proj.g.query(
@@ -646,7 +646,7 @@ def test_supersede_does_not_delete_the_successors_own_confidence(sdk):
         params={"sid": new["id"], "tid": subject["id"], "conf": 0.91},
     )
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     rows = proj.g.query(
         "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "
@@ -679,14 +679,14 @@ def test_supersede_carries_no_dead_source_version_key(sdk):
     proj = sdk._get_proj()
     old = _make_point(sdk, content="Old: versioned subject binding")
     new = _make_point(sdk, content="New: same claim, restated")
-    subject = sdk.create_point("statement", "The bound subject")
+    subject = sdk._create_point("statement", "The bound subject")
     proj.g.query(
         "MATCH (s:Point {id:$sid}), (t:Point {id:$tid}) "
         "MERGE (s)-[r:aboutSubject]->(t) SET r.confidence=$c, r.source_version='v1'",
         params={"sid": old["id"], "tid": subject["id"], "c": 0.5},
     )
 
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
 
     rows = proj.g.query(
         "MATCH (n:Point {id:$nid})-[r:aboutSubject]->(t:Point {id:$tid}) "

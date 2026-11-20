@@ -97,7 +97,13 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # containers (their own 120 -> 112 landed after wave 2 branched), so the wave's own
 # "118 -> 102" is that branch's BEFORE/AFTER and not this tree's. MEASURED here with
 # `tools/surface-target-check.py` and `tools/sdk_surface.py --check`: 110 -> 94.
-DECLARED_COUNT = 105
+#
+# 105 -> 39 on 2026-11-20: #12901's FINAL batch privatised the remaining 66 off-surface
+# methods in one pass (105 − 66 = 39). An off-surface departure, so the approved 40 does not
+# move and `high_water_counts.sdk_public_methods` follows the live count DOWN to 39 in the
+# same PR. MEASURED here with `tools/sdk_surface.py --check` and
+# `tools/sdk_surface_declaration.py show` (`live on TortoiseSDK 39`), not carried over.
+DECLARED_COUNT = 39
 
 
 def _declaration() -> dict:
@@ -320,7 +326,11 @@ def test_a_vanished_public_method_is_a_failure(tmp_path, monkeypatch):
     import tools.sdk_surface as sdk_surface
 
     live = _declared()
-    target = "create_point"
+    # ⛔ The fixture name must be on TODAY'S surface: `create_point` was this test's target
+    # until #12901's FINAL batch privatised it, and a fixture that is not a public `def` makes
+    # the mutation vacuous (nothing vanishes, so nothing reds). `graph_overview` is a live
+    # approved method and its private spelling is unused, so the rename is unambiguous.
+    target = "graph_overview"
     assert target in live, "the fixture name must actually be on the surface"
 
     source = bridge_table.SDK_SRC.read_text(encoding="utf-8")

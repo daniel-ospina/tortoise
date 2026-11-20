@@ -31,6 +31,7 @@ what a delegation changes. The writers' own behaviour is covered by their own su
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -156,7 +157,7 @@ def test_write_knowledge_batch_delegates_to_ingest():
         seen.update(bundle=bundle, granularity=granularity, policy=promotion_policy)
         return {"ok": True}
 
-    sdk.ingest = fake_ingest
+    sdk._ingest = fake_ingest
     out = sdk.write_knowledge_batch({"points": []}, "row", promotion_policy="strict")
 
     assert out == {"ok": True}
@@ -165,13 +166,13 @@ def test_write_knowledge_batch_delegates_to_ingest():
 
 def test_adjust_relationship_delegates_to_annotate_operator():
     sdk = _sdk()
-    sdk.get_point = lambda point_id: {
+    sdk._get_point = lambda point_id: {
         "id": point_id, "is_operator": True,
         "annotator_bias": 0.2, "annotator_precision": 0.3,
         "annotator_consistency": 0.4, "annotator_directness": 0.6,
     }
     seen = {}
-    sdk.annotate_operator = lambda pid, **kw: seen.update(id=pid, **kw) or {"annotated": True}
+    sdk._annotate_operator = lambda pid, **kw: seen.update(id=pid, **kw) or {"annotated": True}
 
     out = sdk.adjust_relationship("op_1", consistency=0.9)
 
@@ -186,8 +187,8 @@ def test_adjust_relationship_delegates_to_annotate_operator():
 def test_adjust_relationship_refuses_when_the_current_annotation_is_unreadable():
     """A residency marker is TRUTHY but carries no node — defaulting would corrupt it."""
     sdk = _sdk()
-    sdk.get_point = lambda point_id: {"residency": "not-hot"}
-    sdk.annotate_operator = lambda *a, **kw: pytest.fail("must not write over an unknown")
+    sdk._get_point = lambda point_id: {"residency": "not-hot"}
+    sdk._annotate_operator = lambda *a, **kw: pytest.fail("must not write over an unknown")
 
     with pytest.raises(ValueError, match="could not be read back"):
         sdk.adjust_relationship("op_1", bias=0.1)
@@ -196,7 +197,7 @@ def test_adjust_relationship_refuses_when_the_current_annotation_is_unreadable()
 def test_refresh_confidence_scope_changed_is_the_dirty_root_path():
     sdk = _sdk()
     seen = {}
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence()
 
@@ -217,7 +218,7 @@ def test_refresh_confidence_scope_graph_passes_every_claim_as_an_anchor():
 
     seen = {}
     sdk.list_knowledge = fake_list
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence("graph")
 
@@ -227,7 +228,7 @@ def test_refresh_confidence_scope_graph_passes_every_claim_as_an_anchor():
 
 def test_refresh_confidence_refuses_an_unknown_scope():
     sdk = _sdk()
-    sdk.compute_confidence = lambda **kw: pytest.fail("must not choose a scope for the caller")
+    sdk._compute_confidence = lambda **kw: pytest.fail("must not choose a scope for the caller")
 
     with pytest.raises(ValueError, match="Unknown confidence scope"):
         sdk.refresh_confidence("everything")
@@ -308,7 +309,7 @@ def test_refresh_confidence_scope_graph_walks_the_CLAIM_population_not_every_poi
         return {"results": [{"id": "c1"}], "hasMore": False}
 
     sdk.list_knowledge = fake_list
-    sdk.compute_confidence = lambda **kw: {"converged": True}
+    sdk._compute_confidence = lambda **kw: {"converged": True}
 
     sdk.refresh_confidence("graph")
 
@@ -328,7 +329,7 @@ def test_refresh_confidence_scope_graph_answers_an_empty_graph_instead_of_re_sco
     sdk = _sdk()
     sdk.list_knowledge = lambda **kw: {"results": [], "hasMore": False}
     seen = {}
-    sdk.compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
+    sdk._compute_confidence = lambda **kw: seen.update(kw) or {"converged": True}
 
     sdk.refresh_confidence("graph")
 
@@ -659,6 +660,14 @@ def test_an_absent_control_plane_refuses_by_naming_the_mode_and_never_returns_em
 
 # ── 4. the instrument: like-for-like, with the fallback kept ────────────────────
 
+#: An approved row in `docs/product/beta-sdk-surface.md`'s surface table: `(ordinal, name)`.
+#: The ORDINAL is the discriminator, not the spelling — row 1 is `Tortoise(...)`, the
+#: entry-point CLASS, which is the one approved name that is not a method and therefore the
+#: one row `sdk_public_methods` must not count. Matching on "looks like a snake_case name"
+#: gets this wrong twice: it drops `close()` (rendered with parens, but a real method) and
+#: it cannot tell an entry point from a method.
+_APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([^`]+)`")
+
 
 def test_the_checker_compares_declared_names_that_resolve_and_reports_40():
     sys.path.insert(0, str(ROOT / "tools"))
@@ -680,7 +689,40 @@ def test_the_checker_compares_declared_names_that_resolve_and_reports_40():
         # public-method count, because `tests/test_surface_manifest.py` pins it against
         # the manifest's `counts.sdk_public_methods`. Redefining it would have made that
         # pin compare two different questions (the #10034 defect, inverted).
-        assert live["sdk"] == live["sdk_public_methods"] >= 40
+        # ⛔ #12901 FINAL batch: the approved surface is **40 NAMES**, and only **39** of them
+        # are METHOD rows — row 1 is the `Tortoise(...)` entry point, a class, not a method
+        # (`docs/product/beta-sdk-surface.md`; this file's own docstring states the same
+        # split). `sdk_public_methods` counts METHODS by construction, so the two views
+        # differ by exactly that row.
+        #
+        # Before the retirement the bound here read `>= 40` and was satisfied by the 105
+        # OVER-DELIVERED methods, so it never exercised the distinction — 40 methods happened
+        # to exist. Landing on the approved 39 exposed the conflation. The repair is an
+        # EQUALITY against the doc's own rows: a lowered bound would have CONFIRMED the
+        # conflation rather than fixed it, and a number chosen to make the line pass is the
+        # false pass this assertion exists to prevent.
+        beta_rows = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        rows = [(int(m.group(1)), m.group(2))
+                for m in map(_APPROVED_ROW.match, beta_rows) if m]
+        rows.sort()
+        assert len(rows) == 40, (
+            "the approved surface table must carry 40 rows — the owner's list")
+        assert rows[0] == (1, "Tortoise(...)"), (
+            f"row 1 of the approved table is {rows[0]!r}, not the `Tortoise(...)` entry "
+            "point — the names/methods split below is derived from the ordinal, so the "
+            "entry point moving is a pin move, not a count to adjust")
+        method_rows = [name for ordinal, name in rows if ordinal != 1]
+        assert len(method_rows) == 39, (
+            f"the approved table carries {len(method_rows)} method rows, not 39 — the "
+            "names/methods split this assertion rests on has moved")
+        assert live["sdk_public_methods"] == len(method_rows), (
+            f"`sdk_public_methods` is {live['sdk_public_methods']} and the approved table "
+            f"carries {len(method_rows)} method rows — the live surface and the approved "
+            "one must be EQUAL, method row for method row")
+        assert live["sdk"] == live["sdk_public_methods"], (
+            "`sdk` and `sdk_public_methods` are the same question and must agree")
         assert live["sdk_public_methods"] != live["sdk_declared"], (
             "the two views coincide only if the off-surface set is empty — if they do, "
             "the fallback has stopped reporting anything"

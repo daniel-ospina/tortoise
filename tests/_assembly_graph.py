@@ -140,20 +140,20 @@ def build_base_graph(sdk: TortoiseSDK) -> dict:
         "SET o.supersededAt = $ts", params={"ts": "2026-09-01T00:00:00Z"})
 
     # session A points
-    sdk.create_point(
+    sdk._create_point(
         "statement", "bought the grey couch from ikea for 800 dollars",
         id="pA-couch-bought", session_id=SESSION_A,
         lme_question_id=qid, is_episodic=True, status="draft",
         search_keys="couch ikea 800 dollars",
         quote="bought the grey couch", createdAt=SESSION_A_DATE,
         when="2026-08-10", validFrom="2026-08-10")
-    sdk.create_point(
+    sdk._create_point(
         "statement", "the dog chewed the corner of the dog bed cushion",
         id="pA-dogbed-chewed", session_id=SESSION_A,
         lme_question_id=qid, is_episodic=True, status="draft",
         search_keys="dog bed chewed cushion", quote="chewed the corner",
         createdAt=SESSION_A_DATE)
-    sdk.create_point(
+    sdk._create_point(
         "statement", "took the dog to the vet for the chewed cushion",
         id="pA-vet", session_id=SESSION_A,
         lme_question_id=qid, is_episodic=True, status="draft",
@@ -166,13 +166,13 @@ def build_base_graph(sdk: TortoiseSDK) -> dict:
     stamp_ep(proj, "pA-dogbed-chewed", 6.0, 2.0)
 
     # session B points (the supersession evidence + sofa delivery)
-    sdk.create_point(
+    sdk._create_point(
         "statement", "sold the old couch and ordered a new sofa instead",
         id="pB-couch-sold", session_id=SESSION_B,
         lme_question_id=qid, is_episodic=True, status="draft",
         search_keys="couch sold sofa replaced", quote="sold the old couch",
         createdAt=SESSION_B_DATE, when="2026-09-01", validFrom="2026-09-01")
-    sdk.create_point(
+    sdk._create_point(
         "statement", "the new sofa was delivered on the first of september",
         id="pB-sofa-delivered", session_id=SESSION_B,
         lme_question_id=qid, is_episodic=True, status="draft",
@@ -184,11 +184,11 @@ def build_base_graph(sdk: TortoiseSDK) -> dict:
 
     # dated Events (zero aboutObject — v2-lane faithful; the hosted-variant
     # Event-aboutObject shape lives in build_hosted_variant)
-    sdk.create_event("bought the grey couch from ikea", "purchase",
+    sdk._create_event("bought the grey couch from ikea", "purchase",
                      sessionId=SESSION_A, lme_question_id=qid,
                      lme_session_index=0, is_episodic=True,
                      startedAt="2026-08-10", lme_event_id="evA-couch")
-    sdk.create_event("sold the old couch and ordered a sofa", "purchase",
+    sdk._create_event("sold the old couch and ordered a sofa", "purchase",
                      sessionId=SESSION_B, lme_question_id=qid,
                      lme_session_index=0, is_episodic=True,
                      startedAt="2026-09-01", lme_event_id="evB-sofa")
@@ -201,7 +201,7 @@ def build_base_graph(sdk: TortoiseSDK) -> dict:
               "phone battery replacement shop", "birthday cake chocolate",
               "airport parking shuttle", "gym membership renewal june"]
     for i, topic in enumerate(topics):
-        sdk.create_point(
+        sdk._create_point(
             "statement", f"talked about {topic} with a friend",
             id=f"pD{i}", session_id=f"sess-distract-{i}",
             lme_question_id=qid, is_episodic=True, status="draft",
@@ -251,7 +251,7 @@ def build_hub_graph(sdk: TortoiseSDK, n_points: int = 60) -> str:
                       lme_question_id="qhub", is_episodic=True)
     for i in range(n_points):
         pid = f"pH{i}"
-        sdk.create_point(
+        sdk._create_point(
             "statement", f"hub-subject update number {i}: another detail "
                          f"about the ongoing topic",
             id=pid, session_id=f"sess-hub-{i % 5}",
@@ -303,7 +303,7 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
     for i in range(55):
         pid = f"pDeepX{i}"
         day = 1 + i
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             f"day {day} - how many days passed since the deep-subject "
             f"milestone was discussed and what deep-subject milestone came "
@@ -320,7 +320,7 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
     for j, pid in enumerate((gold_a, gold_b)):
         day = 56 + j
         gold_date = f"2026-09-{1 + j:02d}"   # VALID calendar dates (Sep 01/02)
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             f"the deep-subject milestone happened on day {day} and was "
             f"noted as a dated {gold_markers[pid]} fact in the log",
@@ -333,7 +333,7 @@ def build_deep_rank_substrate(sdk: TortoiseSDK) -> dict:
         rows += 1
     # rows 57-86: unrelated filler (30 rows) — sink below the golds
     for i in range(30):
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             f"grocery shopping and weather and errands chat number {i} - "
             f"milk bread eggs and rain plans and bus times",
@@ -387,7 +387,7 @@ def build_supersession_chain_variants(sdk: TortoiseSDK) -> dict:
 def build_malformed_date_row(sdk: TortoiseSDK) -> None:
     """Task 6 malformed-date fixture: garbage ``when`` on a point whose
     createdAt is the SENTINEL (no usable date → undated tier)."""
-    sdk.create_point(
+    sdk._create_point(
         "statement", "the event with an unparseable date on the record",
         id="pMalformed", session_id="sess-malformed",
         is_episodic=True, status="draft", quote="unparseable date",
@@ -407,7 +407,7 @@ def build_out_of_subgraph_gold(sdk: TortoiseSDK) -> dict:
     proj = sdk._get_proj()
     sdk.create_entity("object", "bookshelf", objectKind="core:furniture",
                       is_episodic=True)
-    sdk.create_point(
+    sdk._create_point(
         "statement",
         "on the fifth of september we moved the bookshelf into the study "
         "and bought a reading lamp - the same week the old couch was "
@@ -511,7 +511,7 @@ def build_nary_ordering_substrate(sdk: TortoiseSDK,
                           lme_question_id=qid, is_episodic=True)
     golds: dict[str, dict] = {}
     for subject, (pid, statement, day, marker) in NARY_GOLD_ROWS.items():
-        sdk.create_point(
+        sdk._create_point(
             "statement", statement, id=pid,
             session_id=f"sess-nary-{subject.replace(' ', '-')}",
             lme_question_id=qid, is_episodic=True, status="draft",
@@ -522,7 +522,7 @@ def build_nary_ordering_substrate(sdk: TortoiseSDK,
         stamp_ep(proj, pid, 9.0, 1.0)
         golds[subject] = {"id": pid, "marker": marker, "date": day}
     for i in range(crowd_rows):
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             f"day {i}: we talked about the couch, the dog bed and the "
             "bookshelf while rearranging the living room",

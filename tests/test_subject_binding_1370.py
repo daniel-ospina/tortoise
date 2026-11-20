@@ -46,7 +46,7 @@ def sdk():
     fixture pattern)."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_1370_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None
+    s._test_guard = lambda: None
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -60,7 +60,7 @@ def journal_sdk(tmp_path):
     events.mkdir()
     s = TortoiseSDK(str(tmp_path / "g.db"),
                     event_log_path=str(events / "events.jsonl"))
-    s.test_guard = lambda: None
+    s._test_guard = lambda: None
     yield s, events / "events.jsonl"
     s.close()
 
@@ -200,7 +200,7 @@ class TestThresholdValidation:
         from tortoise.subject_binding import BOUND
         monkeypatch.setenv("TORTOISE_SUBJECT_TAU_HI", "0")
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "zero confidence")["id"]
+        pid = sdk._create_point("statement", "zero confidence")["id"]
         out = _bind(sdk, pid=pid, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.0}]})
         assert out[0]["outcome"] != BOUND
@@ -222,7 +222,7 @@ class TestThresholdValidation:
         monkeypatch.setenv("TORTOISE_SUBJECT_TAU_LO", "0.0")
         assert resolve_thresholds() == (DEFAULT_TAU_HI, DEFAULT_TAU_LO)
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "zero pair")["id"]
+        pid = sdk._create_point("statement", "zero pair")["id"]
         out = _bind(sdk, pid=pid, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.0}]})
         assert out[0]["outcome"] != BOUND
@@ -289,7 +289,7 @@ class TestBindFailClosed:
         container and warns nothing. (2) The values under test are ``None``
         and ``{}`` — both reachable.
         """
-        pid = sdk.create_point("statement", "no slots here")["id"]
+        pid = sdk._create_point("statement", "no slots here")["id"]
         with caplog.at_level(logging.WARNING, logger="tortoise.subject_binding"):
             assert _bind(sdk, pid=pid, slots=None) == []
             assert _bind(sdk, pid=pid, slots={}) == []
@@ -305,7 +305,7 @@ class TestBindFailClosed:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         out = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.9}]})
@@ -323,7 +323,7 @@ class TestBindFailClosed:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team maybe shipped")["id"]
+        pid = sdk._create_point("statement", "the team maybe shipped")["id"]
         out = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.1}]})
@@ -341,7 +341,7 @@ class TestBindFailClosed:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team probably shipped")["id"]
+        pid = sdk._create_point("statement", "the team probably shipped")["id"]
         out = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.5}]})
@@ -357,13 +357,13 @@ class TestBindFailClosed:
         function. (2) Fixture row: confidence 0.6, two τ_hi values around it.
         """
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         low = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.6}]}, tau_hi=0.5, tau_lo=0.3)
         assert low[0]["outcome"] == "bound"
         assert _edge(sdk, pid)  # edge written at the lower threshold
-        pid2 = sdk.create_point("statement", "the team shipped again")["id"]
+        pid2 = sdk._create_point("statement", "the team shipped again")["id"]
         high = _bind(sdk, pid=pid2, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.6}]}, tau_hi=0.7, tau_lo=0.3)
@@ -381,7 +381,7 @@ class TestBindFailClosed:
         gate flips the reason — mutation-verified.
         """
         sdk.create_entity("subject", "ghost", subjectKind="core:team")
-        pid = sdk.create_point("statement", "an invented subject")["id"]
+        pid = sdk._create_point("statement", "an invented subject")["id"]
         out = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "ghost", "kind": "totally:invented",
                          "confidence": 0.99}]})
@@ -397,7 +397,7 @@ class TestBindFailClosed:
         exist mints a Subject stub (the D8 fail-open path). (2) Fixture row:
         kind=core:team, name "nobody" absent from the graph — reachable.
         """
-        pid = sdk.create_point("statement", "nobody shipped")["id"]
+        pid = sdk._create_point("statement", "nobody shipped")["id"]
         out = _bind(sdk, pid=pid, slots={
             "subject": [{"name": "nobody", "kind": "core:team",
                          "confidence": 0.99}]})
@@ -446,7 +446,7 @@ class TestBindFailClosed:
         # fail HERE and not only in the sibling test.
         assert _resolve_target(sdk._get_proj(), "Subject",
                                "legacy team")[0] is None
-        pid = sdk.create_point("statement", "legacy stub")["id"]
+        pid = sdk._create_point("statement", "legacy stub")["id"]
         out = _bind(sdk, pid=pid, slots={"subject": [
             {"name": "legacy team", "kind": "core:team", "confidence": 0.9}]})
         assert out[0]["outcome"] == "unbound"
@@ -465,7 +465,7 @@ class TestBindFailClosed:
         the value under test is the slot's kind.
         """
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "ws team shipped")["id"]
+        pid = sdk._create_point("statement", "ws team shipped")["id"]
         out = _bind(sdk, pid=pid, slots={"subject": [
             {"name": "the team", "kind": " core:team ",
              "confidence": 0.99}]})
@@ -502,7 +502,7 @@ class TestBindFailClosed:
         row — reachable.
         """
         sdk, jpath = journal_sdk
-        pid = sdk.create_point("statement", "malformed")["id"]
+        pid = sdk._create_point("statement", "malformed")["id"]
         with caplog.at_level(logging.WARNING, logger="tortoise.subject_binding"):
             out = _bind(sdk, pid=pid, slots=slots)
         assert isinstance(out, list)
@@ -520,7 +520,7 @@ class TestBindFailClosed:
         — reachable by construction.
         """
         sdk, jpath = journal_sdk
-        pid = sdk.create_point("statement", "malformed entry")["id"]
+        pid = sdk._create_point("statement", "malformed entry")["id"]
         with caplog.at_level(logging.WARNING, logger="tortoise.subject_binding"):
             out = _bind(sdk, pid=pid, slots={"subject": [
                 None, "x", 42,
@@ -542,7 +542,7 @@ class TestBindFailClosed:
         is exactly this value.
         """
         sdk.create_entity("subject", "casey", subjectKind="core:naturalPerson")
-        pid = sdk.create_point("statement", "casey the org")["id"]
+        pid = sdk._create_point("statement", "casey the org")["id"]
         out = _bind(sdk, pid=pid, slots={"subject": [
             {"name": "casey", "kind": "core:organization",
              "confidence": 0.99}]})
@@ -551,7 +551,7 @@ class TestBindFailClosed:
         assert _edge(sdk, pid) == []
         # The normalized forms (`core:naturalPerson` vs bare `naturalPerson`)
         # are NOT a mismatch and must still bind.
-        pid2 = sdk.create_point("statement", "casey the person")["id"]
+        pid2 = sdk._create_point("statement", "casey the person")["id"]
         out2 = _bind(sdk, pid=pid2, slots={"subject": [
             {"name": "casey", "kind": "naturalPerson",
              "confidence": 0.99}]})
@@ -567,7 +567,7 @@ class TestBindFailClosed:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("object", "the plan", objectKind="core:plan")
-        pid = sdk.create_point("statement", "the plan shipped")["id"]
+        pid = sdk._create_point("statement", "the plan shipped")["id"]
         proj = sdk._get_proj()
         rows = proj.g.query(
             "MATCH (o:Object {name:'the plan'}) RETURN o.id").result_set
@@ -601,7 +601,7 @@ class TestBindFailClosed:
         """
         sdk.create_entity("subject", "the Aug 3 meeting",
                           subjectKind="core:team")
-        pid = sdk.create_point("statement", "the meeting happened")["id"]
+        pid = sdk._create_point("statement", "the meeting happened")["id"]
         out = _bind(sdk, pid=pid, slots={
             "event": [{"name": "the Aug 3 meeting", "kind": "core:meeting",
                        "confidence": 0.99}]})
@@ -618,7 +618,7 @@ class TestBindFailClosed:
         core:plan object slot at 0.9 — reachable.
         """
         sdk.create_entity("object", "the plan", objectKind="core:plan")
-        pid = sdk.create_point("statement", "the plan shipped")["id"]
+        pid = sdk._create_point("statement", "the plan shipped")["id"]
         out = _bind(sdk, pid=pid, slots={
             "object": [{"name": "the plan", "kind": "core:plan",
                         "confidence": 0.9}]})
@@ -638,7 +638,7 @@ class TestReplayParity:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.9}]})
@@ -659,7 +659,7 @@ class TestReplayParity:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.9}]})
@@ -690,7 +690,7 @@ class TestReplayParity:
         """
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "the team shipped")["id"]
+        pid = sdk._create_point("statement", "the team shipped")["id"]
         _bind(sdk, pid=pid, slots={
             "subject": [{"name": "the team", "kind": "core:team",
                          "confidence": 0.9}]})
@@ -718,7 +718,7 @@ class TestReplayParity:
         the no-confidence record are the values under test — reachable.
         """
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        pid = sdk.create_point("statement", "fold unit")["id"]
+        pid = sdk._create_point("statement", "fold unit")["id"]
         proj = sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Subject {name:'the team'}) RETURN s.id").result_set
@@ -1087,8 +1087,8 @@ class TestGraphAudit:
         """
         from tortoise.subject_binding import audit_subject_binding
         sdk.create_entity("subject", "the team", subjectKind="core:team")
-        p1 = sdk.create_point("statement", "bound one")["id"]
-        p2 = sdk.create_point("statement", "unbound one")["id"]
+        p1 = sdk._create_point("statement", "bound one")["id"]
+        p2 = sdk._create_point("statement", "unbound one")["id"]
         _bind(sdk, pid=p1, slots={"subject": [
             {"name": "the team", "kind": "core:team", "confidence": 0.9}]})
         _bind(sdk, pid=p2, slots={"subject": [
@@ -1109,7 +1109,7 @@ class TestGraphAudit:
         sdk, jpath = journal_sdk
         sdk.create_entity("subject", "team a", subjectKind="core:team")
         sdk.create_entity("subject", "team b", subjectKind="core:team")
-        pid = sdk.create_point("statement", "two subjects")["id"]
+        pid = sdk._create_point("statement", "two subjects")["id"]
         _bind(sdk, pid=pid, slots={"subject": [
             {"name": "team a", "kind": "core:team", "confidence": 0.9},
             {"name": "team b", "kind": "core:team", "confidence": 0.9}]})
@@ -1331,7 +1331,7 @@ class TestHostedCommitSeam:
         payload's subject slot at 0.9 is the reachable binding.
         """
         from tortoise import hosted_api
-        existing = sdk.create_point("statement", "the team approved the plan",
+        existing = sdk._create_point("statement", "the team approved the plan",
                                     is_episodic=False)
         existing_id = existing["id"]
         pid, payload, plan = _hosted_payload_and_plan(

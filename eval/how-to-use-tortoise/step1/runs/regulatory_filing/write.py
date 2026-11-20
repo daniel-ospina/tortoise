@@ -26,7 +26,7 @@ def track(label, res, name):
 
 
 def edge(relation, a, b):
-    r = sdk.create_edge(relation, a, b)
+    r = sdk._create_edge(relation, a, b)
     out["edges"].append({"relation": relation, "from": a, "to": b,
                          "nodes": r.get("edge"), "created": r.get("created"),
                          "nudges": r.get("nudges")})
@@ -42,20 +42,20 @@ SRC = track("Source", sdk.register_source(
 ), "SEC Form D primary_doc.xml")
 
 # ---- Subjects: the filer and the signing role -------------------------
-ORG = track("Subject", sdk.create_subject(
+ORG = track("Subject", sdk._create_subject(
     "Solstice Robotics Inc.",
     subjectKind="core:organization",
     partyRole="issuer",
 ), "Solstice Robotics Inc.")
 
-CFO = track("Subject", sdk.create_subject(
+CFO = track("Subject", sdk._create_subject(
     "CFO of Solstice Robotics Inc.",
     subjectKind="core:role",
     roleTitle="Chief Financial Officer",
 ), "CFO of Solstice Robotics Inc.")
 
 # ---- Event: the filing act -------------------------------------------
-EV = track("Event", sdk.create_event(
+EV = track("Event", sdk._create_event(
     "SEC Form D filed by Solstice Robotics Inc. on 2026-06-11",
     "occurrence",
     eventDate=FILED,
@@ -66,7 +66,7 @@ EV = track("Event", sdk.create_event(
 ), "SEC Form D filing 2026-06-11")
 
 # ---- Object: the offering the filing reports -------------------------
-OFF = track("Object", sdk.create_object(
+OFF = track("Object", sdk._create_object(
     "Solstice Robotics Inc. SEC Form D offering (2026-06-11)",
     objectKind="other",
     filingType="Form D",
@@ -79,7 +79,7 @@ OFF = track("Object", sdk.create_object(
 ), "SEC Form D offering")
 
 # ---- Points: the reported facts (each sourced from the filing) -------
-P_OFF = track("Point", sdk.create_point(
+P_OFF = track("Point", sdk._create_point(
     "observation",
     "Total offering amount of the SEC Form D filed by Solstice Robotics Inc. "
     "on 2026-06-11 was $40,000,000.",
@@ -90,7 +90,7 @@ P_OFF = track("Point", sdk.create_point(
     asReported="$40,000,000",
 ), "total offering amount $40,000,000")
 
-P_SOLD = track("Point", sdk.create_point(
+P_SOLD = track("Point", sdk._create_point(
     "observation",
     "Total amount sold in the SEC Form D filed by Solstice Robotics Inc. "
     "on 2026-06-11 was $12,500,000.",
@@ -101,7 +101,7 @@ P_SOLD = track("Point", sdk.create_point(
     asReported="$12,500,000",
 ), "total amount sold $12,500,000")
 
-P_INV = track("Point", sdk.create_point(
+P_INV = track("Point", sdk._create_point(
     "observation",
     "The SEC Form D filed by Solstice Robotics Inc. on 2026-06-11 reports "
     "14 investors.",
@@ -112,7 +112,7 @@ P_INV = track("Point", sdk.create_point(
     asReported="14",
 ), "14 investors")
 
-P_SIG = track("Point", sdk.create_point(
+P_SIG = track("Point", sdk._create_point(
     "statement",
     "The SEC Form D filing by Solstice Robotics Inc. is signed by the CFO.",
     extractedFrom=URL,
@@ -120,7 +120,7 @@ P_SIG = track("Point", sdk.create_point(
     signedByTitle="Chief Financial Officer",
 ), "signed by the CFO")
 
-P_RET = track("Point", sdk.create_point(
+P_RET = track("Point", sdk._create_point(
     "observation",
     "The SEC Form D filing was retrieved from EDGAR on 2026-10-05.",
     extractedFrom=URL,

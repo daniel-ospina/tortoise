@@ -127,7 +127,9 @@ def _mint_sites_from_its_owner() -> set[tuple[str, str]]:
 #: (the self-service arm and the Supabase-mode arm), and a slice of that pair
 #: disappearing without the note being re-read is exactly the drift here.
 _ESCAPE3_CALL_SITES = {
-    ("tortoise/sdk.py", "org_create"): 1,
+    # #12901 FINAL batch: `org_create` was PRIVATISED (`_org_create`, body unchanged,
+    # public spelling a tombstone). The escape-(3) site is the same function.
+    ("tortoise/sdk.py", "_org_create"): 1,
     ("tortoise/hosted_api.py", "provision_tenant"): 1,
     ("tortoise/hosted_api.py", "register_user"): 2,
     ("tortoise/hosted_api.py", "_eager_provision_org_graph"): 1,

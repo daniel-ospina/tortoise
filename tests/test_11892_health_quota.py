@@ -52,7 +52,7 @@ def _sdk(db_path, tag: str, points: int = 0):
 
     sdk = TortoiseSDK(str(db_path), namespace=f"test_11892_{tag}_{os.urandom(4).hex()}")
     for i in range(points):
-        sdk.create_point("statement", f"claim {i}")
+        sdk._create_point("statement", f"claim {i}")
     return sdk
 
 

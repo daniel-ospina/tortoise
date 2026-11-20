@@ -3290,6 +3290,33 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # three later ones — so the same by-hand method was used: each address was found by
     # searching its own pinned FIRST-line text (and, for the arm, its own LAST-line text
     # `continue`) on the MERGED tree, never by applying an offset to the previous set.
+    # ⛔ RE-DERIVED AGAIN on `feat/12901-sdk-final-c` (#13899's SDK privatisation, which
+    # this branch merges), by the same method and NOT by the delta: each of the four
+    # `sdk.py` rows was located by searching its own pinned text in the tree that was
+    # about to be committed (`grep -n` the first-line text, and for the arm its own
+    # last-line text `continue`; the per-label write was again found by its ONE
+    # occurrence, never by the bare `SET n += $props`). The three rows BELOW
+    # `update_knowledge` moved by **+194** — a uniform shift is the consistency check on
+    # those three measurements, never their input, and it is exactly why the fourth row
+    # (`update_knowledge`, which `#13833` did not move) was NOT given the offset; a
+    # per-address search is what produced each number. The `update_knowledge` row did NOT
+    # move and is unchanged. ⛔ This sentence used to read "All four moved by +194" and
+    # then "the `update_knowledge` row did NOT move", which cannot both hold — the same
+    # lesson the `#13833` note above states, mis-transcribed in the sentence that draws
+    # it (#13899 re-cut review, P2).
+    #
+    # ⛔ RE-DERIVED AT THE RE-CUT that merged `origin/main` `290912f303` (`#13829`,
+    # `#13835`, `#13867`…) INTO this branch, again by the same method and NOT by the
+    # delta. Both sides of the merge moved `sdk.py`, so the four rows were each found
+    # by their own pinned FIRST-line text (`grep -n`; the arm by its own LAST-line
+    # text `continue`, the per-label write by its ONE occurrence — the bare
+    # `SET n += $props` occurs 41× in the merged `sdk.py`) at the tree about to be
+    # committed: `55742-55744`, `55894-55903`, `56343` and `update_knowledge` at
+    # `22779-22954`. Two different deltas this time — **+195** for the three rows
+    # below `update_knowledge` and **+150** for `update_knowledge` itself — because
+    # `#13829`'s insertions sit ABOVE it and the re-cut's land below it: the
+    # two-delta shape is the consistency check on four independent measurements,
+    # never their input.
     ("sdk.py", 55742, 55744): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55894, 55903): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

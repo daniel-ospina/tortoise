@@ -34,19 +34,19 @@ def _make_claim(sdk, content: str, kind: str = "statement") -> dict:
     # #992: EP tests model live claims — status="live" is explicit for intent;
     # create_point's implicit status is live since #1088 (it was draft from
     # #943; the #780 draft filter strips draft inputs from operators).
-    return sdk.create_point(kind, content, dedup=False, status="live")
+    return sdk._create_point(kind, content, dedup=False, status="live")
 
 
 class TestDreamIncremental:
     def test_dream_converges_on_subgraph(self, sdk):
         a = _make_claim(sdk, "conclusion")
         b = _make_claim(sdk, "supporting evidence")
-        sdk.create_operator("IMPL", b["id"], [a["id"]])
-        sdk.set_point_baseline(b["id"], 8.0, 2.0)
+        sdk._create_operator("IMPL", b["id"], [a["id"]])
+        sdk._set_point_baseline(b["id"], 8.0, 2.0)
 
         # #1157: live-uncalibrated claims trip the fail-closed gate; this unit
         # test exercises the EP mechanics, not calibration — opt out explicitly.
-        result = sdk.dream(dirty_only=True, require_calibration=False)
+        result = sdk._dream(dirty_only=True, require_calibration=False)
         assert result["converged"] is True
         assert result["iterations"] >= 1
         assert a["id"] in result["affected_claims"]
@@ -54,17 +54,17 @@ class TestDreamIncremental:
     def test_dream_clears_dirty_roots_on_convergence(self, sdk):
         a = _make_claim(sdk, "c1")
         b = _make_claim(sdk, "c2")
-        sdk.create_operator("IMPL", b["id"], [a["id"]])
+        sdk._create_operator("IMPL", b["id"], [a["id"]])
         assert sdk._dirty_roots, "writes should mark dirty roots"
 
-        sdk.dream(dirty_only=True, require_calibration=False)
+        sdk._dream(dirty_only=True, require_calibration=False)
         assert sdk._dirty_roots == set(), "converged dream clears dirty roots"
 
     def test_dream_no_anchors_noop(self, sdk):
         # Epic 903-C6 (#1244): explicit local mode pins the no-op contract.
         # Auto-select would route a no-dirty-roots small graph to full
         # (I1 rule 3) — the local key-set is the no-op contract surface.
-        result = sdk.dream(dirty_only=True, mode="local")
+        result = sdk._dream(dirty_only=True, mode="local")
         assert result["converged"] is True
         assert result["iterations"] == 0
         assert set(result.keys()) == {
@@ -76,10 +76,10 @@ class TestDreamIncremental:
         c = _make_claim(sdk, "C")
         b = _make_claim(sdk, "B")
         a = _make_claim(sdk, "A")
-        sdk.create_operator("IMPL", c["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [a["id"]])
+        sdk._create_operator("IMPL", c["id"], [b["id"]])
+        sdk._create_operator("IMPL", b["id"], [a["id"]])
 
-        result = sdk.dream(dirty_only=True, max_hops=2,
+        result = sdk._dream(dirty_only=True, max_hops=2,
                           require_calibration=False)
         assert result["converged"] is True
         affected = set(result["affected_claims"])
@@ -92,15 +92,15 @@ class TestDreamAll:
         for i in range(5):
             claim = _make_claim(sdk, f"claim {i}")
             support = _make_claim(sdk, f"support {i}")
-            sdk.create_operator("IMPL", support["id"], [claim["id"]])
+            sdk._create_operator("IMPL", support["id"], [claim["id"]])
 
-        result = sdk.dream(full=True, require_calibration=False)
+        result = sdk._dream(full=True, require_calibration=False)
         assert result["converged_all"] is True
         assert result["batches"] >= 1
         assert result["total_affected"] >= 5
 
     def test_dream_all_empty_graph(self, sdk):
-        result = sdk.dream(full=True)
+        result = sdk._dream(full=True)
         assert result["batches"] == 0
         assert result["converged_all"] is True
 
@@ -108,12 +108,12 @@ class TestDreamAll:
         """O/I/T indicator 4: stabilization WITHOUT explicit compute_confidence."""
         a = _make_claim(sdk, "decision A")
         ev = _make_claim(sdk, "evidence for A")
-        sdk.create_operator("IMPL", ev["id"], [a["id"]])
-        sdk.set_point_baseline(ev["id"], 9.0, 1.0)
+        sdk._create_operator("IMPL", ev["id"], [a["id"]])
+        sdk._set_point_baseline(ev["id"], 9.0, 1.0)
 
         # No explicit compute_confidence — just dream.
-        sdk.dream(full=True, require_calibration=False)
-        conf = sdk.get_confidence(a["id"], require_calibration=False)
+        sdk._dream(full=True, require_calibration=False)
+        conf = sdk._get_confidence(a["id"], require_calibration=False)
         assert 0 <= conf["mean"] <= 1
         assert conf["effective_n"] >= 1
 
@@ -130,20 +130,20 @@ class TestWritePathsMarkDirty:
         a = _make_claim(sdk, "a")
         b = _make_claim(sdk, "b")
         sdk._dirty_roots.clear()
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         assert sdk._dirty_roots, "operator creation marks inputs dirty"
         assert a["id"] in sdk._dirty_roots and b["id"] in sdk._dirty_roots
 
     def test_update_point_marks_dirty(self, sdk):
         p = _make_claim(sdk, "x")
         sdk._dirty_roots.clear()
-        sdk.update_point(p["id"], confidence=0.9)
+        sdk._update_point(p["id"], confidence=0.9)
         assert p["id"] in sdk._dirty_roots
 
     def test_delete_point_marks_dirty(self, sdk):
         p = _make_claim(sdk, "gone")
         sdk._dirty_roots.clear()
-        sdk.delete_point(p["id"])
+        sdk._delete_point(p["id"])
         assert p["id"] in sdk._dirty_roots
 
     def test_delete_point_dirties_neighbors_and_recomputes(self, sdk):
@@ -159,17 +159,17 @@ class TestWritePathsMarkDirty:
         ev_a = _make_claim(sdk, "source A")
         ev_b = _make_claim(sdk, "source B")
         claim = _make_claim(sdk, "conclusion")
-        sdk.set_point_baseline(ev_a["id"], 10.0, 1.0)
-        sdk.set_point_baseline(ev_b["id"], 10.0, 1.0)
-        sdk.create_operator("IMPL", ev_a["id"], [claim["id"]])
-        sdk.create_operator("IMPL", ev_b["id"], [claim["id"]])
+        sdk._set_point_baseline(ev_a["id"], 10.0, 1.0)
+        sdk._set_point_baseline(ev_b["id"], 10.0, 1.0)
+        sdk._create_operator("IMPL", ev_a["id"], [claim["id"]])
+        sdk._create_operator("IMPL", ev_b["id"], [claim["id"]])
         # Stabilize: claim confidence is evidence-driven (two strong sources).
-        sdk.dream(dirty_only=True, require_calibration=False)
+        sdk._dream(dirty_only=True, require_calibration=False)
         assert sdk._dirty_roots == set()
-        conf_before = sdk.get_confidence(claim["id"], require_calibration=False)
+        conf_before = sdk._get_confidence(claim["id"], require_calibration=False)
 
         sdk._dirty_roots.clear()
-        sdk.delete_point(ev_a["id"])
+        sdk._delete_point(ev_a["id"])
 
         # Indicator 1: the surviving neighbor is dirtied — captured BEFORE
         # the DETACH DELETE removed the deleted point's edges (#1916).
@@ -178,8 +178,8 @@ class TestWritePathsMarkDirty:
         # Indicator 2: a dream fires and the neighbor's stored confidence
         # recomputes — with one source gone it falls back toward the
         # single-source posterior.
-        sdk.dream(dirty_only=True, require_calibration=False)
-        conf_after = sdk.get_confidence(claim["id"], require_calibration=False)
+        sdk._dream(dirty_only=True, require_calibration=False)
+        conf_after = sdk._get_confidence(claim["id"], require_calibration=False)
         assert conf_after["mean"] < conf_before["mean"], (
             "claim confidence should drop when one evidence source is deleted"
         )
@@ -188,7 +188,7 @@ class TestWritePathsMarkDirty:
         old = _make_claim(sdk, "old")
         new = _make_claim(sdk, "new")
         sdk._dirty_roots.clear()
-        sdk.invalidate_point(old["id"], new["id"])
+        sdk._invalidate_point(old["id"], new["id"])
         # #2422: the invalidated (outdated=true) point is terminal for EP —
         # it can never enter an affected set so a dirty flag would strand
         # forever (pins auto-dream to local). Only the LIVE successor stays
@@ -202,7 +202,7 @@ class TestWritePathsMarkDirty:
         old = _make_claim(sdk, "superseded")
         new = _make_claim(sdk, "successor")
         sdk._dirty_roots.clear()
-        sdk.supersede_point(old["id"], new["id"])
+        sdk._supersede_point(old["id"], new["id"])
         # #2422: the superseded old point is terminal for EP — a dirty flag
         # would strand forever (never swept). Only the LIVE successor stays.
         assert old["id"] not in sdk._dirty_roots, (
@@ -213,9 +213,9 @@ class TestWritePathsMarkDirty:
     def test_mitigate_marks_dirty(self, sdk):
         a = _make_claim(sdk, "a")
         b = _make_claim(sdk, "b")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         sdk._dirty_roots.clear()
-        sdk.mitigate_operator(op["id"], "weak edge")
+        sdk._mitigate_operator(op["id"], "weak edge")
         assert sdk._dirty_roots, "mitigation marks dirty"
 
 
@@ -223,12 +223,12 @@ class TestLazyReadConsistency:
     def test_get_confidence_auto_dreams_when_dirty(self, sdk):
         a = _make_claim(sdk, "decision")
         ev = _make_claim(sdk, "evidence")
-        sdk.create_operator("IMPL", ev["id"], [a["id"]])
-        sdk.set_point_baseline(ev["id"], 8.0, 2.0)
+        sdk._create_operator("IMPL", ev["id"], [a["id"]])
+        sdk._set_point_baseline(ev["id"], 8.0, 2.0)
         sdk._dirty_roots.add(a["id"])
 
         # get_confidence should trigger a dream and return a fresh value.
-        conf = sdk.get_confidence(a["id"], require_calibration=False)
+        conf = sdk._get_confidence(a["id"], require_calibration=False)
         assert 0 <= conf["mean"] <= 1
         assert sdk._dirty_roots == set(), "lazy read consumed dirty roots"
 
@@ -237,13 +237,13 @@ class TestLazyReadConsistency:
         b = _make_claim(sdk, "c2")
         # #344: neutral Beta(1,1) baselines — the fail-closed gate runs before
         # the auto-dream, so the graph must be calibrated first.
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.create_operator("IMPL", b["id"], [a["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._create_operator("IMPL", b["id"], [a["id"]])
         # Force dirty state.
         sdk._dirty_roots.add(a["id"])
 
-        result = sdk.compute_confidence()  # no anchors → auto-extract
+        result = sdk._compute_confidence()  # no anchors → auto-extract
         assert "confidences" in result
         assert sdk._dirty_roots == set(), "auto-extract dreamed first"
 
@@ -253,17 +253,17 @@ class TestConvergenceAfterBatchWrites:
         """Write N interconnected points, then dream — no explicit EP."""
         claims = [_make_claim(sdk, f"claim {i}") for i in range(10)]
         for i, claim in enumerate(claims[:-1]):
-            sdk.create_operator("IMPL", claims[i + 1]["id"], [claim["id"]])
+            sdk._create_operator("IMPL", claims[i + 1]["id"], [claim["id"]])
 
         assert len(sdk._dirty_roots) >= 10
 
         # Dream everything (no explicit compute_confidence).
-        sdk.dream(dirty_only=True, require_calibration=False)
+        sdk._dream(dirty_only=True, require_calibration=False)
         assert sdk._dirty_roots == set()
 
         # All claims now have stabilized confidence.
         for claim in claims:
-            conf = sdk.get_confidence(claim["id"], require_calibration=False)
+            conf = sdk._get_confidence(claim["id"], require_calibration=False)
             assert 0 <= conf["mean"] <= 1
             assert conf["effective_n"] >= 1
 
@@ -273,7 +273,7 @@ class TestBaselineMarksDirty:
         """P1 (#85): baseline changes alter priors — must mark dirty."""
         p = _make_claim(sdk, "baselined")
         sdk._dirty_roots.clear()
-        sdk.set_point_baseline(p["id"], 8.0, 2.0)
+        sdk._set_point_baseline(p["id"], 8.0, 2.0)
         assert p["id"] in sdk._dirty_roots
 
 
@@ -287,16 +287,16 @@ class TestDreamEvidence:
         clobber the graph (which would corrupt the baseline_set contract)."""
         a = _make_claim(sdk, "A-evidence")
         b = _make_claim(sdk, "B-evidence")
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         # Strong baseline on b
-        sdk.set_point_baseline(b["id"], 10.0, 1.0)
+        sdk._set_point_baseline(b["id"], 10.0, 1.0)
         sdk._dirty_roots.clear()
 
-        sdk.dream([b["id"]], max_hops=2, require_calibration=False)
+        sdk._dream([b["id"]], max_hops=2, require_calibration=False)
 
         # b's posterior must be evidence-dominated (mean > 0.8), NOT clobbered
         # to the no-evidence value (~0.5-0.6) by a bare message-passing run.
-        conf = sdk.get_confidence(b["id"], require_calibration=False)
+        conf = sdk._get_confidence(b["id"], require_calibration=False)
         assert conf["mean"] > 0.8, (
             f"dream clobbered the baseline: b's posterior mean = {conf['mean']} "
             f"(expected evidence-dominated > 0.8)"
@@ -334,14 +334,14 @@ class TestMixedTypeIdsInTheDirtyLifecycle:
         """
         anchor = _make_claim(sdk, "anchor")
         claim = _make_claim(sdk, "claim")
-        sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+        sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
                      params={"id": claim["id"]})
         # The supported, measured write: it resolves the node AND mirrors 42
         # into `_dirty_roots` (`set_point_baseline` ends with `_mark_dirty`).
-        sdk.set_point_baseline(42, 3.0, 1.0)
-        sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+        sdk._set_point_baseline(42, 3.0, 1.0)
+        sdk._set_point_baseline(anchor["id"], 3.0, 1.0)
         assert 42 in sdk._dirty_roots
         assert any(isinstance(r, str) for r in sdk._dirty_roots), (
             "the fixture must mix id TYPES — a homogeneous set cannot fail the "
@@ -362,11 +362,11 @@ class TestMixedTypeIdsInTheDirtyLifecycle:
         """
         anchor = _make_claim(sdk, "anchor")
         claim = _make_claim(sdk, "claim")
-        sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+        sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
                      params={"id": claim["id"]})
-        sdk.set_point_baseline(42, 3.0, 1.0)
+        sdk._set_point_baseline(42, 3.0, 1.0)
         sdk._dirty_roots |= {anchor["id"]}
         assert 42 in sdk._dirty_roots
 
@@ -408,8 +408,8 @@ class TestMixedTypeIdsInTheDirtyLifecycle:
         seed = _make_claim(sdk, "seed")
         t1 = _make_claim(sdk, "target 1")
         t2 = _make_claim(sdk, "target 2")
-        op1 = sdk.create_operator("IMPL", seed["id"], [t1["id"]])
-        op2 = sdk.create_operator("IMPL", seed["id"], [t2["id"]])
+        op1 = sdk._create_operator("IMPL", seed["id"], [t1["id"]])
+        op2 = sdk._create_operator("IMPL", seed["id"], [t2["id"]])
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
                      params={"id": op2["id"]})

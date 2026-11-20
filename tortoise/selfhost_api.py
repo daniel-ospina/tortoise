@@ -301,7 +301,7 @@ async def create_point(body: CreatePointRequest):
             _author_props["authoredBy"] = body.authoredBy
         if body.credibility is not None:
             _author_props["credibility"] = body.credibility
-        result = sdk.create_point(
+        result = sdk._create_point(
             content=body.content,
             kind=body.kind,
             tags=body.tags,
@@ -357,7 +357,7 @@ async def list_points(
 async def get_point(point_id: str):
     """Get a single Point by id."""
     sdk = _sdk()
-    result = sdk.get_point(point_id)
+    result = sdk._get_point(point_id)
     if not result:  # get_point returns {} for a missing id (code-review P2)
         raise HTTPException(status_code=404, detail="Point not found")
     return _point_out(result)
@@ -371,7 +371,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100)):
         # Registry-aligned hybrid search (tortoise_search → tortoise_fts_query):
         # FTS/vector/RRF with an in-memory TF-IDF degradation path — works on
         # remote FalkorDB AND embedded eval (code-review P1, #525).
-        results = sdk.tortoise_fts_query(query=q, limit=limit)
+        results = sdk._tortoise_fts_query(query=q, limit=limit)
         return [_point_out(r) if isinstance(r, dict) else r for r in results]
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost search failed")
@@ -411,7 +411,7 @@ async def topic_summary(
     """
     sdk = _sdk()
     try:
-        result = sdk.topic_summarize(
+        result = sdk._topic_summarize(
             topic,
             max_seeds=max_seeds,
             max_hops=max_hops,
@@ -437,11 +437,11 @@ async def dream(full: bool = False, mode: str | None = None,
     sdk = _sdk()
     try:
         if mode is not None:
-            result = sdk.dream(mode=mode, budget=budget)
+            result = sdk._dream(mode=mode, budget=budget)
         elif full:
-            result = sdk.dream(full=True)
+            result = sdk._dream(full=True)
         else:
-            result = sdk.dream(dirty_only=True)
+            result = sdk._dream(dirty_only=True)
         return {"status": "ok", "result": result}
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost dream failed")
@@ -518,7 +518,7 @@ async def volunteer_context(body: VolunteerContextRequest):
     try:
         result = await _asyncio.wait_for(
             _asyncio.to_thread(
-                sdk.volunteer_context,
+                sdk._volunteer_context,
                 window, body.session_id, body.prior_context,
                 body.min_confidence, body.max_pointers, body.why,
             ),

@@ -50,7 +50,7 @@ def journal_sdk(tmp_path):
 def _capture(sdk, session_id: str) -> str:
     """Create a durable WorkItem Object the link pass can resolve, then
     capture. Returns the session id."""
-    sdk.create_object("test/repo#42", objectKind="pm:issue")
+    sdk._create_object("test/repo#42", objectKind="pm:issue")
     r = sdk._capture_session(CONV, session_id=session_id)
     assert r["ok"] is True, r
     return session_id
@@ -346,16 +346,16 @@ def test_entity_linked_not_resurrected_by_same_id_recreate(journal_sdk):
     sdk, events = journal_sdk
     proj = sdk._get_proj()
     g = proj.g
-    oid = sdk.create_object("X")["id"]
-    pid = sdk.create_point("statement", "attached")["id"]
+    oid = sdk._create_object("X")["id"]
+    pid = sdk._create_point("statement", "attached")["id"]
     assert link_entity(proj, "Point", pid, oid, sdk=sdk) == 1
     assert _live_link_count(g, pid, oid) == 1, "link was not written live"
 
-    assert sdk.delete_entity(oid) is True
+    assert sdk._delete_entity__svc(oid) is True
     assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
     # The premise is the ID, not the name (#3590: ids are minted, and the same
     # name yields a second entity) — so state the re-use explicitly.
-    oid2 = sdk.create_object("X", _server_id=oid)["id"]
+    oid2 = sdk._create_object("X", _server_id=oid)["id"]
     assert oid2 == oid, "the re-create did not land on the deleted id"
     assert _live_link_count(g, pid, oid) == 0, (
         "re-creating the endpoint resurrected the live link")
@@ -380,13 +380,13 @@ def test_entity_linked_not_resurrected_in_apply_engines(journal_sdk):
     sdk, events = journal_sdk
     proj = sdk._get_proj()
     g = proj.g
-    oid = sdk.create_object("Y")["id"]
-    pid = sdk.create_point("statement", "attached")["id"]
+    oid = sdk._create_object("Y")["id"]
+    pid = sdk._create_point("statement", "attached")["id"]
     link_entity(proj, "Point", pid, oid, sdk=sdk)
-    sdk.delete_entity(oid)
+    sdk._delete_entity__svc(oid)
     # Same-ID re-create, stated explicitly (#3590: the name no longer derives
     # the id — see the sibling test's migration note).
-    assert sdk.create_object("Y", _server_id=oid)["id"] == oid
+    assert sdk._create_object("Y", _server_id=oid)["id"] == oid
 
     class _Log:
         def read_all(self):
@@ -424,8 +424,8 @@ def test_link_entity_absent_endpoint_reports_and_journals_nothing(
     sdk, events = journal_sdk
     proj = sdk._get_proj()
     g = proj.g
-    pid = sdk.create_point("statement", "absent-probe")["id"]
-    oid = sdk.create_object("absent-probe-obj")["id"]
+    pid = sdk._create_point("statement", "absent-probe")["id"]
+    oid = sdk._create_object("absent-probe-obj")["id"]
 
     # target absent → no edge
     assert link_entity(proj, "Point", pid, "no-such-object", sdk=sdk) == 0
@@ -463,15 +463,15 @@ def test_noop_link_after_hard_delete_does_not_resurrect(journal_sdk):
     sdk, events = journal_sdk
     proj = sdk._get_proj()
     g = proj.g
-    pid = sdk.create_point("statement", "noop-src")["id"]
-    oid = sdk.create_object("Z-noop")["id"]
-    assert sdk.delete_entity(oid) is True
+    pid = sdk._create_point("statement", "noop-src")["id"]
+    oid = sdk._create_object("Z-noop")["id"]
+    assert sdk._delete_entity__svc(oid) is True
     assert _live_link_count(g, pid, oid) == 0, "delete left the live link"
     # Endpoint absent → the link is a NO-OP: 0 and no journal record.
     assert link_entity(proj, "Point", pid, oid, sdk=sdk) == 0
     # Same-ID re-create, stated explicitly (#3590: the name no longer derives
     # the id — see ``test_entity_linked_not_resurrected_by_same_id_recreate``).
-    assert sdk.create_object("Z-noop", _server_id=oid)["id"] == oid, (
+    assert sdk._create_object("Z-noop", _server_id=oid)["id"] == oid, (
         "the re-create did not land on the deleted id")
     assert _live_link_count(g, pid, oid) == 0, (
         "re-creating the endpoint resurrected the live link")
@@ -987,8 +987,8 @@ def test_fold_deferred_entity_links_counts_only_applied_links(
 
     sdk, _ = journal_sdk
     proj = sdk._get_proj()
-    pid = sdk.create_point("statement", "src")["id"]
-    oid = sdk.create_object("tgt")["id"]
+    pid = sdk._create_point("statement", "src")["id"]
+    oid = sdk._create_object("tgt")["id"]
     with caplog.at_level(logging.WARNING, logger="tortoise.projection.entities"):
         applied = proj.fold_deferred_entity_links([
             (0, {"type": "EntityLinked", "id": pid, "source_id": pid,
@@ -1079,8 +1079,8 @@ def test_entity_linked_fold_rejects_unknown_label_and_rel(journal_sdk):
     with _replay_write_scope():
         proj.apply({"type": "SessionRecorded", "id": "canary-session",
                     "created_at": "2026-01-01T00:00:00+00:00", "turn_count": 1})
-    pid = sdk.create_point("statement", "canary")["id"]
-    oid = sdk.create_object("canary-object")["id"]
+    pid = sdk._create_point("statement", "canary")["id"]
+    oid = sdk._create_object("canary-object")["id"]
 
     # (a) injection-shaped label → NO-OP, and the Session survives.
     assert proj._fold_entity_linked({
@@ -1456,7 +1456,7 @@ def test_link_entity_rejects_ontology_invalid_triple(journal_sdk):
     sdk, _ = journal_sdk
     proj = sdk._get_proj()
     g = proj.g
-    pid = sdk.create_point("statement", "p")["id"]
+    pid = sdk._create_point("statement", "p")["id"]
     with _replay_write_scope():
         proj.apply({"type": "SessionRecorded", "id": "s-triple"})
 
@@ -1475,7 +1475,7 @@ def test_link_entity_rejects_ontology_invalid_triple(journal_sdk):
         "source_label": "Point", "target_label": "Point",
         "target_id": pid, "edge_type": "aboutPoint"}) == 0
     # ...while a PERMITTED triple still folds (the gate is not over-broad).
-    oid = sdk.create_object("tgt2")["id"]
+    oid = sdk._create_object("tgt2")["id"]
     assert proj._fold_entity_linked({
         "type": "EntityLinked", "id": pid, "source_id": pid,
         "source_label": "Point", "target_label": "Object",

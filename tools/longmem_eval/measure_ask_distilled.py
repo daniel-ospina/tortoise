@@ -1601,7 +1601,7 @@ def _seed_distilled(sdk, fixture: dict) -> dict[str, str]:
     for claim in fixture["distilled"]["claims"]:
         ids[claim["text"]] = _seed_distilled_claim(sdk, claim)
     for sup in fixture["distilled"]["supersessions"]:
-        sdk.supersede_point(ids[sup["old"]], ids[sup["new"]])
+        sdk._supersede_point(ids[sup["old"]], ids[sup["new"]])
     return ids
 
 

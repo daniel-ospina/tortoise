@@ -3174,7 +3174,7 @@ def test_the_public_subject_door_writes_the_semantic_layers_subject_half(
         sdk, journal_path = capture_sdk()
         before = dict(monitoring.record_write_failure_counts())
         with use_record_tenant(*tenant):
-            created = sdk.create_subject("Acme Corp",
+            created = sdk._create_subject("Acme Corp",
                                          subjectKind="organization")
         lost = (monitoring.record_write_failure_counts().get("write_failed", 0)
                 - before.get("write_failed", 0))
@@ -3712,7 +3712,7 @@ def test_the_dream_drain_opens_the_graph_the_enqueue_resolved(monkeypatch):
         def _mark_dirty(self, roots):
             self.roots = roots
 
-        def dream(self, **kw):
+        def _dream(self, **kw):
             self.dreamed = kw
 
         def _bind_record_tenant(self, org_id, graph_id):

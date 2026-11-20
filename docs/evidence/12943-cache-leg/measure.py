@@ -251,11 +251,11 @@ def main() -> int:
 
     results = {}
     try:
-        results["object:alpha"] = sdk.create_object("alpha", objectKind="goal")
-        results["object:beta"] = sdk.create_object("beta", objectKind="goal")
-        results["point:gamma"] = sdk.create_point("goal", "gamma content",
+        results["object:alpha"] = sdk._create_object("alpha", objectKind="goal")
+        results["object:beta"] = sdk._create_object("beta", objectKind="goal")
+        results["point:gamma"] = sdk._create_point("goal", "gamma content",
                                                   is_episodic=False)
-        results["point:delta"] = sdk.create_point("goal", "delta content",
+        results["point:delta"] = sdk._create_point("goal", "delta content",
                                                   is_episodic=False)
         o = results["object:alpha"]
         p = results["point:gamma"]
@@ -271,7 +271,7 @@ def main() -> int:
         if "--skip-operator" in sys.argv:
             print("operator         SKIPPED (--skip-operator: see #12949)")
         else:
-            results["operator"] = sdk.create_operator(
+            results["operator"] = sdk._create_operator(
                 "IMPL", o["id"], [p["id"]], "supports")
     except Exception as exc:
         print(f"WRITE RAISED: {type(exc).__name__}: {exc}")

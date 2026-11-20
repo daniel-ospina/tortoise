@@ -169,7 +169,7 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = sdk.org_create("attribution-team")
+        team = sdk._org_create("attribution-team")
         creator = str(_uuid.uuid4())
         mint = sdk._apikey_create(team["id"], created_by=creator)
         key = mint["api_key"]
@@ -190,7 +190,7 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = sdk.org_create("attribution-team-legacy")
+        team = sdk._org_create("attribution-team-legacy")
         # created_via="provisioned", no creator uuid rides the node when the
         # caller does not pass created_by (the "api" class).
         key = sdk._apikey_create(team["id"], "api")["api_key"]
@@ -286,7 +286,7 @@ class TestEmitEventActorBackstop:
         try:
             tok = _current_actor_user_id.set(UUID_B)
             try:
-                pt = sdk.create_point("statement", "emit actor journal line",
+                pt = sdk._create_point("statement", "emit actor journal line",
                                       id="pt-emit-log", is_episodic=False)
             finally:
                 _current_actor_user_id.reset(tok)
@@ -400,7 +400,7 @@ class TestStripAndIgnoreActorClaims:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(db_path=str(tmp_path / "strip.db"))
         try:
-            pt = sdk.create_point("statement", "strip forged claim",
+            pt = sdk._create_point("statement", "strip forged claim",
                                   actor_user_id="attacker-1",
                                   is_episodic=False)
             # props bypass: create_point binds unknown kwargs into props —

@@ -653,7 +653,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 2. **Publish the bridge table** (MCP `type=`/`mode=` → SDK method).
 3. Implement the MCP list with the **SDK frozen** (method names + capabilities unchanged)
    so the handlers are written once.
-4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **105** public
+4. Then the **SDK canonical list** (`config/surface-manifest.yml` declares **39** public
    methods — a number DERIVED from the class, never typed; it moved 147 → 150 at #4282
    phase 2.2 because `link_entities`, `update_knowledge` and `delete_knowledge` were
    approved rows with no `def` yet, 150 → 124 on 2026-10-27 when the surplus methods
@@ -673,8 +673,12 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
    (`create_memory_graph`, `delete_memory_graph`, `create_key`, `list_keys`, `revoke_key`,
    `add_member`, `list_members`, `remove_member`, `adjust_relationship`, `refresh_confidence`,
    `write_knowledge_batch`) — the ONE move in this list that runs the other way, because it
-   delivers approved surface instead of removing surplus —
-   in none of the other moves did the declared surface change, so
+   delivers approved surface instead of removing surplus — and then 105 → 39 when #12901's
+   FINAL batch privatised the whole remaining off-surface set (every body kept PRIVATE on the
+   class as `_name`, every departure recorded in `tortoise/sdk_retired.py` and frozen under
+   `archive/sdk-methods/12901-sdk-final/`), which leaves the class holding exactly the approved
+   method rows;
+   in none of the other moves did the DECLARED surface change, so
    the declaration stays at 40 — and
    `docs/product/canonical-sdk-methods.md` agrees; reconcile the per-name mapping when
    that pass starts). Renames there are mechanical for the

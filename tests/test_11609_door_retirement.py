@@ -530,10 +530,18 @@ class TestEveryPointerResolvesInOneHop:
 
 
 class TestTheDestinationPerformsTheAbsorbedOperation:
-    """Measured by substitution: the container's door is replaced by a recorder."""
+    """Measured by substitution: the container's door is replaced by a recorder.
+
+    ⛔ THE NAME TO SUBSTITUTE IS THE **PRIVATE** SEAM. #12901's final batch privatised the
+    whole retired set (`list_batch` → `_list_batch`, `issue_insight` → `_issue_insight`,
+    `session_context` → `_session_context`, `delete_point` → `_delete_point`, …), and the
+    container arms now dispatch to those `_`-prefixed `def`s. `monkeypatch.setattr(...,
+    raising=True)` is the point of these rows: it reds when the name the arm reaches stops
+    existing, which is exactly what the privatisation did to the public spelling.
+    """
 
     @pytest.mark.parametrize("kind,door", [
-        ("batch", "list_batch"),
+        ("batch", "_list_batch"),
     ])
     def test_list_knowledge_batch_reaches_list_batch(self, kind, door, monkeypatch):
         reached: list = []
@@ -560,15 +568,15 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             return _fn
 
         monkeypatch.setattr(
-            TortoiseSDK, "get_cross_lens_candidates",
+            TortoiseSDK, "_get_cross_lens_candidates",
             record("get_cross_lens_candidates"), raising=True)
         sdk.review_link_candidates("cross_lens", limit=3)
         assert [r[0] for r in reached] == ["get_cross_lens_candidates"], reached
 
     @pytest.mark.parametrize("tool,arm_kwargs,door", [
         ("tortoise_search_knowledge", {"title": "t", "mode": "issue_insight"},
-         "issue_insight"),
-        ("tortoise_check_confidence", {"session": True}, "session_context"),
+         "_issue_insight"),
+        ("tortoise_check_confidence", {"session": True}, "_session_context"),
     ])
     def test_a_rest_spec_door_lands_on_the_method_it_retired_into(
             self, tool, arm_kwargs, door, monkeypatch):
@@ -623,7 +631,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
         reached: list[tuple[str, str]] = []
         sdk = TortoiseSDK.__new__(TortoiseSDK)
 
-        for label, method in (("Point", "delete_point"), ("Object", "delete_entity")):
+        for label, method in (("Point", "_delete_point"), ("Object", "_delete_entity")):
             monkeypatch.setattr(
                 TortoiseSDK, "_get_proj",
                 lambda _self, _label=label: type(
@@ -635,15 +643,15 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
                 TortoiseSDK, method,
                 lambda _self, _id, _m=method: reached.append((_m, _id)) or True,
                 raising=True)
-            assert TortoiseSDK.delete(sdk, f"id-{label}") is True, label
+            assert TortoiseSDK._delete(sdk, f"id-{label}") is True, label
 
-        assert reached == [("delete_point", "id-Point"),
-                           ("delete_entity", "id-Object")], reached
+        assert reached == [("_delete_point", "id-Point"),
+                           ("_delete_entity", "id-Object")], reached
 
         # …and the MCP door's confirmation path lands on that same `sdk.delete`.
         monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
         monkeypatch.setattr(
-            TortoiseSDK, "delete",
+            TortoiseSDK, "_delete",
             lambda _self, _id: reached.append(("delete", _id)) or True, raising=True)
         monkeypatch.setattr(ms, "_is_dev_mode", lambda: True)
         token = ms._deletion.issue("id-x")
@@ -668,7 +676,7 @@ class TestTheDestinationPerformsTheAbsorbedOperation:
             reached.append((args, kwargs))
             return {"session": args[0] if args else None}
 
-        monkeypatch.setattr(TortoiseSDK, "get_session", _fn, raising=True)
+        monkeypatch.setattr(TortoiseSDK, "_get_session", _fn, raising=True)
         monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
         # `_safe`'s auth gate refuses when the transport mode is unset (fail-closed,
         # #236) — this case measures DISPATCH, not auth, so name the mode.

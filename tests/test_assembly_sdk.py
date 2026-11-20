@@ -913,7 +913,7 @@ def test_exactly_one_reader_call_and_no_legacy_rerun(sdk, monkeypatch):
         return "42", 5
 
     monkeypatch.setattr(sdk_mod, "_ask_reader_complete", _flaky)
-    monkeypatch.setattr(sdk, "tortoise_fts_query",
+    monkeypatch.setattr(sdk, "_tortoise_fts_query",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("legacy retrieval must NOT run")))
     monkeypatch.setenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", "1")
@@ -1100,7 +1100,7 @@ def test_malformed_date_row_undated_not_raise(sdk, monkeypatch):
     raise (Task 4 pin carried to the fired surface)."""
     ag.build_base_graph(sdk)
     proj = sdk._get_proj()
-    sdk.create_point(
+    sdk._create_point(
         "statement", "the event with an unparseable date on the record",
         id="pMalformed", session_id="sess-malformed",
         is_episodic=True, status="draft", quote="unparseable date",
@@ -1157,7 +1157,7 @@ def test_no_starvation_whole_hit_skip_survivor(sdk, monkeypatch):
     admitted — never a strict tail drop (assemble_context contract)."""
     ag.build_base_graph(sdk)
     proj = sdk._get_proj()
-    sdk.create_point(
+    sdk._create_point(
         "statement", "HUGEBLOCK " + ("zzz filler detail " * 6000),
         id="pGiant", session_id="sess-giant", is_episodic=True,
         status="draft", createdAt="2026-08-11")
@@ -1324,7 +1324,7 @@ def test_long_successor_sdk_object_read_returns_it_verbatim(sdk):
     # Object view now excludes the canonical terminal vocabulary — so read it
     # through the terminal-inclusive view (the documented audit/history
     # opt-in). This test pins #5370's TRUNCATION contract, not visibility.
-    hits = sdk.tortoise_fts_query("read-src", entity_type="object",
+    hits = sdk._tortoise_fts_query("read-src", entity_type="object",
                                   limit=25, include_terminal=True)
     hit = next((h for h in hits if h.get("content") == "read-src"), None)
     assert hit is not None, (

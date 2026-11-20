@@ -16,9 +16,9 @@ def _tmp_db() -> str:
 
 def _seed_small_graph(sdk: TortoiseSDK) -> tuple[str, str, str]:
     """Create a small graph: entity A + B connected via NAND, plus an outsider C."""
-    a = sdk.create_point("statement", "Entity A says X is true")["id"]
-    b = sdk.create_point("statement", "Entity B says X is false")["id"]
-    c = sdk.create_point("statement", "Entity C is unrelated")["id"]
+    a = sdk._create_point("statement", "Entity A says X is true")["id"]
+    b = sdk._create_point("statement", "Entity B says X is false")["id"]
+    c = sdk._create_point("statement", "Entity C is unrelated")["id"]
 
     # Connect A and B via NAND (disagreement)
     proj = sdk._get_proj()

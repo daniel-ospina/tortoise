@@ -58,7 +58,7 @@ def sdk(tmp_path_factory):
     yield sdk
     # Cleanup: delete all test nodes
     try:
-        sdk.test_guard()
+        sdk._test_guard()
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
     except Exception:
@@ -72,12 +72,12 @@ class TestTopicSummarizationSettledZone:
     def test_settled_zone_with_high_confidence_low_variance(self, sdk):
         """Claims with high confidence + low EP variance → classified as settled."""
         # Create 2 settled claims connected via IMPL (mutual support)
-        claim_a = sdk.create_point("statement", "Pricing should be value-based")
-        claim_b = sdk.create_point("statement", "Value-based pricing maximizes LTV")
+        claim_a = sdk._create_point("statement", "Pricing should be value-based")
+        claim_b = sdk._create_point("statement", "Value-based pricing maximizes LTV")
         aid, bid = claim_a["id"], claim_b["id"]
 
         # IMPL connection: A supports B
-        sdk.create_operator("IMPL", aid, [bid])
+        sdk._create_operator("IMPL", aid, [bid])
 
         # Set EP posteriors: high alpha, low beta → high confidence, tight variance
         # alpha=20, beta=3 → mean=0.87, variance~0.0047 (< 0.01)
@@ -108,12 +108,12 @@ class TestTopicSummarizationSettledZone:
 
     def test_not_settled_when_variance_too_high(self, sdk):
         """Claims with high confidence but elevated variance → NOT settled."""
-        claim = sdk.create_point("statement", "Pricing strategy: freemium model")
+        claim = sdk._create_point("statement", "Pricing strategy: freemium model")
         cid = claim["id"]
 
         # Another supporting claim
-        support = sdk.create_point("statement", "Freemium drives adoption")
-        sdk.create_operator("IMPL", support["id"], [cid])
+        support = sdk._create_point("statement", "Freemium drives adoption")
+        sdk._create_operator("IMPL", support["id"], [cid])
 
         # Set EP: moderate confidence but variance just above settled threshold
         # alpha=5, beta=2 → mean=0.714, variance=10/(49*8)=0.0255 (> 0.01)
@@ -138,7 +138,7 @@ class TestTopicSummarizationContestedZone:
 
     def test_contested_from_ep_variance(self, sdk):
         """Claim with elevated EP posterior variance → classified as contested."""
-        claim = sdk.create_point("statement", "Architecture should use microservices")
+        claim = sdk._create_point("statement", "Architecture should use microservices")
         cid = claim["id"]
 
         # Set EP: high variance posterior → contested
@@ -167,12 +167,12 @@ class TestTopicSummarizationContestedZone:
 
     def test_no_ep_data_not_contested(self, sdk):
         """Claim with edges but no EP data (never calibrated) → NOT contested."""
-        claim = sdk.create_point("statement", "Security requires defense in depth")
+        claim = sdk._create_point("statement", "Security requires defense in depth")
         cid = claim["id"]
 
         # Add edges (so has_evidence would be True) but NO ep_alpha set
-        support = sdk.create_point("statement", "Layered security is effective")
-        sdk.create_operator("IMPL", support["id"], [cid])
+        support = sdk._create_point("statement", "Layered security is effective")
+        sdk._create_operator("IMPL", support["id"], [cid])
 
         graph = sdk._get_proj().g
         result = topic_summarize(graph, topic="security", max_seeds=50, max_hops=0)
@@ -188,12 +188,12 @@ class TestTopicSummarizationDisputedPairs:
 
     def test_nand_disputed_pair_detection(self, sdk):
         """NAND-connected pair with both above variance threshold → disputed."""
-        claim_a = sdk.create_point("statement", "Use React for frontend")
-        claim_b = sdk.create_point("statement", "Use Vue for frontend")
+        claim_a = sdk._create_point("statement", "Use React for frontend")
+        claim_b = sdk._create_point("statement", "Use Vue for frontend")
         aid, bid = claim_a["id"], claim_b["id"]
 
         # NAND connection: A contradicts B
-        sdk.create_operator("NAND", aid, [bid])
+        sdk._create_operator("NAND", aid, [bid])
 
         # Set EP posteriors: both have moderate variance > 0.02 but < 0.04
         # alpha=2, beta=5 → mean=0.286, variance=10/(49*8)=0.0255 (> 0.02, < 0.04)
@@ -232,11 +232,11 @@ class TestTopicSummarizationDisputedPairs:
 
     def test_nand_pair_not_disputed_when_variance_low(self, sdk):
         """NAND-connected pair with low variance → NOT disputed."""
-        claim_a = sdk.create_point("statement", "Use PostgreSQL for storage")
-        claim_b = sdk.create_point("statement", "Use SQLite for storage")
+        claim_a = sdk._create_point("statement", "Use PostgreSQL for storage")
+        claim_b = sdk._create_point("statement", "Use SQLite for storage")
         aid, bid = claim_a["id"], claim_b["id"]
 
-        sdk.create_operator("NAND", aid, [bid])
+        sdk._create_operator("NAND", aid, [bid])
 
         # Set EP: low variance on both (tight posterior)
         # alpha=20, beta=3 → variance=0.0047 (< 0.02)
@@ -264,7 +264,7 @@ class TestTopicSummaryOutputStructure:
 
     def test_to_dict_structure(self, sdk):
         """TopicSummary.to_dict() returns all expected keys."""
-        claim = sdk.create_point("statement", "A claim about testing")
+        claim = sdk._create_point("statement", "A claim about testing")
         cid = claim["id"]
 
         # Set EP data to get classification
@@ -325,12 +325,12 @@ class TestTopicSummarizationArgumentStructure:
 
     def test_impl_chain_in_argument_structure(self, sdk):
         """IMPL relationships appear as impl_chains in argument_structure."""
-        claim_a = sdk.create_point("statement", "Testing improves code quality")
-        claim_b = sdk.create_point("statement", "Code quality reduces bugs")
+        claim_a = sdk._create_point("statement", "Testing improves code quality")
+        claim_b = sdk._create_point("statement", "Code quality reduces bugs")
         aid, bid = claim_a["id"], claim_b["id"]
 
         # A IMPL B
-        sdk.create_operator("IMPL", aid, [bid])
+        sdk._create_operator("IMPL", aid, [bid])
 
         # Set EP data
         proj = sdk._get_proj()
@@ -359,11 +359,11 @@ class TestTopicSummarizationArgumentStructure:
 
     def test_nand_conflict_in_argument_structure(self, sdk):
         """NAND relationships appear as nand_conflicts in argument_structure."""
-        claim_a = sdk.create_point("statement", "Monorepo is best")
-        claim_b = sdk.create_point("statement", "Polyrepo is best")
+        claim_a = sdk._create_point("statement", "Monorepo is best")
+        claim_b = sdk._create_point("statement", "Polyrepo is best")
         aid, bid = claim_a["id"], claim_b["id"]
 
-        sdk.create_operator("NAND", aid, [bid])
+        sdk._create_operator("NAND", aid, [bid])
 
         proj = sdk._get_proj()
         proj.g.query(
@@ -393,8 +393,8 @@ class TestTopicSummarizationRetractedExclusion:
     def test_retracted_points_excluded_from_seeds(self, sdk):
         """Points with status='retracted' are not returned in topic neighborhood."""
         # Create a live point and a retracted point on the same topic
-        live = sdk.create_point("statement", "Pricing should be value-based retracted_test")  # noqa: F841
-        retracted = sdk.create_point("statement", "Pricing should be cost-plus retracted_test")
+        live = sdk._create_point("statement", "Pricing should be value-based retracted_test")  # noqa: F841
+        retracted = sdk._create_point("statement", "Pricing should be cost-plus retracted_test")
         rid = retracted["id"]
 
         # Retract the point (sets status='retracted')
@@ -420,15 +420,15 @@ class TestTopicSummarizationRetractedExclusion:
     def test_retracted_excluded_from_operator_chain(self, sdk):
         """Retracted points are excluded from operator-chain expansion."""
         # Seed point
-        seed = sdk.create_point("statement", "Architecture strategy retracted_chain_test")
+        seed = sdk._create_point("statement", "Architecture strategy retracted_chain_test")
         sid = seed["id"]
 
         # Connected point that is retracted
-        connected = sdk.create_point("statement", "Use monolith retracted_chain_test")
+        connected = sdk._create_point("statement", "Use monolith retracted_chain_test")
         cid = connected["id"]
 
         # Connect them via IMPL
-        sdk.create_operator("IMPL", sid, [cid])
+        sdk._create_operator("IMPL", sid, [cid])
 
         # Set EP data on both
         proj = sdk._get_proj()
@@ -469,12 +469,12 @@ class TestUncalibratedNANDPair:
         defaults no longer fabricate one), so the gate is belt-to-braces — and
         the assertion below pins the new contract instead of the old width.
         """
-        claim_a = sdk.create_point("statement", "Use tabs for indentation uncalibrated")
-        claim_b = sdk.create_point("statement", "Use spaces for indentation uncalibrated")
+        claim_a = sdk._create_point("statement", "Use tabs for indentation uncalibrated")
+        claim_b = sdk._create_point("statement", "Use spaces for indentation uncalibrated")
         aid, bid = claim_a["id"], claim_b["id"]
 
         # NAND connection: A contradicts B
-        sdk.create_operator("NAND", aid, [bid])
+        sdk._create_operator("NAND", aid, [bid])
 
         # DO NOT set any EP data — points remain uncalibrated
 
@@ -534,7 +534,7 @@ class TestStage1aEntityNameResolution:
         proj.g.query(
             "CREATE (o:Object {id:'obj-5510-solo', name:'zq5510solo', "
             "objectKind:'org', status:'live'})")
-        point = sdk.create_point("statement", "unrelated alpha claim")
+        point = sdk._create_point("statement", "unrelated alpha claim")
         proj.g.query(
             "MATCH (p:Point {id:$pid}), (o:Object {id:'obj-5510-solo'}) "
             "CREATE (p)-[:aboutObject]->(o)",
@@ -563,8 +563,8 @@ class TestStage1aEntityNameResolution:
                 "CREATE (o:Object {id:$id, name:'zq5510dup', "
                 "objectKind:'org', status:'live'})",
                 params={"id": oid})
-        point_a = sdk.create_point("statement", "unrelated beta claim")
-        point_b = sdk.create_point("statement", "unrelated gamma claim")
+        point_a = sdk._create_point("statement", "unrelated beta claim")
+        point_b = sdk._create_point("statement", "unrelated gamma claim")
         proj.g.query(
             "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
             "CREATE (p)-[:aboutObject]->(o)",

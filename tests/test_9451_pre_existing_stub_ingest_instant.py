@@ -87,7 +87,7 @@ def _mint_stub_via_create_point(sdk, session_id):
     which is enough to run ``_link_source`` → ``_mint_source_stub`` — the writer
     whose ``ingestedAt`` choice is never journaled.
     """
-    sdk.create_point("observation", "the earlier point, linked to the session",
+    sdk._create_point("observation", "the earlier point, linked to the session",
                      session_id=session_id)
     url = f"session:{session_id}"
     rows = sdk._get_proj().g.query(

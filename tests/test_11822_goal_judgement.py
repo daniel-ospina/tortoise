@@ -73,19 +73,19 @@ def _world(sdk, *, comparator="<=", threshold=10.0, dwell=1, tag=None):
     same nodes and a reading about one would be served for the other.
     """
     suffix = f" [{tag}]" if tag else ""
-    indicator = sdk.create_object(f"CI pipeline duration{suffix}",
+    indicator = sdk._create_object(f"CI pipeline duration{suffix}",
                                   objectKind="workflow")
-    target_node = sdk.create_object(
+    target_node = sdk._create_object(
         f"CI <= 10m{suffix}", objectKind="target",
         comparator=comparator, threshold=threshold, dwell=dwell,
     )
-    goal = sdk.create_object(f"CI is fast{suffix}", objectKind="goal",
+    goal = sdk._create_object(f"CI is fast{suffix}", objectKind="goal",
                              goalState="active")
     return indicator, target_node, goal
 
 
 def _reading(sdk, indicator, value, *, at, unit="minutes", kind="measurement"):
-    return sdk.create_event(
+    return sdk._create_event(
         f"CI run at {at}", kind, value=value, unit=unit, startedAt=at,
         aboutObject=indicator["id"],
     )
@@ -341,13 +341,13 @@ def test_THE_TRAP_confidence_alone_leaves_both_nodes_at_0500(sdk):
     exact defect #11822 exists to remove, pinned so a later refactor cannot
     restore it while every other test in this file stays green.
     """
-    goal = sdk.create_object("CI is fast [trap]", objectKind="goal",
+    goal = sdk._create_object("CI is fast [trap]", objectKind="goal",
                              goalState="active")
-    point = sdk.create_point("statement", "judgement: CI met (confidence=)",
+    point = sdk._create_point("statement", "judgement: CI met (confidence=)",
                              claim_class="derived", confidence=0.95)
-    sdk.create_operator("IMPL", point["id"], [goal["id"]], direction="->")
+    sdk._create_operator("IMPL", point["id"], [goal["id"]], direction="->")
 
-    result = sdk.compute_confidence(require_calibration=False)
+    result = sdk._compute_confidence(require_calibration=False)
     assert result["confidences"][point["id"]]["mean"] == pytest.approx(0.5)
     assert result["confidences"][goal["id"]]["mean"] == pytest.approx(0.5)
     assert result["converged"] is True  # and it SAYS so — that is the trap
@@ -366,7 +366,7 @@ def test_with_a_baseline_the_belief_moves_and_the_flip_moves_it_back(sdk):
     assert met["prior"] == {"alpha": 9.0, "beta": 1.0, "support": 0.9,
                             "source": "system-default"}
 
-    after_met = sdk.compute_confidence()
+    after_met = sdk._compute_confidence()
     assert after_met["converged"] is True
     j_met = after_met["confidences"][met["point_id"]]["mean"]
     g_met = after_met["confidences"][goal["id"]]["mean"]
@@ -384,7 +384,7 @@ def test_with_a_baseline_the_belief_moves_and_the_flip_moves_it_back(sdk):
     # the prior is the SUPPORT this judgement gives the goal, so an `unmet`
     # judgement carries 0.1 — not 0.9 "confidence in the word"
     assert unmet["prior"]["support"] == pytest.approx(0.1)
-    after_unmet = sdk.compute_confidence()
+    after_unmet = sdk._compute_confidence()
     j_unmet = after_unmet["confidences"][unmet["point_id"]]["mean"]
     g_unmet = after_unmet["confidences"][goal["id"]]["mean"]
     assert j_unmet < 0.2, f"the new judgement carries no negative belief ({j_unmet})"
@@ -548,7 +548,7 @@ def test_two_goals_sharing_one_indicator_do_not_share_a_dwell_baseline(sdk):
     """
     indicator, target_node, goal_a = _world(sdk, tag="a")
     _, _, goal_b = _world(sdk, tag="b")
-    goal_b["id"] = sdk.create_object("CI is fast [b2]", objectKind="goal",
+    goal_b["id"] = sdk._create_object("CI is fast [b2]", objectKind="goal",
                                      goalState="active")["id"]
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
@@ -602,7 +602,7 @@ def test_a_flip_does_not_accumulate_operators(sdk):
             "one piece of evidence, counted once"
         )
         beliefs.append(round(
-            sdk.compute_confidence()["confidences"][goal["id"]]["mean"], 4))
+            sdk._compute_confidence()["confidences"][goal["id"]]["mean"], 4))
     assert beliefs[0] == beliefs[2] == beliefs[4], (
         f"same evidence, different belief by flip count: {beliefs}"
     )
@@ -634,7 +634,7 @@ def test_a_refused_strength_writes_nothing_and_the_next_call_works(sdk):
     retry = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                             target=target)
     assert retry["written"] is True
-    assert sdk.compute_confidence()["converged"] is True  # no uncalibrated orphan
+    assert sdk._compute_confidence()["converged"] is True  # no uncalibrated orphan
 
 
 def test_a_target_without_an_id_is_refused_by_the_writer(sdk):
@@ -658,7 +658,7 @@ def test_a_target_without_an_id_is_refused_by_the_writer(sdk):
 
     # two NAMED targets on the same goal+indicator keep one live claim each
     a = Target.from_node(target_node)
-    b_node = sdk.create_object("CI >= 30m", objectKind="target",
+    b_node = sdk._create_object("CI >= 30m", objectKind="target",
                                comparator=">=", threshold=30.0, dwell=1)
     b = Target.from_node(b_node)
     ra = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
@@ -768,7 +768,7 @@ def test_a_retracted_judgement_is_not_the_current_state(sdk):
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
     met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                           target=target)
-    sdk.retract_point(met["point_id"])
+    sdk._retract_point(met["point_id"])
 
     assert latest_judgement(sdk, goal_id=goal["id"]) is None, (
         "a retracted judgement is still served as the current state"
@@ -798,16 +798,16 @@ def test_a_refused_supersede_leaves_no_second_live_claim(sdk, monkeypatch):
                      target=target)
 
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    real = sdk.supersede_point
+    real = sdk._supersede_point
 
     def refuse(*a, **kw):
         raise ValueError("refused by the lifecycle guard")
 
-    monkeypatch.setattr(sdk, "supersede_point", refuse)
+    monkeypatch.setattr(sdk, "_supersede_point", refuse)
     with pytest.raises(ValueError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
@@ -827,7 +827,7 @@ def test_a_refused_baseline_leaves_no_judgement_point(sdk, monkeypatch):
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
 
-    sdk.set_point_baseline = lambda *a, **kw: (_ for _ in ()).throw(
+    sdk._set_point_baseline = lambda *a, **kw: (_ for _ in ()).throw(
         RuntimeError("baseline refused"))
     with pytest.raises(RuntimeError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
@@ -860,17 +860,17 @@ def test_a_supersede_that_fails_after_mutating_keeps_the_migrated_mirror(
                      target=target)
 
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    real = sdk.supersede_point
+    real = sdk._supersede_point
 
     def dies_after_the_mutation(old_id, new_id, **kw):
         real(old_id, new_id, **kw)  # the supersession LANDED (mirror migrated)
         raise RuntimeError("driver died after the journal append")
 
-    monkeypatch.setattr(sdk, "supersede_point", dies_after_the_mutation)
+    monkeypatch.setattr(sdk, "_supersede_point", dies_after_the_mutation)
     with pytest.raises(RuntimeError) as excinfo:
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
@@ -910,7 +910,7 @@ def test_a_supersede_that_dies_mid_transfer_keeps_the_successor(sdk, monkeypatch
                            target=target)
 
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    real = sdk.supersede_point
+    real = sdk._supersede_point
 
     def dies_mid_transfer(old_id, new_id, **kw):
         # 2a landed: the operator's IMPL now points at the successor …
@@ -921,11 +921,11 @@ def test_a_supersede_that_dies_mid_transfer_keeps_the_successor(sdk, monkeypatch
         # … and 2a-INPUT + the status write never happen.
         raise RuntimeError("driver died between the 2a and 2a-INPUT legs")
 
-    monkeypatch.setattr(sdk, "supersede_point", dies_mid_transfer)
+    monkeypatch.setattr(sdk, "_supersede_point", dies_mid_transfer)
     with pytest.raises(RuntimeError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     assert sdk.get_entity(met["point_id"])["status"] == "live", (
         "this pin is about the window where the predecessor is STILL live"
@@ -955,7 +955,7 @@ def test_a_refused_supersede_over_a_non_live_predecessor_still_removes_the_succe
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    authored = sdk.create_point(
+    authored = sdk._create_point(
         "statement", "CI is fast — an authored judgement",
         claim_class="asserted", status="draft", judgementState="met",
         goalId=goal["id"], indicatorId=indicator["id"],
@@ -992,7 +992,7 @@ def test_a_status_only_supersession_landing_keeps_the_successor(sdk, monkeypatch
                            target=target)
 
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    real = sdk.supersede_point
+    real = sdk._supersede_point
 
     def stamps_then_dies(old_id, new_id, **kw):
         # the status write landed; no edge leg ran for this shape
@@ -1001,11 +1001,11 @@ def test_a_status_only_supersession_landing_keeps_the_successor(sdk, monkeypatch
             params={"id": old_id})
         raise RuntimeError("driver died after the status write")
 
-    monkeypatch.setattr(sdk, "supersede_point", stamps_then_dies)
+    monkeypatch.setattr(sdk, "_supersede_point", stamps_then_dies)
     with pytest.raises(RuntimeError):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
-    monkeypatch.setattr(sdk, "supersede_point", real)
+    monkeypatch.setattr(sdk, "_supersede_point", real)
 
     assert sdk.get_entity(met["point_id"])["status"] == "superseded"
     live = [r[0] for r in _judgement_points(sdk, goal["id"])
@@ -1078,7 +1078,7 @@ def test_a_guard_refusal_over_an_unreadable_graph_still_removes_the_successor(
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    authored = sdk.create_point(
+    authored = sdk._create_point(
         "statement", "CI is fast — an authored judgement",
         claim_class="asserted", status="draft", judgementState="met",
         goalId=goal["id"], indicatorId=indicator["id"],
@@ -1187,8 +1187,8 @@ def test_a_failed_compensation_does_not_mask_the_supersede_refusal(
     def cleanup_cannot_confirm(*a, **kw):
         raise RuntimeError("journal append for the delete did not confirm")
 
-    monkeypatch.setattr(sdk, "supersede_point", refuse)
-    monkeypatch.setattr(sdk, "delete_point", cleanup_cannot_confirm)
+    monkeypatch.setattr(sdk, "_supersede_point", refuse)
+    monkeypatch.setattr(sdk, "_delete_point", cleanup_cannot_confirm)
     with pytest.raises(ValueError) as excinfo:
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
@@ -1232,19 +1232,19 @@ def test_a_missing_reading_does_not_retire_a_live_judgement(sdk):
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
     met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                           target=target)
-    sdk.compute_confidence()
-    before = sdk.get_confidence(goal["id"], require_calibration=False)["mean"]
+    sdk._compute_confidence()
+    before = sdk._get_confidence(goal["id"], require_calibration=False)["mean"]
 
     # an unreadable reading arrives
-    sdk.create_event("CI run (bad)", "measurement", value="n/a", unit="minutes",
+    sdk._create_event("CI run (bad)", "measurement", value="n/a", unit="minutes",
                      startedAt="2026-11-11T11:00:00Z", aboutObject=indicator["id"])
     res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                           target=target)
     assert res["written"] is False
     assert res["judged"]["state"] == "unknown"
     assert res["point_id"] == met["point_id"]
-    sdk.compute_confidence()
-    after = sdk.get_confidence(goal["id"], require_calibration=False)["mean"]
+    sdk._compute_confidence()
+    after = sdk._get_confidence(goal["id"], require_calibration=False)["mean"]
     assert after == pytest.approx(before), (
         f"a missing reading moved the goal's belief {before} -> {after}"
     )
@@ -1398,7 +1398,7 @@ def test_judge_scopes_the_previous_state_by_target(sdk):
     """
     indicator, target_node, goal = _world(sdk)
     a = Target.from_node(target_node)
-    b_node = sdk.create_object("CI >= 30m", objectKind="target",
+    b_node = sdk._create_object("CI >= 30m", objectKind="target",
                                comparator=">=", threshold=30.0, dwell=1)
     b = Target.from_node(b_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
@@ -1427,8 +1427,8 @@ def test_an_invalidated_judgement_is_not_the_current_state(sdk):
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
     met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                            target=target)
-    correction = sdk.create_point("statement", "correction", claim_class="derived")
-    sdk.invalidate_point(met["point_id"], corrected_by_id=correction["id"])
+    correction = sdk._create_point("statement", "correction", claim_class="derived")
+    sdk._invalidate_point(met["point_id"], corrected_by_id=correction["id"])
     node = sdk.get_entity(met["point_id"])
     assert node.get("outdated") is True and node.get("status") == "live", (
         "this pin depends on invalidate_point leaving `status` alone"
@@ -1501,7 +1501,7 @@ def test_a_non_finite_value_is_unknown_and_never_bricks_the_writer(sdk):
 
     indicator, target_node, goal = _world(sdk)
     real = Target.from_node(target_node)
-    sdk.create_event("CI run (nan)", "measurement", value="nan", unit="minutes",
+    sdk._create_event("CI run (nan)", "measurement", value="nan", unit="minutes",
                      startedAt="2026-11-11T10:00:00Z", aboutObject=indicator["id"])
     res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                            target=real)
@@ -1656,7 +1656,7 @@ def test_a_double_counted_arrow_is_reported_not_hidden(sdk):
     assert res["extraOperators"] == []
 
     # another writer adds a second arrow into the same goal
-    dupe = sdk.create_operator("IMPL", res["point_id"], [goal["id"]],
+    dupe = sdk._create_operator("IMPL", res["point_id"], [goal["id"]],
                                direction="->")
     assert _extra_operators(sdk, res["point_id"], goal["id"],
                             res["operator_id"]) == [dupe["id"]]
@@ -1697,7 +1697,7 @@ def test_a_bool_is_not_a_number_on_EITHER_path(sdk):
 
     indicator, target_node, goal = _world(sdk)
     real = Target.from_node(target_node)
-    sdk.create_event("CI run (bool)", "measurement", value=True, unit="minutes",
+    sdk._create_event("CI run (bool)", "measurement", value=True, unit="minutes",
                      startedAt="2026-11-11T10:00:00Z", aboutObject=indicator["id"])
     res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                            target=real)
@@ -1716,10 +1716,10 @@ def test_the_scope_guard_refuses_a_predecessor_that_is_not_a_judgement(sdk):
     _, _, goal_b = _world(sdk, tag="b")
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
-    foreign = sdk.create_point("statement", "a foreign conclusion",
+    foreign = sdk._create_point("statement", "a foreign conclusion",
                                claim_class="derived")
-    sdk.set_point_baseline(foreign["id"], 9.0, 1.0)
-    sdk.create_operator("IMPL", foreign["id"], [goal_b["id"]], direction="->")
+    sdk._set_point_baseline(foreign["id"], 9.0, 1.0)
+    sdk._create_operator("IMPL", foreign["id"], [goal_b["id"]], direction="->")
 
     judged = judge(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
                    target=target)
@@ -1769,7 +1769,7 @@ def test_the_scope_guard_checks_the_TARGET_leg(sdk):
     """D4 allows n targets per goal+indicator — they are not one chain."""
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
-    other_node = sdk.create_object("CI >= 30m", objectKind="target",
+    other_node = sdk._create_object("CI >= 30m", objectKind="target",
                                    comparator=">=", threshold=30.0, dwell=1)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
     a = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
@@ -2018,13 +2018,13 @@ def test_a_LEGACY_claim_without_an_indicator_is_REPAIRED_not_refused(sdk):
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
-    legacy = sdk.create_point("statement",
+    legacy = sdk._create_point("statement",
                               "judgement: met (pre-#11965, unscoped)",
                               claim_class="derived", judgementState="met",
                               goalId=goal["id"], targetId=target.target_id)
     assert sdk.get_entity(legacy["id"]).get("indicatorId") is None
-    sdk.set_point_baseline(legacy["id"], 9.0, 1.0)
-    sdk.create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
+    sdk._set_point_baseline(legacy["id"], 9.0, 1.0)
+    sdk._create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
     assert _impl_into(sdk, legacy["id"], goal["id"]) == 1
 
     repaired = record_judgement(
@@ -2046,7 +2046,7 @@ def test_a_LEGACY_claim_without_an_indicator_is_REPAIRED_not_refused(sdk):
     # (`goal_id` was a required argument, written unconditionally), so its
     # absence still means "not a judgement of this chain". Tolerating it would
     # re-open the cross-goal edge transfer (#6180).
-    foreign = sdk.create_point("statement", "a claim with no goalId",
+    foreign = sdk._create_point("statement", "a claim with no goalId",
                                claim_class="derived", judgementState="met",
                                targetId=target.target_id)
     with pytest.raises(ValueError) as exc:
@@ -2073,13 +2073,13 @@ def test_a_LEGACY_claim_without_a_TARGET_is_REPAIRED_too(sdk):
     indicator, target_node, goal = _world(sdk, tag="notarget")
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
-    legacy = sdk.create_point("statement",
+    legacy = sdk._create_point("statement",
                               "judgement: met (pre-#11965, no target)",
                               claim_class="derived", judgementState="met",
                               goalId=goal["id"], indicatorId=indicator["id"])
     assert sdk.get_entity(legacy["id"]).get("targetId") is None
-    sdk.set_point_baseline(legacy["id"], 9.0, 1.0)
-    sdk.create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
+    sdk._set_point_baseline(legacy["id"], 9.0, 1.0)
+    sdk._create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
     assert _impl_into(sdk, legacy["id"], goal["id"]) == 1
 
     repaired = record_judgement(

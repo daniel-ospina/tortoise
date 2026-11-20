@@ -1301,7 +1301,10 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     #    the engine is never handed an array of maps. `update_entity` delegates
     #    to `_update_entity`, which is where the Point branch writes caller
     #    props straight through.
-    for door in ("create_point", "update_point", "_update_entity"):
+    # #12901 FINAL batch: every one of these three is now spelled with the leading
+    # underscore (`_create_point`, `_update_point`) — the bodies are unchanged and the
+    # public spellings are tombstones, so the seam to inspect is the private one.
+    for door in ("_create_point", "_update_point", "_update_entity"):
         assert "_encode_json_record_props" in inspect.getsource(
             getattr(TortoiseSDK, door)), (
             f"{door} no longer encodes `mentions`, so the engine is handed an "
