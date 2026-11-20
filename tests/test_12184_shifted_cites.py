@@ -303,15 +303,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "sdk.py:15787", _SDK, 15787, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
     (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
-    # --- #14043 review, finding 2 (the FINAL-head review): the same class, still UNCLOSED for five
-    # addresses this revision writes at THIS head in its new §2.2 `:Source` reader row and in row 13. They
-    # were in neither the header's enumeration nor any pin here, and the header's own reader rule
-    # resolves such an address to the PIN — where a review measured that the `_REPAIR_PAIR` block opens
-    # at `:274` and not at the `:277-279` row 13 quotes (that range is the two clauses INSIDE the
-    # block), so the default head is wrong for every one of them. Same shape as the `:6989`,
-    # `hosted_backup.py:2666` and four rows above: one ROW per SITE, and an unlisted token is coverage
-    # this file only APPEARED to have (the document's §2.7 note: file-scoped drift is "either fixed
-    # everywhere or trusted nowhere").
+    # --- #14043 review, finding 2 (the FINAL-head review): five addresses this revision writes in its
+    # new §2.2 `:Source` reader row and in row 13 had NO pin and no occurrence count, so the next merge
+    # that inserted into `tortoise/session_source_prose_migration.py` would have moved all five with
+    # nothing red. ⛔ These are NOT head declarations: that file is the SAME BLOB at the pin
+    # `ccb49741b2ec` and at this head (`git rev-parse ccb49741b2ec:tortoise/session_source_prose_migration.py`
+    # == `HEAD:` → `77c86b24e5`), so all five open at the pin exactly as they open here and the header's
+    # pin default resolves them CORRECTLY. What was missing is the guard, not the head — the live defect
+    # here is an unguarded cite, which is the same coverage this file only APPEARED to have that the
+    # `:6989` and `hosted_backup.py:2666` rows above were added for (the document's §2.7 note:
+    # file-scoped drift is "either fixed everywhere or trusted nowhere").
     # NON-VACUOUS: move any of the five by `+1` and the content arm reds (the token arm cannot fire —
     # the document still carries the address); each fragment below is the line's own text at this head,
     # taken with `grep -n 'def …'/the SQL literal` on this tree, never by a delta. ⚠️ `:218-223` is
@@ -479,8 +480,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # that could not be resolved by grep while it named the census's `:842`. Measured:
     # `grep -o 'hosted_backup.py:844' <the document> | wc -l` -> 2.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 2,
-    # #14043 review, finding 2: five UNCLOSED head-relative addresses in this revision's own new
-    # §2.2 `:Source` reader row and in row 13, now enumerated in the header and pinned above. Measured on
+    # #14043 review, finding 2: five UNPINNED addresses in this revision's own new §2.2 `:Source`
+    # reader row and in row 13 (pin-stable — the file is one blob at the pin and at this head — so these
+    # counts guard a RE-POINT, not a head), named once in the header and pinned above. Measured on
     # this document at this head (`grep -o -F '<token>' <the document> | wc -l`): the one-token
     # `:218-223` spelling is carried 2x (the §2.2 row's `tortoise/…` form contains it, plus row 13's
     # bare form — one address, two sites), and each bare sibling is carried 2x (its row plus the
@@ -1105,12 +1107,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # pin, where none of them opens. Same shape as the `:6989` / `hosted_backup.py:2666` rows above:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
     # 72 -> 77 at the SAME review's finding 2: the class was still unclosed for FIVE addresses this
-    # revision writes at this head — the new §2.2 `:Source` reader row's `session_source_prose_migration.py`
+    # revision writes — the new §2.2 `:Source` reader row's `session_source_prose_migration.py`
     # cites (`:218-223`, `:1263-1268`, `:274-281`) and row 13's inner pair (`:277-279`) plus its
-    # `_CONTROL_LEXICON_ROWS` read (`:1292-1300`). The document itself was the only thing naming them,
-    # so nothing reddened when the tree moved under them — the exact failure mode the four rows above
-    # exist to stop, and §2.7's own note (file-scoped drift is "either fixed everywhere or trusted
-    # nowhere") is why the file's remaining unpinned sites are closed in the same commit.
+    # `_CONTROL_LEXICON_ROWS` read (`:1292-1300`). ⛔ Those five are PIN-STABLE, not head-relative: one
+    # blob at both heads, so the header's default resolves them right and the defect was purely the
+    # missing guard — the document was the only thing naming them, so a merge inserting into that file
+    # moved them with nothing red. That is the failure mode the four rows above exist to stop, and
+    # §2.7's own note (file-scoped drift is "either fixed everywhere or trusted nowhere") is why the
+    # file's remaining unpinned sites are closed in the same commit.
     assert len(_PINS) == 77
 
 
