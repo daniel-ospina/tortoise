@@ -3259,14 +3259,20 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         "the document's count command does not count a blank REMOVED line, which is half "
         "the class the cell names (\"a diff line that is just `+` or `-`\") and the shape "
         "the superseded spelling read as `0` (#13956 review, P2)")
-    assert _blank_line_count("+\n-\n") == 2, (
-        "the count command does not count both directions of the blank class, so the "
-        "document prescribes an instrument narrower than the class it names")
-    # The class it says it does NOT count still is not counted — the sentence claims that
-    # boundary, so it is held to it rather than left as prose.
-    assert _blank_line_count("++i\n--counter\n+- 2)\n") == 0, (
-        "the count command now reaches the sign-opening class, while the sentence says it "
-        "counts the blank one ONLY — one of the two is wrong")
+    # ⛔ TWO ASSERTIONS WERE DELETED HERE (#13956 review round 7, P3 — MEASURED; the mutation
+    # pass's rule 3 is a FINDING, never a nit): `_blank_line_count("+\n-\n") == 2` was a strict
+    # CONSEQUENCE of the two assertions above — a `grep -c` counts LINES, so any expression that
+    # counts a blank `+` and a blank `-` returns 2, and under `^\+$` the REMOVED-line assertion
+    # above reds first, so this line could never execute its own failure. And
+    # `_blank_line_count("++i\n--counter\n+- 2)\n") == 0` was unreachable for the same reason one
+    # layer up: `_D5_BLANK_CLASS_EXPR_RE` admits only the exactly-one-character shapes, so
+    # widening the document to the expression that WOULD count `++i`/`--counter` makes
+    # `_d5_blank_count_expression()` raise its loud ZERO ("prescribes 0 BLANK-line count
+    # commands") before this arm runs. Both intents are still held by arms that CAN fail — the
+    # ADDED and REMOVED directions above, each red under its own narrowing, and that loud-ZERO /
+    # MANY count. A dead assertion is not free: it reads as coverage the tree does not have.
+    # ⛔ If the CLASS gate is ever widened to admit wider expressions, this boundary loses its
+    # only reader and the reachable form must come back with the widening.
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
