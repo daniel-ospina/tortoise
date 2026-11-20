@@ -2043,3 +2043,61 @@ def test_a_legitimate_IMPL_and_NAND_pair_is_not_a_duplicate(map_doc):
     third = [*op_rows, *[[f"{row[0]}~dup", *row[1:]]
                          for row in op_rows if row[0] == dup_id]]
     assert filer.duplicate_operators(doc, third), "a third operator over the pair was invisible"
+
+
+def test_the_carried_failure_prints_the_ONE_remedy_that_clears_it(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A carried failure must name its own exit.
+
+    Its marker stays in `written`, so it is never re-attempted, so it can never
+    clear itself — and the `--verify`-based remedy printed for the UNCONFIRMED
+    arm clears only `unconfirmed`, leaving the run at exit 1 forever (#13913
+    review round 11, measured over four resumes). The text must name the `failed`
+    line, and must warn that deleting `state.json` would re-issue every
+    non-idempotent write.
+
+    Mutant: the bare "still unresolved — see state.json" text.
+    """
+    state = tmp_path / "state.json"
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
+    marker = filer.edge_marker(first_op)
+    state.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [marker], "failed": [f"{marker}: mechanism_mismatch — inverted"],
+        "unconfirmed": [],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "delete its line from `failed`" in err or "delete the matching line from `failed`" in err, err
+    assert "Never delete `state.json`" in err, err
+
+
+def test_a_carried_failure_for_an_UNDECLARED_edge_is_named_as_clearable(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A failure for an edge the map no longer declares cannot be re-observed.
+
+    The marker refresh refuses `state.json` on orphan `edge:` markers in
+    `written`, but a `failed` line for a never-written edge had no path out
+    (#13913 review round 11). It is named, with the edit that clears it.
+
+    Mutant: drop the orphan-failure note — the run exits 1 with no route shown.
+    """
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [], "unconfirmed": [],
+        "failed": ["edge:obj:gone->obj:also-gone:IMPL: that edge was removed"],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "no longer declared by this map" in err, err

@@ -954,8 +954,9 @@ def write_map(doc: dict) -> int:
                 failures.append(
                     f"{marker}: attempted, outcome UNCONFIRMED — NOT re-issued. "
                     "Run --verify: if the edge is present it landed — delete this "
-                    "marker from `unconfirmed` in state.json and KEEP it in "
-                    "`written`; if it is absent, delete it from BOTH and re-run.")
+                    "marker from `unconfirmed` in state.json, KEEP it in `written`, "
+                    "and delete the matching line from `failed`; if it is absent, "
+                    "delete it from `written` (and its `failed` line) and re-run.")
                 print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
@@ -1001,10 +1002,36 @@ def write_map(doc: dict) -> int:
     st["unconfirmed"] = sorted(pending)
     save_state(st)
     if carried:
+        # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
+        # `written`, so it is never re-attempted, so `done` never contains it, so
+        # the line can never clear itself. Saying so — with the exact edit — is
+        # the difference between a fail-closed report and a permanent false red
+        # with no route out (#13913 review round 11, measured: the printed remedy
+        # for the UNCONFIRMED arm cleared `unconfirmed` and the run still exited 1
+        # forever, because nothing named the `failed` line).
         print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
-              "(their markers were not re-written this run) — see state.json", file=sys.stderr)
+              "(their markers were not re-written this run) — see state.json",
+              file=sys.stderr)
         for line in carried[:10]:
             print(f"  ! {line}", file=sys.stderr)
+        print("  → to resolve one: `--verify` decides what is in the graph. If the "
+              "write is correct, delete its line from `failed` and keep its marker "
+              "in `written`. If it is wrong (e.g. a mechanism inversion, which "
+              "`--verify` cannot see), delete the node in the graph, then delete "
+              "its marker from `written` and its line from `failed`, and re-run. "
+              "Never delete `state.json` to clear these — a re-run would re-issue "
+              "every non-idempotent write.", file=sys.stderr)
+        # A failure whose marker the map no longer declares can never be
+        # re-observed either: name it, instead of blocking `--write` silently
+        # (#13913 review round 11).
+        declared_markers = {edge_marker(e) for e in doc["edges"]}
+        declared_markers |= {f"event:{e['ref']}" for e in doc["events"]}
+        for line in carried:
+            marker = line.split(": ", 1)[0]
+            if marker.startswith(("edge:", "event:")) and marker not in declared_markers:
+                print(f"  ? {marker} is no longer declared by this map — that line "
+                      "can never clear itself; drop it from `failed` in "
+                      "state.json", file=sys.stderr)
     if ambiguous:
         print(f"\n{len(ambiguous)} item(s) were recorded but returned no id — an "
               "UNKNOWN outcome, NOT re-written (a second write would duplicate a "
