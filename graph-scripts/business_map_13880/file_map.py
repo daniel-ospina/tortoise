@@ -1020,9 +1020,12 @@ def write_map(doc: dict) -> int:
         # both is a permanent false red with a wrong instruction (#13913 review
         # round 12).
         print("  → to resolve one, `--verify` decides what is in the graph:\n"
-              "    * line says `unbound endpoint`: nothing was written, so its "
-              "marker is NOT in `written` — file the node that WAS written (or "
-              "re-run) and delete this line from `failed`.\n"
+              "    * line says `unbound endpoint`: nothing was written for the "
+              "EDGE, and its endpoint is missing an id. A plain re-run does NOT "
+              "clear this when the endpoint is a recorded Event — file the node "
+              "that WAS written, or (the load-bearing edit) record the landed "
+              "node's id under the item's ref in `ids`; then delete this line "
+              "from `failed`.\n"
               "    * otherwise the write landed: if it is correct, delete this "
               "line from `failed` and keep its marker in `written`; if it is wrong "
               "(e.g. a mechanism inversion, which `--verify` cannot see), delete "
@@ -1051,8 +1054,9 @@ def write_map(doc: dict) -> int:
               "did, the node's id is what is missing: record that id under this "
               "item's ref in `ids` in state.json and re-run (the resume then "
               "resolves it without writing). Only if `--verify` shows the node is "
-              "ABSENT should you drop the marker — and then delete its line from "
-              "`failed` too.", file=sys.stderr)
+              "ABSENT should you drop the marker — and then delete the `failed` "
+              "lines of the EDGES that referenced it (an ambiguous item has no "
+              "line of its own; its edges do).", file=sys.stderr)
         for marker in ambiguous:
             print(f"  ? {marker}", file=sys.stderr)
     if failures:

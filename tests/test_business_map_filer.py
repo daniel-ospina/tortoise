@@ -2109,6 +2109,11 @@ def test_the_carried_failure_prints_the_ONE_remedy_that_clears_it(
     # The remedy is PER CLASS: a marker-bearing line and an `unbound endpoint`
     # line have different exits, and one text for both is a wrong instruction.
     assert "line says `unbound endpoint`" in err, err
+    # ⛔ NOT "(or re-run)": for the class that actually produces those lines
+    # (an endpoint is a recorded Event with no id) a plain re-run regenerates
+    # them forever — measured, 3 lines, exit 1, twice.
+    assert "(or re-run)" not in err, err
+    assert "does NOT clear this when the endpoint is a recorded Event" in err, err
 
 
 def test_a_carried_failure_for_an_UNDECLARED_edge_is_named_as_clearable(
@@ -2165,5 +2170,7 @@ def test_an_AMBIGUOUS_event_is_told_to_supply_the_ID_not_to_re_file(
     assert filer.write_map(map_doc) == 1
     err = capsys.readouterr().err
     assert "record that id under this" in err and "`ids`" in err, err
+    # An ambiguous ITEM has no `failed` line of its own — its edges do.
+    assert "no line of its own; its edges do" in err, err
     assert "drop its marker from state.json" not in err, (
         "the remedy still says to drop the marker, which re-files a non-idempotent write")
