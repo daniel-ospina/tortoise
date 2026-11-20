@@ -1325,7 +1325,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # side-attribution row, :1856 the blank-export blocker) — present but
         # inert, which is the state under test.
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""\)',
-        # a WHITESPACE-ONLY value (:2160 the lhs tests TRUTHINESS, the attribution
+        # a WHITESPACE-ONLY value (:2364 the lhs tests TRUTHINESS, the attribution
         # used to test `.strip()`, added by PR #12528). This class ALSO covers the
         # SEPARATE whitespace site that open PR #12537 adds in a new test in this
         # module — so #12537 needs no row of its own.
