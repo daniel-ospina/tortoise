@@ -779,18 +779,22 @@ def run(args) -> dict:
             entry = {
                 "query": qid,
                 "truth_cosine": [key for key, _ in t_cos],
+                # ⛔ DISTANCES ARE ALWAYS PASSED, never conditionally. An earlier
+                # cut skipped them whenever the candidate list had been poisoned
+                # (`len(answers) != len(ids)`), which left `distance.ok = None` on
+                # exactly the runs where a value-level check matters most — and
+                # `_verdict` treats "unmeasured" as "not failed". Two lengths that
+                # disagree now simply stop the zip, so the ids check (which is the
+                # one that fails) still sees the whole poisoned list.
                 "record": compare(
                     t_cos, rec_ids, k=k,
-                    candidate_distances=[d for _k2, d, _r in rec_answers[qid]]
-                    if len(rec_answers[qid]) == len(rec_ids) else None),
+                    candidate_distances=[d for _k2, d, _r in rec_answers[qid]]),
                 "graph_index": compare(
                     t_cos, idx_ids, k=k,
-                    candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]
-                    if len(index_answers[qid]["rows"]) == len(idx_ids) else None),
+                    candidate_distances=[d for _k2, d in index_answers[qid]["rows"]]),
                 "graph_scan_vs_euclidean": compare(
                     t_euc, scan_ids, k=k,
-                    candidate_distances=[d for _k2, d in scan_answers[qid]["rows"]]
-                    if len(scan_answers[qid]["rows"]) == len(scan_ids) else None),
+                    candidate_distances=[d for _k2, d in scan_answers[qid]["rows"]]),
                 "graph_scan_vs_cosine": compare(t_cos, scan_ids, k=k,
                                                 candidate_distances=None),
             }
