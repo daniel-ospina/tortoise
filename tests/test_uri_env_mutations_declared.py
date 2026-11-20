@@ -342,10 +342,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ⛔ #12631 (the root this block records): THREE rows for this key had already landed
     # inside ~4 minutes BEFORE that merge — #13929's, then #13926's, then #13928's squash
     # (147 rows / 145 unique keys at `f2e5e3a98f`) — because each red was repaired by
-    # ADDING a row rather than by checking whether one existed. python keeps the LAST
+    # ADDING a row rather than by checking whether one existed. Python keeps the LAST
     # silently, so the file read as triple coverage while ONE row graded: `ruff` raised
-    # `F601` on the SECOND and THIRD occurrences (never on the first — `:322` is not an
-    # F601, whatever the PR body's first revision said), and
+    # `F601` on the SECOND and THIRD occurrences — `:607` and `:1663` in that tree — and
+    # NEVER on the first, so a `:322:5 F601` is not a diagnostic ruff can emit.
     # `test_the_declaration_table_carries_no_duplicate_key` reads the table as SOURCE, so
     # it reds on the same tree. **Adding a row at THIS position re-creates the cascade** —
     # grep this dict for the key first. One file, one row.
@@ -631,10 +631,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # The module's other three `TORTOISE_DB_URI` mentions are READS — its probe's
     # `env_uri` capture, the probe's candidate list, and `_uri()`'s fallback — which are
     # not mutations and are deliberately not declared: a row that matched them would
-    # silence a future mutation on those lines. (Measured: the module has FOUR mentions,
-    # three reads and the one `sdk`-fixture setenv above; an earlier revision of this
-    # note named two of the three and said "three", which is the kind of count that
-    # cannot be checked and therefore rots.)
+    # silence a future mutation on those lines. (Measured: the module has FOUR mentions —
+    # the `sdk`-fixture setenv the surviving row declares, plus the three reads above; an
+    # earlier revision of this note named two of the three and still said "three", which is
+    # the kind of count that cannot be checked and therefore rots.)
     # ⛔ MERGE NOTE (#13158 vs #13176): an auto-merge that keeps BOTH sides of a row
     # pair is a duplicate dict key, and the last one wins SILENTLY, so the guard would
     # have graded one row while the file showed two. The narrowed row is kept (it
@@ -1542,10 +1542,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   2026-11-17, AFTER this row landed, and it dropped its own loose copy — so the
     #   "if this PR lands after #13164 it MUST DROP this row" paragraph below is the
     #   pre-merge reasoning, kept as the record; the dict carries ONE row for this key
-    #   today). Both roots it cleared were `test (k)` shard failures —
-    #   `test_9124_declared_live_doors.py`'s `_hydrate_evidence` and
-    #   `test_bounded_raw_clients_3065.py`'s two raw `FalkorDB(...)` clients — neither of
-    #   which any row here can reach.
+    #   today). Both roots it cleared were `test (k)` shard failures, and #13164's own
+    #   message names them (`git show 082213c6a8`): the census counting a READ as a
+    #   WRITE for `TortoiseSDK._hydrate_evidence`, pinned in
+    #   `test_9124_declared_live_doors.py`, and the two raw `FalkorDB(...)` clients in
+    #   `tools/text_gate_13099.py`, whose tool-site count
+    #   `test_bounded_raw_clients_3065.py` pins — neither of which any row here can reach.
     #   On its branch it carried its OWN row for this key (that branch's `:482`) with
     #   two loose arms
     #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
