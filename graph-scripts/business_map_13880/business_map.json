@@ -417,6 +417,16 @@
         "std:no-capture-caps"
       ],
       "legacy": "issue #4010 as cited by every lane brief ('No capture caps (#4010)') and the standard 'no capture caps' object"
+    },
+    {
+      "ref": "ev:wave1-exit-gate",
+      "eventKind": "decision",
+      "startedAt": "2026-09-22",
+      "content": "The Wave-1 exit gate was replaced: the 'aha test' is WITHDRAWN as the gate and as open owner decision #1, and the gate is now the nine objectives' done-states, each observed against the running system. The 2026-09-22 plan supersedes-in-part the 2026-09-17 plan and the 2026-09-13 roadmap, which still carry the old aha gate and must be read as superseded rather than authoritative.",
+      "about": [
+        "obj:goal-beta"
+      ],
+      "legacy": "points attached to the legacy Objects 'Tortoise beta roadmap' and 'Tortoise beta plan' in org_3326a01ea34ae595d84de5d8f9 ('The aha test is withdrawn as the Wave-1 exit gate ... the gate is now the nine objectives' done-states'; '... explicitly supersedes_in_part the 2026-09-17 plan and 2026-09-13 roadmap')"
     }
   ],
   "points": [
@@ -644,6 +654,14 @@
       ],
       "source": "src:retention",
       "legacy": "docs/retention-and-deletion.md as cited by the Source rawState axis; legacy 'retention-doctrine quote' point"
+    },
+    {
+      "ref": "pt:beta-exit-is-donestates",
+      "content": "The beta's Wave-1 exit criterion is not a statistic: it is the nine objectives' done-states, each observed against the running system. A gate phrased as a cohort size plus a success bar was withdrawn precisely because it could not be observed against the system.",
+      "about": [
+        "obj:goal-beta"
+      ],
+      "legacy": "'Tortoise beta roadmap' claims: 'The roadmap still asserts that the value scorecard's statistics depend on the cohort numbers in open decision 1, contradicting the withdrawal' + the withdrawal itself"
     }
   ],
   "edges": [
@@ -1228,6 +1246,41 @@
       "label": "supports",
       "direction": "->",
       "why": "The record can only be truth about what capture was allowed to record."
+    },
+    {
+      "from": "ev:wave1-exit-gate",
+      "to": "obj:goal-beta",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:wave1-exit-gate",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->",
+      "why": "The gate moved to states observed against the running system \u2014 the record, not a forecast."
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "obj:goal-beta",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "ev:wave1-exit-gate",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "pt:beta-gate-counts",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->",
+      "why": "Both gates are measured against the system rather than against an intention."
     }
   ]
 }

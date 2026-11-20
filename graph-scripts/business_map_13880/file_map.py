@@ -55,9 +55,13 @@ STATE_PATH = HERE / "state.json"
 API = "https://api.premiselabs.co"
 MCP_URL = f"{API}/mcp/"
 
-# The four epistemic/semantic vocabularies this map is allowed to use. Core
-# §5, plus the two packs the business map leans on. Kept here as data so a
-# typo is a refusal at `--dry-run`, not a silently mis-kinded node.
+# ── the vocabularies ──────────────────────────────────────────────────────
+# ⛔ These are FALLBACKS, used only when the shipped registries cannot be
+# imported (a bare box with no checkout). When the repo IS importable the
+# validator asks the code that actually gates a write — `get_vocab()` for the
+# point/event/source axes and `packs/*/manifest.yaml` for the object kinds —
+# because a hand-copied vocabulary is a transcription of the law, and a
+# transcription that drifts is exactly the mis-kind this check exists to catch.
 POINT_KINDS = {"statement"}
 EVENT_KINDS = {"meeting", "decision", "experiment", "deployment", "review",
                "friction", "extraction", "documentCreated", "roleCreated",
@@ -97,9 +101,59 @@ def load_map() -> dict:
     return json.loads(MAP_PATH.read_text())
 
 
+def shipped_vocab() -> dict | None:
+    """The vocabularies the WRITE GATE uses, or None when unavailable.
+
+    Object kinds are the union of core's `KIND_OWNER_AXES['objectKinds']` and
+    every `objectKinds` list declared by an installed pack manifest — which is
+    precisely ONTOLOGY §5's rule ("core values are here, pack kinds are
+    declared in the pack manifests").
+    """
+    try:
+        from tortoise.commit_schema import get_vocab            # noqa: PLC0415
+        from tortoise.pack_registry import KIND_OWNER_AXES      # noqa: PLC0415
+        from tortoise.sdk import GOAL_STATE_VALUES              # noqa: PLC0415
+    except Exception:                                            # noqa: BLE001
+        return None
+
+    vocab = get_vocab()
+    object_kinds = set(KIND_OWNER_AXES.get("objectKinds", ()))
+    packs_dir = HERE.parents[1] / "packs"
+    if packs_dir.is_dir():
+        try:
+            import yaml                                          # noqa: PLC0415
+            for manifest in sorted(packs_dir.glob("*/manifest.yaml")):
+                doc = yaml.safe_load(manifest.read_text()) or {}
+                ns = doc.get("namespace")
+                for kind in (doc.get("ontology") or {}).get("objectKinds") or []:
+                    object_kinds.add(f"{ns}:{kind}" if ns else kind)
+        except Exception:                                        # noqa: BLE001
+            pass
+    return {
+        "point": set(vocab.point_kinds),
+        "event": set(vocab.event_kinds),
+        "source": set(vocab.source_kinds),
+        "object": object_kinds,
+        "goal_state": set(GOAL_STATE_VALUES),
+    }
+
+
 def validate(doc: dict) -> list[str]:
     """Every rule the ontology makes, checked before a single write."""
     errs: list[str] = []
+    vocab = shipped_vocab()
+    point_kinds = vocab["point"] if vocab else POINT_KINDS
+    event_kinds = vocab["event"] if vocab else EVENT_KINDS
+    source_kinds = vocab["source"] if vocab else SOURCE_KINDS
+    object_kinds = vocab["object"] if vocab else OBJECT_KINDS
+    goal_states = vocab["goal_state"] if vocab else GOAL_STATES
+    if vocab is None:
+        print("! shipped vocabularies unavailable — validating against the "
+              "transcription in this file", file=sys.stderr)
+    else:
+        print(f"vocabularies: shipped (point {len(point_kinds)}, event "
+              f"{len(event_kinds)}, source {len(source_kinds)}, object "
+              f"{len(object_kinds)}, goalState {len(goal_states)})")
     refs: dict[str, str] = {}   # ref -> layer
 
     def reg(ref: str, layer: str) -> None:
@@ -113,28 +167,33 @@ def validate(doc: dict) -> list[str]:
             errs.append(f"{s['ref']}: subjectKind {s['subjectKind']!r} not in core §5")
     for o in doc["objects"]:
         reg(o["ref"], "object")
-        if o["objectKind"] not in OBJECT_KINDS:
-            errs.append(f"{o['ref']}: objectKind {o['objectKind']!r} is not a declared kind")
+        if o["objectKind"] not in object_kinds:
+            errs.append(f"{o['ref']}: objectKind {o['objectKind']!r} is not declared "
+                        "by core or any installed pack")
         gs = o.get("goalState")
         if gs is not None:
-            if gs not in GOAL_STATES:
+            if gs not in goal_states:
                 errs.append(f"{o['ref']}: goalState {gs!r} not in GOAL_STATES")
             if o["objectKind"] not in {"goal", "target", "strategy", "plan"}:
                 errs.append(f"{o['ref']}: goalState is only meaningful on goal/target/strategy/plan")
     for s in doc["sources"]:
         reg(s["ref"], "source")
-        if s["sourceKind"] not in SOURCE_KINDS:
+        if s["sourceKind"] not in source_kinds:
             errs.append(f"{s['ref']}: sourceKind {s['sourceKind']!r} not declared")
     for e in doc["events"]:
         reg(e["ref"], "event")
-        if e["eventKind"] not in EVENT_KINDS:
+        if e["eventKind"] not in event_kinds:
             errs.append(f"{e['ref']}: eventKind {e['eventKind']!r} not in core §5")
         if len(e["content"]) > 1000:
             errs.append(f"{e['ref']}: event content {len(e['content'])} > 1000 chars")
     for p in doc["points"]:
         reg(p["ref"], "point")
-        if p.get("kind", "statement") not in POINT_KINDS:
-            errs.append(f"{p['ref']}: pointKind {p.get('kind')!r} — extraction writes statement only")
+        if p.get("kind", "statement") not in point_kinds:
+            errs.append(f"{p['ref']}: pointKind {p.get('kind')!r} is not declared")
+        if p.get("kind", "statement") != "statement":
+            errs.append(f"{p['ref']}: pointKind {p.get('kind')!r} — the state-centric "
+                        "model writes `statement` only (§5); a decision is an Event "
+                        "and a goal is an Object")
         if len(p["content"]) > 1000:
             errs.append(f"{p['ref']}: point content {len(p['content'])} > 1000 chars")
         if p.get("source") and p["source"] not in {s["ref"] for s in doc["sources"]}:
