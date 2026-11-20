@@ -3567,9 +3567,8 @@ async def _lifespan(app):
             # operator can tell "sweeping, nothing due" from "never armed" —
             # the pass is otherwise invisible when it has nothing to send.
             _logger.info(
-                "capacity notice sweep armed: interval=%ss enabled=%s limit=%s",
-                _notice_interval, _capacity_notice.notices_enabled(),
-                _capacity_notice.sweep_limit())
+                "capacity notice sweep armed: interval=%ss enabled=%s",
+                _notice_interval, _capacity_notice.notices_enabled())
             app.state._capacity_notice_task = \
                 asyncio.get_event_loop().create_task(
                     _capacity_notice_sweep_loop(_notice_interval))
@@ -4594,16 +4593,16 @@ async def _capacity_notice_sweep_pass() -> dict:
         return {"enabled": False}
     if not is_supabase_enabled():
         return {"enabled": True, "skipped": "registry-mode"}
-    summary = await _capacity_notice.sweep_pass(
-        limit=_capacity_notice.sweep_limit())
+    summary = await _capacity_notice.sweep_pass()
     if summary.get("error"):
         _log.warning("capacity notice sweep: %s — no notices this pass",
                      summary["error"])
     return summary
 
 
-async def _capacity_notice_sweep_loop(interval: float) -> None:
-    """#13998: the periodic runner — sleeps FIRST, for #2953's reason.
+async def _capacity_notice_sweep_loop(interval: float,
+                                     first_delay: float | None = None) -> None:
+    """#13998: the periodic runner — a pass at BOOT, then every ``interval``.
 
     A threshold is crossed BETWEEN writes, so there is no request to hang the
     notice on: without this loop the copy exists and no customer ever receives
@@ -4611,10 +4610,31 @@ async def _capacity_notice_sweep_loop(interval: float) -> None:
     the loop, and each pass goes through ``_guarded_step`` (#5381) so a raising
     pass cannot end the ``while True`` — the failure mode that would silently
     stop notifying for the process's lifetime.
+
+    ⛔ THE BOOT RUNG IS THE REAL TRIGGER, NOT A NICETY (#14038 review, P1). An
+    earlier form slept FIRST, which reads as harmless until the deploy cadence is
+    measured: `deploy-hosted.yml` replaces the machine on every `tortoise/**`
+    push to `main`, and over the 30 days to 2026-11-20 the MEDIAN gap between
+    those merges was **0.19 h** with a longest run of **90** consecutive gaps
+    under 6 h — so a sleep-first 6 h timer is reset long before it expires and
+    the notice is delivered days late or never, while the boot log said "armed".
+    The repo's own convention for a sweep that must cover a window regardless of
+    uptime is this one (`#2953`'s boot sweeps run at boot AND on the periodic
+    interval).
+
+    The cost of a boot pass is one complete enumeration plus one point read per
+    account — the same read a pass already does — and an account whose ledger
+    mark is already at the top threshold short-circuits before the gauge is read
+    (``notify_account``). ``first_delay`` spreads a fleet-wide restart so a boot
+    storm does not fire N passes in the same second.
     """
+    if first_delay is None:
+        first_delay = min(interval, 300.0)
+    if first_delay > 0:
+        await asyncio.sleep(first_delay)
     while True:
-        await asyncio.sleep(interval)
         await _guarded_step("capacity notice sweep", _capacity_notice_sweep_pass)
+        await asyncio.sleep(interval)
 
 
 def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
@@ -9722,13 +9742,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         request.query_params.get("org_id"),
         memberships=memberships) or memberships[0]["org_id"]
     from tortoise.supabase_control import (
-        _ORG_ADDITIVE_0015_TIER,
-        _ORG_ADDITIVE_2040_TIER,
-        _ORG_ADDITIVE_BILLING_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_IMPORT_TIER,
-        _ORG_ADDITIVE_ONBOARDING_TIER,
-        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+        _ORG_ADDITIVE_TIERS,
         _QUOTA_SELECT,
         _orgs_row_fail_soft,
         default_graph_for_credential,
@@ -9736,25 +9750,21 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     row = await _cp_offload(
         lambda: _orgs_row_fail_soft(
             cp, org_id, select=_QUOTA_SELECT,
-            # #1832: the FULL additive ladder (newest migration tier dropped
-            # FIRST — 2040 marker, then import tier), same as resolve_api_key /
-            # recover_team_key. The #1230 import ledger + points-cap columns
-            # (last_import_sha256/max_points, migration 20260817000001) ride
-            # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
-            # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
-            # /v1/sessions, /v1/onboarding/state.
-            # ⛔ #13998 review (BLOCKING): `storage_notice_pct` rides
-            # _QUOTA_SELECT too, so ITS tier must be named here or the terminal
-            # base-only rung still selects the missing column and the exact 500
-            # above returns. `tests/test_13998_capacity_notice.py::
-            # test_every_quota_select_ladder_names_the_storage_notice_tier`
-            # parses this module and fails on the omission.
-            additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
-                            _ORG_ADDITIVE_ONBOARDING_TIER,
-                            _ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER, _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER]),
+            # #1832: the FULL additive ladder, newest migration tier dropped
+            # FIRST, same as resolve_api_key / recover_team_key. The #1230 import
+            # ledger + points-cap columns (last_import_sha256/max_points,
+            # 20260817000001), the #2040 marker, the #2406 onboarding marker and
+            # the #13998 capacity-notice mark all ride _QUOTA_SELECT; omitting a
+            # tier made EVERY ladder attempt 400 (PGRST204) → terminal raise →
+            # HTTP 500 on /v1/team, /v1/team/keys, /v1/sessions,
+            # /v1/onboarding/state.
+            # ⛔ #13998 review (BLOCKING): this call site was one of the two whose
+            # hand-spelled list missed the mark's tier, turning a schema one
+            # migration behind into a session-management 500. Since #14038 the
+            # ladder is the ONE shared tuple, so a new additive column cannot be
+            # half-wired again — pinned by
+            # `tests/test_13998_capacity_notice.py::test_every_quota_select_ladder_is_complete`.
+            additive_tiers=list(_ORG_ADDITIVE_TIERS)),
         op="orgs_row_fail_soft")
     if row is None:
         raise HTTPException(status_code=403, detail="Organization not found")
@@ -35749,14 +35759,10 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         get_control_plane, is_supabase_enabled,
         recover_org_key, SignupTokenRecoveryError,
         _orgs_row_fail_soft, _QUOTA_SELECT,
-        _ORG_ADDITIVE_2040_TIER, _ORG_ADDITIVE_IMPORT_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_0015_TIER, _ORG_ADDITIVE_BILLING_TIER,
         # #13998 review (BLOCKING): `storage_notice_pct` rides _QUOTA_SELECT, so
         # its tier must be in this ladder or the terminal base-only rung still
         # selects the missing column — a 500 on the recovery emergency path.
-        _ORG_ADDITIVE_ONBOARDING_TIER,
-        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+        _ORG_ADDITIVE_TIERS,
     )
 
     # [SECOND-MODEL-GATE] P2: normalize user-entered case BEFORE the format
@@ -35781,21 +35787,16 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         row = await _cp_offload(
             lambda: _orgs_row_fail_soft(
                 cp, org_id, select=_QUOTA_SELECT,
-                # #1709 fixer P2.6: the FULL additive ladder (same as
-                # resolve_api_key — newest migration tier dropped FIRST, incl.
-                # the #2040 marker tier) — the recovery emergency path must not
-                # 500 on migration skew (a schema one migration behind the
-                # newest additive drops that tier to safe defaults instead of
-                # raising).
-                # ⛔ #13998 review (BLOCKING): the #13998 mark's tier is part of
-                # that ladder for the same reason — it rides _QUOTA_SELECT.
-                additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
-                                _ORG_ADDITIVE_ONBOARDING_TIER,
-                                _ORG_ADDITIVE_2040_TIER,
-                                _ORG_ADDITIVE_IMPORT_TIER,
-                                _ORG_ADDITIVE_DKL_TIER,
-                                _ORG_ADDITIVE_0015_TIER,
-                                _ORG_ADDITIVE_BILLING_TIER]),
+                # #1709 fixer P2.6: the FULL additive ladder — newest migration
+                # tier dropped FIRST, incl. the #2040 marker tier — so the
+                # recovery emergency path must not 500 on migration skew.
+                # ⛔ #13998 review (BLOCKING): the mark's tier is part of that
+                # ladder for the same reason (it rides _QUOTA_SELECT), and this
+                # was the other call site whose hand-spelled list omitted it —
+                # a key-recovery lockout from one migration of drift. Since
+                # #14038 the ladder is the ONE shared tuple, so the omission
+                # cannot recur here.
+                additive_tiers=list(_ORG_ADDITIVE_TIERS)),
             op="orgs_row_fail_soft")
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted org → uniform 422 (indistinguishable from

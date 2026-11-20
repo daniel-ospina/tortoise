@@ -17,23 +17,25 @@ vocabulary guard in that test also reds on `allowance reached`,
 the words the pre-destination drafts used, and the ones this whole thread exists
 to keep out.
 
-⛔ THE CTA OFFERS CAPACITY, NEVER A TIER. `[ Add capacity ]` resolves to the app's
-billing surface (:func:`add_capacity_url`), where an account's capacity lives. A
-plan-tier link is deliberately absent: a tier change is the wrong answer to a
-capacity need (#13989 policy 4 — *"Capacity (overage/add-on) is offered first;
-tier changes are for **feature** needs only"*), and offering it here is the
-defect this thread fixes.
+⛔ THE CTA OFFERS CAPACITY, NEVER A TIER. `[ Add capacity ]` opens a capacity
+REQUEST (:func:`add_capacity_url` → the published support mailbox, subject
+pre-filled). A plan-tier link is deliberately absent: a tier change is the wrong
+answer to a capacity need (#13989 policy 4 — *"Capacity (overage/add-on) is
+offered first; tier changes are for **feature** needs only"*), and offering it
+here is the defect this thread fixes. ⚠️ The first cut used the dashboard's
+`#/billing` tab, which is a real deep link AND the plan-tier chooser — a guard
+pins a URL string, so that reached review before anyone read what the page
+renders (#14038 review, P1).
 
 ⚠️ THE REPORTED GAP, STATED RATHER THAN GLOSSED: there is **no storage add-on
 purchase surface in the product today** — `product/pricing.json` carries the
 rates (`billing.storage.dimensions.graph_storage.overage_price_usd_per_gb_month`
 = $85.00/GB-mo and `postgres_storage` = $0.30/GB-mo) and
 `metering.storage_overage_cost_usd` prices a bill, but nothing sells a top-up.
-So the CTA lands a customer on the surface that OWNS capacity (usage + plan +
-the portal) and a human fulfils the request; the missing purchase flow is filed
-separately rather than papered over here (see the PR body). The URL is one
-constant on purpose: when the add-on flow lands, this file changes and nothing
-else does.
+So the CTA asks a human for capacity, which is what the product can actually
+fulfil; the missing purchase flow is filed separately rather than papered over
+here (see the PR body). The URL is one function on purpose: when the add-on flow
+lands, this file changes and nothing else does.
 
 WHERE THE NUMBER COMES FROM — the gate's own instruments, never this module's
 arithmetic (#13998 requirement 5):
@@ -256,9 +258,29 @@ NOTICE_INTERVAL_ENV = "TORTOISE_CAPACITY_NOTICE_INTERVAL"
 #: (`allowance_gate.STALE_AFTER_SECONDS`), so a cadence well inside it means a
 #: threshold crossing is noticed the same day without a per-write cost.
 NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
-#: Ops cap on accounts PROCESSED per pass (never a relaxation of enumeration
-#: completeness). Unset = no cap.
-NOTICE_LIMIT_ENV = "TORTOISE_CAPACITY_NOTICE_LIMIT"
+#: How many notices ONE pass may SEND (default). Not an enumeration cap — see
+#: ``sweep_pass``'s docstring — a burst guard on the SHARED Resend budget.
+#:
+#: ⛔ WHY IT EXISTS (#14038 review, P2). The budget is one counter across every
+#: send on an install (``email_notify``: "every Resend send on this budget is
+#: counted — invite, OTP, onboarding … and billing", default 100/day). A first
+#: fleet-wide ramp would otherwise reserve whatever remains in one burst, and a
+#: budget-exhausted INVITE/OTP is dropped with no retry — while a capacity notice
+#: that is skipped is simply retried on the next pass. 25 leaves three quarters of
+#: the daily budget for customer-blocking mail, and with a pass at boot plus one
+#: every ``NOTICE_INTERVAL_DEFAULT_S`` it still ramps the whole fleet within days.
+NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 25
+NOTICE_MAX_SENDS_ENV = "TORTOISE_CAPACITY_NOTICE_MAX_SENDS"
+
+#: Ops cap on accounts PROCESSED per pass.
+#:
+#: ⛔ REMOVED (#14038 review, P2). It forwarded to `_enumerate_billed_orgs`,
+#: whose truncation is `candidates[:limit]` over a keyset walk ordered by id — a
+#: DETERMINISTIC lowest-id prefix, so the same first N accounts were re-processed
+#: (as cheap no-ops) on every pass and the rest of the fleet was never reached. It
+#: re-created, one layer up, exactly the silent-partial-pass failure the
+#: docstring above says the certified walk exists to prevent, and the send-budget
+#: guard (#1138) is the real limiter for a large first pass anyway.
 
 
 def notices_enabled() -> bool:
@@ -297,35 +319,61 @@ def sweep_interval_s() -> int:
     return value
 
 
-def sweep_limit() -> int | None:
-    """Ops cap on how many accounts a pass PROCESSES, or ``None`` for all."""
+def max_sends_per_pass() -> int:
+    """How many notices one pass may SEND — ``NOTICE_MAX_SENDS_ENV`` or the default."""
     import os
 
-    raw = os.environ.get(NOTICE_LIMIT_ENV)
+    raw = os.environ.get(NOTICE_MAX_SENDS_ENV)
     if raw is None or not str(raw).strip():
-        return None
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
     try:
         value = int(str(raw).strip())
     except (TypeError, ValueError):
-        logger.warning("%s=%r is not a whole number — processing the whole "
-                       "fleet", NOTICE_LIMIT_ENV, raw)
-        return None
-    return value if value > 0 else None
+        logger.warning("%s=%r is not a whole number — using %d",
+                       NOTICE_MAX_SENDS_ENV, raw,
+                       NOTICE_MAX_SENDS_PER_PASS_DEFAULT)
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+    if value < 1:
+        logger.warning(
+            "%s=%r is not positive — using %d (0 would disable the notices "
+            "entirely, which is what TORTOISE_CAPACITY_NOTICE=0 is for)",
+            NOTICE_MAX_SENDS_ENV, raw, NOTICE_MAX_SENDS_PER_PASS_DEFAULT)
+        return NOTICE_MAX_SENDS_PER_PASS_DEFAULT
+    return value
+
+
+#: Where a capacity request goes TODAY: the published support address.
+#:
+#: ⛔ THIS IS NOT A TIER LINK, AND THE SHIPPED FORM IS A DELIBERATE CHOICE
+#: (#14038 review, P1). The first cut pointed the CTA at the dashboard's
+#: `#/billing` tab. That IS a real deep link, but the page it opens is a
+#: current-plan card followed by a `<h3>Plans</h3>` grid whose every other card
+#: renders an upgrade button — so the only action in an email about a CAPACITY
+#: need landed the customer on the plan-tier chooser. #13998 requirement 2 and
+#: #13989 policy 4 (owner, 2026-11-20 — *"Capacity (overage/add-on) is offered
+#: first; tier changes are for feature needs only"*) forbid exactly that, and no
+#: test can catch it: a guard pins the URL string, not what the string renders.
+#:
+#: No add-on/overage PURCHASE surface exists yet (there is no route, no SKU
+#: checkout — the rates are in `product/pricing.json`, the fulfilment is a human),
+#: so the honest destination is the human path that can actually add capacity.
+#: When the add-on flow lands, this ONE function changes; nothing else does.
+CAPACITY_REQUEST_EMAIL = "support@premiselabs.co"
 
 
 def add_capacity_url() -> str:
-    """Where `[ Add capacity ]` goes: the app's billing surface.
+    """Where `[ Add capacity ]` goes: a capacity REQUEST, never a tier page.
 
-    The origin comes from `email_notify.email_link_base()` — the ONE env-driven
-    app origin (#11767) — so a staging or preview deployment does not mail a link
-    to production. `#/billing` is a real deep link: `billing` is in the
-    dashboard's `KNOWN_TABS` (`website/apps/dashboard/src/main.jsx`), so an
-    authenticated reader lands on the surface that holds usage, the plan and the
-    portal rather than on the Overview.
+    A `mailto:` rather than an app route, for the reason in
+    ``CAPACITY_REQUEST_EMAIL``: the app has no capacity-purchase surface, and the
+    surface it does have is the one thing this email must not offer. The subject
+    is pre-filled so the request arrives already classified, which is the whole
+    benefit of routing it to a mailbox rather than to a page.
     """
-    from .email_notify import email_link_base
+    from urllib.parse import quote
 
-    return f"{email_link_base()}/#/billing"
+    subject = quote("Add capacity to my Tortoise workspace")
+    return f"mailto:{CAPACITY_REQUEST_EMAIL}?subject={subject}"
 
 
 def render(threshold: int, first_name: str | None) -> Copy:
@@ -469,7 +517,16 @@ def claim_notice(cp, org_id: str, threshold: int,
 #: Columns this module reads from the orgs row. One read, so the marker and the
 #: address are always the same snapshot (a mark read from one row and an email
 #: from another is a bug with no cause to find).
-_ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct")
+#: The org-row facts one notice needs. `deleted_at` is read for the LIVENESS
+#: predicate, not for display: the fleet enumeration (`billing._enumerate_billed_orgs`)
+#: deliberately does NOT filter soft-deleted orgs — "a soft-deleted org can still
+#: be BILLED, and excluding it would hide a live charge" (`billing.py`) — which is
+#: the right predicate for a Stripe mirror and the WRONG one for a customer email.
+#: The copy says "nothing is lost or deleted. Everything you've saved stays
+#: searchable", and the stamp is once-ever, so mailing an account inside its
+#: deletion grace window would both state something false and burn the one notice
+#: it can ever get (#14038 review, P2 — found independently by two reviewers).
+_ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at")
 
 
 @dataclass(frozen=True)
@@ -480,6 +537,7 @@ class Account:
     email: str | None
     name: str | None
     notice_pct: int | None
+    deleted: bool = False
 
 
 def read_account(cp, org_id: str) -> Account | None:
@@ -497,7 +555,8 @@ def read_account(cp, org_id: str) -> Account | None:
         # the extra-send direction is the safe one.
         mark = None
     return Account(org_id=org_id, email=row.get("email"),
-                    name=row.get("name"), notice_pct=mark)
+                    name=row.get("name"), notice_pct=mark,
+                    deleted=bool(row.get("deleted_at")))
 
 
 async def notify_account(org_id: str, *, cp=None, account: Account | None = None,
@@ -510,12 +569,19 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     Resend path, budget-guarded and idempotency-keyed. Tests pass a fake.
 
     Returns ``{"status": …}`` with one of: ``sent``, ``already-notified``,
-    ``no-email``, ``below-threshold``/``no-reading``/``no-allowance`` (the
+    ``no-email``, ``notice-mark-unavailable`` (the ledger column has not been
+    migrated yet), ``below-threshold``/``no-reading``/``no-allowance`` (the
     evaluate reasons are passed through verbatim so the caller can aggregate
     them), ``skipped`` (send budget), ``failed`` (provider), ``unknown-account``.
 
     ⛔ EVERY EXIT EXCEPT ``sent`` LEAVES THE MARK ALONE. That is what makes the
     ledger mean "the customer received this", never "we tried".
+
+    ⛔ NO BLOCKING I/O ON THE EVENT LOOP (#14038 review, P1). The gauge pair
+    (`quota.resolve_org_limits` + the meter) and the marker CAS are synchronous
+    PostgREST/Redis calls; a serial pass over the fleet on the loop would stall
+    every request. Both go through `asyncio.to_thread` — the same discipline the
+    enumeration uses.
     """
     from . import email_notify
 
@@ -524,13 +590,40 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
 
         cp = get_control_plane()
     if account is None:
-        account = await asyncio.to_thread(read_account, cp, org_id)
+        try:
+            account = await asyncio.to_thread(read_account, cp, org_id)
+        except Exception as e:
+            # ⛔ NO SEND WITHOUT A READABLE LEDGER. A missing `storage_notice_pct`
+            # column (code deployed before its migration) raises PostgREST 204/
+            # 400 here; sending anyway would re-send the same one-shot notice on
+            # EVERY pass, and the provider key only collapses a replay of the
+            # SAME threshold — it cannot make a 6-hourly re-send safe. So the
+            # account is reported, loudly and by name, and nothing is sent until
+            # the migration applies (see the migration's deploy-order note).
+            logger.error(
+                "capacity notice: the ledger row for team %s is unreadable "
+                "(%s) — no notice will be sent for this account until the "
+                "storage_notice_pct migration has applied",
+                org_id, type(e).__name__)
+            return {"status": "notice-mark-unavailable", "org_id": org_id}
     if account is None:
         return {"status": "unknown-account", "org_id": org_id}
+    if account.deleted:
+        # Inside the deletion grace window (or cancelled). The stamp is
+        # once-EVER, so mailing here would spend the account's only notice on a
+        # workspace whose data is on its way out — and the copy would tell it
+        # "nothing is lost or deleted" while it is (see `_ACCOUNT_SELECT`).
+        return {"status": "deleted-org", "org_id": org_id}
     if not account.email:
         # A registry/agent-minted org carries no address; the copy greets a
         # PERSON, so there is nobody to greet.
         return {"status": "no-email", "org_id": org_id}
+    if account.notice_pct is not None and account.notice_pct >= max(THRESHOLDS):
+        # The high-water mark is already at the TOP threshold: no threshold can
+        # be left to send, so skip the fleet's most expensive step (two sync
+        # gauge reads) entirely — the fast path the note below refers to.
+        return {"status": "already-notified", "org_id": org_id,
+                "notified": account.notice_pct}
     # ⛔ OFF THE EVENT LOOP. ``evaluate`` is sync and performs TWO blocking
     # control-plane reads (`quota.resolve_org_limits` → `_orgs_row_fail_soft` →
     # `cp.query`, and `allowance_gate.read_dimension` → `cp.query`), and this
@@ -540,6 +633,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     # the length of a fleet pass — the very thing `_cp_offload` exists for
     # (#3498). The two reads beside it (`read_account`, `claim_notice`) were
     # already offloaded; the decision between them was not.
+    #
+    # ⛔ AND AN ACCOUNT ALREADY AT THE TOP THRESHOLD NEVER GETS HERE: no threshold
+    # can be left to send, so the two gauge reads are skipped entirely (the fast
+    # path above). Before it, a fully-notified account paid both reads on every
+    # pass, forever (#14038 review, P1 aggravator).
     notice, reason = await asyncio.to_thread(
         evaluate, org_id, limits=limits, reading=reading)
     if notice is None:
@@ -553,6 +651,21 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     copy = render(notice.threshold,
                   email_notify.recipient_first_name(None, account.email,
                                                    account.name))
+    # Re-read the mark ONCE more immediately before the send (#14038 review, P2):
+    # another process may have stamped while this one was reading the gauge, and
+    # a send is irreversible. This narrows the cross-process window to one round
+    # trip; it does not close it — closing it needs a pre-send reservation (a
+    # stamp-first protocol with a compensating unset), which is a design decision
+    # rather than a tidy-up, and it is recorded on the PR rather than improvised.
+    try:
+        from .supabase_control import org_storage_notice_pct
+
+        fresh = await asyncio.to_thread(org_storage_notice_pct, cp, org_id)
+    except Exception:
+        fresh = account.notice_pct
+    if fresh is not None and notice.threshold <= fresh:
+        return {"status": "already-notified", "org_id": org_id,
+                "threshold": notice.threshold, "notified": fresh}
     sender = send
     if sender is None:
         async def sender(c: Copy) -> dict:
@@ -571,21 +684,24 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         return {"status": status or "failed", "org_id": org_id,
                 "threshold": notice.threshold}
     stamped = await asyncio.to_thread(
-        claim_notice, cp, org_id, notice.threshold, account.notice_pct)
+        claim_notice, cp, org_id, notice.threshold, fresh)
     if not stamped:
         # Another pass moved the mark between our read and our stamp. The email
-        # went out; the provider Idempotency-Key is what makes the pair safe, and
-        # the log says so rather than leaving a silent marker mismatch.
+        # went out; the provider key collapses only a replay of the SAME
+        # threshold (the key names it), so it bounds a duplicate of this send and
+        # says nothing about a different one. The log states exactly that rather
+        # than overclaiming.
         logger.warning(
             "capacity notice: sent to team %s at %s%% but the mark moved "
-            "concurrently (provider key deduped any duplicate)",
+            "concurrently (replaying this threshold is collapsed by the "
+            "provider key; a DIFFERENT threshold's notice is not)",
             org_id, notice.threshold)
     return {"status": "sent", "org_id": org_id, "threshold": notice.threshold,
             "message_id": (result or {}).get("message_id")}
 
 
-async def sweep_pass(*, cp=None, send=None, limit: int | None = None,
-                     enumerate_orgs=None) -> dict:
+async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
+                     max_sends: int | None = None) -> dict:
     """One pass over the fleet: at most ONE notice per account per pass.
 
     ``enumerate_orgs`` defaults to ``billing._enumerate_billed_orgs`` — the seam
@@ -597,8 +713,31 @@ async def sweep_pass(*, cp=None, send=None, limit: int | None = None,
 
     Per-account isolation: one account's unreadable gauge, missing address or
     provider failure costs that account's notice, never the pass.
+
+    ⛔ NO PER-PASS ACCOUNT CAP. An earlier revision forwarded a
+    ``TORTOISE_CAPACITY_NOTICE_LIMIT`` to the enumerator, whose truncation is a
+    lowest-id PREFIX — so the same first N accounts were re-processed on every
+    pass and the fleet's suffix was never notified, recreating one layer up the
+    silent-partial-pass this docstring forbids (#14038 review, P2).
+
+    There IS a per-pass SEND cap (``max_sends`` / ``TORTOISE_CAPACITY_NOTICE_MAX_SENDS``,
+    default 25) and it cannot have that defect: it walks the WHOLE enumeration and
+    stops SENDING, and a send that did not happen leaves its account's mark unset,
+    so the next pass starts with a SMALLER unstamped population and the fleet
+    ramps. The difference is per-pass PROCESSING (a stuck prefix) against
+    per-pass SENDING (a moving frontier) — see ``NOTICE_MAX_SENDS_ENV``'s why.
+
+    ⛔ A PRECONDITION THIS PASS CANNOT SUPPLY: the gauge it reads has ONE
+    production writer, the backup sweep (``BACKUP_SWEEP_ENABLED``, off unless the
+    deploy's secret conjunction is present). With it off, every account reads
+    ``ABSENT`` → ``no-reading`` and NOTHING is ever sent, silently. The summary
+    therefore always carries a ``no-reading`` count and is logged at INFO when the
+    whole pass agrees on it.
     """
-    summary: dict[str, Any] = {"checked": 0, "sent": 0, "statuses": {}}
+    if max_sends is None:
+        max_sends = max_sends_per_pass()
+    summary: dict[str, Any] = {"checked": 0, "sent": 0, "statuses": {},
+                               "max_sends": max_sends}
     if cp is None:
         from .supabase_control import get_control_plane
 
@@ -608,7 +747,7 @@ async def sweep_pass(*, cp=None, send=None, limit: int | None = None,
 
         enumerate_orgs = _enumerate_billed_orgs
     try:
-        orgs = await asyncio.to_thread(enumerate_orgs, limit)
+        orgs = await asyncio.to_thread(enumerate_orgs)
     except Exception as e:
         logger.warning("capacity notice sweep: enumeration failed (%s) — no "
                        "notices this pass", type(e).__name__)
@@ -618,6 +757,13 @@ async def sweep_pass(*, cp=None, send=None, limit: int | None = None,
         if not org_id:
             continue
         summary["checked"] += 1
+        if summary["sent"] >= max_sends:
+            # The burst guard: the pass has spent its share of the shared Resend
+            # budget. Count what it did not reach, so a capped pass is visible as
+            # a capped pass rather than as a small fleet.
+            summary["statuses"]["deferred"] = (
+                summary["statuses"].get("deferred", 0) + 1)
+            continue
         try:
             result = await notify_account(org_id, cp=cp, send=send)
         except asyncio.CancelledError:
@@ -631,6 +777,16 @@ async def sweep_pass(*, cp=None, send=None, limit: int | None = None,
         summary["statuses"][status] = summary["statuses"].get(status, 0) + 1
         if status == "sent":
             summary["sent"] += 1
-    if summary["sent"] or summary["statuses"].keys() - {"below-threshold"}:
+    other = summary["statuses"].keys() - {"below-threshold"}
+    if summary["sent"] or other:
         logger.info("capacity notice sweep %s", summary)
+    elif summary["checked"]:
+        # Every account answered `below-threshold`, OR -- the state worth naming --
+        # every account answered `no-reading`, which is what a stopped gauge
+        # (BACKUP_SWEEP_ENABLED off) looks like. It must not read as "nobody is
+        # near capacity".
+        logger.info("capacity notice sweep: %s accounts checked, nothing sent (%s) "
+                    "-- if `no-reading` dominates, the graph-storage gauge is not "
+                    "being written (BACKUP_SWEEP_ENABLED)", summary["checked"],
+                    summary["statuses"])
     return summary
