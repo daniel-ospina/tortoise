@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-10893-search-1795200149-p3528076-8581e91e",
+  "_sha": "e226d8d68c8d85ddadb4f0da45c9324b46fedb74",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/10893-search.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/10893-search-wait-budget"
+    },
+    {
+      "kind": "sha",
+      "value": "1e712339d0b52067e8e54cb174e60a2087781cd0"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/10893-search"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 43800,
+  "duration_s": 7065,
+  "ended_at": 1795207214,
+  "exit_code": 0,
+  "heartbeat_at": 1795207214,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-10893-search-1795200149-p3528076-8581e91e",
+  "lease_until": 1795251014,
+  "pid": 3528076,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795200149,
+  "state": "DONE",
+  "tag": "10893-search",
+  "worktree": "/home/cmux/tortoise/.worktrees/10893-search"
+}
