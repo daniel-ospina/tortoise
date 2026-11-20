@@ -3590,7 +3590,18 @@ def _css_blanked(css: str) -> str:
     rationale outlives the example, and `_max_width_media_blocks` /
     `_max_height_media_blocks` both cite it. Do not read this docstring as a
     claim about the sheet's current comments.
+    ⛔ HTML COMMENTS ARE STRIPPED TOO. These readers are handed WHOLE PAGES, and
+    a `/* … */`-only blanker leaves `<!-- … -->` intact: a CSS rule parked in a
+    markup comment (genuinely dead — the browser never parses it) satisfied both
+    `PE_ON_RULE_RE` and the `@media (max-height: …)` scan, keeping
+    `test_the_beat_can_receive_the_scroll_gesture_while_visible` and
+    `test_each_tall_beat_declares_the_css_escape_hatch` GREEN with no live rule
+    on the page (measured, #14020 review). This is the "each stripper ALONE is
+    half a stripper" lesson `_live_markup` records, applied here; composing the
+    two in ONE blanker is what keeps every reader below honest instead of
+    fixing each call site.
     """
+    css = re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), css, flags=re.S)
     return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), css, flags=re.S)
 
 
