@@ -32,6 +32,7 @@ that fails OPEN the day someone deletes a branch.
 | `test_a_swallowed_exit_does_not_certify_the_arm` | an exit is a write-stop only if it actually LEAVES | a `raise` a `try` handler or a context manager can swallow certifies the writer as write-stopped |
 | `test_the_collision_clause_of_at_parity_stands_alone` | each `at_parity` clause has its OWN falsifier | the `render_collision == 0` clause is deleted and only `graph_only` refuses |
 | `test_the_stop_arm_must_not_store_the_vector` | the stop arm stops — it does not place the vector first | a stop arm that STORES (then exits, or pops-then-stores) certifies the writer as write-stopped |
+| `test_the_fourth_legs_container_arm_asks_the_whole_family` | the fourth stop-arm leg asks the WHOLE `_CONTAINER_CALLS` family (pair and pair-WITH-EXTRAS), and the redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records is a MEASUREMENT, never a licence to subtract | a local name tuple or a subtraction returns (silent: two family names answer, four skip), or leg 1/leg 3 stops answering a wrapper the record says they read |
 | `test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either` | the `else` of `if gate(l):` is the STOP arm, and it is read | a store on that arm (`orelse` never examined) certifies the writer as write-stopped |
 | `test_upsert_source_IS_a_Source_writer_through_the_PASSTHROUGH` | `_upsert_source` persists a caller `embedding` via `SET n += $extra` | the name is dropped from `:Source`'s population on a static-clause count, letting a strip run into a live writer |
 | `test_the_gate_is_measured_from_a_fresh_process_when_the_population_is_supplied` | **#13796** — the gate is MEASURABLE from a fresh process | the stripper asks without its own denominator/tenant, so every label answers *unproved* while parity holds |
@@ -48,6 +49,7 @@ that fails OPEN the day someone deletes a branch.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -6772,19 +6774,93 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ AND THE PAIR LEG IS LOAD-BEARING ON ITS OWN, which is why it is a SEPARATE leg
-        # beside the pairs rule rather than a replacement for it (`#13788`, measured by
-        # dropping the leg and replaying every row: exactly this row moved). A non-`Name` key
-        # over a `set(...)` WRAPPER is a source the pairs rule does not read and the extras
-        # term does not reach — `set(...)` is a Call, not a List/Tuple literal:
+        # ⛔ AND THIS ROW'S REFUSAL COMES FROM THE LEGS **ABOVE**, NOT FROM THE FOURTH ONE. The
+        # attribution that stood here ("`#13788`, measured by dropping the leg and replaying
+        # every row: exactly this row moved") was STALE, and a stale "this row pins that leg"
+        # note is how the next lane re-widens what the leg was protecting (`#13788` round 12;
+        # re-measured for the review of PR #13928, then again by the test beside this tuple). A
+        # non-`Name` key over a `set(...)` WRAPPER is a source the PAIRS RULE DOES read —
+        # `set(...)` is a Call, and `_pairs_operand_stores_the_vector`'s Call arm unwraps it
+        # through `_container_call_operand` — and leg 3 answers it too, one leg before
+        # `_source_holds_the_store_anywhere` (the fourth leg) is ever asked:
         #
-        #     {v[0]: v[1] for v in set([("embedding", _encode(ev))])}    <- CERTIFIED before
+        #     {v[0]: v[1] for v in set([("embedding", _encode(ev))])}    <- refused by leg 1/3
         #
         # runtime-checked to leave the top-level vector in `props`.
+        # Measured, not reasoned: deleting the FOURTH leg moves NO row of this tuple (the test
+        # still passes), while deleting legs 1+3 makes exactly this row certify. So the row pins
+        # that the `set(...)` wrapper is read at all — worth having — but it does not pin the
+        # fourth leg, and nothing in this tuple does.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {v[0]: v[1] for v in set([("embedding", _encode(ev))])}
+        return None
+    _write(props)
+""",
+        # ⛔ THE PAIR-WITH-EXTRAS BEHIND A FILTERED COMPREHENSION (PR #13928 review, P1). This is
+        # the class the fourth leg's own docstring says it exists for — `(…, 1)` — and the class
+        # its exclusion sample never asked: the wrapper re-emits the 3-tuple, the comprehension's
+        # `if` clause makes the shared source resolver abstain on the BARE literal, and `v[0]`/
+        # `v[1]` then place the top-level vector.
+        # ⛔ BUT THESE THREE ROWS SPELL THE FILTER DIRECTLY IN THE CLAUSE, and THIS FORM is refused
+        # by another term of the `|=` chain with or without the fourth arm (measured end to end at
+        # `085c815866`: all three refused while the arm was subtracting four names). So they pin
+        # the CLASS, not the arm — the arm's own witness is the two NESTED spellings below, which
+        # is where the first repair round's "the disposition moves 0 of 60 rows" came from and why
+        # that reading was a sample artefact: the sample held no nested wrapper.
+        # Non-vacuity measured, not assumed: with the non-`Name`-key chain of
+        # `_pairs_operand_stores_the_vector` disabled, ALL 60 rows of this sample CERTIFY through
+        # `_writer_consults_gate` (so none of these rows is vacuous), and with the arm's four-name
+        # subtraction restored the two NESTED spellings below certify — the false PASS this tuple
+        # pins. A licence whose sample omits the shape it names is how the exclusion looked safe.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in sorted([("embedding", _encode(ev), 1)]) if v}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in set([("embedding", _encode(ev), 1)]) if v}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _i in iter([("embedding", 1, 1)]) if k}
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE **NESTED** SPELLINGS — THE ROWS THAT PIN THE FOURTH ARM ITSELF (PR #13928
+        #    review round 3, measured at `085c815866` vs the arm restored). A comprehension over a
+        #    comprehension: the INNER one carries the `if` / the transforming element, so the
+        #    shared SOURCE resolver sees a `ListComp` it answers with `None` (identity + unfiltered
+        #    only), and the pairs rule sees a 3-tuple (exactly two). Nothing upstream answers it,
+        #    so the fourth arm is the SOLE decider — and while it subtracted the four family names
+        #    these two writers were CERTIFIED (gated True) and the vector reached `props`:
+        #
+        #      leg1 False / leg3 False / leg4 False  <- false PASS, `085c815866`
+        #      leg1 False / leg3 False / leg4 True   <- refused, here
+        #
+        #    Measured, both heads, same fixture bodies, only the arm's disposition moving. These
+        #    two rows plus `test_the_fourth_legs_container_arm_asks_the_whole_family` are the
+        #    non-vacuity proof: re-add
+        #    `_callee_name(node) not in _CONTAINER_CALLS_ANSWERED_UPSTREAM` and both CERTIFY.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in [p for p in sorted([("embedding", _encode(ev), 1)]) if p]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v[0]: v[1] for v in [p[0:2] for p in reversed([("embedding", _encode(ev), 1)])]}
         return None
     _write(props)
 """,
@@ -8341,8 +8417,12 @@ def _upsert_object(props, ev):
         #      props |= dict(list(reversed({"a": ("embedding", _encode(ev))}.values())))  CERTIFIED
         #      props.update(iter({"embedding": _encode(ev)}.items()))                     CERTIFIED
         #
-        #    `_CONTAINER_CALLS` is the ONE list the four seams now share; `sorted`'s
-        #    `key=`/`reverse=` re-order without re-selecting, hence the keyword row.
+        #    `_CONTAINER_CALLS` is the ONE list all four seams ask — the fourth asks it through
+        #    `_container_call_operand` with **no subtraction** (PR #13928 review, P1: the arm
+        #    answered a subtracted part of the family on a sample that never asked the
+        #    pair-with-extras, so the subtraction is gone and only the measurement is recorded,
+        #    in `_CONTAINER_CALLS_ANSWERED_UPSTREAM`); `sorted`'s `key=`/`reverse=` re-order
+        #    without re-selecting, hence the keyword row.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9794,6 +9874,136 @@ def _upsert_object(props, ev):
         module = _fake_writer_module(tmp_path, monkeypatch, source)
         gated, why = strip._writer_consults_gate(module, "_upsert_object", ("object",))
         assert gated is True, f"an honest write-stop was refused: {source!r} ({why})"
+
+
+def _the_comprehension_source_over(source: str) -> tuple:
+    """`props |= {v[0]: v[1] for v in <source>}` -> (source node, dict comprehension)."""
+    module = ast.parse(f"def _u(props, ev):\n    props |= {{v[0]: v[1] for v in {source}}}\n")
+    comprehension = module.body[0].body[0].value
+    return comprehension.generators[0].iter, comprehension
+
+
+def test_the_fourth_legs_container_arm_asks_the_whole_family():
+    """⛔ THE FOURTH LEG SHEDS NO FAMILY NAME, AND ITS REDUNDANCY IS A MEASUREMENT WITH A SHAPE
+    (`#13788` round 12; re-measured for the review of PR #13928, which is why the subtraction
+    is GONE).
+
+    `_source_holds_the_store_anywhere` asks the ONE include list (`_CONTAINER_CALLS`, through
+    `_container_call_operand`) and answers ALL of it. At `085c815866` it answered a measured
+    PART of it — subtracting `_CONTAINER_CALLS_ANSWERED_UPSTREAM` — on a sample of five PLAIN
+    two-element inner shapes, which is the direction this file forbids (a subtraction can only
+    REDUCE refusals) on a licence that never asked the pair-WITH-EXTRAS shape the arm's own
+    docstring says it exists for.
+
+    ⛔ AND THE COVER IS NOT REDUNDANT THERE — measured END TO END through `_writer_consults_gate`,
+    six names x ten inner shapes = 60 rows, same fixture bodies at `085c815866` and at this head,
+    only the arm's disposition moving: **20 CERTIFIED at `085c815866`, 12 here**. The 8 rows that
+    move are `set`/`sorted`/`reversed`/`iter` x the two NESTED extras spellings, each a real store:
+
+        props |= {v[0]: v[1] for v in [p for p in sorted([("embedding", _encode(ev), 1)]) if p]}
+        props |= {v[0]: v[1] for v in [p[0:2] for p in reversed([("embedding", _encode(ev), 1)])]}
+
+    — CERTIFIED at `085c815866`, REFUSED here. A nested comprehension carrying an `if` (or
+    transforming its element) makes leg 3 abstain, and a 3-tuple makes the pairs rule abstain, so
+    the fourth leg is the SOLE decider for that class, not a redundant one. (The first repair
+    round's end-to-end rows spell the filter DIRECTLY in the clause — `sorted([(…, 1)]) if v` —
+    which some other term of the `|=` chain refuses with or without this arm; its 60-row sample
+    read "0 verdicts moved" because it never asked a nested wrapper. Those rows are kept — they
+    pin the class — and the nested spellings are added beside them.)
+
+    So this test guards two things that must move together:
+
+    * the arm still ANSWERS every family name over BOTH pair shapes, INCLUDING the nested extras
+      spellings where nothing upstream answers — a local name tuple, or a subtraction, coming back
+      is the defect `_CONTAINER_CALLS` exists to prevent, and it would be silent: the family
+      would answer here for two names and skip the other four with nothing reddening;
+    * the redundancy the record claims still HOLDS WHERE IT WAS MEASURED, and is asserted NOT to
+      hold for the sole-decider class — so a later lane cannot cite the record as cover for those
+      rows. Thin leg 1 or leg 3 and the first half reddens instead of the record quietly
+      describing a set of legs that no longer read those wrappers.
+
+    ⛔ THE BASELINE IT IS MEASURED AGAINST, stated correctly (the review of `085c815866` caught
+    the earlier sentence being false): at the merge base `e3f894b31b` the arm ALREADY asked the
+    shared helper over all six names — the literal `("list", "tuple")` spelling is pre-`#13788`,
+    two commits back. This test still cannot pass at either head, for two different reasons:
+    at `085c815866` because the arm subtracts four of the six (the assertions below redden), and
+    at `e3f894b31b` because the record constant these assertions read does not exist there.
+    """
+    inner_shapes = (
+        # the inner spellings a wrapper can hand this arm
+        '[("embedding", _encode(ev))]',
+        '[("embedding", _encode(ev))].copy()',
+        '([("embedding", _encode(ev))] if _gate() else [])',
+        '[*[("embedding", _encode(ev))]]',
+        '{("embedding", _encode(ev))}',
+        # ⛔ …AND THE PAIR-WITH-EXTRAS, the shape this arm's own docstring says it exists for and
+        # the class the review's counterexample was made of. Leaving it out of the sample is what
+        # made `0 of 30` look like a licence.
+        '[("embedding", _encode(ev), 1)]',
+        # …and two extras spellings NO leg answers at source level (the produced key is not the
+        # property by any reading these rules make) — kept in the sample so the redundancy claim
+        # is measured over them too rather than silently skipped; their end-to-end rows live in
+        # `test_the_stop_arm_must_not_store_the_vector`.
+        '[("embedding", 1, 1)]',
+        '[(1, "embedding", _encode(ev))]',
+    )
+    # ⛔ THE SOLE-DECIDER CLASS (`085c815866` review, P1): the extras pair BEHIND a nested
+    #    comprehension, whose `if` (or transforming element) makes leg 3 abstain while the 3-tuple
+    #    makes the pairs rule abstain. Nothing upstream answers these, so the fourth leg is the
+    #    whole gate — these are the rows that CERTIFIED while the subtraction was in place.
+    sole_decider_shapes = (
+        '[p for p in [("embedding", _encode(ev), 1)] if p]',
+        '[p[0:2] for p in [("embedding", _encode(ev), 1)]]',
+    )
+    record = tuple(strip._CONTAINER_CALLS_ANSWERED_UPSTREAM)
+    assert record, (
+        "the record of which family names an upstream leg answers is EMPTY — a red-free test "
+        "that asserts nothing. Restore it (it is the measurement, not a disposition)."
+    )
+    for name in record:
+        # the record is spoken over the FAMILY: a name that left `_CONTAINER_CALLS` must leave
+        # this tuple too, or the record describes a set that no longer exists
+        assert name in strip._CONTAINER_CALLS, (
+            f"{name!r} is recorded as answered upstream but is not in `_CONTAINER_CALLS` — the "
+            f"record has outlived the family it measures"
+        )
+
+    for name in strip._CONTAINER_CALLS:
+        for inner in ('[("embedding", _encode(ev))]',
+                      '[("embedding", _encode(ev), 1)]',
+                      *sole_decider_shapes):
+            source, _comprehension = _the_comprehension_source_over(f"{name}({inner})")
+            assert strip._source_holds_the_store_anywhere(source) is True, (
+                f"the fourth seam's container arm stopped answering `{name}({inner})` — it asks "
+                f"the ONE include list, so every family name must reach it. A local name tuple "
+                f"or a subtraction has come back: that reduces refusals, the one direction this "
+                f"file forbids, and it happens silently. For the nested extras spellings this "
+                f"arm is the SOLE decider (`085c815866` CERTIFIED them end to end)."
+            )
+
+    for name in strip._CONTAINER_CALLS:
+        for inner in (*inner_shapes, *sole_decider_shapes):
+            source, _comprehension = _the_comprehension_source_over(f"{name}({inner})")
+            upstream = (strip._pairs_operand_stores_the_vector(source)
+                        or strip._comprehension_source_pairs_the_property_with_a_value(source))
+            if inner in sole_decider_shapes:
+                assert upstream is False, (
+                    f"`{name}({inner})` is now answered UPSTREAM as well, so the fourth leg is "
+                    f"no longer its only decider. That is good news — but say it here, in the "
+                    f"record, before anything leans on it: this row was the counterexample that "
+                    f"killed the four-name subtraction, and a stronger upstream leg is a "
+                    f"measurement, never a licence to subtract again."
+                )
+                continue
+            if strip._source_holds_the_store_anywhere(source) is not True:
+                continue
+            assert upstream is True, (
+                f"`{name}({inner})` is answered by the FOURTH leg and by nothing upstream — the "
+                f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding: "
+                f"leg 1 or leg 3 lost a wrapper it read, or the record is stale and must be "
+                f"corrected before anyone quotes it again. (A real store is still REFUSED here, "
+                f"so nothing certifies — this is the record's guard, not a fail-open.)"
+            )
 
 
 def test_the_stop_arm_of_a_POSITIVE_ask_must_not_store_either(tmp_path, monkeypatch):

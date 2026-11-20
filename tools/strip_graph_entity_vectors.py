@@ -1105,7 +1105,11 @@ _STATEMENT_RUNNERS = ("run", "query", "execute", "write")
 #: Callee names that RETURN THE SAME ELEMENTS they are given, so a wrapper of this family never
 #: changes WHICH element the check sees — `list`, `tuple`, `set` (re-columned), `sorted` (re-ordered),
 #: `reversed` (re-ordered) and `iter` (the one-shot view of the same elements). ⛔ ONE INCLUDE LIST, ASKED AT EVERY SEAM THAT UNWRAPS A CONTAINER
-#: (`#13788` round 12, measured): the family used to be spelled out FOUR times with four different
+#: (`#13788` round 12, measured) — `_source_holds_the_store_anywhere`'s container arm included: it
+#: asks THIS list through `_container_call_operand` and subtracts only
+#: `_CONTAINER_CALLS_ANSWERED_UPSTREAM`, so a name added here reaches that seam too unless it is
+#: excluded there by name, with its measurement beside it. The family used to be spelled out FOUR
+#: times with four different
 #: member sets, and the two names missing from all four — `sorted`/`reversed` — CERTIFIED a stop arm
 #: that STORES the vector, 21 of 100 generated rows, each runtime-checked:
 #:
@@ -1138,6 +1142,58 @@ def _container_call_operand(node):
     if _callee_name(node) not in _CONTAINER_CALLS:
         return None
     return node.args[0]
+
+
+#: The names of the pass-through family that an upstream leg of
+#: `_pairs_operand_stores_the_vector`'s dict-comprehension arm ALSO answers, so that
+#: `_source_holds_the_store_anywhere`'s container arm is REDUNDANT for them IN THE SHAPES MEASURED.
+#: ⛔ THIS IS A RECORD, NOT A DISPOSITION: THE ARM DOES NOT SUBTRACT IT (PR #13928 review, P1).
+#: It used to, and that subtraction was the one direction this file forbids — it can only REDUCE
+#: refusals — on a licence from a sample that never asked the pair-WITH-EXTRAS shape the arm's own
+#: docstring says it exists for.
+#:
+#: ⛔ AND THE COVER IS NOT REDUNDANT THERE — the class false-PASSes with the subtraction in
+#: place. Measured END TO END through `_writer_consults_gate`, six names x ten inner shapes = 60
+#: rows, same fixture bodies at `085c815866` (subtracting) and at this head (whole family), only
+#: the arm's disposition moving: **20 CERTIFIED at `085c815866`, 12 here** — the 8 that move are
+#: `set`/`sorted`/`reversed`/`iter` x the two NESTED extras spellings, each one a real store
+#: (`props["embedding"] = VEC`):
+#:
+#:     props |= {v[0]: v[1] for v in [p for p in sorted([("embedding", _encode(ev), 1)]) if p]}
+#:     props |= {v[0]: v[1] for v in [p[0:2] for p in reversed([("embedding", _encode(ev), 1)])]}
+#:
+#: A nested comprehension carrying an `if` (or transforming its element) makes leg 3 abstain, and a
+#: 3-tuple makes the pairs rule abstain, so this arm is the SOLE decider for that class — 12 rows
+#: at this seam (`list`/`tuple` nested rows were refused at BOTH heads: those names were never
+#: subtracted). The 12 rows certified at BOTH heads are the two extras spellings that place no
+#: top-level key at all (`[("embedding", 1, 1)]` — constant value; `[(1, "embedding", …)]` —
+#: property bound to key `1`), so certification is correct there and neither row belongs to this
+#: arm's question.
+#:
+#: ⛔ THE FIRST REPAIR ROUND READ "0 verdicts moved" AND THAT WAS A SAMPLE ARTEFACT: its rows spell
+#: the filter DIRECTLY in the clause (`sorted([(…, 1)]) if v`), and some other term of the `|=`
+#: chain refuses that form with or without this arm. It also claimed the two index-1 extras rows
+#: were a pre-existing hole; measured here through the same gate they place no top-level key, so
+#: they are not a store to certify. The rows are kept (they pin the class) and the NESTED spellings
+#: are the ones that pin this arm.
+#:
+#: ⛔ SO ONLY BELIEVE THE REDUNDANCY WHILE IT IS MEASURED, and the sample is stated with its read
+#: recipe (`test_the_fourth_legs_container_arm_asks_the_whole_family`, which asserts it): six names
+#: x ten inner shapes (literal, `.copy()`, `if`-expression, `Starred` splice, set literal, three
+#: pair-with-extras literals, and the two NESTED extras wrappers) = **60 rows at this seam**. Leg 1
+#: (`_pairs_operand_stores_the_vector`) answers 30/60, leg 3
+#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and the 12 rows
+#: nothing upstream answers are exactly the nested extras spellings, where this arm is the SOLE
+#: decider. `set`/`list`/`tuple` are SAMPLED here — never extrapolated from the
+#: `sorted`/`reversed`/`iter` sweep that named only three of the six.
+#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 stops answering a family name, or
+#: if a family name is added to `_CONTAINER_CALLS` without being asked at this seam,
+#: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
+#: losing the legs that were doing the work.
+#: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
+#: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
+#: DISCLOSED here, never left looking load-bearing — and an arm that IS witnessed stays whole.
+_CONTAINER_CALLS_ANSWERED_UPSTREAM = ("set", "sorted", "reversed", "iter")
 
 
 def _runs_statements(call) -> bool:
@@ -2333,8 +2389,23 @@ def _source_holds_the_store_anywhere(node) -> bool:
     if isinstance(node, ast.Starred):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
-        # ⛔ ONE INCLUDE LIST (`#13788` round 12): `sorted`/`reversed` re-order the same
-        # elements, so a store behind either is the same store this scan exists to find.
+        # ⛔ THIS SEAM ASKS THE ONE INCLUDE LIST AND ANSWERS ALL OF IT (`#13788` round 12;
+        # re-measured for the review of PR #13928). The MEMBER SET comes from
+        # `_container_call_operand`/`_CONTAINER_CALLS` — which is also what keeps that helper's
+        # documented keyword semantics here (`key=`/`reverse=` re-order without re-selecting, so
+        # for the ELEMENT question this arm asks they are transparent). The site re-spells
+        # nothing: a second tuple here is how the family came to have four different member sets.
+        # ⛔ AND IT IS NOT SUBTRACTED EITHER (PR #13928 review, P1 — adopted fail-closed). This
+        # arm used to drop the four names `_CONTAINER_CALLS_ANSWERED_UPSTREAM` lists, on a sample
+        # of five PLAIN two-element inner shapes only. The review's counterexample — a
+        # pair-WITH-EXTRAS (`(…, 1)`) behind a NESTED comprehension wrapper, the shape this
+        # function's own docstring says it must read — is answered by NEITHER upstream leg, so
+        # this arm is its SOLE decider and the subtraction CERTIFIED it end to end (measured: 20
+        # CERTIFIED of 60 rows at `085c815866` vs 12 here; see that constant for the 60 rows and
+        # the eight false-PASS spellings). A subtraction can only REDUCE refusals, which is the
+        # direction this file forbids, and its licence did not cover the class it was excluding —
+        # so the arm answers every family name and the measurement, not a local name list, is the
+        # record.
         if (operand := _container_call_operand(node)) is not None:
             return _source_holds_the_store_anywhere(operand)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
