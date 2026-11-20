@@ -1300,7 +1300,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # URI falls through `resolve_db_path` to the import-time `DEFAULT_DB_PATH`
     # (`tortoise/config.py:31`, returned at its step 4 — resolved BEFORE the
     # `_isolated` fixture patches `HOME`); and
-    # `tests/test_env_file_divergence.py:841` calls `mcp_server._get_sdk()`. So the
+    # `tests/test_env_file_divergence.py:882` calls `mcp_server._get_sdk()`. So the
     # module IS store-touching. What makes its declared sites safe is the PER-SITE
     # intent above, never a DB-free premise.
     #

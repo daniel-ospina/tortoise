@@ -94,10 +94,13 @@ def _isolated(monkeypatch, tmp_path):
     # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist, and THAT
     # is what makes these tests hermetic: `doctor`'s pre-init arm grades a MISSING
     # target without opening it (`⚠️ … no Tortoise DB at …`, the expected #5815 first
-    # run), so no store is ever opened. ⛔ ONE ROW IS NOT A `doctor` ROW:
+    # run), so no store is ever opened. ⛔ ONE ROW NEEDED THE SAME PIN FOR THE SAME REASON:
     # `test_the_daemons_refusal_is_still_the_one_the_user_sees` builds an SDK, and
-    # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`); the
-    # absent `<db_path>.settings` (`sdk.py:14196`) returns first — THAT is its guard.
+    # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`) — so it takes
+    # `_isolated` too, and on the pinned path the absent `<db_path>.settings` returns first
+    # (`sdk.py:14194-14195`). ⚠️ It did NOT, and that was not academic: unpinned it reached the
+    # REAL `~/.tortoise/tortoise.db`, where a crash-residue `.settings` exists, so the
+    # settings short-circuit was NOT what saved it — the dead-pidfile arm (`:14211-14212`) was.
     import tortoise.config as _config
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / "canonical" / "tortoise.db"))
@@ -858,7 +861,7 @@ def test_config_show_does_not_reassure_when_the_daemon_refuses(capsys, _isolated
     assert "the same graph target as above" not in out, out
 
 
-def test_the_daemons_refusal_is_still_the_one_the_user_sees(monkeypatch):
+def test_the_daemons_refusal_is_still_the_one_the_user_sees(monkeypatch, _isolated):
     """`_get_sdk` must stay constructible on the refusal rung.
 
     `main()` calls `_get_sdk()` BEFORE its own "set TORTOISE_DB_URI … in the
