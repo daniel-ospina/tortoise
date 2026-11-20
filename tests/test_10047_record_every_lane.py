@@ -450,13 +450,10 @@ _PINNED_CORE_VERBS = frozenset({
     # the seeds themselves, plus the module-level carriers in `sdk.py`
     "write_live_record", "_apply_and_journal", "_emit_event",
     "_journal_entity_event", "_write_session_and_turns", "_write_capture_turns",
-    # the doors a lane plausibly writes through …
-    # ⚠️ #12901 FINAL RENAMED the sixteen doors this floor carried: they are the
-    # private carriers now (`_create_point`, `_update_point`, `_supersede_point`, …),
-    # because the batch privatised every off-surface method instead of deleting it.
-    # Repointed to the names the code holds — the derivation is keyed on the `def`
-    # NAME, so a public spelling is not in it while its private body is — which is
-    # the same treatment the #12948 row below records.
+    # ⛔ #12901 privatised these doors (`create_point` -> `_create_point`, …). The
+    # floor demands the names the DERIVATION can see, and the derivation keys on the
+    # `def` NAME in `sdk.py` — so a row left on the retired spelling reports the
+    # verb as `missing` and takes the whole completeness leg down with it.
     "_create_point", "_create_object", "_create_subject", "_create_operator",
     "_create_direct_edge", "_index_directory", "_ingest_corpus", "_update_point",
     "_supersede_point", "_promote_point", "_retract_point", "_invalidate_point",
@@ -676,7 +673,7 @@ def _assigned_handles(node) -> list[tuple[str, ast.expr]]:
     (`self._own_sdk`), because an SDK a class OWNS is a handle too (#10046
     review round 5 P1): reading only `ast.Name` targets meant `__init__`'s
     `self._own_sdk = _make_sdk(namespace=org_id)` was never a handle, so a
-    `run()` writing `self._own_sdk.create_point(...)` was never a write. That is
+    `run()` writing `self._own_sdk._create_point(...)` was never a write. That is
     the package's dominant class idiom — `dream.py`, `onboarding/selfhost.py`,
     `hosted_api._OrgSeedSurface`, `mcp_auth` all hold their SDK on `self`.
 
@@ -901,7 +898,7 @@ def _position_of(node) -> tuple[int, int]:
 
     ⚠️ The def-position alone is NOT the whole answer (#10723 review round 3 P2):
     a closure executes at CALL time, so a handle opened AFTER its `def` is the one
-    the closure actually sees. `def _w(): sdk.create_point(...)` followed by
+    the closure actually sees. `def _w(): sdk._create_point(...)` followed by
     `sdk = _make_sdk(namespace=org_id)` is ordinary ordering, and folding only to
     the def position went silently green on it — a regression against
     `origin/main` and against round 1. `_AFTER_SCOPE` is how the enclosing
@@ -1674,7 +1671,7 @@ def _flagged(source: str) -> list[str]:
 
 
 @pytest.mark.parametrize("verb", ["create_entity", "supersede_knowledge",
-                                  "link_entities", "ingest", "create_point"])
+                                  "link_entities", "_ingest", "_create_point"])
 def test_a_lane_using_an_sdk_alias_is_caught(verb):
     """P1 (#10380): the verbs are DERIVED, so an alias is not a blind spot.
 
@@ -1720,7 +1717,7 @@ from tortoise import hosted_api as _ha
 def _run_qualified_lane(org_id: str) -> None:
     sdk = _ha._make_sdk(namespace=org_id)
     try:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     finally:
         sdk.close()
 '''
@@ -1748,7 +1745,7 @@ def test_a_CLASS_METHOD_writing_through_an_unbound_sdk_is_caught():
 class _MethodLane:
     def run(self, org_id: str) -> None:
         sdk = _make_sdk(namespace=org_id)
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
 '''
     assert _flagged(local), (
         "a write inside a CLASS METHOD through an unbound SDK must be flagged — "
@@ -1763,7 +1760,7 @@ class _BoundWorker:
         _bind_default_graph_record_tenant(self._sdk, org_id)
 
     def run(self) -> None:
-        self._sdk.create_point("Subject", {})
+        self._sdk._create_point("Subject", {})
 '''
     assert _flagged(bind_then_write) == [], (
         "the BOUND direction: an SDK held on `self` that the class then arms — "
@@ -1774,7 +1771,7 @@ class _BoundWorker:
     with_form = '''
 def _run_with_lane(org_id: str) -> None:
     with _make_sdk(namespace=org_id) as sdk:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
 '''
     assert _flagged(with_form), (
         "`with _make_sdk(...) as sdk:` is a SUPPORTED way to hold this SDK "
@@ -1787,7 +1784,7 @@ class _OwnWorker:
         self._own_sdk = _make_sdk(namespace=org_id)
 
     def run(self) -> None:
-        self._own_sdk.create_point("Subject", {})
+        self._own_sdk._create_point("Subject", {})
 '''
     assert _flagged(owned), (
         "an SDK the class OWNS (`self._own_sdk`, opened in `__init__`, written in "
@@ -1799,7 +1796,7 @@ class _ParamWorker:
         self._sdk = sdk
 
     def run(self) -> None:
-        self._sdk.create_point("Subject", {})
+        self._sdk._create_point("Subject", {})
 '''
     assert _flagged(control) == [], (
         "the control: a handle that came from a PARAMETER has an unknown state "
@@ -1819,7 +1816,7 @@ def test_an_install_in_any_spelling_arms_the_handle_it_names():
 def _local_kw(org_id: str) -> None:
     sdk = _make_sdk(namespace=org_id)
     _bind_default_graph_record_tenant(sdk=sdk, org_id=org_id)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(keyword_local) == [], (
         "a KEYWORD-argument install installs the tenant; reporting it RED tells "
@@ -1832,7 +1829,7 @@ class _KwWorker:
         _bind_default_graph_record_tenant(sdk=self._sdk, org_id=org_id)
 
     def run(self) -> None:
-        self._sdk.create_point("Subject", {})
+        self._sdk._create_point("Subject", {})
 '''
     assert _flagged(keyword_self) == [], (
         "the same, on a handle the class owns")
@@ -1840,7 +1837,7 @@ class _KwWorker:
     multi_with = '''
 def _run_multi(org_id: str) -> None:
     with _lock() as lk, _make_sdk(namespace=org_id) as sdk:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
 '''
     assert _flagged(multi_with), (
         "EVERY item of a multi-item `with` binds a handle — stopping at the first "
@@ -1865,7 +1862,7 @@ def test_an_install_arms_the_writes_THAT_FOLLOW_it_and_no_earlier_ones():
 def _late_bind(org_id: str) -> None:
     sdk = _make_sdk(namespace=org_id)
     try:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     finally:
         _bind_default_graph_record_tenant(sdk, org_id)
         sdk.close()
@@ -1878,7 +1875,7 @@ def _late_bind(org_id: str) -> None:
 def _early_bind(org_id: str) -> None:
     sdk = _make_sdk(namespace=org_id)
     _bind_default_graph_record_tenant(sdk, org_id)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(early) == [], (
         "the control: the SAME lane with the install before the write is clean, "
@@ -1908,7 +1905,7 @@ def _match_rebind(org, mode):
             sdk = _data_sdk(org)
         case _:
             pass
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(match_unbound_live), (
         "the arm may not run, so the unbound handle still reaches the write — "
@@ -1922,7 +1919,7 @@ def _match_bound(org, mode):
             sdk = _data_sdk(org)
         case _:
             pass
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(match_all_bound) == [], (
         "the control: an all-bound lane is clean whichever arm runs — making "
@@ -1949,7 +1946,7 @@ def test_a_rebind_to_a_BOUND_opener_before_the_write_clears_the_handle():
 def _rebind_local(org):
     sdk = _make_sdk(namespace=org["org_id"])
     sdk = _data_sdk(org)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(local_rebind) == [], (
         "an unconditional rebind to a BOUND opener before the write clears it")
@@ -1961,7 +1958,7 @@ class _RebindWorker:
 
     def run(self, org) -> None:
         self._sdk = _data_sdk(org)
-        self._sdk.create_point("Subject", {})
+        self._sdk._create_point("Subject", {})
 '''
     assert _flagged(class_rebind) == [], (
         "the same, on a handle the class OWNS: the WRITER's own binding must win "
@@ -1972,7 +1969,7 @@ def _conditional_rebind(org):
     sdk = _make_sdk(namespace=org["org_id"])
     if not sdk:
         sdk = _data_sdk(org)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(conditional_rebind), (
         "the control the round-6 worst-wins rule protects: a CONDITIONAL rebind "
@@ -1999,7 +1996,7 @@ def test_a_nested_def_writing_through_the_ENCLOSING_lane_handle_is_caught():
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(closure), (
@@ -2012,7 +2009,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     _bind_default_graph_record_tenant(sdk, org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(armed_above) == [], (
@@ -2029,7 +2026,7 @@ def _lane(org_id):
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
     _bind_default_graph_record_tenant(sdk, org_id)
 '''
@@ -2048,7 +2045,7 @@ def _lane(org_id):
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
         _bind_default_graph_record_tenant(sdk, org_id)
     _write()
 '''
@@ -2061,7 +2058,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         try:
-            sdk.create_point("Subject", {})
+            sdk._create_point("Subject", {})
         finally:
             _bind_default_graph_record_tenant(sdk, org_id)
     _write()
@@ -2077,7 +2074,7 @@ def _lane(org_id):
     def_before_binding = '''
 def _lane(org_id):
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     sdk = _make_sdk(namespace=org_id)
     _write()
 '''
@@ -2089,7 +2086,7 @@ def _lane(org_id):
 def _lane(org_id):
     sdk = _data_sdk(org)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     sdk = _make_sdk(namespace=org_id)
     _write()
 '''
@@ -2105,7 +2102,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _mid():
         def _inner():
-            sdk.create_point("Subject", {})
+            sdk._create_point("Subject", {})
         _inner()
         _bind_default_graph_record_tenant(sdk, org_id)
     _mid()
@@ -2126,7 +2123,7 @@ def _lane(org_id):
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _bind_default_graph_record_tenant(sdk, org_id)
     _write()
 '''
@@ -2158,7 +2155,7 @@ def test_a_nested_def_writing_through_a_PARAMETER_is_still_silent():
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _drain(sdk):
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _drain(_open_sdk(org_id))
 '''
     assert _flagged(parameter) == [], (
@@ -2171,7 +2168,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _outer(sdk):
         def _inner():
-            sdk.create_point("Subject", {})
+            sdk._create_point("Subject", {})
         _inner()
     _outer(_open_sdk(org_id))
 '''
@@ -2204,7 +2201,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         sdk = _safe_handle()
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(shadowed) == [], (
@@ -2216,7 +2213,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         with _safe_handle() as sdk:
-            sdk.create_point("Subject", {})
+            sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(shadowed_by_a_with_binding) == [], (
@@ -2229,7 +2226,7 @@ def _lane(org_id):
         def _unrelated():
             sdk = _safe_handle()
             return sdk
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(deeper), (
@@ -2264,7 +2261,7 @@ def test_a_USE_of_the_handle_inside_the_writer_is_not_a_shadow():
 def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     attribute_use = '''
@@ -2272,7 +2269,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         sdk.timeout = 5
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     subscript_use = '''
@@ -2280,7 +2277,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         seen[sdk] = 1
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     augmented_attribute = '''
@@ -2288,7 +2285,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         sdk.calls += 1
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     control_flag = _flagged(control)
@@ -2316,7 +2313,7 @@ def _lane(org_id):
     sdk = _make_sdk(namespace=org_id)
     def _write():
         sdk, other = _safe_handle(), 1
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     assert _flagged(unpacked_shadow) == [], (
@@ -2350,7 +2347,7 @@ def _lane(org_id):
     def _write():
         class C:
             sdk = _safe_handle()
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     _write()
 '''
     class_body_binds_another_name = class_body_binds_the_handle.replace(
@@ -2369,7 +2366,7 @@ def _lane(org_id):
 def _lane(org_id):
     class C:
         sdk = _make_sdk(namespace=org_id)
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
 '''
     assert _flagged(class_body_write_through_its_own_handle), (
         "a class body's OWN bindings are still read when the write's scope IS "
@@ -2420,7 +2417,7 @@ def test_a_literal_namespace_is_not_an_org_scoped_site():
     absent_kwarg_write = (
         "def f(org_id):\n"
         "    sdk = _make_sdk()\n"
-        "    sdk.create_point('Subject', {})\n")
+        "    sdk._create_point('Subject', {})\n")
     flagged = _flagged(absent_kwarg_write)
     assert flagged and "`sdk`" in flagged[0], (
         "a write through `_make_sdk()` is an UNBOUND write: the handle carries "
@@ -2445,7 +2442,7 @@ def _run_new_job(org_id: str) -> None:
     if sdk is None:
         return
     try:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     finally:
         sdk.close()
 '''
@@ -2473,7 +2470,7 @@ def test_every_unbound_opener_is_flagged_on_the_handle_it_returns(opener):
 def _run_new_lane(org_id: str) -> None:
     sdk = {opener}(org_id)
     try:
-        sdk.create_point("Subject", {{}})
+        sdk._create_point("Subject", {{}})
     finally:
         sdk.close()
 '''
@@ -2510,7 +2507,7 @@ def test_an_AWAITED_unbound_opener_is_flagged_and_an_awaited_rebind_is_clean():
     awaited_unbound = '''
 async def _lane(org_id):
     sdk = await _org_sdk(org_id)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(awaited_unbound), (
         "an AWAITED unbound opener returns the same tenantless SDK — answering "
@@ -2520,7 +2517,7 @@ async def _lane(org_id):
 async def _lane(org):
     sdk = _make_sdk(namespace=org["org_id"])
     sdk = await _data_sdk_offloaded(org)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(awaited_rebind) == [], (
         "`_data_sdk_offloaded` binds before returning, awaited or not — the "
@@ -2531,7 +2528,7 @@ async def _lane(org):
     sdk = _make_sdk(namespace=org["org_id"])
     if not sdk:
         sdk = await _data_sdk_offloaded(org)
-    sdk.create_point("Subject", {})
+    sdk._create_point("Subject", {})
 '''
     assert _flagged(awaited_conditional), (
         "the conditional case must keep its worst-wins answer through the "
@@ -2550,7 +2547,7 @@ def _run_bound_org_lane(org_id: str) -> None:
     sdk = _org_sdk(org_id)
     _bind_default_graph_record_tenant(sdk, org_id)
     try:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     finally:
         sdk.close()
 '''
@@ -2569,7 +2566,7 @@ def _run_two_sdk_job(org: dict) -> None:
     data = _data_sdk(org)
     other = _make_sdk(namespace=org["org_id"])
     try:
-        other.create_point("Subject", {})
+        other._create_point("Subject", {})
     finally:
         other.close()
         data.close()
@@ -2589,7 +2586,7 @@ def _run_bound_job(org_id: str) -> None:
     sdk = _make_sdk(namespace=org_id)
     _bind_default_graph_record_tenant(sdk, org_id)
     try:
-        sdk.create_point("Subject", {})
+        sdk._create_point("Subject", {})
     finally:
         sdk.close()
 '''
@@ -2601,7 +2598,7 @@ def test_a_lane_that_hands_an_unbound_sdk_to_a_writing_helper_is_caught():
     still the thing that has to be bound, so the CALL is checked."""
     source = '''
 def _seed_the_graph(sdk, org_id: str) -> None:
-    sdk.create_subject("Person", "Ann")
+    sdk._create_subject("Person", "Ann")
 
 def _run_seed_lane(org_id: str) -> None:
     sdk = _make_sdk(namespace=org_id)
@@ -2615,10 +2612,10 @@ def _run_seed_lane(org_id: str) -> None:
 
 
 def test_an_inline_unbound_construction_that_writes_is_caught():
-    """`_make_sdk(namespace=org_id).create_point(…)` binds no handle to check,
+    """`_make_sdk(namespace=org_id)._create_point(…)` binds no handle to check,
     so the receiver itself is inspected."""
     source = '''
 def _run_inline_job(org_id: str) -> None:
-    _make_sdk(namespace=org_id).create_point("Subject", {})
+    _make_sdk(namespace=org_id)._create_point("Subject", {})
 '''
     assert _flagged(source), "an inline unbound write must be flagged"

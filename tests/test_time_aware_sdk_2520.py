@@ -694,12 +694,10 @@ def test_a_topical_query_pays_no_pool_width_state_read(ku_graph, monkeypatch):
 
 _RE_OWNING_LANES = (
     # (label, method name, args, kwargs)
-    # ⚠️ #12901 FINAL: the lane is reached by the `def` the class actually holds, and
-    # `recall_state` / `issue_insight` / `recall_gaps` are the PRIVATE carriers now
-    # (`_recall_state`, `_issue_insight`, `_recall_gaps`) — this tuple is read with
-    # `getattr(sdk, method)`, so a public spelling would have been an `AttributeError`
-    # rather than a measurement. The labels are the lanes' names; the methods are the
-    # names the code holds.
+    # ⛔ #12901 privatised these three into `_recall_state` / `_issue_insight` /
+    # `_recall_gaps`. The method column is a STRING tuple resolved with
+    # `getattr(sdk, method)`, which is the one shape the receiver-typed sweep cannot
+    # see — so the pins stayed on the retired spelling and every lane raised.
     ("recall_state", "_recall_state", (_PLAIN_QUERY,), {}),
     ("issue_insight", "_issue_insight", ("billing ledger", "the database"), {}),
     # #4282 / #11609 Phase 2: the standalone ``suggest_entry_points`` SDK door
@@ -739,7 +737,7 @@ def test_internal_pool_reads_opt_out_of_the_selection(sdk, monkeypatch):
         seen.clear()
         getattr(sdk, method)(*args, **kwargs)
         if not seen:
-            failures.append(f"{label}: never reached tortoise_fts_query")
+            failures.append(f"{label}: never reached _tortoise_fts_query")
             continue
         for _q, kw in seen:
             if kw.get("_valid_time_rerank") is not False:
@@ -757,7 +755,7 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
     Reachable: an AST pass over the six declared lanes below, which asserts the
     DECLARED
     choice per lane rather than a general rule — each file's reason is recorded
-    at its own call site or in its own docstring. Only `sdk.tortoise_fts_query`
+    at its own call site or in its own docstring. Only `sdk._tortoise_fts_query`
     call sites are inspected, so unrelated calls cannot satisfy it.
     """
     import ast
@@ -800,7 +798,7 @@ def test_the_measurement_lanes_declare_their_valid_time_choice():
     problems = []
     for rel, want in expected.items():
         declared = _declared(root / rel)
-        assert declared, f"{rel}: no sdk.tortoise_fts_query call site found"
+        assert declared, f"{rel}: no sdk._tortoise_fts_query call site found"
         for got in declared:
             if got != want:
                 problems.append(f"{rel}: _valid_time_rerank={got!r}, want {want!r}")

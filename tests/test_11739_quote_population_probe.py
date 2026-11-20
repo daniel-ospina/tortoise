@@ -1290,9 +1290,12 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
 
 
 @pytest.mark.parametrize("method, kwargs", [
-    # sdk.py:24334 — the un-paginated read. ⚠️ #12901 FINAL privatised both arms
-    # (`query` -> `_query`, `paginated_query` -> `_paginated_query`); this pin reads
-    # them with `getattr(sdk, method)`, so it names the `def`s the class holds.
+    # ⛔ #12901 privatised both read arms (`query` → `_query`, `paginated_query` →
+    # `_paginated_query`). The parametrize ids are resolved with `getattr(sdk, method)`,
+    # a STRING reference the receiver-typed sweep cannot see, so both arms raised
+    # `AttributeError` instead of pinning the composed predicate.
+    #
+    # sdk.py:24334 — the un-paginated read
     ("_query", {"_record_reads": False}),
     # sdk.py:24407 — `paginated_query`, and THIS is the arm the census traversed: the probe
     # asks `tortoise_query(limit, offset)` (probe::_page), `mcp_server` dispatches the offset
@@ -1306,8 +1309,8 @@ def test_every_read_arm_that_serves_points_carries_both_conjuncts(method, kwargs
     clause, or starts passing `include_outdated_flag=False` for it.
 
     The census's denominator claim is about the population "the default read serves", so the
-    CALL SITES are the last link and prose cannot pin them: `sdk.query` and
-    `sdk.paginated_query` each build their WHERE from `_operator_scope_clauses(kind)` plus
+    CALL SITES are the last link and prose cannot pin them: `sdk._query` and
+    `sdk._paginated_query` each build their WHERE from `_operator_scope_clauses(kind)` plus
     their OWN `_exclude_status_clause("n")` append — two separate statements, `sdk.py:24334`
     and `sdk.py:24407` — and the probe measured through the SECOND one. This captures the
     Cypher each arm hands to `proj.g.query` and asserts the same three things on it.

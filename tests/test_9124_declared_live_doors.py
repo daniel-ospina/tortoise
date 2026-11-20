@@ -256,10 +256,12 @@ _APPLY_FIRST_DOORS = {
     # function that no longer exists, which reds as a stale entry AND leaves the renamed
     # body reaching the write handle with no lane (measured before this: reds 1 and 2).
     "_assess_source",        # SET reliability, then the assessment record
-    "_compute_confidence",   # SET n.confidence per row, then ConfidenceChanged
-    "_mitigate_operator",    # CREATE the mitigation, then its records
-    "_promote_point",        # CAS SET status='live', then PointPromoted
-    "_set_point_baseline",   # SET the baseline, then its record
+    # ⛔ #12901 privatised these four; the inventory is keyed on the census's
+    # FUNCTION name, which is the `def` in `sdk.py`.
+    "_compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
+    "_mitigate_operator",     # CREATE the mitigation, then its records
+    "_promote_point",         # CAS SET status='live', then PointPromoted
+    "_set_point_baseline",    # SET the baseline, then its record
 }
 
 #: Apply-first INTERNAL helpers — the same ordering as the doors above, reached
@@ -352,7 +354,7 @@ _NO_JOURNAL = {
     # row here would be a STALE census entry — which
     # `test_the_inventories_hold_no_stale_entry` reds on. A door that no longer
     # exists has no lane to name.
-    "_ingest",
+    "_ingest",   # #12901: the door moved to the private spelling
     # ⛔ #12948 renamed the public `set_source_tier` to `_set_source_tier` (the container
     # `manage_source_trust` is the door now), so the entry moves with the rename for the
     # same measured reason as `_assess_source` above.
@@ -467,8 +469,6 @@ _UNRESOLVED = {
     # "the readable half has no write keyword" would not settle it. Measured,
     # each function's only handle reach is ONE read:
     #   `_calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)
-    #     ⚠️ #12901 FINAL privatised the door; the citation names the `def` the
-    #     census keys on, which is the spelling this set's row carries.
     #   `_uncalibrated_ep_participants` — `MATCH … RETURN n.id` (a read)
     # with no SET/CREATE/MERGE/DELETE/REMOVE in the assembled query and no CALL
     # to any `sdk.py` function the census proves reaches the write handle
@@ -636,6 +636,7 @@ _UNRESOLVED = {
     "_state_related_objects",
     "_state_related_points",
     "_unsweepable_dirty_roots",
+    # ⛔ #12901 privatised all four read doors; the census keys the `def` name.
     "_list_batch",
     "_paginated_query",
     "_query",
@@ -3903,18 +3904,12 @@ def test_the_module_bindings_cache_retains_its_module():
 _APPLY_FIRST_DECLARED_DOORS = {
     # The apply-first, by decision doors: the record's OUTCOME depends on the
     # write, and the decision is recorded where the door lives.
-    "_delete_point",       # #9207: cache-first, the destroy is the commit point
-    "_update_point",       # #8830: the promote arm's guarded SET, then its record
+    # ⛔ #12901 privatised both doors; the census keys the `def` name.
+    "_delete_point",          # #9207: cache-first, the destroy is the commit point
+    "_update_point",          # #8830: the promote arm's guarded SET, then its record
     # The mechanical apply-first doors (#9206): their record is built from the
     # node they just wrote, so the append cannot precede the write without
     # changing the door's commit contract (#9124 part 2).
-    #
-    # ⚠️ #12901 FINAL: the census keys a door by its `def` NAME, and this batch
-    # privatised four of the doors below (`_delete_point`, `_update_point`,
-    # `_create_operator`, `_create_direct_edge`) — their §17.1 declarations still
-    # carry the PUBLIC spelling, because that is the door's name in the write-lane
-    # record, while the `def` that implements it is private. Re-keyed here, not
-    # dropped: the same four doors, the same four claims.
     "_create_operator",
     "_create_direct_edge",
     "_update_entity",
@@ -5021,7 +5016,7 @@ def test_every_proven_read_names_a_real_census_entry():
                 f"(writes={fact['writes'][:2]}, scopes={fact['scopes']})")
     assert not offenders, (
         "these `_PROVEN_READS` entries name no census entry (wrong key form? the "
-        "census key is scope-qualified — `TortoiseSDK.delete_point`, not "
+        "census key is scope-qualified — `TortoiseSDK._delete_point`, not "
         "`delete_point`) — the pin would be a silent no-op:\n  "
         + "\n  ".join(offenders))
 

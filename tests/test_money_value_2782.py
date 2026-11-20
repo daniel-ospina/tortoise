@@ -846,10 +846,9 @@ class TestWriteBoundary:
 #: ⛔ #11609 Phase 2 retired `update_entity` into `update_knowledge`; the entity
 #: arm below is that container's, so the ENTITY half of every pin here is
 #: unchanged and the door name is the live one.
-#: ⚠️ #12901 FINAL privatised the Point door: the `def` is `_update_point` now, and these
-#: pins address doors by the name the CODE holds (the `@pytest.mark.parametrize` values are
-#: looked up with `getattr(sdk, door)`), so the Point arm carries the private spelling. The
-#: gate below is the moneyValue intake, which the private body is the same writer behind.
+#: ⛔ #12901 privatised the point-shaped door into `_update_point`. These are STRING
+#: references resolved with `getattr(sdk, door)`, so the receiver-typed sweep could not
+#: see them and every arm below raised `AttributeError` rather than the gate's `ValueError`.
 UPDATE_DOORS = ("update_knowledge", "_update_point")
 
 
