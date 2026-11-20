@@ -228,6 +228,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -253,10 +254,13 @@ __all__ = [
     "RELEASE_CONDITIONS",
     "UNMEASURED_UNARMED_WARNING",
     "AllowanceDimension",
+    "CacheFoldDenial",
     "CapBand",
     "MeterReading",
+    "cache_fold_denial",
     "carry_allowance_keys",
     "carry_resolved_allowances",
+    "clear_cache_fold_denial",
     "enforce_allowances",
     "reset_signal_state_for_tests",
     "unarmed_served_counts",
@@ -500,6 +504,31 @@ class AllowanceDimension:
     #: waits on is the staleness this field exists to expose. Revalidated by
     #: ``tests/test_9559_blocked_release_conditions.py``, not by production.
     release: tuple[str, ...] = ()
+    #: Whether this dimension measures a store DERIVED from the record, so that
+    #: its cap must degrade that store instead of refusing the truth (#13829).
+    #:
+    #: ⛔ DEFAULT-DENY, like every other widening here. ``False`` means "a write
+    #: refused by this dimension is a write the tenant did not get", which is the
+    #: correct reading of a dimension measuring the layer the door writes.
+    #: ``True`` claims something specific and testable: this dimension's meter
+    #: describes a store that ``docs/architecture/STORAGE-ARCHITECTURE.md`` §2.0
+    #: calls a **derived hot cache** — one whose loss "loses nothing" recoverable
+    #: from the record (§3). A cap on such a store cannot bound the truth, so
+    #: refusing the truth to protect it is the inversion #13526 measured.
+    #:
+    #: What the declaration BUYS is only the two-armed enforcement below: on a
+    #: door that has DECLARED its write is truth-carried (``truth_carried=True``),
+    #: an over-cap reading is published as a :class:`CacheFoldDenial` for the
+    #: chokepoint to consume, and the write is served. On every other door —
+    #: including every door that has not been proven to reach the record — the
+    #: refusal is unchanged, because there the derived store may be the only
+    #: durable copy and failing the write is then the correct behaviour.
+    #:
+    #: ⛔ It does NOT move ``postgres_storage``, and must not: that dimension
+    #: measures the SYSTEM OF RECORD, i.e. the layer those doors actually write,
+    #: so its refusal is about the thing being refused. (Its gauge is the open
+    #: seam on #13526 and is deliberately untouched here.)
+    derived_layer: bool = False
 
     @property
     def blocked(self) -> bool:
@@ -1007,6 +1036,25 @@ DIMENSIONS: tuple[AllowanceDimension, ...] = (
         # serves. Refusing a new write is reversible; dropping a graph to make
         # room is not.
         cap_band=CapBand(warn_at=1.0, refuse_at=HARD_STOP_MULTIPLE),
+        # ⛔ THIS DIMENSION MEASURES A DERIVED STORE, AND SAYS SO (#13829).
+        # ``docs/architecture/STORAGE-ARCHITECTURE.md`` §2.0 (owner, 2026-10-08):
+        # Postgres is the system of record, **FalkorDB is a derived hot cache**;
+        # §3: *"deleting FalkorDB loses nothing"*, *"the derived layer must be
+        # physically DROPPABLE"*. A cap on a droppable layer therefore cannot
+        # bound the truth — and on a door that has NOT moved the truth, refusing
+        # this dimension's cap is still the honest protection of a write whose
+        # only durable copy is that layer (#13526's standards check names that
+        # exception verbatim). Hence ``derived_layer`` buys a TWO-ARMED rule, not
+        # an amnesty: the refusal stays on every unproven door, and becomes a
+        # named CACHE-FOLD DECLINE only where the door declares the write
+        # truth-carried. The alternative — reading this as "the cap does not
+        # apply to the graph" — would leave the capture-shaped doors free to grow
+        # residency unbounded, which is #13134's separate, reviewed decision.
+        #
+        # ⚠️ It is NOT a licence to evict or delete anything (#10976). The
+        # eviction path is licence-gated and out-of-band; this declaration only
+        # decides WHICH layer's write the comparison may refuse.
+        derived_layer=True,
         # ⛔ NO READING MUST NEVER REFUSE A PAYING TENANT (#13102 P0-1, the
         # blocker). Every unmeasured state of THIS gauge — no row, ``unreported``,
         # ``read_error``, ``period_error``, a reason the gate has never seen, a
@@ -1561,6 +1609,103 @@ def _served_unmeasured(dim: AllowanceDimension, org_id: str, reason: str) -> Non
         alert_allowance_cap_unenforceable(dim.dimension, org_id, reason)
 
 
+@dataclass(frozen=True)
+class CacheFoldDenial:
+    """The DERIVED cache's over-cap verdict for ONE write — the fold's answer.
+
+    Minted by :func:`enforce_allowances` on a ``derived_layer`` dimension when the
+    door has declared its write truth-carried, and CONSUMED by the write
+    chokepoint (``tortoise/live_write.py``), which skips the cache fold and
+    records this as the write's named outcome. It is a dataclass rather than a
+    ``str`` so the reason cannot drift into free text: ``detail`` is the gate's
+    OWN refusal text, built by the gate's own formatter, and ``used``/``limit``
+    are **the figures the gate compared** (``limit`` is the hard stop, not the
+    nameplate cap — the same discipline #13102 fixed in the refusal payload).
+
+    ⚠️ Why the write can be served at all: this outcome is only reachable on the
+    proof that the truth has ALREADY been committed for this write (the journal
+    append is the commit point, ``#7951``) or is committed by the door before it
+    touches the cache. The cache then lags — reads fall back to the record —
+    which is projection lag, the prescribed degradation for a derived store, and
+    never data loss. ``derived = replay(journal)`` heals it.
+    """
+
+    dimension: str
+    used: float
+    #: The figure the gate COMPARED (the hard stop), not the nameplate cap.
+    limit: float
+    #: The nameplate allowance, carried so a reader can say "244 MB against a
+    #: 102 MB cap, refusing at 153 MB" without re-deriving the band.
+    allowance: float
+    #: ``True`` when the reading is a SAMPLING ESTIMATE (a lower bound only up to
+    #: its error) — never silently dropped, because the whole band exists for it.
+    estimated: bool
+    #: The gate's own refusal text, verbatim: it already names the dimension, both
+    #: figures and the estimate's honesty, so a second spelling here would be a
+    #: second thing to keep true.
+    detail: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": "not_applied",
+            "dimension": self.dimension,
+            "used": int(self.used) if float(self.used).is_integer() else self.used,
+            "limit": (int(self.limit) if float(self.limit).is_integer()
+                      else self.limit),
+            "allowance": (int(self.allowance)
+                          if float(self.allowance).is_integer()
+                          else self.allowance),
+            "estimated": self.estimated,
+            "detail": self.detail,
+        }
+
+
+#: The denial for the write IN FLIGHT — set by the gate, consumed by the fold.
+#:
+#: ⛔ WHY A ``ContextVar`` AND NOT A RETURN VALUE. The gate runs at the write
+#: DOOR (``quota.enforce_org_limit``), above the SDK call; the fold runs deep
+#: inside the chokepoint, in a different module, with no reference to the gate's
+#: locals. Threading a value down would mean a new parameter on every SDK write
+#: method. Threading it through module globals would cross tenants under
+#: concurrency, which is the one thing this must never do — a ``ContextVar`` is
+#: per-context by construction, the same primitive the doors already use for
+#: ``_current_org_id``/``_current_org_limits``.
+#:
+#: ⚠️ THE RESIDUAL, stated rather than discovered: a fold that runs in a
+#: DIFFERENT context from the gate (a worker thread, a task spawned without
+#: ``copy_context``) sees no denial and folds as before. That direction is
+#: under-enforcement of a DERIVED store — the cache grows a little while the
+#: record already holds the write — never a refused truth write, which is what
+#: this change exists to stop.
+_CACHE_FOLD_DENIED: ContextVar[CacheFoldDenial | None] = ContextVar(
+    "tortoise_cache_fold_denied", default=None)
+
+
+def cache_fold_denial() -> CacheFoldDenial | None:
+    """CONSUME the derived cache's over-cap verdict for the write in flight.
+
+    Consume-once by design: the fold asks this question at the moment it is about
+    to touch the cache, and a verdict that outlived one fold would silently deny
+    the NEXT write in the same context. Answers ``None`` for every write whose
+    door did not publish one — which is the unarmed, un-tenanted (stdio/operator)
+    and not-truth-carried cases alike, all of which fold exactly as before.
+    """
+    denial = _CACHE_FOLD_DENIED.get()
+    _CACHE_FOLD_DENIED.set(None)
+    return denial
+
+
+def clear_cache_fold_denial() -> None:
+    """Forget any published denial — called at DOOR ENTRY, once per write.
+
+    The freshness half of consume-once: a gate call that does not reach a
+    derived dimension (``resource="api_keys"``, an unlimited tier, a refused
+    earlier dimension) cannot publish a denial, so without this reset a verdict
+    from an earlier write in the same context could be consumed by a later one.
+    """
+    _CACHE_FOLD_DENIED.set(None)
+
+
 def _hard_stop(dim: AllowanceDimension, allowance: float,
                reading: MeterReading) -> float:
     """The figure at which a WRITE is refused — the cap or a measured deadband.
@@ -1787,6 +1932,7 @@ def _reading(dim: AllowanceDimension, org_id: str,
 def enforce_allowances(
         limits: dict | None, *, org_id: str | None = None, resource: str = "points",
         meters: Mapping[str, Callable[[str], MeterReading | None]] | None = None,
+        truth_carried: bool = False,
 ) -> None:
     """Apply every CONFIGURED dimension allowance. Unconfigured ones are inert.
 
@@ -1800,6 +1946,28 @@ def enforce_allowances(
         meters: optional per-dimension meter overrides, keyed by DECLARED
             dimension name. The production path passes nothing and uses the
             instruments; D11/D12's "a reading supplied" is this seam.
+        truth_carried: the CALLER's statement that this write reaches the record
+            (the journal is its commit point, ``#7951``) BEFORE any derived store
+            is touched, so an over-cap reading on a ``derived_layer`` dimension
+            may degrade that store instead of refusing the write (#13829).
+
+            ⛔ ``False`` BY DEFAULT IS THE WHOLE SAFETY PROPERTY. A dimension
+            measuring a derived store is still the ONLY durable copy of the write
+            on a door that has not proven it reaches the record — there, failing
+            the write is not the inversion, it is the honest behaviour of a
+            system whose truth has not moved yet (#13526's own standards check
+            names that exception verbatim). So an UNOPENED door keeps today's
+            refusal, and opting in is a deliberate act with a proof behind it
+            (the door consumes :func:`cache_fold_denial` where it writes the
+            cache, and appends first). An unenumerated path is an UNPROVEN path
+            and keeps the refusal.
+
+            On the opted-in arm an over-cap reading is NOT raised: the verdict is
+            published as a :class:`CacheFoldDenial` for the chokepoint to consume
+            and the write is served. The operator signal
+            (``allowance exceeded`` warning + the denial's own ``detail``) is
+            unchanged — this changes WHERE the cap binds, not whether it is
+            reported.
 
     Raises:
         QuotaExceededError: at/over a configured allowance (names the dimension).
@@ -1815,6 +1983,39 @@ def enforce_allowances(
         return
     if resource not in ALLOWANCE_GATED_RESOURCES:
         return
+    # ⛔ "PUBLISHED ONLY FOR A SERVED WRITE" IS A PROPERTY, NOT A HOPE (#13829).
+    # A derived-layer dimension can publish a cache-fold denial and a LATER
+    # dimension in this same loop can then refuse the write — the denial would
+    # outlive the write it describes and could be consumed by the next fold in
+    # this context, silently denying a cache write nobody capped. So every exit
+    # that is not a served write clears it. ``_DERIVED_DIMENSION_PUBLISHED``
+    # tracks whether this call published at all, so the ordinary path pays a
+    # boolean and nothing else.
+    # ⚠️ An OUT-PARAM, not a return value: the loop can RAISE after publishing, so
+    # a return value is never delivered on the one path this guarantee exists for.
+    _published: list[bool] = []
+    try:
+        _enforce_each_dimension(
+            limits, org_id=org_id, resource=resource, meters=meters,
+            truth_carried=truth_carried, published=_published)
+    except BaseException:
+        if _published:
+            _CACHE_FOLD_DENIED.set(None)
+        raise
+
+
+def _enforce_each_dimension(
+        limits: dict, *, org_id: str, resource: str,
+        meters: Mapping[str, Callable[[str], MeterReading | None]] | None,
+        truth_carried: bool, published: list[bool],
+) -> None:
+    """The dimension loop of :func:`enforce_allowances`.
+
+    Split out ONLY so the caller can make "a denial never outlives the write it
+    describes" an ``except`` rather than a comment; it records that it published
+    into ``published`` (see the caller for why that is an out-param). The loop
+    body is otherwise exactly the one it has always been.
+    """
     for dim in DIMENSIONS:
         if resource not in dim.resources:
             continue  # this door cannot move THIS dimension's meter
@@ -1945,6 +2146,44 @@ def enforce_allowances(
                 "allowance exceeded: team=%s dimension=%s used=%s limit=%s "
                 "hard_stop=%s", org_id, dim.dimension, used, allowance,
                 refuse_at)
+            if dim.derived_layer and truth_carried:
+                # ── THE CAP MOVES TO THE FOLD (#13829) ────────────────────
+                # The tenant is over the cap of a store that is DERIVED from the
+                # record (``STORAGE-ARCHITECTURE.md`` §2.0/§3: FalkorDB is a
+                # derived hot cache, "deleting it loses nothing", the derived
+                # layer must be physically DROPPABLE). The door has declared this
+                # write truth-carried, so the record holds — or will hold, before
+                # the cache is touched — the whole write. Refusing HERE would stop
+                # the RECORD from growing by refusing the record, which is the
+                # inversion #13526 measured: the customer pays for the record's
+                # allowance (pro: 1.3 GB) and is refused on the cache's (102 MB).
+                #
+                # So the refusal becomes the FOLD's decision instead of the
+                # door's: the cache stops taking this write, reads fall back to
+                # the record, and the outcome is NAMED (this object) rather than
+                # silent. That is projection lag — the prescribed degradation for
+                # a derived read model — and ``derived = replay(journal)`` heals
+                # it.
+                #
+                # ⛔ It licenses NOTHING about eviction or deletion (#10976): no
+                # byte is dropped here, the cache simply stops growing. The
+                # eviction path stays licence-gated and out-of-band.
+                denial = CacheFoldDenial(
+                    dimension=dim.dimension,
+                    used=float(used),
+                    limit=float(refuse_at),
+                    allowance=float(allowance),
+                    estimated=bool(reading.estimated),
+                    detail=head + note,
+                )
+                _CACHE_FOLD_DENIED.set(denial)
+                published.append(True)
+                _logger.warning(
+                    "allowance deferred to the cache fold (#13829): team=%s "
+                    "dimension=%s used=%s hard_stop=%s — the write is served "
+                    "and the derived store does not take it",
+                    org_id, dim.dimension, used, refuse_at)
+                continue
             # ⛔ THE PAYLOAD CARRIES THE VALUES THE GATE COMPARED (#13102).
             # ``quota.py`` documents that every field "must be the ones THIS
             # gate compared", and a banded dimension compares at the HARD STOP —
