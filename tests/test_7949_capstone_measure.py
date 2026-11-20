@@ -16658,8 +16658,10 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #:
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
-#: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6729`-`:6733` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: currency spellings, and ALL FOUR already have readers — the derived-literal arm (cited
+#: WITHOUT a line number on purpose: a self-cite here re-stales on every insert above it, and
+#: this one had drifted 49 lines by the time review measured it) asserts each of the four
+#: against `_honours_line`, and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
 #: that clause ever had a reader. Only the `dedup_reviewed IS NULL` clause below, and the
@@ -16760,6 +16762,29 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                 f"{needle!r} is at {hits}. Re-derive by CONTENT "
                 "(`grep -n`), never by carrying the number forward")
 
+    # ⛔ THE DICT ROW ABOVE CANNOT DISCRIMINATE ON ITS OWN (#13878 review, cycle 3 — measured).
+    # Its needle `"provider": None, "route": None, "failover_used": False,` occurs FOUR times
+    # in `sdk.py` (`:19492` no-provider meta, `:19528` replay, `:20311` the empty-gate dict,
+    # `:20612` error meta), so re-pointing the D5 clause onto a SIBLING dict stayed GREEN — a
+    # false PASS of exactly the shape the fragment is meant to close. The empty-gate dict is the
+    # only one of the four whose SUCCESSOR line is the no-content refusal (measured: `:19493`
+    # carries `_CAPTURE_NO_PROVIDER_WARNING`, `:19529` the replay warnings, `:20312` the refusal,
+    # `:20613` the error list), so the successor is the second, discriminating needle.
+    _dict_row = next(r for r in _D5_CURRENT_CLAIMS
+                     if r[0] == "the `sdk.py` empty-gate return dict")
+    _dict_found = re.search(_dict_row[1], text)
+    if _dict_found is not None:
+        _dict_n = int(_dict_found.group("n"))
+        _dict_src = sources[_dict_row[2]]
+        _dict_next = _dict_src[_dict_n] if 0 < _dict_n < len(_dict_src) else ""
+        if "no extractable content" not in _dict_next:
+            failures.append(
+                f"D5 states the `sdk.py` empty-gate return dict at `:{_dict_n}`, but that "
+                f"line's SUCCESSOR is {_dict_next.strip()[:90]!r} — the four dicts sharing "
+                "the `provider`/`route`/`failover_used` fragment are indistinguishable on "
+                "the dict line alone, so only the successor identifies the empty-gate one. "
+                "Re-derive by CONTENT; a re-point onto one of its three siblings must red here.")
+
     triple = _D5_TRIPLE_RE.search(text)
     if triple is None:
         failures.append(
@@ -16827,8 +16852,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `:15328` at `c3309ec656` and `:15346` from `819a473cd4` onward.
     assert "819a473cd4" in text, (
         "D5 no longer names `819a473cd4` (`#13841`), the commit whose 18 inserted `/health` "
-        "docstring lines the +84 is made of (#13878 review, F2). Unattributed, the +18 gets "
-        "credited to whatever commit is nearest — which is how it was credited to `#13845`.")
+        "docstring lines are the +18 HALF of the +84 (#13878 review, F2). Unattributed, the "
+        "+18 gets credited to whatever commit is nearest — which is how it was credited to "
+        "`#13845`.")
     assert "inserted its D5 formatting guard" not in text, (
         "D5 describes the +18 as a commit that 'inserted its D5 formatting guard'. No commit "
         "did that: the 18 lines are `819a473cd4`'s `Embedder check (#13674)` docstring "
