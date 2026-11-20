@@ -1372,10 +1372,12 @@ def main() -> int:
         elif kind == "fly-only":
             # A `fly-only:` exception, NOT a way to spell `unmanaged` — see
             # read_manifest: reaching here proves the ref named an issue number.
-            # ⛔ Not "decision-backed": the checker is SHAPE ONLY and hermetic and
-            # never reads the issue, and the shipped manifest declares one member
-            # whose ruling is still a DECLARED GAP (`#13674`), so this layer must not
-            # assert the decision half in its own words (#13814 review rounds 8, 11).
+            # ⛔ Not "decision-backed": this checker is SHAPE ONLY and hermetic —
+            # it never reads the issue the ref names, so it cannot know whether a
+            # ruling exists, and its summary line is what an operator reads on a
+            # GREEN run. The decision half is a REVIEWER's to check (the manifest's
+            # entry-point paragraph routes them there), so this layer must not
+            # assert it in its own words (#13814 review rounds 8, 11).
             # The exception is only true while the name really is a live,
             # deliberately unversioned Fly secret, so every half is checked:
             # a name that is gone (nothing to except), a name the deploy assigns
