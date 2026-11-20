@@ -1985,6 +1985,133 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
         f"{_census_membership_verdicts(_bundle)!r}")
 
 
+#: Spellings that describe the `#`-only comment filter by a property its INPUT cannot have, or
+#: that turn its EMPTY output into a "these lines are comments" verdict. Retired BY NAME
+#: (#13853 review round 16, P2-1 and P2-2). ⛔ Every row is refuted by the filter's own
+#: mechanism rather than by a measurement of this head, so this is a TEXT ban in the same
+#: sense as the two ledgers above: it fires in the depth-1 checkout the gating job uses, and
+#: no product PR can false-red it.
+#:
+#: WHY A BAN AND NOT A RE-MEASUREMENT. The lines reaching
+#: `grep -vE '^[+-][[:space:]]*#'` already carry the diff marker, so their first non-space
+#: character is ALWAYS `+` or `-`. The stage therefore drops a changed line whose first
+#: non-space character AFTER the marker is `#` — a `#` comment, and equally a docstring line
+#: whose own text opens with `#` (measured: `tortoise/ranking.py`'s `graph_boost` docstring
+#: carries such a line). An empty result therefore proves that every changed line OPENS with
+#: `#`; it cannot prove those lines are comments, which is the over-claim that TWO separate
+#: sentences of the D5 cell made — and the second one was not among the three the review
+#: quoted, which is why the correction is a ban over the class and not a patch of one
+#: sentence.
+_FILTER_FALSE_DESCRIPTIONS = (
+    "drops only lines whose first non-space character is `#`",
+    "drops exactly the lines whose first non-space character is `#`",
+    "a CODE line and a DOCSTRING line both survive it and would print",
+    "a docstring line or a code line WOULD appear in its output and an empty result rules "
+    "both out",
+    "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
+    "comment",
+)
+
+
+def _false_filter_descriptions(doc: str) -> list[str]:
+    """Every retired description of the `#`-only filter still spelled in `doc`.
+
+    A substring test, deliberately: this arm grades the document's TEXT and never the tree,
+    so it needs no merge base and cannot be skipped in a shallow checkout (the failure mode
+    that made the measurement-keyed cut of (c-i) assert nothing — #13807 review, F1).
+    """
+    return [spelling for spelling in _FILTER_FALSE_DESCRIPTIONS if spelling in doc]
+
+
+def _comment_filter(payload: str) -> str:
+    """The document's two grep stages, executed on `payload`.
+
+    `05-verify.md` grades the `tortoise/` half of the diff with
+    `grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`. Running the REAL filters rather
+    than a Python mirror is the point: the claim under test is about what `grep` does with
+    those two expressions, and a re-spelled mirror would prove only that the mirror agrees
+    with itself.
+    """
+    staged = subprocess.run(
+        ["grep", "-E", r"^[+-][^+-]"], input=payload,
+        capture_output=True, text=True, check=False)
+    return subprocess.run(
+        ["grep", "-vE", r"^[+-][[:space:]]*#"], input=staged.stdout,
+        capture_output=True, text=True, check=False).stdout
+
+
+def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
+    """The `#`-only grep was described as something the filter cannot be (#13853 round 16).
+
+    ⛔ MEASURED ON THE PRE-FIX TREE, which is why this is a pin and not a note. The cell
+    said the stage "drops only lines whose first non-space character is `#`" — but a line
+    reaching it has already passed `grep -E '^[+-][^+-]'`, so its first non-space character
+    is `+` or `-` and NEVER `#`. It concluded that "a CODE line and a DOCSTRING line both
+    survive it and would print", and therefore that "an empty result … means no changed
+    `tortoise/` line is anything but a `#` comment" — while a docstring line whose own text
+    opens with `#` is dropped exactly like a comment, so emptiness does not mean comment.
+    Two sentences of that cell stated it; only the first was among the quoted three.
+
+    Three things are asserted: the document states none of the retired descriptions, each
+    needle still matches itself (a typo'd row is an inert ban, and the injection loop is
+    what catches that), and the MECHANISM the replacements claim — the real greps drop a
+    `#`-opening docstring line and print a code line — actually holds.
+    """
+    bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+              / "05-verify.md").read_text(encoding="utf-8")
+    assert _false_filter_descriptions(bundle) == [], (
+        "05-verify.md restates a description of the `#`-only grep that the filter's own "
+        f"input refutes: {_false_filter_descriptions(bundle)!r}. The stage drops a changed "
+        "line whose first non-space character AFTER the diff marker is `#`, which covers "
+        "`#` comments AND docstring lines opening with `#`; an empty result therefore "
+        "proves the lines OPEN with `#`, never that they are comments (#13853 review "
+        "round 16, P2-1 and P2-2)")
+
+    # (2) CONTENT, not size: the tuple is pinned WHOLE. A loop over the module constant
+    # iterates the MUTATED list, so deleting a row (or re-wording one by a character) left
+    # the injection loop green while that description could be re-inserted into the document
+    # uncaught — the measured bypass #13807 review finding 5 recorded for the membership
+    # ledger, closed here the same way: pin the rows, never the count.
+    assert (
+        "drops only lines whose first non-space character is `#`",
+        "drops exactly the lines whose first non-space character is `#`",
+        "a CODE line and a DOCSTRING line both survive it and would print",
+        "a docstring line or a code line WOULD appear in its output and an empty result "
+        "rules both out",
+        "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
+        "comment",
+    ) == _FILTER_FALSE_DESCRIPTIONS, (
+        "the `#`-filter description ledger changed. These are the exact spellings that were "
+        "recorded as FALSE at a head and survived every arm, so a row that is edited, "
+        "however slightly, is a ban the document can be re-inserted past. Retiring a NEW "
+        "spelling means adding it; it never means re-wording one (#13853 review round 16, "
+        "P2-1/P2-2; the property is #13807 review finding 5)")
+
+    # (3) INJECTION: every needle must be reachable through the detector, or the ban has a
+    # row that can never fire — "an unread row is a ban the document is re-inserted past".
+    for spelling in _FILTER_FALSE_DESCRIPTIONS:
+        probe = f"… and the grep {spelling} at this head …"
+        assert _false_filter_descriptions(probe) == [spelling], (
+            f"the ban's own row {spelling!r} is not detected when injected, so editing it "
+            "(even by one character) turns this arm inert — the bypass #13807 review "
+            "finding 5 recorded for the membership ledger")
+
+    # (4) MECHANISM: the premise of (1), executed rather than reasoned about.
+    docstring_line = "+        #11702 — an ABSENT belief contributes NO term.\n"
+    code_line = "+        subject_binding = resolve_subject()\n"
+    assert docstring_line.lstrip()[0] == "+", (
+        "the fixture stopped carrying a diff marker, so it no longer reproduces the "
+        "condition the retired description got wrong")
+    assert _comment_filter(docstring_line) == "", (
+        "the filter no longer drops a docstring line whose own text opens with `#` — if "
+        "that changed, the replacement prose in `05-verify.md` is now the wrong one")
+    assert _comment_filter(code_line) == code_line, (
+        "the filter no longer prints a code line, so the replacement prose's second half "
+        "is false")
+    assert _comment_filter(docstring_line + code_line) == code_line, (
+        "the two-stage pipeline is not behaving as the document describes it")
+
+
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """⛔ The doc said it re-pointed that row to `sdk.py:19485`. The row reads `:21496`.
 
