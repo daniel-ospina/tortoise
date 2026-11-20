@@ -2828,14 +2828,22 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: backtick. That is the same LAYOUT axis rounds 26-29 closed on the two bans above, and it is
 #: closed here the same way.
 #:
-#: ⛔ AND THE DELIMITER RUN IS UNBOUNDED (#13948 review rounds 32-33, both MEASURED). At
-#: `{0,8}` the budget was effectively SEVEN spaces (the needle's own backtick spends one), so
-#: ordinary PADDED MARKDOWN — one aligned table cell, an eight-space list continuation — put the
-#: false property back with the cell green. Widening it to the window's own `{0,400}` was NOT a fix,
-#: and the comment claiming it was ("without a second number that can be one space too small")
-#: was itself falsified by measurement: 400 spaces returned `[]`. So the run is `*` — any amount of
-#: layout — and there is no longer a number to be one space too small. Measured: 8, 9, 390, 400 and
-#: 2000 spaces all caught; the real `05-verify.md` still `[]`.
+#: ⛔ AND THE WINDOW IS A LOCALITY BOUND, NOT A LAYOUT BUDGET (#13948 review rounds 33-34).
+#: Two numbers lived in this pattern and only one of them was a mistake:
+#:   · the DELIMITER RUN, copula -> `#`, is now `*`. It WAS a budget (`{0,8}` = seven spaces after
+#:     the needle's backtick, then `{0,400}` = "a second number that can be one space too small",
+#:     which 400 spaces falsified in one round). Layout cannot be counted out, so it is unbounded.
+#:   · the NOUN -> COPULA `{0,400}` is deliberately finite and STAYS: it keeps the match inside
+#:     one sentence, so "character" in one paragraph and "is #" in another cannot pair into a
+#:     false RED. That is locality, not layout.
+#: A restatement padded past 400 characters BETWEEN the noun and the copula is therefore a
+#: DECLARED residual (pinned as an escape below), not a claim that the axis is closed everywhere.
+#: Measured: 8, 9, 390, 400 and 2000 spaces between COPULA and `#` all caught; the real
+#: `05-verify.md` still `[]`.
+#:
+#: ⛔ AND THE COPULA'S OWN WHITESPACE IS `\s+`, NOT A LITERAL SPACE (#13948 review round 34, P1
+#: — MEASURED). `is equal to` / `is a` spelled with ASCII spaces missed a tab or a re-wrap inside
+#: the copula (`is\tequal\tto`, `is\r\nequal to`) — the same layout axis, one token further in.
 #:
 #: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
 #: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
@@ -2863,7 +2871,7 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
+    r"(?:is\s+equal\s+to|equals|is\s+a|is)[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -3094,7 +3102,14 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… whose first non-space character is" + " " * 400 + "`#` — a comment …",
              "character is" + " " * 400 + "`#`"),
             ("… whose first non-space character is" + " " * 2000 + "`#` — a comment …",
-             "character is" + " " * 2000 + "`#`")):
+             "character is" + " " * 2000 + "`#`"),
+            # ⛔ AND THE COPULA'S OWN LAYOUT (#13948 review round 34, P1 — MEASURED): a tab or a
+            # re-wrap INSIDE `is equal to` / `is a` escaped while the copula was spelled with
+            # literal spaces.
+            ("… non-space character\tis\tequal to `#` — a comment …",
+             "character\tis\tequal to `#`"),
+            ("… character is\r\nequal to `#` — a comment …",
+             "character is\r\nequal to `#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
@@ -3110,7 +3125,12 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             # Without these two, reverting `markers?` to `marker` OR dropping `re.I` from the
             # MARKER side also left the cell green, so the flag was pinned on one axis only.
             "… whose first non-space character after the diff Marker is `#` …",
-            "… whose first non-space character after the markers is `#` …"):
+            "… whose first non-space character after the markers is `#` …",
+            # ⛔ THE DECLARED LOCALITY RESIDUAL (#13948 review round 34, P2): the noun -> copula
+            # window is 400 characters on purpose, so a pad BEYOND it is an escape rather than a
+            # silent claim of closure. Pinned here so the prose above cannot drift into claiming
+            # the axis is closed everywhere.
+            "… character" + " " * 401 + "is equal to `#` …"):
         assert _false_filter_property_restatements(escape) == [], (
             f"the arm now catches {escape!r} — good, but then the DECLARED-ESCAPE list above "
             "is stale and must say so (#13853 review round 19)")
