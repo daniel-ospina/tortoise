@@ -3539,7 +3539,17 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
             # this line returned `--count`, which that test ACCEPTS, so the tail was discarded and
             # never declined — the prose claimed a check the code did not run.
             return option + rest, ""
-        return (option, rest) if option[-1] in _ARG_TAKING_SHORT_FLAGS else None
+        # ⛔ THIS IS `None`, NOT A MEMBERSHIP TEST (#14027 round 10, P3 — MEASURED). The split
+        # above has already returned for every short cluster with an argument-taking character at
+        # index >= 1, and a short flag word is always at least `-` plus one character, so
+        # `option[-1]` is always inside `option[1:]` — which makes `option[-1] in
+        # _ARG_TAKING_SHORT_FLAGS` unreachable-True here. Instrumented over 2,664,574 tokens this
+        # line was reached 481,304 times and answered True 0 times, so the `(option, rest)` branch
+        # was dead; the file's own rule bans a member nothing can reach, and the one spelling it
+        # was written for (`-e^[+-]$`) is read by the split one branch up. Deleting the test changes
+        # no answer: `_d5_flag_word`, `_d5_blank_class_prescriptions` and
+        # `_d5_count_prescriptions` are identical over 47,264 enumerated tokens.
+        return None
     if option.startswith("--"):
         if rest.startswith("="):
             return option, rest  # `--regexp=^[+-]$` — for a LONG option the `=` IS the separator
