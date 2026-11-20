@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -216,7 +216,7 @@ def test_restart_survives_on_the_checkpoint_alone(stream: Path) -> None:
         "'p1t':r.last_served('Point','p1'),'total':r.served_total,"
         "'replayed':r.replayed}))"
     )
-    out = subprocess.run(  # noqa: S603 — our own interpreter, our own argv
+    out = subprocess.run(
         [sys.executable, "-c", code, str(stream)],
         capture_output=True,
         text=True,
@@ -584,7 +584,7 @@ def test_refresh_never_raises_when_the_stream_disappears_mid_flight(
 
     real_stat = Path.stat
 
-    def _boom(self: Path, *a: object, **k: object):  # noqa: ANN401
+    def _boom(self: Path, *a: object, **k: object):
         if self == stream:
             raise OSError("gone")
         return real_stat(self, *a, **k)

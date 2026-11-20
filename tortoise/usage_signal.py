@@ -109,10 +109,11 @@ import logging
 import os
 import stat
 import threading
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any
 
 from .env_truthy import is_truthy
 
@@ -734,7 +735,7 @@ class UsageReading:
         """
         wanted = set(keys) if keys is not None else None
         rows: list[tuple[tuple[float, int, str], tuple[str, str]]] = []
-        for (lbl, key), got in self.entries.items():
+        for lbl, key in self.entries:
             if label is not None and lbl != label:
                 continue
             if wanted is not None and key not in wanted:
