@@ -682,8 +682,15 @@ _NUMERALS: dict[str, int] = {
 #: so the ordering is defence and the literal is the guarantee.
 _NUMERAL_ALT = "|".join(sorted(_NUMERALS, key=len, reverse=True))
 _TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code spans")
+#: ⛔ `(?:is|are)`, for the same reason `_TWO_SPAN_TOTAL` writes `pairs?`: number AGREEMENT is a property of
+#: the count, not of the claim. `one of them IS resolved` is how a lane re-measuring to a single uncounted
+#: pair writes that sentence — the singular form for the one count that takes it — and a plural-only pattern
+#: could not read it. That was never the false-ABSENCE verdict the messages above were reworded to avoid (it
+#: reported the count as one \"in a form this guard reads\"), which is worse in one way: the document is
+#: RIGHT, the guard says it cannot read it, and the lane re-measuring is sent to reword a correct sentence
+#: instead of to its figure (`#14010` re-review, P2). `zero`/`none`/`two`.. keep `are`.
 _TWO_SPAN_NEW = re.compile(
-    rf"(\d+|{_NUMERAL_ALT}) of them are resolved but not counted by the one-token rule"
+    rf"(\d+|{_NUMERAL_ALT}) of them (?:is|are) resolved but not counted by the one-token rule"
 )
 
 
@@ -1167,9 +1174,10 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
 
     * `writes TWO pairs as TWO code spans` — `_TWO_SPAN_TOTAL`'s own scaffold spells `two`, so a document
       measuring two two-code-span pairs (`count("two") == 2`) tripped the assert;
-    * `ONE of them are resolved but not counted by the ONE-token rule` — the `one-token rule` is part of
+    * `ONE of them is resolved but not counted by the ONE-token rule` — the `one-token rule` is part of
       the sentence, so `count("one") == 2` on the (entirely plausible) reading that one of the pairs is
-      not already counted.
+      not already counted. (`one` is the only count that takes the SINGULAR verb — `_TWO_SPAN_NEW`
+      accepts `(?:is|are)` on purpose, for this sentence in the form a lane would actually write it.)
 
     Both are legitimate measurements of this document — the patterns accept `_SPELLED_NUMERALS` and
     `_as_int` grades all of them — so the helper rejected numerals the rest of the guard is built to
@@ -1187,11 +1195,17 @@ def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells()
     at `ten` while the patterns accept more.
     """
     for pattern, template in (
-        (_TWO_SPAN_TOTAL, "the header writes {n} pairs as two code spans"),
-        (_TWO_SPAN_NEW, "{n} of them are resolved but not counted by the one-token rule"),
+        (_TWO_SPAN_TOTAL, "the header writes {n} {pair} as two code spans"),
+        (_TWO_SPAN_NEW, "{n} of them {verb} resolved but not counted by the one-token rule"),
     ):
-        for numeral in (*_NUMERALS, "7"):
-            sentence = template.format(n=numeral)
+        for numeral in (*_NUMERALS, "7", "1"):
+            # Number AGREEMENT, from the count this numeral stands for: `one pair … IS`, `zero pairs …
+            # ARE`. Spelling the wrong one would test a frame the patterns are not required to accept,
+            # and the singular frame is exactly the one a one-pair edition writes.
+            singular = _as_int(numeral) == 1
+            sentence = template.format(
+                n=numeral, pair="pair" if singular else "pairs", verb="is" if singular else "are"
+            )
             match = pattern.search(sentence)
             assert match is not None, f"the pattern no longer matches its own sentence frame: {sentence!r}"
             assert match.group(1) == numeral, (match.group(0), numeral)
