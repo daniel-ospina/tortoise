@@ -1000,7 +1000,7 @@ def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row],
                      retired_rows: list[tuple[str, bool, str, str]] | None = None,
                      archived_rows: list[tuple[str, str]] | None = None) -> str:
     lines: list[str] = []
-    lines.append("### Approved MCP tools — one real call each, through the authenticated tenant door")
+    lines.append("## Approved MCP tools — one real call each, through the authenticated tenant door")
     lines.append("")
     lines.append("| # | approved tool | served door | status | latency | answer shape | note |")
     lines.append("|---|---|---|---|---|---|---|")
@@ -1012,7 +1012,7 @@ def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row],
         lines.append(f"| {i} | `{r.approved}` | `{r.door}` | **{r.status}** | {ms} | "
                      f"`{r.shape}` | {note} |")
     lines.append("")
-    lines.append("### Approved SDK methods — one real call each, against a throwaway embedded store")
+    lines.append("## Approved SDK methods — one real call each, against a throwaway embedded store")
     lines.append("")
     lines.append("| # | approved method | status | latency | answer shape | note |")
     lines.append("|---|---|---|---|---|---|")
@@ -1024,15 +1024,15 @@ def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row],
         lines.append(f"| {i} | `{r.approved}` | **{r.status}** | {ms} | `{r.shape}` | {note} |")
     lines.append("")
     if retired_rows:
-        lines.append("### V3 — the retirement shim: one retired name per destination family")
+        lines.append("## V3 — the retirement shim: one retired name per destination family")
         lines.append("")
         lines.append("| retired name | notice published | use_instead | what the retired door did |")
         lines.append("|---|---|---|---|")
         for name, notice, use, answer in retired_rows:
-            lines.append(f"| `{name}` | {'YES' if notice else '**NO**'} | `{use[:70]}` | "
-                         f"{answer[:80]} |")
+            lines.append(f"| `{name}` | {'YES' if notice else '**NO**'} | `{use[:70].replace(chr(124), chr(92) + chr(124))}` | "
+                         f"{answer[:80].replace(chr(124), chr(92) + chr(124))} |")
         lines.append("")
-        lines.append("### V3 — archived with no destination: the documented not-found")
+        lines.append("## V3 — archived with no destination: the documented not-found")
         lines.append("")
         lines.append("| archived name | answer |")
         lines.append("|---|---|")

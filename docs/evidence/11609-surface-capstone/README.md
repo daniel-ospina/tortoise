@@ -43,6 +43,7 @@ uv run python tools/test_lane.py run -- \
 uv run python tools/surface-guard.py                            # V6
 uv run python tools/sdk_surface_declaration.py check             # V6
 uv run python tools/surface_manifest.py check                    # V6
+
 ```
 
 `tools/surface_capstone_probe.py` is new in this lane. It is the instrument this
@@ -56,7 +57,7 @@ SEEDED content back out of the answer.
 
 ## V1 — the targets are met? **FAIL (MCP leg). SDK leg PASS.**
 
-```
+```text
 $ uv run python tools/surface-target-check.py     # exit 1
   target:    27 MCP tools / 40 SDK methods
   live:      40 MCP tools / 40 SDK methods   ← the DECLARED names that resolve
@@ -64,6 +65,7 @@ $ uv run python tools/surface-target-check.py     # exit 1
              fallback view (not the verdict): class carries 39 public SDK method(s)
   MCP tools    live   40 → target   27   (Δ +13, 1.5x) OVER TARGET
   SDK methods  live   40 → target   40   (Δ +0, 1.0x) OK
+
 ```
 
 Three tools, three different counting axes, and **none of them is 27**:
@@ -112,11 +114,12 @@ can only retire once `tortoise_search_knowledge` answers that shape).
 
 Full table: [`probe-tables.md`](probe-tables.md) (generated, one row per approved name).
 
-```
+```text
 $ uv run python tools/surface_capstone_probe.py
   tools  answered: 22/27   (refused-by-design 4)
   SDK    answered: 27/40   (unmeasured 12)
   retired shim: 22/22 families publish the notice; 9/9 archived names are not-found
+
 ```
 
 * **22 answered** with the seeded content readable out of the payload — 19 at the
@@ -177,16 +180,18 @@ VALID for the door's own old signature.
   refusal rather than scoring it as a broken shim.
   Examples:
 
-  ```
-  tortoise_get            → _meta: use_instead="tortoise_get_entity(id, type=...)"  + the get_entity payload
+```text
+  tortoise_get            → `_meta`: use_instead="tortoise_get_entity(id, type=...)"  + the get_entity payload
   tortoise_list_batch     → use_instead="tortoise_list_knowledge(kind=\"batch\", id=...)"
   tortoise_paginated_query→ use_instead="tortoise_query(offset=..., limit=...)"
   tortoise_issue_insight  → use_instead="tortoise_search_knowledge(title=..., body=..., mode=\"issue_insight\")"
-  ```
+
+```
 
   **All 68 `use_instead` pointers name a tool that is LIVE in `TOOL_REGISTRY`**
   (measured: 68/68, 0 pointing at a retired or absent name) — a pointer to a retired
   name would be a dead end, and one hop is the shim's documented limit.
+
 * **Archived-without-destination names (9) all return the documented not-found**
   `Unknown tool: '<name>'`: the four `archive/mcp-tools/b1-removed-no-destination/`
   tools (`tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
@@ -195,13 +200,14 @@ VALID for the door's own old signature.
 
 ## V4 — no capability silently dropped? **PASS, after repairing its own suite**
 
-```
+```text
 $ uv run python tools/test_lane.py run -- tests/test_11609_*.py -q
   450 passed  (read/sources/confidence/create containers + door_retirement +
                structural_blockers + sdk_40)
   44 passed   (write containers)
 $ uv run python tools/bridge_table.py --check
   OK: docs/product/bridge-table.md is current (108 registry tools)
+
 ```
 
 ⛔ **This row could not be measured when the lane started**: 4 of the write-container
@@ -223,10 +229,11 @@ members (substitution to per-arm payload assertions in
 
 ## V5 — the ontology holds? **PASS on the reachable graph; the fleet graph is UNMEASURED**
 
-```
+```text
 tortoise_graph_overview(section="pointkinds")
   → [{"kind": "statement", "count": 4, "pack": ""},
      {"kind": "decision",  "count": 1, "pack": ""}]
+
 ```
 
 `statement` dominant, `pack: ""` where no pack kind is used — the shape `#10977`
@@ -263,12 +270,13 @@ and no surface decision moves.
 
 ## Production reachability, recorded because it bounds what could be called
 
-```
+```text
 $ curl -s -m 45 -w '%{http_code} %{time_total}' https://api.premiselabs.co/health
   200  2.6 s   "status": "degraded"    db.ok=true (155 ms / 560 ms)
                refusals: 19-24 in 120 s, by_surface {"mcp": 0, "rest": 19-24}, refusing=true
                loop_blocks: 23 episodes, last 5.19 s in socket/ssl connect
 $ curl -s -m 20 -X POST https://api.premiselabs.co/mcp ...              → 401 in 3.4 s
+
 ```
 
 * The MCP door is ALIVE (a 401 with the documented bearer message in ~3 s), and its

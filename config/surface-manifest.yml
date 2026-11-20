@@ -239,7 +239,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: c4c5470b7460b37e7166bebabdd1da9fa566f217
+cut_at_commit: a296e6741e51ddf2c36ac969087edfe541cdb44e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
