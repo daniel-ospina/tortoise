@@ -8115,6 +8115,73 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE SAME VIEW AT THE OPERAND SEAM, AND ITS UNBOUND SPELLING, AND THE `fromkeys`
+        #    TWIN (`#13788` review round 11: 3 P1/P2 fail-opens, each measured CERTIFIED *and*
+        #    runtime-stored one position sideways from a row that was already refused).
+        #    `dict.update` / `dict.__ior__` accept an iterable of PAIRS, so a values view of a
+        #    PAIRS-VALUED mapping is a pairs iterable — and `dict.fromkeys(m, v)` takes m's
+        #    KEYS, which the constructor rule read through `_sequence_options` alone.
+        #
+        #      props.update({"embedding": _encode(ev)}.items())                 refused
+        #      props.update({"a": ("embedding", _encode(ev))}.values())         CERTIFIED
+        #      props |= dict.fromkeys(["embedding"], _encode(ev))               refused
+        #      props |= dict.fromkeys({"embedding": 1}, _encode(ev))            CERTIFIED
+        #      props.update({"embedding": _encode(ev)}.items())                 refused
+        #      props.update(dict.items({"embedding": _encode(ev)}))             CERTIFIED
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"a": ("embedding", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict({"a": ("embedding", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys({"embedding": 1}, _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys({"embedding": 1}.keys(), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict.items({"embedding": _encode(ev)}))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict.values({"a": ("embedding", _encode(ev))}))
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE UNBOUND VIEW INSIDE A CONSTRUCTOR, which is the ONLY position that reaches
+        #    `_mapping_items_pairs`' unbound arm directly (`#13788` review round 11, measured by
+        #    the mutation sweep: reverting that arm moved NO row until this one existed — the
+        #    operand seam rebuilds the BOUND call and never asks it). A leg with no witness is
+        #    not a closed hole.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(dict.items({"embedding": 1}))}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -8286,8 +8353,11 @@ def _upsert_object(props, ev):
         # ⛔ THE TWO NARROWINGS OF THE CONTAINER WRAPPER, or the fix becomes an over-refusal.
         # A PARTIAL slice changes WHICH element the outer index selects (`[1:][0]` is the
         # SECOND element), so resolving it would answer about a different element — the same
-        # reason `_is_full_slice` takes only `[:]` / `[0:]` / `[::1]`. And `.values()` is not
-        # the pairs view; only `.items()` places keys.
+        # reason `_is_full_slice` takes only `[:]` / `[0:]` / `[::1]`. And a values view of
+        # ⛔ SCALAR values is not a pairs view — but a values view of PAIRS is one, at the
+        # unpacking and operand seams alike (`#13788` review round 11; the earlier wording here
+        # said "`.values()` is not the pairs view", which the round-10/11 rules falsify and which
+        # a future lane would have cited to leave the operand-seam hole open).
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9322,6 +9392,31 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in d.items()}
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE OPERAND-SEAM VIEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review round
+        #    11). A values view of SCALAR values is not a pairs view at all, and a pairs view
+        #    whose key names a different property places nothing — both are honest write-stops
+        #    and both are the shapes a blanket "a values view is a store" rule would refuse.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"a": 1, "b": 2}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({"a": ("embedding_model", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys({"embedding_model": 1}, _encode(ev))
         return None
     _write(props)
 """,

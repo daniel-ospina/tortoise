@@ -1733,6 +1733,19 @@ def _constructor_stores_the_vector(call, alias_keys: frozenset[str] = frozenset(
         named = any(_names_property_key(element, alias_keys)
                     for option in (_sequence_options(keys) or ())
                     for element in option)
+        if not named:
+            # ⛔ A MAPPING IS A KEYS SOURCE AT THIS TWIN TOO (`#13788` review round 11, P1,
+            #    measured): the round-10 fix taught the PAIRS resolver's `fromkeys` arm to fall
+            #    back to `_comprehension_source_yields`, and left the identical arm in
+            #    `_constructor_stores_the_vector` — the one the `|=` / `update(…)` / rebuild
+            #    positions actually ask — asking `_sequence_options` alone. So
+            #    `dict.fromkeys(["embedding"], vec)` was REFUSED while
+            #    `dict.fromkeys({"embedding": 1}, vec)` and
+            #    `dict.fromkeys({"embedding": 1}.keys(), vec)` CERTIFIED and stored
+            #    (`dict.fromkeys(m, v)` takes m's KEYS). One fallback, the same resolver.
+            named = any(_names_property_key(element, alias_keys)
+                        for option in (_comprehension_source_yields(keys) or ())
+                        for element in option)
         return (named and len(call.args) >= 2
                 and not isinstance(call.args[1], ast.Constant))
     return (_mapping_argument_stores_the_vector(call, alias_keys=alias_keys)
@@ -2088,6 +2101,45 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "items"
                 and not node.args and not node.keywords):
             return _mapping_operand_stores_the_vector(node.func.value, alias_keys=alias_keys)
+        # ⛔ THE `.values()` VIEW OF A PAIRS-VALUED MAPPING IS THE SAME STORE, AND THIS ARM
+        #    ANSWERED ONLY `.items()` (`#13788` review round 11, P1, measured through
+        #    `_writer_consults_gate` with a runtime oracle on every row). `dict.__ior__` and
+        #    `dict.update` both accept an iterable of PAIRS, and a values view of a mapping
+        #    whose values ARE pairs is one — so the operand store was answered one attribute
+        #    name to the left:
+        #
+        #        props.update({"embedding": _encode(ev)}.items())          refused
+        #        props.update({"a": ("embedding", _encode(ev))}.values())  CERTIFIED, stores
+        #        props |= dict({"a": ("embedding", _encode(ev))}.values()) CERTIFIED, stores
+        #
+        #    The question is the pair question — is the KEY the property, and is the paired
+        #    VALUE a real store rather than a constant — asked of `_mapping_items_pairs`, the
+        #    ONE resolver for a mapping's pairs, instead of a second vocabulary here. A
+        #    constant value cannot be the vector (`{"embedding": 1}.values()` yields `1`), so
+        #    that half is what keeps the honest key-source spellings certified.
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "values"
+                and not node.args and not node.keywords):
+            pairs = _mapping_items_pairs(node)
+            if pairs is None:
+                return False
+            return any(_names_property_key(key, alias_keys)
+                       and not isinstance(value, ast.Constant)
+                       for key, value in pairs)
+        # ⛔ AND THE UNBOUND SPELLING OF EITHER VIEW IS THE SAME VIEW (`#13788` review round 11,
+        #    P2, measured): `update(dict.items({"embedding": _encode(ev)}))` and
+        #    `update(dict.values({"a": ("embedding", _encode(ev))}))` place the vector and
+        #    CERTIFIED, because both arms above resolve the receiver of a BOUND view only. The
+        #    unbound family is already modelled in this module (`dict.__setitem__(props, …)`),
+        #    so it is the same voice one spelling over. Rebuilding the BOUND call and recursing
+        #    into the SAME arm keeps one rule for both spellings.
+        if (isinstance(node.func, ast.Attribute) and len(node.args) == 1
+                and not node.keywords and node.func.attr in ("items", "values")
+                and isinstance(node.func.value, ast.Name)
+                and _is_mapping_constructor(node.func.value.id)):
+            bound = ast.Call(
+                func=ast.Attribute(value=node.args[0], attr=node.func.attr, ctx=ast.Load()),
+                args=[], keywords=[])
+            return _pairs_operand_stores_the_vector(bound, alias_keys=alias_keys)
         copied = _transparent_copy_operand(node)
         if copied is not None:
             # ⛔ BOTH SPELLINGS: the value under `.copy()` may be the PAIRS literal or the
@@ -2481,6 +2533,30 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
         #    does at runtime). Both only ever produce keys/values for the key question, so
         #    neither can widen acceptance; an unreadable receiver returns `None` (abstain),
         #    which is the pre-existing answer for a NAME-bound mapping.
+        # ⛔ THE UNBOUND SPELLING IS THE SAME VIEW (`#13788` review round 11, P2, measured):
+        #    `dict.items({"embedding": _encode(ev)})` and
+        #    `dict.values({"a": ("embedding", _encode(ev))})` place the vector and
+        #    CERTIFIED, because the bound-view arm below resolves the RECEIVER only. This
+        #    module already recognises the unbound family elsewhere (`dict.__setitem__
+        #    (props, …)`), so it is the same voice, one spelling over. Rebuilding the BOUND
+        #    form and recursing keeps ONE rule for both spellings — a second arm here is
+        #    exactly the per-resolver vocabulary this branch keeps deleting. `.keys()` is
+        #    deliberately absent: a keys view is not a pairs sequence, and the constructor
+        #    paths ask it through `_comprehension_source_yields`.
+        #    ⛔ AND IT MUST SIT OUTSIDE THE `not mapping.args` GUARD BELOW — an unbound view has
+        #    exactly one positional, so an arm nested inside that guard is DEAD CODE that looks
+        #    like a fix (measured: it survived its own mutation sweep until the row that reaches
+        #    it was written).
+        if (len(mapping.args) == 1 and not mapping.keywords
+                and isinstance(mapping.func, ast.Attribute)
+                and mapping.func.attr in ("items", "values")
+                and isinstance(mapping.func.value, ast.Name)
+                and _is_mapping_constructor(mapping.func.value.id)):
+            bound = ast.Call(
+                func=ast.Attribute(value=mapping.args[0], attr=mapping.func.attr,
+                                   ctx=ast.Load()),
+                args=[], keywords=[])
+            return _mapping_items_pairs(bound, _depth + 1)
         if not mapping.args and not mapping.keywords and isinstance(mapping.func, ast.Attribute):
             if mapping.func.attr == "items":
                 return _mapping_items_pairs(mapping.func.value, _depth + 1)
