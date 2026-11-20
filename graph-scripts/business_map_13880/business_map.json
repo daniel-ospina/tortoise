@@ -437,7 +437,7 @@
         "std:record-truth"
       ],
       "source": "src:storage",
-      "legacy": "docs/architecture/STORAGE-ARCHITECTURE.md \u00a72.0 as carried by the legacy 'record is truth' findings and the GraphEvent journal (76,610 rows of the largest legacy graph) that exists to make replay possible"
+      "legacy": "docs/architecture/STORAGE-ARCHITECTURE.md \u00a72.0 as carried by the legacy 'record is truth' findings and the GraphEvent journal (76,610 nodes of the largest legacy graph) that exists to make replay possible"
     },
     {
       "ref": "pt:journal-is-not-knowledge",

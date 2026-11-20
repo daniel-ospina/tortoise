@@ -1394,9 +1394,6 @@ def test_presence_refuses_a_TWO_ROW_source_slot_and_reads_a_STORED_alias(map_doc
     decoy = next(ident for ref, ident in idents.items()
                  if ident != src and ident != dst)
     wide_source = [list(r) for r in op_rows]
-    for row in wide_source:
-        if row[0] == opid and row[2] == 0:
-            row.extend([])  # keep the shape, append below
     wide_source.insert(
         next(i for i, r in enumerate(wide_source) if r[0] == opid and r[2] == 0) + 1,
         [opid, declared["op"], 0, filer.direction_of(declared), *_row_of(decoy)])
@@ -1902,8 +1899,10 @@ def test_a_REAL_HTTPError_honours_the_Retry_After_HEADER(monkeypatch):
     meeting (#13913 review round 18). The pure helper's row did not catch it,
     because the CALL SITE was never driven.
 
-    Mutant: `headers = dict(exc.headers or {})` removed — `UnboundLocalError`
-    instead of the retry.
+    Mutant: the handler's `headers = dict(_hdrs)` bind removed — NOT an
+    `UnboundLocalError`: `headers: dict = {}` above the `try` leaves the name bound
+    to `{}`, so the `Retry-After` is silently dropped and the client ramp
+    `[5, 10, 15, 20, 25]` runs instead. This row reds on `slept[:1] == [3.0]`.
     """
     import io
 
@@ -2307,6 +2306,51 @@ def test_a_ZERO_body_retry_after_is_ADVICE_not_the_absence_of_advice(monkeypatch
     assert sleeps == [5, 10, 15, 20, 25], (
         f"`retry_after: 0` on an idempotent write must take the ramp: {sleeps}")
     assert len(posts) == 6, posts
+
+
+def test_a_4xx_carrying_retry_after_is_still_a_REFUSAL(monkeypatch):
+    """A pre-handler rejection is a refusal whatever advice its body carries.
+
+    The `error` arm sits ABOVE the `4xx` arm, so a `403` whose body is a JSON-RPC
+    `error` with `data.retry_after` reached the may-have-landed branch and raised
+    `UnknownOutcome`. `write_once` keeps the intent on that type, so the operator's
+    marker sat in `written` AND `unconfirmed` with nothing written and no later run
+    able to clear it — the hand-edited-`state.json` recovery the `4xx` arm's own
+    comment describes (#13950 review round 33). A 4xx means the request was
+    rejected BEFORE the handler ran, so nothing landed, whatever the body advises.
+
+    The `0` spelling is a REGRESSION against the pre-#13950 truthiness test, which
+    fell past the advice arm to the refusal; the non-zero spellings were already
+    wrong before it, on both sides of the change.
+
+    Non-vacuity, MEASURED: with the `not (400 <= code < 500)` exclusion removed
+    from the `retry_after` arm this raises `UnknownOutcome` — a `RuntimeError`
+    sibling of `Refusal`, not a subclass — so the `pytest.raises(filer.Refusal)`
+    below reds on the first value, and `sleeps` fills in for the idempotent
+    spellings.
+    """
+    for zero in (0, -5, "0", 0.0, 30):
+        posts: list[int] = []
+        sleeps: list[float] = []
+        monkeypatch.setattr(filer.time, "sleep",
+                            lambda s, _s=sleeps: _s.append(s))
+
+        def _post(_body, _zero=zero, _posts=posts):
+            _posts.append(1)
+            return 403, {"jsonrpc": "2.0", "id": 1,
+                         "error": {"code": -32000,
+                                   "data": {"retry_after": _zero}}}, {}
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.Refusal) as excinfo:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        assert "refused" in str(excinfo.value).lower(), excinfo.value
+        assert len(posts) == 1, (
+            f"a 403 was re-issued {len(posts)} times over `retry_after: {zero!r}`")
+        assert sleeps == [], (
+            "a 403 must not back off at all — nothing landed: "
+            f"{sleeps}")
 
 
 def test_a_NON_NUMERIC_body_retry_after_is_classified_not_raised(monkeypatch):

@@ -639,7 +639,18 @@ class Mcp:
                 # "the work may still complete" for: the #10849 EP double-count, and
                 # a fail-OPEN measured at #13950 review round 7. Absent advice is
                 # still a refusal; present-but-zero is not.
-                if retry_after is not None:
+                # ⛔ AND A 4xx IS NEVER AN UNKNOWN OUTCOME, whatever advice its body
+                # carries. This arm sits ABOVE the `4xx` arm below, so without the
+                # status exclusion a pre-handler rejection — the request was refused
+                # BEFORE the handler ran, so nothing landed — that happens to carry
+                # `data.retry_after` (including the `0` this arm exists to honour)
+                # was classified MAY-HAVE-LANDED: `write_once` then kept the intent,
+                # so the marker sat in `written` AND `unconfirmed` with nothing
+                # written and no later run could clear it — the hand-edited-
+                # `state.json` recovery the `4xx` arm's own comment describes
+                # (#13950 review round 33). On a 4xx the STATUS, not the advice,
+                # decides landed-ness; the advice arm still governs 2xx/3xx/5xx.
+                if retry_after is not None and not (400 <= code < 500):
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
                     if not retry_safe:
