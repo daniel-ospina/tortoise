@@ -133,6 +133,12 @@ DESTINATION = {
     "tortoise_delete_point": "delete_knowledge",
     "tortoise_delete_entity": "delete_knowledge",
     "tortoise_delete": "delete_knowledge",
+    # #11609 lane P7 — the four newly-registered targets. Each is a REGISTRY tool,
+    # so the map owes it a row; its destination is its own target name.
+    "tortoise_delete_knowledge": "delete_knowledge",
+    "tortoise_get_historical_knowledge": "get_historical_knowledge",
+    "tortoise_link_entities": "link_entities",
+    "tortoise_poll_events": "poll_events",
     "tortoise_retract_point": "update_knowledge",
     "tortoise_invalidate": "supersede_knowledge",
     "tortoise_supersede": "supersede_knowledge",
