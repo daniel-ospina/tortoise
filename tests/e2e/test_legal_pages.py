@@ -1834,10 +1834,18 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     # ORDER of the emit relative to `opt_in_capturing()` cannot be seen in a
     # served-bytes match; it is pinned statically in
     # tests/test_website_static.py::TestConsentSeam.
-    assert "tortoise:consent" in js, \
+    #
+    # ⛔ CODE, not served prose. #13696 review cycle 2 (P1, measured): matching
+    # the RAW bytes let a commented-out dispatch leave every consent row green —
+    # the event name survives in a `//` comment and the rows below cannot tell a
+    # mention from a call. Same span-cutting rule `_code_only` in
+    # tests/test_website_static.py uses for this exact hazard.
+    js_code = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    js_code = re.sub(r"(?<!:)//[^\n]*", "", js_code)
+    assert "tortoise:consent" in js_code, \
         "consent.js never dispatches the tortoise:consent event (a page that " \
         "waits for it would capture nothing on a return visit)"
-    assert 'announceConsent("granted")' in js, \
+    assert 'announceConsent("granted")' in js_code, \
         "consent.js has no granted announcement — a visitor who accepts has no " \
         "page view counted (#13645)"
 

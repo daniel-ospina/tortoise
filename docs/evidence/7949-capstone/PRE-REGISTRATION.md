@@ -3157,3 +3157,60 @@ to answer.
   edit to this file, and the bundle README's present-tense digest with it.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a supersede
   marker.
+
+### 10.39 — the sixth row's PRODUCER lands: `E6` is now measured, and no bar moved (`#11695`, 2026-11-20)
+
+**What this entry adds.** `#11673` (§10.21) registered `E6` as a REQUIRED criterion and stated the
+half it did not ship: *"⛔ What is NOT yet wired, and is named rather than left to be discovered: the
+verdict ROW (`#11695`) … `#11695` still owns teaching the probe to emit the row"*. This entry records
+that the row is emitted — `probes/capstone_measure.py` now measures `E6` and appends it to the scored
+table — so §10.21's "NOT yet wired" paragraph reads as the accurate statement of the head it was
+written at and as **history** from here. It is not struck: §8 preserves what a record said, and the
+sentence was true when it was committed.
+
+**No existing row moves, and no bar is re-typed.** `E1`–`E5`, `E1b`, `E2a`, `E2b` and `A1`–`A5` keep
+their metrics, denominators, thresholds, class sets and floors untouched; the corpus pin, the split,
+the salience pins and the step set are unchanged. `E6`'s own bar (`unbound_and_unexplained = 0`) and
+floor (`denominator_floors.e6_declared_rows: 30`) are the ones §3.1/§10.21 already registered —
+`parse_bars` now READS them rather than leaving them prose-only, which is the same rule every other
+row's bar follows (*"a bar typed into this file is a bar nobody froze"*).
+
+**The closing set is NOT touched, and that is deliberate.** `tools/capstone_verdict_check.py`'s
+`CRITERIA` stays `E1`–`E5`, so `V2`'s row demand and `V9`/`--require-green`'s `5/5` are exactly the
+recorded five-row close: **this epic can close 5-of-5 with `E6` red**, by rule. Promoting `E6` into
+the closing set is a re-registration (§10.21's own words), so it is the owner's call and not a lane's;
+this entry neither makes it nor hints at it. What DID change is that the RECORD can now carry the row
+`REQUIRED_CRITERIA` demands, which is the whole of what `#11695` owns.
+
+**What `E6` measures at this head, re-derived and not remembered.** `population.declared` is read from
+the packs at the run's head (`tools/pack_relation_census.py`'s hermetic `build_census`, the instrument
+§10.21 names and this change does not rebuild):
+
+- **45 declared rows** — 39 `relations[]` + 6 `hierarchies[]` — over **7** packs;
+- **44 `writable`**, **1 `declaration-only`** (`pm`'s `onBoard`, retired **with** its reason),
+  **0 `predicate-not-in-allowlist`**, and an `effective_direction` on every row that binds a path;
+- therefore **`unbound_and_unexplained = 0` of 45** ⇒ `E6` **GREEN** on the registered bar;
+- the census's `written` column, reported **beside** it and never as it: **9 `direct`, 35 `mediated`,
+  1 `none`** (`A1` owns that graph, §3.8).
+
+⚠️ **The population is 45, not the 42 §3.1 and §9 record — and that is a READ, not a revision.** Both
+sentences say "**42** at the `#11083` stamp", and `population.declared` is registered as *"every
+declared row across the installed packs, counted from the registry **at the run's head**"*. `#11001`'s
+KIN-2 rows moved the registry after that stamp, and `#11797` owns re-measuring the hand-copied
+inventory. The row therefore reports the head's number and its note says the denominator MOVES with
+the packs; neither the registered metric nor its floor is restated here.
+
+**One derived number moved, as §8's change control requires.** Inserting the row builder above the E3
+census window shifted it `:2747-2749 -> :2800-2802` (+53), so `preregistration.json`'s
+`door.acceptance_arm.read_back` records a FIFTH move with its issue (`#11695`) and the live cite is
+re-pointed; the four historical positions stay, because they are what those commits did.
+
+**Why an amendment and not a second registration.** Same ground as §10.11 and §10.21: one corpus pin,
+one machine record, one criteria table, and `measurement_visible_to_author` is per-row. `E6`'s row was
+already disclosed as post-visible at registration (§10.21: the bar is a zero-tolerance COUNT, so
+nothing could have been fitted to it), and this entry moves no value at all — it adds the producer the
+registration said was missing.
+
+**Prereq for a reader re-deriving this.** `uv run python tools/pack_relation_census.py --json` prints
+the declaration half hermetically; `--write-probe` is what fills `written`, and
+`docs/evidence/11083/pack-relation-census.json` is the committed artifact that carries it.

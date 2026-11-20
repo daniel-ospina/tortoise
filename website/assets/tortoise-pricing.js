@@ -7,8 +7,10 @@
  * worse than no campaign page. So the tier table + the formatting contract live
  * HERE, both pages load this file, and
  * `tests/test_website_static.py::TestPricingSourceIsShared` holds the two pages
- * to it (the pages' static cards are a no-JS fallback and are pinned to this
- * source by `TestStaticPricingFallback`).
+ * to it. The pages' static cards are a no-JS fallback: product.html's are
+ * derived from this source by `TestStaticPricingFallback`, and the campaign
+ * page's by
+ * `TestPricingSourceIsShared::test_the_static_cards_on_both_pages_carry_the_shared_numbers`.
  *
  * ⛔ DO NOT add a second copy of this object to a page. Both pages load
  * `/assets/tortoise-pricing.js`, and the list of pages that render the table is
@@ -21,8 +23,10 @@
  * coverage by copy-pasting this file's shape.
  *
  * The table is a MIRROR of `product/pricing.json` (the first source), pinned
- * against it by `tests/test_website_static.py::TestMirrorNumericParity` and
- * `tests/test_tier_naming.py`. Edit this file and `product/pricing.json`
+ * against it by `tests/test_website_static.py::TestMirrorNumericParity`. (The
+ * tier NAMES are separately held across `product/pricing.json`, product.html's
+ * `labels` map and the dashboard's `TIER_LABELS` by `tests/test_tier_naming.py`;
+ * that module does not read this file.) Edit this file and `product/pricing.json`
  * together, never one of them alone.
  *
  * Serving: `website/assets/` is `public` in
@@ -88,5 +92,12 @@ window.tortoiseFmtPrice = function (price, mode, discountPct) {
     var total = perMonth * 12;
     return { big: '$' + perMonth, total: '$' + total + ' billed annually' };
   }
+  /* ⛔ The Free tier is free in BOTH modes. Without this line a $0 tier read
+   * `$0 /mo — Billed monthly` on the Monthly tab and `Free forever` on Annual:
+   * nothing is billed on a free tier, so the Monthly copy is both false and a
+   * contradiction of the same card one click away (#13696 review cycle 2, P2).
+   * The static card already says `Free forever`, so this also keeps the JS
+   * render and the no-JS fallback saying the same thing. */
+  if (price === 0) return { big: '$0', total: 'Free forever' };
   return { big: '$' + price, total: 'Billed monthly' };
 };
