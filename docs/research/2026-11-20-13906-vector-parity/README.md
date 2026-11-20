@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (65 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (66 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -414,6 +414,18 @@ rebuild still wrong for two legal conninfo spellings — both measured on real
 | **P2 (non-blocking, fixed anyway)** `run()` constructed `RecordStore` and called `require_schema()` OUTSIDE the `try`, so a `CannotRun` from the schema check left the connection open | read the call site | `require_schema()` is now inside a `try`/`except BaseException: close(); raise` |
 | **P2 (non-blocking, noted)** the write leg is not gated by a successful READ: `app_role_dsn`'s rebuilt DSN is what the read queries use, and `teardown()` runs in `finally`, so a shape that seeds successfully and then fails to read still deletes by `org_id` in that store. The guard is what makes this safe, not the read | read `run()`/`teardown()` | stated here explicitly so no later round assumes an ordering that does not exist |
 
+### Round 18: the conninfo scanner invented a `host=` libpq never parses
+
+The attestation review at `49d05629` swept 436,296 URI × environment cases (**0
+bypasses** — the URI grammar is sound) and 49,171 conninfo × environment cases,
+where **1,111 pairs over 793 DSNs bypassed** the guard. One root, measured with
+`PQconninfoParse` and `psql`:
+
+| finding | verified how | fix |
+|---|---|---|
+| **U1 (P1)** `_CONNINFO_KV` was a flat regex over `host`/`hostaddr`/`service`. libpq SKIPS whitespace after `=` and honours backslash escapes, so `dbname= host=127.0.0.1` is ONE pair to libpq (`dbname='host=127.0.0.1'`, **no host**) and `dbname=x\ host=127.0.0.1` likewise — while the regex invented a loopback `host=`. Worse, the invented key also went into the "keys the DSN supplies" set, so the `PGHOST`/`PGHOSTADDR`/`PGSERVICE` fallback was SKIPPED: a DSN naming no host at all was certified local while libpq dialled the environment's remote host. `dbname= host=127.0.0.1` is what a templated DSN produces when one variable is empty; `dbname=x\ host=…` is a password or `application_name` carrying the text | `psql` reports `connection to server at "203.0.113.9"` for all three shapes while the guard PASSED | ONE grammar walker (`_conninfo_pairs`) — quotes, backslash escapes, whitespace on both sides of `=`, whitespace AFTER `=` skipped — now feeds BOTH `_conninfo_hosts` (the guard) and `_drop_options_pairs` (the rebuild), so the two interpretations cannot drift. Pinned by `test_a_conninfo_value_that_LOOKS_like_a_host_is_not_one`: the three shapes refused with the environment set, a DSN that really sets a loopback host still passing (the DSN wins over a remote environment, as libpq has it), and remote keywords in either position refusing. Mutants: restore the flat regex → **6 failed**; stop skipping whitespace after `=` → **3 failed** |
+| **U2 (P2)** the differential gate the previous round added to END the review-by-review cycle could not see either axis the bypass lived on: every entry in `shapes` was a `postgresql://` URI and the environment was cleared for the whole test — and its docstring claimed the axes that moved the boundary were covered | read the gate against the sweeps | its oracle is libpq; a conninfo `shapes` list and a second pass with a remote `PG*` environment belong there. Recorded as scoped to the URI grammar in the round-17 row rather than claimed complete — **the gate does not yet cover conninfo × environment** |
+
 ## 6. Reproducing
 
 ```bash
@@ -443,7 +455,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **65 passed**.
+tests/test_vector_parity_13906.py -q` → **66 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:

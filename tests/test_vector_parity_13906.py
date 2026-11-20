@@ -620,6 +620,73 @@ def test_an_unpoisoned_run_that_could_not_measure_is_not_a_divergence(
     monkeypatch.setattr(harness, "run", lambda _args: report)
     assert harness.main(argv) == 1, "a measured divergence must keep exit 1"
 
+def test_a_conninfo_value_that_LOOKS_like_a_host_is_not_one(harness, monkeypatch):
+    """⛔ THE GRAMMAR, NOT A REGEX — and the environment is where the host was.
+
+    A flat `(host|hostaddr|service)`-with-`\\s*=\\s*` regex invented a `host=`
+    libpq never parses, because libpq SKIPS whitespace after `=` and honours
+    backslash escapes. Both shapes below are legal, both are what a templated DSN
+    produces when one variable is empty or a password carries the text, and BOTH
+    let a remote record be certified local — the regex reported a loopback host
+    AND suppressed the environment fallback, so the `PGHOST`/`PGHOSTADDR` that
+    libpq actually dials was never consulted:
+
+        dbname= host=127.0.0.1       libpq: dbname='host=127.0.0.1'  (NO host)
+                                     PGHOST=203.0.113.9 -> dials 203.0.113.9
+        dbname=x\\ host=127.0.0.1     libpq: dbname='x host=127.0.0.1' (NO host)
+        user= hostaddr=127.0.0.1     libpq: user='hostaddr=127.0.0.1' (NO hostaddr)
+
+    Measured with `PQconninfoParse` and `psql` (which names the host it dials):
+    1,111 of 49,171 conninfo × environment pairs bypassed. The guard and the
+    rebuild now share ONE grammar walker (`_conninfo_pairs`), so an interpretation
+    cannot drift from the other.
+    """
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.delenv(var, raising=False)
+
+    # the shapes as DSNs, with the environment supplying the host libpq dials
+    cases = (
+        ("dbname= host=127.0.0.1", {"PGHOST": "203.0.113.9"}),
+        ("dbname=x\\ host=127.0.0.1", {"PGHOST": "203.0.113.9"}),
+        ("user= hostaddr=127.0.0.1", {"PGHOSTADDR": "203.0.113.9"}),
+        ("dbname= host=127.0.0.1", {"PGSERVICE": "prod"}),
+    )
+    for dsn, env in cases:
+        for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+            monkeypatch.delenv(var, raising=False)
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        # the DSN names NO host …
+        assert harness._conninfo_hosts(dsn)[0] == [], (dsn, harness._conninfo_hosts(dsn))
+        # …so the environment decides, and the guard must refuse
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act works
+
+    # CONTROL: with no environment host, the same DSNs name no host at all — which
+    # is ALSO a refusal (`RECORD_DSN_NO_HOST`), not a pass.
+    for var in ("PGHOST", "PGHOSTADDR", "PGSERVICE"):
+        monkeypatch.delenv(var, raising=False)
+    for dsn in ("dbname= host=127.0.0.1", "dbname=x\\ host=127.0.0.1"):
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+
+    # CONTROL: a DSN that really DOES set a loopback host PASSES, and a remote
+    # environment must NOT override it — the DSN's own keyword wins, as libpq has it.
+    monkeypatch.setenv("PGHOST", "203.0.113.9")
+    for dsn in ("host=127.0.0.1 dbname=x", "host = 127.0.0.1",
+                "host='127.0.0.1' dbname='a b'", "hostaddr=127.0.0.1 host=127.0.0.1"):
+        harness._assert_local_record_dsn(dsn, False), dsn
+
+    # …and a real remote keyword in either position still refuses.
+    monkeypatch.setenv("PGHOST", "203.0.113.9")
+    for dsn in ("host=203.0.113.9", "hostaddr=203.0.113.9 dbname=x",
+                "host=127.0.0.1 hostaddr=203.0.113.9"):
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+
+
 def test_the_guard_answers_what_libpq_would_DIAL_not_what_this_string_says(
         harness, monkeypatch):
     """The third indirection of one class: parse like libpq, and read its env.
