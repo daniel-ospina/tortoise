@@ -287,7 +287,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2724-2726'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 1,
+    # 2: the header enumeration's (`sdk.py`'s second `capture_redactions` writer :2876, on this tree
+    # `:2921`) AND the §2.4 `capture_redactions` row's second writer cite (`sdk.py:2898` and `:2921`),
+    # which the `#13854` cite re-derivation re-pointed off a delta-shifted `:2705`. Two sites, one
+    # spelling — the count is what stops a third appearing unannounced.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37502`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37525`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37525` |'): 1,
@@ -465,9 +469,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "123 of this document's 215",
-        "dedupes the **326** as-written spellings to **215** — **111**",
-        "326 written spellings → 215 pairs → 111 collisions → 123 drifters of the 215",
+        "129 of this document's 222",
+        "dedupes the **328** as-written spellings to 222 — **106**",
+        "328 written spellings → 222 pairs → 106 collisions → 129 drifters of the 222",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1237,3 +1241,90 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
             f"the addendum's consume pair cites sdk.py:{n}, which reads "
             f"{sdk[int(n) - 1].strip()!r}, not {needle!r} — re-derive the pair by content "
             f"(`grep -nF '{needle}' tortoise/sdk.py`), never by a delta")
+
+
+#: ⛔ `#13854` cite families — the `#13854` review measured 27 addresses DELTA-SHIFTED (the branch's own
+#: insert delta applied to a cite whose row survives two different offsets), so they opened on a comment
+#: or unrelated code at BOTH heads. The `faaad5308c` predecessor then applied a blanket `-23` to eight
+#: `projection/entities.py` cites that were already correct at that head — the FALSE CORRECTION this whole
+#: file exists for — and re-derived nothing: `:1223` was a blank line, `:3857` a module import.
+#:
+#: Every row below was re-taken by CONTENT on THIS tree (`grep -n '<the fragment the row quotes>' <path>`),
+#: never by arithmetic, and each is a claim about the line the DOCUMENT currently names. NON-VACUOUS on the
+#: pre-fix document: `sdk.py:38840` was `last_pass is None…` prose at this head (the statement is `:42105`),
+#: `sdk.py:52910` was a comment (statement `:58561`), and `entities.py:1223` was EMPTY (the declaration is
+#: `:1246`) — so the fragment arm reds on every one of them.
+#:
+#: ⚠️ A RANGE row anchors on the line INSIDE the cited range that carries the quoted fragment (the same
+#: convention `_PINS` states), and `test_..._range_anchors_are_inside_their_range` below proves the anchor is
+#: in the range the token names — without it a range row could pin a line the range does not cover.
+_REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
+    ("sdk.py:17814", "tortoise/sdk.py", 17814, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 2),
+    ("sdk.py:41347", "tortoise/sdk.py", 41347, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 2),
+    ("sdk.py:42105", "tortoise/sdk.py", 42105, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 1),
+    ("sdk.py:58561", "tortoise/sdk.py", 58561, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
+    ("sdk.py:19805-19808", "tortoise/sdk.py", 19808, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
+    ("sdk.py:19813", "tortoise/sdk.py", 19813, "_stamp_capture_provenance(", 1),
+    ("sdk.py:57910-57934", "tortoise/sdk.py", 57912, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
+    ("sdk.py:57912-57934", "tortoise/sdk.py", 57912, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
+    ("sdk.py:57912", "tortoise/sdk.py", 57912, "\"s.turn_count, s.actor_user_id, s.harness, \"", 3),
+    ("sdk.py:4234-4237", "tortoise/sdk.py", 4234, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
+    ("sdk.py:4368-4375", "tortoise/sdk.py", 4373, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
+    ("sdk.py:2898", "tortoise/sdk.py", 2898, "\"SET s.capture_redactions=$redactions \"", 1),
+    ("sdk.py:31152", "tortoise/sdk.py", 31152, "\"MATCH (t:Tag) \"", 1),
+    ("sdk.py:31170", "tortoise/sdk.py", 31170, "\"MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) \"", 1),
+    ("sdk.py:24132", "tortoise/sdk.py", 24132, "\"MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) \"", 1),
+    ("sdk.py:24476", "tortoise/sdk.py", 24476, "\"MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t\"),", 1),
+    ("sdk.py:27419", "tortoise/sdk.py", 27419, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
+    (":28318", "tortoise/sdk.py", 28318, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
+    (":29976", "tortoise/sdk.py", 29976, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 3),
+    (":30072", "tortoise/sdk.py", 30072, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
+    (":30171", "tortoise/sdk.py", 30171, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
+    (":43800", "tortoise/sdk.py", 43800, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
+    ("entities.py:1246", "tortoise/projection/entities.py", 1246, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
+    ("entities.py:2022-2030", "tortoise/projection/entities.py", 2022, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
+    ("entities.py:2460", "tortoise/projection/entities.py", 2460, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
+    ("entities.py:2509", "tortoise/projection/entities.py", 2509, "_POINT_DENY: frozenset = frozenset({", 1),
+    ("entities.py:2369-2370", "tortoise/projection/entities.py", 2370, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
+    ("entities.py:2373-2374", "tortoise/projection/entities.py", 2374, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
+    ("entities.py:3118", "tortoise/projection/entities.py", 3118, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
+    ("entities.py:3923", "tortoise/projection/entities.py", 3923, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
+    (":3236-3238", "tortoise/projection/entities.py", 3238, "self._POINT_HANDLED | self._POINT_DENY,", 1),
+    (":3280", "tortoise/projection/entities.py", 3280, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
+    (":3330", "tortoise/projection/entities.py", 3330, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
+)
+
+
+def test_the_13854_cite_families_open_on_the_line_they_quote() -> None:
+    """Every re-derived cite in the `#13854` families still resolves, at the head it names.
+
+    The token arm catches a re-point (the document no longer carries the address) and the occurrence
+    count makes every SITE load-bearing; the fragment arm catches the number staying while the line
+    under it moves.
+    """
+    text = (REPO / _AUDIT).read_text(encoding="utf-8")
+    for token, path, line, fragment, expected in _REDEFINED_13854:
+        assert text.count(token) == expected, (
+            f"{_AUDIT} carries {token!r} {text.count(token)}x, not {expected}x — a SITE was re-pointed "
+            "while a sibling kept the string. Re-derive by CONTENT and update the count."
+        )
+        target = (REPO / path).read_text(encoding="utf-8").splitlines()
+        assert 0 < line <= len(target), f"{path} has no line {line}"
+        assert fragment in target[line - 1], (
+            f"{path}:{line} no longer carries {fragment!r} — it reads {target[line - 1].strip()[:96]!r}. "
+            "The cite is bound to a line, so re-derive it from the row's own quoted fragment instead of "
+            "moving it by a delta."
+        )
+
+
+def test_the_13854_range_anchors_are_inside_the_range_the_token_names() -> None:
+    """A range row's anchor must be a line the range actually covers."""
+    for token, path, line, _fragment, _expected in _REDEFINED_13854:
+        found = re.search(r":(\d+)-(\d+)$", token)
+        if not found:
+            continue
+        start, end = int(found.group(1)), int(found.group(2))
+        assert start <= line <= end, (
+            f"{path}:{line} is the anchor pinned for {token!r}, which covers {start}-{end} — a range row "
+            "whose anchor sits outside its own range resolves nothing the row quotes."
+        )
