@@ -1460,3 +1460,122 @@ def test_the_verdict_refuses_DUPLICATED_operators(map_doc):
     doubled = [*op_rows, *[[f"{row[0]}~dup", *row[1:]] for row in op_rows]]
     assert filer.duplicate_operators(map_doc, doubled), "the duplicate was invisible"
     assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, doubled) == 1
+
+
+# ── #13913 review round 8 ─────────────────────────────────────────────────
+class _DeadBody:
+    """A response body that dies while being read (proxy truncation / reset)."""
+
+    def read(self) -> bytes:
+        raise filer.http.client.IncompleteRead(b"partial")
+
+    def close(self) -> None:      # pytest's resource warning calls this
+        return None
+
+
+def test_an_HTTPError_whose_BODY_dies_is_still_unknown(monkeypatch):
+    """`exc.read()` runs INSIDE the `HTTPError` handler, where no sibling
+    `except` can reach it: a truncated 5xx body used to escape as
+    `IncompleteRead`, so `write_once` read a 5xx as a DEFINITE REFUSAL and
+    retired a non-idempotent intent — measured: the resume re-issued
+    `create_operator` (#13913 review round 8).
+
+    Mutant: read the body unguarded inside the handler.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    for code in (500, 429, 401):
+        exc = filer.urllib.error.HTTPError(
+            "https://api.premiselabs.co/mcp/", code, "Server Error", {}, _DeadBody())
+        monkeypatch.setattr(mcp, "_post", lambda _b, _e=exc: (_ for _ in ()).throw(_e))
+        with pytest.raises(RuntimeError) as err:
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+        if code in (500, 429):
+            assert isinstance(err.value, filer.UnknownOutcome), code
+        else:  # 401 is rejected before the handler: a refusal, re-issuable
+            assert not isinstance(err.value, filer.UnknownOutcome), code
+
+
+def test_a_body_that_PARSES_to_a_non_object_is_unknown(monkeypatch):
+    """A proxy error page can be valid JSON (`[]`, `"Bad Gateway"`, `502`).
+
+    `payload.get` raised `AttributeError` outside every classification, retiring
+    the intent exactly like an unparsable body. Mutant: drop the isinstance check.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    for payload in ([], "Bad Gateway", 502, True):
+        monkeypatch.setattr(mcp, "_post", lambda _b, _p=payload: (200, _p, {}))
+        with pytest.raises(filer.UnknownOutcome):
+            mcp.call("tortoise_create_operator", {}, retry_safe=False)
+
+
+def test_an_operator_with_TWO_targets_in_one_slot_certifies_nothing(map_doc):
+    """A slot holds a SET, so bounding slot KEYS does not bound ENDPOINTS.
+
+    Measured pre-fix: replace the two operators over `(source -> target A)` and
+    `(source -> target B)` with ONE node whose slot 1 reaches both → `78/78`,
+    `101/101`, exit 0 — one node carrying two judgements, priced as one
+    three-input factor (#13913 review round 8).
+
+    The two declared edges are the ONLY thing at stake here: every other
+    operator row is untouched, so a verdict of 1 is caused by the arity leg.
+
+    Mutant: `all(slot in (0, 1) for slot in slots)` without the per-slot counts.
+    """
+    # The pair must share source AND mechanism AND direction, or the merged node
+    # could not certify the second edge for a reason other than the arity leg —
+    # which is what a first draft of this test measured (it picked a NAND and an
+    # IMPL over one source, so the mutant passed).
+    by_source: dict[tuple, list[dict]] = {}
+    for e in map_doc["edges"]:
+        if "op" in e:
+            by_source.setdefault((e["from"], e["op"], e.get("direction")), []).append(e)
+    pair = next(edges for edges in by_source.values() if len(edges) >= 2)
+    first, second = pair[0], pair[1]
+
+    edge_rows, op_rows = _edge_rows(map_doc)
+    # The two operator nodes the merged one REPLACES: same source, distinct targets.
+    nid_of: dict[str, str] = {}
+    for e in map_doc["edges"]:
+        if "op" in e:
+            nid_of.setdefault(e["from"] + "|" + e["to"], f"op{len(nid_of)}")
+    replaced = {nid_of[first["from"] + "|" + first["to"]],
+                nid_of[second["from"] + "|" + second["to"]]}
+    kept = [row for row in op_rows if row[0] not in replaced]
+    assert len(kept) == len(op_rows) - 4, "expected two 2-row operator nodes to replace"
+
+    idents = filer.identity_by_ref(map_doc)
+    merged = [
+        *kept,
+        ["opMERGED", first["op"], 0, filer.direction_of(first), *_row_of(idents[first["from"]])],
+        ["opMERGED", first["op"], 1, filer.direction_of(first), *_row_of(idents[first["to"]])],
+        ["opMERGED", first["op"], 1, filer.direction_of(first), *_row_of(idents[second["to"]])],
+    ]
+    assert not filer.duplicate_operators(map_doc, merged)
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, merged) == 1
+
+
+def test_a_duplicate_with_a_DIFFERENT_direction_or_mechanism_is_still_a_duplicate(map_doc):
+    """The duplicate census is per ENDPOINT PAIR, not per (mechanism, direction).
+
+    A re-issued `create_operator` that stored a flipped direction (or mechanism)
+    still makes EP price the pair twice (#10849); keying the census on
+    (mechanism, direction, pair) made it invisible — measured 101/101, exit 0
+    (#13913 review round 8).
+
+    Mutant: key `holders` by (mechanism, direction, pair).
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    flipped = [[row[0] + "~dup", row[1], row[2],
+                "<->" if row[3] == "->" else "->", *row[4:]] for row in op_rows]
+    other_mech = [[row[0] + "~dup2", "NAND" if row[1] == "IMPL" else "IMPL",
+                   row[2], row[3], *row[4:]] for row in op_rows]
+    assert filer.duplicate_operators(map_doc, [*op_rows, *flipped]), "direction-blind"
+    assert filer.duplicate_operators(map_doc, [*op_rows, *other_mech]), "mechanism-blind"
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows,
+                         [*op_rows, *flipped]) == 1
+
+
+def test_the_bare_invocation_is_not_success(monkeypatch):
+    """A runbook passing the mode through an empty variable must not read 0."""
+    monkeypatch.setattr(filer.sys, "argv", ["file_map.py"])
+    assert filer.main() == 2
