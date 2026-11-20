@@ -55,17 +55,19 @@ _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
 
 #: A PINNED SUBSET of the names the LIVE manifest declares `fly-toml-env` — NOT the
 #: full audited set. ⛔ Do not read it as one: the live set grows with every
-#: `fly-toml-env` DECLARATION — not with every `fly.toml [env]` key (`[env]` holds
-#: 20 keys while only 8 are declared `fly-toml-env`; that 8 is itself pending
-#: #13923, which owns `main`'s duplicate `TORTOISE_EMBEDDER_WARMUP` and may leave 7).
+#: `fly-toml-env` DECLARATION — not with every `fly.toml [env]` key (`[env]` held
+#: 20 keys, 8 of them declared `fly-toml-env`, when this was measured; that 8 is
+#: itself pending #13923, which owns `main`'s duplicate
+#: `TORTOISE_EMBEDDER_WARMUP` and may leave 7).
 #: This block and the tuple were written at `552e845ec5` (2026-09-28, #5656), when the
 #: manifest declared exactly 3 — precisely these three — so "the three names" was TRUE
 #: then. It went stale at `98dae4857a` (2026-10-26), which declared a 4th; the set
 #: stands at 7 by `e3f894b31b` and 8 with #13926. ⛔ A count here is HISTORY, never a
 #: standing claim: state the rule, not the total.
-#: `LIVE_NAMES` is fixture data for the tests below and is never compared against
-#: the real manifest; what is pinned is that a manifest edit is a DELIBERATE test
-#: change, not that this tuple covers the audited set.
+#: `LIVE_NAMES` is fixture data: it is the DEFAULT manifest these tests hand the
+#: script, and it is never compared against the real one — nothing here opens
+#: `.github/scripts/fly-managed-secrets.txt`, so editing the real manifest changes
+#: nothing below. Editing the TUPLE is what changes these tests.
 LIVE_NAMES = ("TORTOISE_CONTROL_PLANE", "TORTOISE_REAUTH_WINDOW_SECONDS",
               "TORTOISE_MANUAL_LINKING_ENABLED")
 
