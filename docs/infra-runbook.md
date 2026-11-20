@@ -4410,9 +4410,16 @@ operator who read the line above as "CI defends this" would never run it.
 > whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **This copy is the only line-citing
 > one left, and it is pinned:** `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
 > resolves each cite above by NAME↔NUMBER, so a merge that moves the code reds instead of rotting it
-> silently. The manifest used to carry a sibling copy and its own pin; #13926 took the name to route
-> (b) and #13814's `fly-only:` block went with it, so there is no second copy to keep in step —
-> do not reintroduce one without its own arm.
+> silently. The manifest used to carry a sibling copy and its own pin; **this change** deletes the
+> `fly-only:#13674` block that carried it (#13926 had already taken the name to route (b), and that
+> block landed on top of it seven minutes later — which is what produced the duplicate), so there is
+> no second copy to keep in step: do not reintroduce one without its own arm.
+>
+> ⛔ **What that arm does NOT cover.** Its region stops at the "When to flip it" sentence, so the three
+> timing/cold-load cites further down this section — the `_prewarm_embedder` window in `entrypoint.sh`,
+> the readiness bound in `embeddings.py`, and the boot override beside it — are read by NO test and rot
+> silently: re-pinning one to a neighbouring line leaves the suite green (measured). The manifest
+> paragraph that used to disclose this went with the `fly-only:` block, so the disclosure lives here now.
 >
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
@@ -4495,8 +4502,9 @@ WITHOUT it, which is exactly what a fixture that models the transition away does
 The route-(b) PAIR — exit 1 with the shadow, exit 0 with it withheld — is pinned by
 `tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
 (it seeds this name as the live shadow, so this state cannot be reported as clean again). The rejected
-direction's exit 0 is a HAND measurement above and is NOT pinned — that test reds on the route assertion
-(`declared[embedder_warmup] == "fly-toml-env"`) before the gate even runs. The exit-2 half is pinned by
+direction's exit 0 is a HAND measurement above and is NOT pinned — that test reds first on its
+`open_route_b` guard (`… is recorded here as an OPEN route-(b) transition but this manifest declares
+it 'fly-only:#13674'`), before the gate even runs. The exit-2 half is pinned by
 `::test_duplicate_declaration_is_exit_2`, on a fixture manifest — which is why the duplicate must never
 be re-created.
 

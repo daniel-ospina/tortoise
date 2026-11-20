@@ -1836,7 +1836,7 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     of hard-blocking the deploy in CI.
 
     ⛔ The exit code IS pinned now, and the policy is NOT "any violation fails":
-    `open_route_b` (:1898) records the route-(b) transitions that are still OPEN,
+    `open_route_b` (defined at :1905) records the route-(b) transitions that are OPEN,
     and for a name in it a `STALE DECLARATION` carrying the `which shadows [env]`
     clause is tolerated and the code pinned to 1 — with a withheld-shadow control
     that must come back 0, so the two fixtures cannot collapse into one run. Every
@@ -1905,9 +1905,21 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     for name in open_route_b:
         assert declared.get(name) == "fly-toml-env", (
             f"{name} is recorded here as an OPEN route-(b) transition but this manifest "
-            f"declares it {declared.get(name)!r}. A transition that is not declared "
-            "`fly-toml-env` has nothing left to unset, so this arm would be pinning a "
-            "state the branch does not ship — re-read the manifest before editing either."
+            f"declares it {declared.get(name)!r}"
+            + (
+                " — i.e. it is no longer declared at all, so the emergency switch "
+                f"lost its provenance line; restore `{name} fly-toml-env`, with "
+                f"`{name} = \"0\"` in fly.toml [env]. "
+                if declared.get(name) is None
+                else ". "
+            )
+            + "A transition that is not declared `fly-toml-env` has nothing left to "
+            "unset, so this arm would be pinning a state the branch does not ship — "
+            "re-read the manifest before editing either. ⛔ Removing the lever on "
+            "purpose is a DIFFERENT change and not this assertion's to block: delete "
+            "the [env] row AND this declaration in ONE merged change, and drop this "
+            "name from `open_route_b` here together with its withheld-shadow "
+            "control, or the two fixtures collapse into one run."
         )
     living = [n for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
     real_secrets = _fixture(
@@ -1954,7 +1966,10 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # was fixed with. Until then the suite models the open transition on purpose.
     assert "UNDECLARED" not in r.stdout, r.stdout
     stale = [line for line in r.stdout.splitlines() if "STALE DECLARATION" in line]
-    foreign = [line for line in stale if not any(n in line for n in open_route_b)]
+    # ⛔ IDENTITY, not a substring: the gate prints the name in single quotes, and a
+    # family name already exists in this tree (`TORTOISE_BOOT_EMBEDDER_WARMUP_TIMEOUT_S`),
+    # so `n in line` would tolerate an unrecorded `…_GRACE_S` shadow as if it were this one.
+    foreign = [line for line in stale if not any(f"'{n}'" in line for n in open_route_b)]
     assert not foreign, (
         "the shipped artifacts carry a STALE declaration for a name that is not the open "
         f"route-(b) transition — that is a real defect, not the recorded interval:\n{foreign}"
@@ -2141,24 +2156,13 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # a permanent out-of-band secret with a recorded ruling, and #13926 rejected it
     # for exactly this reason. Pinned in both directions, because each wrong route
     # is one plausible "helpful" edit away:
-    #   * deleting the declaration -> `KeyError`-shaped red with no diagnosis
-    #     without the membership assert, so it is split out and named;
-    #   * moving it back to `fly-only:`/`unmanaged`, or out of `[env]`, -> the
-    #     route/`env_keys` asserts below.
+    #   * deleting the declaration, or moving it back to `fly-only:`/`unmanaged` — BOTH
+    #     are refused by the `open_route_b` guard ABOVE, which is the live one and
+    #     carries both diagnoses (including the removal path). It runs FIRST, so a
+    #     separate membership assert below it could never be the thing that reds —
+    #     two of them lived here until review round 5, dead, with messages that could
+    #     never print. Do not reintroduce a second route assert: extend that guard.
     embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
-    assert embedder_warmup in declared, (
-        "TORTOISE_EMBEDDER_WARMUP is no longer declared at all, so the emergency "
-        "switch lost its provenance line — restore `TORTOISE_EMBEDDER_WARMUP "
-        "fly-toml-env`, with `TORTOISE_EMBEDDER_WARMUP = \"0\"` in fly.toml [env]. "
-        "The manifest declares: " + ", ".join(sorted(declared))
-    )
-    assert declared[embedder_warmup] == "fly-toml-env", (
-        "TORTOISE_EMBEDDER_WARMUP must stay declared `fly-toml-env` (#13926, route "
-        "(b)): it is non-secret config whose home is `fly.toml [env]`, so "
-        "`fly-only:` would claim a permanent out-of-band secret with a recorded "
-        "ruling that does not exist, and `unmanaged` is the #4126 defect. "
-        f"Found: {declared[embedder_warmup]!r}"
-    )
     assert embedder_warmup in env_keys, (
         "TORTOISE_EMBEDDER_WARMUP is declared `fly-toml-env` but is not an "
         "assigned key in fly.toml [env] — the versioned source the declaration "
@@ -3456,7 +3460,9 @@ def _reviewer_entry_point() -> str:
     # takes the FIRST one — which slices a note instead of the entry point and
     # then reports that the entry point names no `fly-only:` member at all. Two
     # such notes lived in this manifest (the `DECLARED GAP` paragraph and the
-    # `#13674` entry block, both deleted when #13926 took that name to route (b)),
+    # `#13674` entry block, both deleted BY #13941's dedupe — #13926 had already taken
+    # the name to route (b), and that block landed on top of it 7 minutes later, which
+    # is what produced the duplicate),
     # so the artifact carries no live example — the anchor stays because the next
     # note written above this block re-creates the trap. Measured while fixing
     # #13814's review: adding one note that named the paragraph cost a full
@@ -3543,7 +3549,9 @@ def _declared_gap_paragraph() -> str:
     # GAP` paragraph above …`) would let a containment match anchor the reader
     # inside that note the moment the real paragraph is deleted — which is exactly
     # the stale-removal case this reader exists to report, so a containment match
-    # would make it pass. Both that block and the paragraph are gone now (#13926),
+    # would make it pass. Both that block and the paragraph are gone now — deleted by
+    # #13941's dedupe, NOT by #13926: the block landed 7 minutes AFTER #13926 merged,
+    # which is exactly how the duplicate got in,
     # so the line anchor is what makes this reader report the absence instead.
     #
     # ⛔ THE COUNT IS PART OF THE ANCHOR, not the literal `ONE`. Pinning `⚠️ ONE
