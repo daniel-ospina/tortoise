@@ -121,11 +121,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57090` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
-    # head (it is `scored.append({`), nor on `origin/main`, where the statement is `:57423` (the `#13550` / `#13584`
-    # integration inserted 186 lines above it, and later merges 147 more — 333 in all). ⛔ AND EACH
+    # head (at this head `:57090` is a BLANK line inside `_no_source_advisory`'s docstring, which
+    # opens at `:57089`; `scored.append({` is `:57284`), nor on
+    # `origin/main`, where the statement is `:57617` (the `#13550` / `#13584`
+    # integration inserted 186 lines above it, later merges 147 more — 333 in all at the PRE-`#13833`
+    # tip (`:57423`) — and `main`'s `#13833` a further 194, so 527 at `origin/main`). ⛔ AND EACH
     # HEAD GETS ITS OWN VALUE, because the arithmetic closes on a CHAIN, not on one figure:
     # `57090 + 186 = 57276` is `f07b73b1de`'s (the statement sits on `:57276` there, so `:57423` is
-    # NOT that head's), and `57276 + 147 = 57423` is `origin/main`'s and this head's. Measured per
+    # NOT that head's), and `57276 + 341 = 57617` is `origin/main`'s and this head's — the third hop
+    # being `main`'s `#13833`, which inserted 194 above it (`57276 + 147 = 57423` is what this
+    # comment carried before that landed, and it is HISTORY at this head, not a locator). Measured per
     # head with `git show <rev>:tortoise/sdk.py | grep -n 'entity_type="event"'` — an earlier cut of
     # this comment named `:57387` for BOTH heads and so contradicted its own 186 (#13750 review).
     # A cite re-derived before a merge is stale after it, which is D5's own rule; the pin is what
@@ -136,18 +141,19 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57423`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
-    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
-    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
+    # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
+    # further 194), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57423` passes `"event"`', _SDK, 57423, 'entity_type="event"'),
+    (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5137`", _MCP, 5137, "entity_type=entity_type"),
-    (_AUDIT, "`:5577`", _MCP, 5577, "entity_type=entity_type"),
-    (_AUDIT, "`:8129`", _MCP, 8129, "entity_type=entity_type"),
+    (_AUDIT, "`:5607`", _MCP, 5607, "entity_type=entity_type"),
+    (_AUDIT, "`:8159`", _MCP, 8159, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -198,9 +204,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'sdk.py:21867', _SDK, 21867, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:21909', 'tortoise/sdk.py', 21909, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:22032`', 'tortoise/sdk.py', 22032, 's.summary, s.topics, s.'),
-    (_AUDIT, 'hosted_api.py:23028', 'tortoise/hosted_api.py', 23028, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:22840`', 'tortoise/hosted_api.py', 22840, 'def _execute_commit_writes'),
-    (_AUDIT, '`:33791`', 'tortoise/hosted_api.py', 33791, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:23046', 'tortoise/hosted_api.py', 23046, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:22858`', 'tortoise/hosted_api.py', 22858, 'def _execute_commit_writes'),
+    (_AUDIT, '`:33809`', 'tortoise/hosted_api.py', 33809, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -248,8 +254,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:21909", _SDK, 21909, "s.summary=CASE WHEN $sum"),
     (":22032", _SDK, 22032, "s.summary, s.topics, s."),
-    ("hosted_api.py:23028", "tortoise/hosted_api.py", 23028, "MERGE (s:Source {url:$did})"),
-    (":22840", "tortoise/hosted_api.py", 22840, "def _execute_commit_writes"),
+    ("hosted_api.py:23046", "tortoise/hosted_api.py", 23046, "MERGE (s:Source {url:$did})"),
+    (":22858", "tortoise/hosted_api.py", 22858, "def _execute_commit_writes"),
 )
 
 
@@ -293,13 +299,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37503` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37503`)'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37480` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57423` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57617` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5137`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5577`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8129`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5607`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8159`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -338,9 +344,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21867'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:21909'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22032`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23028'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22840`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33791`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5366` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7117` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -883,7 +889,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
     # 58 -> 59 in the same lane: the FTS row's `entity_type="event"` cite, re-derived BEFORE the
     # `origin/main` integration and therefore 186 lines stale at the merge head (`:57090` -> `:57276`),
-    # and 333 by this head (`:57423`).
+    # and 333 by the PRE-`#13833` tip (`:57423`), 527 by this one (`:57617`).
     # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
     # names (`:37144` / `:37186`) had NO pin at all — both shipped one line high (on the `:Source`
     # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
@@ -1212,7 +1218,7 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 
     `:12111`/`:12164` is `#13456`'s pre-`#13466` value, so the cell quoted two heads as
     one. ⛔ **Why no existing row saw it**: the capstone pin's `_pin_row_failures` scopes a
-    row to ONE markdown LINE, and D5 is one line carrying ~50 numbers — so any `:12111`
+    row to ONE markdown LINE, and D5 is one line carrying 262 numbers — so any `:12111`
     anywhere on it satisfied every `sdk`-keyed row, and the addendum's own contradictory
     spelling was read by nothing. This arm is scoped to the addendum's SENTENCE, which is
     the narrowest thing that can disagree with it.

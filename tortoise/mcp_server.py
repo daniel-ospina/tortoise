@@ -3663,7 +3663,7 @@ def _carry_allowances(limits: dict | None, resource: str) -> dict | None:
     return carry_resolved_allowances(limits)
 
 
-def _enforce_quota(resource: str = "points") -> None:
+def _enforce_quota(resource: str = "points", *, truth_carried: bool = False) -> None:
     """#329: fail-closed org quota pre-write for MCP write tools.
 
     HTTP mode: limits come from the middleware-resolved ContextVar (same
@@ -3674,9 +3674,25 @@ def _enforce_quota(resource: str = "points") -> None:
     resolved by ``quota.resolve_org_limits`` — this lane's ContextVar carries
     none in Supabase mode, and an uncarried allowance is UNLIMITED to the gate
     (see ``_carry_allowances`` and ``tortoise/allowance_gate.py``).
+
+    ``truth_carried`` (#13829) is the DOOR's declaration that the tool it guards
+    reaches the record before it touches the derived cache — see
+    ``allowance_gate.enforce_allowances``. It defaults to ``False`` because the
+    default is the protection: only a door whose cache write consumes
+    ``allowance_gate.cache_fold_denial()`` may set it, or the over-cap cache
+    would simply keep growing on a path that never asks.
     """
     from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id, _current_org_limits
     from tortoise.quota import enforce_org_limit, resolve_org_limits
+    # ⛔ FRESH PER DOOR CALL: a verdict published for the PREVIOUS write in this
+    # context must not be consumable by this one. Cleared before the early
+    # returns too, so a no-org (stdio) call cannot leave a stale verdict behind.
+    try:
+        from tortoise.allowance_gate import clear_cache_fold_denial
+    except Exception:  # noqa: BLE001, RUF100 — a gate that will not import cannot publish
+        clear_cache_fold_denial = None
+    if clear_cache_fold_denial is not None:
+        clear_cache_fold_denial()
     org_id = _current_org_id.get()
     if not org_id:
         return  # stdio/operator — no org context
@@ -3692,7 +3708,8 @@ def _enforce_quota(resource: str = "points") -> None:
               else _carry_allowances(limits, resource))
     # Count on the SAME org SDK the tool writes to (identical connection),
     # so the count and the write can never target different databases.
-    enforce_org_limit(limits, resource, sdk=_get_org_sdk())
+    enforce_org_limit(limits, resource, sdk=_get_org_sdk(),
+                      truth_carried=truth_carried)
 
 
 def _alert_unmetered(lane: str, org_id: str | None,
@@ -3722,7 +3739,8 @@ def _alert_unmetered(lane: str, org_id: str | None,
     report_unmetered_increment(lane=lane, org_id=org_id, error=error)
 
 
-def _quota_gated(fn, resource: str = "points", abuse_weight=None):
+def _quota_gated(fn, resource: str = "points", abuse_weight=None,
+                 truth_carried: bool = False):
     """Wrap a bound SDK method with a pre-write quota check + metering.
 
     Preserves the bound-callable style (_safe(_get_org_sdk().name, ...)):
@@ -3742,9 +3760,17 @@ def _quota_gated(fn, resource: str = "points", abuse_weight=None):
     fixed weight, or callable(result, args, kwargs) -> int for bulk ops
     (ingest/checkpoint/file_decision). Tools that do not create Points pass
     None and record nothing (an edit/update burst must never trip R1).
+
+    ``truth_carried`` (#13829) is passed through to ``_enforce_quota`` and is
+    OPT-IN PER DOOR: it asserts that ``fn``'s write reaches the record (journal
+    append + record projection) before it touches the derived cache, and that
+    the cache write it guards consumes ``allowance_gate.cache_fold_denial()``.
+    Set it only where both halves are true and tested — an unproven door keeps
+    the door-level refusal on the derived-cache dimension, which is the correct
+    behaviour where the cache may be the write's only durable copy.
     """
     def _gated(*args, **kwargs):
-        _enforce_quota(resource)
+        _enforce_quota(resource, truth_carried=truth_carried)
         try:
             from tortoise.mcp_auth import _current_org_id
             org_id = _current_org_id.get()
@@ -4330,7 +4356,27 @@ def tortoise_create_point(kind: str, content: str,
     # the signature so no existing positional argument rebinds.
     if goalState is not None:
         merged["goalState"] = goalState
-    result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
+    # ⛔ #13829 — THE ONE DOOR OPTED IN SO FAR, and the proof it rests on. The
+    # derived cache's cap (`graph_storage`) must not refuse the RECORD's write;
+    # it moves to the cache FOLD instead. That is only sound here because BOTH
+    # halves hold, measured in this tree:
+    #   1. TRUTH FIRST — `TortoiseSDK.create_point` calls `_emit_event`
+    #      (`journal append + record projection`) BEFORE its `CREATE (:Point)`
+    #      block, so the record holds the write before the cache is touched, and
+    #      `PointAdded` is one of the 11 journal-carried types `rebuild_all`
+    #      replays. A `_record_committed is False` raise lands before any graph
+    #      write at all.
+    #   2. THE CACHE WRITE ASKS — that same block is guarded by
+    #      `allowance_gate.cache_fold_denial()`: an over-cap reading makes it SKIP
+    #      the fold and record the named decline, so the cache does not simply
+    #      keep growing on a door that never consumes the verdict.
+    # Every other `_quota_gated` site keeps `truth_carried=False` — including
+    # every path that has not been shown to reach the record — because there the
+    # derived store may be the write's only durable copy and refusing is correct.
+    # The enumeration is in the PR for #13829; a door is opted in with its own
+    # proof, never by inheriting this one.
+    result = _safe(_quota_gated(_get_org_sdk().create_point, "points",
+                                abuse_weight=1, truth_carried=True), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
     # prop named "error" must not suppress the onboarding observation.
     if not isinstance(result, _SafeError):

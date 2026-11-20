@@ -49,7 +49,7 @@ re-derived twice for this class.
 were dropped. It is corrected here rather than carried, because it claimed the PR re-cut the
 **MCP/SDK surface** (`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`), which this
 branch does not do: no surface tool was added, removed or renamed.
-**Nothing under `tortoise/` changes behaviour and nothing instruments the extractor** — this
+**The `tortoise/` set is whatever `git diff --name-only origin/main...HEAD -- tortoise/` answers at the head you merge, and nothing instruments the extractor** — this
 bundle installs no wrapper, spy or step-composition anywhere in the measured path, so the E4
 row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extractor_v2.py`
 lines this bundle cites are read, not changed.
