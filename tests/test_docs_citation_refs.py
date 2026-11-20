@@ -3866,16 +3866,21 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             # (#13995 review round 12, P2 — MEASURED). `[\-+]` reads as the DESCENDING RANGE
             # `\`–`+` — `grep -cE '^[\-+]$'` → `grep: Invalid range end`, rc 2, in BRE and ERE —
             # so consuming `\-` as an escaped member (which this helper did) graded a command that
-            # cannot run as a BLANK-class prescription. The rule, stated exactly (#14026 review, P2
-            # — MEASURED, because this comment used to merge three different spellings into one
-            # sentence): an escaped `-` BETWEEN two members is the range case and is refused
-            # wherever it sits — `[\-+]` and `[+\-+]` both answer `None` for that reason, and
-            # `grep -cE` refuses both with `Invalid range end`, rc 2. An escaped hyphen ANYWHERE
-            # ELSE is consumed as a member, which keeps `[+\-]` and `[-\+]` accepted; both also
-            # match a lone `\`, so they count `3` on a probe carrying one where this class counts
-            # `2` — the DECLARED SUPERSET documented in the docstring above. The UNESCAPED `[-+]`
-            # is the plain class with no `\` member at all (counts `2` on that probe), and it is
-            # kept as the class itself — not as a superset.
+            # cannot run as a BLANK-class prescription. The rule, exactly as the two branches below
+            # implement it (#14026 review, P2 — MEASURED: this comment used to merge three
+            # different spellings into one sentence, and then two of them into a second one):
+            #   * an escaped `-` with ANY character after it is refused, because that `-` is a
+            #     RANGE — `grep -cE` refuses `^[\-+]$` and `^[+\-+]$` with `Invalid range end`,
+            #     rc 2, and both answer `None` here;
+            #   * an escaped `-` in the LAST position is consumed as the member `-`, which is
+            #     what keeps `[+\-]` accepted — it also matches a lone `\`, so it counts `3` on
+            #     a probe carrying one where this class counts `2`;
+            #   * a backslash before any OTHER character is consumed as that character, which is
+            #     what keeps `[-\+]` accepted; there the ESCAPED character is `+` and the leading
+            #     hyphen is unescaped, so it reaches the same backslash-bearing superset (`3`);
+            #   * the UNESCAPED `[-+]` is the plain class, no `\` member at all (counts `2` on
+            #     that probe), and it is kept as the class itself — not as a superset.
+            # What the superset costs is stated in the docstring above: one impossible diff line.
             if index + 2 < len(content) and content[index + 1] == "-":
                 return None  # a `-` between members is a RANGE, escaped or not
             escaped = True
@@ -3902,11 +3907,12 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
     `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
     are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
-    SUPERSET
-    documented in the NEXT paragraph. They agree at `2` only on the 4-line probe, which carries no
-    `\`. So the retired list REFUSING `^[+\-]$` was the correct answer rather than a defect, and
-    the sentence used a true statement about one spelling to carry a false one about the other —
-    contradicting this docstring's own next paragraph, in the paragraph that justifies the
+    SUPERSET documented in the NEXT paragraph. They agree at `2` only on the 4-line probe, which
+    carries no `\`. So the retired list REFUSING `^[+\-]$` was reading it as what it is — NOT
+    this class — rather than mis-reading it; that `main` now accepts the spelling as a DECLARED
+    SUPERSET is a deliberate widening (stated below), not a claim that it IS the class. The
+    sentence therefore used a true statement about one spelling to carry a false one about the
+    other — contradicting this docstring's own next paragraph, in the paragraph that justifies the
     widening.
 
     Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
