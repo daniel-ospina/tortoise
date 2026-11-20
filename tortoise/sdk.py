@@ -23848,7 +23848,7 @@ class TortoiseSDK:
                     "record until a replay folds it.",
                     id, getattr(_cache_fold_denial, "detail", _cache_fold_denial))
                 return _with_end_receipt(
-                    {**self.get_point(id), **emit_props}, _end_receipt)
+                    {**self._get_point(id), **emit_props}, _end_receipt)
 
         # #7405: the property writes below ride the bounded write retry —
         # `update_point` is the SDK's most common mutation door

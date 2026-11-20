@@ -130,7 +130,20 @@ SWEEP_NAMES = 66
 #: `._tortoise_fts_query(`: that receiver is a SUBSCRIPT, so the sweep could not type it and had
 #: REPORTED it as residue — the re-key removes that one row. Measured with `--repin` on this tree,
 #: not arithmetic.
-SWEEP_RESIDUE = (11757, "7a53ce4f33a41246")
+#: RE-PINNED AGAIN → (11758, 3b0765cfdbe87b0d) by the RE-CUT that merged `origin/main`
+#: `290912f303` INTO `feat/12901-sdk-final-c` (#13899). The residue SET moved by rows that are
+#: the sweep's own documented edge rather than a defect: `declared_markers.update` — a plain
+#: `set` `.update(…)` in `graph-scripts/business_map_13880/file_map.py:752`, a file `main` gained
+#: with `#13880` (`update` is one of the 47 ordinary words other objects answer to, so a
+#: name-scoped rewrite would have been sabotage). Diffed row-by-row between the pre-cut head and
+#: the merged tree; every key that moved is an ordinary-word receiver on a plain dict/set.
+#: RE-PINNED AGAIN → (11760, 7eac1e084fe07dfc) by the same re-cut taking the two commits `main`
+#: landed WHILE it ran (`bd020ff45b`, `#13886` + `#13853`): +2 rows, `state.update` 9→10
+#: (a plain dict, `tests/test_13036_capstone_v2.py:637`) and `tc.headers.update` 27→28 (a
+#: `requests`/`httpx` header map, same file:591), plus 17 typed references in that one new file
+#: that `--apply` rewrote. Again row-diffed against the pre-cut head, not arithmetic.
+#: Measured with `--repin`, not arithmetic.
+SWEEP_RESIDUE = (11760, "7eac1e084fe07dfc")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

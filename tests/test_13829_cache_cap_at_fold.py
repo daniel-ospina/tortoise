@@ -331,7 +331,7 @@ def test_create_point_asks_the_fold_before_it_touches_the_cache():
     """
     from tortoise.sdk import TortoiseSDK
 
-    source = inspect.getsource(TortoiseSDK.create_point)
+    source = inspect.getsource(TortoiseSDK._create_point)
     assert "cache_fold_denial" in source, (
         "create_point no longer consumes the derived-cache verdict — the door "
         "opted into truth_carried=True in mcp_server and would then never skip "
@@ -359,7 +359,7 @@ def test_the_record_append_precedes_the_cache_write():
     """
     from tortoise.sdk import TortoiseSDK
 
-    source = inspect.getsource(TortoiseSDK.create_point)
+    source = inspect.getsource(TortoiseSDK._create_point)
     assert source.index("_emit_event") < source.index(
         '_live_write_scope("create_point")')
 
@@ -423,7 +423,7 @@ def test_the_door_serves_the_write_the_record_holds(journal_sdk):
     enforce_allowances(armed, resource="points", meters=OVER_CAP,
                        truth_carried=True)
 
-    reply = sdk.create_point("statement", "the cache declined this write (#13829)")
+    reply = sdk._create_point("statement", "the cache declined this write (#13829)")
 
     # SERVED, not failed: the RECORD holds the write, so the door returns it.
     assert reply["id"]
@@ -436,7 +436,7 @@ def test_the_door_serves_the_write_the_record_holds(journal_sdk):
         f"write nothing durable holds ({added!r})")
     # … and the CACHE really declined it — otherwise the assertions above would be
     # satisfied by a fold that ran and a denial nobody consumed.
-    assert sdk.get_point(reply["id"]) == {}
+    assert sdk._get_point(reply["id"]) == {}
 
 
 def test_a_journal_less_door_keeps_the_refusal(tmp_path):
@@ -464,7 +464,7 @@ def test_a_journal_less_door_keeps_the_refusal(tmp_path):
                            truth_carried=True)
 
         with pytest.raises(QuotaExceededError):
-            sdk.create_point("statement", "nothing durable can hold this (#13829)")
+            sdk._create_point("statement", "nothing durable can hold this (#13829)")
 
         # The refusal CONSUMED the verdict — it is not left to deny a later fold.
         assert cache_fold_denial() is None
@@ -544,19 +544,19 @@ def test_the_default_dedup_arm_honours_the_same_verdict(journal_sdk):
     """
     sdk, events = journal_sdk
     content = "the dedup arm writes the cache (#13829)"
-    first = sdk.create_point("statement", content, custom_field="before")
-    assert sdk.get_point(first["id"])["custom_field"] == "before"
+    first = sdk._create_point("statement", content, custom_field="before")
+    assert sdk._get_point(first["id"])["custom_field"] == "before"
 
     enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
                        meters=OVER_CAP, truth_carried=True)
 
-    reply = sdk.create_point("statement", content, dedup=True,
+    reply = sdk._create_point("statement", content, dedup=True,
                              custom_field="after")
 
     # It IS the dedup hit, not a second point.
     assert reply["id"] == first["id"]
     # THE CACHE DECLINED the revision …
-    assert sdk.get_point(first["id"])["custom_field"] == "before", (
+    assert sdk._get_point(first["id"])["custom_field"] == "before", (
         "the over-cap derived cache took the dedup arm's write: the cap is "
         "skipped on the default MCP shape (#13829)")
     # … and the verdict did not outlive the write it describes.
@@ -591,13 +591,13 @@ def test_the_temporal_refusal_arm_spends_the_verdict_it_never_folds(journal_sdk)
     """
     sdk, _events = journal_sdk
     content = "a terminal claim the fold must not re-stamp (#13829)"
-    first = sdk.create_point("statement", content)
-    sdk.retract_point(first["id"])          # terminal: the #7819 fold is refused
+    first = sdk._create_point("statement", content)
+    sdk._retract_point(first["id"])          # terminal: the #7819 fold is refused
 
     enforce_allowances(_limits(max_graph_storage_mb=77), resource="points",
                        meters=OVER_CAP, truth_carried=True)
 
-    reply = sdk.create_point("statement", content, dedup=True,
+    reply = sdk._create_point("statement", content, dedup=True,
                              validFrom="2020-01-01T00:00:00Z")
 
     # The refusal is the PRE-EXISTING behaviour, unchanged: nothing applied, and
