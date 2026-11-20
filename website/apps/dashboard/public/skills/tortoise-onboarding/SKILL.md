@@ -970,7 +970,7 @@ connection):
    attempt with zero undocumented calls (0 CalibrationError).
 3. **Confirm with the user before wiring:** list the criteria (for value)
    and the options (for completeness).
-4. **Wire criteria → options** with `tortoise_create_operator`:
+4. **Wire criteria → options** with `tortoise_link_entities` (`target_ids=[…]` selects the operator writer):
    - `criterion -[IMPL]-> option` — the criterion argues FOR the option,
    - `criterion -[NAND]-> option` — the criterion argues AGAINST the option.
    A ranking needs ≥1 IMPL edge before `tortoise_check_confidence(recompute=True)` can

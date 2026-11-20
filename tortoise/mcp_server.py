@@ -7717,13 +7717,15 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped (the SDK's
     own rule; a dropped keyword returns success for a write that stored a subset).
 
-    TWO SPELLINGS OF THE TARGET: `to_id` (one target; the surface shape) and
-    `target_ids` (the retired operator door's own argument). They are the same
-    call. **A LIST of two or more targets is the PART/WHOLE fan-out** — ONE
-    operator over N targets, the shape `tortoise_create_operator` had and a
-    per-target loop would NOT reproduce — so it is dispatched to the same
-    `_create_operator` writer the door used, and `semantics` (the Layer-2 meaning
-    that resolves the direction) is accepted on that arm alone.
+    TWO SPELLINGS OF THE TARGET, and they select DIFFERENT writers on purpose:
+    `to_id` follows the RELATION (the surface's own contract), while
+    `target_ids` — the retired operator door's own argument — selects the
+    OPERATOR arm at any target count, INCLUDING one. The list form is the
+    part/whole fan-out: ONE operator over N targets, the shape
+    `tortoise_create_operator` had and a per-target loop would NOT reproduce.
+    Both operator spellings dispatch to the same `_create_operator` writer the
+    door used, and `semantics` (the Layer-2 meaning that resolves the direction)
+    is accepted on that arm alone. `operator=true` selects the same arm.
 
     `direction` is EP-propagation direction (`bidirectional` default,
     `unidirectional` for a directed attack). `operator` is the ONE explicit
@@ -7747,13 +7749,22 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
                            "code": ERR_INVALID})
     sdk = _get_org_sdk()
 
-    # ── The PART/WHOLE fan-out: one operator over N targets ────────────────
-    if len(targets) > 1:
+    # ── The OPERATOR arm: one operator over 1..N targets ───────────────────
+    # ⛔ THE PLURAL SPELLING (`target_ids`) OR AN EXPLICIT `operator=true` SELECTS THIS
+    # WRITER, whatever the target count — that is what preserves the retired
+    # `tortoise_create_operator` door's semantics. Measured failure this rule prevents
+    # (capstone V2, #11609 lane P7): `tortoise_link_entities("NAND", a, [b])` with ONE
+    # target fell through to the singular arm, where IMPL/NAND without `operator=True` is
+    # the operator-LESS direct edge — so a caller migrating from the operator door got a
+    # plain edge, a different write with the same arguments and no error (the #8447 shape).
+    # `to_id` alone still follows the relation, which is `link_entities`'s own contract.
+    operator_arm = op_flag is True or target_ids is not None or len(targets) > 1
+    if operator_arm:
         if op_flag is False:
             return _SafeError({"error": (
-                "link_entities: a multi-target call always writes a carrying "
-                "operator (one operator over N targets) — `operator=false` has no "
-                "meaning there. Pass a single target for a plain direct edge."),
+                "link_entities: the operator arm (`target_ids=` or `operator=true`) "
+                "always writes a carrying operator — `operator=false` has no meaning "
+                "there. Use `to_id=` with no `operator` for a relation-decided write."),
                 "code": ERR_INVALID})
         stray = [name for name, value in (
             ("confidence", confidence), ("weight", weight),
@@ -7761,9 +7772,9 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
             ("source_kind", source_kind)) if value is not None]
         if stray:
             return _SafeError({"error": (
-                f"link_entities: the multi-target part/whole arm writes through "
-                f"create_operator, which records no {', '.join(stray)} — refusing "
-                "rather than returning success for a write that dropped them"),
+                f"link_entities: the operator arm writes through create_operator, "
+                f"which records no {', '.join(stray)} — refusing rather than "
+                "returning success for a write that dropped them"),
                 "code": ERR_INVALID})
         from tortoise.quota import MAX_OPERATOR_TARGETS
         if len(targets) > MAX_OPERATOR_TARGETS:
@@ -7779,10 +7790,11 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     # ── The single-target arm: the SDK's own dispatch ──────────────────────
     if semantics is not None:
         return _SafeError({"error": (
-            "link_entities: `semantics` is the multi-target operator arm's meaning "
-            "argument. On a single target the RELATION itself is the meaning "
-            "(e.g. relation='supports'), so it has no slot here — name the meaning "
-            "as the relation instead of dropping it."), "code": ERR_INVALID})
+            "link_entities: `semantics` is the OPERATOR arm's meaning argument (pass "
+            "`target_ids=` or `operator=true`). On the relation-decided arm the "
+            "RELATION itself is the meaning (e.g. relation='supports'), so it has no "
+            "slot here — name the meaning as the relation instead of dropping it."),
+            "code": ERR_INVALID})
     return _safe(sdk.link_entities, relation, from_id, targets[0],
                  operator=op_flag, direction=direction, confidence=confidence,
                  weight=weight, label=label, batch_id=batch_id,

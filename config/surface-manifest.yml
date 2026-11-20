@@ -985,7 +985,7 @@ response_fields:
     and its embedded fallback both set the key (#4889)
   unchanged_when_off: yes — not flag-gated; the key is ABSENT whenever a subject resolved or the graph can carry
     one, so those responses stay byte-identical and simply omit this key; no other key is affected either way
-- response: tortoise_events_poll
+- response: tortoise_poll_events
   field: changes
   emitted_when: TORTOISE_CHANGE_FEED is truthy (1/true/yes/on; unset or 0 means off) — the SAME `:GraphEvent` page
     the response's `events` key carries, folded into per-claim semantic deltas with before/after (tortoise/change_feed.py
@@ -1012,9 +1012,9 @@ response_fields:
   field: changes
   emitted_when: the same field on the SDK/assembly half — `TortoiseSDK.poll_events` is the ONE assembly site (tortoise/sdk.py)
     that the MCP tool above and the hosted events endpoint both relay, so the switch and the shape are identical
-    on all three surfaces. See the `tortoise_events_poll` row above for the full contract
+    on all three surfaces. See the `tortoise_poll_events` row above for the full contract
   unchanged_when_off: the `changes` key is ABSENT and the reply's SHAPE is unchanged — `events` and `next_cursor`
-    only, NOT byte-identical (the hard-delete `deleted` marker, see below). The same two qualifications as the `tortoise_events_poll`
+    only, NOT byte-identical (the hard-delete `deleted` marker, see below). The same two qualifications as the `tortoise_poll_events`
     row above apply, for the same reason — the WRITE side (the `PointRevised` store half, and the hard-delete `deleted`
     marker) is not scoped to the reader
 - response: tortoise_create_point

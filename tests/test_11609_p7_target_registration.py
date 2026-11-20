@@ -150,11 +150,35 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
         }, kwargs
 
     def test_the_operator_door_s_spelling_of_the_target_is_accepted(self, served):
-        """`target_ids` — the retired door's own argument name — is the same call."""
-        _sdk, calls = served("link_entities", {"edge": 1})
-        ms.tortoise_link_entities("supports", "a", target_ids="b")
+        """`target_ids` — the retired door's own argument name — is accepted, and it
+        selects the OPERATOR arm (see the dedicated row below): the spelling carries the
+        door's semantics, so neither a JSON-string list nor a bare id is a TypeError."""
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("supports", "a", target_ids='["b"]')
         assert len(calls) == 1, calls
-        assert calls[0][0] == ("supports", "a", "b"), calls[0]
+        assert calls[0][0] == ("supports", "a", ["b"]), calls[0]
+
+    def test_the_plural_spelling_selects_the_operator_arm_even_for_ONE_target(self, served):
+        """`target_ids=[x]` is the retired operator door's call — an OPERATOR, not a
+        plain direct edge.
+
+        ⛔ MEASURED FAILURE this pins (capstone V2, P7): with only the multi-target
+        count selecting the operator arm, `link_entities("NAND", a, [b])` fell through to
+        the relation-decided arm, where IMPL/NAND without `operator=True` writes the
+        operator-LESS direct edge — a DIFFERENT write for the same arguments, with no
+        error (the #8447 shape). The spelling selects the writer.
+        """
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("NAND", "a", target_ids=["b"])
+        assert len(calls) == 1, calls
+        args, kwargs = calls[0]
+        assert args == ("NAND", "a", ["b"]), args
+        assert kwargs["semantics"] is None, kwargs
+
+    def test_an_explicit_operator_true_selects_the_same_arm(self, served):
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("supports", "a", "b", operator=True)
+        assert len(calls) == 1 and calls[0][0] == ("supports", "a", ["b"]), calls
 
     def test_a_multi_target_call_is_ONE_operator_over_N_targets(self, served):
         """The part/whole fan-out `tortoise_create_operator` had, preserved exactly.
