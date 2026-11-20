@@ -8865,24 +8865,10 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {v: k for k, v in [("embedding", _encode(ev))]}
-        return None
-    _write(props)
-""",
         # ⛔ …and a comprehension KEYED BY A NAME THE CLAUSE DOES NOT BIND: it keys the mapping
         # by that name and places nothing (`{"other": vec}`), so refusing it was an
         # over-refusal — the same reason the arm that did so was removed. The ALIASED twin is
         # the one that stores, and it has its own refused row.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {other: v for k, v in [("embedding", _encode(ev))]}
-        return None
-    _write(props)
-""",
         # ⛔ …and a MENTION: a comprehension handed to an UNKNOWN callee writes nothing
         # (`_audit` reports, it does not store). Recognising it in the REBUILD walk refused
         # this honest writer (measured), which is why the rebuild recognition is keyed to the
@@ -8900,13 +8886,6 @@ def _upsert_object(props, ev):
         # refused both of these honest writers (measured with a runtime oracle: the merge
         # places no top-level key), so only the generators are scanned and these rows keep the
         # branch from widening back over them.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {x: [("embedding", _encode(ev))] for x in _keys()}
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9075,13 +9054,6 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev, **kwargs):
     if not _derived_mirror_required("object"):
-        props.update(**kwargs)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev, **kwargs):
-    if not _derived_mirror_required("object"):
         _set(props, **kwargs)
         return None
     _write(props)
@@ -9135,13 +9107,6 @@ def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.__setitem__(embedding=None)
         props.pop("embedding", None)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props.__setitem__(*_pair(ev))
         return None
     _write(props)
 """,
@@ -9220,42 +9185,15 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= dict.fromkeys(_keys(ev), _encode(ev))
-        return None
-    _write(props)
-""",
-        # ⛔ THE VALUE-SIDE `Starred` BOUNDARY, BOTH DIRECTIONS PINNED (`#13788`, measured at
-        # `bcb710a5`). A `Starred` in the unpack VALUE spreads an UNKNOWN number of elements, so
-        # the walk does not flatten it — and an unnamed boundary is the exact defect the reviews
-        # of `4748044f7d` kept finding. Two rows:
-        #  - an HONEST control: `x` is paired with the star itself, binds nothing, and in this
-        #    fixture `rest = ("a", "b")` leaves `x = "a"` — nothing is stored, so the writer
-        #    must CERTIFY (if this row ever refuses, the arm has started inventing positions);
-        #  - a MEASURED, DISCLOSED FALSE PASS: `x, *r = *rest, 1` with `rest = ("embedding",)`
-        #    binds `x = "embedding"` and PLACES the vector (runtime-checked), and the row still
-        #    CERTIFIES. It is pinned as a residual, exactly like the folding-key and `zip`
-        #    residuals beside it, so a future fix reds here and must argue the boundary first.
-        """
-def _upsert_object(props, ev):
-    rest = ("a", "b")
-    x, y, *r = *rest, 1
-    if not _derived_mirror_required("object"):
-        props[x] = _encode(ev)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    rest = ("embedding",)
-    x, *_r = *rest, 1
-    if not _derived_mirror_required("object"):
-        props[x] = _encode(ev)
-        return None
-    _write(props)
-""",
+        # ⛔ THE VALUE-SIDE `Starred` BOUNDARY (`#13788`, measured at `bcb710a5`). A `Starred`
+        # in the unpack VALUE spreads an UNKNOWN number of elements, so the walk does not
+        # flatten it. ⛔ BOTH OF ITS ROWS MOVED TO `over_refused` UNDER `#14001`, and one of
+        # them was this file's last measured FALSE PASS:
+        #   `x, *r = *rest, 1` with `rest = ("embedding",)` binds `x = "embedding"` and PLACES
+        #   the vector (runtime-checked) — and it CERTIFIED here, pinned as a residual.
+        # The inverted polarity refuses an unbound name in a key position, so the false PASS is
+        # closed and its honest twin (`rest = ("a", "b")`, `x = "a"`) is refused too, as the
+        # permitted over-refusal. Resolving either needs the value's own binding model.
         # ⛔ THE `zip` RESIDUAL THAT STAYS RESIDUAL (`#13788`): a zip whose COLUMNS ARE NAMES is
         # data flow this module does not do, and the two narrowings of the literal form must
         # each keep an honest writer certified — a keys literal naming ANOTHER property, a
@@ -9263,13 +9201,6 @@ def _upsert_object(props, ev):
         # `dict(zip(("embedding",), ()))` is `{}`), and a CONSTANT value (the pre-guard reset
         # `embedding = None`, which places nothing). Without these the new arm costs an honest
         # writer its gate.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= dict(zip(_keys(ev), (_encode(ev),)))
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9360,20 +9291,6 @@ def _upsert_object(props, ev):
         # strengthened recursion must not swallow a MENTION or an identity-triple rebuild —
         # `_write({**props, **extra})` merges an unknown and names no key, and
         # `_write({**props, "embedding_model": …})` merges only the identity triple.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, **extra})
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, "embedding_model": _m()})
-        return None
-    _write(props)
-""",
         # ⛔ THE HONEST-STOP CONTROLS FOR THE `**` VALUE WALK (`#13788` F5): a READ whose
         # default is a literal must still CERTIFY, and the identity triple must stay certified
         # behind the same wrapper — otherwise the walk costs an honest writer its gate.
@@ -9506,13 +9423,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props.update(_merged[0])
-        return None
-    _write(props)
-""",
         # ⛔ AND THE CONTROLS FOR THE UNION ARM: the wrapper recognition must not swallow a
         # union that places nothing — the identity triple behind `.copy()` in the same
         # position still CERTIFIES, and so does a union of two empty displays.
@@ -9548,16 +9458,11 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # …the key is bound to the property but the SOURCE is a name — the disclosed residual.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in _keys()}
-        return None
-    _write(props)
-""",
         # …and the pair is consumed WHOLE, so the mapping is keyed by the pair and no
         # top-level `embedding` key is placed.
+        # ⛔ THE "KEY BOUND TO THE PROPERTY, SOURCE IS A NAME" control that used to sit here is
+        # GONE — `#14001` refuses it and its row is pinned in `over_refused` below (verified by
+        # the round-2 review: the comment had been left orphaned above an unrelated row).
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9587,6 +9492,24 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in ChainMap({"embedding_model": 1})}
+        return None
+    _write(props)
+""",
+        # ⛔ A `{**<name>}` MERGE HANDED TO THE WRITE CHANNEL stays an honest control: the
+        # mapping is BUILT in the arm, and the arm's own docstring (residual 4) records that
+        # this channel is NOT proved — a withdrawn positional rule refuses these and leaks
+        # everywhere it does not look.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
         return None
     _write(props)
 """,
@@ -9672,13 +9595,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
-        return None
-    _write(props)
-""",
         # ⛔ THE NEW OPERAND FORMS MUST NOT SWALLOW A NON-STORE EITHER (`#13788` review round 8):
         # a MIXED constructor and a `|` UNION whose only property-looking key is absent are
         # honest write-stops, so the collection loop and the union arm are pinned against the
@@ -9693,28 +9609,7 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in dict(d).items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k, _v in {kk: 1 for kk in ["embedding_model"]}.items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in dict([d]).items()}
         return None
     _write(props)
 """,
@@ -9727,13 +9622,6 @@ def _upsert_object(props, ev):
         #    a record that overstates its own coverage is how the next lane measures the wrong
         #    row. `dict([d]).items()` earns its place as an honest-write-stop control, not as an
         #    arity witness.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in dict([d])}
-        return None
-    _write(props)
-""",
         # ⛔ AND THE TWO `dict([d])` ROWS ARE CERTIFIED BECAUSE `d` IS A NAME, NOT BECAUSE THE
         #    STORE IS HARMLESS (`#13788` review round 10, P2, measured): bound to a real pair or
         #    a mapping, BOTH rows place the vector at runtime. They sit in the tuple whose block
@@ -9773,20 +9661,6 @@ def _upsert_object(props, ev):
         #    `for k in m.values()` reads the view as a KEY source, not as pairs, so a blanket
         #    "a values view is a pairs sequence" rule would refuse an honest writer. Pinned as
         #    an accepted control because that is the cheaper error to police.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in d.values()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in d.items()}
-        return None
-    _write(props)
-""",
         # ⛔ THE OPERAND-SEAM VIEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review rounds
         #    11/12). A values view of SCALAR values is not a pairs view at all, a pairs view
         #    whose key names a different property places nothing, a CONSTANT value places the
@@ -9884,6 +9758,157 @@ def _upsert_object(props, ev):
     # this tuple is that these rows are NOT stores: widening acceptance here needs the doctrine
     # argued first, not a quiet key-reading improvement.
     over_refused = (
+        # ⛔ THESE ROWS ARE REFUSED **BECAUSE OF THE POLARITY INVERSION** (`#14001`).
+        # Every one of them was in `accepted` while the stop arm's key source was a shape
+        # the gate ABSTAINED on — a call (`_keys()`, `_pair(ev)`, `zip(_keys(ev), …)`), a
+        # mapping reached through a NAME, a `**kwargs` splat, or a value-side `Starred` —
+        # and abstention was read as "no store". That reading is the DEFECT: `props |=
+        # {k: vec for k in _keys()}` PLACES the vector the moment `_keys()` answers
+        # `["embedding"]`, and the old gate certified it. Under the inverted polarity an
+        # unprovable key source REFUSES, which costs these honest writers their gate and
+        # is the cheaper error by the doctrine above. They stay PINNED as refusals: making
+        # any of them certify again needs the doctrine argued first, exactly as before.
+        # (SEVERAL of these rows really store once their key source answers `embedding` —
+        # `props |= {k: vec for k in _keys()}` does, and `x, *_r = *rest, 1` with
+        # `rest = ("embedding",)` is statically certain to — so they are fail-OPENs this
+        # polarity closes, not only over-refusals.)
+        #
+        # ⛔ AND ONE OF THEM IS THE CANONICAL ROW OF THE WHOLE ISSUE, kept here because a
+        # review of an earlier cut of this branch found it had been DELETED and not re-pinned
+        # (the pin is what `assert over_refused` exists to protect):
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v: k for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {other: v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {x: [("embedding", _encode(ev))] for x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev, **kwargs):
+    if not _derived_mirror_required("object"):
+        props.update(**kwargs)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*_pair(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(_keys(ev), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    rest = ("a", "b")
+    x, y, *r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    rest = ("embedding",)
+    x, *_r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(_keys(ev), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_merged[0])
+        return None
+    _write(props)
+""",
+        # ⛔ THE SAME CLASS ONE OPERATOR OVER (`#14001`): a `{|}` / `{**}` merge whose OTHER
+        # operand is a NAME (`d`) — the keys are `d`'s, which this walk cannot read, so
+        # `d = {"embedding": vec}` would place the vector.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([d]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([d])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.items()}
+        return None
+    _write(props)
+""",
         # ⛔ THE VALUE-SIDE `Starred` IS THE THIRD PERMITTED OVER-REFUSAL, and it is the price of
         # not following a value's binding (`#13788`, measured at `bcb710a5`). `*rest` spreads an
         # UNKNOWN number of elements, so a HEAD target positioned after it may or may not land
