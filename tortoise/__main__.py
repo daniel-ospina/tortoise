@@ -919,11 +919,16 @@ def _cmd_record_reconcile(args):
     elif declared.source == SOURCE_DERIVED and not args.cache_graph:
         # ⛔ NOT SILENT. A derived name is the one this tree has always been
         # wrong about for graph 0, so a run that used it must say so — the
-        # verdict is real, the COORDINATE is an assumption.
+        # verdict is real, the COORDINATE is an assumption. Both conventions are
+        # named for the reason the old refusal named them: an operator who is
+        # told only one spelling cannot tell a coherent cache from an empty one.
         print(f"note: --cache-graph not given and no control plane answered, so "
-              f"{declared.name!r} is the DERIVED (registry/ACL) spelling — if "
-              f"this tenant is the org's default graph its cache is "
-              f"org_<org_id>. Pass --cache-graph to state it (#13337).",
+              f"{declared.name!r} is the DERIVED (registry/ACL) spelling — this "
+              f"tree names a tenant's cache graph org_<org_id>_<graph_id> "
+              f"(registry/ACL) or org_<org_id> (the org's DEFAULT graph, the "
+              f"legacy namespace). If this tenant is the org's default graph "
+              f"its cache is org_<org_id>. Pass --cache-graph to state it "
+              f"(#13337).",
               file=sys.stderr)
     timeout_ms = args.timeout_ms if args.timeout_ms is not None \
         else CACHE_READ_TIMEOUT_MS
@@ -1489,11 +1494,25 @@ def _cmd_record_restore(args):
               f"graph is {namespace_fact!r} that is a restore into a graph "
               f"nobody reads (#13337).", file=sys.stderr)
     elif declared.source == SOURCE_DERIVED and not args.cache_graph:
-        print(f"note: --cache-graph not given and no control plane answered, so "
-              f"{declared.name!r} is the DERIVED (registry/ACL) spelling — if "
-              f"this tenant is the org's default graph its cache is "
-              f"org_<org_id>. Pass --cache-graph to state it (#13337).",
-              file=sys.stderr)
+        # ⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB (#9556).
+        # `record-reconcile` may grade an assumed coordinate — it reports the
+        # source, and a wrong verdict is recoverable by re-running. This verb
+        # WIPES the graph it is given and refills it, so an assumption here
+        # destroys a graph the operator never named and reports a restore into
+        # one nobody reads. The refusal therefore STAYS for the derived arm and
+        # is now actionable rather than blind: it names the spelling it would
+        # have used and the two ways to supply the fact.
+        print(
+            "Error: --cache-graph is required — no control-plane namespace could "
+            f"be read for {args.graph}, so the name would be DERIVED "
+            f"({declared.name!r}), and this tree names an org's DEFAULT graph "
+            "org_<org_id> (the registry/ACL spelling is the other). Guessing "
+            "wrong opens an EMPTY graph, so this run would report a restore "
+            "into a graph nobody reads while the real graph stayed destroyed. "
+            "Nothing was restored. Supply the fact: pass --cache-graph, or run "
+            "with a reachable control plane (#13337).",
+            file=sys.stderr)
+        return EXIT_UNAVAILABLE
     args.cache_graph = declared.name
     if args.limit is not None and args.limit < 1:
         print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "

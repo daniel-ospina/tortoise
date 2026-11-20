@@ -243,11 +243,16 @@ def test_record_reconcile_no_longer_refuses_for_a_missing_cache_graph(
     assert code == 2, "the record being unreachable is still no-verdict (2)"
 
 
-def test_record_restore_no_longer_refuses_for_a_missing_cache_graph(
+def test_record_restore_STILL_refuses_when_the_name_would_be_DERIVED(
         monkeypatch, capsys):
-    """The same hole, with a worse consequence (a wipe into a graph nobody
-    reads), so it must be closed by the same declaration rather than by a second
-    spelling of the rule."""
+    """⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB.
+
+    ``#9556`` pinned this refusal for the right reason — a wrong guess WIPES a
+    graph and refills it, so an assumption here destroys a graph the operator
+    never named. What changes is that the refusal is no longer BLIND: it names
+    the spelling it would have used, so the flag is one read away instead of a
+    guess the operator has to make blind.
+    """
     import types
 
     stub = types.ModuleType("psycopg2")
@@ -257,6 +262,7 @@ def test_record_restore_no_longer_refuses_for_a_missing_cache_graph(
 
     stub.connect = _connect
     monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
 
     args = argparse.Namespace(
         db="docker://localhost:6379",
@@ -266,9 +272,45 @@ def test_record_restore_no_longer_refuses_for_a_missing_cache_graph(
     code = cli._cmd_record_restore(args)
     captured = capsys.readouterr()
 
+    assert code == 2, "a destructive verb must refuse on an assumed coordinate"
+    assert "--cache-graph is required" in captured.err, captured.err
+    assert "org_orgrepro_grepro" in captured.err, (
+        f"the refusal must name the spelling it would have used: {captured.err}")
+    assert "Nothing was restored" in captured.err, captured.err
+
+
+def test_record_restore_ACCEPTS_the_name_once_a_FACT_answers(monkeypatch, capsys):
+    """The half that changes: with the control plane answering, the SAME run does
+    not refuse for the missing flag — it proceeds to the record and fails THERE
+    (this box has no Postgres), which is the proof that the flag is no longer the
+    blocker."""
+    import types
+
+    stub = types.ModuleType("psycopg2")
+
+    def _connect(*a, **k):
+        raise OSError("no database here")
+
+    stub.connect = _connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+
+    table: dict = {}
+    _fake_control_plane("org_orgrepro", table)
+    try:
+        args = argparse.Namespace(
+            db="docker://localhost:6379",
+            record_dsn="postgresql://tortoise_record_app:repro@localhost:5432/record",
+            org="orgrepro", graph="grepro", cache_graph=None,
+            limit=None, allow_empty=False, json=True)
+        code = cli._cmd_record_restore(args)
+    finally:
+        _restore_control_plane(table)
+    captured = capsys.readouterr()
+
+    assert code == 2, "still no verdict — but for the RECORD, not the flag"
     assert "--cache-graph is required" not in captured.err, captured.err
-    assert "DERIVED" in captured.err, captured.err
-    assert code == 2
+    assert "record is unreadable" in captured.err, captured.err
 
 
 # ── 3. the end-to-end acceptance (both stores; SKIPS without them) ───────────

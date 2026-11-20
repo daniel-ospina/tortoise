@@ -972,15 +972,24 @@ class _RecordingGraph:
         return self._inner.query(*args, **kwargs)
 
 
-def test_the_verb_refuses_without_a_cache_graph(monkeypatch, capsys):
+def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
     """A derived cache-graph name is a COHERENT CACHE reported as divergent.
 
     The record's ``--graph`` is a ``graph_id`` scope COLUMN; the cache graph is
     named ``org_<org_id>`` or ``org_<org_id>_<graph_id>``. FalkorDB opens a
     graph on first touch, so the old ``--cache-graph`` default (``--graph``)
     silently read an EMPTY graph: every record key became ``missing_in_cache``
-    and a coherent cache exited ``3``. A refusal that names both conventions is
-    the fail-closed direction.
+    and a coherent cache exited ``3``.
+
+    ⚠️ **SUPERSEDED IN PART BY #13337, and this pin follows the successor rule
+    rather than the old one.** The refusal that used to answer this case existed
+    because DERIVING was the only alternative to guessing — and a derivation is
+    wrong about exactly one graph, an org's default at ``org_<org_id>``. A fact
+    exists now (``public.graphs.namespace``), so the flag is optional; what must
+    never come back is the SILENT derivation this test was written against. So
+    the assertion is unchanged in substance — both conventions are named and the
+    run says the coordinate was assumed — while the exit code is no longer the
+    flag refusal's (this run fails on the stubbed record instead).
     """
     from tortoise import __main__ as cli
 
@@ -993,8 +1002,13 @@ def test_the_verb_refuses_without_a_cache_graph(monkeypatch, capsys):
                    "--org", "acme", "--graph", "g1"])
     err = capsys.readouterr().err
 
-    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "org_<org_id>" in err and "org_<org_id>_<graph_id>" in err, err
+    assert "DERIVED" in err, err
+    assert "org_acme_g1" in err, err
+    assert "--cache-graph is required" not in err, (
+        "the flag is optional now (#13337); the refusal that remains is for a "
+        f"coordinate nothing can answer, and here one was derived: {err}")
+    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "UNKNOWN, not zero" in err, err
 
 
