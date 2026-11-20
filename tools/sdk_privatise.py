@@ -169,7 +169,23 @@ SWEEP_NAMES = 66
 #: the eighth row is `scale_graph.compute_confidence`'s second occurrence. A receiver such as
 #: `type(sdk)` or `store` is exactly what the sweep refuses to guess at, so the row was
 #: REPORTED rather than rewritten; fixing the call site is what removes it.
-SWEEP_RESIDUE = (11752, "910c86ce66c0eac9")
+#: RE-PINNED → (11762, "c78653328fa17ea7") by `#13906`'s query-parity harness, on a base that
+#: carries `#13899`'s `--check` CALLER — so the gate first ran against this PR's own new files after
+#: the forward merge, and it reded exactly there. Ten rows, every one an ordinary-word receiver on
+#: an object that is not the SDK, each attributed with `edits_for` on the one file it lives in
+#: rather than by arithmetic:
+#:   * `self.g.query` 7 and `self.g.delete` 1 — `self.g` is a **`falkordb` Graph**
+#:     (`self.client.select_graph(...)`, `tools/vector_parity_13906.py:1511` and `:1538`): the same
+#:     shape as the `g.query` / `graph.query` / `proj.g.query` rows already pinned;
+#:   * `self.client.list_graphs` 1 — the **`falkordb.FalkorDB` client itself**
+#:     (`tools/vector_parity_13906.py:1510`), not an SDK handle;
+#:   * `urlsplit(hash_shape).query` 1 — a **`urllib.parse.SplitResult` attribute**, a DSN's query
+#:     component (`tests/test_vector_parity_13906.py`), caught by the `X.query` shape only because
+#:     that receiver cannot be typed from evidence.
+#: None of the ten is a reference to a retired public name — `typed references still pointing at a
+#: public name: 0` on this tree. The pin moves UPWARD because the tree gained files: that is the
+#: direction which has to be declared deliberately rather than absorbed silently.
+SWEEP_RESIDUE = (11762, "c78653328fa17ea7")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
