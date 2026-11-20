@@ -1014,13 +1014,22 @@ def write_map(doc: dict) -> int:
               file=sys.stderr)
         for line in carried[:10]:
             print(f"  ! {line}", file=sys.stderr)
-        print("  → to resolve one: `--verify` decides what is in the graph. If the "
-              "write is correct, delete its line from `failed` and keep its marker "
-              "in `written`. If it is wrong (e.g. a mechanism inversion, which "
-              "`--verify` cannot see), delete the node in the graph, then delete "
-              "its marker from `written` and its line from `failed`, and re-run. "
-              "Never delete `state.json` to clear these — a re-run would re-issue "
-              "every non-idempotent write.", file=sys.stderr)
+        # ⛔ THE REMEDY IS PER CLASS. The marker-bearing lines (a landed write
+        # whose follow-up step failed) and the `unbound endpoint` lines (a write
+        # that never happened) have DIFFERENT exits, and printing one of them for
+        # both is a permanent false red with a wrong instruction (#13913 review
+        # round 12).
+        print("  → to resolve one, `--verify` decides what is in the graph:\n"
+              "    * line says `unbound endpoint`: nothing was written, so its "
+              "marker is NOT in `written` — file the node that WAS written (or "
+              "re-run) and delete this line from `failed`.\n"
+              "    * otherwise the write landed: if it is correct, delete this "
+              "line from `failed` and keep its marker in `written`; if it is wrong "
+              "(e.g. a mechanism inversion, which `--verify` cannot see), delete "
+              "the node in the graph, then delete its marker from `written` and "
+              "this line from `failed`, and re-run.\n"
+              "    Never delete `state.json` to clear these — a re-run would "
+              "re-issue every non-idempotent write.", file=sys.stderr)
         # A failure whose marker the map no longer declares can never be
         # re-observed either: name it, instead of blocking `--write` silently
         # (#13913 review round 11).
@@ -1033,10 +1042,17 @@ def write_map(doc: dict) -> int:
                       "can never clear itself; drop it from `failed` in "
                       "state.json", file=sys.stderr)
     if ambiguous:
+        # ⛔ NOT "drop its marker" — that re-files a non-idempotent write, the
+        # duplicate this sentence exists to forbid. The state the door leaves is
+        # an ID problem, and the fix is to supply the id (#13913 review round 12).
         print(f"\n{len(ambiguous)} item(s) were recorded but returned no id — an "
               "UNKNOWN outcome, NOT re-written (a second write would duplicate a "
-              "non-idempotent node). Run --verify: if the node is present it "
-              "landed; to re-file it, drop its marker from state.json.", file=sys.stderr)
+              "non-idempotent node). Run --verify to see whether it landed. If it "
+              "did, the node's id is what is missing: record that id under this "
+              "item's ref in `ids` in state.json and re-run (the resume then "
+              "resolves it without writing). Only if `--verify` shows the node is "
+              "ABSENT should you drop the marker — and then delete its line from "
+              "`failed` too.", file=sys.stderr)
         for marker in ambiguous:
             print(f"  ? {marker}", file=sys.stderr)
     if failures:

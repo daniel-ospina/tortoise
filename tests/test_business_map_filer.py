@@ -2104,8 +2104,11 @@ def test_the_carried_failure_prints_the_ONE_remedy_that_clears_it(
     monkeypatch.setattr(filer, "Mcp", _StubMcp)
     assert filer.write_map(map_doc) == 1
     err = capsys.readouterr().err
-    assert "delete its line from `failed`" in err or "delete the matching line from `failed`" in err, err
+    assert "delete this line from `failed`" in err, err
     assert "Never delete `state.json`" in err, err
+    # The remedy is PER CLASS: a marker-bearing line and an `unbound endpoint`
+    # line have different exits, and one text for both is a wrong instruction.
+    assert "line says `unbound endpoint`" in err, err
 
 
 def test_a_carried_failure_for_an_UNDECLARED_edge_is_named_as_clearable(
@@ -2132,3 +2135,35 @@ def test_a_carried_failure_for_an_UNDECLARED_edge_is_named_as_clearable(
     assert filer.write_map(map_doc) == 1
     err = capsys.readouterr().err
     assert "no longer declared by this map" in err, err
+
+
+def test_an_AMBIGUOUS_event_is_told_to_supply_the_ID_not_to_re_file(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The ambiguous-Event remedy was "drop its marker" — which RE-FILES it.
+
+    A marker recorded with no id is an ID problem: the node may have landed, and
+    `create_event` has no existence check. The remedy must name recording the id
+    under `ids`, and only drop the marker when `--verify` shows the node absent
+    (#13913 review round 12, measured: the printed remedy re-issued the write the
+    same sentence forbids, and an `unbound endpoint` line's exit was printed
+    nowhere).
+
+    Mutant: the old "to re-file it, drop its marker from state.json" text.
+    """
+    state = tmp_path / "state.json"
+    event = map_doc["events"][0]
+    marker = filer.item_marker("events", event)
+    state.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "points")
+                for item in map_doc[section]},
+        "written": [marker], "unconfirmed": [marker], "failed": [],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "record that id under this" in err and "`ids`" in err, err
+    assert "drop its marker from state.json" not in err, (
+        "the remedy still says to drop the marker, which re-files a non-idempotent write")
