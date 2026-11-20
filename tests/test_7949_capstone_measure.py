@@ -16715,6 +16715,47 @@ _D5_TRIPLE_RE = re.compile(
     r"`(?P<fa>[^`]+)`, `(?P<fb>[^`]+)` and `(?P<fc>[^`]+)` respectively")
 
 
+#: The ASSERTING shape this file's own prose actually carried, and must not carry again
+#: (#13878 review, F2 / cycle 5 — MEASURED). `52173b6844`'s comment read, on one line, a
+#: backticked `#13841` immediately followed by the mis-description "inserted its D5 formatting
+#: guard"; `e167194f38` repaired it, because `#13841` (`819a473cd4`) inserted the `Embedder
+#: check (#13674)` docstring paragraph (`git diff --numstat 819a473cd4^ 819a473cd4 --
+#: tortoise/hosted_api.py` -> `18 0`), not a formatting guard on any document.
+#:
+#: ⛔ NARROW ON PURPOSE, and the narrowing is MEASURED rather than stylistic — this arm has now
+#: had two VACUOUS cuts, each of which passed the review that found the previous one:
+#:   · `e167194f38` asserted the phrase absent from `text`, which is `d5[0]` — the ONE markdown
+#:     line of `05-verify.md`'s D5 row. That line never carried it at any commit on this branch,
+#:     so the assertion could not fire (cycle 4's finding).
+#:   · `07c1b55d5b` moved the ban to this file's own prose but kept the WRONG spelling: it
+#:     forbade `#13845`'s `+18`, which is present 0 times at `ba1e8a9956`, `52173b6844`,
+#:     `e167194f38`, `a627848618` and `07c1b55d5b` (`git show <c>:tests/test_7949_capstone_
+#:     measure.py | grep -cF`), so it evaluated IDENTICALLY pre-fix and post-fix — vacuous, in
+#:     the commit whose subject was the vacuous guard (cycle 5's finding).
+#: So the requirement is structural: a backticked issue ref IMMEDIATELY followed by the
+#: mis-description (`:6593`'s "NOT a \"D5 formatting guard\"" and `:16846`'s "as \"its D5
+#: formatting guard\"" name the class without asserting it, and stay green). And a refutation
+#: on the same line is exempt (`_D5_MISATTRIBUTION_REFUTES`): #13750's own doctrine is that a
+#: guard which reds on TRUE content is a false RED, and the next lane deletes the guard instead
+#: of the defect.
+_D5_MISATTRIBUTION_RE = re.compile(
+    r"`#\d+`\s+inserted its D5 formatting guard", re.IGNORECASE)
+
+#: The refutation markers that must stay WRITABLE in the window before a match: a sentence whose
+#: subject is that nobody wrote the asserting form. ⚠️ RESIDUAL, stated rather than hidden — an
+#: unrelated negation inside that window exempts a line that does assert it. The window keeps
+#: the exemption from being earned by a stray "not" in adjacent prose.
+_D5_MISATTRIBUTION_REFUTES = re.compile(
+    r"\b(?:never|not|no|nobody|noone|rather than|instead of)\b", re.IGNORECASE)
+_D5_MISATTRIBUTION_REFUTATION_WINDOW = 60
+
+#: The PRE-FIX line itself, assembled from two pieces so this file's own source never contains
+#: the asserting form (`_own_prose` scans the source), and fed to the matcher at runtime: an arm
+#: that cannot fire on the line it exists for is exactly the defect four review cycles chased.
+_D5_MISATTRIBUTION_WITNESS = (
+    "        # `#13841` " + "inserted its D5 formatting guard — a UNIFORM +84 in total — and is")
+
+
 def test_the_D5_current_head_anchors_are_the_lines_they_name():
     """D5 asserts numbers as CURRENT, and until this pin NOTHING read them (#13602).
 
@@ -16859,20 +16900,42 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THIS GUARD READ THE WRONG ARTIFACT, TWICE (#13878 review, cycles 4 and 5 — both
     # measured). Cycle 4's cut asserted the phrase was absent from `text`, which is `d5[0]`:
     # the ONE markdown line of `05-verify.md`'s D5 row. That line NEVER carried the phrase at
-    # any commit on this branch, so the assertion could not fire. Cycle 4 moved the read to
-    # this FILE's own prose but banned a DIFFERENT string — `#13845`'s +18 — which this file
+    # any commit on this branch, so the assertion could not fire. Cycle 5's cut moved the read
+    # to this FILE's own prose but banned a DIFFERENT string — `#13845`'s +18 — which this file
     # likewise never carried (`for c in <every commit here>; do git show $c:tests/… | grep -c
     # … ; done` -> 0 for all), so re-inserting the wording this file ACTUALLY shipped left the
     # row at `1 passed`. The ban is now on the artifact that carried the defect AND in the
-    # form it carried it: the positive attribution of the guard-insertion to that commit. The
-    # two retractions in this file quote the phrase only to REFUTE it, so they stay green.
+    # form it carried it — the positive attribution of the guard-insertion — recorded at
+    # `_D5_MISATTRIBUTION_RE`.
+    #
+    # ⛔ AND IT IS NOT KEYED TO ONE ISSUE REF, which is the third cut this arm would otherwise
+    # have needed: measured over this branch, the wording moved between two commits while
+    # keeping its false DESCRIPTION — `ba1e8a9956` read `#13845` there and `52173b6844`,
+    # after the commit-half of F2 was fixed, still read `#13841` there. A ban naming only
+    # `#13845` greens on the second, which is the wording the review cycle that raised this
+    # finding actually quoted. The form is the unit, not the ref.
     _own_prose = Path(__file__).read_text(encoding="utf-8")
-    assert not re.search(r"#13845`? inserted its D5 formatting guard", _own_prose), (
-        "this file's comment names `#13845` as the commit that inserted the guard. No commit "
-        "did that: the 18 lines are `819a473cd4`'s `Embedder check (#13674)` docstring "
-        "paragraph (`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` "
-        "-> `18 0`), and `#13845` (`8bdd34c631`) touches three doc/test files and no "
-        "`hosted_api.py` (#13878 review, F2).")
+    # Non-vacuity, EXECUTED rather than asserted in prose: if the matcher stops firing on the
+    # pre-fix line, this goes red here instead of quietly passing over the defect forever.
+    assert _D5_MISATTRIBUTION_RE.search(_D5_MISATTRIBUTION_WITNESS), (
+        "the matcher no longer fires on the line this arm exists for, so the arm is VACUOUS "
+        "again — the exact defect two predecessor cuts of it shipped (#13878 review, cycles 4 "
+        f"and 5). Witness: {_D5_MISATTRIBUTION_WITNESS!r}")
+    _misattributed = [
+        (number, line)
+        for number, line in enumerate(_own_prose.splitlines(), 1)
+        if (match := _D5_MISATTRIBUTION_RE.search(line))
+        and not _D5_MISATTRIBUTION_REFUTES.search(
+            line[max(0, match.start() - _D5_MISATTRIBUTION_REFUTATION_WINDOW):match.start()])
+    ]
+    assert not _misattributed, (
+        "this file's own prose describes the +18 as a commit that [inserted its D5 formatting "
+        f"guard] — line(s) {[number for number, _ in _misattributed]}: "
+        f"{_misattributed[0][1].strip()[:200]!r}. No commit did that: the 18 lines are "
+        "`819a473cd4`'s (`#13841`) `Embedder check (#13674)` docstring paragraph "
+        "(`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` -> `18 0`), "
+        "and `#13845` (`8bdd34c631`) touches three doc/test files and no `hosted_api.py` — it "
+        "RE-DERIVED the +66 (#13878 review, F2). Name the commit AND what it inserted.")
     assert not re.search(r"#13845`'s \+18", text), (
         "D5 credits the +18 to `#13845`. It is `819a473cd4`'s (`#13841`): a doc-only commit "
         "cannot move a line in `hosted_api.py` (#13878 review, F2).")
