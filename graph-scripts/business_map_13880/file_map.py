@@ -122,11 +122,18 @@ STRUCTURAL_RELS = {"performs", "produces", "uses", "authoredBy", "ownedBy",
 #: `SEMANTICS` is the ONLY gate between a Layer-2 typo and a filed operator: the
 #: door WARN-NOT-BLOCKS an out-of-vocabulary `semantics` (`undeclared_relation`,
 #: #7852) and `--verify` cannot read the word back, so a drifted transcription
-#: files an operator whose meaning is neither the judgement's nor recoverable
-#: (measured: one label typo'd to `suports` passed `validate()`, was sent, and
-#: the run printed `all nodes and edges written` with rc 0). `OP_TYPES` gates the
-#: mechanism. Both now follow the shipped vocabularies; the literals are the
-#: standalone-box fallback, the same shape `DIRECTIONS` uses (#13913 round 18).
+#: files an operator whose meaning is neither the judgement's nor recoverable.
+#: ⛔ THE EVIDENCE IS THE SHAPE, NOT A MEASUREMENT — and an earlier cut of this
+#: comment claimed one that CANNOT happen: it said a label typo'd to `suports`
+#: "passed `validate()`", but `validate()`'s own `label not in SEMANTICS` guard
+#: refuses it at every commit of this branch (#13950 review round 6, measured:
+#: `label 'suports' not in the Layer-2 semantics vocabulary`, exit 2 at MAP
+#: REFUSED before any dispatch). What is true is the reason the transcription must
+#: not drift: this set IS the gate, so a copy that gains a word silently ACCEPTS an
+#: operator the judgement never declared, and a copy that loses one refuses a
+#: correct map forever. `OP_TYPES` gates the mechanism. Both now follow the shipped
+#: vocabularies; the literals are the standalone-box fallback, the same shape
+#: `DIRECTIONS` uses (#13913 round 18).
 _FALLBACK_OP_TYPES = {"IMPL", "NAND", "coherence"}
 _FALLBACK_SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
                        "mutuallyExclusive", "hasPart", "causes", "produces",
@@ -441,16 +448,16 @@ class Mcp:
         """
         for attempt in range(6):
             self._next_id += 1
-            # ⛔ A DEFENSIVE DEFAULT, NOT THE FIX. The load-bearing bind is the
-            # one in the `except HTTPError` handler below (every non-2xx raises
-            # there), and it is what makes a real 5xx's `Retry-After` readable —
-            # `headers` was unbound at the status arm before that bind existed,
-            # which is the `UnboundLocalError` this PR closes. This line only
-            # guarantees no arm can ever read a PREVIOUS attempt's headers. It is
-            # NOT what stops the unbound name: deleting it leaves the suite green
-            # (#13950 review round 5 measured that), so do not read it as the fix
-            # and do not "simplify" the handler's `dict(_hdrs)` normalisation
-            # away on the strength of it.
+            # ⛔ AN UNCONDITIONAL INITIALISATION, KEPT FOR READABILITY AND FOR THE
+            # TYPE — NOT A GUARANTEE, and NOT the fix. The load-bearing bind is the
+            # one in the `except HTTPError` handler below, and `headers` is rebound
+            # on BOTH paths in EVERY iteration (the tuple unpack and that handler),
+            # so no arm could read a previous attempt's value with or without this
+            # line — deleting it leaves the suite green (#13950 review rounds 5 and
+            # 6 both measured that). It is here so the name is visibly bound before
+            # the `try`, which is a readability choice; do not read it as protection
+            # and do not "simplify" the handler's `dict(_hdrs)` normalisation away
+            # on the strength of it.
             headers: dict = {}
             try:
                 code, payload, headers = self._post({
@@ -1341,11 +1348,20 @@ def write_map(doc: dict) -> int:
         reobserved = {f.split(": ", 1)[0] for f in failures}
         repeated = [line for line in carried
                     if line.split(": ", 1)[0] not in reobserved]
-        if carried:
-            # ⛔ COUNT MARKERS, NOT LINES: the dedupe below is marker-keyed, so a
-            # count of LINES can exceed what is listed and the parenthetical then
-            # claims a line was printed that was not (#13913 review round 19).
-            markers_carried = {line.split(": ", 1)[0] for line in carried}
+        # ⛔ COUNT MARKERS, NOT LINES, AND COUNT THEM FROM `repeated` — NOT FROM
+        # `carried`. `carried` includes every marker this run RE-OBSERVED and
+        # re-failed, and those are reported under their own class heading below, so
+        # counting them here too made a resume print three failures under TWO
+        # headings — with this heading's "its marker is never re-attempted … the
+        # line can never clear itself" premise, which is simply FALSE for an
+        # `unbound`/`declined` line: its marker is not in `written`, the edge IS
+        # re-attempted every run, and the line clears itself the moment the
+        # endpoints resolve (#13950 review round 6, measured on the resume the
+        # unbound pin builds: `3 marker(s) from an earlier run` above `3 edge(s)
+        # hit an UNBOUND endpoint`). Counting markers rather than lines still
+        # holds: `repeated` is marker-keyed.
+        markers_carried = {line.split(": ", 1)[0] for line in repeated}
+        if markers_carried:
             print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
                   "STILL unresolved (their markers were not re-written this run) "
                   "— see state.json", file=sys.stderr)

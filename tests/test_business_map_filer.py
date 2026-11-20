@@ -1472,6 +1472,15 @@ def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
     assert err.count(marker) == 1, (
         f"{marker!r} is reported {err.count(marker)}x — once in-loop and again "
         "as an earlier run's line reads as two failures")
+    # ⛔ AND ONE HEADING, NOT TWO. This run RE-OBSERVES an intent a previous run
+    # left unconfirmed, so the line is in `carried` too — the carried heading used
+    # to be built from `carried`, so it counted this same failure a second time
+    # under a premise (“its marker is never re-attempted … the line can never clear
+    # itself”) that is FALSE for a re-attempted line (#13950 review round 6).
+    # `err.count(marker)` cannot see that: headings never repeat the marker text,
+    # which is exactly why the assertion above passed over the defect.
+    assert "from an earlier run" not in err, (
+        "the same failure was reported under two headings: " + err)
     # ⛔ AND THE SUMMARY MUST NOT SAY "NOT WRITTEN" ABOUT A MAY-HAVE-LANDED
     # WRITE. `unwritten_n` was `len(failures) - mismatched_n`, i.e. an arithmetic
     # bucket for everything that was not a mismatch — so an UNCONFIRMED operator
@@ -1995,6 +2004,8 @@ def test_a_cross_classifying_MESSAGE_cannot_print_a_NEGATIVE_count(
     # ONLY class header printed for it.
     assert "MAY HAVE LANDED" in err, err
     assert "filed INVERTED" not in err, (
+        "one line was given two contradictory remedies: " + err)
+    assert "UNBOUND endpoint" not in err, (
         "one line was given two contradictory remedies: " + err)
     assert "DECLINED by the door" not in err, (
         "one line was given two contradictory remedies: " + err)
