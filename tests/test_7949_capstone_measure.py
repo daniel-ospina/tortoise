@@ -16946,31 +16946,56 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                          "a document that carries two"):
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
-            "figure and this arm has already been wrong in both directions; state a "
-            "re-point by its PAIR, or state that the file is not in the diff — and whether "
-            "it is is `git diff --numstat origin/main...HEAD` at the head you merge, never a "
-            "claim typed here (#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    # ⛔ THE CHIMERA IS REFUSED, IN EVERY SPELLING (#13879 review, cycles 3-4 — MEASURED).
-    # This arm used to REQUIRE the pair "`sdk.py:28682` -> `:28718` and the I7 range
-    # `:15262-15339` -> `:15346-15423`" as the pair `04-plan.md` carries, and both halves were
-    # false at the merged head: the range reads IDENTICALLY on `origin/main` and here because
-    # `main` made that move (a pair whose halves come from two different heads is a CHIMERA),
-    # and `04-plan.md` is not in this diff at all (`git diff --numstat origin/main...HEAD --
-    # …/04-plan.md` prints nothing). A pin that REQUIRES the false claim is green over it,
-    # which is the class this row exists to close — so the pin now refuses the pair-list
-    # spelling instead. A REGEX, not a literal: the row writes its pair-lists in BOTH arrow
-    # conventions (`->` and `→`) and does not always backtick the target, so a literal caught
-    # ONE spelling and let three through (mutation-verified, #13879 review cycle 4).
-    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
-        "D5 names the I7 range's move as one of THIS diff's re-points. It is not one: those "
-        "two readings are identical on `origin/main` and at this head, because `main` made "
-        "that move — a pair whose two halves come from two different heads is the chimera "
-        "D5 exists to forbid (#13879 review, cycle 3)")
+            "figure and this arm has already been wrong in both directions; state the "
+            "address the row READS and the base it came from, or state that the file is "
+            "not in the diff — neither is a count. "
+            "And whether that file sits in the diff is `git diff --numstat"
+            " origin/main...HEAD` at the head you merge, never a claim typed here "
+            "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
+    # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
+    # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
+    # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
+    # halves were false: naming `:15346-15423` as this diff's pair was a CHIMERA of two
+    # heads — `main` made that move, so both ends read identically at `origin/main` and
+    # here.
+    # ⛔ RE-MEASURED at the `origin/main` `ef1d6f7561` merge (the `#13879` lane's second
+    # re-cut): `main`'s `#13940`/`#13948` re-derived `04-plan.md`'s own row to
+    # `sdk.py:28935` while this PR waited, so the file is now NOT in this diff at all —
+    # `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING — and the
+    # `sdk.py:28718` -> `sdk.py:28935` move is MAIN's, not a re-point this branch makes.
+    # The pin below asserts the MEMBERSHIP is absent and binds both ends of that move,
+    # because a typed claim about a head-bound fact is the same defect class one layer up.
+    # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
+    # "CARRIES" (#13879 re-cut — MEASURED: `04-plan.md` contains `sdk.py:28935` and
+    # NOT `sdk.py:28718`). Both ends are still pinned so the row cannot drift back to
+    # the base's value, which is what a re-derivation-by-offset produces.
+    for _provenance in ("its own row now reads `sdk.py:28935`", "the base read `sdk.py:28718`"):
+        assert _provenance in text, (
+            f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
+            "`sdk.py:28935` at this head and the base carried `sdk.py:28718` — pinning "
+            "both ends is what catches a re-derivation that keeps the base's value "
+            "(#13750 review, cycle 3; re-derived at the `ef1d6f7561` merge)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
-        "D5 still claims `04-plan.md` carries a re-point pair at this head, while the file is "
-        "not in this diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints "
-        "nothing). State the two facts instead: the file is absent from the diff, and its own "
-        "row reads the address below (#13879 re-cut)")
+        "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
+        "head, while its row reads ONE address and the file is not in this diff at all "
+        "(`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). "
+        "That sentence was deleted for being false at this head (#13879 review, cycle 3)")
+    assert "NOT in this diff at this head" in text, (
+        "D5 no longer states that `04-plan.md` is absent from this diff. At this head it "
+        "IS absent (`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing), "
+        "and a row that implies otherwise names a membership the head does not have")
+    # and the chimera is refused, not merely absent from the message above
+    # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
+    # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
+    # backtick the target, so a literal caught ONE spelling and let three through — green
+    # exactly where this arm is supposed to be red. Measured by mutating a /tmp copy: the
+    # exact old spelling fired, and all three variants stayed green under the literal.
+    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
+        "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
+        "`:15346-15423` reads identically on `origin/main` and at this head, because "
+        "`main` made that move — a pair whose two halves come from two different heads "
+        "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
     assert "sdk.py:28935" in text, (
         "D5 no longer names `sdk.py:28935`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
