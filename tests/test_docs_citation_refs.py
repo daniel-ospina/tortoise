@@ -3286,8 +3286,6 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     # not) — the same question the docstring above answers, and the one whose answer is `None`
     # for `grep -c'…'`. The `--` test mirrors GNU grep's `=`/attached-value reach on the long form.
     if text.startswith("--"):
-        # A long option may carry a value under ANY name (grep is the judge of the name), so the
-        # `=`-form below admits it; the short cluster is the case that needs the arg-taking set.
         match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
     elif text.startswith("-"):
         match = re.fullmatch(r"(-[A-Za-z0-9]+)(.*)", text, re.S)
