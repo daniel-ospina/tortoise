@@ -417,6 +417,14 @@ class Mcp:
         """
         for attempt in range(6):
             self._next_id += 1
+            # ⛔ BOUND BEFORE THE CALL, and re-bound on every attempt. The status
+            # arm below reads `headers` on BOTH paths into it — the tuple return
+            # (a 2xx/3xx) and the `HTTPError` handler (EVERY 4xx/5xx) — and an
+            # unbound or leftover name there is not a small defect: on attempt 0
+            # it is `UnboundLocalError`, which aborts the whole `--write` run on
+            # the first transient 5xx; on a later attempt it would back off on
+            # the PREVIOUS response's `Retry-After` (#13950 review).
+            headers: dict = {}
             try:
                 code, payload, headers = self._post({
                     "jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
@@ -430,7 +438,24 @@ class Mcp:
                 # retired a non-idempotent intent the server may have acted on —
                 # the resume then re-issued `create_operator` (#13913 review
                 # round 8, measured). No body is an UNKNOWN body, never a refusal.
+                # ⛔ `headers` IS BOUND HERE BECAUSE THIS IS WHERE A REAL 5xx
+                # LANDS: `urlopen` raises `HTTPError` for every non-2xx, so the
+                # tuple-returning path above is 2xx/3xx only and the status arm's
+                # `Retry-After` read would otherwise reach an unbound name on
+                # exactly the responses it was written for (measured: a real
+                # `HTTPError(503, …, {"Retry-After": "7"})` from `_post` raised
+                # `UnboundLocalError` instead of backing off — one POST where
+                # `main` made six; #13950 review).
+                # ⛔ AND IT IS NORMALISED TO A `dict`: `HTTPError.headers` is an
+                # `email.message.Message`, and `_retry_after_seconds` requires a
+                # mapping — binding the Message directly would leave the header
+                # unread, i.e. the same defect wearing the fix's clothes.
                 code, payload = exc.code, None
+                _hdrs = getattr(exc, "headers", None)
+                try:
+                    headers = dict(_hdrs) if _hdrs else {}
+                except (TypeError, ValueError):
+                    headers = {}
                 # ⛔ THE BODY READ IS PART OF THE CLASSIFICATION. This read sits
                 # inside `except HTTPError`, so an exception raised HERE is not
                 # caught by the sibling `except` below — and it escaped all the
@@ -512,7 +537,9 @@ class Mcp:
                 if attempt < 5:
                     # The back-off can ride a HEADER only: the middleware
                     # answers `Retry-After` in headers and `call()` used to
-                    # discard the third element of `_post`'s result.
+                    # discard the third element of `_post`'s result. Both paths
+                    # bind `headers` (the tuple return and the `HTTPError`
+                    # handler), so this read is defined for every 5xx/408/429.
                     wait = _retry_after_seconds(headers)
                     time.sleep(min(120, wait) if wait else min(60, 5 * (attempt + 1)))
                     continue
@@ -1099,7 +1126,15 @@ def write_map(doc: dict) -> int:
     # it exits 1, and its only printed line names the failure without a route out
     # (#13913 review round 18).
     declined = [f for f in failures if "create_edge returned created=" in f]
-    if carried or declined:
+    # ⛔ THE UNBOUND-ENDPOINT CLASS IS STUCK IN THE SAME WAY, and gating on
+    # `carried`/`declined` alone skipped it on the one run that matters: the run
+    # that FIRST records it, where `carried` is empty (the line is this run's own)
+    # and nothing was `declined` — so the exit below was never printed and the
+    # `!!` line was the whole trace, i.e. exactly the "names the failure without a
+    # route out" state this block exists to remove (#13950 review, measured on the
+    # recorded-intent-without-id resume the unbound pin builds).
+    unbound = [f for f in failures if "unbound endpoint" in f]
+    if carried or declined or unbound:
         # ⛔ A CARRIED FAILURE HAS NO AUTOMATIC EXIT: its marker stays in
         # `written`, so it is never re-attempted, so `done` never contains it, so
         # the line can never clear itself. Saying so — with the exact edit — is
@@ -1124,8 +1159,15 @@ def write_map(doc: dict) -> int:
             print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
                   "STILL unresolved (their markers were not re-written this run) "
                   "— see state.json", file=sys.stderr)
-        else:
+        # ⛔ ONE HEADER PER NON-EMPTY CLASS, not an `else` chain: a run can record
+        # a declined edge AND an unbound one, and an `elif` silently drops the
+        # second class's count (#13950 review).
+        if declined:
             print(f"\n{len(declined)} edge(s) were DECLINED by the door — nothing "
+                  "was written for them (see `failed` in state.json)",
+                  file=sys.stderr)
+        if unbound:
+            print(f"\n{len(unbound)} edge(s) hit an UNBOUND endpoint — nothing "
                   "was written for them (see `failed` in state.json)",
                   file=sys.stderr)
         for line in repeated[:10]:
