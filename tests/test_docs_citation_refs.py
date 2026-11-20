@@ -3192,9 +3192,14 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: word ends at whitespace or at a character that cannot appear inside a `grep` argument in prose
 #: (`` ` `` closes the code span; `;`/`|`/`&`/`(`/`)`/`<`/`>` are shell operators); a flag TOKEN
 #: is `--`/`-` then alphanumerics (which still expresses `-c`, `-Ec`, `--count`,
-#: `--color=never`, `-C3`, `-m2`); a QUOTED tail is an attached value only on a SHORT cluster
-#: that contains an argument-taking flag, so `grep -c'…'` and `grep -c, '…'` decline rather than
-#: pass the quote through as an option; and on a LONG option a quoted tail is MORE NAME with the
+#: `--color=never`, `-C3`, `-m2`); a QUOTED tail is an attached VALUE only on a SHORT cluster
+#: whose LAST character takes an argument (`-e'…'`), and on every other cluster it is MORE FLAG
+#: CHARACTERS, because the shell has already removed the quotes — an alphanumeric residue is read
+#: as one word (`grep -c'x'` is argv `-cx`, so it IS a count and the quoted token after it is its
+#: expression) while a non-alphanumeric one is unreadable (`grep -c'^\+$'` is argv `-c^\+$`, which
+#: grep rejects). An UNQUOTED tail follows the same split: it is a value only on such a cluster
+#: (`-e^[+-]$`), and `grep -c, '…'` is unreadable because `-c,` is not a flag cluster at all. On a
+#: LONG option a quoted tail is MORE NAME with the
 #: quotes removed (`--count'x'` is argv `--countx`), so the acceptance test refuses it, while a
 #: tail that is a `=`-separated value (`--regexp='x'`) is read as that value. A QUOTED section
 #: may hold spaces and still be one word, which is what makes `--label='x -c'` one flag word
@@ -3313,7 +3318,9 @@ def _resolved_long_option(option: str) -> str | None:
     prescription in that spelling left the arm GREEN. The rule is getopt's own: a prefix that
     names EXACTLY ONE member names that member; one that names several (`--ex`, `--d`) is
     ambiguous and answered `None` rather than guessed. The set searched is grep's WHOLE
-    documented long-option table, `_D5_ALL_LONG_OPTIONS` — ⛔ NOT the `_ARG_TAKING_LONG_FLAGS` ∪
+    long-option universe — every name `grep --help` documents, PLUS the one declared undocumented
+    alias grep still accepts (`_D5_UNDOCUMENTED_LONG_OPTIONS`, which `_D5_ALL_LONG_OPTIONS` now
+    carries), — ⛔ NOT the `_ARG_TAKING_LONG_FLAGS` ∪
     `_PATTERN_SUPPLYING_LONG_FLAGS` pair, which answer a DIFFERENT question (what a resolved
     option's ARGUMENT is, in `_d5_argument_role`) and are too narrow to decide ambiguity: `--re`
     names `--regexp` among them and still names `--recursive` in grep's own terms. A sentence here
@@ -3794,9 +3801,12 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: `_long_option_is_accepted` declines every alias spelling (`--fixed-regexp`, `--fixed-r`,
 #: `--fixed-re`), so a member here would be UNREACHABLE: this line used to carry one and nothing
 #: witnessed it — dropping it left the suite green, which is the inert-table-member defect
-#: (agent-infra#3442). The residual is that those spellings are UNREAD; it is pinned in the
-#: long-spelling cell and in `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_
-#: is_NOT_A_REGEX`, and it is FAIL-CLOSED: `-F` prints `0` on the blank-class probe, so declining
+#: (agent-infra#3442). The residual is that those spellings are UNREAD; it is pinned in
+#: `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX`'s
+#: `alias_spelling` loop, and NOWHERE ELSE — this paragraph used to name the long-spelling cell
+#: as a second witness, and that cell asserts nothing about an alias (measured: `--fixed-regexp`
+#: occurs there only inside grep's own ambiguity message), which is the `_D5_RETIRED_OVERCLAIMS`
+#: defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints `0` on the blank-class probe, so declining
 #: the alias can never grade a non-class as this class.
 #: ⛔ THE NEIGHBOURS THAT ARE **NOT** HERE, measured on the same probe: `-i`, `-w`, `-x`, `-E`, `-G`
 #: and `-P` all print `2`, so they leave this class intact; `--null` is `-Z` (a NUL after the FILE
@@ -4008,7 +4018,6 @@ def _d5_class_members(char_class: str) -> set[str] | None:
     return None if escaped else members
 
 
-
 def _d5_counts_the_blank_class(expr: str) -> bool:
     r"""Does `expr` count exactly the lines that are one `+` or one `-`?
 
@@ -4114,6 +4123,7 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
             return False
         signs.add(sign)
     return signs == {"+", "-"}
+
 
 def _d5_blank_class_prescriptions(bundle: str) -> list[str]:
     """The expressions of the count commands that count THIS class — positive match set only.
@@ -4678,16 +4688,20 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         # ⛔ A DOUBLED BACKSLASH IS NOT AN ESCAPED SIGN (#14027 second review round, P3 —
         # MEASURED). The alternation branch used to strip EVERY backslash from each alternative,
         # so both rows below were graded as this class; in a POSIX ERE `\\` is a literal
-        # backslash and the `+` after it is a QUANTIFIER, and grep's own answer on the probe
-        # disagrees with the class in both directions.
+        # backslash and the `+` after it is a QUANTIFIER. ⛔ ON THE PROBE DECLARED ABOVE THE
+        # DIFFERENCE IS MEMBERSHIP, NOT THE COUNT, and the two rows say which (#14027 — a review
+        # round measured `1`/`0` on the four-line probe and wrote "for every number below" beside
+        # a six-line one, so the numbers are re-measured on the declared probe here).
         ("^(\\\\+|-)$",
-         "counts 1, not 2: `\\\\+` is one-or-more LITERAL BACKSLASHES, so only the `-` branch "
-         "can match (measured `grep -cE '^(\\\\+|-)$'` -> 1, rc 0) — grading it as the class "
-         "reports an instrument that counts half of it"),
+         "matches the `\\` line and the `-` line and NEVER the `+` line (measured: `grep -nE` "
+         "reports lines 2 and 3 of the declared probe), so its count is 2 — the SAME number as "
+         "this class, for two different lines. Grading it as the class reports an instrument "
+         "that counts the wrong two lines"),
         ("^(\\\\+|\\\\-)$",
-         "counts 0, not 2: both branches are literal-backslash runs, so nothing on the probe "
-         "matches (measured -> 0, rc 1) — the class is graded onto a command that counts none "
-         "of it, which is the false PASS #13962 exists to retire"),
+         "counts 1, not 2: both branches are literal-backslash runs, so on the declared probe it "
+         "matches only the lone `\\` line and no `+` or `-` line at all (measured -> 1, rc 0) — "
+         "the class is graded onto a command that counts none of it, which is the false PASS "
+         "#13962 exists to retire"),
     ):
         assert not _d5_counts_the_blank_class(not_the_class), (
             f"{not_the_class!r} must NOT be graded as the blank class: it {why}. Grading it "
