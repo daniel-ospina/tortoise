@@ -8115,19 +8115,47 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ THE SAME VIEW AT THE OPERAND SEAM, AND ITS UNBOUND SPELLING, AND THE `fromkeys`
-        #    TWIN (`#13788` review round 11: 3 P1/P2 fail-opens, each measured CERTIFIED *and*
-        #    runtime-stored one position sideways from a row that was already refused).
-        #    `dict.update` / `dict.__ior__` accept an iterable of PAIRS, so a values view of a
-        #    PAIRS-VALUED mapping is a pairs iterable — and `dict.fromkeys(m, v)` takes m's
-        #    KEYS, which the constructor rule read through `_sequence_options` alone.
+        # ⛔ THE VIEW SEAMS, ROUND BY ROUND (`#13788` review round 11 + round 12). Each row
+        #    below was measured CERTIFIED *and* runtime-stored ONE POSITION SIDEWAYS from a
+        #    row that was already refused, because `dict.__ior__`/`dict.update` UNPACK every
+        #    ELEMENT of what they are given and a mapping's VIEW is an iterable of those
+        #    elements. Which view, and which wrapper, is the whole difference:
         #
-        #      props.update({"embedding": _encode(ev)}.items())                 refused
-        #      props.update({"a": ("embedding", _encode(ev))}.values())         CERTIFIED
-        #      props |= dict.fromkeys(["embedding"], _encode(ev))               refused
-        #      props |= dict.fromkeys({"embedding": 1}, _encode(ev))            CERTIFIED
-        #      props.update({"embedding": _encode(ev)}.items())                 refused
-        #      props.update(dict.items({"embedding": _encode(ev)}))             CERTIFIED
+        #      props.update({"embedding": _encode(ev)}.items())                  refused
+        #      props.update({"a": ("embedding", _encode(ev))}.values())          CERTIFIED
+        #      props |= dict({"a": ("embedding", _encode(ev))}.values())         CERTIFIED
+        #      props |= {"a": ("embedding", _encode(ev))}.values()               CERTIFIED
+        #      props |= list({"a": ("embedding", _encode(ev))}.values())         CERTIFIED
+        #      props |= tuple({"a": ("embedding", _encode(ev))}.values())        CERTIFIED
+        #      props |= {("embedding", _encode(ev)): 1}.keys()                    CERTIFIED
+        #      props |= list({("embedding", _encode(ev)): 1}.keys())              CERTIFIED
+        #      props.update({("embedding", _encode(ev)): 1}.keys())               CERTIFIED
+        #      props.update(dict.items({"embedding": _encode(ev)}))              CERTIFIED
+        #      props.update(dict.values({"a": ("embedding", _encode(ev))}))      CERTIFIED
+        #      props.update(dict.keys({("embedding", _encode(ev)): 1}))          CERTIFIED
+        #
+        #    …plus the `fromkeys` twin, which takes its argument's KEYS and was read through
+        #    `_sequence_options` alone while its pairs twin had already been taught to read a
+        #    mapping:
+        #
+        #      props |= dict.fromkeys(["embedding"], _encode(ev))                refused
+        #      props |= dict.fromkeys({"embedding": 1}, _encode(ev))             CERTIFIED
+        #      props |= dict.fromkeys({"embedding": 1}.keys(), _encode(ev))      CERTIFIED
+        #
+        #    Every row was runtime-checked (executed, not asserted) to leave
+        #    `props["embedding"]` at the vector. They are ONE rule at three seams, not a new
+        #    vocabulary: `_mapping_items_pairs` already reads a view, `_comprehension_source_yields`
+        #    already answers a mapping's keys, and `_sequence_options` already resolves the
+        #    wrappers — each new spelling asks the resolver that exists.
+        #
+        #    ⛔ A ROW PER LEG, because a leg without a witness is not a closed hole (the sweep
+        #    that found two of round 10's own legs surviving said so): the `values()` rows
+        #    witness the pairs-operand view arm; the `keys()` rows witness the `.keys()` arm in
+        #    `_mapping_items_pairs`; the wrapped/constructor rows witness `_sequence_options`'
+        #    attribute list; the `fromkeys` rows witness the constructor rule's mapping
+        #    fallback; and the two `dict.items/dict.values/dict.keys` rows witness the UNBOUND
+        #    arms — the last of which was DEAD CODE nested inside a `not args` guard until a
+        #    row reached it (measured by that sweep).
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -8139,6 +8167,48 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= dict({"a": ("embedding", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"a": ("embedding", _encode(ev))}.values()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= list({"a": ("embedding", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= tuple({"a": ("embedding", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {("embedding", _encode(ev)): 1}.keys()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= list({("embedding", _encode(ev)): 1}.keys())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update({("embedding", _encode(ev)): 1}.keys())
         return None
     _write(props)
 """,
@@ -8170,6 +8240,14 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE UNBOUND KEYS VIEW, which is the third attribute of that same family.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(dict.keys({("embedding", _encode(ev)): 1}))
+        return None
+    _write(props)
+""",
         # ⛔ AND THE UNBOUND VIEW INSIDE A CONSTRUCTOR, which is the ONLY position that reaches
         #    `_mapping_items_pairs`' unbound arm directly (`#13788` review round 11, measured by
         #    the mutation sweep: reverting that arm moved NO row until this one existed — the
@@ -8179,6 +8257,20 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in dict(dict.items({"embedding": 1}))}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(list({("embedding", 1): 1}.keys()))}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(dict.keys({("embedding", 1): 1}))}
         return None
     _write(props)
 """,
@@ -9395,10 +9487,13 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ AND THE OPERAND-SEAM VIEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review round
-        #    11). A values view of SCALAR values is not a pairs view at all, and a pairs view
-        #    whose key names a different property places nothing — both are honest write-stops
-        #    and both are the shapes a blanket "a values view is a store" rule would refuse.
+        # ⛔ THE OPERAND-SEAM VIEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review rounds
+        #    11/12). A values view of SCALAR values is not a pairs view at all, a pairs view
+        #    whose key names a different property places nothing, a CONSTANT value places the
+        #    placeholder the file already refuses to count, and plain scalar KEYS are not pairs
+        #    either — every one is an honest write-stop and every one is the shape a blanket
+        #    "a view is a pairs source" rule would refuse. Pinned as accepted rows because a
+        #    false refusal is the cheaper error to police.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9410,6 +9505,34 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update({"a": ("embedding_model", _encode(ev))}.values())
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"a": ("embedding", None)}.values()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {("a", "b"): 1}.keys()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {("embedding_model", _m()): 1}.keys()
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {"embedding": 1}.keys()
         return None
     _write(props)
 """,
