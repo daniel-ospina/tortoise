@@ -6787,8 +6787,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
     # because D5 is one markdown LINE carrying 262 cite-shaped `:N` tokens (the `~50` these
-    # comments used to say was an order of magnitude low — #13900 review, finding 5): a row
-    # cannot separate two
+    # comments used to say was about five times low, `262/50 ≈ 5.2`, not a tenfold one —
+    # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
     # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
     _honours_line = next(
@@ -16676,7 +16676,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
 #: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6791`-`:6794` asserts each of the four against `_honours_line`, and the `05-verify.md`
+#: `:6798`-`:6801` asserts each of the four (the symbol derived at `:6794`), and the `05-verify.md`
 #: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
 #: that clause ever had a reader. THREE things here are new coverage: the
@@ -16695,7 +16695,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
     # carries 262 cite-shaped `:N` tokens (measured at this head with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
-    # say was an order of magnitude low, which is the same rot one layer up) — so `:20329`
+    # say was about five times low (`262/50 ≈ 5.2`), which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
@@ -16732,7 +16732,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
     number that shared a line with 262 others (the `~50` this sentence used to say
-    was an order of magnitude low: #13900 review, cycle 11).
+    was about five times low — `262/50 ≈ 5.2`: #13900 review, finding 5).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
     document handed them two different answers for ONE statement on the SAME line.
