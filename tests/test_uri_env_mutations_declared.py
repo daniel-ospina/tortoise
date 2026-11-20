@@ -1715,6 +1715,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # than riding along on this arm (#11083). Reformatting the call is likewise a
     # re-triage, not a silent pass. The arm also pins the VALUE (`_uri()`), so the
     # #11083 hazard — an arm wider than the site it was written for — cannot recur here.
+    # ⛔ THIS IS THE ONLY ROW for this file (#12631): three lanes triaged #13903
+    # concurrently and `main` ended up carrying three copies of this key, of which
+    # Python silently kept the last — a duplicate dict key is a SHADOWED row, not a
+    # stronger declaration, and the two it shadowed authorized nothing while reading
+    # as coverage. If you are here to add a row, EDIT THIS ONE.
     "test_13557_13558_reachable_reads.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }
