@@ -176,9 +176,11 @@ cutover by the same window. The measured cost above is the alternative.
    `(org_id, graph_id)` and the rebuild door has neither, so it can refuse a
    rebuild on a configured record where no graph is cut over yet. Too broad
    refuses a rebuild that would have been fine (one flag); too narrow destroys
-   work with no error. A
-   MALFORMED DSN is not refused — nothing can allocate there, so the append
-   stays and the journal IS the source.
+   work with no error. ⛔ A MALFORMED DSN IN THE SHELL IS NOT AN ANSWER: it means
+   the shell could not say, so the deployment's `.env` is asked too, and only
+   "no record in either" allows a rebuild (the earlier rule — "nothing can
+   allocate there, so the journal IS the source" — was true only while the gate
+   was process-env-only).
    ⚠️ **Reachability, stated so the gate is not read as covering more than it
    does:** on a HOSTED lane `tortoise rebuild` is the only wipe+replay door. Two
    more call `rebuild_all(..., confirm_destructive=True)` — the
@@ -199,9 +201,12 @@ cutover by the same window. The measured cost above is the alternative.
    claiming the journal could not have fed the record — and (ii) made
    `record-reconcile --journal` unable to report clean on a healthy pair, which is
    the arming step `journal_ready` tells an operator to run. So the reading now
-   carries `journal_is_export` (the same two facts `record_owns_position` asks:
-   armed + an `active` cursor row), and that shape answers `unprojected == 0`
-   instead. ⚠️ **The reading asks the RECORD, never the reading process's
+   carries `journal_is_export` — the ROW ALONE, in mode `active`, decides, and
+   the mode is what separates "export" from "still an input" — and that shape
+   answers `unprojected == 0` instead. ⚠️ `record_owns_position` additionally
+   requires the deployment to be ARMED; that difference is deliberate (#14002
+   cycle 3 P2): a reader does not carry a writer's flag, and a reading keyed on
+   it reported a healthy cut-over pair as an impossible journal. ⚠️ **The reading asks the RECORD, never the reading process's
    `TORTOISE_RECORD_ALLOCATE`** (review cycle 3, P2): the row is the fact
    `ALLOCATION_SQL` keys on, while the flag is a WRITER switch an operator's
    shell does not carry — keying on it made `record-reconcile --journal` (the

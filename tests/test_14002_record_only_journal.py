@@ -1046,10 +1046,24 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     # The escape is the ASSERTION, not a bypass: with it, the rebuild proceeds.
     assert _journal_rebuild_refusal(journal_is_complete=True) is None
 
-    # A MALFORMED DSN is not a usable record: nothing can allocate, the append
-    # stays, and the journal is complete — so the rebuild is allowed.
+    # ⛔ A MALFORMED SHELL DSN IS NOT AN ANSWER (#14002 review cycle 5/6, P2).
+    # `record_dsn()` RAISING means the shell could not say — and the deployment's
+    # `.env` may still name a usable record, so the question has to be asked
+    # there. MEASURED: with this arm reverted to `return None`, the whole file
+    # stayed green, so the fail-open the commit says it closed could come back
+    # silently while this leg blessed it. Both halves are asserted.
     monkeypatch.setenv(rw.RECORD_DSN_ENV, "not-a-dsn")
-    assert _journal_rebuild_refusal() is None
+    monkeypatch.setattr(cli, "_deployment_names_a_record", lambda: True)
+    assert cli._journal_rebuild_refusal() is not None, (
+        "a MALFORMED shell DSN was read as 'no record' without asking the "
+        "deployment — the destructive door fails open on the one input an "
+        "operator shell is least reliable on (`TORTOISE_DB_URI` habits, a "
+        "hostless URI), and a cut-over graph would be rebuilt from a frozen "
+        "journal")
+    # …and with no record in the deployment's `.env` either, the journal IS the
+    # only source, so the rebuild is allowed.
+    monkeypatch.setattr(cli, "_deployment_names_a_record", lambda: False)
+    assert cli._journal_rebuild_refusal() is None
 
     # And the CLI turns it into the established `Refused:` / exit-1 contract
     # rather than a traceback or a silent success.
