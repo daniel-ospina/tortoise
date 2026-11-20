@@ -839,8 +839,14 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     #    `[<]a>` is `_BRACKET` whole, or a bare `[` plus the tag `<]a>` — and `match` commits to
     #    the first. MEASURED: `origin/main` graded `[<]a>`, `[<]1>` and `<[>a]`, and this head
     #    returns `[]`, because the committed parse stalls 2 units in on the word character and the
-    #    closure's partition is never tried. THREE admissions, all of the shape "a bracketed run
-    #    whose interior CONTAINS a tag's `<`"; none occurs in the live tree (all 855 docs
+    #    closure's partition is never tried. THREE admissions, and ⛔ THE NESTING RUNS IN EITHER
+    #    DIRECTION (#13921 review, final round, finding 2, MEASURED — an earlier form of this
+    #    sentence called all three "a bracketed run whose interior contains a tag's `<`", which
+    #    describes only two of them): `[<]a>` and `[<]1>` are `_BRACKET` whole (`[<]`, abandoned
+    #    partition = a bare `[` plus the tag `<]a>`), while `<[>a]` is `_TAG` whole (`<[>`, abandoned
+    #    partition = a bare `<` plus the bracket `[>a]`) — the mirror. `_unit_pat.match` commits to
+    #    whichever unit starts first, so the class is "a `[`/`<` run whose interior holds the OTHER
+    #    pair's opener", not one direction of it; none occurs in the live tree (all 855 docs
     #    identical to `origin/main`, both subjects), which is why this is DECLARED as a residual
     #    and pinned by its own witness rather than left to drift. A candidate that is not one of
     #    those positions is not this occurrence's verb. That enumeration is also what replaces the blank-line `break` this
@@ -1935,14 +1941,16 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # ⛔ AND THE WALK'S FIRST-MATCH COMMITMENT HAS THREE DECLARED LOSSES, PINNED HERE (#13921
     # review, final round, finding 2, MEASURED). `_unit_pat.match` commits to the FIRST parse of a
     # position, while a `*`-closure can backtrack into another partition of the same characters; so
-    # a bracketed run whose interior CONTAINS a tag's `<` is taken as `_BRACKET` whole, stalls on
-    # the word character behind it, and the closure's partition (a bare `[` plus the tag) is never
-    # tried. `origin/main` graded all three of these and this head returns `[]`. They are DECLARED
-    # as a residual, not fixed — the fix is to enumerate every partition at `[`/`<`, which is a
-    # larger change than this PR carries — and they are pinned so the behaviour cannot drift
-    # silently. None occurs in the live tree: all 855 `docs/**/*.md`, both subjects, are identical
-    # to `origin/main`. If a future document reds one of these rows, that is the signal to fix the
-    # walk rather than to widen this list.
+    # a `[`/`<` run whose interior holds the OTHER pair's opener is taken as ONE unit whole, stalls
+    # on the word character behind it, and the closure's partition is never tried. ⛔ THE NESTING
+    # RUNS IN EITHER DIRECTION: `[<]a>` and `[<]1>` are `_BRACKET` whole (`[<]`), while `<[>a]` is
+    # `_TAG` whole (`<[>`) — the mirror, not the same shape (MEASURED, correcting an earlier form
+    # of this comment that named only the bracketed direction). `origin/main` graded all three of
+    # these and this head returns `[]`. They are DECLARED as a residual, not fixed — the fix is to
+    # enumerate every partition at `[`/`<`, which is a larger change than this PR carries — and
+    # they are pinned so the behaviour cannot drift silently. None occurs in the live tree: all
+    # 855 `docs/**/*.md`, both subjects, are identical to `origin/main`. If a future document reds
+    # one of these rows, that is the signal to fix the walk rather than to widen this list.
     for _lost in ("[<]a>", "[<]1>", "<[>a]"):
         assert _typed_answers_to_tortoise_cmd(
             f"`` `-- tortoise/` {_lost} prints TWO paths ``", "-- tortoise/") == [], (
@@ -2046,7 +2054,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # claim parses only if `_BRACKET` is consumed whole. ⛔ THIS ROW IS NOT WHAT A `_BRACKET`
     # REMOVAL REDS FIRST (#13921 review, finding 5, MEASURED): deleting `_BRACKET` from
     # `_GAP_UNIT` reds the `[^note]` row of the separator-unit block ~190 lines above (it asserts
-    # `[]` and is the first bracket row in file order), and this row is masked behind it. The
+    # a GRADED answer, so the mutant's `[]` is what reds it — ⛔ not "it asserts `[]`", which an
+    # earlier form of this comment said and which inverts which side fails; #13921 review, last
+    # round, finding 3), and this row is masked behind it. The
     # earlier form of this comment claimed "Dropping it reds this row and nothing else
     # (measured)" — a measurement claim the suite does not demonstrate, which is the same
     # over-stated-attribution class as the `[is]` row above. The ROW is still worth keeping: it
@@ -2071,11 +2081,14 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the gap crossed a BLANK line — a paragraph break is the boundary, and crossing it "
         "joins two unrelated clauses (over-block side)")
     # …and a no-verb run is BOUNDED, which is all this row claims — it is NOT LINEAR, and
-    # `_GAP_UNIT`'s block records the five points that say so: each start is scanned TWICE (the
-    # closing unit, then its lookahead), so the run is ~n^2 (#13921 review, finding 3: this line
-    # said LINEAR 1,300 lines from a paragraph that says NOT LINEAR). `7557a52cf5` measured the
-    # earlier ambiguous form as EXPONENTIAL; bounded here so a regression reds instead of hanging,
-    # 28 spaces being the size that took 15.8 s there.
+    # `_GAP_UNIT`'s block records the five points that say so: at every `[` the closing unit scans
+    # to the end and fails, and a run of `[` is ~n such starts, so the run is ~n^2 (#13921 review,
+    # finding 3: this line said LINEAR 1,300 lines from a paragraph that says NOT LINEAR). ⛔ IT IS
+    # ONE SCAN PER START, NOT TWO: the second was `_OPEN_BRACKET`'s lookahead and it is gone — an
+    # inert construct, deleted, which nearly HALVED this cost (MEASURED `[` x 3200: lookahead
+    # 0.8179 s, bare `[` 0.4026 s). `7557a52cf5` measured the earlier ambiguous form as
+    # EXPONENTIAL; bounded here so a regression reds instead of hanging, 28 spaces being the size
+    # that took 15.8 s there.
     import time as _time
     _t0 = _time.monotonic()
     _typed_answers_to_tortoise_cmd("`-- tortoise/`" + " " * 28 + "no verb here", "-- tortoise/")
