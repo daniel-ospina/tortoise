@@ -3606,10 +3606,15 @@ def _declared_gap_paragraph() -> str:
     Same reader shape as `_reserved_members_paragraph` — from the paragraph's
     opening until the next block separator (a bare `#`) — so it follows the file
     rather than a line range that drifts under every edit above it. The heading is
-    matched on `⚠️ ONE DECLARED GAP` rather than on `DECLARED GAP` alone: the
+    matched as `⚠️ <COUNT> DECLARED GAP(S)` at the start of the stripped line —
+    `re.match` is start-anchored, so a prose line that merely CONTAINS "ONE
+    DECLARED GAP" still does not anchor — rather than on `DECLARED GAP` alone: the
     RESERVED paragraph above refers to "a DECLARED GAP", so the bare phrase would
     anchor this reader INSIDE the contract paragraph and silently read the wrong
-    block.
+    block. ⛔ The COUNT is part of the anchor, not the literal `ONE`: a correctly
+    declared second gap heads its paragraph `⚠️ TWO DECLARED GAPS`, and pinning
+    `ONE` made that artifact red while demanding a gap it had already declared
+    (#13814 review rounds 10-11).
 
     Returns `""` when the paragraph is ABSENT, which is the correct and expected
     end state once every `fly-only:` member carries its recorded ruling: the

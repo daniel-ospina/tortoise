@@ -1370,8 +1370,12 @@ def main() -> int:
                     "or declare its real source)"
                 )
         elif kind == "fly-only":
-            # A decision-backed exception, NOT a way to spell `unmanaged` — see
+            # A `fly-only:` exception, NOT a way to spell `unmanaged` — see
             # read_manifest: reaching here proves the ref named an issue number.
+            # ⛔ Not "decision-backed": the checker is SHAPE ONLY and hermetic and
+            # never reads the issue, and the shipped manifest declares one member
+            # whose ruling is still a DECLARED GAP (`#13674`), so this layer must not
+            # assert the decision half in its own words (#13814 review rounds 8, 11).
             # The exception is only true while the name really is a live,
             # deliberately unversioned Fly secret, so every half is checked:
             # a name that is gone (nothing to except), a name the deploy assigns
@@ -1382,7 +1386,7 @@ def main() -> int:
             if name not in fly_names:
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared fly-only:{gh_name} but "
-                    "exists neither on Fly nor in the deploy payload; a decision-backed "
+                    "exists neither on Fly nor in the deploy payload; a `fly-only:` "
                     "exception is for a REAL out-of-band Fly secret (remove the entry, "
                     "or declare its real source)"
                 )
