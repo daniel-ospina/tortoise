@@ -118,10 +118,28 @@ STRUCTURAL_RELS = {"performs", "produces", "uses", "authoredBy", "ownedBy",
                    "participatesIn", "hasPart", "related", "dependsOn",
                    "references", "wasDerivedFrom", "aboutObject", "aboutSubject",
                    "aboutEvent", "aboutDocument", "aboutSource"}
-OP_TYPES = {"IMPL", "NAND", "coherence"}
-SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
-             "mutuallyExclusive", "hasPart", "causes", "produces", "dependsOn",
-             "transacts", "related", "ownedBy", "managedBy"}
+#: ⛔ TWO MORE TRANSCRIPTIONS THAT GATE A WRITE, READ FROM THE SHIPPED SOURCE.
+#: `SEMANTICS` is the ONLY gate between a Layer-2 typo and a filed operator: the
+#: door WARN-NOT-BLOCKS an out-of-vocabulary `semantics` (`undeclared_relation`,
+#: #7852) and `--verify` cannot read the word back, so a drifted transcription
+#: files an operator whose meaning is neither the judgement's nor recoverable
+#: (measured: one label typo'd to `suports` passed `validate()`, was sent, and
+#: the run printed `all nodes and edges written` with rc 0). `OP_TYPES` gates the
+#: mechanism. Both now follow the shipped vocabularies; the literals are the
+#: standalone-box fallback, the same shape `DIRECTIONS` uses (#13913 round 18).
+_FALLBACK_OP_TYPES = {"IMPL", "NAND", "coherence"}
+_FALLBACK_SEMANTICS = {"addresses", "supports", "refutes", "mutuallySupportive",
+                       "mutuallyExclusive", "hasPart", "causes", "produces",
+                       "dependsOn", "transacts", "related", "ownedBy", "managedBy"}
+try:
+    from tortoise.ep import MECHANISM_REL_TYPES as _SHIPPED_OP_TYPES
+    from tortoise.pack_registry import SEMANTICS_VALUES as _SHIPPED_SEMANTICS
+
+    OP_TYPES = set(_SHIPPED_OP_TYPES)
+    SEMANTICS = set(_SHIPPED_SEMANTICS)
+except Exception:  # standalone box: the literals, never a silent pass
+    OP_TYPES = set(_FALLBACK_OP_TYPES)
+    SEMANTICS = set(_FALLBACK_SEMANTICS)
 #: ⛔ READ THE DIRECTION VOCABULARY FROM THE SHIPPED SOURCE, never transcribe
 #: it. `validate()` refuses a direction this set does not hold, so a drifted
 #: transcription is a validator that refuses a surface-LEGAL edge — the same
