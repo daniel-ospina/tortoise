@@ -1904,6 +1904,27 @@ def _census_membership_verdicts(doc: str) -> list[str]:
 
 _TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3,6})")
 
+#: ⛔ A PROXIMITY WINDOW IS NOT A BINDING (#13802 review, round 12, P1 — MEASURED: with the
+#: window alone, `Per `#10215`, at this head the `tortoise/` set is empty.` was GREEN, and so
+#: was the same claim after any `#ref` within 80 characters — 21.5% of the guarded corpus
+#: sits inside that window). The head must be the head the claim is ABOUT, so the allowance
+#: accepts only two BOUND constructions inside ONE clause:
+#:
+#:   1. `at` / `on` / `in` / `as of` + a sha        -> "at `2584a86ec1` the command printed …"
+#:   2. a `#PR` (or sha) followed by an EVENT verb  -> "`#12943` adds `tortoise/cache_leg.py`"
+#:
+#: A copula is deliberately NOT an event verb: `#10215` shipped that; at this head …` is a
+#: claim about THIS head introduced by an unrelated citation, and round 12's counterexamples
+#: are all of that shape.
+_TORTOISE_HEAD_BINDING_AT = re.compile(r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?")
+_TORTOISE_HEAD_BINDING = re.compile(
+    r"(?:(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?"
+    r"|`?#\d{3,6}`?['’]?s?\s+(?:`?[0-9a-f]{7,40}`?\s+)?"
+    r"|`?[0-9a-f]{7,40}`?\s+"
+    r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
+    r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)")
+
 
 class _HeadBoundBan:
     """The direction ban, minus HISTORICAL mentions.
@@ -1915,6 +1936,16 @@ class _HeadBoundBan:
     the match's preceding window (#13802 review, P2 — measured: three named-head emptiness
     sentences were refused by the unanchored verb-before-path alternative, one of them
     already shipped in `docs/evidence/7949-capstone/README.md`).
+
+    ⛔ AND THE WINDOW ALONE WAS NOT ENOUGH (#13802 review, round 12, P1 — MEASURED): with a
+    bare 80-char proximity test, `Per `#10215`, at this head the `tortoise/` set is empty.`
+    was GREEN, and so was the same claim behind ANY `#ref` or sha within 80 characters —
+    21.5% of the guarded corpus sits inside that window, so the allowance covered a fifth of
+    the text it was supposed to be checking. The name must now BIND: `at`/`on`/`in` + a sha,
+    a `#PR` followed by an event verb (optionally through its `'s <sha>`), or a bare sha
+    followed by an event verb — read on the clause, because a clause boundary is exactly what
+    separates an unrelated citation from a claim about THIS head. A copula is not an event
+    verb: that is what the round-12 counterexamples all turn on.
     """
 
     __slots__ = ("_rx",)
@@ -1923,7 +1954,19 @@ class _HeadBoundBan:
         self._rx = rx
 
     def _claimed(self, m, text):
-        return not _TORTOISE_NAMED_HEAD.search(text[max(0, m.start() - 80):m.start()])
+        """Is this match about the head it names? Bound construction inside one clause."""
+        _window = text[max(0, m.start() - 90):m.end()]
+        # `at <sha>` binds across a comma (`at `2584a86ec1`, the `tortoise/` set was empty`),
+        # so it is read on the window; the attribution form is read on the clause, because
+        # `Per #10215, at this head …` cites a PR and then claims something about THIS head —
+        # exactly the false PASS round 12 measured.
+        if _TORTOISE_HEAD_BINDING_AT.search(_window):
+            return False
+        _seg = _window
+        _cut = max((_seg.rfind(ch) for ch in ".;:!?\n,"), default=-1)
+        if _cut >= 0:
+            _seg = _seg[_cut + 1:]
+        return not _TORTOISE_HEAD_BINDING.search(_seg)
 
     def search(self, text):
         for m in self._rx.finditer(text):
@@ -1974,7 +2017,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"(?:prints?|->|→|returns?|reports?|lists?|yields|carries|gives|shows?|names?|"
     r"comes? back|resolves? to|answers? with|"
     r"includes?|contains?|outputs?|has|holds?|answers?|resolves?|reveals?|reads?|touches?|"
-    r"is|[=:])\s*`?"
+    r"is|are|was|were|remains?|stays?|[=:])\s*`?"
     # ⛔ AND A PREPOSITION BETWEEN THE VERB AND THE ANSWER (`comes back WITH an empty
     # list`, `resolves to ZERO`), measured GREEN before this line (#13802 review, round 7)
     r"(?:(?:with|to|as|into|out|of)\s+)?"
@@ -1986,10 +2029,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # in the same sense the verb class was — and on the `set`/deictic anchor this ban is
     # the only layer at all.
     r"(?:(?:just|only|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|"
-    r"no\s+fewer\s+than|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both)"
-    r"\s+)?"
+    r"no\s+fewer\s+than|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both|"
+    # ⛔ AND THE DETECTOR'S OWN MODIFIER STRIP LIST (#13802 review, round 12, P1 — MEASURED:
+    # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
+    # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
+    r"now|still|actually|also)\s+)?"
     r"(?:,\s*[^,.;\n]{1,30},)?\s*"
-    r"(?:(?:NOT|not)\s+)?"
+    # ⛔ AND THE VERB PARTICLE `back` (`gives back nothing`) (#13802 review, round 12, P2)
+    r"(?:back\s+)?"
+    # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
+    # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
+    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
@@ -2180,6 +2230,24 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "the `tortoise/` set holds a single record",
         "the `tortoise/` set prints a single item",
         "the `tortoise/` set prints a single row",
+        # ⛔ AND THE DETECTOR'S MODIFIER WORDS, THE PARTICLE, `no longer`, AND THE NO-DIFFERENCE
+        # VERBS ON THE SET ANCHOR (#13802 review, round 12 — 1260 of 1536 verb×modifier×answer
+        # cells were detector-only, and the set/deictic anchor saw NONE of them because the
+        # detector needs a command token)
+        "the `tortoise/` set prints now nothing",
+        "the `tortoise/` set is still empty",
+        "`-- tortoise/` gives back nothing",
+        "the `tortoise/` set is no longer empty",
+        "the `tortoise/` set remains unchanged",
+        "the `tortoise/` set stays untouched",
+        "the `tortoise/` side remains byte-identical to `main`",
+        # ⛔ AND THE THREE SENTENCES THE PROXIMITY WINDOW LET THROUGH (#13802 review, round 12,
+        # P1 — a head token anywhere within 80 chars neutralised the ban; 21.5% of the guarded
+        # corpus sits inside that window). Each is a claim about THIS head introduced by an
+        # unrelated citation.
+        "Per `#10215`, at this head the `tortoise/` set is empty.",
+        "`#10215` shipped that; at this head the `tortoise/` set prints NOTHING.",
+        "refs #13572 and #13746: the `tortoise/` set is empty at this head.",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
         # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
         # `_member`/`_empty` classes; on the `set`/deictic anchors this ban is the only
