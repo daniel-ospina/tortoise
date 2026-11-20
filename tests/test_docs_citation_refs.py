@@ -3828,13 +3828,26 @@ def _d5_split_top_level(body: str, sep: str) -> list[str] | None:
 
 
 def _d5_class_members(char_class: str) -> set[str] | None:
-    """The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
+    r"""The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
 
     A negated class, a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members) and
-    an incomplete escape are all answered `None` rather than interpreted. ⛔ A BACKSLASH IS NOT AN
-    ESCAPE IN A POSIX BRACKET EXPRESSION (#13995 review round 12, P2 — MEASURED): `[\-+]` is the
-    descending range `\`–`+` (`grep: Invalid range end`, rc 2), which this helper used to read as
-    the members `{-, +}` because it consumed `\-` as an escaped hyphen.
+    an incomplete escape are all answered `None` rather than interpreted.
+
+    ⛔ `[\-+]` IS REFUSED AS A DESCENDING RANGE, AND THAT IS NOT THE CLAIM "backslash is not an
+    escape here" (#13995 review round 12, P2; stated precisely by #14026 review, P2 — MEASURED).
+    `[\-+]` is the range `\`–`+` (`grep: Invalid range end`, rc 2), and this helper used to read it
+    as the members `{-, +}` by consuming `\-` as an escaped hyphen.
+
+    ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
+    over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
+    inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` where
+    this class counts `2`, while the escape model answers `{+,-}` for it — i.e. it grades a
+    SUPERSET as the class. That over-acceptance is the DECLARED superset written up at
+    `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
+    impossible diff line (no line of a unified diff is a bare `\`, because every diff line carries
+    a `+`/`-`/space prefix). Removing the machinery would be stricter and would reverse a landed
+    decision, so it is a reopen rather than a tidy-up — which is why this paragraph states what
+    the CODE does and not what POSIX says.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
@@ -3868,12 +3881,23 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     r"""Does `expr` count exactly the lines that are one `+` or one `-`?
 
     ⛔ A BOUNDED EQUIVALENCE, NOT A REGEX-EQUIVALENCE DECISION (#13995 review, P2 — MEASURED).
-    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so
-    `^[+\\-]$` and `^(\\+|-)$` — the same class, measured `2` on the 4-line probe — were read as
-    expressions of some OTHER class. Two consequences, both measured: a second blank-class
-    prescription spelled either way left the arm GREEN (a false PASS), and putting one in place
+    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so `^(\+|-)$` — the
+    same class as the row's own `^[+-]$`, measured `2` on the 4-line probe — was read as an
+    expression of some OTHER class. Two consequences, both measured: a second blank-class
+    prescription spelled `^(\+|-)$` left the arm GREEN (a false PASS), and putting one in place
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
+
+    ⛔ AND THIS SENTENCE USED TO NAME A SECOND SPELLING BESIDE IT, ON A PREMISE THAT IS FALSE
+    (#14026 review, P2 — MEASURED). It read "`^[+\-]$` and `^(\+|-)$` — the same class, measured
+    `2` on the 4-line probe — were read as expressions of some OTHER class". Only `^(\+|-)$` is
+    this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members are `{+,-,\}`
+    and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED SUPERSET
+    documented in the NEXT paragraph. They agree at `2` only on the 4-line probe, which carries no
+    `\`. So the retired list REFUSING `^[+\-]$` was the correct answer rather than a defect, and
+    the sentence used a true statement about one spelling to carry a false one about the other —
+    contradicting this docstring's own next paragraph, in the paragraph that justifies the
+    widening.
 
     Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
     `^[+\-]$`, and the alternation forms `^(\+|-)$` / `^(-|\+)$` (PLAIN groups, each counting `2`
