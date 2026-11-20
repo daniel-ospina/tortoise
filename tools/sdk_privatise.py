@@ -333,8 +333,9 @@ SWEEP_NAMES = 66
 #: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
 #: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
 #: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
-#: untyped receivers, add one different shape -> net -1, absorbed). Read the rows `--repin` prints,
-#: not the direction of the delta (#14003 review, round 3, P3 / #14030).
+#: untyped receivers, add one different shape -> net -1, absorbed). Read the ROWS from `--report`'s
+#: dump against `SWEEP_BASE` (`--repin` prints only the tuple), not the direction of the delta
+#: (#14003 review, round 3, P3 / #14030).
 #: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
 #: once the file moves, and this block carried exactly such a stale address — nothing in the tree
 #: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
