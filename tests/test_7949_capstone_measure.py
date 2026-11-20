@@ -16773,8 +16773,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ THE ROW'S OWN COUNT IS NOW TYPED (#13900 review, P2-1). The row states how
     # many `:N` tokens share its line, and until this assert NOTHING read that figure — which is
     # why `~50` survived four sibling corrections and disagreed with the `262` this file stated
-    # at `f16ef087d1`
-    # states elsewhere. It is re-MEASURED here rather than typed as a constant, so the row cannot
+    # at `f16ef087d1`; the row itself is re-MEASURED here rather than typed as a constant, so it
+    # cannot
     # drift from the line it describes: the sentence is the claim, the line is its subject.
     _stated_count = re.search(r"carrying (\d+) numbers", text)
     assert _stated_count is not None, (
@@ -16787,14 +16787,17 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         f"carries {_measured_count} — the same sentence family stated two different figures, "
         "which is the failure the D5 row exists to prevent (#13900 review, P2-1)")
     # ⛔ AND THE FIGURES THIS FILE STATES IN ITS OWN COMMENTS GET A READER TOO (#13802 review,
-    # round 27, P2 — MEASURED: four comments sentence-initialised the same count (`6808`,
-    # `16489`, `16691`, `16720`) and NOTHING read them, so a mutated figure (`269` -> `263` in
-    # the docstring) left this arm GREEN — a typed number in the file whose thesis is "a typed
-    # number rots", with the fix's own sentence asserting "the arm below RE-MEASURES it" while no
-    # such arm existed. The derivation is the same one the row is graded by: the number is read
-    # OUT of this file and compared with the live line, so the four sentences cannot drift from
-    # the row they describe. Any NEW `<n> cite-shaped` sentence is graded too, which is why the
-    # number is bound to the phrase rather than to a line number.
+    # round 27, P2 — MEASURED: four comments sentence-initialised the same count and NOTHING read
+    # them, so a mutated figure (`269` -> `263` in the docstring) left this arm GREEN — a typed
+    # number in the file whose thesis is "a typed number rots", with the fix's own sentence
+    # asserting "the arm below RE-MEASURES it" while no such arm existed. The derivation is the
+    # same one the row is graded by: the number is read OUT of this file and compared with the
+    # live line, so the four `<n> cite-shaped` sentences cannot drift from the row they describe.
+    # Any NEW `<n> cite-shaped` sentence is graded too, which is why the number is bound to the
+    # PHRASE. ⛔ AND THE SENTENCES ARE NAMED BY THEIR PHRASE, NOT BY `file:line` — an earlier
+    # draft cited the four line numbers and the same commit's own insertions staled two of them
+    # (#13802 review, round 28, P3), which is this file's recurring defect committed in the act
+    # of fixing it.
     _typed_comment_counts = {
         int(n) for line in Path(__file__).read_text(encoding="utf-8").splitlines()
         for n in re.findall(r"(\d+)\s+cite-shaped", line)}
