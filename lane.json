@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-13123-evictor-1795212127-p714805-a7d9982c",
+  "_sha": "f74f10467a385139c918ecf537719edc2b87a2f3",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/13123-evictor.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/13123-evictor-snapshot-invalidate"
+    },
+    {
+      "kind": "sha",
+      "value": "0f011ee2b7e55c149eb009bf9194e42a423d267a"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/13123-evictor"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 2362,
+  "ended_at": 1795214489,
+  "exit_code": 0,
+  "heartbeat_at": 1795214489,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13123-evictor-1795212127-p714805-a7d9982c",
+  "lease_until": 1795251089,
+  "pid": 714805,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795212127,
+  "state": "DONE",
+  "tag": "13123-evictor",
+  "worktree": "/home/cmux/tortoise/.worktrees/13123-evictor"
+}
