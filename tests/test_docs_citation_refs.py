@@ -2860,7 +2860,13 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     # the injection loop green while that description could be re-inserted into the document
     # uncaught — the measured bypass #13807 review finding 5 recorded for the membership
     # ledger, closed here the same way: pin the rows, never the count.
-    assert (
+    # ⛔ THE LEDGER IS ON THE LEFT, which is what `ruff check .` asks for: SIM300 (Yoda
+    # condition) flags a literal compared on the left of the `==`, and this assert had
+    # the five-string tuple literal there. Operand order is all that changes — the
+    # comparison, the pinned spellings and the message are the same, and swapping it
+    # back reds `agent-infra-ci / lint` here and `main-lint` on `main` (both were red
+    # on this row at `bd020ff45b`).
+    assert _FILTER_FALSE_DESCRIPTIONS == (
         "drops only lines whose first non-space character is `#`",
         "drops exactly the lines whose first non-space character is `#`",
         "a CODE line and a DOCSTRING line both survive it and would print",
@@ -2868,7 +2874,7 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "rules both out",
         "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
         "comment",
-    ) == _FILTER_FALSE_DESCRIPTIONS, (
+    ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
         "however slightly, is a ban the document can be re-inserted past. Retiring a NEW "
