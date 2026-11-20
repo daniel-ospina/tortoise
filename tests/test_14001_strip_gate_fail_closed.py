@@ -512,29 +512,6 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
-    # a mapping REBUILD whose key is unprovable, handed on rather than merged into `props`
-    ("rebuilt-mapping-handed-on", """
-    k = "embed" + "ding"
-    if not _derived_mirror_required("object"):
-        params = {**props, k: _encode(ev)}
-        _write(params)
-        return None
-    _write(props)
-"""),
-    ("rebuilt-mapping-inline", """
-    k = "embed" + "ding"
-    if not _derived_mirror_required("object"):
-        _write({**props, k: _encode(ev)})
-        return None
-    _write(props)
-"""),
-    ("rebuilt-mapping-bitor", """
-    k = "embed" + "ding"
-    if not _derived_mirror_required("object"):
-        _write(props | {k: _encode(ev)})
-        return None
-    _write(props)
-"""),
     # the MUTATOR spelling of the dynamic-namespace write (residual 3's other half)
     ("globals-mutator-rebinding", """
     global gk
@@ -604,6 +581,54 @@ def test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open(tmp_path, monke
         "the fall-through residual is CLOSED — good news, but it must not change silently: "
         "delete this pin, move the row into DEFEATED_RESOLVER_ROWS, and check the five real "
         "writers named in the tool's docstring still certify")
+
+
+#: ⛔ RESIDUAL 3 — A MAPPING THE ARM BUILDS AND HANDS ON, pinned as a known fail-open. A rebuild
+#: SITE was written and WITHDRAWN (round-9 review): the positional version certified every WRAPPED
+#: spelling while refusing two honest fixtures, so the boundary is disclosed rather than half-held.
+REBUILD_RESIDUAL_ROWS = (
+    ("handed-on", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        params = {**props, k: _encode(ev)}
+        _write(params)
+        return None
+    _write(props)
+"""),
+    ("wrapped-in-ifexp", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)} if _f() else props)
+        return None
+    _write(props)
+"""),
+    ("wrapped-in-copy", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        params = ({**props, k: _encode(ev)}).copy()
+        _write(params)
+        return None
+    _write(props)
+"""),
+)
+
+
+@pytest.mark.parametrize("case,arm", REBUILD_RESIDUAL_ROWS,
+                         ids=[row[0] for row in REBUILD_RESIDUAL_ROWS])
+def test_the_rebuild_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch, case, arm):
+    """Residual 3, measured: these arms certify AND hand the write channel the vector.
+
+    ⛔ GREEN ON A KNOWN FAIL-OPEN IS THE POINT — the tool's docstring states the boundary, and
+    this pin is what stops it changing silently. Closing it needs a mapping-VALUE analysis (every
+    expression that can evaluate to a mapping, in every position); the positional attempt is
+    recorded in the withdrawn-rule note in `_stop_arm_places_the_property`.
+    """
+    assert _oracle(arm)["lands"] is True, (
+        f"`{case}` no longer stores the vector, so it documents nothing")
+    gated, _why = _gate(tmp_path, monkeypatch, arm, f"rebuild_residual_{case.replace('-', '_')}")
+    assert gated is True, (
+        f"`{case}` is CLOSED — good news, but it must not change silently: delete this pin and "
+        "move the row into DEFEATED_RESOLVER_ROWS")
 
 
 def test_the_helper_call_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch):

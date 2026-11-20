@@ -192,7 +192,17 @@ confidence:
    Making it precise needs value flow (which local holds the placeholder on the stop path),
    which is a change of its own — and an inert enforcer that refuses every real writer is the
    worse error of the two.
-3. **NOT A FAIL-OPEN, stated so nobody hunts for one:** a name rebound behind a dynamic
+3. **A MAPPING THE ARM BUILDS AND HANDS ON** (`params = {**props, k: vec}; _write(params)`,
+   `_write({**props, k: vec} if f else props)`, or a rebuild behind `.copy()`). The store lands
+   in the mapping the write channel
+   receives, so no `Subscript` target exists and the recogniser abstains. ⛔ A rebuild SITE was
+   written, measured and WITHDRAWN (round-9 review): it must resolve transparent wrappers first,
+   and the positional version certified every wrapped spelling while refusing two honest
+   fixtures — the same "partial rule claims coverage and leaks" failure this issue is about.
+   Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
+   mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
+   another positional arm.
+4. **NOT A FAIL-OPEN, stated so nobody hunts for one:** a name rebound behind a dynamic
    namespace write. `globals()[…] = …` / `locals()[…] = …` / `vars()[…] = …` poisons EVERY name
    the scope declares `global`/`nonlocal` (`_dynamic_namespace_write`), and a name with no such
    declaration is either unproven (absent from the binding map ⇒ refuse) or out of reach (a
@@ -5734,16 +5744,13 @@ def _stop_arm_places_the_property(statements, scope) -> tuple[bool, str]:
                     problem = _unproven_target_keys(target, node.value, bindings, handled)
                     if problem:
                         break
-                # ⛔ AND A REBUILT MAPPING IS A KEY-BEARING SITE (`#14001`, measured by the
-                # round-8 review): `params = {**props, k: _encode(ev)}; _write(params)` places
-                # the vector in the mapping it hands on, and neither a `Subscript` target nor
-                # stage 1's recogniser sees it when `k` is unprovable. The REBUILD shapes
-                # (`{**…}`, a `|` merge, a multi-operand constructor) are asked in PROOF
-                # polarity; a plain literal, or a one-operand `dict(ev)` COPY, stays a mention.
-                if not problem and _is_mapping_rebuild(node.value):
-                    problem = _keys_reason(
-                        _stop_arm_pairs_key_values(node.value, bindings),
-                        f"a rebuilt mapping ({_render(node.value)})")
+                # ⛔ A MAPPING THE ARM **BUILDS** AND HANDS ON IS NOT PROVED HERE — see
+                # residual 4 in the module docstring. A positional rebuild check was written
+                # and withdrawn: it refused two honest fixtures and, measured by the round-9
+                # review, still certified every WRAPPED rebuild (`if/else`, `.copy()`, a
+                # walrus, a `*`-splat, a comprehension, a rebuild nested under the Cypher
+                # `$props` key) — a partial rule that claims coverage and leaks is worse than a
+                # disclosed boundary.
             elif isinstance(node, ast.AugAssign):
                 # ⛔ A `|=` MERGE IS A KEY-BEARING SITE WHATEVER ITS OPERAND SPELLING
                 # (`#14001`): the mapping, the pairs sequence, the comprehension and the
@@ -5764,56 +5771,11 @@ def _stop_arm_places_the_property(statements, scope) -> tuple[bool, str]:
                 # a target the assignment pairing did not reach — a `for`/`with` binding, a
                 # comprehension target, or an `|=` on a subscript: unproven.
                 problem = _unproven_key_slice(node.slice, bindings, "a subscript store")
-            elif isinstance(node, ast.Call):
-                if _key_bearing_call(node):
-                    problem = _stop_arm_mutator_key_values(node, bindings)
-                if not problem:
-                    # ⛔ AND A REBUILT MAPPING HANDED TO A CALLEE IS THE SAME STORE (`#14001`,
-                    # round-8 review): `_write({**props, k: _encode(ev)})` builds the mapping the
-                    # write channel receives, so it places the vector whether or not `props`
-                    # itself is mutated. The rebuild shapes are asked in PROOF polarity; a plain
-                    # literal (`_write({"SET n += $props": props})`) is a mention.
-                    for argument in list(node.args) + [keyword.value
-                                                       for keyword in node.keywords]:
-                        if _is_mapping_rebuild(argument):
-                            problem = _keys_reason(
-                                _stop_arm_pairs_key_values(argument, bindings),
-                                f"a rebuilt mapping handed to `{_callee_name(node)}(…)` "
-                                f"({_render(argument)})")
-                            if problem:
-                                break
+            elif isinstance(node, ast.Call) and _key_bearing_call(node):
+                problem = _stop_arm_mutator_key_values(node, bindings)
             if problem:
                 return True, problem
     return False, "the stop arm places no key this gate cannot rule out"
-
-
-def _is_mapping_rebuild(value) -> bool:
-    """Is this expression a mapping MERGE/REBUILD rather than a plain literal or a mention?
-
-    ⛔ THE REBUILD IS THE STORE (`#14001`, measured by the round-8 review): the writer hands a
-    NEW mapping to its write channel, so `{**props, k: vec}` places the vector even though no
-    `Subscript` target exists and `props` itself is never mutated. A plain dict literal handed
-    to a callee stays a MENTION (`_audit({"embedding": props.get(…)})`), which is why the filter
-    is the merge shapes and not "any Dict".
-    """
-    import ast
-
-    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
-        return True
-    if isinstance(value, ast.Dict):
-        return any(key is None for key in value.keys)
-    if isinstance(value, ast.Call):
-        name = _callee_name(value)
-        if name == "fromkeys":
-            return True
-        if name in set(_MAPPING_CONSTRUCTORS):
-            # ⛔ A ONE-OPERAND CONSTRUCTOR IS A **COPY**, NOT A MERGE (`dict(ev)`,
-            # `dict(_props_base)` — both used by real write-stops, measured): it adds no key of
-            # its own. Only extra operands or a `**` operand make it a key-bearing rebuild.
-            return (len(value.args) + len(value.keywords) > 1
-                    or any(keyword.arg is None for keyword in value.keywords))
-        return False
-    return False
 
 
 def _unproven_target_keys(target, value, bindings, handled: set[int]) -> str | None:

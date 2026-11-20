@@ -9495,6 +9495,24 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ A `{**<name>}` MERGE HANDED TO THE WRITE CHANNEL stays an honest control: the
+        # mapping is BUILT in the arm, and the arm's own docstring (residual 4) records that
+        # this channel is NOT proved — a withdrawn positional rule refuses these and leaks
+        # everywhere it does not look.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
+        return None
+    _write(props)
+""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9835,25 +9853,6 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(_merged[0])
-        return None
-    _write(props)
-""",
-        # ⛔ AND A `{**<name>}` MERGE HANDED TO THE WRITE CHANNEL (`#14001`, round-8
-        # review): the mapping the write receives is BUILT in the arm, so an unreadable
-        # operand's keys are unproven — `extra = {"embedding": vec}` would place the
-        # vector through `{**props, **extra}`. The one-literal-key twin is caught by the
-        # same rule because its `**props` operand is a Name this walk cannot read.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, **extra})
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, "embedding_model": _m()})
         return None
     _write(props)
 """,
