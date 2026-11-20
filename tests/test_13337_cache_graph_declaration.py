@@ -483,11 +483,40 @@ def test_the_DERIVED_refusal_precedes_the_WIPE_it_protects(monkeypatch, capsys):
         raise AssertionError(
             "the wipe ran on an ASSUMED coordinate — the refusal must precede it")
 
+    # The verb imports its seams INSIDE the function, so patching the MODULE
+    # attributes is what it resolves. The record read and the projection open are
+    # made to SUCCEED so the run genuinely reaches the composition: without that
+    # this row would pass on a stubbed driver that fails earlier, i.e. it would
+    # assert nothing the ordering claim needs (measured — a first cut of this row
+    # was vacuous for exactly that reason). `allow_empty=True` is part of the same
+    # discipline: the composition is preceded by the EMPTY-SOURCE refusal too, so
+    # without it the run exits 3 there and the ordering is never exercised.
+    import tortoise.cache_projection as cp
+    import tortoise.projection as proj_mod
+
+    monkeypatch.setattr(cp, "read_record_view", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        proj_mod, "FalkorProjection", type("FalkorProjection", (), {
+            "from_uri": classmethod(lambda _cls, *_a, **_k: None),
+        }))
+    # `psycopg2.connect` must SUCCEED here (the default stub raises).
+    import types
+
+    ok = types.ModuleType("psycopg2")
+
+    class _Conn:
+        def close(self):
+            return None
+
+    ok.connect = lambda *a, **k: _Conn()
+    monkeypatch.setitem(sys.modules, "psycopg2", ok)
+
     # The verb imports the seam INSIDE the function, so patching the module
     # attribute is what it resolves.
     monkeypatch.setattr(rr, "restore_from_record_view", _boom)
 
-    code = cli._cmd_record_restore(_restore_args(cache_graph=None))
+    code = cli._cmd_record_restore(_restore_args(cache_graph=None,
+                                                 allow_empty=True))
 
     assert code == 2, capsys.readouterr().err
 
