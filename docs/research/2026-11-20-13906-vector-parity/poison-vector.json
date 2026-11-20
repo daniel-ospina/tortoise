@@ -1,11 +1,20 @@
 {
   "issue": "#13906",
-  "generated_at": "2026-11-20T00:30:19Z",
+  "generated_at": "2026-11-20T00:40:12Z",
   "k": 10,
   "seed": 13906,
   "n_rows": 59,
   "label": "point",
   "poison": "vector",
+  "environment": {
+    "record": {
+      "pgvector": "0.8.7",
+      "postgres": "16.16 (Debian 16.16-1.pgdg12+1)"
+    },
+    "graph": {
+      "falkordb": "4.20.6 (module ver 42006)"
+    }
+  },
   "arms": {
     "record": {
       "driver": "pgvector HNSW, cosine"
@@ -66,6 +75,7 @@
           "ok": true,
           "max_delta": 4.665883013288408e-09,
           "worst": "r011",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -106,6 +116,7 @@
           "ok": true,
           "max_delta": 3.1155620083822555e-08,
           "worst": "r036",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": false,
@@ -180,9 +191,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 1.2572615322170577e-06,
           "worst": "r036",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -262,7 +274,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -352,6 +365,7 @@
           "ok": true,
           "max_delta": 3.1155620083822555e-08,
           "worst": "r036",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": false,
@@ -488,6 +502,7 @@
           "ok": true,
           "max_delta": 1.709240449176974e-08,
           "worst": "r006",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -528,6 +543,7 @@
           "ok": true,
           "max_delta": 8.428132602933402e-08,
           "worst": "r011",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -565,9 +581,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 4.094970130097408e-06,
           "worst": "r013",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -647,7 +664,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -735,6 +753,7 @@
           "ok": true,
           "max_delta": 8.428132602933402e-08,
           "worst": "r011",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -829,6 +848,7 @@
           "ok": true,
           "max_delta": 1.707291197305949e-08,
           "worst": "r005",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -866,9 +886,10 @@
       },
       "graph_index": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 6.849817257847945e-08,
           "worst": "r009",
+          "unmeasured": 1,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -946,9 +967,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 1.0541391624485641e-05,
           "worst": "r004",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -1028,7 +1050,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -1119,9 +1142,10 @@
       },
       "graph_index_ef200": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 6.849817257847945e-08,
           "worst": "r009",
+          "unmeasured": 1,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1272,6 +1296,7 @@
           "ok": true,
           "max_delta": 1.840409713516067e-08,
           "worst": "r003",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1309,9 +1334,10 @@
       },
       "graph_index": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 5.700938066066641e-08,
           "worst": "r039",
+          "unmeasured": 1,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1389,9 +1415,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 1.2693586178613714e-05,
           "worst": "r036",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -1471,7 +1498,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -1562,9 +1590,10 @@
       },
       "graph_index_ef200": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 5.700938066066641e-08,
           "worst": "r039",
+          "unmeasured": 1,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1715,6 +1744,7 @@
           "ok": true,
           "max_delta": 1.1012964984402629e-08,
           "worst": "r007",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1755,6 +1785,7 @@
           "ok": true,
           "max_delta": 5.06105373165866e-08,
           "worst": "r011",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -1792,9 +1823,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 3.880892116114865e-06,
           "worst": "r034",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -1874,7 +1906,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -1964,6 +1997,7 @@
           "ok": true,
           "max_delta": 5.06105373165866e-08,
           "worst": "r011",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -2062,6 +2096,7 @@
           "ok": true,
           "max_delta": 7.921950873068795e-09,
           "worst": "r037",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": true,
@@ -2102,6 +2137,7 @@
           "ok": true,
           "max_delta": 1.0558362295576273e-07,
           "worst": "r017",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": false,
@@ -2155,9 +2191,10 @@
       },
       "graph_scan_vs_euclidean": {
         "distance": {
-          "ok": true,
+          "ok": false,
           "max_delta": 9.467861978862402e-06,
           "worst": "r011",
+          "unmeasured": 1,
           "tolerance": 0.001
         },
         "count_equal": true,
@@ -2237,7 +2274,8 @@
         "distance": {
           "ok": null,
           "max_delta": null,
-          "worst": null
+          "worst": null,
+          "unmeasured": 0
         },
         "count_equal": true,
         "duplicates": [],
@@ -2327,6 +2365,7 @@
           "ok": true,
           "max_delta": 1.0558362295576273e-07,
           "worst": "r017",
+          "unmeasured": 0,
           "tolerance": 0.0001
         },
         "count_equal": false,
@@ -2430,12 +2469,12 @@
     "poison": "vector",
     "poison_status": "POISON DETECTED",
     "failures": [
-      "q_anchor: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.2572615322170577e-06)",
-      "q_tie: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=4.094970130097408e-06)",
-      "q00: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.0541391624485641e-05)",
-      "q01: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=1.2693586178613714e-05)",
-      "q02: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=3.880892116114865e-06)",
-      "q03: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=True, distance_delta=9.467861978862402e-06)"
+      "q_anchor: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.2572615322170577e-06)",
+      "q_tie: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=4.094970130097408e-06)",
+      "q00: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.0541391624485641e-05)",
+      "q01: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=1.2693586178613714e-05)",
+      "q02: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=3.880892116114865e-06)",
+      "q03: graph_scan diverged from truth_euclidean (recall=0.9, order=diverged, distance_ok=False, distance_delta=9.467861978862402e-06)"
     ],
     "informational": {
       "metric_divergence_ids_total": 76
