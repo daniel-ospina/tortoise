@@ -288,8 +288,9 @@ def test_the_edge_arm_ignores_edges_that_are_not_the_map_s(map_doc):
     Mutant: credit an edge whenever each endpoint matches ANY identity present
     (`& present`) — both foreign-edge cases go green with zero declared edges.
     """
-    foreign_nodes = [["", f"foreign-{i}", ""] for i in range(30)]
-    foreign_edges = [["IMPL", "", f"foreign-{i}", "", "", f"foreign-{i + 1}", ""]
+    foreign_nodes = [["Object", f"foreign-{i}", "", ""] for i in range(30)]
+    foreign_edges = [["IMPL", "Object", "", f"foreign-{i}", "",
+                      "Object", "", f"foreign-{i + 1}", ""]
                      for i in range(29)]
     assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes,
                          foreign_edges, []) == 1
@@ -335,9 +336,10 @@ def test_an_operator_over_a_THIRD_node_does_not_cover_a_declared_pair(map_doc):
     structural, _operators = _edge_rows(map_doc)
     op_edges = [e for e in map_doc["edges"] if "op" in e]
     first = op_edges[0]
-    rows = [[ "opX", first["op"], 0, *_row_for(map_doc, first["to"])],
-            [ "opX", first["op"], 1, *_row_for(map_doc, first["from"])],
-            [ "opX", first["op"], 1, *_row_for(map_doc, first["to"])]]
+    want = filer.direction_of(first)
+    rows = [["opX", first["op"], 0, want, *_row_for(map_doc, first["to"])],
+            ["opX", first["op"], 1, want, *_row_for(map_doc, first["from"])],
+            ["opX", first["op"], 1, want, *_row_for(map_doc, first["to"])]]
     assert filer.verdict(map_doc, _node_rows(map_doc), structural, rows) == 1
 
 
@@ -483,25 +485,21 @@ def test_validate_refuses_an_orphan(map_doc):
     assert any("no edges — an orphan node is invisible" in e for e in errs), errs
 
 
+def _row_of(ident: tuple[str, str, str]) -> list[str]:
+    """A read-back row for one (label, property, value) identity."""
+    row = [ident[0], "", "", ""]  # label + `filer.IDENTITY_PROPS` order
+    row[1 + filer.IDENTITY_PROPS.index(ident[1])] = ident[2]
+    return row
+
+
 def _row_for(doc: dict, ref: str) -> list[str]:
     """The identity row `verify()` reads back for one declared ref.
 
-    Derived from the same authority the writer uses: an Event is keyed on the
-    `name` its door writes, not on `content` (which the Event door takes as a
-    prop, not as a parameter).
+    Taken from the same authority the writer uses (`identity_by_ref`), so the row
+    carries the LABEL as its first column: a value alone cannot say what kind of
+    node carries it, and the read-back must read the kind (#13913 round 5).
     """
-    item = filer.doc_by_ref(doc, ref)
-    if any(e["ref"] == ref for e in doc["events"]):
-        prop, value = "name", filer.event_name(item)
-    elif "url" in item:
-        prop, value = "url", item["url"]
-    elif "content" in item:
-        prop, value = "content", item["content"]
-    else:
-        prop, value = "name", item["name"]
-    row = ["", "", ""]  # `filer.IDENTITY_PROPS` order
-    row[filer.IDENTITY_PROPS.index(prop)] = value
-    return row
+    return _row_of(filer.identity_by_ref(doc)[ref])
 
 
 def _node_rows(doc: dict) -> list[list[str]]:
@@ -667,10 +665,12 @@ def test_the_event_identity_is_the_name_its_door_writes(map_doc):
     Mutant: key Events on `content` — a correctly filed map then reports 14
     missing nodes and `--verify` refuses forever (#13913 review).
     """
-    names = {value for prop, value in filer.map_identities(map_doc) if prop == "name"}
+    names = {value for _label, prop, value in filer.map_identities(map_doc)
+             if prop == "name"}
     event_names = {filer.event_name(e) for e in map_doc["events"]}
     assert event_names <= names, sorted(event_names - names)
-    contents = {value for prop, value in filer.map_identities(map_doc) if prop == "content"}
+    contents = {value for _label, prop, value in filer.map_identities(map_doc)
+                if prop == "content"}
     assert not (event_names & contents)
     # The read-back's power rests on identities being DISTINCT: `ev:no-capture-caps`
     # and the `standard` Object "no capture caps" collide on an unprefixed slug, and
@@ -688,9 +688,24 @@ def test_validate_refuses_two_items_sharing_one_identity(map_doc):
     the verdict noticing.
     """
     clashing = json.loads(json.dumps(map_doc))
-    clashing["objects"][0]["name"] = filer.event_name(map_doc["events"][0])
+    clashing["objects"][1]["name"] = clashing["objects"][0]["name"]
     errs = filer.validate(clashing)
     assert any("share the identity" in e for e in errs), errs
+
+
+def test_a_name_shared_across_KINDS_is_not_a_collision(map_doc):
+    """The label is part of the identity, so an Event and an Object may share a
+    name — and the read-back must still tell them apart.
+
+    Mutant: key identity on `(property, value)` without the label — the
+    legitimate same-name pair is refused here, and the read-back in
+    `test_an_Object_cannot_certify_a_declared_Event` is satisfied by the wrong
+    kind.
+    """
+    shared = json.loads(json.dumps(map_doc))
+    shared["objects"][0]["name"] = filer.event_name(shared["events"][0])
+    errs = filer.validate(shared)
+    assert not any("share the identity" in e for e in errs), errs
 
 
 def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
@@ -698,7 +713,7 @@ def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
 
     Mutant: `return 0 if got >= expected * 0.9 else 1` over a whole-graph count.
     """
-    unrelated = [["", f"unrelated-{i}", ""] for i in range(71)]
+    unrelated = [["Object", f"unrelated-{i}", "", ""] for i in range(71)]
     assert filer.verdict(map_doc, unrelated, [], []) == 1
 
 
@@ -711,24 +726,34 @@ def test_the_readback_verdict_refuses_a_map_with_no_edges(map_doc):
     assert filer.verdict(map_doc, _node_rows(map_doc), [], []) == 1
 
 
-def _edge_rows(doc: dict) -> tuple[list[list], list[list]]:
+def _edge_rows(doc: dict,
+               idents: dict[str, tuple[str, str, str]] | None = None,
+               ) -> tuple[list[list], list[list]]:
     """The read-back rows a correctly-filed map would produce.
 
-    Structural edges: `(type, from-identity…, to-identity…)`. Operator edges: an
-    operator NODE whose typed edges reach both endpoints — grouped per operator,
-    mirroring `presence()` and the writer's own shape (`MERGE (o)-[:IMPL]->(s)`).
+    Structural edges: `(type, from-label, from-identity…, to-label, to-identity…)`.
+    Operator edges: an operator NODE whose typed edges reach both endpoints —
+    grouped per operator, mirroring `presence()` and the writer's own shape
+    (`MERGE (o)-[:IMPL]->(s)`), with the DIRECTION the write declares.
+
+    `idents` overrides the ref -> identity map, so a case can describe a graph
+    whose nodes are the WRONG KIND without hand-building 78 rows.
     """
+    idents = idents if idents is not None else filer.identity_by_ref(doc)
     structural: list[list] = []
     operators: list[list] = []
     op_index: dict[str, list] = {}
     for e in doc["edges"]:
-        a, b = _row_for(doc, e["from"]), _row_for(doc, e["to"])
+        a, b = _row_of(idents[e["from"]]), _row_of(idents[e["to"]])
         if "op" in e:
             nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
             # idx 0 IS the source, idx >= 1 ARE the targets (the fold writes one
-            # edge per slot with `idx`) — the read-back matches on the SLOT.
-            operators.append([nid[0], e["op"], 0, *a])
-            operators.append([nid[0], e["op"], 1, *b])
+            # edge per slot with `idx`) — the read-back matches on the SLOT — and
+            # the DIRECTION the write declares rides the operator node too, so a
+            # writer that drops the keyword is not certified by a right-ordered
+            # slot pair.
+            operators.append([nid[0], e["op"], 0, filer.direction_of(e), *a])
+            operators.append([nid[0], e["op"], 1, filer.direction_of(e), *b])
         else:
             structural.append([e["relation"], *a, *b])
     return structural, operators
@@ -863,3 +888,181 @@ def test_the_structural_relation_set_is_the_SHIPPED_one(map_doc):
         pytest.fail("the map has no structural edge to re-point")
     errs = filer.validate(legal)
     assert not any("not a valid structural predicate" in e for e in errs), errs
+
+
+# ── #13913 review round 5: the four fail-open arms ────────────────────────
+class _UnknownOperatorOutcome:
+    """The transport dies on the operator write: the outcome is UNKNOWN.
+
+    `create_operator` is not idempotent, so `Mcp.call` raises `_Unconfirmed`
+    rather than retrying — the caller must NOT un-record the intent (that is the
+    arm that re-issued a second operator on resume) and must NOT re-issue it.
+    """
+
+    instances: ClassVar[list] = []
+
+    def __init__(self, *_a, **_k) -> None:
+        self._n = 0
+        self.operator_calls = 0
+        self._inner = _RealMcp("not-a-real-key")
+
+        def _post(body: dict):
+            tool = (body.get("params") or {}).get("name")
+            if tool == "tortoise_create_operator":
+                self.operator_calls += 1
+                if self.operator_calls == 1:
+                    raise filer.urllib.error.URLError("connection reset")
+            self._n += 1
+            return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+        self._inner._post = _post
+        _UnknownOperatorOutcome.instances.append(self)
+
+    def initialize(self) -> None:  # pragma: no cover - no session to open
+        return None
+
+    def call(self, tool: str, args: dict, **kw) -> dict:
+        return self._inner.call(tool, args, **kw)
+
+
+def test_an_UNCONFIRMED_operator_is_neither_un_remembered_nor_re_issued(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """An UNKNOWN operator outcome may have LANDED, so the intent stays recorded
+    and the resume reports it instead of writing it again.
+
+    Measured before the fix: `except Exception: unmark(marker)` fired on the
+    `_Unconfirmed` path too, so the re-run made **one more operator call over the
+    same endpoints** and printed `all nodes and edges written` — the #10849 EP
+    double-count. Mutants: (a) `except Exception: unmark(marker)` (no distinct
+    class) → the resume re-issues; (b) un-recording removed everywhere → a
+    DEFINITE refusal is skipped on resume.
+    """
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+
+    monkeypatch.setattr(filer, "Mcp", _UnknownOperatorOutcome)
+    _UnknownOperatorOutcome.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+
+    first = _UnknownOperatorOutcome.instances[-1]
+    op_edges = len([e for e in map_doc["edges"] if "op" in e])
+    assert first.operator_calls == op_edges, (
+        f"{first.operator_calls} operator calls for {op_edges} operators — "
+        "a non-idempotent write was retried")
+    recorded = json.loads(state.read_text())
+    unconfirmed = recorded["unconfirmed"]
+    assert len(unconfirmed) == 1, unconfirmed
+    marker = unconfirmed[0]
+    assert marker in recorded["written"], "the intent was un-recorded on UNKNOWN"
+
+    # A healthy re-run: reports the unresolved operator, never re-issues it.
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    sent = [tool for tool, _args in _RecordingMcp.instances[-1].calls]
+    assert "tortoise_create_operator" not in sent, (
+        "the resume re-issued a write whose outcome is UNKNOWN")
+    failed = json.loads(state.read_text())["failed"]
+    assert any(marker in f for f in failed), failed
+
+
+def test_a_recorded_event_intent_without_an_id_is_not_re_issued(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A recorded-but-unresolved event intent is REPORTED, not written again.
+
+    `create_event` has no existence check, so the state left by an interrupted
+    run (marker recorded, no id) used to fall through the `and e['ref'] in ids`
+    guard and issue a SECOND event. Mutant: restore that guard as the only
+    condition — the resume calls `tortoise_create_event` again.
+    """
+    state = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    event_ref = map_doc["events"][0]["ref"]
+    recorded = json.loads(state.read_text())
+    del recorded["ids"][event_ref]          # the interrupted-run shape
+    state.write_text(json.dumps(recorded))
+
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    sent = [tool for tool, _args in _RecordingMcp.instances[-1].calls]
+    assert "tortoise_create_event" not in sent, "a duplicate event was written"
+    # It is REPORTED (AMBIGUOUS, exit 1), not silently skipped and not rewritten.
+    assert event_ref in err, err
+
+
+def test_the_verdict_refuses_flipped_operator_DIRECTIONS(map_doc):
+    """A recorded operator's DIRECTION is part of the assertion.
+
+    `direction` is stored on the operator node (`entities.py`: `n.direction=$dir`,
+    "stored ALWAYS") and the door's default is the MUTUAL reading for IMPL/NAND,
+    so a writer that drops the keyword turns 46 one-way edges bidirectional and
+    changes what the graph means. Measured before the fix: flip all 51 declared
+    directions, read back the unchanged rows → `edges: 101/101`, verdict 0.
+
+    Mutant: `held = any(kind == e['op'] and a in ends and b in ends …)` — this
+    fixture passes with every direction flipped.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, op_rows) == 0
+
+    flipped = [[row[0], row[1], row[2],
+                "<->" if row[3] == "->" else "->", *row[4:]]
+               for row in op_rows]
+    assert [row[3] for row in flipped] != [row[3] for row in op_rows]
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, flipped) == 1
+
+
+def test_the_verdict_refuses_an_operator_over_EXTRA_endpoints(map_doc):
+    """An operator over three endpoints holds a declared pair's endpoints, so a
+    match without an ARITY leg certifies an edge the graph does not hold.
+
+    Mutant: drop `len(ends) == 2` — this padded operator satisfies all 51
+    declared operator edges and the verdict returns 0.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    nid = op_rows[0][0]
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
+    # The SAME operator, with a THIRD slot (idx 2) also reaching an endpoint: the
+    # declared pair is held by slots 0 and 1, so without the arity leg the extra
+    # slot is invisible.
+    padded = [*op_rows, [nid, first_op["op"], 2, filer.direction_of(first_op),
+                         "Point", "", "a third endpoint", ""]]
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, padded) == 1
+
+
+def test_an_Object_cannot_certify_a_declared_Event(map_doc):
+    """The LABEL is part of a node's identity.
+
+    Measured before the fix: drop the `ev:beta-gates-measured` row, add a
+    `name`-only row → `nodes: 78/78`, verdict 0 — an Object of the same name
+    certified a missing Event. This fixture describes exactly that graph (the
+    declared Event is absent; everything joins to an Object carrying its name).
+
+    Mutant: the FULL pre-fix identity, `(property, value)` with no label on
+    EITHER side (`identity_by_ref` and `_row_identities`) — this graph then reads
+    78/78 and verdict 0, which is the measured false PASS.
+    """
+    event = map_doc["events"][0]
+    declared = filer.identity_by_ref(map_doc)[event["ref"]]
+    assert declared[0] == "Event", declared
+    impostor = ("Object", declared[1], declared[2])
+    assert impostor != declared
+
+    sabotaged = dict(filer.identity_by_ref(map_doc))
+    sabotaged[event["ref"]] = impostor
+    node_rows = [_row_of(ident) for ident in sabotaged.values()]
+    structural, operators = _edge_rows(map_doc, sabotaged)
+
+    assert filer.verdict(map_doc, node_rows, structural, operators) == 1
