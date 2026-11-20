@@ -4903,10 +4903,9 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
     MEASURED while verifying round 7's F2): the QUOTED branch asks whether the cluster CONTAINS an
     argument-taking flag (`any(...)`), the UNQUOTED branch whether its LAST character takes the
     argument. The module
-    comment used to state the last-character rule for both, which the code contradicts: in
-    `_d5_flag_word` the UNQUOTED branch asks whether the cluster's LAST character takes the
-    argument (`option[-1] in _ARG_TAKING_SHORT_FLAGS`) while the QUOTED branch asks whether the
-    cluster CONTAINS one (`any(...)`) — which is why `-ec'…'` is an attached value. The asymmetry is
+    comment used to state the last-character rule for both; `_d5_flag_word` applies it only to the
+    UNQUOTED branch (`option[-1] in _ARG_TAKING_SHORT_FLAGS`), which is why `-ec'…'` is an attached
+    value. The asymmetry is
     observable ONLY in `_d5_flag_word` — a non-last
     argument-taking flag always makes the value's role `other`, so no graded prescription
     changes, which is exactly why it needs a READER pin rather than a graded row: `-ec'^[+-]$'`
