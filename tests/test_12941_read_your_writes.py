@@ -97,8 +97,10 @@ def _sdk_class():
     """The real class, so `_get_point` is the one under test.
 
     ⛔ The PRIVATE spelling, because #12901's FINAL batch (#13899) privatised the body
-    (`def get_point` → `def _get_point`) and left a tombstone at the public name: calling
-    `get_point` raises `AttributeError` instead of running the method.
+    (`def get_point` → `def _get_point`) and removed the public name from the class
+    entirely: `get_point` is NOT in the retirement register (`retirement_hint` returns
+    `None`), so `__getattr__` raises the interpreter's generic `AttributeError` — no
+    migration hint — and calling it cannot run the method under test.
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -112,7 +114,7 @@ def _sdk_class():
             # P1-1), so it is counted separately from the query: a cold open is a
             # connect + index ensure, and on a stopped graph it RAISES before the
             # record is ever asked. Asserting only "no query ran" left the
-            # mutation that hoists `self._get_proj()` to the top of `get_point`
+            # mutation that hoists `self._get_proj()` to the top of `_get_point`
             # invisible — measured GREEN (23 passed) by mutation.
             self.handle_opens = 0
 

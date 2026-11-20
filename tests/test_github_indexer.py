@@ -3187,30 +3187,30 @@ _PINNED_MODULES = {
 # text required ON the last line; None when the citation is a single line)
 _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # entities.py — the status latch, its two refusals, and the by-name reopen reach
-    ("entities.py", 5231, 5233): (
+    ("entities.py", 5261, 5263): (
         '"st": ev.get("status"),  # #1350: status ON CREATE only —',
         "# re-mention cannot reset superseded→live)."),
-    ("entities.py", 6094, 6094): ("excluded = _terminal_object_statuses()", None),
-    ("entities.py", 6176, 6177): (
+    ("entities.py", 6124, 6124): ("excluded = _terminal_object_statuses()", None),
+    ("entities.py", 6206, 6207): (
         "pipeline_key=target_kind,", "decl=index.pipeline_for(target_kind),"),
-    ("entities.py", 6334, 6335): (
+    ("entities.py", 6364, 6365): (
         "_live_holders = _live_holders_same_entity(", 'self.g, "Object", name)[0]'),
-    ("entities.py", 6358, 6362): (
+    ("entities.py", 6388, 6392): (
         "_reopen_targets_closed = (", "and isinstance(_held[0], str))"),
-    ("entities.py", 6358, 6363): (
+    ("entities.py", 6388, 6393): (
         "_reopen_targets_closed = (", "if _reopen_targets_closed:"),
-    ("entities.py", 6358, 6364): (
+    ("entities.py", 6388, 6394): (
         "_reopen_targets_closed = (", "object_id = _held[0]"),
-    ("entities.py", 6359, 6362): (
+    ("entities.py", 6389, 6392): (
         "bool(builtin_fold_reopens(event_kind))", "and isinstance(_held[0], str))"),
-    ("entities.py", 6366, 6368): (
+    ("entities.py", 6396, 6398): (
         "object_id = resolve_fold_name(",
         "mention=bool(_held) and not _live_holders)"),
-    ("entities.py", 6387, 6387): ("declared_kinds=sorted(index.kind_forms))", None),
-    ("entities.py", 6419, 6424): ("row = self.g.query(", ").result_set"),
-    ("entities.py", 6428, 6428): (
+    ("entities.py", 6417, 6417): ("declared_kinds=sorted(index.kind_forms))", None),
+    ("entities.py", 6449, 6454): ("row = self.g.query(", ").result_set"),
+    ("entities.py", 6458, 6458): (
         "if status is not None and status in excluded:", None),
-    ("entities.py", 6439, 6441): (
+    ("entities.py", 6469, 6471): (
         "if (declared_kinds is not None and object_kind is not None", "return False"),
     # cache_projection.py — the NOT MONOTONE bullet the superseded claim rests on
     ("cache_projection.py", 811, 811): (
@@ -3224,9 +3224,12 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # against the merged tree. So NO number here is an
     # offset or a carry: every address was found by searching for its own pinned
     # FIRST-line text (and, where the row has one, its own LAST-line text) at the tree
-    # that was about to be committed. `entities.py` happened to keep this branch's
-    # values across both merges because its inserts are the ones above the status
-    # latch; `sdk.py` moved for both sides each time, including
+    # that was about to be committed. `entities.py` used to keep this branch's values
+    # across both of those merges; it no longer does — `#13971` adds lines ABOVE the
+    # status latch, so the whole block moved together and is re-derived here again
+    # (`+30` against the pre-`#13971` numbers, measured by resolving every pinned
+    # first/last line, not applied as an offset); `sdk.py` moves for both sides each
+    # time, including
     # `update_knowledge`'s range end, which is located as the function's own last
     # line rather than computed. The numbers in this block are therefore a
     # MEASUREMENT of the tree that carries them, and the test re-checks all 18 rows on
