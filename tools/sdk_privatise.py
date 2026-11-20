@@ -190,13 +190,50 @@ SWEEP_NAMES = 66
 #: `origin/main` `ef1d6f7561`, which observes 11784 on its OWN tree against the same pin of 11752.
 #: ⛔ So the 32 rows between 11752 and that base's 11784 are the BASE's, not declared here, and this
 #: block does not enumerate them (they are `#13854`/`#13966`-era merges' business); the ten above
-#: are the only rows this PR owns. ⛔ And
+#: are the only rows `#13906`'s harness owned; `#13919`'s own rows are declared below.
 #: ⛔ **`--check` on that tree is RED regardless of this pin** — `typed references still pointing at
-#: a public name: 4`, all four on the typed SDK receiver `._ingest_corpus` in
+#: a public name: 4`, all four on the typed SDK receiver `.ingest_corpus` in
 #: `tests/test_13826_write_gate.py:544,555,580,596` (a `#13854` file). A re-pin cannot make that
-#: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
+#: check green, and `#13906`'s harness did not FIX it: on that tree the four were base-owned and out
+#: of that PR's scope — this branch fixed them at `21ae734ce3`, declared in the `#13919` block below.
+#: ⛔ Spelling matters on that row: the four were `sdk.ingest_corpus(…)`, the PUBLIC name. A private
+#: receiver (`sdk._ingest_corpus(…)`) is not typed residue at all — the rename map is keyed on public
+#: names only (`off_surface_names` skips `_`-prefixed defs) and `edits_for` counts a hit only when
+#: the attribute is IN that map — so a reader who chases a red by re-pointing an already-private
+#: name will find nothing to fix and start distrusting the gate.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
+#: ⛔ THE PARAGRAPH ABOVE IS MAINTENANCE HISTORY, NOT A LIVE CLAIM — corrected by `#13919` at the
+#: merge of `origin/main` `6fbd96f270` (see the `#13919` block immediately below). The four typed
+#: references it records were `main`'s own red and are **0** on this tree, measured with `--check`
+#: (exit 0); a reader must not re-derive `main`'s red from this paragraph.
+#:
+#: RE-CUT to the MERGED tree → (11822, "05e0ff542dfb8e62") by `#13919` (the `#4211` hierarchy-census
+#: lane), merging `origin/main` `6fbd96f270` into `chore/4211-edge-census-mac`. The pin is an
+#: ABSOLUTE count, so it moves with the base as well as with the PR, and this block therefore
+#: declares ONLY the rows this PR owns — the base's rows above stay `main`'s business:
+#:   * `origin/main` `6fbd96f270` on its OWN tree measures (11804, "e0c67cf6a5e97d20") — read off
+#:     `--repin` in a detached worktree at that commit, so the base's contribution is measured and
+#:     not inferred from the difference;
+#:   * THIS PR adds +18, all inside the two files it introduces for the census, and every row
+#:     delta below is the difference of two MEASURED counts — `--report --base 28ca66878d` on the
+#:     merged tree minus the same on `origin/main` `6fbd96f270`'s own tree — not arithmetic on this
+#:     pin: `g.query` 1483 → 1490 (+7) and `h.update` 60 → 62 (+2) in
+#:     `tools/measure_4211_session_hierarchy.py`; `super().query` 62 → 67 (+5), `seen.update` 99 →
+#:     101 (+2), `out.update` 41 → 42 (+1) and `graph.query` 267 → 268 (+1) in
+#:     `tests/test_measure_4211_session_hierarchy.py`. 7+2+5+2+1+1 = 18 = 11822 − 11804.
+#: Every one is an ordinary-word receiver on a dict/set, a `hashlib` hash object (the two `h.update`
+#: rows), or a FalkorDB `Graph` (or a fake standing in for one). ⛔ The five `super().query(…)` rows
+#: are a test double that OVERRIDES `Graph.query` and
+#: delegates to the fake's own implementation — re-pointing them at a private spelling would break the
+#: double's fidelity to the API it stands in for, which is exactly the `declared_markers.update`
+#: precedent (a name-scoped rewrite would be sabotage). No new SDK-holding receiver is added.
+#: The typed-reference count is 0 on this tree, measured (`--check` exit 0). It was 5 on the merged
+#: tree before `21ae734ce3`: 1 `sdk.create_object(…)` in `tools/measure_4211_session_hierarchy.py` and
+#: the four `sdk.ingest_corpus(…)` calls in `tests/test_13826_write_gate.py` that were `main`'s own
+#: red — those two names are RETIRED public spellings (`#4282`/`#13899`) which the SDK's `__getattr__`
+#: answers with an `AttributeError` migration hint rather than forwarding, so they were latent runtime
+#: failures, not style.
 #: ⛔ RE-CUT AGAIN onto `origin/main` `6fbd96f270` → (11804, "e0c67cf6a5e97d20"), MEASURED with
 #: `--repin` on THIS tree. The value is the same one `origin/main` observes on its OWN tree
 #: (`uv run python tools/sdk_privatise.py --repin` in a clean checkout of `6fbd96f270` prints
@@ -210,7 +247,15 @@ SWEEP_NAMES = 66
 #: (`docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`, deviation D5). ⛔ The
 #: practical effect is that `main`'s `--check` is RED on its own tree at `6fbd96f270` and this
 #: re-cut turns it green; re-derive the pair with `--repin`, never by arithmetic on the last one.
-SWEEP_RESIDUE = (11804, "e0c67cf6a5e97d20")
+#:
+#: RE-CUT AGAIN → still (11822, "05e0ff542dfb8e62") by `#13919`, merging `origin/main`
+#: `3d99bd51d6` into `chore/4211-edge-census-mac`. Both trees were re-measured for THIS merge rather
+#: than carried forward: `origin/main` `3d99bd51d6` on its OWN tree prints
+#: (11804, "e0c67cf6a5e97d20") — identical to the pair its own block above records, so that merge
+#: moved neither side's number — and the merged tree prints (11822, "05e0ff542dfb8e62"), i.e. the
+#: same 11804 + this PR's declared +18 (the two census files, row by row above). `--check` on the
+#: merged tree: `typed references still pointing at a public name: 0`, exit 0.
+SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
