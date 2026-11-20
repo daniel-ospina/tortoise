@@ -518,6 +518,11 @@ def test_the_real_docs_tree_is_not_empty():
 #: tortoise/` invocation, so its gap must stay NARROW — no word characters outside a unit — or a
 #: quoted invocation's later clause is refused (the F4 fail-open, measured: three true, head-named
 #: history sentences on the live document red under a wide gap and none red under this one).
+#: ⚠️ DECLARED RESIDUAL, and it is the price of that narrowness: a membership claim stated on the
+#: ABBREVIATION with prose between it and the verb (`-- tortoise/` at this head prints FIVE paths)
+#: is graded by NO arm — the abbreviation cannot cross ` at this `, and the wide subject only
+#: fires when the sentence also names the FULL command. Measured, and pinned in the honest
+#: direction at the witness block (#13900 review, verification round, P1).
 #:
 #: Both gaps are built from FOUR UNIT KINDS and nothing else — all four in BOTH gaps (the wide
 #: gap's budget is 40 units, the narrow one's is unbounded, and the bracket unit was missing
@@ -543,14 +548,21 @@ def test_the_real_docs_tree_is_not_empty():
 #:      a claim left GREEN. `&` is a character `origin/main`'s gap already admitted, and a closure
 #:      that drops a form the previous rule had is a regression wearing a widening's clothes.
 #:
+#: ⛔ The measured cost is linear in the number of units ONLY for the UNAMBIGUOUS unit kinds
+#: (#13900 review, verification round, P2, MEASURED). The earlier form of this sentence claimed
+#: "40 repeated units of each kind → 0.000-0.002 s", which is FALSE for a BRACKET run in the
+#: WIDE gap — measured at this head: 20 × `[a]` → 1.145 s, 40 × `[a]` → 4.182 s (4.08 s with a
+#: verb after the run), against 0.001 s for the same shape under the abbreviation. The 40-unit
+#: budget bounds it at ≈4 s per occurrence, so it is latent rather than fatal — but a reader
+#: trusting "of each kind" would conclude the wide gap's newly-added bracket unit is free. The
+#: EXPONENTIAL-in-run-length model, its measurement and its bound are stated once, in the
+#: AMBIGUOUS-UNIT residual note in `test_the_answers_are_read_in_every_spelling`.
 #: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
 #: crossed, a BLANK line is the boundary. Every unit in the WIDE gap begins with a different
 #: character, so that run has one parse. The narrow gap is not fully DISJOINT — `<` can begin
 #: both a tag and a single-character unit — because the single-character branch matching a bare
 #: `<` is the wider reading and is kept; a tag probe that then fails costs one bounded scan
-#: (measured: 3,200 `<` with no `>` / 9.6 KB → 0.001-0.002 s). The measured cost is linear:
-#: 8/16/28/40/80/200 spaces and 40 repeated units of each kind → 0.000-0.002 s; the ambiguous
-#: form `7557a52cf5` replaced took 15.8 s at 24 spaces.
+#: (measured: 3,200 `<` with no `>` / 9.6 KB → 0.001-0.002 s).
 _AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
 #: ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT, NOT ONLY BETWEEN UNITS (#13900 review,
 #: verification round, MEASURED). Three holes, each reproduced on the LIVE document:
@@ -709,10 +721,23 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # "RESIDUAL, stated" note immediately above the `rest = doc[...]` slice below) rather
             # than pointed at by line number: a `:NNNN` here was measured to have drifted onto a
             # bare assignment (#13900 review, verification round, P2).
+            # ⛔ THE VERB MUST NOT BE MATCHED INSIDE A WORD (#13900 review, verification round,
+            # P1, MEASURED). The WIDE gap crosses word characters, so with an unbounded verb
+            # alternation the `is` inside `this` pre-empted the real verb: appending
+            # ``… -- tortoise/` at this head prints FIVE paths`` to the LIVE bundle's
+            # `05-verify.md` left the suite GREEN, because the match ended at `… at this`,
+            # `rest` was ` head prints FIVE paths`, and no listed answer word follows — so a
+            # FALSE, present-tense, THIS-head membership claim was never graded. Reproduced for
+            # `at this head is EMPTY` and `at THIS head returns TWO paths` too, while the
+            # control `At this head `…` prints FIVE paths` WAS graded (its verb is not preceded
+            # by a letter). The `(?<![A-Za-z])` below is the whole fix, and it is applied to the
+            # ALPHABETIC verbs only: the arrow/`=`/`:` arms have no word to sit inside, and a
+            # right-hand boundary is deliberately NOT imposed because `isn't` reaches the
+            # negation arm at the head of `rest` and must keep matching.
             + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV)
             + r"(?:(?:still|now|actually|also)\s+)?"
-              r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
-              r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
+              r"((?<![A-Za-z])(?:prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
+              r"names|includes|contains|has|is)|->|→|=|:)", doc, flags=re.IGNORECASE):
         # ⛔ A COMMAND PINNED TO ANOTHER REV ANSWERS A DIFFERENT QUESTION (#13845 review,
         # cycle 3, P1). The short form a caller may pass is a SUBSTRING of every longer
         # `git diff … -- <pathspec>` invocation, so the tail of a sentence the writer fixed
@@ -1720,6 +1745,33 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "a tag's quoted value, a bare apostrophe in a tag and an ESCAPED character in a "
             "label are each one unit; each was measured `[]` when its unit was narrowed "
             "(#13900 review, verification round, P2)")
+    # …AND THE VERB IS NOT MATCHED INSIDE A WORD (#13900 review, verification round, P1). Each
+    # of these returned `[]` at `8418599668` because the `is` in `this` pre-empted the real verb;
+    # the control beside them was already graded, which is what identifies the mechanism rather
+    # than a class of sentence.
+    for _refuted in (f"`{_full_subject}` at this head prints FIVE paths",
+                     f"`{_full_subject}` at this head is EMPTY",
+                     f"`{_full_subject}` at THIS head returns TWO paths"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, _full_subject), (
+            f"the arm SKIPPED {_refuted!r} — the verb was matched inside `this`, so a FALSE "
+            "present-tense membership claim about THIS head went ungraded "
+            "(#13900 review, verification round, P1)")
+    assert _typed_answers_to_tortoise_cmd(
+        f"At this head `{_full_subject}` prints FIVE paths", _full_subject), (
+        "the control for the row above regressed — a verb NOT preceded by a letter is graded "
+        "(#13900 review, verification round, P1)")
+    # ⛔ AND ON THE ABBREVIATION THIS IS NOT FIXED, DELIBERATELY — the narrow gap admits no word
+    # characters outside a unit, so ` at this ` cannot be crossed there. Widening it was MEASURED
+    # to refuse three TRUE head-named history sentences (the F4 false-block at the constants), so
+    # the narrow gap stays and this is the DECLARED RESIDUAL: a membership claim stated on the
+    # ABBREVIATION with prose between it and the verb is graded by no arm. Pinned in the honest
+    # direction so the trade cannot be re-litigated by accident; a sentence that also names the
+    # FULL command IS caught (the rows above).
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/` at this head prints FIVE paths", "-- tortoise/") == [], (
+        "the ABBREVIATION's gap now crosses word characters — that is the F4 FALSE-BLOCK, measured "
+        "to refuse three true head-named history sentences; the declared residual is that this "
+        "claim shape is ungraded, not that it is graded (#13900 review, verification round, P1)")
     # …AND THE BRACKET UNIT IS IN THE **WIDE** GAP TOO, which no row reached either: `;` STOPPS
     # the wide gap, so this claim parses ONLY if the bracketed run is one unit there. Dropping
     # `_BRACKET` from `_GAP_FULL` reds this row and nothing else (measured).
@@ -1739,9 +1791,11 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "`-- tortoise/`\n\nprints ONE path at this head", "-- tortoise/") == [], (
         "the gap crossed a BLANK line — a paragraph break is the boundary, and crossing it "
         "joins two unrelated clauses (over-block side)")
-    # …and the run stays LINEAR when no verb follows, which is what `7557a52cf5` measured as
-    # exponential in the earlier ambiguous form. Bounded here so a regression reds instead of
-    # hanging: 28 spaces is the size that took 15.8 s there.
+    # …and the run stays LINEAR IN SPACES when no verb follows, which is what `7557a52cf5`
+    # measured as exponential in the earlier ambiguous form. ⚠️ SPACES ONLY: this row does NOT
+    # speak for the ambiguous unit kinds — 40 × `[a]` in the WIDE gap measures 4.18 s at this
+    # head (bounded by the 40-unit budget), which is why the ambiguous-unit row below carries
+    # its own bound. Bounded here so a regression reds instead of hanging.
     import time as _time
     _t0 = _time.monotonic()
     _typed_answers_to_tortoise_cmd("`-- tortoise/`" + " " * 28 + "no verb here", "-- tortoise/")
