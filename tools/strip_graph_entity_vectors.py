@@ -1196,12 +1196,16 @@ def _container_call_operand(node):
 #: PARAGRAPH NAMES WHICH LEG: if **leg 3** stops answering a family name, or if a family name is
 #: added to `_CONTAINER_CALLS` without being asked at this seam,
 #: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
-#: losing the legs that were doing the work. **LEG 1 IS NOT WITNESSED BY ANY ROW AND THE ASSERTS
-#: CANNOT SEE IT** (measured at `f2e5e3a98f` over this same 60-row sample: `leg1 AND NOT leg3` is
-#: **0** rows, so deleting leg 1 outright moves `upstream` nowhere and the test stays green). That
-#: is DISCLOSED rather than repaired: deleting a leg is the one direction that can widen
-#: acceptance, so leg 1 stays and this record says plainly that it is a duplicate at this seam —
-#: naming it as a guard would be the inert-enforcer shape this file's doctrine removes.
+#: losing the legs that were doing the work. **LEG 1 IS SILENT IN ONE DIRECTION ONLY: removing or
+#: weakening it cannot redden the test** (measured at `f2e5e3a98f` over this same 60-row sample:
+#: `leg1 AND NOT leg3` is **0** rows, so deleting leg 1 outright moves `upstream` nowhere and the
+#: test stays green). It is NOT invisible outright — leg 1 is a disjunct of `upstream`, so a mutant
+#: that STRENGTHENS it to answer a sole-decider row reddens `assert upstream is False`, correctly.
+#: Read this as "no removal of leg 1 is a regression the suite can see", never "leg 1 is
+#: unwitnessed". That asymmetry is DISCLOSED rather than repaired: deleting a leg is the one
+#: direction that can widen acceptance, so leg 1 stays and this record says plainly that it is a
+#: duplicate at this seam — naming it as a guard would be the inert-enforcer shape this file's
+#: doctrine removes.
 #: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
 #: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
 #: DISCLOSED here, never left looking load-bearing — and an arm that IS witnessed stays whole.

@@ -9920,12 +9920,18 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
     * the redundancy the record claims still HOLDS WHERE IT WAS MEASURED, and is asserted NOT to
       hold for the sole-decider class — so a later lane cannot cite the record as cover for those
       rows. Thin leg 3 and the first half reddens instead of the record quietly describing a set
-      of legs that no longer read those wrappers. ⛔ **Leg 1 is NOT witnessed here and no mutant of
-      it can redden this test** (measured at `f2e5e3a98f`: over this 60-row sample `leg1 AND NOT
-      leg3` is 0 rows, so deleting leg 1 outright reddens nothing). The assertions below ask
-      `leg1 OR leg3` on purpose — the record is about the redundancy, not about a leg — and the
-      record says so rather than naming leg 1 as a guard it cannot be. Repairing that would mean
-      deleting leg 1, which is the one direction this file forbids.
+      of legs that no longer read those wrappers. ⛔ **Leg 1 cannot redden this test by REMOVAL or
+      WEAKENING, and that is the only direction it is silent in** (measured at `f2e5e3a98f`: over
+      this 60-row sample `leg1 AND NOT leg3` is 0 rows — leg 1 is a subset of leg 3 here — so
+      deleting leg 1 outright moves `upstream` nowhere and this test stays green). It is NOT
+      unwitnessed in every direction: leg 1 is a disjunct of `upstream` at `:9990`, so a future
+      mutant that STRENGTHENS leg 1 to answer a sole-decider row reddens the `assert upstream is
+      False` at `:9994` — correctly, and with the message that says so. Read this paragraph as
+      "no removal of leg 1 is a regression the suite can see", never as "leg 1 is invisible".
+      The assertions below ask `leg1 OR leg3` on purpose — the record is about the redundancy, not
+      about a leg — and the record says so rather than naming leg 1 as a guard it cannot be.
+      Repairing the asymmetry would mean deleting leg 1, which is the one direction this file
+      forbids.
 
     ⛔ THE BASELINE IT IS MEASURED AGAINST, stated correctly (the review of `085c815866` caught
     the earlier sentence being false): at the merge base `e3f894b31b` the arm ALREADY asked the
