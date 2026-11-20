@@ -973,7 +973,15 @@ def _drop_options_pairs(dsn: str) -> str:
     # operator is told the DSN is good and every record query then carries a
     # `record_error`, i.e. no measurement at all. Falling through to the rebuild
     # quotes the value (`dbname='x\\'`), which libpq reads back as `x\`.
-    trailing_backslashes = len(dsn) - len(dsn.rstrip("\\"))
+    # ⛔ COUNTED ON THE **STRIPPED** TAIL, because `app_role_dsn` appends after
+    # `dsn.strip()`: for `dbname=x\ ` (backslash then a space) the UNSTRIPPED tail
+    # is whitespace — an even, zero-length run — so the early return handed back
+    # the bytes verbatim and the subsequent `.strip()` removed exactly the space
+    # the trailing `\` was escaping, reinstating T1 one spelling over. Trailing
+    # whitespace is not hypothetical here: that `.strip()` exists because
+    # env-var- and file-sourced DSNs carry it.
+    tail = dsn.rstrip()
+    trailing_backslashes = len(tail) - len(tail.rstrip("\\"))
     if (not any(key == "options" or (key is not None and not value)
                 for key, value in pairs)
             and trailing_backslashes % 2 == 0):
