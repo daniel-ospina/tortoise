@@ -2828,12 +2828,14 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: backtick. That is the same LAYOUT axis rounds 26-29 closed on the two bans above, and it is
 #: closed here the same way.
 #:
-#: ⛔ AND THE BOUND IS IN THE WINDOW'S UNITS, NOT IN SPACES (#13948 review round 32, P2 —
-#: MEASURED). At `{0,8}` the budget was effectively SEVEN spaces (the needle's own backtick spends
-#: one), so ordinary PADDED MARKDOWN — one aligned table cell, an eight-space list continuation —
-#: put the false property back with the cell green. The bound is now on the same scale as the
-#: window it lives in — the only honest way to say "any amount of layout" without a second number
-#: that can be one space too small.
+#: ⛔ AND THE DELIMITER RUN IS UNBOUNDED (#13948 review rounds 32-33, both MEASURED). At
+#: `{0,8}` the budget was effectively SEVEN spaces (the needle's own backtick spends one), so
+#: ordinary PADDED MARKDOWN — one aligned table cell, an eight-space list continuation — put the
+#: false property back with the cell green. Widening it to the window's own `{0,400}` was NOT a fix,
+#: and the comment claiming it was ("without a second number that can be one space too small")
+#: was itself falsified by measurement: 400 spaces returned `[]`. So the run is `*` — any amount of
+#: layout — and there is no longer a number to be one space too small. Measured: 8, 9, 390, 400 and
+#: 2000 spaces all caught; the real `05-verify.md` still `[]`.
 #:
 #: ⛔ WHAT IT IS NOT: a semantics checker. A restatement that ALSO re-words the noun or the
 #: copula ("the leading printable glyph … amounts to `#`"), or that merely MENTIONS the word
@@ -2861,7 +2863,7 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
     r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z]{0,400}#[`*_'\"]{0,8}", re.S | re.I)
+    r"(?:is equal to|equals|is a|is)[^0-9A-Za-z#]*#[`*_'\"]*", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -3085,7 +3087,14 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… whose first non-space character is" + " " * 9 + "`#` — a comment …",
              "character is" + " " * 9 + "`#`"),
             ("… whose first non-space character is\n\n        `#` — a comment …",
-             "character is\n\n        `#`")):
+             "character is\n\n        `#`"),
+            # ⛔ AND BEYOND ANY BUDGET (#13948 review round 33, P2 — MEASURED): at `{0,400}` a
+            # four-hundred-space pad returned `[]`. The run is unbounded now, so these two reds if
+            # anyone reintroduces a finite bound.
+            ("… whose first non-space character is" + " " * 400 + "`#` — a comment …",
+             "character is" + " " * 400 + "`#`"),
+            ("… whose first non-space character is" + " " * 2000 + "`#` — a comment …",
+             "character is" + " " * 2000 + "`#`")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
