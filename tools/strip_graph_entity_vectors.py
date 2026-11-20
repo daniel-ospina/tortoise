@@ -2333,10 +2333,19 @@ def _source_holds_the_store_anywhere(node) -> bool:
     if isinstance(node, ast.Starred):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
-        # ⛔ ONE INCLUDE LIST (`#13788` round 12): `sorted`/`reversed` re-order the same
-        # elements, so a store behind either is the same store this scan exists to find.
-        if (operand := _container_call_operand(node)) is not None:
-            return _source_holds_the_store_anywhere(operand)
+        # ⛔ DELIBERATELY NOT WIDENED TO THE PASS-THROUGH FAMILY (`#13788` round 12, measured):
+        # this scan's container arm is answered by NOTHING — disabling it outright moved NO
+        # verdict across six candidate spellings (`sorted([*(("embedding", vec),)])`,
+        # `sorted(x.copy())`, `sorted(x if f else [])`, and the `reversed`/`iter` twins),
+        # because the pairs resolver in `_pairs_operand_stores_the_vector` answers every
+        # container spelling this scan can reach, one leg before this one. A leg with no
+        # witness is not a closed hole, and widening an unreachable arm would CLAIM a fix that
+        # no row could ever redden — so it keeps the two-name tuple it had, and the three seams
+        # that ARE reached (`_pairs_operand_stores_the_vector`, `_comprehension_source_yields`,
+        # `_sequence_options`) carry the fix.
+        name = _callee_name(node)
+        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
+            return _source_holds_the_store_anywhere(node.args[0])
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
                 and not node.args and not node.keywords):
             return _source_holds_the_store_anywhere(node.func.value)
