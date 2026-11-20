@@ -291,17 +291,28 @@ SWEEP_NAMES = 66
 #: review, P2). Name the call site by its TEXT; the text is the durable fact.
 #: `typed references still pointing at a public name: 0` on this tree says no typed site replaced it.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-#: RE-CUT UP 11821 → (11828, "8796b279232593bd") by the #13998 lane, and the direction is the one
-#: that NEEDS the reading rather than the arithmetic: a residue that GROWS can be a new reference
-#: shape, which is exactly what the pin exists to refuse (`x.query` on an ordinary-word receiver is
-#: invisible to a typed-reference count). Read first, then re-pin. The seven rows are `cp.query` on
-#: a control-plane CLIENT, all of them introduced here: `capacity_notice.read_account` /
-#: `claim_notice` (2), and the tests' `_ColumnBlindCP` / fake-plane probes (5). None of them is a
-#: SDK accessor — `cp` is `supabase_control`'s PostgREST client, not `TortoiseSDK` — and
-#: `--check` on this tree still reports `typed references still pointing at a public name: 0`, so no
-#: typed site became an untyped one; seven NEW write/read calls did, which the count cannot
-#: distinguish. Re-cut with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11828, "8796b279232593bd")
+#: RE-CUT UP by the #13998 lane onto the rebased head → (11829, "7f3b489549a7393d"), and the
+#: direction is the one that NEEDS the reading rather than the arithmetic: a residue that GROWS can
+#: be a new reference shape, which is exactly what the pin exists to refuse (`x.query` on an
+#: ordinary-word receiver is invisible to a typed-reference count). Read first, then re-pin.
+#: ⛔ MEASURED ON BOTH SIDES, not carried: this tree prints (11829, …) with `--repin`, and `origin/main`
+#: `7efdedf238` prints 11822 on its OWN tree with the same command — so the whole +7 is this PR's, and
+#: the +1 over the pre-rebase pin of 11828 is `main`'s (it moved 11821 → 11822 while this PR waited).
+#: The row counts alone could not have told me which side moved it; do the two-tree measurement.
+#: The seven rows, read one by one off the diff — SIX `cp.query` plus ONE `row.update`, which is why
+#: this cannot be summarised as "seven `cp.query` rows":
+#:   * `cp.query` 263 → 269 (+6): `capacity_notice.read_account`'s orgs read and its drift-soft
+#:     retry (2), `supabase_control.org_storage_notice_pct` and `set_org_storage_notice_pct` (2), and
+#:     `tests/test_13998_capacity_notice.py`'s save/restore pair on the `_ColumnBlindCP` fake
+#:     (`original_query = cp.query`, `cp.query = query`) (2);
+#:   * `row.update` 59 → 60 (+1): `tests/test_13998_capacity_notice.py`'s `_org_row` helper projects
+#:     a plain DICT row, not an SDK object.
+#: None of them is an SDK accessor — `cp` is `supabase_control`'s PostgREST client (or a fake standing
+#: in for it) and `row` is a `dict` — and `--check` on this tree still reports `typed references still
+#: pointing at a public name: 0`, so no typed site became an untyped one: seven NEW write/read calls
+#: did, which the count cannot distinguish. Re-cut with `--repin` on THIS tree, never by arithmetic on
+#: the last pin.
+SWEEP_RESIDUE = (11829, "7f3b489549a7393d")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
