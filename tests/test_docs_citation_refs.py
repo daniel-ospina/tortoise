@@ -573,9 +573,14 @@ def test_the_real_docs_tree_is_not_empty():
 #: paragraph said "the lookahead is what keeps each pair disjoint" and named a `_OPEN_TAG`
 #: lookahead that an earlier round DELETED — the tag half of that sentence described code that no
 #: longer existed, one commit after the sentence was written (#13921 review, finding 3).
-#: The one input where the BRACKET pair can both start is a run whose interior crosses a soft
-#: break (`[a\n]`): the closing unit takes it whole while the bare `[` cannot — a bounded residual,
-#: not an exponential.
+#: The BRACKET pair's two branches NEVER both start: `_BRACKET` is tried first and the closing
+#: unit takes `[a\n]` WHOLE, so the bare `[` is not reached there at all (MEASURED — an earlier
+#: form of this sentence said "the one input where the BRACKET pair can both start is `[a\n]`",
+#: which its own second clause disproved, #13921 review, final round, finding 1). What DOES differ
+#: between them is ALPHABETICAL: `_BRACKET`'s interior admits `_SOFT` and the bare `[` is one
+#: character. That difference is INERT — it can only matter where `_BRACKET` already failed, and
+#: then there is no closer to take — so a soft-break interior is a bounded residual, not an
+#: exponential.
 #: ⛔ AND THE RUN IS **NOT** LINEAR — the word this block used to carry, on the strength of a
 #: single 200-point reading (#13921 review, finding 4). MEASURED at this head: 200 × `[` ->
 #: 0.0011 s, 400 -> 0.0040, 800 -> 0.0152, 1600 -> 0.0612, 3200 -> 0.2332 s — about x3.9 per
@@ -819,10 +824,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     #    LOOKAHEAD cannot see past the slice it is handed, so `[is]` would let `[` match the
     #    UNTERMINATED-bracket unit on the prefix `" ["` and grade the `is` INSIDE the bracket (and
     #    a tag's quoted `title="a: b"` would do the same through its `:`). So the boundaries are
-    #    ENUMERATED from the document itself, walking `_GAP_UNIT` with `match` — which is exactly
-    #    the parse the greedy closure took, since each alternative requires a character and they
-    #    are tried in order — and a candidate that is not one of those positions is not this
-    #    occurrence's verb. That enumeration is also what replaces the blank-line `break` this
+    #    ENUMERATED from the document itself, walking `_GAP_UNIT` with `match`. ⛔ THAT IS THE
+    #    **FIRST-MATCH** PARSE, NOT THE CLOSURE'S PARSE, AND THE DIFFERENCE IS DECLARED AND
+    #    WITNESSED (#13921 review, final round, finding 2, MEASURED — an earlier form of this
+    #    sentence claimed `match` gave "exactly the parse the greedy closure took", which is
+    #    FALSE): a `*`-closure BACKTRACKS into a different partition of the same characters —
+    #    `[<]a>` is `_BRACKET` whole, or a bare `[` plus the tag `<]a>` — and `match` commits to
+    #    the first. MEASURED: `origin/main` graded `[<]a>`, `[<]1>` and `<[>a]`, and this head
+    #    returns `[]`, because the committed parse stalls 2 units in on the word character and the
+    #    closure's partition is never tried. THREE admissions, all of the shape "a bracketed run
+    #    whose interior CONTAINS a tag's `<`"; none occurs in the live tree (all 855 docs
+    #    identical to `origin/main`, both subjects), which is why this is DECLARED as a residual
+    #    and pinned by its own witness rather than left to drift. A candidate that is not one of
+    #    those positions is not this occurrence's verb. That enumeration is also what replaces the blank-line `break` this
     #    function used to carry: `_SOFT` refuses to cross one and the single-character unit
     #    excludes `\n`, so a blank line simply ends the boundary list (pinned by a witness).
     _cmd_pat = re.compile(r"`?(?P<cmd>" + re.escape(cmd) + r")", re.IGNORECASE)
@@ -1911,6 +1925,23 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_escaped!r} — a label closed by an ESCAPED `]` is one unit, and "
             "`origin/main` graded this shape; excluding `\\` from `_BRACKET`'s catch-all without "
             "widening its closer drops it (#13921 review, finding 1 of the next round)")
+    # ⛔ AND THE WALK'S FIRST-MATCH COMMITMENT HAS THREE DECLARED LOSSES, PINNED HERE (#13921
+    # review, final round, finding 2, MEASURED). `_unit_pat.match` commits to the FIRST parse of a
+    # position, while a `*`-closure can backtrack into another partition of the same characters; so
+    # a bracketed run whose interior CONTAINS a tag's `<` is taken as `_BRACKET` whole, stalls on
+    # the word character behind it, and the closure's partition (a bare `[` plus the tag) is never
+    # tried. `origin/main` graded all three of these and this head returns `[]`. They are DECLARED
+    # as a residual, not fixed — the fix is to enumerate every partition at `[`/`<`, which is a
+    # larger change than this PR carries — and they are pinned so the behaviour cannot drift
+    # silently. None occurs in the live tree: all 855 `docs/**/*.md`, both subjects, are identical
+    # to `origin/main`. If a future document reds one of these rows, that is the signal to fix the
+    # walk rather than to widen this list.
+    for _lost in ("[<]a>", "[<]1>", "<[>a]"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`` `-- tortoise/` {_lost} prints TWO paths ``", "-- tortoise/") == [], (
+            f"the walk now reaches {_lost!r} — the DECLARED first-match residual is gone, which "
+            "is good news and means this row (and the comment above it) should be updated, not "
+            "that something broke (#13921 review, final round, finding 2)")
     # ⛔ AN UNTERMINATED `<` IS THE SAME CLASS, AND IT WAS STILL OPEN (#13921 review, finding 1,
     # MEASURED). `_TAG` requires a closing `>`, so a bare `<` matched NOTHING in the unit list and
     # the separator walk stopped on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
